@@ -77,11 +77,13 @@ export class TiamudBot {
     requiredExit(gate, 'south');
 
     const replay = await this.#command(north.command, requestId, 'command.north.replay');
+    // The request result is cached, while the observer snapshot may legitimately
+    // advance when another bot enters or leaves the room concurrently.
     if (
       replay.result.ok !== first.result.ok ||
       replay.result.message !== first.result.message ||
       replay.scene.viewId !== gate.viewId ||
-      replay.scene.revision !== gate.revision
+      replay.scene.revision < gate.revision
     ) {
       throw new Error(`Bot ${this.#index} observed a non-idempotent requestId replay.`);
     }
@@ -91,7 +93,7 @@ export class TiamudBot {
     if (
       synced.afterSeq !== afterSeq ||
       synced.scene.viewId !== gate.viewId ||
-      synced.scene.revision !== gate.revision
+      synced.scene.revision < replay.scene.revision
     ) {
       throw new Error(`Bot ${this.#index} received an inconsistent sync.snapshot.`);
     }
@@ -146,14 +148,19 @@ export class TiamudBot {
       if (
         replay.result.ok !== first.result.ok ||
         replay.result.message !== first.result.message ||
-        replay.scene.viewId !== first.scene.viewId
+        replay.scene.viewId !== first.scene.viewId ||
+        replay.scene.revision < first.scene.revision
       ) {
         throw new Error(`Bot ${this.#index} observed a non-idempotent periodic replay.`);
       }
 
       const afterSeq = Math.max(0, this.#socket.lastSequence - 1);
       const synced = await this.#socket.sync(afterSeq, this.#recordLatency);
-      if (synced.afterSeq !== afterSeq || synced.scene.viewId !== this.#scene.viewId) {
+      if (
+        synced.afterSeq !== afterSeq ||
+        synced.scene.viewId !== replay.scene.viewId ||
+        synced.scene.revision < replay.scene.revision
+      ) {
         throw new Error(`Bot ${this.#index} received an inconsistent periodic sync.snapshot.`);
       }
     }

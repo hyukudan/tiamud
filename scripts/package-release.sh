@@ -57,7 +57,10 @@ readonly -a license_files=(
   LICENSE-APACHE
   LICENSE-MIT
   LICENSE-CONTENT.md
+  THIRD_PARTY_NOTICES.md
 )
+
+node "$project_root/scripts/generate-third-party-notices.mjs" --check
 
 temporary_dir=$(mktemp -d)
 trap 'rm -rf "$temporary_dir"' EXIT
@@ -75,16 +78,6 @@ for license_file in "${license_files[@]}"; do
   install -m 0644 "$source_path" "$temporary_dir/$binary_bundle/$license_file"
   install -m 0644 "$source_path" "$temporary_dir/$web_bundle/$license_file"
 done
-
-# Manual reproducibility audits may run before the dependency inventory is
-# complete. Tagged releases fail earlier in the workflow unless this reviewed
-# notice file exists, and when present it is carried by both distributions.
-if [[ -f $project_root/THIRD_PARTY_NOTICES.md ]]; then
-  install -m 0644 "$project_root/THIRD_PARTY_NOTICES.md" \
-    "$temporary_dir/$binary_bundle/THIRD_PARTY_NOTICES.md"
-  install -m 0644 "$project_root/THIRD_PARTY_NOTICES.md" \
-    "$temporary_dir/$web_bundle/THIRD_PARTY_NOTICES.md"
-fi
 
 for binary in "${binaries[@]}"; do
   source_path="$cargo_target_dir/release/$binary"

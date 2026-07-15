@@ -40,5 +40,6 @@ describe('client preferences', () => {
     expect(motionReduced(DEFAULT_PREFERENCES, true)).toBe(true);
     expect(motionReduced({ ...DEFAULT_PREFERENCES, reduceMotion: true }, false)).toBe(true);
     expect(motionReduced({ ...DEFAULT_PREFERENCES, screenReader: true }, false)).toBe(true);
+    expect(multimediaAllowed({ ...DEFAULT_PREFERENCES, screenReader: true })).toBe(false);
   });
 });

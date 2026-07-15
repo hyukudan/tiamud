@@ -39,11 +39,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require reviewed third-party notices for tagged distribution
-        if: github.ref_type == 'tag'
-        shell: bash
-        run: test -s THIRD_PARTY_NOTICES.md
-
       - name: Resolve and validate the release version
         id: version
         env:
@@ -99,6 +94,10 @@ jobs:
         working-directory: apps/web
         shell: bash
         run: pnpm install --frozen-lockfile
+
+      - name: Verify locked third-party notices and license policy
+        shell: bash
+        run: node scripts/generate-third-party-notices.mjs --check
 
       - name: Build and package twice in isolated directories
         env:

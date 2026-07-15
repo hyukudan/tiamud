@@ -64,18 +64,39 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.11.0
+
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
 
       - name: Install the pinned Rust toolchain
         shell: bash
         run: rustup toolchain install 1.93.1 --profile minimal
 
-      - name: Build the locked release server
+      - name: Install locked web dependencies
+        working-directory: apps/web
         shell: bash
-        run: cargo build -p tiamud-server --bin tiamud-server --release --locked
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the browser distribution embedded by the server
+        working-directory: apps/web
+        shell: bash
+        run: pnpm build
+
+      - name: Build the locked release binaries
+        shell: bash
+        run: |
+          source_date_epoch=$(git show -s --format=%ct "$GITHUB_SHA")
+          export SOURCE_DATE_EPOCH="$source_date_epoch"
+          export RUSTFLAGS="-C debuginfo=0 --remap-path-prefix=${GITHUB_WORKSPACE}=."
+          cargo build --workspace --bins --release --locked
 
       - name: Run and retain the configured soak
         env:
@@ -99,6 +120,14 @@ jobs:
             --max-sustained-growth-mb "$SOAK_MAX_SUSTAINED_GROWTH_MB" \
             --max-rss-slope-mb-per-hour "$SOAK_MAX_RSS_SLOPE_MB_PER_HOUR" \
             --report "artifacts/soak-${SOAK_DURATION}.json"
+
+      - name: Verify the 24-hour acceptance report
+        if: ${{ always() && inputs.duration == '24h' }}
+        shell: bash
+        run: |
+          node scripts/verify-soak-report.mjs \
+            --binary target/release/tiamud-server \
+            artifacts/soak-24h.json
 
       - name: Upload soak evidence
         if: always()

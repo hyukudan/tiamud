@@ -27,12 +27,23 @@ revision, and artifact digests. There is deliberately no long-lived signing key
 on a build host and no separate GPG signature to trust in place of provenance.
 
 The three bundled project licenses do not replace notices required by Rust or
-web dependencies. Before publishing a binary tag, generate, review and retain a
-complete third-party license/notice inventory from the locked Cargo and pnpm
-graphs as `THIRD_PARTY_NOTICES.md`, then include it in both archives. Tagged
-workflow runs fail closed while that reviewed file is absent; manual packaging
-may still run for reproducibility verification but is not suitable for public
-binary distribution.
+web dependencies. `THIRD_PARTY_NOTICES.md` is generated from the release Cargo
+graph and the complete frozen pnpm graph, embeds the license/notice texts
+shipped by those packages, and is included in both archives. Regenerate and
+review it whenever either lockfile changes:
+
+```sh
+pnpm --dir apps/web install --frozen-lockfile
+node scripts/generate-third-party-notices.mjs
+node scripts/generate-third-party-notices.mjs --check
+```
+
+The generator also enforces `scripts/third-party-license-policy.json`. An
+unreviewed declared-license expression, a dependency without a discoverable
+notice, a stale lockfile digest, or a stale generated file fails closed. The
+release workflow installs the frozen web graph and runs the same check before
+building; the packaging script also runs the check and requires the reviewed
+notice file in every archive, including local reproducibility audits.
 
 ## Consumer verification
 
@@ -79,7 +90,6 @@ diff --no-dereference --recursive build/first/packages build/second/packages
 ```
 
 An empty diff is necessary but not sufficient for publication: a tagged
-release must include the reviewed third-party notice inventory, pass the
-workflow, publish its signed provenance, and be independently verified with
-the commands above. Until that happens for a specific tag, release acceptance
-remains partial.
+release must pass the locked notice/policy check, pass the workflow, publish its
+signed provenance, and be independently verified with the commands above.
+Until that happens for a specific tag, release acceptance remains partial.

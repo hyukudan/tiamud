@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "releaseTarget": "x86_64-unknown-linux-gnu",
+  "approvedDeclaredLicenseExpressions": {
+    "rust": [
+      "(MIT OR Apache-2.0) AND Unicode-3.0",
+      "0BSD OR MIT OR Apache-2.0",
+      "Apache-2.0",
+      "Apache-2.0 AND ISC",
+      "Apache-2.0 OR BSL-1.0",
+      "Apache-2.0 OR BSL-1.0 OR MIT",
+      "Apache-2.0 OR ISC OR MIT",
+      "Apache-2.0 OR MIT",
+      "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "BSD-2-Clause",
+      "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "BSD-3-Clause",
+      "BSD-3-Clause OR Apache-2.0",
+      "CC0-1.0 OR Apache-2.0",
+      "CC0-1.0 OR MIT-0 OR Apache-2.0",
+      "ISC",
+      "ISC AND (Apache-2.0 OR ISC)",
+      "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",
+      "MIT",
+      "MIT AND BSD-3-Clause",
+      "MIT OR Apache-2.0",
+      "MIT OR Apache-2.0 OR Zlib",
+      "MIT OR Zlib OR Apache-2.0",
+      "MIT/Apache-2.0",
+      "Unicode-3.0",
+      "Unlicense OR MIT",
+      "Unlicense/MIT",
+      "Zlib",
+      "Zlib OR Apache-2.0 OR MIT"
+    ],
+    "web": [
+      "Apache-2.0",
+      "BSD-3-Clause",
+      "ISC",
+      "MIT",
+      "MPL-2.0"
+    ]
+  },
+  "supplementalNoticeFiles": {
+    "rust": {
+      "mlua-sys@0.10.0": [
+        {
+          "path": "third-party-notices/mlua-sys-0.10.0-LICENSE",
+          "sha256": "63b61a30d3e3abcfcb1bda4b99f4eea9fdb7d6ab05fbc513461fef6cf89baf29",
+          "source": "https://github.com/mlua-rs/mlua/blob/e7fa8d75bb3947648605562694d03c1ce4c82b20/LICENSE",
+          "review": "Exact repository-root license at the crate's Cargo publish commit; the mlua-sys crate archive omits it."
+        }
+      ],
+      "profiling@1.0.18": [
+        {
+          "path": "third-party-notices/profiling-1.0.18-LICENSE-MIT",
+          "sha256": "e64891b51361725890d69bafa508ad013bc92aeef99054caecb6f5ce5f7dfd51",
+          "source": "https://github.com/aclysma/profiling/blob/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "review": "Exact MIT alternative from the Cargo publish commit; the profiling crate archive omits both repository-root license files."
+        }
+      ],
+      "profiling-procmacros@1.0.18": [
+        {
+          "path": "third-party-notices/profiling-1.0.18-LICENSE-MIT",
+          "sha256": "e64891b51361725890d69bafa508ad013bc92aeef99054caecb6f5ce5f7dfd51",
+          "source": "https://github.com/aclysma/profiling/blob/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "review": "Exact MIT alternative from the Cargo publish commit; the profiling-procmacros crate archive omits both repository-root license files."
+        }
+      ],
+      "simd_helpers@0.1.0": [
+        {
+          "path": "third-party-notices/simd_helpers-0.1.0-LICENSE",
+          "sha256": "d69f24ad84ec2ade64c0b68bdb31b41170e997b158370342056918329cc9af1e",
+          "source": "https://github.com/lu-zero/simd_helpers/blob/82040194cd05affb060bf94d6f19f82a771d07fb/LICENSE",
+          "review": "The v0.1.0 manifest declares MIT but its crate and tag omit the text; this is the canonical upstream MIT file later added by the same author."
+        }
+      ]
+    },
+    "web": {
+      "@rolldown/binding-linux-x64-gnu@1.1.5": [
+        {
+          "path": "third-party-notices/rolldown-1.1.5-LICENSE",
+          "sha256": "23ecfff35a5a2e80d92142f75228912c3b1abc4b5a8337a821ff4397e2f9f734",
+          "source": "https://github.com/rolldown/rolldown/blob/f09947ab017d6df74299f691853dcfc4f4f0f86e/LICENSE",
+          "review": "Exact repository license at the package's npm gitHead; the platform binding package omits it."
+        },
+        {
+          "path": "third-party-notices/rolldown-1.1.5-THIRD-PARTY-LICENSE",
+          "sha256": "743d64c1f8a673ddcfd1740aa81672eac950ad7e63f6ba2d7c39f91dd57c5b99",
+          "source": "https://github.com/rolldown/rolldown/blob/f09947ab017d6df74299f691853dcfc4f4f0f86e/THIRD-PARTY-LICENSE",
+          "review": "Exact upstream derived-code notice at the package's npm gitHead."
+        }
+      ],
+      "is-reference@3.0.3": [
+        {
+          "path": "third-party-notices/rich-harris-MIT",
+          "sha256": "82838dbc68b885c3c92029dbabb59b87ceb3bfc3532ff8182961d4998aa7ec02",
+          "source": "https://github.com/Rich-Harris/is-reference/blob/8bb053129bfabe2f6a7d7ed050159d67ebe82829/package.json",
+          "review": "The immutable package manifest declares MIT and Rich Harris as author but omits a license file; the supplemental file is canonical MIT text retaining that attribution."
+        }
+      ],
+      "locate-character@3.0.0": [
+        {
+          "path": "third-party-notices/rich-harris-MIT",
+          "sha256": "82838dbc68b885c3c92029dbabb59b87ceb3bfc3532ff8182961d4998aa7ec02",
+          "source": "https://registry.npmjs.org/locate-character/3.0.0",
+          "review": "The versioned npm registry manifest declares MIT, Rich Harris as author and gitHead 4f08a59ec248121f7002abd02ee7b94e8eda06bc, but the tarball omits a license file; the supplemental file is canonical MIT text retaining that attribution."
+        }
+      ],
+      "stackback@0.0.2": [
+        {
+          "path": "third-party-notices/stackback-0.0.2-LICENSE",
+          "sha256": "db5997474e15b4663d34bb3890f93df67609094e885e820387816c0ccec4f5aa",
+          "source": "https://github.com/defunctzombie/node-stackback/blob/2963095372abf7b75ba55f01cef08ab1e62c2ff4/package.json",
+          "review": "The immutable package manifest declares MIT and Roman Shtylman as author but omits a license file; the supplemental file is canonical MIT text retaining that attribution."
+        }
+      ]
+    }
+  }
+}

@@ -84,8 +84,10 @@ Playwright includes axe A/AA/WCAG 2.2 tags, keyboard, mobile overflow and fixed
 command checks across Chromium, Firefox and WebKit in CI.
 
 This automation is not a substitute for a real assistive-technology pass. A
-manual screen-reader audit is still pending; local WebKit also needs its native
-host dependencies even though the CI job is configured for it.
+manual screen-reader audit is still pending. Chromium, Firefox and WebKit have
+all passed the automated suite; the retained project log records WebKit's
+temporary user-space host-library setup without treating it as a runtime
+dependency.
 
 ## License
 

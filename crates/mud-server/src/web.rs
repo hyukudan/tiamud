@@ -2179,7 +2179,7 @@ mod tests {
         assert!(immutable_asset_path("assets/index-CtsH2LhL.js"));
         assert!(immutable_asset_path("assets/index-DCFEe-LW.js"));
         assert!(immutable_asset_path(
-            "assets/da4f7d051bedf8b273201494c79873136b6d9d2d61dee0c3afe124324d352f87/manifest.json"
+            "assets/0000000000000000000000000000000000000000000000000000000000000000/manifest.json"
         ));
         assert!(!immutable_asset_path("index.html"));
         assert!(!immutable_asset_path("assets/favicon.svg"));

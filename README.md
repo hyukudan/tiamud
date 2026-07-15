@@ -34,10 +34,9 @@ specification and is playable end to end on one process and one ordinary host:
 
 The [completion matrix](docs/project/COMPLETION_MATRIX.md) is the source of
 truth. External evidence is still open for the 24-hour soak, a manual
-screen-reader pass, local WebKit host dependencies, an external PostgreSQL
-exercise, a third-party notice inventory, an independently verified tagged
-release and Tiamud trademark/domain clearance. These are release acceptance
-items, not hidden runtime dependencies.
+screen-reader pass, public repository visibility, an independently verified
+tagged release and final Tiamud trademark/domain clearance. These are release
+acceptance items, not hidden runtime dependencies.
 
 ## Run locally
 
@@ -164,6 +163,7 @@ pnpm --dir apps/web check
 pnpm --dir apps/web test
 pnpm --dir apps/web build
 pnpm --dir apps/web e2e
+node scripts/generate-third-party-notices.mjs --check
 cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -195,6 +195,10 @@ from the user supplying them. `envy-import` keeps unknown provenance and
 licensing explicit and never turns historical input into project-owned
 material. No historical MUD source or area is bundled with Tiamud.
 
+The dated [Tiamud name/domain pre-check](docs/project/NAME_DOMAIN_PRECHECK.md)
+is preliminary only; it is neither trademark clearance nor a domain
+reservation.
+
 ## Contributing
 
 Issues and pull requests are welcome. Keep domain behavior transport-neutral,
@@ -218,4 +222,5 @@ are available under
 [Creative Commons Attribution 4.0 International](LICENSE-CONTENT.md). Asset
 manifests retain per-asset provenance and license metadata. Historical or
 third-party material keeps its own license and is never relicensed merely by
-being imported.
+being imported. Locked release dependencies and their retained license texts
+are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

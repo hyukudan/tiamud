@@ -115,6 +115,28 @@ test('preferences are keyboard-operable, persistent, and prevent artwork request
   await expect(page.locator('picture.welcome-art')).toHaveCount(0);
 });
 
+test('screen-reader mode suppresses images and motion without accessibility violations', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('tiamud.preferences.v1', JSON.stringify({ screenReader: true }));
+  });
+  const imageRequests: string[] = [];
+  page.on('request', (request) => {
+    if (request.resourceType() === 'image') imageRequests.push(request.url());
+  });
+
+  await page.goto('/');
+  await expect(page.getByLabel('Screen-reader mode')).toBeChecked();
+  await expect(page.locator('html')).toHaveAttribute('data-reader', 'true');
+  await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduce');
+  await expect(page.locator('picture.welcome-art')).toHaveCount(0);
+  expect(imageRequests).toEqual([]);
+
+  const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  expect(results.violations).toEqual([]);
+});
+
 test('narrow mobile layout has no horizontal overflow and keeps controls reachable', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   await page.goto('/');

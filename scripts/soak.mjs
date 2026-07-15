@@ -7,6 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
+import { collectCandidateEvidence, fileEvidence } from './soak-evidence.mjs';
+
 const root = path.resolve(import.meta.dirname, '..');
 const options = parseArguments(process.argv.slice(2));
 
@@ -32,8 +34,20 @@ const startedAt = new Date();
 const monotonicStart = performance.now();
 const samples = [];
 const errors = [];
+const harnessEvidence = {
+  soak: await fileEvidence(import.meta.filename),
+  evidence: await fileEvidence(path.join(root, 'scripts', 'soak-evidence.mjs')),
+  load: await fileEvidence(path.join(root, 'scripts', 'load.mjs')),
+  bot: await fileEvidence(path.join(root, 'scripts', 'bot.mjs')),
+};
+const candidateEvidence = await collectCandidateEvidence(root).catch((error) => {
+  errors.push(`candidate evidence failed: ${errorMessage(error)}`);
+  return null;
+});
+let binaryEvidence = null;
 let temporary;
 let server;
+let serverConfiguration = null;
 let sampler;
 let sampling = false;
 let loadChild;
@@ -61,8 +75,10 @@ try {
     monitoredPid = options.pid;
     await waitUntilReady(baseUrl);
   } else {
+    binaryEvidence = await fileEvidence(path.resolve(options.binary));
     temporary = await mkdtemp(path.join(os.tmpdir(), 'tiamud-soak-'));
     server = await startServer(temporary, options.binary, options.users);
+    serverConfiguration = server.configuration;
     baseUrl = server.baseUrl;
     monitoredPid = server.child.pid;
   }
@@ -120,13 +136,15 @@ const analysis = analyzeSamples(samples, options);
 errors.push(...analysis.errors);
 const finishedAt = new Date();
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   success: errors.length === 0,
   evidence: {
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     elapsedMs: Math.round(performance.now() - monotonicStart),
-    commit: process.env.GITHUB_SHA ?? null,
+    commit: candidateEvidence?.commit ?? null,
+    candidate: candidateEvidence,
+    harness: harnessEvidence,
     runner: {
       platform: process.platform,
       release: os.release(),
@@ -138,6 +156,8 @@ const report = {
     mode: options.url ? 'existing-server' : 'temporary-server',
     url: baseUrl?.origin ?? null,
     pid: monitoredPid ?? null,
+    binary: binaryEvidence,
+    configuration: serverConfiguration,
   },
   profile: {
     durationMs: options.durationMs,
@@ -181,19 +201,37 @@ async function startServer(directory, binaryValue, users) {
   });
   const [httpPort, telnetPort] = await reservePorts(2);
   const log = new LogTail(64 * 1024);
+  const configuration = {
+    storage: 'temporary-sqlite',
+    worldPack: 'embedded',
+    tickMillis: 1_000,
+    telnetMode: 'plaintext',
+    authAttemptsPerMinute: Math.max(1_000, users * 20),
+    authBurst: Math.max(100, users * 4),
+    commandsPerSecond: 100,
+    commandBurst: 200,
+    maxSessionsPerAccount: 4,
+    maxSessionsPerIp: 16,
+  };
+  const childEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith('TIAMUD_')),
+  );
   const child = spawn(binary, [], {
     cwd: root,
     env: {
-      ...process.env,
+      ...childEnvironment,
       RUST_LOG: process.env.RUST_LOG ?? 'tiamud_server=warn',
       TIAMUD_DB_PATH: path.join(directory, 'soak.sqlite3'),
       TIAMUD_HTTP_ADDR: `127.0.0.1:${httpPort}`,
       TIAMUD_TELNET_ADDR: `127.0.0.1:${telnetPort}`,
-      TIAMUD_TELNET_MODE: 'plaintext',
-      TIAMUD_AUTH_ATTEMPTS_PER_MINUTE: String(Math.max(1_000, users * 20)),
-      TIAMUD_AUTH_BURST: String(Math.max(100, users * 4)),
-      TIAMUD_COMMANDS_PER_SECOND: '100',
-      TIAMUD_COMMAND_BURST: '200',
+      TIAMUD_TELNET_MODE: configuration.telnetMode,
+      TIAMUD_TICK_MILLIS: String(configuration.tickMillis),
+      TIAMUD_AUTH_ATTEMPTS_PER_MINUTE: String(configuration.authAttemptsPerMinute),
+      TIAMUD_AUTH_BURST: String(configuration.authBurst),
+      TIAMUD_COMMANDS_PER_SECOND: String(configuration.commandsPerSecond),
+      TIAMUD_COMMAND_BURST: String(configuration.commandBurst),
+      TIAMUD_MAX_SESSIONS_PER_ACCOUNT: String(configuration.maxSessionsPerAccount),
+      TIAMUD_MAX_SESSIONS_PER_IP: String(configuration.maxSessionsPerIp),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -206,7 +244,7 @@ async function startServer(directory, binaryValue, users) {
     await stopServer(child);
     throw new Error(`${errorMessage(error)}\nServer log tail:\n${log.value}`);
   }
-  return { child, baseUrl: serverUrl, log };
+  return { child, baseUrl: serverUrl, log, configuration };
 }
 
 async function runLoad(url, pid, settings) {
