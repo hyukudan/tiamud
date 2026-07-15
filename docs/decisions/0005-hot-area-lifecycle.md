@@ -155,6 +155,14 @@ puede desaparecer por timeout silencioso: debe completarse, cancelarse mediante
 un protocolo seguro o elevar una alerta. Las referencias de cliente no cuentan
 como autoridad y nunca mantienen un área cargada por sí solas.
 
+Un portal compatible o una dependencia declarativa no son por sí solos una
+dependencia dura ni un pin de residencia. Solo fija el área una relación viva
+que no pueda representarse de forma durable y reanudable. Del mismo modo, las
+definiciones y entidades pasivas de NPC u objetos podrán descargarse después de
+su checkpoint; actividad, autoridad o callbacks todavía vivos sí mantienen el
+pin. Esta distinción evita que un ciclo de portales o dependencias editoriales
+termine conservando todo el mundo en memoria.
+
 ## Checkpoint y descarga
 
 Una descarga segura es una transición, no una liberación de memoria oportunista:
@@ -316,4 +324,3 @@ Por ello, el modo monolítico seguirá siendo válido y preferente para mundos q
 caben con margen en memoria. La descarga LRU será opcional y justificada por
 métricas. Nunca se presentará como optimización segura hasta completar las fases
 y criterios anteriores.
-

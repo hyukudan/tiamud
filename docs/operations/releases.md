@@ -9,6 +9,11 @@ revision, derives `SOURCE_DATE_EPOCH` from its commit, builds in two isolated
 target directories, packages both results, and rejects the release unless the
 two package directories are byte-for-byte identical.
 
+Publication is create-only. If a GitHub release already exists for the tag,
+the workflow fails instead of uploading into it or replacing any published
+asset; investigate the existing release and use a new version for changed
+bytes.
+
 The packaging script fixes archive ordering, timestamps, numeric ownership,
 gzip metadata, executable modes, and web file modes. It rejects symbolic links
 and special files in the web distribution. Both bundles must contain the root
@@ -62,12 +67,11 @@ directory. First verify the bytes:
 sha256sum --check --strict SHA256SUMS
 ```
 
-Then verify each archive against the expected repository and the portable
-bundle. Replace `OWNER/REPOSITORY` only after the canonical public repository
-has been established:
+Then verify each archive against the canonical repository and the portable
+bundle:
 
 ```sh
-repository=OWNER/REPOSITORY
+repository=hyukudan/tiamud
 # Set this to the exact workspace/package version in the release tag.
 version=0.1.0
 for artifact in tiamud-*.tar.gz; do

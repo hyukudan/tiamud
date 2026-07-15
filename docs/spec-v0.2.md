@@ -999,7 +999,7 @@ docs/
   operations/
 ```
 
-Podrá entregarse como un único comando `mud`; la separación del repositorio es modularidad de desarrollo, no microservicios.
+Podrá entregarse como un único comando `tiamud-server`; la separación del repositorio es modularidad de desarrollo, no microservicios.
 
 ## 24. Pruebas
 
