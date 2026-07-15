@@ -91,6 +91,12 @@ dependency.
 
 ## License
 
-The client software is available under `MIT OR Apache-2.0`. Original bundled
-artwork and compiled media use `CC-BY-4.0`; see the repository root license
-files for the complete boundary and attribution requirements.
+The client source, tests, configuration, scripts and built JavaScript/CSS are
+software available under `MIT OR Apache-2.0`. Original bundled artwork/audio
+and their derived image/audio renditions use `CC-BY-4.0`. A production web
+distribution can contain both categories; inclusion does not license the
+software under CC BY 4.0 or the media under the software licenses. See
+[`LICENSE`](../../LICENSE) and
+[`LICENSE-CONTENT.md`](../../LICENSE-CONTENT.md) for the complete boundary and
+[`LICENSE-CC-BY-4.0`](../../LICENSE-CC-BY-4.0) for the unmodified CC legal
+code.

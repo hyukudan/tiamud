@@ -33,6 +33,9 @@ jobs:
         working-directory: apps/web
         run: pnpm install --frozen-lockfile
 
+      - name: Verify project license files
+        run: bash scripts/verify-project-licenses.sh
+
       - name: Verify locked third-party notices and license policy
         run: node scripts/generate-third-party-notices.mjs --check
 

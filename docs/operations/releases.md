@@ -11,9 +11,12 @@ two package directories are byte-for-byte identical.
 
 The packaging script fixes archive ordering, timestamps, numeric ownership,
 gzip metadata, executable modes, and web file modes. It rejects symbolic links
-and special files in the web distribution, and requires the Tiamud MIT,
-Apache-2.0 and original-content license notices in both bundles. The workflow
-is designed to retain:
+and special files in the web distribution. Both bundles must contain the root
+software/content boundary notice, the complete MIT and Apache-2.0 texts, the
+original-content boundary notice, and the complete unmodified CC BY 4.0 legal
+code. CI and release packaging pin the reviewed MIT text and verify the
+vendored Apache-2.0 and CC BY 4.0 legal codes against their official-text
+digests. The workflow is designed to retain:
 
 - `tiamud-<version>-x86_64-unknown-linux-gnu.tar.gz` with the server and tools;
 - `tiamud-web-<version>.tar.gz` with the browser distribution;
@@ -26,11 +29,11 @@ short-lived OIDC identity, and the attestation records the repository, workflow,
 revision, and artifact digests. There is deliberately no long-lived signing key
 on a build host and no separate GPG signature to trust in place of provenance.
 
-The three bundled project licenses do not replace notices required by Rust or
-web dependencies. `THIRD_PARTY_NOTICES.md` is generated from the release Cargo
-graph and the complete frozen pnpm graph, embeds the license/notice texts
-shipped by those packages, and is included in both archives. Regenerate and
-review it whenever either lockfile changes:
+The five bundled project licensing files do not replace notices required by
+Rust or web dependencies. `THIRD_PARTY_NOTICES.md` is generated from the
+release Cargo graph and the complete frozen pnpm graph, embeds the
+license/notice texts shipped by those packages, and is included in both
+archives. Regenerate and review it whenever either lockfile changes:
 
 ```sh
 pnpm --dir apps/web install --frozen-lockfile
@@ -44,6 +47,11 @@ notice, a stale lockfile digest, or a stale generated file fails closed. The
 release workflow installs the frozen web graph and runs the same check before
 building; the packaging script also runs the check and requires the reviewed
 notice file in every archive, including local reproducibility audits.
+
+Release archives are mixed artifacts. The program source/binaries,
+configuration and scripts remain `MIT OR Apache-2.0`; original narrative,
+documentation prose, artwork/audio and derived media renditions retain
+`CC-BY-4.0`. Packaging the categories together does not relicense either one.
 
 ## Consumer verification
 

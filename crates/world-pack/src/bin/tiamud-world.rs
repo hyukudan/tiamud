@@ -22,7 +22,8 @@ use tiamud_editorial_ai::{
     MAX_TIMEOUT, ProviderConfig,
 };
 use world_pack::{
-    ConditionContext, DocumentToolError, PreviewFormat, TimePeriod, Weather, WorldPackDocument,
+    CompositionError, ConditionContext, DocumentToolError, PreviewFormat, TimePeriod, Weather,
+    WorldPackDocument, compose_world_project,
 };
 
 const MAX_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
@@ -37,7 +38,7 @@ const EDITORIAL_ARTIFACT_SCHEMA: u8 = 1;
 #[command(
     name = "tiamud-world",
     version,
-    about = "Validate, build, compare, preview, and test Tiamud WorldPacks"
+    about = "Compose, validate, build, compare, preview, and test Tiamud WorldPacks"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -46,6 +47,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Compose strict AreaPack v1 modules offline into one canonical runtime WorldPack v2.
+    Compose {
+        project: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Validate a WorldPack and all authoring extensions without writing files.
     Validate { input: PathBuf },
     /// Build canonical, deterministic WorldPack JSON.
@@ -306,6 +313,11 @@ impl From<CliWeather> for Weather {
 
 #[derive(Debug, Error)]
 enum CliError {
+    #[error("could not compose project {path:?}: {source}")]
+    Composition {
+        path: PathBuf,
+        source: Box<CompositionError>,
+    },
     #[error("could not inspect {path:?}: {source}")]
     Inspect {
         path: PathBuf,
@@ -388,6 +400,23 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
+        Command::Compose { project, output } => {
+            let composed =
+                compose_world_project(&project).map_err(|source| CliError::Composition {
+                    path: project.clone(),
+                    source: Box::new(source),
+                })?;
+            write_artifact_atomically(&output, &composed.artifact)?;
+            println!(
+                "composed {} area(s) into canonical WorldPack {:?} at {:?} ({} bytes, sha256:{}, {} cross-area reference(s))",
+                composed.report.areas.len(),
+                composed.report.project_id,
+                output,
+                composed.report.artifact_bytes,
+                composed.report.artifact_sha256,
+                composed.report.cross_area_references.len(),
+            );
+        }
         Command::Validate { input } => {
             let document = load_document(&input)?;
             validate_document(&input, &document)?;
@@ -983,6 +1012,76 @@ fn write_artifact(path: &Path, bytes: &[u8], force: bool) -> Result<(), CliError
     })
 }
 
+/// Publish a complete new file in one filesystem operation. The destination is
+/// never opened for writing, so a failed composition/write cannot expose a
+/// truncated runtime artifact and an existing output is never replaced.
+fn write_artifact_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    if path.exists() {
+        return Err(CliError::OutputExists(path.to_owned()));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("world.json");
+    let mut temporary = None;
+    for nonce in 0..128_u16 {
+        let candidate = parent.join(format!(
+            ".{file_name}.{}.{}.part",
+            std::process::id(),
+            nonce
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        match options.open(&candidate) {
+            Ok(file) => {
+                temporary = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(CliError::Write {
+                    path: candidate,
+                    source,
+                });
+            }
+        }
+    }
+    let Some((temporary_path, mut file)) = temporary else {
+        return Err(CliError::Write {
+            path: path.to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "could not reserve a temporary output path",
+            ),
+        });
+    };
+    let result = (|| {
+        file.write_all(bytes).map_err(|source| CliError::Write {
+            path: temporary_path.clone(),
+            source,
+        })?;
+        file.sync_all().map_err(|source| CliError::Write {
+            path: temporary_path.clone(),
+            source,
+        })?;
+        drop(file);
+        fs::hard_link(&temporary_path, path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                CliError::OutputExists(path.to_owned())
+            } else {
+                CliError::Write {
+                    path: path.to_owned(),
+                    source,
+                }
+            }
+        })?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temporary_path);
+    result
+}
+
 fn world_storage_id(world_id: &str) -> String {
     sha256_hex(world_id.as_bytes())
 }
@@ -1084,6 +1183,18 @@ mod tests {
 
     #[test]
     fn parses_every_command() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "tiamud-world",
+                "compose",
+                "world.project.json",
+                "--output",
+                "world.json"
+            ])
+            .unwrap()
+            .command,
+            Command::Compose { .. }
+        ));
         assert!(matches!(
             Cli::try_parse_from(["tiamud-world", "validate", "world.json"])
                 .unwrap()

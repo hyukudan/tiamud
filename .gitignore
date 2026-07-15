@@ -36,6 +36,55 @@ test-results/
 .env.*
 !.env.example
 
+# Package-manager and CLI credentials
+.npmrc
+.netrc
+_netrc
+.cargo/credentials
+.cargo/credentials.toml
+**/.cargo/credentials
+**/.cargo/credentials.toml
+credentials.json
+application_default_credentials.json
+client_secret*.json
+service-account*.json
+service_account*.json
+.htpasswd
+
+# Private keys, certificate containers, and local TLS identities
+*.key
+*.pem
+*.p12
+*.pfx
+*.pkcs12
+*.jks
+*.keystore
+*.crt
+*.cer
+*.der
+id_dsa
+id_ecdsa
+id_ed25519
+id_rsa
+
+# Terraform working data, credentials, plans, and local variable values
+.terraform/
+.terraformrc
+terraform.rc
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfplan
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Public keys (`*.pub`), signing requests (`*.csr`), and
+# `.terraform.lock.hcl` are intentionally not ignored.
+
 # Editor and OS files
 .idea/
 .vscode/

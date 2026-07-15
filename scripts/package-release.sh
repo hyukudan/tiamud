@@ -54,12 +54,15 @@ readonly -a binaries=(
   tiamud-world
 )
 readonly -a license_files=(
+  LICENSE
   LICENSE-APACHE
   LICENSE-MIT
   LICENSE-CONTENT.md
+  LICENSE-CC-BY-4.0
   THIRD_PARTY_NOTICES.md
 )
 
+bash "$project_root/scripts/verify-project-licenses.sh"
 node "$project_root/scripts/generate-third-party-notices.mjs" --check
 
 temporary_dir=$(mktemp -d)
@@ -68,16 +71,6 @@ umask 022
 
 mkdir -p "$temporary_dir/$binary_bundle/bin" "$temporary_dir/$web_bundle" "$output_dir"
 printf '%s\n' "$version" >"$temporary_dir/$binary_bundle/VERSION"
-
-for license_file in "${license_files[@]}"; do
-  source_path="$project_root/$license_file"
-  if [[ ! -f $source_path ]]; then
-    echo "release license file is missing: $source_path" >&2
-    exit 1
-  fi
-  install -m 0644 "$source_path" "$temporary_dir/$binary_bundle/$license_file"
-  install -m 0644 "$source_path" "$temporary_dir/$web_bundle/$license_file"
-done
 
 for binary in "${binaries[@]}"; do
   source_path="$cargo_target_dir/release/$binary"
@@ -95,6 +88,25 @@ fi
 
 cp -a "$web_dist_dir/." "$temporary_dir/$web_bundle/"
 printf '%s\n' "$version" >"$temporary_dir/$web_bundle/VERSION"
+
+# Install legal material after the web distribution so a colliding filename in
+# an input build can never replace the reviewed project licenses or notices.
+for license_file in "${license_files[@]}"; do
+  source_path="$project_root/$license_file"
+  if [[ ! -f $source_path ]]; then
+    echo "release license file is missing: $source_path" >&2
+    exit 1
+  fi
+  for bundle in "$binary_bundle" "$web_bundle"; do
+    destination="$temporary_dir/$bundle/$license_file"
+    install -m 0644 "$source_path" "$destination"
+    if ! cmp -s "$source_path" "$destination"; then
+      echo "packaged legal file differs from project source: $bundle/$license_file" >&2
+      exit 1
+    fi
+  done
+done
+
 find "$temporary_dir/$web_bundle" -type d -exec chmod 0755 {} +
 find "$temporary_dir/$web_bundle" -type f -exec chmod 0644 {} +
 

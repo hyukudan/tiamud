@@ -1,0 +1,23 @@
+Tiamud software license
+
+Except where a file or its metadata states otherwise, Tiamud software is
+licensed at your option under either:
+
+* the Apache License, Version 2.0, whose complete text is in
+  `LICENSE-APACHE`; or
+* the MIT License, whose complete text is in `LICENSE-MIT`.
+
+The SPDX expression for this choice is `MIT OR Apache-2.0`. You may use,
+modify, and distribute the software under either license; you do not have to
+comply with both.
+
+For this notice, “software” includes program source code, tests, built
+binaries, configuration, build and deployment material, and scripts. When a
+binary or release bundle contains separately licensed narrative, artwork,
+audio, documentation, or other content, this software grant applies only to
+the software portions. That content retains the terms described in
+`LICENSE-CONTENT.md` and the complete `LICENSE-CC-BY-4.0` legal code.
+
+Third-party components and imported material retain their own terms. See
+`THIRD_PARTY_NOTICES.md` and any file-level or asset-level license and
+provenance metadata. These copyright licenses do not grant trademark rights.

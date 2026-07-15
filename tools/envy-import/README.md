@@ -28,10 +28,13 @@ The implemented importer can:
   shop, special, program-owner, and recall references without guessing;
 - emit either validated WorldPack JSON or a complete machine-readable report.
 
-WorldPack v2 cannot yet represent NPCs, shops, conditional resets, containers,
-equipment, door state, or historical programs. The importer never guesses:
-those records remain in `LegacyContent`, and special procedure/program text is
-never executed or copied into the runtime WorldPack.
+WorldPack v2 now represents authored NPC prototypes/spawns and basic item
+equipment/effect rules. This historical importer does not yet translate
+mobiles or equipment records into those newer fields. Shops, conditional
+resets, containers, door state, and historical programs also remain outside
+its safe conversion subset. The importer never guesses: those records stay in
+`LegacyContent`, and special procedure/program text is never executed or
+copied into the runtime WorldPack.
 
 ```sh
 cargo run --manifest-path tools/envy-import/Cargo.toml -- audit area.are

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "lantern-square",
+  "name": "Tiamud: Lantern Square",
+  "startRoomId": "demo:lantern-square",
+  "rngSeed": 6073466303471576068,
+  "areas": [
+    {
+      "id": "archive",
+      "path": "areas/archive.area.json"
+    },
+    {
+      "id": "north-gate",
+      "path": "areas/north-gate.area.json"
+    },
+    {
+      "id": "square",
+      "path": "areas/square.area.json"
+    }
+  ]
+}

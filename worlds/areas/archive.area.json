@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "id": "archive",
+  "dependsOn": [
+    "square"
+  ],
+  "items": [
+    {
+      "id": "tiamud:weathered-map",
+      "name": "weathered map",
+      "description": "Rain-softened ink traces forgotten paths from Lantern Square into the northern wilds.",
+      "aliases": [
+        "map",
+        "old map"
+      ]
+    },
+    {
+      "id": "tiamud:bronze-sword",
+      "name": "notched bronze sword",
+      "description": "The old blade is nicked along one edge, but its leather grip remains sound.",
+      "aliases": [
+        "sword",
+        "bronze sword",
+        "blade"
+      ]
+    }
+  ],
+  "rooms": [
+    {
+      "id": "demo:archive",
+      "title": "The Cartographer's Archive",
+      "description": "Shelves of annotated maps surround a broad oak table. A dry stair climbs back toward the square.",
+      "items": [
+        "tiamud:weathered-map",
+        "tiamud:bronze-sword"
+      ],
+      "exits": [
+        {
+          "direction": "up",
+          "target": {
+            "kind": "room",
+            "room_id": "demo:lantern-square"
+          }
+        }
+      ]
+    }
+  ],
+  "itemRules": [
+    {
+      "itemId": "tiamud:bronze-sword",
+      "equipmentSlot": "weapon",
+      "attackBonus": 4
+    }
+  ],
+  "roomPerception": [
+    {
+      "roomId": "demo:archive",
+      "light": "bright"
+    }
+  ]
+}

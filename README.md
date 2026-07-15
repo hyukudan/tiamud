@@ -1,226 +1,386 @@
 # Tiamud
 
-[![CI](https://github.com/hyukudan/mud/actions/workflows/ci.yml/badge.svg)](https://github.com/hyukudan/mud/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust](https://img.shields.io/badge/Rust-1.88%2B-b7410e.svg)](https://www.rust-lang.org/)
+[![CI](https://github.com/hyukudan/tiamud/actions/workflows/ci.yml/badge.svg)](https://github.com/hyukudan/tiamud/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licensing)
+[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-b7410e.svg)](https://www.rust-lang.org/)
 
-![Lantern Square in the rain, the reviewed default Tiamud world](apps/web/public/assets/8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/scene-1280.webp)
+![Tiamud sign-in screen over Lantern Square at night, with account fields and a text-completeness notice.](docs/images/tiamud-client.webp)
 
-Tiamud is a clean Rust multiplayer narrative engine inspired by EnvyMUD, Merc
-and other classic text MUDs. It is **browser-first, not browser-only**, and
-**text-complete, not text-only**: the official web client adds atmosphere and
-accessible controls while every playable fact remains available as text and a
-basic Telnet client remains viable.
+**A new multiplayer narrative engine for worlds that read beautifully, run
+locally and remain playable everywhere.**
 
-## Current status
+Tiamud is a Rust engine inspired by EnvyMUD, Merc and other classic text MUDs.
+It is **browser-first, not browser-only**, and **text-complete, not text-only**:
+the official web client adds atmosphere and accessible controls, while every
+playable fact remains available as text and a basic Telnet client remains a
+first-class way to play.
 
-The current `0.1.0` package line implements the repository's v0.2 development
-specification and is playable end to end on one process and one ordinary host:
+The server, reviewed Lantern Square world, browser client and SQLite storage
+fit in one process on one ordinary host. PostgreSQL, richer terminal clients,
+media processing and editorial AI are optional additions rather than runtime
+requirements.
 
-- registered accounts, Argon2id passwords, revocable sessions, character
-  rosters and one-live-controller leases;
-- shared authored rooms/items/NPCs, equipment, skills/effects, deterministic
-  combat/loot/progression/recovery, logical time/weather, quests, parties,
-  economy, chat and moderation;
-- observer-specific perception and opaque IDs before WebSocket/Telnet
-  serialization;
-- a responsive Svelte client with typed recovery, persistent preferences and
-  history, accessible panels, optional image/audio and a bounded Service
-  Worker;
-- fragment-safe Telnet with RFC 1143/MTTS, GMCP, MSSP, MCCP2, optional links,
-  ANSI/CellFrame consumers and direct TLS;
-- SQLite by default, optional PostgreSQL, WorldPack/asset/import tools,
-  health/metrics, bounded queues and staged shutdown.
+## What is included
 
-The [completion matrix](docs/project/COMPLETION_MATRIX.md) is the source of
-truth. External evidence is still open for the 24-hour soak, a manual
-screen-reader pass, public repository visibility, an independently verified
-tagged release and final Tiamud trademark/domain clearance. These are release
-acceptance items, not hidden runtime dependencies.
+- **A persistent shared world.** Accounts, characters, rooms, objects, NPCs,
+  equipment, combat, progression, quests, parties, economy, chat, moderation,
+  logical time and weather survive clean restarts.
+- **One game, multiple clients.** Browser and Telnet gameplay inputs become the
+  same transport-neutral actions. Observer-specific perception is applied
+  before either protocol receives a scene or event.
+- **A modern browser experience.** Responsive Svelte UI, typed reconnect and
+  snapshot recovery, command history, map, accessible panels, persistent
+  media/motion/contrast preferences and a bounded Service Worker.
+- **A capable terminal experience.** Fragment-safe Telnet negotiation, ANSI,
+  GMCP, MSSP, MCCP2, optional safe links, direct TLS, and opt-in graphical
+  capabilities; official TinTin++ and Mudlet integrations are included.
+- **Authored worlds with guardrails.** Versioned WorldPacks, deterministic
+  build/diff/preview/test/publish/rollback tools, bounded Lua hooks, immutable
+  assets and explicit provenance. Editorial AI is optional, authoring-only and
+  never part of the game loop; explicitly configured remote compatible
+  providers may use HTTPS.
+- **Operator-facing safety.** Argon2id credentials, revocable sessions,
+  authorization and rate limits, bounded queues, health and Prometheus
+  endpoints, graceful shutdown, verified SQLite backup/restore, an explicit
+  PostgreSQL mover and reproducible release tooling.
 
-## Run locally
+### One authoritative action path
 
-Prerequisites: Rust 1.88 or newer (CI and release use 1.93.1), Node.js 20.19+
-(or 22.12+) and pnpm 10+. Node is needed only to build/test the browser client.
+```mermaid
+flowchart LR
+    accTitle: Tiamud shared action architecture
+    accDescr: Browser and terminal gameplay inputs share one authorized domain path, world actor, observer projection and selected persistence backend.
+
+    Browser[Browser client<br/>HTTP account API + WebSocket tiamud.v1] --> Web[Web adapter]
+    Telnet[Basic Telnet client<br/>text + TLS] --> TN[Telnet adapter]
+    Rich[Rich terminal client<br/>GMCP + opt-in media] --> TN
+
+    Web --> Action[PlayerAction<br/>shared domain type and authorization]
+    TN --> Action
+    Action --> Actor[Single-writer world actor<br/>bounded queues]
+    Actor --> Projection[Perception and observer projection]
+    Projection --> Web
+    Projection --> TN
+
+    Actor <--> Store[(SQLite by default<br/>or PostgreSQL)]
+    Pack[Reviewed WorldPack<br/>bounded Lua hooks] --> Actor
+```
+
+Stable world identifiers and hidden variants stay behind the projection
+boundary. Clients receive session-opaque view IDs and only the facts their
+character is allowed to perceive. When a browser sequence gap occurs, the
+client requests a fresh authoritative snapshot instead of guessing or blindly
+replaying events.
+
+## Choose a surface and store
+
+| Layer | Local/default | Public/alternative | Important property |
+| --- | --- | --- | --- |
+| Play | Browser over HTTP locally | HTTPS/WSS behind Caddy | Illustrated, responsive and keyboard accessible |
+| Terminal | Telnet with direct TLS | Explicit plaintext on a trusted local network | Complete clean-text fallback; rich features require consent |
+| Persistence | Embedded SQLite | PostgreSQL via an explicit offline transfer | Exactly one backend; Tiamud never dual-writes |
+| World | Embedded Lantern Square WorldPack | Reviewed external WorldPack | Deterministic validation and digest-based rollback |
+
+## Quick start
+
+You need Git, Rust 1.88 or newer, a C/C++ compiler and linker, CMake,
+Node.js 20.19+ (or 22.12+) and pnpm 10+. Node and pnpm build and test the web
+client and run repository tooling; neither is a runtime service for the built
+server. CI, release and soak reproducibility workflows pin Rust 1.93.1,
+Node.js 24 and pnpm 11.11.0.
 
 ```sh
+git clone https://github.com/hyukudan/tiamud.git
+cd tiamud
 pnpm --dir apps/web install --frozen-lockfile
 pnpm --dir apps/web build
 TIAMUD_TELNET_MODE=plaintext cargo run -p tiamud-server
 ```
 
-Open `http://127.0.0.1:8080` or connect Telnet to `127.0.0.1:4000`.
-`TIAMUD_TELNET_MODE=plaintext` is an explicit development/private-network
-exception and logs a warning because credentials are unencrypted. Without it,
-Telnet defaults to TLS and startup fails closed unless both certificate and key
-are valid. Use the TLS configuration in the [single-host
-runbook](docs/operations/single-host.md) for any public listener.
+Then open <http://127.0.0.1:8080> or connect a Telnet client to
+`127.0.0.1:4000`.
 
-The default SQLite database is `data/tiamud.db`; the reviewed Lantern Square
-WorldPack is embedded. Common commands include:
+> `TIAMUD_TELNET_MODE=plaintext` is a deliberate local-development exception.
+> It logs a warning because Telnet registration and login are unencrypted.
+> Never expose that listener to the public Internet. The default mode is TLS
+> and startup fails closed without a valid certificate and private key.
+
+The default database is `data/tiamud.db`; the Lantern Square WorldPack and
+browser distribution are embedded in the server. Try:
 
 ```text
-look, north/east/south/west/up/down, inventory
-take/drop/examine/use/equip/unequip <target>, attack <target>
-weather, time, quest ..., party ..., balance/shop/buy/sell ...
-say ..., tell ..., who, help, ignore/unignore, block/unblock, report ...
+look                       north / east / south / west
+inventory                  take / drop / examine / use <target>
+equip / unequip <target>   attack <target>
+weather                    time
+quest ...                  party ...
+balance / shop / buy ...   say / tell / who / help ...
 ```
 
-Administrative mute/ban/role commands are authorization checked and audited.
+See the [single-host runbook](docs/operations/single-host.md) for HTTPS/WSS,
+direct Telnet TLS, Caddy, systemd, backups, monitoring, updates and rollback.
 
-## Configuration
+## Runtime configuration
 
-- `TIAMUD_HTTP_ADDR` (default `127.0.0.1:8080`)
-- `TIAMUD_TELNET_ADDR` (default `127.0.0.1:4000`)
-- `TIAMUD_TELNET_MODE`: exactly `tls` (default) or `plaintext`
-- `TIAMUD_TELNET_TLS_CERT`, `TIAMUD_TELNET_TLS_KEY`
-- `TIAMUD_TELNET_TLS_HANDSHAKE_TIMEOUT_SECONDS` (default `10`)
-- `TIAMUD_TELNET_MAX_PENDING_HANDSHAKES` (default `128`)
-- `TIAMUD_DB_PATH` (default `data/tiamud.db`) or mutually exclusive
-  `TIAMUD_DATABASE_URL` (`sqlite://...`, `postgresql://...` or `postgres://...`)
-- `TIAMUD_WORLD_PACK`: optional external authored document; the embedded pack
-  is used when unset
-- `TIAMUD_TICK_MILLIS` (default `1000`)
-- `TIAMUD_AUTH_ATTEMPTS_PER_MINUTE`/`TIAMUD_AUTH_BURST` (defaults `10`/`5`)
-- `TIAMUD_COMMANDS_PER_SECOND`/`TIAMUD_COMMAND_BURST` (defaults `12`/`20`)
-- `TIAMUD_MAX_SESSIONS_PER_ACCOUNT`/`TIAMUD_MAX_SESSIONS_PER_IP` (defaults
-  `4`/`16`, shared by browser and Telnet)
-- `RUST_LOG`
+The most useful settings are:
 
-`/health/live` checks the HTTP process and `/health/ready` probes the world and
-selected storage worker. Prometheus metrics are available at loopback
-`/metrics`; the reviewed Caddy configuration deliberately does not expose it.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TIAMUD_HTTP_ADDR` | `127.0.0.1:8080` | HTTP, WebSocket, health and metrics listener |
+| `TIAMUD_TELNET_ADDR` | `127.0.0.1:4000` | Direct Telnet listener |
+| `TIAMUD_TELNET_MODE` | `tls` | Exactly `tls` or explicit `plaintext` |
+| `TIAMUD_TELNET_TLS_CERT` / `TIAMUD_TELNET_TLS_KEY` | — | PEM identity required by Telnet TLS |
+| `TIAMUD_DB_PATH` | `data/tiamud.db` | Default SQLite database; must not be set with `TIAMUD_DATABASE_URL` |
+| `TIAMUD_DATABASE_URL` | — | Alternative `sqlite://`, `postgresql://` or `postgres://` URL; mutually exclusive with `TIAMUD_DB_PATH` |
+| `TIAMUD_WORLD_PACK` | embedded pack | Path to a reviewed external WorldPack |
+| `TIAMUD_TICK_MILLIS` | `1000` | Logical world tick interval |
+| `RUST_LOG` | `tiamud_server=info,tower_http=info` | Structured application log filter |
 
-## Operator and author tools
+Authentication, command, session and TLS-handshake limits are configurable as
+well. [`deploy/tiamud.env.example`](deploy/tiamud.env.example) is the reviewed
+production example; the [single-host runbook](docs/operations/single-host.md)
+explains the operational choices and additional storage settings.
 
-Check, back up, restore and safely migrate SQLite:
+Health and metrics:
+
+- `/health/live` checks that the HTTP process responds.
+- `/health/ready` reports readiness/availability by probing the world actor and
+  selected storage worker.
+- `/metrics` exposes Prometheus data on the same HTTP listener, which binds to
+  loopback by default. The provided Caddy configuration deliberately does not
+  publish it.
+
+## Security and operating model
+
+Tiamud is designed to fail closed at trust boundaries, but a secure public
+installation still depends on correct host operation.
+
+- Use HTTPS/WSS for the browser and direct TLS for public Telnet. Keep
+  plaintext Telnet on an explicitly trusted network only.
+- Keep `/metrics`, database files, private keys, WorldPack staging areas and
+  backups off the public surface.
+- Run the service as a dedicated unprivileged account and put ordinary
+  firewall, proxy limits, log retention and off-host backups around it.
+- Treat `/health/ready` as a readiness/availability signal, not as proof of
+  data integrity. Exercise `tiamud-admin check`, verified backups and restore
+  tests.
+- Review every imported area and asset license. The importer never converts
+  unknown provenance into permission to redistribute material.
+- Follow [SECURITY.md](SECURITY.md) for private reporting. Use GitHub's private
+  vulnerability reporting form when it is enabled; otherwise use the fallback
+  described there. Never publish exploitable details in an issue.
+
+The reference deployment is intentionally one process on one host. It has
+bounded actor, persistence and transport queues; slow clients lose lower-value
+updates first and are disconnected if critical output cannot drain. `SIGTERM`
+and `SIGINT` stop new listeners, place a barrier behind accepted world actions,
+then drain and close persistence.
+
+## Author and operator tools
+
+The workspace includes focused CLIs rather than putting maintenance powers in
+the live player protocol.
+
+| Tool | Purpose |
+| --- | --- |
+| `tiamud-admin` | Integrity checks, safe migration and SQLite backup/verify/restore |
+| `tiamud-world` | Compose, validate, build, diff, preview, test, publish and roll back WorldPacks |
+| `tiamud-assets` | Compile responsive content-addressed media with provenance and review metadata |
+| `tiamud-migrate-postgres` | Move one offline current SQLite snapshot into an empty PostgreSQL schema |
+| `envy-import` | Audit or conservatively convert historical EnvyMUD/Merc-family areas without executing programs |
+
+Examples:
 
 ```sh
+# Check the default local database and reviewed world.
 cargo run -p tiamud-admin -- check \
   --database data/tiamud.db \
   --world-pack worlds/lantern-square.world.json
-cargo run -p tiamud-admin -- backup create \
-  --database data/tiamud.db --output data/backups/tiamud.sqlite3
-cargo run -p tiamud-admin -- backup verify \
-  --backup data/backups/tiamud.sqlite3
-cargo run -p tiamud-admin -- backup restore \
-  --backup data/backups/tiamud.sqlite3 --database data/restored/tiamud.db
-cargo run -p tiamud-admin -- migrate \
-  --database data/tiamud.db --backup data/backups/pre-migrate.sqlite3
-```
 
-Validate/build/diff/preview/test and publish an immutable WorldPack:
-
-```sh
-mkdir -p data/worlds data/world-registry
-cargo run -p world-pack --bin tiamud-world -- validate worlds/lantern-square.world.json
-cargo run -p world-pack --bin tiamud-world -- build \
-  worlds/lantern-square.world.json --output data/worlds/lantern-square.world.json
+# Validate and preview a WorldPack without publishing it.
+cargo run -p world-pack --bin tiamud-world -- validate \
+  worlds/lantern-square.world.json
 cargo run -p world-pack --bin tiamud-world -- preview \
-  worlds/lantern-square.world.json --room demo:lantern-square --format ansi
-cargo run -p world-pack --bin tiamud-world -- test worlds/lantern-square.world.json
-cargo run -p world-pack --bin tiamud-world -- publish \
-  worlds/lantern-square.world.json --registry data/world-registry
-```
+  worlds/lantern-square.world.json \
+  --room demo:lantern-square --format ansi
 
-`tiamud-world rollback --registry ... --world ... --sha256 ...` atomically
-reactivates a previously published digest. Feature-gated `ai-draft` and
-`ai-review` commands are optional authoring aids; they never modify or publish
-a WorldPack and are absent from the runtime server.
-
-Move an offline current SQLite snapshot into an empty PostgreSQL schema (never
-dual-write):
-
-```sh
-TIAMUD_POSTGRES_URL='postgresql://tiamud@localhost/tiamud?sslmode=require' \
-  cargo run -p tiamud-persistence-postgres --bin tiamud-migrate-postgres -- \
-  --sqlite data/transfer.sqlite3 --confirm-offline
-```
-
-Audit or conservatively convert a historical area without executing programs:
-
-```sh
+# Audit a historical area; unsupported records remain inert diagnostics.
 cargo run -p envy-import -- audit path/to/area.are
-cargo run -p envy-import -- convert path/to/area.are --id example > example.world.json
 ```
 
-Compile a reviewed image directly, or use the stricter
-`quarantine` -> `review` -> `publish` workflow for an untrusted source:
+Detailed workflows:
+
+- [World authoring and runtime decisions](docs/decisions/0002-runtime-world-and-durable-identity.md)
+- [Asset pipeline](crates/asset-pipeline/README.md)
+- [Quota-limited scripting](crates/scripting/README.md)
+- [Optional editorial AI](crates/editorial-ai/README.md)
+- [Release and provenance runbook](docs/operations/releases.md)
+
+## Modular world authoring
+
+![Technical illustration of the three-room Lantern Square WorldPack, surrounded by media, perception, variant, script and content-test modules.](docs/images/tiamud-worldpack.webp)
+
+Editors can split a world into bounded, independently owned areas without
+changing the runtime contract. A project manifest names between 1 and 256
+strict `AreaPack` modules; `tiamud-world compose` resolves their declared
+dependencies and emits the one canonical `WorldPack` document consumed by the
+server.
+
+```mermaid
+flowchart LR
+    accTitle: Tiamud modular world authoring flow
+    accDescr: One version 1 project manifest selects between one and 256 version 1 area modules. The offline compose command validates and combines them into one canonical version 2 WorldPack for the current runtime.
+
+    Project[WorldProjectManifest v1<br/>world identity and start room]
+    Areas[1..=256 AreaPack v1<br/>ownership and dependsOn]
+    Compose[tiamud-world compose<br/>strict offline validation]
+    Pack[WorldPack v2<br/>one canonical runtime artifact]
+    Report[CompositionReport<br/>source, manifest and artifact digests]
+
+    Project --> Areas --> Compose --> Pack
+    Compose --> Report
+```
+
+The reviewed Lantern Square project composes three areas—`square`, `archive`
+and `north-gate`—with the real command below:
 
 ```sh
-cargo run -p tiamud-asset-pipeline --bin tiamud-assets -- build \
-  --source artwork/scene.png \
-  --alt "A rain-dark square surrounds a stone fountain." \
-  --output data/assets --author "Example Studio" --license CC-BY-4.0 \
-  --provenance "Original commissioned artwork" \
-  --reviewed-at 2026-07-15T00:00:00Z
+mkdir -p build/worlds
+cargo run --locked -p world-pack --bin tiamud-world -- compose \
+  worlds/lantern-square.project.json \
+  --output build/worlds/lantern-square.composed.world.json
 ```
+
+Composition is deterministic, atomic and implemented today. Its report records
+the ownership of every structured record, declared dependencies, cross-area
+references, exact source SHA-256 values, and canonical manifest and artifact
+digests. Each area file, all area sources together and the composed artifact
+are independently capped at 16 MiB.
+
+The current server still loads exactly one complete WorldPack at startup; it
+does not compose, hot-load or evict areas while running. A resident catalog,
+immutable area bundles, hot activation and LRU lifecycle are future
+architecture—not implemented runtime behavior—documented in
+[ADR 0005](docs/decisions/0005-hot-area-lifecycle.md). See the complete
+[world-authoring guide](docs/world-authoring.md) for schemas, dependency rules,
+validation, content tests, publication and rollback.
 
 ## Verification
+
+Representative local gates are shown below. The workflows pin their toolchains
+and run the documented profiles with their own exact parameters.
 
 ```sh
 pnpm --dir apps/web check
 pnpm --dir apps/web test
 pnpm --dir apps/web build
+pnpm --dir apps/web exec playwright install --with-deps chromium firefox webkit
 pnpm --dir apps/web e2e
+bash scripts/verify-project-licenses.sh
 node scripts/generate-third-party-notices.mjs --check
+node --test scripts/verify-soak-report.test.mjs
+
 cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+
 node scripts/smoke.mjs
 node scripts/load.mjs --users 2 --rounds 2 --concurrency 2 --pace-ms 100
 ```
 
-Playwright requires its browser engines and native dependencies. See
-[soak-testing.md](docs/operations/soak-testing.md) before claiming 24-hour
-acceptance.
+The Playwright install step fetches Chromium, Firefox and WebKit plus the native
+dependencies required before `e2e`. PostgreSQL integration tests are
+intentionally opt-in and require a disposable external database. See the
+[completion matrix](docs/project/COMPLETION_MATRIX.md) for requirement-by-
+requirement evidence and [soak-testing.md](docs/operations/soak-testing.md)
+before interpreting short load tests as long-duration acceptance.
+
+## Project status and limits
+
+Tiamud is the definitive product name. The current packages are versioned
+`0.1.0`; implementation and acceptance are tracked against the repository's
+historical [v0.2 specification](docs/spec-v0.2.md).
+
+The engine, default world, browser and Telnet paths, SQLite and PostgreSQL
+adapters, tooling and automated browser matrix are implemented with focused
+coverage. The exact candidate commit `a592eb7` entered its 24-hour candidate
+soak on **2026-07-15 20:37:47 UTC**, with completion expected around
+**2026-07-16 20:38 UTC**. A running soak is not acceptance; the report and
+deterministic verifier must both finish successfully before the matrix records
+criterion 19 as complete.
+
+Remaining qualifications are kept visible rather than folded into broad
+“production-ready” language:
+
+- a manual pass with real screen-reader software is still required; automated
+  axe, keyboard, responsive and reader-mode coverage is retained separately;
+- the browser WebSocket protocol is explicitly experimental before its first
+  public compatibility milestone;
+- release workflows exist and local archives have reproduced byte-for-byte,
+  but a tagged release with independently verified OIDC provenance is still
+  required;
+- the canonical GitHub repository is still private; making it publicly visible
+  remains a release acceptance item;
+- the single-host material is a reviewed reference configuration, not evidence
+  that a live public Tiamud service has been installed;
+- the dated [name/domain pre-check](docs/project/NAME_DOMAIN_PRECHECK.md) is not
+  trademark clearance or a domain reservation.
+
+The [completion matrix](docs/project/COMPLETION_MATRIX.md) is authoritative when
+this summary and retained evidence differ.
 
 ## Repository map
 
-- `crates/mud-core`: transport-independent world, gameplay and perception.
-- `crates/mud-server`: actor, transports, storage adapters and embedded web.
-- `crates/persistence-sqlite`, `crates/persistence-postgres`: schemas/tools.
-- `crates/world-pack`, `crates/scripting`: authoring, variants and Lua quotas.
-- `crates/asset-pipeline`, `crates/editorial-ai`, `crates/cell-frame`: optional
-  offline/presentation capabilities.
-- `crates/tiamud-admin`, `tools/envy-import`: operator/compatibility tools.
-- `apps/web`, `clients/`: official browser, TinTin++ and Mudlet consumers.
-- `docs/operations`, `deploy/`: single-host operation and release/soak flows.
-
-## Legal and content boundary
-
-Compatibility and inspiration do not grant redistribution rights. Historical
-code, areas, help text or media require a known compatible license or rights
-from the user supplying them. `envy-import` keeps unknown provenance and
-licensing explicit and never turns historical input into project-owned
-material. No historical MUD source or area is bundled with Tiamud.
-
-The dated [Tiamud name/domain pre-check](docs/project/NAME_DOMAIN_PRECHECK.md)
-is preliminary only; it is neither trademark clearance nor a domain
-reservation.
+```text
+apps/web/                    official Svelte browser client
+clients/                     TinTin++ and Mudlet integrations
+crates/mud-core/             transport-independent domain and perception
+crates/mud-server/           actor, transports, storage adapters, embedded web
+crates/persistence-*/        shared SQLite schema and PostgreSQL transfer
+crates/world-pack/           world model and authoring CLI
+crates/scripting/            quota-limited Lua capabilities
+crates/asset-pipeline/       deterministic reviewed media pipeline
+crates/editorial-ai/         optional authoring-only AI adapters
+crates/tiamud-admin/         operator integrity and recovery CLI
+tools/envy-import/           isolated historical compatibility tool
+worlds/                      reviewed source WorldPacks
+docs/operations/             deployment, soak and release runbooks
+deploy/                      Caddy, systemd and environment examples
+```
 
 ## Contributing
 
 Issues and pull requests are welcome. Keep domain behavior transport-neutral,
-preserve text completeness and add focused coverage for new parser, state or
-authorization paths. Before opening a pull request, run the commands in
-[Verification](#verification); use GitHub private vulnerability reporting or a
-security advisory instead of a public issue for sensitive security findings.
+preserve text completeness, maintain strict bounds at untrusted inputs, and add
+focused coverage for parser, state, persistence and authorization changes.
+Run the relevant [verification gates](#verification) before opening a pull
+request.
 
 Contributions intentionally submitted for inclusion are accepted under the
-same software or content terms that apply to the files being changed.
+same software or content terms that apply to the files being changed. No
+historical MUD source code, area, help text or media is bundled with Tiamud;
+compatibility does not grant redistribution rights.
 
-## License
+## Licensing
 
-Tiamud software source code, configuration and scripts are available under
-your choice of the [MIT License](LICENSE-MIT) or the
+The [software licensing notice](LICENSE) covers source, tests, binaries,
+configuration, build and deployment material, and scripts under your choice of
+the [MIT License](LICENSE-MIT) or the
 [Apache License 2.0](LICENSE-APACHE), expressed as `MIT OR Apache-2.0` in
 package metadata.
 
-Original Tiamud narrative content, documentation, artwork and compiled media
-are available under
-[Creative Commons Attribution 4.0 International](LICENSE-CONTENT.md). Asset
-manifests retain per-asset provenance and license metadata. Historical or
-third-party material keeps its own license and is never relicensed merely by
-being imported. Locked release dependencies and their retained license texts
-are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Original narrative and world data, documentation prose, artwork, audio and
+derived image/audio renditions are available under [Creative Commons
+Attribution 4.0 International](LICENSE-CONTENT.md); the complete legal text is
+retained in [LICENSE-CC-BY-4.0](LICENSE-CC-BY-4.0). Asset manifests keep
+per-asset provenance and license metadata. The README illustrations have their
+generation and processing record in
+[docs/images/README.md](docs/images/README.md).
+
+A source tree, browser distribution, executable or release archive may contain
+both software and content. Inclusion in that mixed artifact does not apply CC
+BY 4.0 to the software or the software licenses to the content. Third-party
+and imported material keeps its own terms and is never relicensed merely by
+passing through a Tiamud tool. Locked release dependencies and their retained
+license texts are recorded in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

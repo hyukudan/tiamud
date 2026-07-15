@@ -1,4 +1,6 @@
-# Tiamud: motor MUD multimedia browser-first
+<a id="tiamud-motor-mud-multimedia-browser-first"></a>
+
+# Tiamud: motor MUD multimedia orientado al navegador
 
 ## Especificación técnica propuesta v0.2
 
@@ -7,7 +9,7 @@
 - Prioridad: ejecutable en un único equipo sin infraestructura externa.
 - Alcance: Tiamud es un motor nuevo inspirado por EnvyMUD, Merc y otros MUD de su época, no una traducción de su código.
 
-> Nota histórica: este documento conserva la propuesta previa a la entrega alpha. Tiamud es el nombre definitivo. La [matriz de completitud](project/COMPLETION_MATRIX.md) contrasta cada requisito con evidencia actual; la memoria, los ADR y los logs versionados conservan las decisiones y entregas.
+> Nota histórica: este documento conserva la propuesta previa a la entrega alfa. Tiamud es el nombre definitivo. La [matriz de completitud](project/COMPLETION_MATRIX.md) contrasta cada requisito con evidencia actual; la memoria, los ADR y los registros versionados conservan las decisiones y entregas.
 
 ## 1. Decisión principal
 
@@ -20,16 +22,16 @@ Se desarrollarán por separado:
 3. Pruebas de compatibilidad de comandos y comportamiento.
 4. Adaptadores para navegador, Telnet y clientes MUD.
 
-La experiencia oficial será browser-first, pero el juego seguirá siendo completamente utilizable mediante texto.
+La experiencia oficial dará prioridad al navegador, pero el juego seguirá siendo completamente utilizable mediante texto.
 
-> Browser-first, no browser-only. Text-first, no text-only.
+> Prioridad al navegador, sin depender exclusivamente de él. Prioridad al texto, sin limitarse exclusivamente a él.
 
 ## 2. Objetivos
 
 ### 2.1 Objetivos de producto
 
 - Entrar a jugar desde un enlace sin instalar un cliente.
-- Mantener la inmediatez, profundidad textual y scripting asociados a los MUD.
+- Mantener la inmediatez, profundidad textual y capacidad de automatización asociadas a los MUD.
 - Ofrecer imágenes, mapas, audio y controles visuales como mejoras opcionales.
 - Permitir jugar desde Telnet, TinTin++, Mudlet y otros clientes compatibles.
 - Funcionar bien en escritorio, móvil, teclado y lector de pantalla.
@@ -48,19 +50,19 @@ La experiencia oficial será browser-first, pero el juego seguirá siendo comple
 
 ## 3. No objetivos iniciales
 
-Quedan fuera del MVP:
+Quedan fuera del producto mínimo viable (MVP):
 
 - Kubernetes y orquestación de clústeres.
 - Microservicios.
 - Redis, Kafka, NATS o buses externos.
-- Event sourcing completo.
-- IA obligatoria o NPC controlados permanentemente por un LLM.
-- Composición raster en tiempo real.
+- Registro del estado como una secuencia completa de eventos.
+- IA obligatoria o NPC controlados permanentemente por un modelo de lenguaje de gran tamaño.
+- Composición de mapas de bits en tiempo real.
 - Vídeo.
 - Capas gráficas complejas con NPC posicionados.
-- Plugins no confiables ejecutándose dentro del servidor.
+- Complementos no confiables ejecutándose dentro del servidor.
 - Un formato gráfico universal nuevo.
-- Un fork propio de TinTin++.
+- Una bifurcación propia de TinTin++.
 - Escalado horizontal de un mismo mundo.
 
 ## 4. Licencia y relación con EnvyMUD
@@ -74,7 +76,7 @@ Política propuesta:
 - Publicar el importador sin incluir contenido histórico.
 - Conservar los VNUM importados como alias, no como identidad canónica.
 - Usar el nombre Tiamud y completar su comprobación de disponibilidad antes de una publicación.
-- Licenciar por separado motor, herramientas, mundo de ejemplo y assets.
+- Licenciar por separado motor, herramientas, mundo de ejemplo y recursos multimedia.
 
 Licencia recomendada para el motor: MPL-2.0 si se desea que las modificaciones al núcleo sigan siendo compartibles sin impedir mundos privados. Apache-2.0 es una alternativa si se prioriza la máxima adopción.
 
@@ -94,8 +96,8 @@ tiamud-server
   ├── cliente web embebido en el ejecutable
   ├── SQLite en data/tiamud.db
   ├── mundos compilados en data/worlds/
-  ├── assets publicados en data/assets/
-  └── logs en data/logs/
+  ├── recursos publicados en data/assets/
+  └── registros en data/logs/
 ```
 
 Requisitos externos: ninguno.
@@ -117,13 +119,13 @@ data/
   └── logs/
 ```
 
-Caddy o un proxy equivalente simplifica HTTPS y certificados, pero no forma parte del motor ni es necesario para jugar en local.
+Caddy o un servidor intermediario inverso equivalente simplifica HTTPS y certificados, pero no forma parte del motor ni es necesario para jugar en local.
 
 El proyecto proporcionará:
 
 - Unidad de `systemd` de ejemplo.
 - Configuración mínima de Caddy.
-- Comando de backup.
+- Comando de copia de seguridad.
 - Comando de comprobación de salud.
 - Guía para actualizar el binario y revertirlo.
 
@@ -132,8 +134,8 @@ El proyecto proporcionará:
 Solo se implementará si las métricas lo justifican:
 
 - PostgreSQL en lugar de SQLite.
-- Object storage o CDN en lugar de filesystem.
-- Gateway de conexiones separado del proceso de mundo.
+- Almacenamiento de objetos o CDN en lugar del sistema de archivos.
+- Pasarela de conexiones separada del proceso de mundo.
 - Varias instancias o mundos en procesos distintos.
 
 La posibilidad de este perfil influye en las interfaces internas, pero no añade dependencias al MVP.
@@ -145,29 +147,29 @@ La posibilidad de este perfil influye en las interfaces internas, pero no añade
 │                       tiamud-server                           │
 │                                                               │
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────┐  │
-│  │ HTTP + WSS  │  │ Telnet/TLS   │  │ Admin/health local  │  │
+│  │ HTTP + WSS  │  │ Telnet/TLS   │  │ Admin./salud local  │  │
 │  └──────┬──────┘  └──────┬───────┘  └──────────┬──────────┘  │
 │         └────────────────┬┴──────────────────────┘             │
 │                          ▼                                    │
-│                  Action Router                                │
+│                  Enrutador de acciones                        │
 │                          │                                    │
 │                          ▼                                    │
-│             World Actor / Simulation Core                     │
+│             Actor de mundo / núcleo de simulación             │
 │                          │ DomainEvents                        │
 │                          ▼                                    │
-│              Perception + View Projection                     │
+│              Percepción + proyección de vista                 │
 │                   ┌──────┴─────────┐                          │
 │                   ▼                ▼                          │
-│              Web events       Text/GMCP                       │
+│              Eventos web      Texto/GMCP                      │
 │                                                               │
 │  ┌────────────────┐  ┌─────────────────┐  ┌────────────────┐ │
-│  │ SQLite         │  │ World registry  │  │ Static assets  │ │
-│  │ persistence    │  │ scripts/packs   │  │ and web client │ │
+│  │ SQLite         │  │ Registro mundo  │  │ Recursos estát.│ │
+│  │ persistencia   │  │ guiones/paquetes│  │ y cliente web  │ │
 │  └────────────────┘  └─────────────────┘  └────────────────┘ │
 └───────────────────────────────────────────────────────────────┘
 ```
 
-Un proceso no implica un único thread. El runtime puede usar varios threads para red, base de datos y tareas auxiliares, mientras el estado autoritativo de cada mundo conserva un único escritor lógico.
+Un proceso no implica un único hilo. El entorno de ejecución puede usar varios hilos para red, base de datos y tareas auxiliares, mientras el estado autoritativo de cada mundo conserva un único escritor lógico.
 
 ## 7. Capas del sistema
 
@@ -178,9 +180,9 @@ Contiene datos versionados e inmutables durante una publicación:
 - Habitaciones y topología.
 - Prototipos de objetos y NPC.
 - Reglas, habilidades y tablas.
-- Scripts.
+- Guiones de automatización.
 - Definiciones de escenas.
-- Referencias lógicas a assets.
+- Referencias lógicas a recursos multimedia.
 - Ayudas y localización.
 
 ### 7.2 Estado de ejecución
@@ -191,8 +193,8 @@ Contiene:
 - Instancias de objetos y NPC.
 - Combate y efectos.
 - Clima y tiempo.
-- Estados de quests.
-- Spawns y timers.
+- Estados de misiones.
+- Apariciones y temporizadores.
 - Canales, grupos y sesiones.
 
 ### 7.3 Percepción
@@ -202,7 +204,7 @@ Determina qué conoce un personaje:
 - Luz, ceguera y sentidos.
 - Invisibilidad y ocultación.
 - Puertas y salidas secretas.
-- Estado de quests.
+- Estado de misiones.
 - Instancia del mundo.
 - Clasificación de contenido y preferencias.
 - Información administrativa.
@@ -216,7 +218,7 @@ Añade pistas no autoritativas:
 - Fondo visual.
 - Punto focal.
 - Paleta o tema.
-- Mood.
+- Atmósfera.
 - Transición.
 - Audio ambiental.
 - Arte de celdas opcional.
@@ -247,40 +249,42 @@ Prioridades de salida:
 ```text
 0: control de conexión y seguridad
 1: resultado de acciones y texto crítico
-2: combate, mensajes y chat
-3: estado de UI
+2: combate, mensajes y conversación
+3: estado de la interfaz de usuario
 4: visuales y audio
 5: precarga
 ```
 
 Al aplicar presión:
 
-- Se coalescen actualizaciones de vitals y estado visual.
+- Se coalescen actualizaciones de indicadores vitales y estado visual.
 - Se descartan precargas.
 - Se reemplazan visuales obsoletos por el último.
 - Nunca se descarta silenciosamente el resultado de un comando aceptado.
 - Si la cola crítica no puede avanzar, se desconecta al cliente lento de forma explícita.
 
-## 9. Stack del servidor
+<a id="9-stack-del-servidor"></a>
+
+## 9. Tecnologías del servidor
 
 ### 9.1 Elección principal
 
 - Rust estable.
-- Tokio para red, timers y tareas.
+- Tokio para red, temporizadores y tareas.
 - Axum para HTTP y WebSocket.
 - rustls para TLS directo cuando se configure.
 - serde para serialización.
-- rusqlite con una conexión poseída por un worker dedicado.
-- tracing para logs y spans.
-- clap para CLI.
+- rusqlite con una conexión poseída por una tarea dedicada.
+- tracing para registros y trazas.
+- clap para la interfaz de línea de comandos.
 
 ### 9.2 Motivos
 
-- Un único binario portable.
+- Un único binario transportable.
 - Bajo consumo en reposo.
-- Seguridad de memoria en parsers de red.
-- Buen control de límites y backpressure.
-- Sin garbage collector compartiendo tiempo con el tick del mundo.
+- Seguridad de memoria en analizadores de red.
+- Buen control de límites y contrapresión.
+- Sin recolector de basura compartiendo tiempo con el ciclo del mundo.
 - Posibilidad de reutilizar tipos entre servidor, compiladores y herramientas.
 
 ### 9.3 Alternativas
@@ -294,12 +298,12 @@ SQLite será la base de datos predeterminada y la única obligatoria en v1.
 Configuración:
 
 - Modo WAL.
-- Foreign keys activadas.
-- Busy timeout acotado.
+- Claves foráneas activadas.
+- `busy_timeout` acotado.
 - Migraciones incluidas en el binario.
 - Transacciones para cambios jugables importantes.
-- Checkpoints controlados.
-- Integridad comprobable mediante CLI.
+- Puntos de control gestionados.
+- Integridad comprobable mediante la interfaz de línea de comandos.
 
 Datos persistidos inmediatamente:
 
@@ -307,7 +311,7 @@ Datos persistidos inmediatamente:
 - Propiedad o pérdida de objetos.
 - Economía.
 - Avance de personaje.
-- Resultado de quests.
+- Resultado de misiones.
 - Acciones administrativas.
 
 Datos que pueden agruparse o reconstruirse:
@@ -327,32 +331,34 @@ tiamud-admin backup verify --backup <backup>
 tiamud-admin backup restore --backup <backup> --database <new-db>
 ```
 
-No se harán escrituras dobles ni replicación artesanal entre SQLite y PostgreSQL. Se mantendrá una interfaz de repositorios estrecha para añadir PostgreSQL como backend alternativo seleccionable cuando exista una necesidad medida. Cada instalación tendrá un único backend autoritativo y dispondrá de una migración explícita si cambia de SQLite a PostgreSQL. JSONB podrá utilizarse en ese adaptador para metadatos flexibles, pero el modelo jugable portable seguirá siendo relacional.
+No se harán escrituras dobles ni replicación artesanal entre SQLite y PostgreSQL. Se mantendrá una interfaz de repositorios estrecha para añadir PostgreSQL como sistema de persistencia alternativo seleccionable cuando exista una necesidad medida. Cada instalación tendrá un único sistema de persistencia autoritativo y dispondrá de una migración explícita si cambia de SQLite a PostgreSQL. JSONB podrá utilizarse en ese adaptador para metadatos flexibles, pero el modelo jugable transportable seguirá siendo relacional.
 
 ## 11. Cliente web
 
-### 11.1 Stack
+<a id="111-stack"></a>
+
+### 11.1 Tecnologías
 
 - TypeScript.
 - Svelte.
 - Vite.
 - CSS propio con variables de tema.
-- Service Worker pequeño.
+- Un trabajador de servicio pequeño mediante la API `Service Worker`.
 - Playwright para pruebas.
 
-El resultado compilado se incrustará en el ejecutable del servidor. No habrá runtime Node en producción.
+El resultado compilado se incrustará en el ejecutable del servidor. No habrá un entorno de ejecución de Node en producción.
 
 ### 11.2 Interfaz MVP
 
-- Login y selección de personaje.
-- Feed narrativo.
+- Inicio de sesión y selección de personaje.
+- Flujo narrativo.
 - Línea de comandos con historial y autocompletado.
 - Acciones contextuales accesibles.
 - Título, descripción e ilustración de escena.
 - Salidas y navegación.
-- Vitals.
+- Indicadores vitales.
 - Inventario y equipo.
-- Chat, tell, who e ignore.
+- Los comandos de conversación `chat`, `tell`, `who` e `ignore`.
 - Mapa básico.
 - Reconexión y reanudación.
 - Preferencias de imágenes, audio, movimiento y consumo de datos.
@@ -370,7 +376,7 @@ Escritorio:
 Móvil:
 
 - Escena y narrativa como vista principal.
-- Paneles secundarios en pestañas o drawers.
+- Paneles secundarios en pestañas o paneles deslizantes.
 - Comando fijo sin cubrir la salida.
 - Acciones frecuentes utilizables con una mano.
 
@@ -378,17 +384,17 @@ Móvil:
 
 - DOM virtualizado o recortado para el historial largo.
 - Historial persistido limitado y configurable.
-- Assets responsivos.
+- Recursos multimedia adaptables.
 - No descargar audio ni imágenes grandes cuando el usuario los desactive.
 - Respetar `Save-Data` y preferencias equivalentes cuando estén disponibles.
-- Objetivo inicial de JavaScript menor de 250 KiB comprimidos, excluyendo assets del juego.
+- Objetivo inicial de JavaScript menor de 250 KiB comprimidos, excluyendo los recursos multimedia del juego.
 
 ### 11.5 Accesibilidad
 
 - Objetivo WCAG 2.2 AA.
 - Navegación completa por teclado.
-- Feed con `role="log"` y anuncios selectivos.
-- No anunciar automáticamente cada línea de spam de combate.
+- Flujo narrativo con `role="log"` y anuncios selectivos.
+- No anunciar automáticamente cada línea repetitiva de combate.
 - Texto alternativo contextual.
 - Alto contraste y `forced-colors`.
 - Tamaño de fuente configurable.
@@ -401,7 +407,7 @@ La imagen no contendrá información jugable exclusiva.
 
 El navegador utilizará un protocolo propio sobre WebSocket, no GMCP encapsulado.
 
-Envelope:
+Estructura envolvente:
 
 ```json
 {
@@ -446,10 +452,10 @@ Reglas:
 - Máximo inicial de 64 KiB por mensaje.
 - Secuencia monotónica por sesión.
 - `requestId` generado por el cliente para acciones.
-- Cache corta de resultados para evitar duplicados tras reconectar.
+- Caché breve de resultados para evitar duplicados tras reconectar.
 - Retención breve de eventos para reanudación.
-- Snapshot completo si falta parte de la secuencia.
-- Heartbeat y timeout.
+- Instantánea completa si falta parte de la secuencia.
+- Latido de conexión y tiempo de espera.
 - Validación mediante esquema y tipos del servidor.
 - Autorización de cada acción.
 
@@ -510,25 +516,25 @@ Se reutilizarán paquetes conocidos cuando encajen:
 - `Group`.
 - `Client.Media`.
 
-El namespace propio se limitará inicialmente a:
+El espacio de nombres propio se limitará inicialmente a:
 
 ```text
 Tiamud.Scene 1
 Tiamud.Assets 1
 ```
 
-MTTS será la fuente para ANSI, UTF-8, 256 colores, truecolor y lector de pantalla. Solo capacidades no cubiertas, como un panel multimedia específico, necesitarán negociación propia.
+MTTS será la fuente para ANSI, UTF-8, 256 colores, color verdadero y lector de pantalla. Solo capacidades no cubiertas, como un panel multimedia específico, necesitarán negociación propia.
 
 ### 13.3 TinTin++
 
-No se hará un fork en el MVP.
+No se hará una bifurcación en el MVP.
 
 Se proporcionará:
 
-- Script oficial para GMCP.
-- Vitals y estado.
+- Guion de automatización oficial para GMCP.
+- Indicadores vitales y estado.
 - Automapa.
-- Alias y triggers de ejemplo.
+- Alias y activadores de ejemplo.
 - Manejo de URLs de escena sin descarga automática obligatoria.
 
 ### 13.4 Mudlet
@@ -536,16 +542,16 @@ Se proporcionará:
 Se priorizará un paquete oficial capaz de:
 
 - Mostrar la imagen de escena.
-- Mantener mapa y vitals.
-- Cachear assets.
+- Mantener mapa e indicadores vitales.
+- Almacenar recursos multimedia en caché.
 - Respetar preferencias multimedia.
-- Degradar a GMCP estándar si el paquete no está instalado.
+- Recurrir a GMCP estándar si el paquete no está instalado.
 
 ### 13.5 Arte y gráficos de terminal
 
 - Texto y ANSI son la base.
-- Arte de celdas será opt-in.
-- Kitty, SIXEL e iTerm2 serán experimentales y opt-in.
+- El arte de celdas requerirá activación expresa.
+- Kitty, SIXEL e iTerm2 serán experimentales y requerirán activación expresa.
 - Nunca se activarán solo por el valor de `TTYPE`.
 
 ## 14. Modelo semántico de escena
@@ -579,11 +585,11 @@ Reglas:
 - Los visuales estáticos representan ambiente, no el estado autoritativo completo.
 - NPC, puertas y objetos dinámicos permanecen en texto y datos estructurados durante el MVP.
 
-Las actualizaciones parciales serán tipadas. No se utilizará una lista `changed` que duplique los datos ni JSON Patch genérico en v1.
+Las actualizaciones parciales serán tipadas. No se utilizará una lista `changed` que duplique los datos ni el formato JSON Patch genérico en v1.
 
 ## 15. Variantes y condiciones
 
-Las condiciones de contenido usan un AST declarativo y validado:
+Las condiciones de contenido usan un árbol de sintaxis abstracta (AST) declarativo y validado:
 
 ```json
 {
@@ -604,10 +610,24 @@ El compilador detectará:
 - Ausencia de variante por defecto.
 - Condiciones imposibles conocidas.
 - Referencias rotas.
-- Assets ausentes.
+- Recursos multimedia ausentes.
 - Posibles fugas de contenido secreto.
 
-## 16. World packs e importación
+<a id="16-world-packs-e-importación"></a>
+
+## 16. Paquetes WorldPack e importación
+
+> **Estado implementado posterior.** El servidor no carga esta estructura de
+> directorios: consume un único `WorldPackDocument` v2 plano y validado, sin
+> conservar una entidad `area` en el runtime ni componer varios packs durante
+> el arranque. La herramienta implementada `tiamud-world compose` fusiona sin
+> conexión un `WorldProjectManifest` v1 estricto y entre 1 y 256 módulos
+> `AreaPack` v1 en ese artefacto final; valida dependencias declaradas,
+> referencias y alcanzabilidad globales, colisiones de ID, recursos y límites.
+> La estructura y los comandos que siguen se conservan como propuesta
+> histórica. La [guía actual de autoría](world-authoring.md) documenta el
+> contrato real, el ejemplo modular, las herramientas, los límites y la
+> publicación inmutable.
 
 Estructura propuesta:
 
@@ -655,19 +675,21 @@ El importador produce un informe de:
 
 - Entradas convertidas.
 - Referencias rotas.
-- Flags desconocidos.
+- Indicadores desconocidos.
 - Colisiones.
 - Codificaciones dudosas.
-- MOBPROG o scripts no soportados.
+- MOBPROG o guiones no compatibles.
 - Referencias a contenido cuya licencia no está declarada.
 
-## 17. Scripting
+<a id="17-scripting"></a>
+
+## 17. Automatización mediante guiones
 
 La mayor parte del mundo debe poder expresarse mediante datos, condiciones y acciones predefinidas.
 
 Para comportamiento especial se propone Lua embebido y versionado, con estas restricciones:
 
-- Sin filesystem.
+- Sin acceso al sistema de archivos.
 - Sin red.
 - Sin ejecución de procesos.
 - Sin carga de bibliotecas nativas.
@@ -677,9 +699,9 @@ Para comportamiento especial se propone Lua embebido y versionado, con estas res
 - Número máximo de eventos encadenados.
 - Semillas controlables para pruebas.
 
-Los scripts de builders se consideran contenido confiable del operador, pero aun así se limitan para evitar errores y saturación accidental.
+Los guiones creados por los autores del mundo se consideran contenido confiable del operador, pero aun así se limitan para evitar errores y saturación accidental.
 
-La API incluirá inicialmente hooks como:
+La API incluirá inicialmente puntos de extensión como:
 
 ```text
 on_enter
@@ -693,11 +715,22 @@ on_timer
 on_quest_event
 ```
 
-## 18. Assets y publicación multimedia
+<a id="18-assets-y-publicación-multimedia"></a>
+
+## 18. Recursos y publicación multimedia
+
+> **Estado implementado posterior.** La herramienta real `tiamud-assets`
+> procesa las imágenes sin conexión con bibliotecas Rust, publica bundles
+> `assets/<sha256>/manifest.json` con variantes de 640 y 1280 píxeles, y exige
+> procedencia y revisión. El servidor de referencia sirve la distribución web
+> incrustada en el ejecutable; el registro de WorldPacks no copia multimedia.
+> Las rutas fragmentadas y libvips descritos a continuación pertenecen a la
+> propuesta histórica. Consulte la [guía actual de autoría y
+> multimedia](world-authoring.md#multimedia-percepcion-y-localizacion).
 
 ### 18.1 Almacenamiento v1
 
-Los recursos publicados viven en el filesystem local:
+Los recursos publicados residen en el sistema de archivos local:
 
 ```text
 data/assets/sha256/ab/cd/<digest>.avif
@@ -707,14 +740,16 @@ data/assets/sha256/ab/cd/<digest>.jpg
 
 El servidor los sirve directamente con caché inmutable. S3 o CDN serán adaptadores futuros.
 
-### 18.2 Pipeline
+<a id="182-pipeline"></a>
+
+### 18.2 Proceso de publicación
 
 ```text
 fuente
   ↓
 cuarentena y límites
   ↓
-decodificación y re-encode aislado
+decodificación y recodificación aislada
   ↓
 eliminación de metadatos
   ↓
@@ -725,14 +760,14 @@ hash de cada salida
 manifiesto publicado
 ```
 
-Se propone libvips para procesado offline.
+Se propone libvips para el procesamiento sin conexión.
 
 Formatos:
 
 - AVIF para navegador moderno.
-- WebP como fallback moderno.
+- WebP como alternativa moderna.
 - JPEG como compatibilidad.
-- PNG únicamente cuando se requiera transparencia o lossless.
+- PNG únicamente cuando se requiera transparencia o compresión sin pérdida.
 
 Anchuras iniciales:
 
@@ -747,17 +782,17 @@ Presupuestos orientativos:
 - Imagen habitual: 150–500 KiB.
 - Imagen excepcional: hasta 2 MiB.
 - Dimensión máxima publicada: 4096 × 4096.
-- Upload fuente: configurable y procesado fuera del actor de mundo.
+- Carga de la fuente: configurable y procesada fuera del actor de mundo.
 
 ### 18.3 Manifiesto
 
-Cada asset lógico registrará:
+Cada recurso lógico registrará:
 
 - ID y revisión.
-- Variantes y digests.
+- Variantes y resúmenes criptográficos.
 - Dimensiones.
 - Punto focal.
-- Color dominante o placeholder.
+- Color dominante o marcador de posición.
 - Autor y licencia.
 - Procedencia.
 - Herramienta o modelo generativo si aplica.
@@ -792,7 +827,7 @@ La IA encaja primero como herramienta editorial:
 - Sugerir texto alternativo.
 - Revisar consistencia de un área.
 - Detectar salidas o referencias sospechosas.
-- Generar ideas para NPC o quests.
+- Generar ideas para NPC o misiones.
 - Crear imágenes durante la autoría.
 
 Flujo obligatorio:
@@ -817,7 +852,7 @@ La integración se hará mediante un adaptador opcional, no enlazando un modelo 
 ai.provider = "none"       # valor por defecto
 ai.provider = "ollama"     # opcional
 ai.provider = "llama.cpp"  # opcional
-ai.provider = "compatible" # endpoint configurado por el operador
+ai.provider = "compatible" # punto de acceso configurado por el operador
 ```
 
 Para ejecución local se favorecerán modelos cuantizados pequeños, aproximadamente de 1B–4B parámetros, usados solo bajo demanda editorial.
@@ -828,16 +863,16 @@ El motor no descargará modelos automáticamente.
 
 No forma parte del MVP. Si se experimenta posteriormente:
 
-- Se ejecuta en un worker o proceso opcional.
+- Se ejecuta en una tarea auxiliar o proceso opcional.
 - Nunca decide reglas, recompensas, daño, inventario ni permisos.
 - Cola global y por jugador estrictamente acotada.
 - Límite configurable de CPU, RAM, tokens y tiempo.
-- Respuesta cacheable cuando sea apropiado.
-- Fallback determinista si falla o está desactivada.
+- Respuesta almacenable en caché cuando sea apropiado.
+- Alternativa determinista si falla o está desactivada.
 - Posibilidad de desactivar por mundo y por jugador.
 - Etiquetado claro de contenido generado.
 
-Un fallo del proveedor de IA no puede ralentizar movimiento, combate, chat ni guardado.
+Un fallo del proveedor de IA no puede ralentizar movimiento, combate, conversación ni guardado.
 
 ## 20. Audio y animación
 
@@ -857,46 +892,48 @@ Un fallo del proveedor de IA no puede ralentizar movimiento, combate, chat ni gu
 - Cookies `HttpOnly`, `Secure` y `SameSite` cuando se use sesión web.
 - Autorización en cada acción.
 - Argon2id para contraseñas.
-- Passkeys como mejora futura.
+- Claves de acceso como mejora futura.
 - Telnet TLS para credenciales en clientes compatibles.
-- Telnet sin cifrar opt-in y con advertencia.
+- Telnet sin cifrar sólo mediante activación expresa y con advertencia.
 
 ### 21.2 Límites
 
 - Tamaño de mensaje WebSocket: 64 KiB inicialmente.
 - Subnegociación Telnet acotada.
 - Profundidad y tamaño JSON acotados.
-- Frecuencia de comandos y login limitada.
+- Frecuencia limitada de comandos y de intentos de inicio de sesión.
 - Máximo de sesiones por cuenta e IP configurable.
 - Colas acotadas en todas las fronteras.
-- Timeouts para DB, scripts, assets y shutdown.
+- Tiempos de espera para la base de datos, los guiones, los recursos y el apagado.
 
-### 21.3 Contenido y assets
+<a id="213-contenido-y-assets"></a>
+
+### 21.3 Contenido y recursos
 
 - Sin SVG remoto en v1.
 - Sin HTML o JavaScript arbitrario.
 - Sin `data:` o `file:` URLs.
-- Sin hosts externos no permitidos.
-- MIME detectado por contenido y re-encode de imágenes.
+- Sin servidores externos no permitidos.
+- MIME detectado por contenido y recodificación de imágenes.
 - Metadatos eliminados.
 - CSP y `X-Content-Type-Options: nosniff`.
-- Procesado de uploads fuera del actor de mundo y con recursos limitados.
+- Procesamiento de cargas fuera del actor de mundo y con recursos limitados.
 
 ### 21.4 Moderación
 
-Antes de una alpha pública:
+Antes de una alfa pública:
 
-- Ignore, mute y block.
+- Funciones para ignorar, silenciar y bloquear.
 - Reporte de usuarios y mensajes.
-- Rate limiting de chat.
+- Limitación de frecuencia de la conversación.
 - Roles administrativos.
-- Audit log.
-- Bans temporales y permanentes.
-- Protección de datos sensibles en logs.
+- Registro de auditoría.
+- Bloqueos temporales y permanentes.
+- Protección de datos sensibles en los registros.
 
 ## 22. Operación y observabilidad
 
-Logs estructurados con rotación y salida legible para instalación simple.
+Registros estructurados con rotación y salida legible para una instalación simple.
 
 Métricas mínimas:
 
@@ -905,24 +942,24 @@ Métricas mínimas:
 - Latencia de acciones.
 - Longitud de colas.
 - Visuales coalescidos o descartados.
-- Tiempo de scripts y timeouts.
+- Tiempo de ejecución de guiones y esperas agotadas.
 - Transacciones y errores SQLite.
 - Uso de memoria.
-- Tiempo de tick o ciclo de acciones.
+- Tiempo de ciclo o de procesamiento de acciones.
 
-El endpoint de salud distinguirá:
+El punto de acceso de salud distinguirá:
 
 ```text
 /health/live
 /health/ready
 ```
 
-Shutdown elegante:
+Apagado ordenado:
 
 1. Dejar de aceptar conexiones.
 2. Informar a los clientes.
 3. Detener nuevas acciones.
-4. Drenar acciones aceptadas dentro de un timeout.
+4. Drenar acciones aceptadas dentro de un tiempo de espera.
 5. Persistir estado necesario.
 6. Cerrar SQLite.
 7. Permitir que el cliente reconecte al reiniciar.
@@ -968,14 +1005,14 @@ Podrá entregarse como un único comando `mud`; la separación del repositorio e
 
 ### 24.1 Dominio
 
-- Tests deterministas de combate, movimiento y percepción.
-- Property tests de inventario, economía y efectos.
+- Pruebas deterministas de combate, movimiento y percepción.
+- Pruebas basadas en propiedades de inventario, economía y efectos.
 - Semillas reproducibles.
-- Tests de invariantes después de cada acción.
+- Pruebas de invariantes después de cada acción.
 
 ### 24.2 Protocolos
 
-- Fuzzing de Telnet e IAC.
+- Pruebas mediante generación automatizada de entradas inválidas y limítrofes para Telnet e IAC.
 - Negociaciones fragmentadas y concatenadas.
 - JSON truncado, profundo y sobredimensionado.
 - Reconexión y reanudación.
@@ -988,52 +1025,58 @@ Podrá entregarse como un único comando `mud`; la separación del repositorio e
 - Referencias.
 - Habitaciones inalcanzables.
 - Salidas no recíprocas cuando deban serlo.
-- Variantes sin default.
+- Variantes sin valor predeterminado.
 - Texto alternativo ausente.
 - Fugas de contenido oculto.
-- Golden tests de renderizado de texto.
+- Pruebas de referencia del renderizado de texto.
 
 ### 24.4 Web y accesibilidad
 
 - Chromium, Firefox y WebKit mediante Playwright.
-- Viewports móvil y escritorio.
+- Tamaños de ventana gráfica para móvil y escritorio.
 - Navegación por teclado.
-- Contraste y reduced motion.
+- Contraste y movimiento reducido.
 - Lectores de pantalla mediante pruebas manuales periódicas.
 
 ### 24.5 Carga
 
-- Bot headless que conecta, autentica, mueve, habla y combate.
-- Soak test de 24 horas.
+- Cliente automatizado sin interfaz gráfica que conecta, autentica, mueve, habla y combate.
+- Prueba prolongada de 24 horas.
 - Clientes que reconectan repetidamente.
-- Assets ausentes o lentos.
-- Scripts que consumen su cuota.
+- Recursos ausentes o lentos.
+- Guiones que consumen su cuota.
 
-## 25. Roadmap
+<a id="25-roadmap"></a>
 
-### Fase 0 — Decisiones y walking skeleton (2 semanas)
+## 25. Hoja de ruta
+
+<a id="fase-0--decisiones-y-walking-skeleton-2-semanas"></a>
+
+### Fase 0 — Decisiones y esqueleto funcional (2 semanas)
 
 - Revisión legal y elección de licencia.
-- Nombre provisional.
-- Monorepo Rust/TypeScript.
+- Nombre definitivo elegido: Tiamud.
+- Repositorio único para Rust y TypeScript.
 - Un ejecutable con web embebida.
 - SQLite y migración inicial.
 - Una habitación compartida por navegador y Telnet.
-- Bot de prueba.
+- Cliente automatizado de prueba.
 
 Criterio:
 
 > `tiamud-server` permite entrar desde navegador y Telnet al mismo mundo sin servicios externos.
 
-### Fase 1 — Vertical browser-first (4–6 semanas)
+<a id="fase-1--vertical-browser-first-46-semanas"></a>
+
+### Fase 1 — Vertical orientada al navegador (4–6 semanas)
 
 - Cuenta registrada y selección de personaje.
 - Personaje.
-- Movimiento, look, say, tell, who y help.
+- Movimiento y comandos `look`, `say`, `tell`, `who` y `help`.
 - `scene.snapshot`.
-- Imagen externa/local con fallback textual.
-- Reconexión y snapshot.
-- Cliente responsive.
+- Imagen externa o local con alternativa textual.
+- Reconexión e instantánea.
+- Cliente adaptable.
 - Texto Telnet limpio.
 
 Criterio:
@@ -1044,12 +1087,12 @@ Criterio:
 
 - Inventario y equipo.
 - Combate.
-- Skills y efectos.
-- NPC y spawns.
+- Habilidades y efectos.
+- NPC y apariciones.
 - Muerte y recuperación.
-- Persistencia durable.
-- Primeros hooks de script.
-- Vitals e inventario estructurados.
+- Persistencia duradera.
+- Primeros puntos de extensión para guiones.
+- Indicadores vitales e inventario estructurados.
 
 Criterio:
 
@@ -1057,28 +1100,30 @@ Criterio:
 
 ### Fase 3 — Contenido y multimedia (4–6 semanas)
 
-- World packs.
+- Paquetes WorldPack.
 - `world validate/build/diff`.
 - `asset build`.
 - Variantes de imagen.
 - Condiciones de escena.
 - Importador histórico EnvyMUD/Merc parcial.
-- Preview de texto, web y ANSI.
+- Previsualización de texto, web y ANSI.
 
 Criterio:
 
 > Un área se valida, compila, publica y puede importarse parcialmente desde un formato histórico.
 
-### Fase 4 — Alpha pública (6–8 semanas)
+<a id="fase-4--alpha-pública-68-semanas"></a>
+
+### Fase 4 — Alfa pública (6–8 semanas)
 
 - Telnet TLS.
 - GMCP estándar.
 - Paquete Mudlet.
-- Script TinTin++.
+- Guion de automatización para TinTin++.
 - Mapa y grupos.
 - Moderación.
 - Accesibilidad y móvil.
-- Backup y restore probados.
+- Copia de seguridad y restauración probadas.
 - Métricas y pruebas de carga.
 
 Criterio:
@@ -1087,12 +1132,12 @@ Criterio:
 
 ### Fase 5 — Beta (4–6 semanas)
 
-- Publicación y rollback de mundos.
+- Publicación y reversión de mundos.
 - Localización preparada.
-- Mejoras de onboarding.
-- Hardening de seguridad.
-- Documentación para builders y operadores.
-- Decisión basada en métricas sobre PostgreSQL, object storage o separación de procesos.
+- Mejoras de incorporación de nuevos jugadores.
+- Refuerzo de seguridad.
+- Documentación para creadores y operadores.
+- Decisión basada en métricas sobre PostgreSQL, almacenamiento de objetos o separación de procesos.
 
 ## 26. Criterios globales de aceptación
 
@@ -1104,17 +1149,17 @@ Criterio:
 6. Ningún cliente recibe gráficos de terminal sin consentimiento.
 7. No existen colas sin límite.
 8. Una reconexión no duplica la última acción confirmada.
-9. El cliente puede pedir un snapshot tras perder eventos.
+9. El cliente puede pedir una instantánea tras perder eventos.
 10. Los IDs externos no revelan variantes ocultas.
-11. SQLite puede respaldarse y restaurarse mediante la CLI.
+11. SQLite puede respaldarse y restaurarse mediante la interfaz de línea de comandos.
 12. El mundo puede actualizarse y revertirse de forma documentada.
-13. Los scripts tienen cuotas de tiempo y recursos.
+13. Los guiones tienen cuotas de tiempo y recursos.
 14. La IA puede estar completamente ausente.
 15. Un fallo de IA no afecta al juego.
-16. La instalación pública de un solo host está documentada.
+16. La instalación pública en un solo equipo está documentada.
 17. El navegador funciona con teclado y lector de pantalla.
 18. Telnet básico recibe texto limpio.
-19. El proceso supera un soak test de 24 horas sin crecimiento continuo de memoria.
+19. El proceso supera una prueba prolongada de 24 horas sin crecimiento continuo de memoria.
 20. Cualquier paso hacia arquitectura distribuida exige métricas que lo justifiquen.
 
 ## 27. Decisiones abiertas en la propuesta original
@@ -1125,10 +1170,11 @@ Criterio:
   original.
 - Método de emisión y renovación de certificados para Telnet TLS.
 - ~~Primer mundo de ejemplo y licencia de su contenido.~~ Resuelta con Lantern
-  Square y la licencia de contenido `CC-BY-4.0` registrada en el manifiesto y
-  el ADR 0004.
+  Square y la licencia de contenido `CC-BY-4.0` documentada en
+  `LICENSE-CONTENT.md` y el ADR 0004; el manifiesto de cada recurso conserva
+  además su licencia y procedencia específicas.
 - Objetivos de concurrencia realistas para el primer servidor público.
-- Política de cuentas: password, magic link y/o passkeys.
+- Política de cuentas: contraseña, enlace de acceso y/o claves de acceso.
 - Nivel de compatibilidad requerido con clientes distintos de Mudlet y TinTin++.
 
 ## 28. Regla de evolución
@@ -1140,7 +1186,7 @@ Una dependencia o servicio nuevo solo se añade cuando:
 1. Resuelve un problema observado.
 2. Existe una métrica o caso reproducible.
 3. No puede resolverse razonablemente dentro del proceso actual.
-4. Incluye migración, operación y rollback documentados.
+4. Incluye migración, operación y reversión documentadas.
 
 El objetivo no es construir infraestructura para un MMO hipotético, sino hacer un MUD moderno, rápido, mantenible y agradable de operar.
 
@@ -1149,14 +1195,14 @@ El objetivo no es construir infraestructura para un MMO hipotético, sino hacer 
 Estas decisiones sustituyen cualquier alternativa contradictoria que permanezca en borradores anteriores:
 
 1. Se construirá Tiamud como motor nuevo en Rust, inspirado por EnvyMUD, Merc y otros MUD de su época, pero sin copiar sus implementaciones históricas.
-2. El producto será browser-first y text-complete. WebSocket será el transporte principal del navegador; Telnet textual seguirá siendo jugable.
+2. El producto dará prioridad al navegador y será completo mediante texto. WebSocket será el transporte principal del navegador; Telnet textual seguirá siendo jugable.
 3. El despliegue de referencia será un único proceso en un equipo corriente. Docker será opcional y Kubernetes, Redis, S3 y microservicios no formarán parte de v1.
 4. El núcleo será un actor propietario del mundo. Las acciones de dominio serán independientes de HTTP, WebSocket y Telnet.
-5. SQLite en WAL será el backend predeterminado mediante rusqlite y un worker dedicado. PostgreSQL podrá añadirse como backend alternativo, nunca como doble escritura obligatoria.
+5. SQLite en WAL será el sistema de persistencia predeterminado mediante rusqlite y una tarea dedicada. PostgreSQL podrá añadirse como sistema de persistencia alternativo, nunca como doble escritura obligatoria.
 6. Las ilustraciones serán acompañamiento atmosférico. No contendrán información jugable exclusiva ni intentarán componer en tiempo real cada NPC u objeto.
-7. El pipeline offline producirá AVIF como variante preferente para navegador, WebP como fallback moderno y JPEG como compatibilidad. Las primeras anchuras serán 640 y 1280 píxeles.
+7. El proceso sin conexión producirá AVIF como variante preferente para navegador, WebP como alternativa moderna y JPEG como compatibilidad. Las primeras anchuras serán 640 y 1280 píxeles.
 8. Los fallos o ausencias de imágenes no bloquearán el juego. El procesamiento y la IA no se ejecutarán dentro del actor de mundo.
-9. La IA será una ayuda declarada para desarrollo y, opcionalmente, para autoría offline ligera. No será dependencia de ejecución y toda salida editorial requerirá revisión humana.
-10. Las áreas históricas EnvyMUD/Merc legalmente utilizables servirán para ayudar a migrar contenido mediante el importador offline independiente `envy-import`. WorldPack seguirá siendo el formato canónico de Tiamud.
-11. La reconexión pedirá un snapshot autoritativo; v1 no implementará replay general de comandos ni eventos.
+9. La IA será una ayuda declarada para desarrollo y, opcionalmente, para autoría ligera sin conexión. No será dependencia de ejecución y toda salida editorial requerirá revisión humana.
+10. Las áreas históricas EnvyMUD/Merc legalmente utilizables servirán para ayudar a migrar contenido mediante el importador independiente sin conexión `envy-import`. WorldPack seguirá siendo el formato canónico de Tiamud.
+11. La reconexión pedirá una instantánea autoritativa; v1 no implementará reproducción general de comandos ni eventos.
 12. Las decisiones permanentes y el estado de implementación se conservarán dentro del repositorio, junto con esta especificación histórica versionada.

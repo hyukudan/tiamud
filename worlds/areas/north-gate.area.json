@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "id": "north-gate",
+  "dependsOn": [
+    "square"
+  ],
+  "items": [
+    {
+      "id": "tiamud:road-token",
+      "name": "iron road token",
+      "description": "A thumb-sized iron token stamped with a gate above a winding road.",
+      "aliases": [
+        "token",
+        "iron token"
+      ]
+    },
+    {
+      "id": "tiamud:wolf-clasp",
+      "name": "silver wolf clasp",
+      "description": "A small silver clasp shaped like a running wolf, won from the gate-stalker.",
+      "aliases": [
+        "clasp",
+        "wolf clasp",
+        "silver clasp"
+      ]
+    }
+  ],
+  "rooms": [
+    {
+      "id": "demo:north-gate",
+      "title": "The North Gate",
+      "description": "An iron-bound gate stands open between squat stone towers. The road continues into fields silvered by rain.",
+      "items": [
+        "tiamud:road-token",
+        "tiamud:wolf-clasp"
+      ],
+      "exits": [
+        {
+          "direction": "south",
+          "target": {
+            "kind": "room",
+            "room_id": "demo:lantern-square"
+          }
+        }
+      ]
+    }
+  ],
+  "npcPrototypes": [
+    {
+      "id": "tiamud:gate-stalker",
+      "name": "rain-dark gate-stalker",
+      "description": "A lean wolf-like creature watches the road through eyes the colour of storm glass.",
+      "level": 1,
+      "maxHealth": 18,
+      "strength": 3,
+      "defence": 1,
+      "experienceReward": 60,
+      "respawnTicks": 8,
+      "lootItemIds": [
+        "tiamud:wolf-clasp"
+      ]
+    }
+  ],
+  "npcSpawns": [
+    {
+      "id": "tiamud:gate-stalker-1",
+      "prototypeId": "tiamud:gate-stalker",
+      "roomId": "demo:north-gate"
+    }
+  ],
+  "roomPerception": [
+    {
+      "roomId": "demo:north-gate",
+      "light": "bright",
+      "hiddenItems": {
+        "tiamud:road-token": 8
+      },
+      "hiddenNpcs": {
+        "tiamud:gate-stalker-1": 8
+      }
+    }
+  ]
+}

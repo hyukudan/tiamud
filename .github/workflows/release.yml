@@ -12,20 +12,21 @@ on:
         type: string
 
 permissions:
-  artifact-metadata: write
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build-verify-attest:
-    name: Build twice, verify, and attest
+  build_verify:
+    name: Build twice and verify
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     env:
       CARGO_INCREMENTAL: "0"
@@ -95,6 +96,10 @@ jobs:
         shell: bash
         run: pnpm install --frozen-lockfile
 
+      - name: Verify project license files
+        shell: bash
+        run: bash scripts/verify-project-licenses.sh
+
       - name: Verify locked third-party notices and license policy
         shell: bash
         run: node scripts/generate-third-party-notices.mjs --check
@@ -106,6 +111,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export SOURCE_DATE_EPOCH="$RELEASE_EPOCH"
           export RUSTFLAGS="-C debuginfo=0 --remap-path-prefix=${GITHUB_WORKSPACE}=."
 
           for build in first second; do
@@ -137,16 +143,29 @@ jobs:
       - name: Prepare checksummed release artifacts
         env:
           RELEASE_EPOCH: ${{ steps.version.outputs.source_date_epoch }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
+          binary="tiamud-${RELEASE_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          web="tiamud-web-${RELEASE_VERSION}.tar.gz"
+          mapfile -t produced < <(find build/first/packages -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          expected=("$binary" "$web")
+          mapfile -t expected < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          if [[ ${produced[*]} != "${expected[*]}" ]]; then
+            echo "release package inventory differs from the two expected archives" >&2
+            printf 'expected: %s\n' "${expected[*]}" >&2
+            printf 'actual:   %s\n' "${produced[*]}" >&2
+            exit 1
+          fi
           mkdir -p release
-          cp -a build/first/packages/. release/
+          install -m 0644 "build/first/packages/$binary" "release/$binary"
+          install -m 0644 "build/first/packages/$web" "release/$web"
           (
             cd release
-            sha256sum -- *.tar.gz >SHA256SUMS
+            sha256sum -- "$binary" "$web" >SHA256SUMS
             sha256sum --check --strict SHA256SUMS
-            for artifact in *.tar.gz; do
+            for artifact in "$binary" "$web"; do
               tar --list --gzip --file "$artifact" >/dev/null
             done
           )
@@ -157,6 +176,63 @@ jobs:
             echo "comparison=byte-for-byte-identical"
           } >release/REPRODUCIBILITY.txt
 
+      - name: Upload verified inputs for attestation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tiamud-release-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/tiamud-${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+            release/tiamud-web-${{ steps.version.outputs.version }}.tar.gz
+            release/SHA256SUMS
+            release/REPRODUCIBILITY.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  attest:
+    name: Attest verified release artifacts
+    needs: build_verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download verified release inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tiamud-release-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+
+      - name: Recheck downloaded checksums
+        env:
+          RELEASE_VERSION: ${{ needs.build_verify.outputs.version }}
+        working-directory: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="tiamud-${RELEASE_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          web="tiamud-web-${RELEASE_VERSION}.tar.gz"
+          expected=(REPRODUCIBILITY.txt SHA256SUMS "$binary" "$web")
+          mapfile -t actual < <(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t expected < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          if [[ ${actual[*]} != "${expected[*]}" ]]; then
+            echo "downloaded release inventory is not the exact verified input set" >&2
+            exit 1
+          fi
+          mapfile -t checksum_names < <(sed -nE 's/^[0-9a-f]{64}  (.+)$/\1/p' SHA256SUMS)
+          if [[ ${#checksum_names[@]} -ne 2 \
+                || ${checksum_names[0]} != "$binary" \
+                || ${checksum_names[1]} != "$web" \
+                || $(wc -l <SHA256SUMS) -ne 2 ]]; then
+            echo "SHA256SUMS must name exactly the two expected release archives" >&2
+            exit 1
+          fi
+          sha256sum --check --strict SHA256SUMS
+
       - name: Generate OIDC-signed build provenance
         id: attest
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
@@ -166,31 +242,81 @@ jobs:
       - name: Preserve the portable attestation bundle
         env:
           ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_VERSION: ${{ needs.build_verify.outputs.version }}
         shell: bash
         run: cp "$ATTESTATION_BUNDLE" "release/tiamud-${RELEASE_VERSION}.intoto.jsonl"
 
       - name: Upload versioned workflow artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: tiamud-${{ steps.version.outputs.version }}-linux-x86_64
-          path: release/*
+          name: tiamud-${{ needs.build_verify.outputs.version }}-linux-x86_64
+          path: |
+            release/tiamud-${{ needs.build_verify.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
+            release/tiamud-web-${{ needs.build_verify.outputs.version }}.tar.gz
+            release/SHA256SUMS
+            release/REPRODUCIBILITY.txt
+            release/tiamud-${{ needs.build_verify.outputs.version }}.intoto.jsonl
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
 
+  publish:
+    name: Publish tagged GitHub release
+    if: github.ref_type == 'tag'
+    needs:
+      - build_verify
+      - attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download attested release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tiamud-${{ needs.build_verify.outputs.version }}-linux-x86_64
+          path: release
+
       - name: Publish tagged GitHub release
-        if: github.ref_type == 'tag'
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build_verify.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
+          binary="tiamud-${RELEASE_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          web="tiamud-web-${RELEASE_VERSION}.tar.gz"
+          attestation="tiamud-${RELEASE_VERSION}.intoto.jsonl"
+          expected=(REPRODUCIBILITY.txt SHA256SUMS "$attestation" "$binary" "$web")
+          mapfile -t actual < <(find release -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t expected < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          if [[ ${actual[*]} != "${expected[*]}" ]]; then
+            echo "publish inventory is not the exact attested release set" >&2
+            exit 1
+          fi
+          mapfile -t checksum_names < <(sed -nE 's/^[0-9a-f]{64}  (.+)$/\1/p' release/SHA256SUMS)
+          if [[ ${#checksum_names[@]} -ne 2 \
+                || ${checksum_names[0]} != "$binary" \
+                || ${checksum_names[1]} != "$web" \
+                || $(wc -l <release/SHA256SUMS) -ne 2 ]]; then
+            echo "SHA256SUMS must name exactly the two expected release archives" >&2
+            exit 1
+          fi
+          (cd release && sha256sum --check --strict SHA256SUMS)
+          artifacts=(
+            "release/$binary"
+            "release/$web"
+            release/SHA256SUMS
+            release/REPRODUCIBILITY.txt
+            "release/$attestation"
+          )
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release/* --clobber
+            gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber
           else
-            gh release create "$RELEASE_TAG" release/* \
+            gh release create "$RELEASE_TAG" "${artifacts[@]}" \
               --verify-tag \
               --generate-notes \
               --title "Tiamud $RELEASE_TAG"
