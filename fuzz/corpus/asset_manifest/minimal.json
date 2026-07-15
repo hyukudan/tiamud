@@ -1,0 +1,33 @@
+{
+  "schema": 2,
+  "assetId": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "revision": 1,
+  "kind": "atmosphere",
+  "alt": "A bounded manifest seed.",
+  "focalPoint": {
+    "xPerMille": 500,
+    "yPerMille": 500
+  },
+  "dominantColor": "#000000",
+  "author": "Tiamud fuzz harness",
+  "license": "LicenseRef-Test",
+  "provenance": "Synthetic fuzz seed.",
+  "contentClassification": "general",
+  "humanReviewedAt": "2026-07-15T00:00:00Z",
+  "source": {
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "width": 1280,
+    "height": 720
+  },
+  "variants": [
+    {
+      "format": "png",
+      "mediaType": "image/png",
+      "width": 640,
+      "height": 360,
+      "bytes": 1,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "path": "seed/scene-640.png"
+    }
+  ]
+}

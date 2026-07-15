@@ -1,0 +1,13 @@
+[package]
+name = "tiamud-scripting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Capability-based, quota-limited Lua hooks for Tiamud WorldPacks"
+
+[dependencies]
+mlua.workspace = true
+serde.workspace = true
+thiserror.workspace = true

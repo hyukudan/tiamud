@@ -2,12 +2,22 @@
 name = "world-pack"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+editorial-ai = ["dep:tiamud-editorial-ai"]
+
 [dependencies]
+clap.workspace = true
+hex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tiamud-editorial-ai = { path = "../editorial-ai", optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+tempfile.workspace = true

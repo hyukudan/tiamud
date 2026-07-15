@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, ImageEncoder, ImageFormat, ImageReader, RgbImage};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const TARGET_WIDTHS: [u32; 2] = [640, 1280];
-const SCHEMA_VERSION: u8 = 1;
+const SCHEMA_VERSION: u8 = 2;
 const JPEG_QUALITY: u8 = 84;
 const AVIF_QUALITY: f32 = 64.0;
 const AVIF_SPEED: u8 = 8;
@@ -29,6 +30,9 @@ pub struct BuildRequest {
     pub alt: String,
     pub output_dir: PathBuf,
     pub limits: BuildLimits,
+    pub metadata: AuthoringMetadata,
+    /// Publish only deterministic PNG variants, even when the source is opaque.
+    pub lossless: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -48,7 +52,7 @@ impl Default for BuildLimits {
             max_dimension: 8192,
             max_pixels: 40_000_000,
             max_decoded_bytes: 256 * 1024 * 1024,
-            max_variant_bytes: 8 * 1024 * 1024,
+            max_variant_bytes: 2 * 1024 * 1024,
             max_alt_chars: 1024,
         }
     }
@@ -60,6 +64,7 @@ pub enum AssetFormat {
     Avif,
     Webp,
     Jpeg,
+    Png,
 }
 
 impl AssetFormat {
@@ -68,6 +73,7 @@ impl AssetFormat {
             Self::Avif => "avif",
             Self::Webp => "webp",
             Self::Jpeg => "jpg",
+            Self::Png => "png",
         }
     }
 
@@ -76,6 +82,7 @@ impl AssetFormat {
             Self::Avif => "image/avif",
             Self::Webp => "image/webp",
             Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
         }
     }
 }
@@ -86,6 +93,7 @@ impl fmt::Display for AssetFormat {
             Self::Avif => "AVIF",
             Self::Webp => "WebP",
             Self::Jpeg => "JPEG",
+            Self::Png => "PNG",
         })
     }
 }
@@ -95,10 +103,42 @@ impl fmt::Display for AssetFormat {
 pub struct AssetManifest {
     pub schema: u8,
     pub asset_id: String,
+    pub revision: u32,
     pub kind: String,
+    /// Fallback only. WorldPack scenes provide the contextual/localized alt.
     pub alt: String,
+    pub focal_point: FocalPoint,
+    pub dominant_color: String,
+    pub author: String,
+    pub license: String,
+    pub provenance: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generator: Option<String>,
+    pub content_classification: String,
+    pub human_reviewed_at: String,
     pub source: SourceDescriptor,
     pub variants: Vec<PublishedVariant>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthoringMetadata {
+    pub revision: u32,
+    pub focal_point: FocalPoint,
+    pub author: String,
+    pub license: String,
+    pub provenance: String,
+    pub generator: Option<String>,
+    pub content_classification: String,
+    pub human_reviewed_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FocalPoint {
+    /// Horizontal position in thousandths, from 0 (left) to 1000 (right).
+    pub x_per_mille: u16,
+    /// Vertical position in thousandths, from 0 (top) to 1000 (bottom).
+    pub y_per_mille: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -130,6 +170,41 @@ pub struct BuildResult {
     pub manifest: AssetManifest,
 }
 
+#[derive(Clone, Debug)]
+pub struct QuarantineRequest {
+    pub source: PathBuf,
+    pub quarantine_dir: PathBuf,
+    pub limits: BuildLimits,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineReview {
+    pub reviewer: String,
+    pub reviewed_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineRecord {
+    pub schema: u8,
+    pub original_sha256: String,
+    pub sanitized_sha256: String,
+    pub width: u32,
+    pub height: u32,
+    pub has_transparency: bool,
+    pub sanitized_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<QuarantineReview>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineResult {
+    pub record_path: PathBuf,
+    pub record: QuarantineRecord,
+}
+
 #[derive(Debug, Error)]
 pub enum PipelineError {
     #[error("alternative text must not be empty")]
@@ -138,14 +213,22 @@ pub enum PipelineError {
     AltTooLong { maximum: usize },
     #[error("alternative text must be a single line without control characters")]
     InvalidAltCharacters,
+    #[error("asset metadata field {field} must be non-empty, bounded, and contain no controls")]
+    InvalidMetadata { field: &'static str },
+    #[error("asset focal point must be between 0 and 1000 per mille on each axis")]
+    InvalidFocalPoint,
+    #[error("asset revision must be greater than zero")]
+    InvalidRevision,
+    #[error("invalid quarantine record: {0}")]
+    InvalidQuarantine(String),
+    #[error("quarantined source has not been reviewed")]
+    QuarantineNotReviewed,
     #[error("source is {actual} bytes, exceeding the {maximum}-byte limit")]
     SourceTooLarge { actual: u64, maximum: u64 },
     #[error("source width {actual} is below the required 1280 pixels; upscaling is disabled")]
     SourceTooNarrow { actual: u32 },
     #[error("source dimensions {width}x{height} exceed the configured limits")]
     InvalidDimensions { width: u32, height: u32 },
-    #[error("source contains transparent pixels; atmospheric backdrops must be opaque")]
-    SourceHasTransparency,
     #[error("unsupported source format; use PNG, JPEG, or WebP")]
     UnsupportedSourceFormat,
     #[error("required {0} encoder is unavailable")]
@@ -218,6 +301,7 @@ impl VariantEncoders for DefaultEncoders {
             #[cfg(not(feature = "webp-encoding"))]
             AssetFormat::Webp => Err(PipelineError::MissingRequiredEncoder(AssetFormat::Webp)),
             AssetFormat::Jpeg => encode_jpeg(image),
+            AssetFormat::Png => encode_png_rgb(image),
         }
     }
 }
@@ -226,11 +310,123 @@ pub fn build_asset(request: &BuildRequest) -> Result<BuildResult, PipelineError>
     build_asset_with(request, &DefaultEncoders)
 }
 
+/// Decode and re-encode an untrusted local upload into a metadata-free,
+/// content-addressed PNG. The returned record remains unpublished and pending
+/// review; this function has no network access and is never used by the server.
+pub fn quarantine_source(request: &QuarantineRequest) -> Result<QuarantineResult, PipelineError> {
+    let original = read_bounded_source(&request.source, request.limits.max_source_bytes)?;
+    let original_sha256 = sha256_hex(&original);
+    let decoded = decode_bounded_source(&original, request.limits)?;
+    let (width, height) = decoded.dimensions();
+    let transparent = has_transparency(&decoded);
+    let sanitized = if transparent {
+        encode_png_rgba(&decoded.to_rgba8())?
+    } else {
+        encode_png_rgb(&decoded.to_rgb8())?
+    };
+    if sanitized.len() as u64 > request.limits.max_source_bytes {
+        return Err(PipelineError::SourceTooLarge {
+            actual: sanitized.len() as u64,
+            maximum: request.limits.max_source_bytes,
+        });
+    }
+    let sanitized_sha256 = sha256_hex(&sanitized);
+    let bundle_dir = request.quarantine_dir.join(&sanitized_sha256);
+    let source_path = bundle_dir.join("source.png");
+    write_immutable(&source_path, &sanitized)?;
+
+    let pending = QuarantineRecord {
+        schema: 1,
+        original_sha256,
+        sanitized_sha256,
+        width,
+        height,
+        has_transparency: transparent,
+        sanitized_path: "source.png".to_owned(),
+        review: None,
+    };
+    let record_path = bundle_dir.join("quarantine.json");
+    let record = if record_path.exists() {
+        let existing = read_quarantine_record(&record_path, request.limits.max_source_bytes)?;
+        if existing.original_sha256 != pending.original_sha256 {
+            return Err(PipelineError::InvalidQuarantine(
+                "sanitized collision has different original bytes".to_owned(),
+            ));
+        }
+        existing
+    } else {
+        write_json_immutable(&record_path, &pending)?;
+        pending
+    };
+    validate_quarantine_record(&record_path, &record, request.limits.max_source_bytes)?;
+    Ok(QuarantineResult {
+        record_path,
+        record,
+    })
+}
+
+/// Record the explicit human decision that makes a quarantined source eligible
+/// for publication. Re-review is idempotent only with identical metadata.
+pub fn review_quarantine(
+    record_path: &Path,
+    reviewer: &str,
+    reviewed_at: &str,
+    max_bytes: u64,
+) -> Result<QuarantineResult, PipelineError> {
+    let reviewer = validate_quarantine_field(reviewer, "reviewer")?;
+    let reviewed_at = validate_quarantine_field(reviewed_at, "reviewed_at")?;
+    let mut record = read_quarantine_record(record_path, max_bytes)?;
+    validate_quarantine_record(record_path, &record, max_bytes)?;
+    let review = QuarantineReview {
+        reviewer,
+        reviewed_at,
+    };
+    if let Some(existing) = &record.review {
+        if existing != &review {
+            return Err(PipelineError::InvalidQuarantine(
+                "an existing review cannot be silently replaced".to_owned(),
+            ));
+        }
+    } else {
+        record.review = Some(review);
+        write_json_atomic(record_path, &record)?;
+    }
+    Ok(QuarantineResult {
+        record_path: record_path.to_owned(),
+        record,
+    })
+}
+
+/// Publish only the sanitized bytes named by a reviewed quarantine record.
+pub fn build_quarantined(
+    record_path: &Path,
+    mut request: BuildRequest,
+) -> Result<BuildResult, PipelineError> {
+    let record = read_quarantine_record(record_path, request.limits.max_source_bytes)?;
+    validate_quarantine_record(record_path, &record, request.limits.max_source_bytes)?;
+    let review = record
+        .review
+        .as_ref()
+        .ok_or(PipelineError::QuarantineNotReviewed)?;
+    if request.metadata.human_reviewed_at.trim() != review.reviewed_at {
+        return Err(PipelineError::InvalidQuarantine(
+            "publication review timestamp does not match quarantine review".to_owned(),
+        ));
+    }
+    request.source = record_path
+        .parent()
+        .ok_or_else(|| PipelineError::InvalidQuarantine("record has no parent".to_owned()))?
+        .join("source.png");
+    request.lossless |= record.has_transparency;
+    build_asset(&request)
+}
+
 pub fn build_asset_with(
     request: &BuildRequest,
     encoders: &dyn VariantEncoders,
 ) -> Result<BuildResult, PipelineError> {
     let alt = validate_alt(&request.alt, request.limits.max_alt_chars)?;
+    let metadata = validate_metadata(&request.metadata)?;
     let source_bytes = read_bounded_source(&request.source, request.limits.max_source_bytes)?;
     let source_sha256 = sha256_hex(&source_bytes);
     let source = decode_bounded_source(&source_bytes, request.limits)?;
@@ -241,23 +437,36 @@ pub fn build_asset_with(
             actual: source_width,
         });
     }
-    reject_transparency(&source)?;
-
-    let formats = encoders.formats();
-    for required in [AssetFormat::Avif, AssetFormat::Jpeg] {
-        if !formats.contains(&required) {
-            return Err(PipelineError::MissingRequiredEncoder(required));
+    let has_transparency = has_transparency(&source);
+    let formats = if request.lossless || has_transparency {
+        vec![AssetFormat::Png]
+    } else {
+        let formats = encoders.formats();
+        for required in [AssetFormat::Avif, AssetFormat::Jpeg] {
+            if !formats.contains(&required) {
+                return Err(PipelineError::MissingRequiredEncoder(required));
+            }
         }
-    }
+        formats
+    };
 
     let source_rgb = source.to_rgb8();
+    let source_rgba = (request.lossless || has_transparency).then(|| source.to_rgba8());
+    let dominant_color = dominant_color(&source_rgb);
     let mut encoded_variants = Vec::with_capacity(TARGET_WIDTHS.len() * formats.len());
     for width in TARGET_WIDTHS {
         let height = scaled_height(source_width, source_height, width);
         let resized = image::imageops::resize(&source_rgb, width, height, FilterType::Lanczos3);
+        let resized_rgba = source_rgba
+            .as_ref()
+            .map(|image| image::imageops::resize(image, width, height, FilterType::Lanczos3));
 
         for format in &formats {
-            let bytes = encoders.encode(*format, &resized)?;
+            let bytes = if *format == AssetFormat::Png {
+                encode_png_rgba(resized_rgba.as_ref().expect("PNG source prepared"))?
+            } else {
+                encoders.encode(*format, &resized)?
+            };
             if bytes.len() > request.limits.max_variant_bytes {
                 return Err(PipelineError::VariantTooLarge {
                     format: *format,
@@ -281,6 +490,8 @@ pub fn build_asset_with(
         &source_sha256,
         source_width,
         source_height,
+        &metadata,
+        &dominant_color,
         &encoded_variants,
     );
     let asset_id = format!("sha256:{asset_hash}");
@@ -306,8 +517,17 @@ pub fn build_asset_with(
     let manifest = AssetManifest {
         schema: SCHEMA_VERSION,
         asset_id: asset_id.clone(),
+        revision: metadata.revision,
         kind: "atmosphere".to_owned(),
         alt,
+        focal_point: metadata.focal_point,
+        dominant_color,
+        author: metadata.author,
+        license: metadata.license,
+        provenance: metadata.provenance,
+        generator: metadata.generator,
+        content_classification: metadata.content_classification,
+        human_reviewed_at: metadata.human_reviewed_at,
         source: SourceDescriptor {
             sha256: source_sha256,
             width: source_width,
@@ -352,6 +572,58 @@ fn validate_alt(alt: &str, max_chars: usize) -> Result<String, PipelineError> {
     Ok(alt.to_owned())
 }
 
+fn validate_metadata(metadata: &AuthoringMetadata) -> Result<AuthoringMetadata, PipelineError> {
+    if metadata.revision == 0 {
+        return Err(PipelineError::InvalidRevision);
+    }
+    if metadata.focal_point.x_per_mille > 1000 || metadata.focal_point.y_per_mille > 1000 {
+        return Err(PipelineError::InvalidFocalPoint);
+    }
+
+    fn field(value: &str, name: &'static str) -> Result<String, PipelineError> {
+        let value = value.trim();
+        if value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control) {
+            return Err(PipelineError::InvalidMetadata { field: name });
+        }
+        Ok(value.to_owned())
+    }
+
+    Ok(AuthoringMetadata {
+        revision: metadata.revision,
+        focal_point: metadata.focal_point,
+        author: field(&metadata.author, "author")?,
+        license: field(&metadata.license, "license")?,
+        provenance: field(&metadata.provenance, "provenance")?,
+        generator: metadata
+            .generator
+            .as_deref()
+            .map(|value| field(value, "generator"))
+            .transpose()?,
+        content_classification: field(&metadata.content_classification, "content_classification")?,
+        human_reviewed_at: field(&metadata.human_reviewed_at, "human_reviewed_at")?,
+    })
+}
+
+fn dominant_color(image: &RgbImage) -> String {
+    let (red, green, blue, count) = image.pixels().fold(
+        (0_u64, 0_u64, 0_u64, 0_u64),
+        |(red, green, blue, count), pixel| {
+            (
+                red + u64::from(pixel.0[0]),
+                green + u64::from(pixel.0[1]),
+                blue + u64::from(pixel.0[2]),
+                count + 1,
+            )
+        },
+    );
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        red / count.max(1),
+        green / count.max(1),
+        blue / count.max(1)
+    )
+}
+
 fn read_bounded_source(path: &Path, max_bytes: u64) -> Result<Vec<u8>, PipelineError> {
     let metadata = fs::metadata(path).map_err(|error| PipelineError::io(path, error))?;
     if metadata.len() > max_bytes {
@@ -361,6 +633,81 @@ fn read_bounded_source(path: &Path, max_bytes: u64) -> Result<Vec<u8>, PipelineE
         });
     }
     fs::read(path).map_err(|error| PipelineError::io(path, error))
+}
+
+fn read_quarantine_record(path: &Path, max_bytes: u64) -> Result<QuarantineRecord, PipelineError> {
+    let bytes = read_bounded_source(path, max_bytes.min(64 * 1024))?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        PipelineError::InvalidQuarantine(format!("record JSON is invalid: {error}"))
+    })
+}
+
+fn validate_quarantine_record(
+    record_path: &Path,
+    record: &QuarantineRecord,
+    max_bytes: u64,
+) -> Result<(), PipelineError> {
+    if record.schema != 1
+        || record.sanitized_path != "source.png"
+        || record.width == 0
+        || record.height == 0
+        || record.original_sha256.len() != 64
+        || record.sanitized_sha256.len() != 64
+        || !record
+            .original_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !record
+            .sanitized_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(PipelineError::InvalidQuarantine(
+            "record fields violate schema 1".to_owned(),
+        ));
+    }
+    if let Some(review) = &record.review {
+        validate_quarantine_field(&review.reviewer, "reviewer")?;
+        validate_quarantine_field(&review.reviewed_at, "reviewed_at")?;
+    }
+    let parent = record_path
+        .parent()
+        .ok_or_else(|| PipelineError::InvalidQuarantine("record has no parent".to_owned()))?;
+    if parent.file_name().and_then(|name| name.to_str()) != Some(record.sanitized_sha256.as_str()) {
+        return Err(PipelineError::InvalidQuarantine(
+            "record directory does not match sanitized digest".to_owned(),
+        ));
+    }
+    let sanitized_path = parent.join("source.png");
+    let sanitized = read_bounded_source(&sanitized_path, max_bytes)?;
+    if sha256_hex(&sanitized) != record.sanitized_sha256 {
+        return Err(PipelineError::InvalidQuarantine(
+            "sanitized source digest mismatch".to_owned(),
+        ));
+    }
+    let decoded = decode_bounded_source(
+        &sanitized,
+        BuildLimits {
+            max_source_bytes: max_bytes,
+            ..BuildLimits::default()
+        },
+    )?;
+    if decoded.dimensions() != (record.width, record.height)
+        || has_transparency(&decoded) != record.has_transparency
+    {
+        return Err(PipelineError::InvalidQuarantine(
+            "sanitized source properties mismatch".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_quarantine_field(value: &str, name: &'static str) -> Result<String, PipelineError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control) {
+        return Err(PipelineError::InvalidMetadata { field: name });
+    }
+    Ok(value.to_owned())
 }
 
 fn decode_bounded_source(bytes: &[u8], limits: BuildLimits) -> Result<DynamicImage, PipelineError> {
@@ -392,16 +739,12 @@ fn decode_bounded_source(bytes: &[u8], limits: BuildLimits) -> Result<DynamicIma
     Ok(decoded)
 }
 
-fn reject_transparency(source: &DynamicImage) -> Result<(), PipelineError> {
-    if source.color().has_alpha()
+fn has_transparency(source: &DynamicImage) -> bool {
+    source.color().has_alpha()
         && source
             .to_rgba8()
             .pixels()
             .any(|pixel| pixel.0[3] != u8::MAX)
-    {
-        return Err(PipelineError::SourceHasTransparency);
-    }
-    Ok(())
 }
 
 fn scaled_height(source_width: u32, source_height: u32, target_width: u32) -> u32 {
@@ -456,25 +799,75 @@ fn encode_jpeg(image: &RgbImage) -> Result<Vec<u8>, PipelineError> {
     Ok(output)
 }
 
+fn encode_png_rgb(image: &RgbImage) -> Result<Vec<u8>, PipelineError> {
+    let mut output = Vec::new();
+    PngEncoder::new(&mut output)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|error| PipelineError::Encoder {
+            format: AssetFormat::Png,
+            message: error.to_string(),
+        })?;
+    Ok(output)
+}
+
+fn encode_png_rgba(image: &image::RgbaImage) -> Result<Vec<u8>, PipelineError> {
+    let mut output = Vec::new();
+    PngEncoder::new(&mut output)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|error| PipelineError::Encoder {
+            format: AssetFormat::Png,
+            message: error.to_string(),
+        })?;
+    Ok(output)
+}
+
 fn asset_digest(
     alt: &str,
     source_sha256: &str,
     source_width: u32,
     source_height: u32,
+    metadata: &AuthoringMetadata,
+    dominant_color: &str,
     variants: &[EncodedVariant],
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"envy-atmospheric-asset-v1\0");
+    digest.update(b"tiamud-atmospheric-asset-v2\0");
     digest.update((alt.len() as u64).to_be_bytes());
     digest.update(alt.as_bytes());
     digest.update(source_sha256.as_bytes());
     digest.update(source_width.to_be_bytes());
     digest.update(source_height.to_be_bytes());
+    digest.update(metadata.revision.to_be_bytes());
+    digest.update(metadata.focal_point.x_per_mille.to_be_bytes());
+    digest.update(metadata.focal_point.y_per_mille.to_be_bytes());
+    for value in [
+        metadata.author.as_str(),
+        metadata.license.as_str(),
+        metadata.provenance.as_str(),
+        metadata.generator.as_deref().unwrap_or_default(),
+        metadata.content_classification.as_str(),
+        metadata.human_reviewed_at.as_str(),
+        dominant_color,
+    ] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
     for variant in variants {
         digest.update([match variant.format {
             AssetFormat::Avif => 1,
             AssetFormat::Webp => 2,
             AssetFormat::Jpeg => 3,
+            AssetFormat::Png => 4,
         }]);
         digest.update(variant.width.to_be_bytes());
         digest.update(variant.height.to_be_bytes());
@@ -539,6 +932,43 @@ fn write_immutable(path: &Path, bytes: &[u8]) -> Result<(), PipelineError> {
     result
 }
 
+fn write_json_immutable<T: Serialize>(path: &Path, value: &T) -> Result<(), PipelineError> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    write_immutable(path, &bytes)
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), PipelineError> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| PipelineError::io(parent, error))?;
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".quarantine.{}.{}.part",
+        std::process::id(),
+        sequence
+    ));
+    let result = (|| {
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| PipelineError::io(&temporary, error))?;
+        output
+            .write_all(&bytes)
+            .map_err(|error| PipelineError::io(&temporary, error))?;
+        output
+            .sync_all()
+            .map_err(|error| PipelineError::io(&temporary, error))?;
+        fs::rename(&temporary, path).map_err(|error| PipelineError::io(path, error))
+    })();
+    if temporary.exists() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +1013,22 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    fn reviewed_metadata() -> AuthoringMetadata {
+        AuthoringMetadata {
+            revision: 1,
+            focal_point: FocalPoint {
+                x_per_mille: 500,
+                y_per_mille: 500,
+            },
+            author: "Tiamud test suite".to_owned(),
+            license: "LicenseRef-Test".to_owned(),
+            provenance: "Generated test fixture".to_owned(),
+            generator: None,
+            content_classification: "general".to_owned(),
+            human_reviewed_at: "2026-07-15T00:00:00Z".to_owned(),
+        }
+    }
+
     #[test]
     fn validates_alt_before_touching_the_source() {
         let request = BuildRequest {
@@ -590,10 +1036,38 @@ mod tests {
             alt: " \n ".to_owned(),
             output_dir: PathBuf::from("unused"),
             limits: BuildLimits::default(),
+            metadata: reviewed_metadata(),
+            lossless: false,
         };
         assert!(matches!(
             build_asset_with(&request, &FakeEncoders),
             Err(PipelineError::EmptyAlt)
+        ));
+    }
+
+    #[test]
+    fn requires_reviewed_metadata_before_touching_the_source() {
+        let mut metadata = reviewed_metadata();
+        metadata.revision = 0;
+        let request = BuildRequest {
+            source: PathBuf::from("does-not-exist.png"),
+            alt: "A reviewed scene.".to_owned(),
+            output_dir: PathBuf::from("unused"),
+            limits: BuildLimits::default(),
+            metadata,
+            lossless: false,
+        };
+        assert!(matches!(
+            build_asset_with(&request, &FakeEncoders),
+            Err(PipelineError::InvalidRevision)
+        ));
+
+        let mut request = request;
+        request.metadata.revision = 1;
+        request.metadata.focal_point.x_per_mille = 1001;
+        assert!(matches!(
+            build_asset_with(&request, &FakeEncoders),
+            Err(PipelineError::InvalidFocalPoint)
         ));
     }
 
@@ -610,6 +1084,8 @@ mod tests {
                 max_source_bytes: 8,
                 ..BuildLimits::default()
             },
+            metadata: reviewed_metadata(),
+            lossless: false,
         };
         assert!(matches!(
             build_asset_with(&request, &FakeEncoders),
@@ -618,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_upscaling_and_transparency() {
+    fn rejects_upscaling_and_preserves_transparency_as_png() {
         let temp = tempfile::tempdir().unwrap();
         let narrow = temp.path().join("narrow.png");
         write_png(&narrow, 1279, 4, None);
@@ -627,6 +1103,8 @@ mod tests {
             alt: "A narrow backdrop.".to_owned(),
             output_dir: temp.path().join("narrow-out"),
             limits: BuildLimits::default(),
+            metadata: reviewed_metadata(),
+            lossless: false,
         };
         assert!(matches!(
             build_asset_with(&narrow_request, &FakeEncoders),
@@ -640,11 +1118,28 @@ mod tests {
             alt: "A translucent backdrop.".to_owned(),
             output_dir: temp.path().join("transparent-out"),
             limits: BuildLimits::default(),
+            metadata: reviewed_metadata(),
+            lossless: false,
         };
-        assert!(matches!(
-            build_asset_with(&transparent_request, &FakeEncoders),
-            Err(PipelineError::SourceHasTransparency)
-        ));
+        let result = build_asset_with(&transparent_request, &FakeEncoders).unwrap();
+        assert_eq!(result.manifest.variants.len(), 2);
+        assert!(
+            result
+                .manifest
+                .variants
+                .iter()
+                .all(|variant| variant.format == AssetFormat::Png)
+        );
+        let published = fs::read(
+            result
+                .manifest_path
+                .parent()
+                .unwrap()
+                .join("scene-1280.png"),
+        )
+        .unwrap();
+        let decoded = image::load_from_memory_with_format(&published, ImageFormat::Png).unwrap();
+        assert!(has_transparency(&decoded));
     }
 
     #[test]
@@ -657,6 +1152,8 @@ mod tests {
             alt: "  An empty stone plaza under a quiet blue dusk.  ".to_owned(),
             output_dir: temp.path().join("one"),
             limits: BuildLimits::default(),
+            metadata: reviewed_metadata(),
+            lossless: false,
         };
         let request_two = BuildRequest {
             output_dir: temp.path().join("two"),
@@ -677,6 +1174,59 @@ mod tests {
             first.manifest.alt,
             "An empty stone plaza under a quiet blue dusk."
         );
+    }
+
+    #[test]
+    fn quarantine_requires_review_and_detects_tampering_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("upload.png");
+        write_png(&source, 1280, 4, Some(128));
+        let staged = quarantine_source(&QuarantineRequest {
+            source,
+            quarantine_dir: temp.path().join("quarantine"),
+            limits: BuildLimits::default(),
+        })
+        .unwrap();
+        assert!(staged.record.review.is_none());
+        assert!(staged.record.has_transparency);
+
+        let publication = BuildRequest {
+            source: PathBuf::new(),
+            alt: "A translucent sigil over dark stone.".to_owned(),
+            output_dir: temp.path().join("published"),
+            limits: BuildLimits::default(),
+            metadata: reviewed_metadata(),
+            lossless: false,
+        };
+        assert!(matches!(
+            build_quarantined(&staged.record_path, publication.clone()),
+            Err(PipelineError::QuarantineNotReviewed)
+        ));
+
+        review_quarantine(
+            &staged.record_path,
+            "Tiamud reviewer",
+            "2026-07-15T00:00:00Z",
+            BuildLimits::default().max_source_bytes,
+        )
+        .unwrap();
+        let result = build_quarantined(&staged.record_path, publication.clone()).unwrap();
+        assert!(
+            result
+                .manifest
+                .variants
+                .iter()
+                .all(|variant| variant.format == AssetFormat::Png)
+        );
+
+        let sanitized = staged.record_path.parent().unwrap().join("source.png");
+        fs::write(sanitized, b"tampered").unwrap();
+        assert!(matches!(
+            build_quarantined(&staged.record_path, publication),
+            Err(PipelineError::InvalidQuarantine(_))
+                | Err(PipelineError::Image(_))
+                | Err(PipelineError::UnsupportedSourceFormat)
+        ));
     }
 
     #[test]

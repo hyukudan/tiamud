@@ -1,0 +1,24 @@
+[package]
+name = "tiamud-persistence-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+clap.workspace = true
+postgres.workspace = true
+rusqlite.workspace = true
+rustls = { version = "0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8.4"
+thiserror.workspace = true
+tiamud-persistence-sqlite = { path = "../persistence-sqlite" }
+tokio-postgres-rustls = { version = "0.14.0", features = ["native-certs", "ring"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "tiamud-migrate-postgres"
+path = "src/bin/tiamud-migrate-postgres.rs"

@@ -1,6 +1,6 @@
 use std::{env, fs, path::Path};
 
-use envy_import::{TextEncoding, audit, parse_world_pack};
+use envy_import::{ImportDiagnostic, TextEncoding, audit, parse_import};
 
 fn main() {
     if let Err(error) = run() {
@@ -24,7 +24,7 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
-        [command, path, options @ ..] if command == "convert" => {
+        [command, path, options @ ..] if command == "convert" || command == "convert-report" => {
             let mut pack_id = path_stem(path)?;
             let mut encoding = TextEncoding::Ascii;
             let mut index = 0;
@@ -56,15 +56,48 @@ fn run() -> Result<(), String> {
             }
 
             let bytes = fs::read(path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
-            let pack = parse_world_pack(&bytes, &pack_id, Some(path.clone()), encoding)
-                .map_err(|error| error.to_string())?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&pack).map_err(|error| error.to_string())?
-            );
+            if command == "convert-report" {
+                let report = parse_import(&bytes, &pack_id, Some(path.clone()), encoding)
+                    .map_err(|error| error.to_string())?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+                );
+            } else {
+                let report = parse_import(&bytes, &pack_id, Some(path.clone()), encoding)
+                    .map_err(|error| error.to_string())?;
+                emit_diagnostics(&report.diagnostics);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report.world_pack)
+                        .map_err(|error| error.to_string())?
+                );
+            }
             Ok(())
         }
         _ => Err(usage()),
+    }
+}
+
+fn emit_diagnostics(diagnostics: &[ImportDiagnostic]) {
+    for diagnostic in diagnostics {
+        let line = diagnostic
+            .line
+            .map(|line| format!(" line {line}"))
+            .unwrap_or_default();
+        let vnum = diagnostic
+            .vnum
+            .map(|vnum| format!(" VNUM {vnum}"))
+            .unwrap_or_default();
+        eprintln!(
+            "{:?} [{}{}{}] {} Recommendation: {}",
+            diagnostic.severity,
+            diagnostic.section,
+            line,
+            vnum,
+            diagnostic.message,
+            diagnostic.recommendation
+        );
     }
 }
 
@@ -87,5 +120,5 @@ fn path_stem(path: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  envy-import audit <area.are>\n  envy-import convert <area.are> [--id pack-id] [--encoding ascii|utf-8]".to_owned()
+    "usage:\n  envy-import audit <area.are>\n  envy-import convert <area.are> [--id pack-id] [--encoding ascii|utf-8]\n  envy-import convert-report <area.are> [--id pack-id] [--encoding ascii|utf-8]".to_owned()
 }

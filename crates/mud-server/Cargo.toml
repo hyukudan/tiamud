@@ -1,21 +1,40 @@
 [package]
-name = "mud-server"
+name = "tiamud-server"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish = false
 
 [dependencies]
 async-trait.workspace = true
+argon2.workspace = true
 axum.workspace = true
+flate2 = "1.1"
+hex.workspace = true
 mime_guess.workspace = true
-mud-core = { path = "../mud-core" }
+tiamud-core = { path = "../mud-core" }
+tiamud-cell-frame = { path = "../cell-frame" }
+tiamud-persistence-postgres = { path = "../persistence-postgres" }
+tiamud-persistence-sqlite = { path = "../persistence-sqlite" }
+tiamud-scripting = { path = "../scripting" }
+postgres.workspace = true
+rand_core.workspace = true
+rustls = { version = "0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
+world-pack = { path = "../world-pack" }
 rusqlite.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+rcgen = "0.13.2"
+tempfile.workspace = true

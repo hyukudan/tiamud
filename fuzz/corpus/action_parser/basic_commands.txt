@@ -1,0 +1,9 @@
+look
+n
+go south
+take blue lantern
+party invite Aria
+quest complete first-light
+tell Aria Meet me at the gate.
+mute Griefer 15m repeated spam
+role Rowan moderator

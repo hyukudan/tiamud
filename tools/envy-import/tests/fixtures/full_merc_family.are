@@ -1,0 +1,90 @@
+#AREA
+{ 100 2999 } Synthetic Merc-family compatibility area~
+#HELPS
+0 $~
+#0
+#RECALL
+100
+#MOBILES
+#1000
+keeper shopkeeper~
+the lantern keeper~
+The lantern keeper watches the square.~
+A synthetic keeper used only by importer tests stands here.~
+1 0 0 S
+10 2 -10 3d8+20 1d4+2
+100 500
+8 8 1
+0 0 0
+>greet_prog 100~
+say Welcome to the synthetic shop.
+Never execute this historical program.~
+|
+#0
+#OBJECTS
+#2000
+lantern brass lamp~
+a brass lantern~
+A brass lantern rests on the ground.~
+The lantern is cold.~
+5 0 1
+0 0 0 0
+2 50 5
+#2001
+key iron~
+an iron key~
+An iron key has been left here.~
+~
+18 0 1
+0 0 0 0
+1 10 1
+>get_prog 100~
+echo The key program remains inert.~
+|
+#0
+#ROOMS
+#100
+The Synthetic Square~
+A square created solely to exercise the Tiamud historical importer.~
+0 1
+D0
+A test road leads north.~
+road~
+0 -1 101
+>speech_prog hello~
+echo This room program is imported only as inert text.~
+|
+S
+#101
+The Synthetic Shop~
+A shop fixture with no copied historical creative content.~
+0 0 0
+D2
+The square is south.~
+~
+0 -1 100
+S
+#0
+#RESETS
+* Mobile and equipment semantics remain inert.
+M 0 1000 1 101
+G 1 2001 1
+O 0 2000 1 100
+P 0 2001 1 2000
+D 0 101 2 1
+R 0 100 3
+X 0 9000 42
+S
+#SHOPS
+1000 5 18 0 0 0 120 80 8 20
+0
+#SPECIALS
+M 1000 spec_cast_cleric
+O 2000 spec_legacy_lantern
+S
+#MOBPROGS
+#1000
+external program reference is preserved as text
+#0
+S
+#$

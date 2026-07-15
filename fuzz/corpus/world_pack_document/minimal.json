@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "id": "fuzz",
+  "name": "Fuzz World",
+  "startRoomId": "fuzz:room:start",
+  "rooms": [
+    {
+      "id": "fuzz:room:start",
+      "title": "The beginning",
+      "description": "A bounded seed world.",
+      "exits": []
+    }
+  ]
+}

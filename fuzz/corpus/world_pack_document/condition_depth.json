@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "id": "depth",
+  "name": "Condition depth seed",
+  "startRoomId": "depth:start",
+  "rooms": [
+    {
+      "id": "depth:start",
+      "title": "Depth",
+      "description": "A seed near the authoring condition boundary.",
+      "exits": []
+    }
+  ],
+  "sceneVariants": [
+    {
+      "roomId": "depth:start",
+      "variants": [
+        {
+          "id": "nested",
+          "priority": 1,
+          "when": {
+            "not": {
+              "not": {
+                "eq": ["world.weather", "clear"]
+              }
+            }
+          },
+          "description": "Nested condition seed."
+        },
+        {
+          "id": "default",
+          "priority": 0,
+          "description": "Default condition seed."
+        }
+      ]
+    }
+  ]
+}

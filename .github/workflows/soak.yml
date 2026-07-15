@@ -1,0 +1,111 @@
+name: 24-hour soak evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Acceptance duration; 24h is required for criterion 19
+        required: true
+        default: 24h
+        type: choice
+        options:
+          - 24h
+          - 6h
+          - 1h
+      users:
+        description: Concurrent provisioned users
+        required: true
+        default: "16"
+        type: string
+      concurrency:
+        description: Maximum simultaneous bots
+        required: true
+        default: "4"
+        type: string
+      max_rss_growth_mb:
+        description: Maximum initial-to-final RSS growth in MiB
+        required: true
+        default: "96"
+        type: string
+      max_sustained_growth_mb:
+        description: Maximum first-to-last window median RSS growth in MiB
+        required: true
+        default: "16"
+        type: string
+      max_rss_slope_mb_per_hour:
+        description: Maximum accepted post-warmup RSS regression slope in MiB/hour
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: Retain ${{ inputs.duration }} soak evidence
+    # GitHub-hosted jobs cannot run for 24 hours. This label intentionally
+    # targets a dedicated Linux x86_64 self-hosted runner with enough disk.
+    runs-on: [self-hosted, linux, x64, tiamud-soak]
+    timeout-minutes: 1500
+
+    env:
+      CARGO_INCREMENTAL: "0"
+      LC_ALL: C
+      TZ: UTC
+
+    steps:
+      - name: Check out the exact tested revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.93.1 --profile minimal
+
+      - name: Build the locked release server
+        shell: bash
+        run: cargo build -p tiamud-server --bin tiamud-server --release --locked
+
+      - name: Run and retain the configured soak
+        env:
+          SOAK_CONCURRENCY: ${{ inputs.concurrency }}
+          SOAK_DURATION: ${{ inputs.duration }}
+          SOAK_MAX_RSS_GROWTH_MB: ${{ inputs.max_rss_growth_mb }}
+          SOAK_MAX_RSS_SLOPE_MB_PER_HOUR: ${{ inputs.max_rss_slope_mb_per_hour }}
+          SOAK_MAX_SUSTAINED_GROWTH_MB: ${{ inputs.max_sustained_growth_mb }}
+          SOAK_USERS: ${{ inputs.users }}
+        shell: bash
+        run: |
+          node scripts/soak.mjs \
+            --binary target/release/tiamud-server \
+            --duration "$SOAK_DURATION" \
+            --warmup 30m \
+            --sample-interval 1m \
+            --users "$SOAK_USERS" \
+            --concurrency "$SOAK_CONCURRENCY" \
+            --pace-ms 150 \
+            --max-rss-growth-mb "$SOAK_MAX_RSS_GROWTH_MB" \
+            --max-sustained-growth-mb "$SOAK_MAX_SUSTAINED_GROWTH_MB" \
+            --max-rss-slope-mb-per-hour "$SOAK_MAX_RSS_SLOPE_MB_PER_HOUR" \
+            --report "artifacts/soak-${SOAK_DURATION}.json"
+
+      - name: Upload soak evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-${{ inputs.duration }}-${{ github.sha }}
+          path: artifacts/soak-${{ inputs.duration }}.json
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 90

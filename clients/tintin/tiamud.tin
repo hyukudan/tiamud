@@ -1,0 +1,150 @@
+#NOP Tiamud official TinTin++ profile (TinTin++ 2.02+).
+#NOP It consumes structured data only. It never auto-sends game commands,
+#NOP follows server-provided links, or downloads media without user action.
+
+#EVENT {SESSION CONNECTED}
+{
+    #VARIABLE {TIAMUD[IAC]}  {\xFF};
+    #VARIABLE {TIAMUD[DO]}   {\xFD};
+    #VARIABLE {TIAMUD[SB]}   {\xFA};
+    #VARIABLE {TIAMUD[SE]}   {\xF0};
+    #VARIABLE {TIAMUD[GMCP]} {\xC9};
+    #VARIABLE {TIAMUD[media]} {off};
+    #VARIABLE {TIAMUD[media_json]} {false};
+    #VARIABLE {TIAMUD[graphics]} {none};
+    #VARIABLE {TIAMUD[plain]} {false};
+    #VARIABLE {TIAMUD[reduced]} {false};
+    #VARIABLE {TIAMUD[screen_reader]} {false};
+    #VARIABLE {TIAMUD[decorative]} {true}
+}
+
+#EVENT {IAC WILL GMCP}
+{
+    #SEND {$TIAMUD[IAC]$TIAMUD[DO]$TIAMUD[GMCP]\};
+    #SEND {$TIAMUD[IAC]$TIAMUD[SB]$TIAMUD[GMCP] Core.Hello {"client":"TinTin++","version":"2.02"}$TIAMUD[IAC]$TIAMUD[SE]\};
+    #SEND {$TIAMUD[IAC]$TIAMUD[SB]$TIAMUD[GMCP] Core.Supports.Set ["Room 1","Tiamud.Scene 1","Tiamud.Assets 1","Tiamud.CellFrame 1","Client.Media 1","Char.Vitals 1","Char.Items 1"]$TIAMUD[IAC]$TIAMUD[SE]\};
+    tiamud-send-settings
+}
+
+#ALIAS {tiamud-send-settings}
+{
+    #SEND {$TIAMUD[IAC]$TIAMUD[SB]$TIAMUD[GMCP] Tiamud.Client.Set {"media":$TIAMUD[media_json],"assets":true,"links":"plain","graphics":"$TIAMUD[graphics]","plain":$TIAMUD[plain],"reducedMotion":$TIAMUD[reduced],"screenReader":$TIAMUD[screen_reader],"decorative":$TIAMUD[decorative]}$TIAMUD[IAC]$TIAMUD[SE]\}
+}
+
+#EVENT {IAC SB GMCP Room.Info IAC SE}
+{
+    #VARIABLE {TIAMUD[room]} {%0};
+    #NOP Room.Info is retained for safe user-defined map rendering. No value
+    #NOP supplied by the server is evaluated as a TinTin++ or game command.
+}
+
+#EVENT {IAC SB GMCP Tiamud.Scene IAC SE}
+{
+    #VARIABLE {TIAMUD[scene]} {%0}
+}
+
+#EVENT {IAC SB GMCP Tiamud.Assets IAC SE}
+{
+    #VARIABLE {TIAMUD[assets]} {%0}
+}
+
+#EVENT {IAC SB GMCP Client.Media.Play IAC SE}
+{
+    #IF {"$TIAMUD[media]" == "on"}
+    {
+        #REGEXP {%0} {"(url|file)":"/assets/[0-9a-f]{64}/[A-Za-z0-9._-]+\.(opus|ogg|mp3)"}
+        {
+            #VARIABLE {TIAMUD[media_event]} {%0};
+            #NOP A validated event is recorded only. It is never evaluated,
+            #NOP downloaded, opened, played, or sent as a game command.
+        }
+    }
+}
+
+#EVENT {IAC SB GMCP Client.Media.Load IAC SE}
+{
+    #IF {"$TIAMUD[media]" == "on"}
+    {
+        #REGEXP {%0} {"(url|file)":"/assets/[0-9a-f]{64}/[A-Za-z0-9._-]+\.(opus|ogg|mp3)"}
+        {
+            #VARIABLE {TIAMUD[media_event]} {%0}
+        }
+    }
+}
+
+#EVENT {IAC SB GMCP Client.Media.Default IAC SE}
+{
+    #IF {"$TIAMUD[media]" == "on"}
+    {
+        #REGEXP {%0} {"(url|file)":"/assets/[0-9a-f]{64}/[A-Za-z0-9._-]+\.(opus|ogg|mp3)"}
+        {
+            #VARIABLE {TIAMUD[media_event]} {%0}
+        }
+    }
+}
+
+#EVENT {IAC SB GMCP Client.Media.Stop IAC SE}
+{
+    #IF {"$TIAMUD[media]" == "on"}
+    {
+        #VARIABLE {TIAMUD[media_event]} {stop}
+    }
+}
+
+#ALIAS {tiamud-media-on}
+{
+    #VARIABLE {TIAMUD[media]} {on};
+    #VARIABLE {TIAMUD[media_json]} {true};
+    tiamud-send-settings;
+    #SHOWME {Tiamud safe media events enabled; this profile never downloads or plays them.}
+}
+
+#ALIAS {tiamud-media-off}
+{
+    #VARIABLE {TIAMUD[media]} {off};
+    #VARIABLE {TIAMUD[media_json]} {false};
+    tiamud-send-settings;
+    #SHOWME {Tiamud media events disabled.}
+}
+
+#ALIAS {tiamud-graphics-ansi}
+{
+    #VARIABLE {TIAMUD[graphics]} {ansi};
+    tiamud-send-settings
+}
+
+#ALIAS {tiamud-graphics-kitty}
+{
+    #VARIABLE {TIAMUD[graphics]} {kitty};
+    tiamud-send-settings
+}
+
+#ALIAS {tiamud-graphics-sixel}
+{
+    #VARIABLE {TIAMUD[graphics]} {sixel};
+    tiamud-send-settings
+}
+
+#ALIAS {tiamud-graphics-iterm2}
+{
+    #VARIABLE {TIAMUD[graphics]} {iterm2};
+    tiamud-send-settings
+}
+
+#ALIAS {tiamud-graphics-off}
+{
+    #VARIABLE {TIAMUD[graphics]} {none};
+    tiamud-send-settings
+}
+
+#ALIAS {tiamud-accessible}
+{
+    #VARIABLE {TIAMUD[media]} {off};
+    #VARIABLE {TIAMUD[media_json]} {false};
+    #VARIABLE {TIAMUD[graphics]} {none};
+    #VARIABLE {TIAMUD[plain]} {true};
+    #VARIABLE {TIAMUD[reduced]} {true};
+    #VARIABLE {TIAMUD[screen_reader]} {true};
+    #VARIABLE {TIAMUD[decorative]} {false};
+    tiamud-send-settings
+}

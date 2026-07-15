@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 2,
+  "id": "refs",
+  "name": "Cross-reference seed",
+  "startRoomId": "refs:start",
+  "items": [
+    {
+      "id": "refs:key",
+      "name": "iron key",
+      "description": "A key used to exercise item references.",
+      "aliases": ["key"]
+    }
+  ],
+  "rooms": [
+    {
+      "id": "refs:start",
+      "title": "Start",
+      "description": "The reachable start room.",
+      "items": ["refs:key"],
+      "exits": [
+        {
+          "direction": "north",
+          "target": {"kind": "room", "room_id": "refs:end"},
+          "description": "A narrow arch.",
+          "keywords": "arch",
+          "legacyValues": []
+        }
+      ]
+    },
+    {
+      "id": "refs:end",
+      "title": "End",
+      "description": "The referenced destination.",
+      "exits": []
+    }
+  ],
+  "roomPerception": [
+    {
+      "roomId": "refs:start",
+      "light": "dim",
+      "hiddenItems": {"refs:key": 10},
+      "secretExits": {"north": 20}
+    }
+  ]
+}

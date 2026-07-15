@@ -1,15 +1,28 @@
-//! A conservative reader for stock EnvyMUD 2.2 area files.
+//! A conservative offline reader for sectioned historical EnvyMUD/Merc-family
+//! area files, with stock EnvyMUD 2.2 ordering as its audited baseline.
 //!
 //! It is intentionally an offline conversion tool. It never executes specials,
 //! scripts, or any other content found in an area file.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use world_pack::{
     CURRENT_SCHEMA_VERSION, Direction, Exit, ExitTarget, LegacyRoomData, Room, SourceMetadata,
     WorldPack,
+};
+
+mod legacy;
+
+pub use legacy::{
+    AreaMetadata, DiagnosticSeverity, ImportDiagnostic, ImportProvenance, ImportResult,
+    LegacyContent, LegacyDataLine, LegacyHelp, LegacyMobile, LegacyObject, LegacyProgram,
+    LegacyReset, LegacyShop, LegacySpecial, LicenseReviewStatus, ProgramOwner,
 };
 
 const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
@@ -20,8 +33,10 @@ const MAX_ROOMS: usize = 100_000;
 pub const STOCK_SECTION_ORDER: [&str; 10] = [
     "AREA", "HELPS", "RECALL", "MOBILES", "OBJECTS", "ROOMS", "RESETS", "SHOPS", "SPECIALS", "$",
 ];
+const SUPPORTED_EXTENSION_SECTIONS: [&str; 4] = ["MOBPROGS", "OBJPROGS", "ROOMPROGS", "PROGS"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TextEncoding {
     Ascii,
     Utf8,
@@ -54,6 +69,8 @@ pub struct AuditIssue {
 pub fn audit(bytes: &[u8]) -> Result<AuditReport, ImportError> {
     check_input_size(bytes)?;
     let mut sections = Vec::new();
+    let mut additional_issues = Vec::new();
+    let mut extension_sections = HashSet::new();
 
     for (index, line) in byte_lines(bytes).enumerate() {
         let trimmed = trim_ascii(line);
@@ -67,6 +84,27 @@ pub fn audit(bytes: &[u8]) -> Result<AuditReport, ImportError> {
             sections.push(SectionOccurrence {
                 name: String::from_utf8_lossy(name).into_owned(),
                 line: index + 1,
+            });
+        } else if SUPPORTED_EXTENSION_SECTIONS
+            .iter()
+            .any(|known| name == known.as_bytes())
+        {
+            let name = String::from_utf8_lossy(name).into_owned();
+            if !extension_sections.insert(name.clone()) {
+                additional_issues.push(AuditIssue {
+                    code: "duplicate_extension_section",
+                    line: Some(index + 1),
+                    message: format!("supported extension section #{name} appears more than once"),
+                });
+            }
+        } else if is_named_section(name) {
+            additional_issues.push(AuditIssue {
+                code: "unknown_section",
+                line: Some(index + 1),
+                message: format!(
+                    "section #{} is not part of the audited stock or supported extension set",
+                    String::from_utf8_lossy(name)
+                ),
             });
         }
     }
@@ -108,12 +146,31 @@ pub fn audit(bytes: &[u8]) -> Result<AuditReport, ImportError> {
         }
     }
 
+    issues.extend(additional_issues);
+    let stock_order = !issues.iter().any(|issue| {
+        matches!(
+            issue.code,
+            "duplicate_section"
+                | "section_out_of_order"
+                | "missing_section"
+                | "duplicate_extension_section"
+        )
+    });
+
     Ok(AuditReport {
         input_bytes: bytes.len(),
-        stock_order: issues.is_empty(),
+        stock_order,
         sections,
         issues,
     })
+}
+
+fn is_named_section(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+        && name.iter().any(u8::is_ascii_uppercase)
 }
 
 pub fn parse_world_pack(
@@ -122,8 +179,24 @@ pub fn parse_world_pack(
     source_file: Option<String>,
     encoding: TextEncoding,
 ) -> Result<WorldPack, ImportError> {
+    parse_import(bytes, pack_id, source_file, encoding).map(|result| result.world_pack)
+}
+
+/// Parses a historical area into a validated WorldPack plus a loss-aware,
+/// inert compatibility report.
+///
+/// The compatibility data is never interpreted as executable code. Callers
+/// can use the diagnostics to decide which constructs need manual authoring in
+/// Tiamud instead of silently accepting a lossy conversion.
+pub fn parse_import(
+    bytes: &[u8],
+    pack_id: &str,
+    source_file: Option<String>,
+    encoding: TextEncoding,
+) -> Result<ImportResult, ImportError> {
     check_input_size(bytes)?;
     validate_pack_id(pack_id)?;
+    validate_text_encoding(bytes, encoding)?;
     let audit = audit(bytes)?;
     if !audit.stock_order {
         return Err(ImportError::AuditFailed(audit.issues));
@@ -144,6 +217,10 @@ pub fn parse_world_pack(
         line_number(bytes, rooms_range.start),
     );
     let mut rooms = Vec::new();
+    let mut room_programs = Vec::new();
+    let mut room_diagnostics = Vec::new();
+    let mut external_exit_references = Vec::new();
+    let mut seen_room_vnums = HashSet::new();
     while !cursor.is_finished() {
         cursor.skip_ascii_whitespace();
         if cursor.is_finished() {
@@ -154,6 +231,12 @@ pub fn parse_world_pack(
         let vnum = parse_record_header(header, header_line)?;
         if vnum == 0 {
             break;
+        }
+        if !seen_room_vnums.insert(vnum) {
+            return Err(ImportError::Syntax {
+                line: header_line,
+                message: format!("duplicate room VNUM {vnum}"),
+            });
         }
         if rooms.len() >= MAX_ROOMS {
             return Err(ImportError::Limit {
@@ -181,8 +264,31 @@ pub fn parse_world_pack(
         let flags = metadata[metadata.len() - 2];
         let sector = metadata[metadata.len() - 1];
         let prefix_values = metadata[..metadata.len() - 2].to_vec();
+        if flags != 0 {
+            room_diagnostics.push(import_warning(
+                "room_flag_mask_preserved",
+                "ROOMS",
+                Some(metadata_line_number),
+                Some(vnum),
+                &format!("room flag mask {flags} is preserved but not interpreted"),
+                "review the source dialect's room flag table and author equivalent Tiamud behavior explicitly",
+            ));
+        }
+        if !(0..=10).contains(&sector) {
+            room_diagnostics.push(import_warning(
+                "unknown_room_sector_descriptor",
+                "ROOMS",
+                Some(metadata_line_number),
+                Some(vnum),
+                &format!(
+                    "room sector descriptor {sector} is outside the audited stock range 0..=10"
+                ),
+                "verify the source codebase's sector table before mapping this room's environment",
+            ));
+        }
 
         let mut exits = Vec::new();
+        let mut seen_directions = HashMap::new();
         loop {
             cursor.skip_blank_lines();
             let directive_line = cursor.line();
@@ -195,9 +301,30 @@ pub fn parse_world_pack(
                 cursor.tilde_string()?;
                 continue;
             }
+            if directive == b"|" {
+                continue;
+            }
+            if directive.starts_with(b">") {
+                room_programs.push(legacy::parse_consumed_program_header(
+                    directive,
+                    directive_line,
+                    &mut cursor,
+                    encoding,
+                    ProgramOwner::Room { vnum },
+                )?);
+                continue;
+            }
             if let Some(number) = directive.strip_prefix(b"D") {
                 let direction_number = parse_i64(number, directive_line)?;
                 let direction = parse_direction(direction_number, directive_line)?;
+                if let Some(first_line) = seen_directions.insert(direction, directive_line) {
+                    return Err(ImportError::Syntax {
+                        line: directive_line,
+                        message: format!(
+                            "room {vnum} repeats direction D{direction_number}; first declared on line {first_line}"
+                        ),
+                    });
+                }
                 let description_line = cursor.line();
                 let exit_description = decode(cursor.tilde_string()?, encoding, description_line)?
                     .trim()
@@ -214,6 +341,19 @@ pub fn parse_world_pack(
                         message: "exit data requires a target VNUM".to_owned(),
                     });
                 };
+                if !legacy_values.is_empty() {
+                    room_diagnostics.push(import_warning(
+                        "exit_descriptors_preserved",
+                        "ROOMS",
+                        Some(values_line),
+                        Some(vnum),
+                        &format!(
+                            "exit D{direction_number} descriptor values {legacy_values:?} are preserved but not interpreted"
+                        ),
+                        "review door flags and key semantics against the source dialect before authoring the exit",
+                    ));
+                }
+                external_exit_references.push((values_line, vnum, target_vnum));
                 exits.push(Exit {
                     direction,
                     target: ExitTarget::LegacyVnum { vnum: target_vnum },
@@ -237,7 +377,9 @@ pub fn parse_world_pack(
             legacy_vnum: Some(vnum),
             title,
             description,
+            asset_manifest: None,
             exits,
+            items: Vec::new(),
             legacy: Some(LegacyRoomData {
                 flags,
                 sector,
@@ -247,20 +389,101 @@ pub fn parse_world_pack(
     }
 
     resolve_local_exits(&mut rooms);
-    let pack = WorldPack {
+    for (line, source_vnum, target_vnum) in external_exit_references {
+        if !seen_room_vnums.contains(&target_vnum) {
+            room_diagnostics.push(import_warning(
+                "external_or_missing_exit_target",
+                "ROOMS",
+                Some(line),
+                Some(target_vnum),
+                &format!(
+                    "room {source_vnum} exits to VNUM {target_vnum}, which is not present in this area"
+                ),
+                "compose the owning area explicitly or repair the target VNUM before publication",
+            ));
+        }
+    }
+    let start_room_id = rooms
+        .first()
+        .map(|room| room.id.clone())
+        .ok_or_else(|| ImportError::Validation("the area contains no rooms".to_owned()))?;
+    let provenance = ImportProvenance {
+        source_file: source_file.clone(),
+        source_format: "envymud-area".to_owned(),
+        dialect: "envymud-2.2-stock".to_owned(),
+        text_encoding: encoding,
+        input_bytes: bytes.len(),
+        input_sha256: sha256_hex(bytes),
+        license_status: LicenseReviewStatus::UndeterminedReviewRequired,
+    };
+    let mut pack = WorldPack {
         schema_version: CURRENT_SCHEMA_VERSION,
         id: pack_id.to_owned(),
         name: area_name,
+        start_room_id,
         source: Some(SourceMetadata {
             format: "envymud-area".to_owned(),
             dialect: Some("envymud-2.2-stock".to_owned()),
             file: source_file,
         }),
+        items: Vec::new(),
         rooms,
+        gameplay: world_pack::GameplayDefinition::default(),
     };
+    let (legacy, mut diagnostics) =
+        legacy::parse_and_translate(bytes, pack_id, encoding, &mut pack, room_programs)?;
+    diagnostics.extend(room_diagnostics);
+    diagnostics.extend(
+        audit
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "unknown_section")
+            .map(|issue| {
+                import_warning(
+                    "unknown_section_preserved_or_ignored",
+                    "AREA",
+                    issue.line,
+                    None,
+                    &issue.message,
+                    "identify the source dialect and add a reviewed importer before relying on this section",
+                )
+            }),
+    );
+    diagnostics.push(import_warning(
+        "source_license_review_required",
+        "AREA",
+        None,
+        None,
+        "the importer cannot determine the copyright holder or license of historical content",
+        "record authoritative provenance and obtain a human legal/license decision before distributing imported content",
+    ));
     pack.validate()
         .map_err(|error| ImportError::Validation(error.to_string()))?;
-    Ok(pack)
+    Ok(ImportResult {
+        world_pack: pack,
+        legacy,
+        diagnostics,
+        provenance,
+    })
+}
+
+fn import_warning(
+    code: &'static str,
+    section: &'static str,
+    line: Option<usize>,
+    vnum: Option<i64>,
+    message: &str,
+    recommendation: &str,
+) -> ImportDiagnostic {
+    ImportDiagnostic {
+        severity: DiagnosticSeverity::Warning,
+        code,
+        section,
+        line,
+        vnum,
+        message: message.to_owned(),
+        recommendation: recommendation.to_owned(),
+    }
 }
 
 fn resolve_local_exits(rooms: &mut [Room]) {
@@ -438,6 +661,66 @@ fn decode(bytes: &[u8], encoding: TextEncoding, line: usize) -> Result<String, I
     }
 }
 
+fn validate_text_encoding(bytes: &[u8], encoding: TextEncoding) -> Result<(), ImportError> {
+    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        return Err(ImportError::Encoding {
+            line: 1,
+            message: "UTF-8 BOM detected; remove the BOM so #AREA is the first byte".to_owned(),
+        });
+    }
+    match encoding {
+        TextEncoding::Ascii => {
+            let Some(offset) = bytes.iter().position(|byte| !byte.is_ascii()) else {
+                return Ok(());
+            };
+            let line = line_number(bytes, offset);
+            let line_start = bytes[..offset]
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |position| position + 1);
+            let column = offset - line_start + 1;
+            let hint = if std::str::from_utf8(bytes).is_ok() {
+                "the file is valid UTF-8; select --encoding utf-8 explicitly"
+            } else {
+                "the file may use a legacy single-byte encoding; transcode it offline to UTF-8"
+            };
+            Err(ImportError::Encoding {
+                line,
+                message: format!(
+                    "non-ASCII byte 0x{:02x} at byte offset {offset}, column {column}; {hint}",
+                    bytes[offset]
+                ),
+            })
+        }
+        TextEncoding::Utf8 => std::str::from_utf8(bytes)
+            .map(|_| ())
+            .map_err(|error| {
+                let offset = error.valid_up_to();
+                let line = line_number(bytes, offset);
+                let line_start = bytes[..offset]
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(0, |position| position + 1);
+                let column = offset - line_start + 1;
+                ImportError::Encoding {
+                    line,
+                    message: format!(
+                        "invalid UTF-8 at byte offset {offset}, column {column}: {error}; transcode the source offline with an explicit legacy codec"
+                    ),
+                }
+            }),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    hex
+}
+
 fn validate_pack_id(pack_id: &str) -> Result<(), ImportError> {
     let valid = !pack_id.is_empty()
         && pack_id.bytes().all(|byte| {
@@ -554,6 +837,18 @@ impl<'a> Cursor<'a> {
             self.line += 1;
         }
         Ok(&self.bytes[start..end])
+    }
+
+    fn peek_line_bytes(&self) -> &'a [u8] {
+        let start = self.position;
+        let mut end = start;
+        while end < self.bytes.len() && self.bytes[end] != b'\n' {
+            end += 1;
+        }
+        if end > start && self.bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        &self.bytes[start..end]
     }
 
     fn tilde_string(&mut self) -> Result<&'a [u8], ImportError> {
@@ -726,7 +1021,98 @@ S
         let error =
             parse_world_pack(input.as_bytes(), "synthetic", None, TextEncoding::Ascii).unwrap_err();
 
-        assert!(matches!(error, ImportError::Encoding { .. }));
+        let ImportError::Encoding { line, message } = error else {
+            panic!("expected encoding error");
+        };
+        assert!(line > 1);
+        assert!(message.contains("0xc3"));
+        assert!(message.contains("column"));
+        assert!(message.contains("valid UTF-8"));
+    }
+
+    #[test]
+    fn encoding_preflight_rejects_bom_and_invalid_utf8_actionably() {
+        let mut bom = vec![0xef, 0xbb, 0xbf];
+        bom.extend_from_slice(STOCK_AREA);
+        let error = parse_import(&bom, "bom", None, TextEncoding::Utf8).unwrap_err();
+        assert!(error.to_string().contains("BOM"));
+
+        let mut invalid = STOCK_AREA.to_vec();
+        let offset = invalid
+            .windows("The First Room".len())
+            .position(|window| window == b"The First Room")
+            .unwrap();
+        invalid[offset] = 0xff;
+        let error = parse_import(&invalid, "invalid", None, TextEncoding::Utf8).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("byte offset"));
+        assert!(message.contains("transcode"));
+    }
+
+    #[test]
+    fn audit_surfaces_unknown_and_duplicate_extension_sections() {
+        let unknown = String::from_utf8(STOCK_AREA.to_vec())
+            .unwrap()
+            .replace("#$", "#VENDOR_DATA\nopaque\n#$");
+        let report = audit(unknown.as_bytes()).unwrap();
+        assert!(report.stock_order);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "unknown_section")
+        );
+        let imported = parse_import(
+            unknown.as_bytes(),
+            "unknown-section",
+            None,
+            TextEncoding::Ascii,
+        )
+        .unwrap();
+        assert!(imported.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown_section_preserved_or_ignored" && diagnostic.line.is_some()
+        }));
+
+        let duplicate_extension = String::from_utf8(STOCK_AREA.to_vec())
+            .unwrap()
+            .replace("#$", "#MOBPROGS\nS\n#MOBPROGS\nS\n#$");
+        let report = audit(duplicate_extension.as_bytes()).unwrap();
+        assert!(!report.stock_order);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "duplicate_extension_section")
+        );
+    }
+
+    #[test]
+    fn room_vnum_and_direction_collisions_are_line_specific_errors() {
+        let duplicate_room = String::from_utf8(STOCK_AREA.to_vec())
+            .unwrap()
+            .replace("#101\nThe Second Room", "#100\nThe Second Room");
+        let error = parse_import(
+            duplicate_room.as_bytes(),
+            "duplicate-room",
+            None,
+            TextEncoding::Ascii,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate room VNUM 100"));
+
+        let duplicate_direction = String::from_utf8(STOCK_AREA.to_vec()).unwrap().replace(
+            "1 -1 101\nS",
+            "1 -1 101\nD0\nA duplicate road.~\nroad~\n0 -1 101\nS",
+        );
+        let error = parse_import(
+            duplicate_direction.as_bytes(),
+            "duplicate-direction",
+            None,
+            TextEncoding::Ascii,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("repeats direction D0"));
+        assert!(error.to_string().contains("first declared on line"));
     }
 
     #[test]
@@ -739,5 +1125,35 @@ S
             parse_world_pack(text.as_bytes(), "synthetic", None, TextEncoding::Ascii).unwrap_err();
 
         assert!(matches!(error, ImportError::Syntax { .. }));
+    }
+
+    #[test]
+    fn arbitrary_bounded_inputs_never_panic_the_auditor_or_converter() {
+        let mut seed = 0x5449_414d_5544_u64;
+        for case in 0..512 {
+            let length = (next_random(&mut seed) as usize) % 4096;
+            let bytes = (0..length)
+                .map(|_| next_random(&mut seed) as u8)
+                .collect::<Vec<_>>();
+
+            let _ = audit(&bytes);
+            let _ = parse_world_pack(
+                &bytes,
+                &format!("fuzz-{case}"),
+                None,
+                if case % 2 == 0 {
+                    TextEncoding::Ascii
+                } else {
+                    TextEncoding::Utf8
+                },
+            );
+        }
+    }
+
+    fn next_random(seed: &mut u64) -> u64 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        *seed
     }
 }

@@ -1,6 +1,7 @@
 {
-  "name": "@mud/web",
+  "name": "@tiamud/web",
   "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,9 +12,12 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run"
+    "e2e": "playwright test",
+    "test": "vitest run --exclude e2e/**"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
     "@sveltejs/vite-plugin-svelte": "7.2.0",
     "svelte": "5.56.5",
     "svelte-check": "4.7.2",

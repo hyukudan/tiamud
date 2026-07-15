@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "assetId": "sha256:8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c",
+  "revision": 2,
+  "kind": "atmosphere",
+  "alt": "Lantern Square after rain, its dark stones lit by a blue-glass lantern beneath the clock tower.",
+  "focalPoint": {
+    "xPerMille": 500,
+    "yPerMille": 465
+  },
+  "dominantColor": "#14191f",
+  "author": "Tiamud project contributors",
+  "license": "CC-BY-4.0",
+  "provenance": "Original illustration generated for Tiamud from a project-authored prompt; no historical MUD artwork was reused.",
+  "generator": "OpenAI image generation; human-directed and reviewed",
+  "contentClassification": "general",
+  "humanReviewedAt": "2026-07-15T00:00:00Z",
+  "source": {
+    "sha256": "17cad37510833ad553b644090fc033daa6919a5c5e5952c08dfe9a6c4811ed29",
+    "width": 1896,
+    "height": 830
+  },
+  "variants": [
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 640,
+      "height": 280,
+      "bytes": 9664,
+      "sha256": "c4713a484e4d7a2ec4a9fc77232cfce967aae423b08068a183cd63dbddfe88af",
+      "path": "8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/scene-640.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 640,
+      "height": 280,
+      "bytes": 19612,
+      "sha256": "da36cee01a31e3961e571637ce0f2242dd44d35981fc0c3a4906f4553ff2c5e9",
+      "path": "8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/scene-640.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 640,
+      "height": 280,
+      "bytes": 35919,
+      "sha256": "21a5f361d770bc01fef2d2f675a832a633674b164821e4ac6621223852a96531",
+      "path": "8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/scene-640.jpg"
+    },
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 1280,
+      "height": 560,
+      "bytes": 38295,
+      "sha256": "a16d70bc33be192354db4178b2f29032c10581e2d028cc4a6ae9a581de68621e",
+      "path": "8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/scene-1280.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 1280,
+      "height": 560,
+      "bytes": 74038,
+      "sha256": "d4158e03eba49c7b7ed9192fa5f70fcb1dc26069cecea8fabc2342392cc5abdb",
+      "path": "8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/scene-1280.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 1280,
+      "height": 560,
+      "bytes": 140255,
+      "sha256": "9e834080f00b7ac9e8ad10a2d3b6ce0e611adef7f039e17d88e940d30abc89af",
+      "path": "8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/scene-1280.jpg"
+    }
+  ]
+}

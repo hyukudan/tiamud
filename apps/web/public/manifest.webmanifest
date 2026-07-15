@@ -1,0 +1,11 @@
+{
+  "name": "Tiamud",
+  "short_name": "Tiamud",
+  "description": "A browser-first, text-complete multiplayer world of adventures.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#11130f",
+  "theme_color": "#11130f",
+  "lang": "en"
+}

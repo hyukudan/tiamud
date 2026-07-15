@@ -1,0 +1,198 @@
+name: Reproducible release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional artifact version for a verification-only manual run
+        required: false
+        type: string
+
+permissions:
+  artifact-metadata: write
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-verify-attest:
+    name: Build twice, verify, and attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    env:
+      CARGO_INCREMENTAL: "0"
+      LC_ALL: C
+      TZ: UTC
+
+    steps:
+      - name: Check out the exact release revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require reviewed third-party notices for tagged distribution
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: test -s THIRD_PARTY_NOTICES.md
+
+      - name: Resolve and validate the release version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tiamud-server") | .version')
+          if [[ -z "$package_version" || "$package_version" == null ]]; then
+            echo "could not resolve the Tiamud package version" >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version=${GITHUB_REF_NAME#v}
+            if [[ "$GITHUB_REF_NAME" != "v${package_version}" ]]; then
+              echo "release tag $GITHUB_REF_NAME must match workspace version v${package_version}" >&2
+              exit 1
+            fi
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            version=$INPUT_VERSION
+          else
+            version="${package_version}-dev.${GITHUB_SHA:0:12}"
+          fi
+
+          if [[ ! "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+            echo "release version contains unsafe characters: $version" >&2
+            exit 1
+          fi
+
+          source_date_epoch=$(git show -s --format=%ct "$GITHUB_SHA")
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "source_date_epoch=$source_date_epoch" >>"$GITHUB_OUTPUT"
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >>"$GITHUB_ENV"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.11.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.93.1 --profile minimal
+
+      - name: Install locked web dependencies
+        working-directory: apps/web
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and package twice in isolated directories
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_EPOCH: ${{ steps.version.outputs.source_date_epoch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTFLAGS="-C debuginfo=0 --remap-path-prefix=${GITHUB_WORKSPACE}=."
+
+          for build in first second; do
+            pnpm --dir apps/web build
+            mkdir -p "build/$build/web"
+            cp -a apps/web/dist/. "build/$build/web/"
+
+            CARGO_TARGET_DIR="build/$build/target" \
+              cargo build --workspace --bins --release --locked
+
+            # Keep the server on WorldPack's feature-free dependency graph, then
+            # replace only the authoring CLI with its explicitly optional AI flow.
+            CARGO_TARGET_DIR="build/$build/target" \
+              cargo build -p world-pack --bin tiamud-world \
+                --features editorial-ai --release --locked
+
+            bash scripts/package-release.sh \
+              "$RELEASE_VERSION" \
+              "build/$build/target" \
+              "build/$build/web" \
+              "build/$build/packages" \
+              "$RELEASE_EPOCH"
+          done
+
+      - name: Require byte-for-byte reproducibility
+        shell: bash
+        run: diff --no-dereference --recursive build/first/packages build/second/packages
+
+      - name: Prepare checksummed release artifacts
+        env:
+          RELEASE_EPOCH: ${{ steps.version.outputs.source_date_epoch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp -a build/first/packages/. release/
+          (
+            cd release
+            sha256sum -- *.tar.gz >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+            for artifact in *.tar.gz; do
+              tar --list --gzip --file "$artifact" >/dev/null
+            done
+          )
+          {
+            echo "revision=$GITHUB_SHA"
+            echo "source_date_epoch=$RELEASE_EPOCH"
+            echo "isolated_builds=2"
+            echo "comparison=byte-for-byte-identical"
+          } >release/REPRODUCIBILITY.txt
+
+      - name: Generate OIDC-signed build provenance
+        id: attest
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: release/SHA256SUMS
+
+      - name: Preserve the portable attestation bundle
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: cp "$ATTESTATION_BUNDLE" "release/tiamud-${RELEASE_VERSION}.intoto.jsonl"
+
+      - name: Upload versioned workflow artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tiamud-${{ steps.version.outputs.version }}-linux-x86_64
+          path: release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Publish tagged GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Tiamud $RELEASE_TAG"
+          fi

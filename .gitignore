@@ -1,6 +1,8 @@
 # Rust
 /target/
 **/target/
+/build/
+/artifacts/
 
 # JavaScript / web builds
 node_modules/
@@ -8,6 +10,10 @@ node_modules/
 dist/
 **/dist/
 .svelte-kit/
+playwright-report/
+test-results/
+/apps/web/public/assets/da4f7d051bedf8b273201494c79873136b6d9d2d61dee0c3afe124324d352f87/
+/apps/web/public/assets/e44abe804d268de033cc7f817cfe2297f646eeeef43424b6789a3eb8ef9179cb/
 
 # Runtime data and databases
 /data/
@@ -38,6 +44,5 @@ dist/
 *~
 .DS_Store
 
-# Local design material and AI reviews
-/docs/spec-v0.2.md
+# Local AI reviews
 /docs/reviews/

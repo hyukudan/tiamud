@@ -1,8 +1,14 @@
 [workspace]
 members = [
     "crates/asset-pipeline",
+    "crates/cell-frame",
+    "crates/editorial-ai",
     "crates/mud-core",
     "crates/mud-server",
+    "crates/persistence-postgres",
+    "crates/persistence-sqlite",
+    "crates/scripting",
+    "crates/tiamud-admin",
     "crates/world-pack",
     "tools/envy-import",
 ]
@@ -10,17 +16,23 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
+license = "MIT OR Apache-2.0"
 rust-version = "1.88"
 version = "0.1.0"
 
 [workspace.dependencies]
 async-trait = "0.1.89"
+argon2 = "0.5.3"
 axum = { version = "0.8.9", features = ["ws"] }
 clap = { version = "4.6.1", features = ["derive"] }
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+mlua = { version = "0.11.6", default-features = false, features = ["lua54", "vendored"] }
 mime_guess = "2.0.5"
+postgres = "0.19.14"
 ravif = { version = "0.13.0", default-features = false }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 rust-embed = "8.12.0"
 serde = { version = "1.0.228", features = ["derive"] }

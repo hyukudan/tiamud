@@ -37,6 +37,14 @@ jobs:
           pnpm test
           pnpm build
 
+      - name: Install browser engines
+        working-directory: apps/web
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      - name: Test accessibility in Chromium, Firefox, and WebKit
+        working-directory: apps/web
+        run: pnpm e2e
+
       - name: Install Rust toolchain
         run: rustup toolchain install 1.93.1 --profile minimal --component rustfmt,clippy
 
@@ -51,3 +59,28 @@ jobs:
 
       - name: Run transport smoke test
         run: node scripts/smoke.mjs
+
+      - name: Run bounded headless load profile
+        run: node scripts/load.mjs --users 2 --rounds 2 --concurrency 2 --pace-ms 100 --max-rss-growth-mb 96
+
+      - name: Retain a short soak-evidence profile
+        run: |
+          node scripts/soak.mjs \
+            --binary target/debug/tiamud-server \
+            --duration 30s \
+            --warmup 5s \
+            --sample-interval 5s \
+            --users 2 \
+            --concurrency 2 \
+            --pace-ms 100 \
+            --max-rss-growth-mb 96 \
+            --report artifacts/soak-short.json
+
+      - name: Upload short soak evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-short-${{ github.run_id }}
+          path: artifacts/soak-short.json
+          if-no-files-found: warn
+          retention-days: 14

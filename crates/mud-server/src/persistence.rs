@@ -1,40 +1,557 @@
+use crate::{
+    auth::{
+        AuthenticatedSession, DEFAULT_SESSION_TTL, MAX_PASSWORD_BYTES, MIN_PASSWORD_BYTES,
+        SessionToken, digest_token, hash_password, validate_password, verify_password,
+    },
+    operations::RuntimeMetrics,
+};
 use async_trait::async_trait;
-use mud_core::CharacterSnapshot;
-use rusqlite::{Connection, OptionalExtension, params};
-use std::{io, path::Path, thread};
+use rusqlite::{Connection, OptionalExtension, params, types::Type};
+use std::{
+    future::Future,
+    io,
+    path::Path,
+    sync::Arc,
+    thread,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tiamud_core::{
+    AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
+    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, WorldRuntimeSnapshot,
+};
+use tiamud_persistence_sqlite::{SchemaError, migrate};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{Duration, timeout},
+};
+
+const MAX_IDENTITY_NAME_BYTES: usize = 64;
+const MAX_ACTIVE_SESSIONS: i64 = 16;
+const MAX_CHARACTER_JSON_BYTES: usize = 65_536;
+const MAX_EVENT_JSON_BYTES: usize = 65_536;
+const MAX_RUNTIME_JSON_BYTES: usize = 1_048_576;
+pub const MAX_SOCIAL_REASON_BYTES: usize = 1_024;
+pub const MAX_REPORT_REASON_BYTES: usize = 2_048;
+const MAX_AUDIT_DETAILS_BYTES: usize = 4_096;
+const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
+const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SocialProfile {
+    pub character_id: CharacterId,
+    pub account_id: AccountId,
+    pub character_name: String,
+    pub role: AccountRole,
+    pub muted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SocialRelationKind {
+    Ignore,
+    Block,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModerationAction {
+    Mute {
+        expires_at: Option<i64>,
+        reason: String,
+    },
+    Unmute,
+    Ban {
+        expires_at: Option<i64>,
+        reason: String,
+    },
+    Unban,
+    SetRole(AccountRole),
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditEntry {
+    pub sequence: i64,
+    pub actor_account_id: AccountId,
+    pub target_account_id: Option<AccountId>,
+    pub action: String,
+    pub details_json: String,
+    pub created_at: i64,
+}
 
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("PostgreSQL error: {0}")]
+    Postgres(#[from] postgres::Error),
+    #[error("could not connect to PostgreSQL: {0}")]
+    PostgresConnect(#[from] tiamud_persistence_postgres::ConnectError),
+    #[error("could not initialise the PostgreSQL schema: {0}")]
+    PostgresSchema(#[from] tiamud_persistence_postgres::SchemaError),
+    #[error("invalid persisted character state: {0}")]
+    CharacterState(#[from] serde_json::Error),
+    #[error("serialized {kind} exceeds the {maximum} byte persistence limit")]
+    SnapshotTooLarge { kind: &'static str, maximum: usize },
     #[error("the persistence worker stopped unexpectedly")]
     WorkerStopped,
+    #[error("the persistence worker did not answer within the bounded timeout")]
+    RequestTimeout,
     #[error("could not start the persistence worker: {0}")]
     ThreadSpawn(#[source] io::Error),
+    #[error(
+        "{kind} name must be 1-{MAX_IDENTITY_NAME_BYTES} bytes and contain no control characters"
+    )]
+    InvalidName { kind: &'static str },
+    #[error("account {0:?} does not exist")]
+    AccountNotFound(AccountId),
+    #[error("an account with that name already exists")]
+    AccountAlreadyExists,
+    #[error("password must be {MIN_PASSWORD_BYTES}-{MAX_PASSWORD_BYTES} bytes")]
+    InvalidPassword,
+    #[error("invalid account name or password")]
+    InvalidCredentials,
+    #[error("the session token is invalid")]
+    InvalidSession,
+    #[error("the session has expired")]
+    SessionExpired,
+    #[error("the session has been revoked")]
+    SessionRevoked,
+    #[error("password hashing failed")]
+    PasswordHashing,
+    #[error("character {character_id:?} does not belong to account {account_id:?}")]
+    CharacterNotFound {
+        account_id: AccountId,
+        character_id: CharacterId,
+    },
+    #[error("character gameplay state for {0:?} does not exist")]
+    CharacterGameplayNotFound(CharacterId),
+    #[error("no character matches that social target")]
+    SocialTargetNotFound,
+    #[error("that social target is ambiguous")]
+    AmbiguousSocialTarget,
+    #[error("a social action cannot target the acting character")]
+    SocialSelfTarget,
+    #[error("that account is not authorized for this moderation action")]
+    SocialForbidden,
+    #[error("chat is currently muted for this account")]
+    ChatMuted,
+    #[error("chat rate limit exceeded")]
+    ChatRateLimited,
+    #[error("that account is banned")]
+    AccountBanned,
+    #[error("invalid or oversized social input")]
+    InvalidSocialInput,
+    #[error("database schema version {found} is newer than supported version {supported}")]
+    UnsupportedSchemaVersion { found: i64, supported: i64 },
 }
 
+/// Mutable identity and character state behind the transport-independent actor.
 #[async_trait]
 pub trait CharacterStore: Send + Sync {
-    async fn load_or_create(
+    fn backend_name(&self) -> &'static str {
+        "custom"
+    }
+
+    fn queue_depth(&self) -> usize {
+        0
+    }
+
+    /// Verify that the backing worker and database can answer a minimal query.
+    async fn health_check(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// Drains requests accepted before this barrier and closes the backend
+    /// owner. Implementations without an owner thread may use the default.
+    async fn shutdown(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn register_account(
         &self,
         name: &str,
-        default_room: &str,
+        password: &str,
+    ) -> Result<AuthenticatedSession, StoreError>;
+
+    async fn login_account(
+        &self,
+        name: &str,
+        password: &str,
+    ) -> Result<AuthenticatedSession, StoreError>;
+
+    async fn resolve_session(&self, token: &str) -> Result<AccountSnapshot, StoreError>;
+
+    async fn revoke_session(&self, token: &str) -> Result<(), StoreError>;
+
+    #[cfg(test)]
+    async fn load_or_create_account(&self, name: &str) -> Result<AccountSnapshot, StoreError>;
+
+    async fn list_characters(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<CharacterSnapshot>, StoreError>;
+
+    async fn load_or_create_character(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        start_room: &str,
+    ) -> Result<CharacterSnapshot, StoreError>;
+
+    async fn load_character(
+        &self,
+        account_id: AccountId,
+        character_id: CharacterId,
     ) -> Result<CharacterSnapshot, StoreError>;
 
     async fn save(&self, snapshot: CharacterSnapshot) -> Result<(), StoreError>;
+
+    async fn load_character_gameplay(
+        &self,
+        character_id: CharacterId,
+    ) -> Result<CharacterGameplaySnapshot, StoreError>;
+
+    async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError>;
+
+    /// Load the authoritative event ledger in durable sequence order.
+    async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError>;
+
+    async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError>;
+
+    async fn social_target(&self, name: &str) -> Result<SocialProfile, StoreError>;
+
+    /// Returns false when recipient-side ignore or either-side block policy
+    /// suppresses delivery. Callers deliberately do not reveal which policy
+    /// matched to the sender.
+    async fn social_delivery_allowed(
+        &self,
+        sender: CharacterId,
+        recipient: CharacterId,
+    ) -> Result<bool, StoreError>;
+
+    async fn set_social_relation(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        relation: SocialRelationKind,
+        enabled: bool,
+    ) -> Result<(), StoreError>;
+
+    async fn report_character(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        reason: &str,
+    ) -> Result<(), StoreError>;
+
+    async fn moderate_character(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        action: ModerationAction,
+    ) -> Result<(), StoreError>;
+
+    #[cfg(test)]
+    async fn audit_log(&self) -> Result<Vec<AuditEntry>, StoreError>;
+
+    /// Atomically persist the character aggregate and shared-world events
+    /// produced by one accepted action.
+    async fn commit_action(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError>;
 }
 
-enum Request {
-    LoadOrCreate {
+/// Adds bounded operational timing to every database transaction while
+/// retaining one authoritative backend. Read-only queries deliberately bypass
+/// the transaction counters so the exported metric keeps its stated meaning.
+pub struct MeasuredCharacterStore {
+    inner: Arc<dyn CharacterStore>,
+    metrics: Arc<RuntimeMetrics>,
+}
+
+impl MeasuredCharacterStore {
+    pub fn new(inner: Arc<dyn CharacterStore>, metrics: Arc<RuntimeMetrics>) -> Self {
+        Self { inner, metrics }
+    }
+
+    async fn transaction<T>(
+        &self,
+        operation: impl Future<Output = Result<T, StoreError>>,
+    ) -> Result<T, StoreError> {
+        let started = Instant::now();
+        let result = operation.await;
+        self.metrics
+            .database_transaction_finished(started.elapsed(), result.is_ok());
+        result
+    }
+}
+
+#[async_trait]
+impl CharacterStore for MeasuredCharacterStore {
+    fn backend_name(&self) -> &'static str {
+        self.inner.backend_name()
+    }
+
+    fn queue_depth(&self) -> usize {
+        self.inner.queue_depth()
+    }
+
+    async fn health_check(&self) -> Result<(), StoreError> {
+        self.inner.health_check().await
+    }
+
+    async fn shutdown(&self) -> Result<(), StoreError> {
+        self.inner.shutdown().await
+    }
+
+    async fn register_account(
+        &self,
+        name: &str,
+        password: &str,
+    ) -> Result<AuthenticatedSession, StoreError> {
+        self.transaction(self.inner.register_account(name, password))
+            .await
+    }
+
+    async fn login_account(
+        &self,
+        name: &str,
+        password: &str,
+    ) -> Result<AuthenticatedSession, StoreError> {
+        self.transaction(self.inner.login_account(name, password))
+            .await
+    }
+
+    async fn resolve_session(&self, token: &str) -> Result<AccountSnapshot, StoreError> {
+        self.inner.resolve_session(token).await
+    }
+
+    async fn revoke_session(&self, token: &str) -> Result<(), StoreError> {
+        self.transaction(self.inner.revoke_session(token)).await
+    }
+
+    #[cfg(test)]
+    async fn load_or_create_account(&self, name: &str) -> Result<AccountSnapshot, StoreError> {
+        self.transaction(self.inner.load_or_create_account(name))
+            .await
+    }
+
+    async fn list_characters(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<CharacterSnapshot>, StoreError> {
+        self.inner.list_characters(account_id).await
+    }
+
+    async fn load_or_create_character(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        start_room: &str,
+    ) -> Result<CharacterSnapshot, StoreError> {
+        self.transaction(
+            self.inner
+                .load_or_create_character(account_id, name, start_room),
+        )
+        .await
+    }
+
+    async fn load_character(
+        &self,
+        account_id: AccountId,
+        character_id: CharacterId,
+    ) -> Result<CharacterSnapshot, StoreError> {
+        self.inner.load_character(account_id, character_id).await
+    }
+
+    async fn save(&self, snapshot: CharacterSnapshot) -> Result<(), StoreError> {
+        self.transaction(self.inner.save(snapshot)).await
+    }
+
+    async fn load_character_gameplay(
+        &self,
+        character_id: CharacterId,
+    ) -> Result<CharacterGameplaySnapshot, StoreError> {
+        self.inner.load_character_gameplay(character_id).await
+    }
+
+    async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
+        self.inner.load_runtime_snapshot().await
+    }
+
+    async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError> {
+        self.inner.load_domain_events().await
+    }
+
+    async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
+        self.inner.social_profile(character_id).await
+    }
+
+    async fn social_target(&self, name: &str) -> Result<SocialProfile, StoreError> {
+        self.inner.social_target(name).await
+    }
+
+    async fn social_delivery_allowed(
+        &self,
+        sender: CharacterId,
+        recipient: CharacterId,
+    ) -> Result<bool, StoreError> {
+        self.inner.social_delivery_allowed(sender, recipient).await
+    }
+
+    async fn set_social_relation(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        relation: SocialRelationKind,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        self.transaction(
+            self.inner
+                .set_social_relation(actor, target, relation, enabled),
+        )
+        .await
+    }
+
+    async fn report_character(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.report_character(actor, target, reason))
+            .await
+    }
+
+    async fn moderate_character(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        action: ModerationAction,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.moderate_character(actor, target, action))
+            .await
+    }
+
+    #[cfg(test)]
+    async fn audit_log(&self) -> Result<Vec<AuditEntry>, StoreError> {
+        self.inner.audit_log().await
+    }
+
+    async fn commit_action(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.commit_action(characters, runtime, events))
+            .await
+    }
+}
+
+pub(super) enum Request {
+    Shutdown {
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    Health {
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    RegisterAccount {
         name: String,
-        default_room: String,
+        password: String,
+        reply: oneshot::Sender<Result<AuthenticatedSession, StoreError>>,
+    },
+    LoginAccount {
+        name: String,
+        password: String,
+        reply: oneshot::Sender<Result<AuthenticatedSession, StoreError>>,
+    },
+    ResolveSession {
+        token: String,
+        reply: oneshot::Sender<Result<AccountSnapshot, StoreError>>,
+    },
+    RevokeSession {
+        token: String,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    #[cfg(test)]
+    LoadOrCreateAccount {
+        name: String,
+        reply: oneshot::Sender<Result<AccountSnapshot, StoreError>>,
+    },
+    ListCharacters {
+        account_id: AccountId,
+        reply: oneshot::Sender<Result<Vec<CharacterSnapshot>, StoreError>>,
+    },
+    LoadOrCreateCharacter {
+        account_id: AccountId,
+        name: String,
+        start_room: String,
+        reply: oneshot::Sender<Result<CharacterSnapshot, StoreError>>,
+    },
+    LoadCharacter {
+        account_id: AccountId,
+        character_id: CharacterId,
         reply: oneshot::Sender<Result<CharacterSnapshot, StoreError>>,
     },
     Save {
         snapshot: CharacterSnapshot,
         reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    LoadCharacterGameplay {
+        character_id: CharacterId,
+        reply: oneshot::Sender<Result<CharacterGameplaySnapshot, StoreError>>,
+    },
+    LoadRuntimeSnapshot {
+        reply: oneshot::Sender<Result<Option<WorldRuntimeSnapshot>, StoreError>>,
+    },
+    LoadDomainEvents {
+        reply: oneshot::Sender<Result<Vec<DomainEvent>, StoreError>>,
+    },
+    CommitAction {
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SocialProfile {
+        character_id: CharacterId,
+        reply: oneshot::Sender<Result<SocialProfile, StoreError>>,
+    },
+    SocialTarget {
+        name: String,
+        reply: oneshot::Sender<Result<SocialProfile, StoreError>>,
+    },
+    SocialDeliveryAllowed {
+        sender: CharacterId,
+        recipient: CharacterId,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+    SetSocialRelation {
+        actor: CharacterId,
+        target: CharacterId,
+        relation: SocialRelationKind,
+        enabled: bool,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ReportCharacter {
+        actor: CharacterId,
+        target: CharacterId,
+        reason: String,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ModerateCharacter {
+        actor: CharacterId,
+        target: CharacterId,
+        action: ModerationAction,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    #[cfg(test)]
+    AuditLog {
+        reply: oneshot::Sender<Result<Vec<AuditEntry>, StoreError>>,
     },
 }
 
@@ -52,37 +569,197 @@ impl SqliteCharacterStore {
         let path = path.as_ref().to_owned();
         // Backpressure here prevents an accidental caller from building an
         // unbounded heap queue while the database is busy.
-        let (tx, mut rx) = mpsc::channel(256);
+        let (tx, mut rx) = mpsc::channel(PERSISTENCE_REQUEST_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = oneshot::channel();
 
         thread::Builder::new()
             .name("sqlite-writer".into())
             .spawn(move || {
-                let connection = match Connection::open(path).and_then(|connection| {
-                    initialise(&connection)?;
+                let mut connection = match (|| -> Result<Connection, StoreError> {
+                    let mut connection = Connection::open(path)?;
+                    initialise(&mut connection)?;
                     Ok(connection)
-                }) {
+                })() {
                     Ok(connection) => {
                         let _ = ready_tx.send(Ok(()));
                         connection
                     }
                     Err(error) => {
-                        let _ = ready_tx.send(Err(StoreError::Sqlite(error)));
+                        let _ = ready_tx.send(Err(error));
                         return;
                     }
                 };
 
                 while let Some(request) = rx.blocking_recv() {
                     match request {
-                        Request::LoadOrCreate {
+                        Request::Shutdown { reply } => {
+                            drop(connection);
+                            let _ = reply.send(Ok(()));
+                            return;
+                        }
+                        Request::Health { reply } => {
+                            let result = connection
+                                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                                .map(|_| ())
+                                .map_err(StoreError::from);
+                            let _ = reply.send(result);
+                        }
+                        Request::RegisterAccount {
                             name,
-                            default_room,
+                            password,
                             reply,
                         } => {
-                            let _ = reply.send(load_or_create(&connection, &name, &default_room));
+                            let _ = reply.send(register_account(
+                                &mut connection,
+                                &name,
+                                &password,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::LoginAccount {
+                            name,
+                            password,
+                            reply,
+                        } => {
+                            let _ = reply.send(login_account(
+                                &mut connection,
+                                &name,
+                                &password,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ResolveSession { token, reply } => {
+                            let _ =
+                                reply.send(resolve_session(&connection, &token, unix_timestamp()));
+                        }
+                        Request::RevokeSession { token, reply } => {
+                            let _ =
+                                reply.send(revoke_session(&connection, &token, unix_timestamp()));
+                        }
+                        #[cfg(test)]
+                        Request::LoadOrCreateAccount { name, reply } => {
+                            let _ = reply.send(load_or_create_account(&connection, &name));
+                        }
+                        Request::ListCharacters { account_id, reply } => {
+                            let _ = reply.send(list_characters(&connection, account_id));
+                        }
+                        Request::LoadOrCreateCharacter {
+                            account_id,
+                            name,
+                            start_room,
+                            reply,
+                        } => {
+                            let _ = reply.send(load_or_create_character(
+                                &connection,
+                                account_id,
+                                &name,
+                                &start_room,
+                            ));
+                        }
+                        Request::LoadCharacter {
+                            account_id,
+                            character_id,
+                            reply,
+                        } => {
+                            let _ =
+                                reply.send(load_character(&connection, account_id, character_id));
                         }
                         Request::Save { snapshot, reply } => {
                             let _ = reply.send(save(&connection, &snapshot));
+                        }
+                        Request::LoadCharacterGameplay {
+                            character_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(load_character_gameplay(&connection, character_id));
+                        }
+                        Request::LoadRuntimeSnapshot { reply } => {
+                            let _ = reply.send(load_runtime_snapshot(&connection));
+                        }
+                        Request::LoadDomainEvents { reply } => {
+                            let _ = reply.send(load_domain_events(&connection));
+                        }
+                        Request::CommitAction {
+                            characters,
+                            runtime,
+                            events,
+                            reply,
+                        } => {
+                            let _ = reply.send(commit_action(
+                                &mut connection,
+                                &characters,
+                                &runtime,
+                                &events,
+                            ));
+                        }
+                        Request::SocialProfile {
+                            character_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(social_profile(
+                                &connection,
+                                character_id,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::SocialTarget { name, reply } => {
+                            let _ = reply.send(social_target(&connection, &name, unix_timestamp()));
+                        }
+                        Request::SocialDeliveryAllowed {
+                            sender,
+                            recipient,
+                            reply,
+                        } => {
+                            let _ =
+                                reply.send(social_delivery_allowed(&connection, sender, recipient));
+                        }
+                        Request::SetSocialRelation {
+                            actor,
+                            target,
+                            relation,
+                            enabled,
+                            reply,
+                        } => {
+                            let _ = reply.send(set_social_relation(
+                                &mut connection,
+                                actor,
+                                target,
+                                relation,
+                                enabled,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ReportCharacter {
+                            actor,
+                            target,
+                            reason,
+                            reply,
+                        } => {
+                            let _ = reply.send(report_character(
+                                &mut connection,
+                                actor,
+                                target,
+                                &reason,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ModerateCharacter {
+                            actor,
+                            target,
+                            action,
+                            reply,
+                        } => {
+                            let _ = reply.send(moderate_character(
+                                &mut connection,
+                                actor,
+                                target,
+                                action,
+                                unix_timestamp(),
+                            ));
+                        }
+                        #[cfg(test)]
+                        Request::AuditLog { reply } => {
+                            let _ = reply.send(audit_log(&connection));
                         }
                     }
                 }
@@ -92,113 +769,2142 @@ impl SqliteCharacterStore {
         ready_rx.await.map_err(|_| StoreError::WorkerStopped)??;
         Ok(Self { tx })
     }
+
+    async fn request<T>(
+        &self,
+        request: Request,
+        receive: oneshot::Receiver<Result<T, StoreError>>,
+    ) -> Result<T, StoreError> {
+        self.tx
+            .send_timeout(request, PERSISTENCE_REQUEST_TIMEOUT)
+            .await
+            .map_err(|error| match error {
+                mpsc::error::SendTimeoutError::Timeout(_) => StoreError::RequestTimeout,
+                mpsc::error::SendTimeoutError::Closed(_) => StoreError::WorkerStopped,
+            })?;
+        timeout(PERSISTENCE_REQUEST_TIMEOUT, receive)
+            .await
+            .map_err(|_| StoreError::RequestTimeout)?
+            .map_err(|_| StoreError::WorkerStopped)?
+    }
 }
 
 #[async_trait]
 impl CharacterStore for SqliteCharacterStore {
-    async fn load_or_create(
+    fn backend_name(&self) -> &'static str {
+        "sqlite"
+    }
+
+    fn queue_depth(&self) -> usize {
+        self.tx.max_capacity().saturating_sub(self.tx.capacity())
+    }
+
+    async fn health_check(&self) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::Health { reply }, receive).await
+    }
+
+    async fn shutdown(&self) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::Shutdown { reply }, receive).await
+    }
+
+    async fn register_account(
         &self,
         name: &str,
-        default_room: &str,
+        password: &str,
+    ) -> Result<AuthenticatedSession, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::RegisterAccount {
+                name: name.to_owned(),
+                password: password.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn login_account(
+        &self,
+        name: &str,
+        password: &str,
+    ) -> Result<AuthenticatedSession, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoginAccount {
+                name: name.to_owned(),
+                password: password.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn resolve_session(&self, token: &str) -> Result<AccountSnapshot, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ResolveSession {
+                token: token.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn revoke_session(&self, token: &str) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::RevokeSession {
+                token: token.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn load_or_create_account(&self, name: &str) -> Result<AccountSnapshot, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoadOrCreateAccount {
+                name: name.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn list_characters(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<CharacterSnapshot>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::ListCharacters { account_id, reply }, receive)
+            .await
+    }
+
+    async fn load_or_create_character(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        start_room: &str,
     ) -> Result<CharacterSnapshot, StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(Request::LoadOrCreate {
+        self.request(
+            Request::LoadOrCreateCharacter {
+                account_id,
                 name: name.to_owned(),
-                default_room: default_room.to_owned(),
+                start_room: start_room.to_owned(),
                 reply,
-            })
-            .await
-            .map_err(|_| StoreError::WorkerStopped)?;
-        receive.await.map_err(|_| StoreError::WorkerStopped)?
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn load_character(
+        &self,
+        account_id: AccountId,
+        character_id: CharacterId,
+    ) -> Result<CharacterSnapshot, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoadCharacter {
+                account_id,
+                character_id,
+                reply,
+            },
+            receive,
+        )
+        .await
     }
 
     async fn save(&self, snapshot: CharacterSnapshot) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(Request::Save { snapshot, reply })
+        self.request(Request::Save { snapshot, reply }, receive)
             .await
-            .map_err(|_| StoreError::WorkerStopped)?;
-        receive.await.map_err(|_| StoreError::WorkerStopped)?
+    }
+
+    async fn load_character_gameplay(
+        &self,
+        character_id: CharacterId,
+    ) -> Result<CharacterGameplaySnapshot, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoadCharacterGameplay {
+                character_id,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::LoadRuntimeSnapshot { reply }, receive)
+            .await
+    }
+
+    async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::LoadDomainEvents { reply }, receive)
+            .await
+    }
+
+    async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::SocialProfile {
+                character_id,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn social_target(&self, name: &str) -> Result<SocialProfile, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::SocialTarget {
+                name: name.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn social_delivery_allowed(
+        &self,
+        sender: CharacterId,
+        recipient: CharacterId,
+    ) -> Result<bool, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::SocialDeliveryAllowed {
+                sender,
+                recipient,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn set_social_relation(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        relation: SocialRelationKind,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::SetSocialRelation {
+                actor,
+                target,
+                relation,
+                enabled,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn report_character(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ReportCharacter {
+                actor,
+                target,
+                reason: reason.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn moderate_character(
+        &self,
+        actor: CharacterId,
+        target: CharacterId,
+        action: ModerationAction,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ModerateCharacter {
+                actor,
+                target,
+                action,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn audit_log(&self) -> Result<Vec<AuditEntry>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::AuditLog { reply }, receive).await
+    }
+
+    async fn commit_action(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::CommitAction {
+                characters,
+                runtime,
+                events,
+                reply,
+            },
+            receive,
+        )
+        .await
     }
 }
 
-fn initialise(connection: &Connection) -> rusqlite::Result<()> {
+fn initialise(connection: &mut Connection) -> Result<(), StoreError> {
     connection.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = FULL;
          PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;
-         CREATE TABLE IF NOT EXISTS characters (
-             name TEXT PRIMARY KEY COLLATE NOCASE,
-             room_id TEXT NOT NULL,
-             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-         );",
-    )
+         PRAGMA busy_timeout = 5000;",
+    )?;
+
+    match migrate(connection) {
+        Ok(_) => Ok(()),
+        Err(SchemaError::Sqlite(error)) => Err(StoreError::Sqlite(error)),
+        Err(SchemaError::UnsupportedVersion { found, supported }) => {
+            Err(StoreError::UnsupportedSchemaVersion { found, supported })
+        }
+    }
 }
 
-fn load_or_create(
-    connection: &Connection,
+fn normalise_name(name: &str, kind: &'static str) -> Result<String, StoreError> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > MAX_IDENTITY_NAME_BYTES || name.chars().any(char::is_control)
+    {
+        return Err(StoreError::InvalidName { kind });
+    }
+    Ok(name.to_owned())
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+fn register_account(
+    connection: &mut Connection,
     name: &str,
-    default_room: &str,
-) -> Result<CharacterSnapshot, StoreError> {
-    let stored = connection
+    password: &str,
+    now: i64,
+) -> Result<AuthenticatedSession, StoreError> {
+    let name = normalise_name(name, "account")?;
+    if !validate_password(password) {
+        return Err(StoreError::InvalidPassword);
+    }
+    if connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM accounts WHERE name = ?1)",
+        [&name],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Err(StoreError::AccountAlreadyExists);
+    }
+
+    let password_hash = hash_password(password).map_err(|_| StoreError::PasswordHashing)?;
+    let transaction = connection.transaction()?;
+    let role = if transaction.query_row(
+        "SELECT COUNT(*) FROM accounts WHERE auth_state = 'registered'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? == 0
+    {
+        AccountRole::Admin
+    } else {
+        AccountRole::Player
+    };
+    transaction.execute(
+        "INSERT INTO accounts (name, password_hash, auth_state, role)
+         VALUES (?1, ?2, 'registered', ?3)",
+        params![name, password_hash, role_as_database(role)],
+    )?;
+    let account = AccountSnapshot {
+        id: AccountId(transaction.last_insert_rowid()),
+        name,
+    };
+    if role == AccountRole::Admin {
+        append_audit(
+            &transaction,
+            account.id,
+            Some(account.id),
+            "bootstrap_admin",
+            serde_json::json!({"source": "first_registered_account"}),
+            now,
+        )?;
+    }
+    let session = issue_session(&transaction, account, now)?;
+    transaction.commit()?;
+    Ok(session)
+}
+
+fn login_account(
+    connection: &mut Connection,
+    name: &str,
+    password: &str,
+    now: i64,
+) -> Result<AuthenticatedSession, StoreError> {
+    let name = normalise_name(name, "account")?;
+    if !validate_password(password) {
+        return Err(StoreError::InvalidPassword);
+    }
+
+    let account_and_hash = connection
         .query_row(
-            "SELECT name, room_id FROM characters WHERE name = ?1",
-            [name],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            "SELECT id, name, password_hash FROM accounts
+             WHERE name = ?1 AND auth_state = 'registered'",
+            [&name],
+            |row| {
+                Ok((
+                    AccountSnapshot {
+                        id: AccountId(row.get(0)?),
+                        name: row.get(1)?,
+                    },
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .optional()?;
 
-    let (name, room_id) = match stored {
-        Some(stored) => stored,
-        None => {
-            connection.execute(
-                "INSERT INTO characters (name, room_id) VALUES (?1, ?2)",
-                params![name, default_room],
-            )?;
-            (name.to_owned(), default_room.to_owned())
-        }
+    let Some((account, Some(encoded_hash))) = account_and_hash else {
+        // Spend the same dominant Argon2 work for unknown and guest accounts,
+        // making account-name probing less useful to a remote caller.
+        let _ = hash_password(password);
+        return Err(StoreError::InvalidCredentials);
     };
+    if !verify_password(password, &encoded_hash).map_err(|_| StoreError::PasswordHashing)? {
+        return Err(StoreError::InvalidCredentials);
+    }
+    if account_is_banned(connection, account.id, now)? {
+        return Err(StoreError::AccountBanned);
+    }
 
-    Ok(CharacterSnapshot { name, room_id })
+    let transaction = connection.transaction()?;
+    let session = issue_session(&transaction, account, now)?;
+    transaction.commit()?;
+    Ok(session)
 }
 
-fn save(connection: &Connection, snapshot: &CharacterSnapshot) -> Result<(), StoreError> {
+fn issue_session(
+    connection: &Connection,
+    account: AccountSnapshot,
+    now: i64,
+) -> Result<AuthenticatedSession, StoreError> {
+    let ttl = i64::try_from(DEFAULT_SESSION_TTL.as_secs()).unwrap_or(i64::MAX);
+    let expires_at = now.checked_add(ttl).ok_or(StoreError::InvalidSession)?;
+
     connection.execute(
-        "INSERT INTO characters (name, room_id, updated_at)
-         VALUES (?1, ?2, unixepoch())
-         ON CONFLICT(name) DO UPDATE SET
-             room_id = excluded.room_id,
-             updated_at = excluded.updated_at",
-        params![snapshot.name, snapshot.room_id],
+        "DELETE FROM auth_sessions
+         WHERE account_id = ?1 AND (expires_at <= ?2 OR revoked_at IS NOT NULL)",
+        params![account.id.0, now],
+    )?;
+    let active: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM auth_sessions WHERE account_id = ?1",
+        [account.id.0],
+        |row| row.get(0),
+    )?;
+    if active >= MAX_ACTIVE_SESSIONS {
+        let remove_count = active - MAX_ACTIVE_SESSIONS + 1;
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE token_hash IN (
+                 SELECT token_hash FROM auth_sessions
+                 WHERE account_id = ?1
+                 ORDER BY created_at, rowid LIMIT ?2
+             )",
+            params![account.id.0, remove_count],
+        )?;
+    }
+
+    let token = SessionToken::generate();
+    connection.execute(
+        "INSERT INTO auth_sessions
+             (token_hash, account_id, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![token.digest().as_slice(), account.id.0, now, expires_at],
+    )?;
+    Ok(AuthenticatedSession {
+        account,
+        token,
+        expires_at,
+    })
+}
+
+fn resolve_session(
+    connection: &Connection,
+    token: &str,
+    now: i64,
+) -> Result<AccountSnapshot, StoreError> {
+    let token_hash = digest_token(token).ok_or(StoreError::InvalidSession)?;
+    let session = connection
+        .query_row(
+            "SELECT accounts.id, accounts.name, auth_sessions.expires_at,
+                    auth_sessions.revoked_at
+             FROM auth_sessions
+             JOIN accounts ON accounts.id = auth_sessions.account_id
+             WHERE auth_sessions.token_hash = ?1",
+            [token_hash.as_slice()],
+            |row| {
+                Ok((
+                    AccountSnapshot {
+                        id: AccountId(row.get(0)?),
+                        name: row.get(1)?,
+                    },
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::InvalidSession)?;
+
+    if session.2.is_some() {
+        return Err(StoreError::SessionRevoked);
+    }
+    if session.1 <= now {
+        return Err(StoreError::SessionExpired);
+    }
+    if account_is_banned(connection, session.0.id, now)? {
+        return Err(StoreError::AccountBanned);
+    }
+    Ok(session.0)
+}
+
+fn account_is_banned(
+    connection: &Connection,
+    account_id: AccountId,
+    now: i64,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM account_bans
+                 WHERE account_id = ?1 AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?2)
+             )",
+            params![account_id.0, now],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn revoke_session(connection: &Connection, token: &str, now: i64) -> Result<(), StoreError> {
+    let token_hash = digest_token(token).ok_or(StoreError::InvalidSession)?;
+    let updated = connection.execute(
+        "UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?1)
+         WHERE token_hash = ?2",
+        params![now, token_hash.as_slice()],
+    )?;
+    if updated == 0 {
+        return Err(StoreError::InvalidSession);
+    }
+    Ok(())
+}
+
+fn ensure_account_exists(connection: &Connection, account_id: AccountId) -> Result<(), StoreError> {
+    if connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?1)",
+        [account_id.0],
+        |row| row.get(0),
+    )? {
+        Ok(())
+    } else {
+        Err(StoreError::AccountNotFound(account_id))
+    }
+}
+
+fn role_from_database(value: &str) -> Result<AccountRole, StoreError> {
+    match value {
+        "player" => Ok(AccountRole::Player),
+        "moderator" => Ok(AccountRole::Moderator),
+        "admin" => Ok(AccountRole::Admin),
+        _ => Err(StoreError::InvalidSocialInput),
+    }
+}
+
+fn role_as_database(role: AccountRole) -> &'static str {
+    match role {
+        AccountRole::Player => "player",
+        AccountRole::Moderator => "moderator",
+        AccountRole::Admin => "admin",
+    }
+}
+
+fn social_profile(
+    connection: &Connection,
+    character_id: CharacterId,
+    now: i64,
+) -> Result<SocialProfile, StoreError> {
+    let raw = connection
+        .query_row(
+            "SELECT characters.id, characters.account_id, characters.name, accounts.role,
+                    EXISTS(
+                        SELECT 1 FROM moderation_mutes
+                        WHERE moderation_mutes.account_id = accounts.id
+                          AND moderation_mutes.revoked_at IS NULL
+                          AND (moderation_mutes.expires_at IS NULL
+                               OR moderation_mutes.expires_at > ?2)
+                    )
+             FROM characters
+             JOIN accounts ON accounts.id = characters.account_id
+             WHERE characters.id = ?1",
+            params![character_id.0, now],
+            |row| {
+                Ok((
+                    CharacterId(row.get(0)?),
+                    AccountId(row.get(1)?),
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::SocialTargetNotFound)?;
+    Ok(SocialProfile {
+        character_id: raw.0,
+        account_id: raw.1,
+        character_name: raw.2,
+        role: role_from_database(&raw.3)?,
+        muted: raw.4,
+    })
+}
+
+fn social_target(
+    connection: &Connection,
+    name: &str,
+    now: i64,
+) -> Result<SocialProfile, StoreError> {
+    let name = normalise_name(name, "social target")?;
+    let mut statement = connection
+        .prepare("SELECT id FROM characters WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 2")?;
+    let matches = statement
+        .query_map([name], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    match matches.as_slice() {
+        [id] => social_profile(connection, CharacterId(*id), now),
+        [] => Err(StoreError::SocialTargetNotFound),
+        [_, ..] => Err(StoreError::AmbiguousSocialTarget),
+    }
+}
+
+fn social_delivery_allowed(
+    connection: &Connection,
+    sender: CharacterId,
+    recipient: CharacterId,
+) -> Result<bool, StoreError> {
+    if sender == recipient {
+        return Ok(true);
+    }
+    let both_exist: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM characters WHERE id IN (?1, ?2)",
+        params![sender.0, recipient.0],
+        |row| row.get(0),
+    )?;
+    if both_exist != 2 {
+        return Err(StoreError::SocialTargetNotFound);
+    }
+    let suppressed = connection.query_row(
+        "SELECT
+             EXISTS(SELECT 1 FROM social_ignores
+                    WHERE owner_character_id = ?2 AND target_character_id = ?1)
+             OR EXISTS(SELECT 1 FROM social_blocks
+                       WHERE owner_character_id = ?2 AND target_character_id = ?1)
+             OR EXISTS(SELECT 1 FROM social_blocks
+                       WHERE owner_character_id = ?1 AND target_character_id = ?2)",
+        params![sender.0, recipient.0],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(!suppressed)
+}
+
+fn set_social_relation(
+    connection: &mut Connection,
+    actor: CharacterId,
+    target: CharacterId,
+    relation: SocialRelationKind,
+    enabled: bool,
+    now: i64,
+) -> Result<(), StoreError> {
+    if actor == target {
+        return Err(StoreError::SocialSelfTarget);
+    }
+    let transaction = connection.transaction()?;
+    let actor_profile = social_profile(&transaction, actor, now)?;
+    let target_profile = social_profile(&transaction, target, now)?;
+    if actor_profile.account_id == target_profile.account_id {
+        return Err(StoreError::SocialSelfTarget);
+    }
+    let table = match relation {
+        SocialRelationKind::Ignore => "social_ignores",
+        SocialRelationKind::Block => "social_blocks",
+    };
+    let sql = if enabled {
+        format!(
+            "INSERT INTO {table} (owner_character_id, target_character_id, created_at)
+             VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING"
+        )
+    } else {
+        format!("DELETE FROM {table} WHERE owner_character_id = ?1 AND target_character_id = ?2")
+    };
+    if enabled {
+        transaction.execute(&sql, params![actor.0, target.0, now])?;
+    } else {
+        transaction.execute(&sql, params![actor.0, target.0])?;
+    }
+    let action = match (relation, enabled) {
+        (SocialRelationKind::Ignore, true) => "ignore",
+        (SocialRelationKind::Ignore, false) => "unignore",
+        (SocialRelationKind::Block, true) => "block",
+        (SocialRelationKind::Block, false) => "unblock",
+    };
+    append_audit(
+        &transaction,
+        actor_profile.account_id,
+        Some(target_profile.account_id),
+        action,
+        serde_json::json!({"targetCharacterId": target.0}),
+        now,
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn report_character(
+    connection: &mut Connection,
+    actor: CharacterId,
+    target: CharacterId,
+    reason: &str,
+    now: i64,
+) -> Result<(), StoreError> {
+    if actor == target {
+        return Err(StoreError::SocialSelfTarget);
+    }
+    let reason = normalise_social_text(reason, MAX_REPORT_REASON_BYTES)?;
+    let transaction = connection.transaction()?;
+    let actor_profile = social_profile(&transaction, actor, now)?;
+    let target_profile = social_profile(&transaction, target, now)?;
+    if actor_profile.account_id == target_profile.account_id {
+        return Err(StoreError::SocialSelfTarget);
+    }
+    transaction.execute(
+        "INSERT INTO social_reports
+             (reporter_character_id, target_character_id, reason, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![actor.0, target.0, reason, now],
+    )?;
+    append_audit(
+        &transaction,
+        actor_profile.account_id,
+        Some(target_profile.account_id),
+        "report",
+        serde_json::json!({"reportId": transaction.last_insert_rowid()}),
+        now,
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn moderate_character(
+    connection: &mut Connection,
+    actor: CharacterId,
+    target: CharacterId,
+    action: ModerationAction,
+    now: i64,
+) -> Result<(), StoreError> {
+    if actor == target {
+        return Err(StoreError::SocialSelfTarget);
+    }
+    let transaction = connection.transaction()?;
+    let actor_profile = social_profile(&transaction, actor, now)?;
+    let target_profile = social_profile(&transaction, target, now)?;
+    if actor_profile.account_id == target_profile.account_id {
+        return Err(StoreError::SocialSelfTarget);
+    }
+    let role_change = matches!(action, ModerationAction::SetRole(_));
+    let authorized = if role_change {
+        actor_profile.role == AccountRole::Admin
+    } else {
+        actor_profile.role.can_moderate(target_profile.role)
+    };
+    if !authorized {
+        return Err(StoreError::SocialForbidden);
+    }
+
+    let (action_name, details) = match action {
+        ModerationAction::Mute { expires_at, reason } => {
+            let reason = normalise_social_text(&reason, MAX_SOCIAL_REASON_BYTES)?;
+            validate_expiry(expires_at, now)?;
+            revoke_active(
+                &transaction,
+                "moderation_mutes",
+                target_profile.account_id,
+                actor_profile.account_id,
+                now,
+            )?;
+            transaction.execute(
+                "INSERT INTO moderation_mutes
+                     (account_id, imposed_by_account_id, reason, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    target_profile.account_id.0,
+                    actor_profile.account_id.0,
+                    reason,
+                    now,
+                    expires_at
+                ],
+            )?;
+            (
+                "mute",
+                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
+            )
+        }
+        ModerationAction::Unmute => {
+            revoke_active(
+                &transaction,
+                "moderation_mutes",
+                target_profile.account_id,
+                actor_profile.account_id,
+                now,
+            )?;
+            ("unmute", serde_json::json!({}))
+        }
+        ModerationAction::Ban { expires_at, reason } => {
+            let reason = normalise_social_text(&reason, MAX_SOCIAL_REASON_BYTES)?;
+            validate_expiry(expires_at, now)?;
+            revoke_active(
+                &transaction,
+                "account_bans",
+                target_profile.account_id,
+                actor_profile.account_id,
+                now,
+            )?;
+            transaction.execute(
+                "INSERT INTO account_bans
+                     (account_id, imposed_by_account_id, reason, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    target_profile.account_id.0,
+                    actor_profile.account_id.0,
+                    reason,
+                    now,
+                    expires_at
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, ?1)
+                 WHERE account_id = ?2",
+                params![now, target_profile.account_id.0],
+            )?;
+            (
+                "ban",
+                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
+            )
+        }
+        ModerationAction::Unban => {
+            revoke_active(
+                &transaction,
+                "account_bans",
+                target_profile.account_id,
+                actor_profile.account_id,
+                now,
+            )?;
+            ("unban", serde_json::json!({}))
+        }
+        ModerationAction::SetRole(role) => {
+            transaction.execute(
+                "UPDATE accounts SET role = ?1 WHERE id = ?2",
+                params![role_as_database(role), target_profile.account_id.0],
+            )?;
+            (
+                "set_role",
+                serde_json::json!({"role": role_as_database(role)}),
+            )
+        }
+    };
+    append_audit(
+        &transaction,
+        actor_profile.account_id,
+        Some(target_profile.account_id),
+        action_name,
+        details,
+        now,
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+const MAX_MODERATION_DURATION_SECONDS: i64 = 365 * 24 * 60 * 60;
+
+fn validate_expiry(expires_at: Option<i64>, now: i64) -> Result<(), StoreError> {
+    if expires_at.is_some_and(|expires_at| {
+        expires_at <= now || expires_at.saturating_sub(now) > MAX_MODERATION_DURATION_SECONDS
+    }) {
+        Err(StoreError::InvalidSocialInput)
+    } else {
+        Ok(())
+    }
+}
+
+fn revoke_active(
+    connection: &Connection,
+    table: &str,
+    target: AccountId,
+    actor: AccountId,
+    now: i64,
+) -> Result<(), StoreError> {
+    debug_assert!(matches!(table, "moderation_mutes" | "account_bans"));
+    connection.execute(
+        &format!(
+            "UPDATE {table}
+             SET revoked_at = ?1, revoked_by_account_id = ?2
+             WHERE account_id = ?3 AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?1)"
+        ),
+        params![now, actor.0, target.0],
+    )?;
+    Ok(())
+}
+
+fn normalise_social_text(value: &str, maximum: usize) -> Result<String, StoreError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
+        Err(StoreError::InvalidSocialInput)
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn append_audit(
+    connection: &Connection,
+    actor: AccountId,
+    target: Option<AccountId>,
+    action: &str,
+    details: serde_json::Value,
+    now: i64,
+) -> Result<(), StoreError> {
+    let details_json = serde_json::to_string(&details)?;
+    if action.is_empty() || action.len() > 64 || details_json.len() > MAX_AUDIT_DETAILS_BYTES {
+        return Err(StoreError::InvalidSocialInput);
+    }
+    connection.execute(
+        "INSERT INTO moderation_audit
+             (actor_account_id, target_account_id, action, details_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            actor.0,
+            target.map(|target| target.0),
+            action,
+            details_json,
+            now
+        ],
     )?;
     Ok(())
 }
 
 #[cfg(test)]
+fn audit_log(connection: &Connection) -> Result<Vec<AuditEntry>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT sequence, actor_account_id, target_account_id, action, details_json, created_at
+         FROM moderation_audit ORDER BY sequence",
+    )?;
+    statement
+        .query_map([], |row| {
+            Ok(AuditEntry {
+                sequence: row.get(0)?,
+                actor_account_id: AccountId(row.get(1)?),
+                target_account_id: row.get::<_, Option<i64>>(2)?.map(AccountId),
+                action: row.get(3)?,
+                details_json: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(StoreError::from)
+}
+
+#[cfg(test)]
+fn load_or_create_account(
+    connection: &Connection,
+    name: &str,
+) -> Result<AccountSnapshot, StoreError> {
+    let name = normalise_name(name, "account")?;
+    connection.execute(
+        "INSERT INTO accounts (name, auth_state)
+         VALUES (?1, 'guest') ON CONFLICT(name) DO NOTHING",
+        [&name],
+    )?;
+    connection
+        .query_row(
+            "SELECT id, name FROM accounts
+             WHERE name = ?1 AND auth_state = 'guest'",
+            [&name],
+            |row| {
+                Ok(AccountSnapshot {
+                    id: AccountId(row.get(0)?),
+                    name: row.get(1)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::AccountAlreadyExists)
+}
+
+fn list_characters(
+    connection: &Connection,
+    account_id: AccountId,
+) -> Result<Vec<CharacterSnapshot>, StoreError> {
+    ensure_account_exists(connection, account_id)?;
+    let mut statement = connection.prepare(
+        "SELECT id, account_id, name, room_id, item_locations_json
+         FROM characters WHERE account_id = ?1 ORDER BY name COLLATE NOCASE, id",
+    )?;
+    let snapshots = statement
+        .query_map([account_id.0], character_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(snapshots)
+}
+
+fn load_or_create_character(
+    connection: &Connection,
+    account_id: AccountId,
+    name: &str,
+    start_room: &str,
+) -> Result<CharacterSnapshot, StoreError> {
+    ensure_account_exists(connection, account_id)?;
+    let name = normalise_name(name, "character")?;
+    connection.execute(
+        "INSERT INTO characters (account_id, name, room_id)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(account_id, name) DO NOTHING",
+        params![account_id.0, name, start_room],
+    )?;
+    connection
+        .query_row(
+            "SELECT id, account_id, name, room_id, item_locations_json
+             FROM characters WHERE account_id = ?1 AND name = ?2",
+            params![account_id.0, name],
+            character_from_row,
+        )
+        .map_err(StoreError::from)
+}
+
+fn load_character(
+    connection: &Connection,
+    account_id: AccountId,
+    character_id: CharacterId,
+) -> Result<CharacterSnapshot, StoreError> {
+    ensure_account_exists(connection, account_id)?;
+    connection
+        .query_row(
+            "SELECT id, account_id, name, room_id, item_locations_json
+             FROM characters WHERE account_id = ?1 AND id = ?2",
+            params![account_id.0, character_id.0],
+            character_from_row,
+        )
+        .optional()?
+        .ok_or(StoreError::CharacterNotFound {
+            account_id,
+            character_id,
+        })
+}
+
+fn character_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CharacterSnapshot> {
+    let item_locations_json = row.get::<_, String>(4)?;
+    let item_locations = serde_json::from_str(&item_locations_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+    })?;
+    Ok(CharacterSnapshot {
+        id: CharacterId(row.get(0)?),
+        account_id: AccountId(row.get(1)?),
+        name: row.get(2)?,
+        room_id: row.get(3)?,
+        item_locations,
+    })
+}
+
+fn save(connection: &Connection, snapshot: &CharacterSnapshot) -> Result<(), StoreError> {
+    let name = normalise_name(&snapshot.name, "character")?;
+    let item_locations_json = serde_json::to_string(&snapshot.item_locations)?;
+    let updated = connection.execute(
+        "UPDATE characters
+         SET name = ?1, room_id = ?2, item_locations_json = ?3, updated_at = unixepoch()
+         WHERE id = ?4 AND account_id = ?5",
+        params![
+            name,
+            snapshot.room_id,
+            item_locations_json,
+            snapshot.id.0,
+            snapshot.account_id.0
+        ],
+    )?;
+    if updated == 0 {
+        return Err(StoreError::CharacterNotFound {
+            account_id: snapshot.account_id,
+            character_id: snapshot.id,
+        });
+    }
+    Ok(())
+}
+
+fn load_character_gameplay(
+    connection: &Connection,
+    character_id: CharacterId,
+) -> Result<CharacterGameplaySnapshot, StoreError> {
+    let json = connection
+        .query_row(
+            "SELECT gameplay_json FROM characters WHERE id = ?1",
+            [character_id.0],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(StoreError::CharacterGameplayNotFound(character_id))?;
+    serde_json::from_str(&json).map_err(StoreError::from)
+}
+
+fn load_runtime_snapshot(
+    connection: &Connection,
+) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
+    connection
+        .query_row(
+            "SELECT snapshot_json FROM world_runtime WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+        .transpose()
+}
+
+fn load_domain_events(connection: &Connection) -> Result<Vec<DomainEvent>, StoreError> {
+    let mut statement =
+        connection.prepare("SELECT event_json FROM domain_events ORDER BY sequence")?;
+    statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .map(|json| {
+            let json = json?;
+            serde_json::from_str(&json).map_err(StoreError::from)
+        })
+        .collect()
+}
+
+fn commit_action(
+    connection: &mut Connection,
+    characters: &[DurableCharacterSnapshot],
+    runtime: &WorldRuntimeSnapshot,
+    events: &[DomainEvent],
+) -> Result<(), StoreError> {
+    let gameplay_json = characters
+        .iter()
+        .map(|snapshot| {
+            bounded_json(
+                &snapshot.gameplay,
+                "character gameplay",
+                MAX_CHARACTER_JSON_BYTES,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let adventure_json = characters
+        .iter()
+        .map(|snapshot| {
+            bounded_json(
+                &serde_json::json!({
+                    "coins": snapshot.gameplay.coins,
+                    "commodities": snapshot.gameplay.commodities,
+                    "quests": snapshot.gameplay.quests,
+                }),
+                "character adventure",
+                MAX_CHARACTER_JSON_BYTES,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
+    let world_adventure_json = bounded_json(
+        &runtime.adventure,
+        "world adventure",
+        MAX_RUNTIME_JSON_BYTES,
+    )?;
+    let event_json = events
+        .iter()
+        .map(|event| bounded_json(event, "domain event", MAX_EVENT_JSON_BYTES))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let transaction = connection.transaction()?;
+    for ((snapshot, gameplay_json), adventure_json) in
+        characters.iter().zip(gameplay_json).zip(adventure_json)
+    {
+        save(&transaction, &snapshot.character)?;
+        let updated = transaction.execute(
+            "UPDATE characters SET gameplay_json = ?1, updated_at = unixepoch()
+             WHERE id = ?2 AND account_id = ?3",
+            params![
+                gameplay_json,
+                snapshot.character.id.0,
+                snapshot.character.account_id.0
+            ],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::CharacterNotFound {
+                account_id: snapshot.character.account_id,
+                character_id: snapshot.character.id,
+            });
+        }
+        transaction.execute(
+            "INSERT INTO character_adventure (character_id, state_json, updated_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(character_id) DO UPDATE SET
+                 state_json = excluded.state_json,
+                 updated_at = excluded.updated_at",
+            params![snapshot.character.id.0, adventure_json],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO world_runtime
+             (singleton, snapshot_version, snapshot_json, updated_at)
+         VALUES (1, ?1, ?2, unixepoch())
+         ON CONFLICT(singleton) DO UPDATE SET
+             snapshot_version = excluded.snapshot_version,
+             snapshot_json = excluded.snapshot_json,
+             updated_at = excluded.updated_at",
+        params![runtime.snapshot_version, runtime_json],
+    )?;
+    transaction.execute(
+        "INSERT INTO world_adventure (singleton, state_json, updated_at)
+         VALUES (1, ?1, unixepoch())
+         ON CONFLICT(singleton) DO UPDATE SET
+             state_json = excluded.state_json,
+             updated_at = excluded.updated_at",
+        [world_adventure_json],
+    )?;
+    for event_json in event_json {
+        transaction.execute(
+            "INSERT INTO domain_events (event_json) VALUES (?1)",
+            [event_json],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn bounded_json<T: serde::Serialize>(
+    value: &T,
+    kind: &'static str,
+    maximum: usize,
+) -> Result<String, StoreError> {
+    let json = serde_json::to_string(value)?;
+    if json.len() > maximum {
+        return Err(StoreError::SnapshotTooLarge { kind, maximum });
+    }
+    Ok(json)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tiamud_core::{
+        ActiveEffect, Direction, EffectKind, EquipmentSlot, ItemLocationSnapshot,
+        RuntimeItemLocation, World,
+    };
+
+    async fn account(store: &SqliteCharacterStore, name: &str) -> AccountSnapshot {
+        store.load_or_create_account(name).await.unwrap()
+    }
 
     #[tokio::test]
-    async fn round_trips_a_character_snapshot() {
+    async fn shutdown_is_a_fifo_barrier_and_closes_the_owner_thread() {
         let store = SqliteCharacterStore::open(":memory:").await.unwrap();
-        let created = store
-            .load_or_create("Aria", "demo:lantern-square")
+        store
+            .register_account("Shutdown Owner", "correct horse battery staple")
             .await
             .unwrap();
-        assert_eq!(created.room_id, "demo:lantern-square");
+        store.shutdown().await.unwrap();
+        assert!(matches!(
+            store.health_check().await,
+            Err(StoreError::WorkerStopped)
+        ));
+    }
+
+    #[tokio::test]
+    async fn registration_and_login_are_case_insensitive() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let registered = store
+            .register_account("  Adventurer  ", "correct horse battery staple")
+            .await
+            .unwrap();
+        let logged_in = store
+            .login_account("ADVENTURER", "correct horse battery staple")
+            .await
+            .unwrap();
+
+        assert_eq!(logged_in.account, registered.account);
+        assert_ne!(logged_in.token, registered.token);
+        assert_eq!(
+            store
+                .resolve_session(logged_in.token.as_str())
+                .await
+                .unwrap(),
+            registered.account
+        );
+    }
+
+    #[tokio::test]
+    async fn incorrect_password_is_rejected() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        store
+            .register_account("Adventurer", "correct horse battery staple")
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            store
+                .login_account("adventurer", "this password is incorrect")
+                .await,
+            Err(StoreError::InvalidCredentials)
+        ));
+        assert!(matches!(
+            store.load_or_create_account("ADVENTURER").await,
+            Err(StoreError::AccountAlreadyExists)
+        ));
+    }
+
+    #[test]
+    fn database_contains_only_argon2_password_and_sha256_token_material() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let password = "correct horse battery staple";
+        let session = register_account(&mut connection, "Secure", password, 1_000).unwrap();
+
+        let encoded_hash: String = connection
+            .query_row(
+                "SELECT password_hash FROM accounts WHERE id = ?1",
+                [session.account.id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_token_hash: Vec<u8> = connection
+            .query_row("SELECT token_hash FROM auth_sessions", [], |row| row.get(0))
+            .unwrap();
+
+        assert!(encoded_hash.starts_with("$argon2id$v=19$"));
+        assert!(!encoded_hash.contains(password));
+        assert_eq!(stored_token_hash.len(), 32);
+        assert_ne!(stored_token_hash, session.token.as_str().as_bytes());
+        assert_eq!(stored_token_hash, session.token.digest());
+    }
+
+    #[test]
+    fn expired_and_revoked_tokens_are_rejected() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let expired = register_account(
+            &mut connection,
+            "Expiring",
+            "correct horse battery staple",
+            1_000,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            resolve_session(&connection, expired.token.as_str(), expired.expires_at),
+            Err(StoreError::SessionExpired)
+        ));
+
+        let active = login_account(
+            &mut connection,
+            "expiring",
+            "correct horse battery staple",
+            2_000,
+        )
+        .unwrap();
+        revoke_session(&connection, active.token.as_str(), 2_001).unwrap();
+        assert!(matches!(
+            resolve_session(&connection, active.token.as_str(), 2_002),
+            Err(StoreError::SessionRevoked)
+        ));
+    }
+
+    #[test]
+    fn authentication_inputs_and_active_sessions_are_bounded() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        assert!(matches!(
+            register_account(&mut connection, "Short", "tiny", 1_000),
+            Err(StoreError::InvalidPassword)
+        ));
+
+        let first = register_account(
+            &mut connection,
+            "Bounded",
+            "correct horse battery staple",
+            2_000,
+        )
+        .unwrap();
+        for offset in 1..MAX_ACTIVE_SESSIONS + 2 {
+            issue_session(&connection, first.account.clone(), 2_000 + offset).unwrap();
+        }
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM auth_sessions WHERE account_id = ?1",
+                [first.account.id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, MAX_ACTIVE_SESSIONS);
+        assert!(matches!(
+            resolve_session(&connection, first.token.as_str(), 2_100),
+            Err(StoreError::InvalidSession)
+        ));
+    }
+
+    #[test]
+    fn schema_v7_adventure_mirrors_are_written_in_the_same_transaction() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let owner = load_or_create_account(&connection, "Adventure Owner").unwrap();
+        let character =
+            load_or_create_character(&connection, owner.id, "Market Hero", "demo:lantern-square")
+                .unwrap();
+        let gameplay = CharacterGameplaySnapshot {
+            coins: 28,
+            commodities: std::collections::BTreeMap::from([("tonic".into(), 1)]),
+            ..CharacterGameplaySnapshot::default()
+        };
+        let mut runtime = World::demo().runtime_snapshot();
+        runtime.adventure.shop_stock.insert("tonic".into(), 19);
+
+        commit_action(
+            &mut connection,
+            &[DurableCharacterSnapshot {
+                character: character.clone(),
+                gameplay,
+            }],
+            &runtime,
+            &[],
+        )
+        .unwrap();
+
+        let character_json: String = connection
+            .query_row(
+                "SELECT state_json FROM character_adventure WHERE character_id = ?1",
+                [character.id.0],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let world_json: String = connection
+            .query_row(
+                "SELECT state_json FROM world_adventure WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(character_json.contains("\"coins\":28"));
+        assert!(character_json.contains("\"tonic\":1"));
+        assert!(world_json.contains("\"tonic\":19"));
+    }
+
+    #[tokio::test]
+    async fn account_ids_are_stable_and_names_are_case_insensitive() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let created = account(&store, "  Aria  ").await;
+        let loaded = account(&store, "aria").await;
+
+        assert_eq!(loaded.id, created.id);
+        assert_eq!(loaded.name, "Aria");
+    }
+
+    #[tokio::test]
+    async fn character_ids_survive_saves_and_case_insensitive_loads() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let owner = account(&store, "Owner").await;
+        let created = store
+            .load_or_create_character(owner.id, "Aria", "demo:lantern-square")
+            .await
+            .unwrap();
+
+        let loaded_by_name = store
+            .load_or_create_character(owner.id, "aria", "ignored")
+            .await
+            .unwrap();
+        assert_eq!(loaded_by_name, created);
+
+        let mut moved = created.clone();
+        moved.room_id = "demo:north-gate".into();
+        moved
+            .item_locations
+            .insert("demo:lantern".into(), ItemLocationSnapshot::Carried);
+        store.save(moved.clone()).await.unwrap();
+        assert_eq!(
+            store.load_character(owner.id, created.id).await.unwrap(),
+            moved
+        );
+    }
+
+    #[tokio::test]
+    async fn character_and_shared_world_events_commit_atomically() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let owner = account(&store, "Event Owner").await;
+        let mut character = store
+            .load_or_create_character(owner.id, "Aria", "room:a")
+            .await
+            .unwrap();
+        character.room_id = "room:b".into();
+        let event = DomainEvent::CharacterMoved {
+            actor_id: character.id,
+            actor_name: character.name.clone(),
+            from_room_id: "room:a".into(),
+            to_room_id: "room:b".into(),
+            direction: Direction::North,
+        };
 
         store
-            .save(CharacterSnapshot {
-                name: "Aria".into(),
-                room_id: "demo:north-gate".into(),
-            })
+            .commit_action(
+                vec![DurableCharacterSnapshot {
+                    character: character.clone(),
+                    gameplay: CharacterGameplaySnapshot {
+                        coins: 28,
+                        commodities: std::collections::BTreeMap::from([("tonic".into(), 1)]),
+                        ..CharacterGameplaySnapshot::default()
+                    },
+                }],
+                {
+                    let mut runtime = World::demo().runtime_snapshot();
+                    runtime.adventure.shop_stock.insert("tonic".into(), 19);
+                    runtime
+                },
+                vec![event.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_character(owner.id, character.id).await.unwrap(),
+            character
+        );
+        assert_eq!(store.load_domain_events().await.unwrap(), vec![event]);
+        assert_eq!(
+            store
+                .load_character_gameplay(character.id)
+                .await
+                .unwrap()
+                .coins,
+            28
+        );
+
+        let mut missing = character;
+        missing.id = CharacterId(9999);
+        let rejected = DomainEvent::ItemTaken {
+            actor_id: missing.id,
+            actor_name: missing.name.clone(),
+            item_id: "item:missing".into(),
+            item_name: "missing".into(),
+            room_id: "room:b".into(),
+        };
+        assert!(
+            store
+                .commit_action(
+                    vec![DurableCharacterSnapshot {
+                        character: missing,
+                        gameplay: CharacterGameplaySnapshot::default(),
+                    }],
+                    {
+                        let mut runtime = World::demo().runtime_snapshot();
+                        runtime.logical_tick = 99;
+                        runtime.adventure.shop_stock.insert("tonic".into(), 0);
+                        runtime
+                    },
+                    vec![rejected],
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(store.load_domain_events().await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .load_runtime_snapshot()
+                .await
+                .unwrap()
+                .unwrap()
+                .logical_tick,
+            0
+        );
+        assert_eq!(
+            store
+                .load_runtime_snapshot()
+                .await
+                .unwrap()
+                .unwrap()
+                .adventure
+                .shop_stock["tonic"],
+            19
+        );
+    }
+
+    #[tokio::test]
+    async fn gameplay_and_runtime_snapshots_round_trip_together() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let owner = account(&store, "Snapshot Owner").await;
+        let character = store
+            .load_or_create_character(owner.id, "Aria", "demo:lantern-square")
+            .await
+            .unwrap();
+        let defaults = CharacterGameplaySnapshot::default();
+        let gameplay = CharacterGameplaySnapshot {
+            level: 4,
+            experience: 375,
+            vitals: tiamud_core::Vitals {
+                health: 0,
+                max_health: defaults.vitals.max_health,
+            },
+            attributes: defaults.attributes,
+            skills: defaults.skills,
+            equipment: std::collections::BTreeMap::from([(
+                EquipmentSlot::Weapon,
+                "demo:blue-lantern".to_owned(),
+            )]),
+            effects: vec![ActiveEffect {
+                kind: EffectKind::Strength,
+                magnitude: 3,
+                remaining_ticks: 2,
+            }],
+            recovery_at_tick: Some(19),
+            coins: 123,
+            commodities: std::collections::BTreeMap::from([("tonic".into(), 2)]),
+            quests: std::collections::BTreeMap::from([(
+                "first-hunt".into(),
+                tiamud_core::QuestProgress {
+                    status: tiamud_core::QuestStatus::ReadyToClaim,
+                    current: 1,
+                    target: 1,
+                },
+            )]),
+            script_flags: std::collections::BTreeSet::from(["archive-welcomed".into()]),
+            scheduled_script_flags: vec![tiamud_core::ScheduledScriptFlag {
+                flag: "archive-follow-up".into(),
+                due_tick: 23,
+            }],
+        };
+        let mut runtime = World::demo().runtime_snapshot();
+        runtime.logical_tick = 17;
+        runtime.adventure.next_weather_tick = 20;
+        runtime.adventure.shop_stock.insert("tonic".into(), 18);
+        runtime.item_locations.insert(
+            "demo:blue-lantern".into(),
+            RuntimeItemLocation::Equipped {
+                character_id: character.id,
+                slot: EquipmentSlot::Weapon,
+            },
+        );
+
+        store
+            .commit_action(
+                vec![DurableCharacterSnapshot {
+                    character: character.clone(),
+                    gameplay: gameplay.clone(),
+                }],
+                runtime.clone(),
+                Vec::new(),
+            )
             .await
             .unwrap();
 
-        let loaded = store.load_or_create("aria", "ignored").await.unwrap();
-        assert_eq!(loaded.name, "Aria");
-        assert_eq!(loaded.room_id, "demo:north-gate");
+        assert_eq!(
+            store.load_character_gameplay(character.id).await.unwrap(),
+            gameplay
+        );
+        assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
+    }
+
+    #[tokio::test]
+    async fn accounts_can_own_same_named_characters_without_identity_collision() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let first = account(&store, "First").await;
+        let second = account(&store, "Second").await;
+        let first_character = store
+            .load_or_create_character(first.id, "Hero", "room:a")
+            .await
+            .unwrap();
+        let second_character = store
+            .load_or_create_character(second.id, "Hero", "room:b")
+            .await
+            .unwrap();
+
+        assert_ne!(first_character.id, second_character.id);
+        assert_eq!(first_character.account_id, first.id);
+        assert_eq!(second_character.account_id, second.id);
+        assert_eq!(store.list_characters(first.id).await.unwrap().len(), 1);
+        assert_eq!(store.list_characters(second.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn character_selection_checks_account_ownership() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let owner = account(&store, "Owner").await;
+        let stranger = account(&store, "Stranger").await;
+        let character = store
+            .load_or_create_character(owner.id, "Private", "room:a")
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            store.load_character(stranger.id, character.id).await,
+            Err(StoreError::CharacterNotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_accounts_and_invalid_names_are_rejected() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        assert!(matches!(
+            store.load_or_create_account(" \n ").await,
+            Err(StoreError::InvalidName { kind: "account" })
+        ));
+        assert!(matches!(
+            store
+                .load_or_create_character(AccountId(999), "Hero", "room:a")
+                .await,
+            Err(StoreError::AccountNotFound(AccountId(999)))
+        ));
+    }
+
+    #[test]
+    fn durable_ids_are_unchanged_after_the_database_is_reopened() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mud-persistence-{}-{nonce}.sqlite3",
+            std::process::id()
+        ));
+
+        let (account_id, character_id, login_token, login_account_id) = {
+            let mut connection = Connection::open(&path).unwrap();
+            initialise(&mut connection).unwrap();
+            let account = load_or_create_account(&connection, "Persistent Player").unwrap();
+            let character = load_or_create_character(
+                &connection,
+                account.id,
+                "Persistent Hero",
+                "demo:lantern-square",
+            )
+            .unwrap();
+            let login = register_account(
+                &mut connection,
+                "Persistent Login",
+                "correct horse battery staple",
+                1_000,
+            )
+            .unwrap();
+            (
+                account.id,
+                character.id,
+                login.token.as_str().to_owned(),
+                login.account.id,
+            )
+        };
+
+        {
+            let mut connection = Connection::open(&path).unwrap();
+            initialise(&mut connection).unwrap();
+            let account = load_or_create_account(&connection, "persistent player").unwrap();
+            let character = load_character(&connection, account.id, character_id).unwrap();
+            assert_eq!(account.id, account_id);
+            assert_eq!(character.id, character_id);
+            assert_eq!(character.account_id, account_id);
+            assert_eq!(
+                resolve_session(&connection, &login_token, 1_001)
+                    .unwrap()
+                    .id,
+                login_account_id
+            );
+        }
+
+        for suffix in ["", "-shm", "-wal"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[test]
+    fn migrates_the_name_keyed_bootstrap_schema_without_losing_location() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE characters (
+                     name TEXT PRIMARY KEY COLLATE NOCASE,
+                     room_id TEXT NOT NULL,
+                     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 INSERT INTO characters (name, room_id)
+                     VALUES ('Legacy Hero', 'demo:north-gate');",
+            )
+            .unwrap();
+
+        initialise(&mut connection).unwrap();
+        let migrated_account = load_or_create_account(&connection, "legacy hero").unwrap();
+        let migrated = list_characters(&connection, migrated_account.id).unwrap();
+
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].name, "Legacy Hero");
+        assert_eq!(migrated[0].room_id, "demo:north-gate");
+        assert!(migrated[0].id.0 > 0);
+        let migrated_column: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_table_info('characters') WHERE name = 'account_id'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(migrated_column);
+    }
+
+    #[test]
+    fn migrates_v2_accounts_as_explicit_guests_without_losing_rosters() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE accounts (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                     created_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 CREATE TABLE characters (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                     name TEXT NOT NULL COLLATE NOCASE,
+                     room_id TEXT NOT NULL,
+                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                     UNIQUE(account_id, name)
+                 );
+                 INSERT INTO accounts (id, name) VALUES (7, 'Legacy Guest');
+                 INSERT INTO characters (id, account_id, name, room_id)
+                     VALUES (9, 7, 'Old Hero', 'demo:north-gate');
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+
+        initialise(&mut connection).unwrap();
+        let (password_hash, state): (Option<String>, String) = connection
+            .query_row(
+                "SELECT password_hash, auth_state FROM accounts WHERE id = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let roster = list_characters(&connection, AccountId(7)).unwrap();
+
+        assert_eq!(password_hash, None);
+        assert_eq!(state, "guest");
+        assert_eq!(roster[0].id, CharacterId(9));
+        assert_eq!(roster[0].room_id, "demo:north-gate");
+        assert!(matches!(
+            login_account(
+                &mut connection,
+                "legacy guest",
+                "correct horse battery staple",
+                1_000
+            ),
+            Err(StoreError::InvalidCredentials)
+        ));
+    }
+
+    #[tokio::test]
+    async fn social_policy_roles_bans_and_audit_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("social.db");
+        let store = SqliteCharacterStore::open(&path).await.unwrap();
+        let admin = store
+            .register_account("Admin", "correct horse battery staple")
+            .await
+            .unwrap();
+        let player = store
+            .register_account("Player", "another correct horse battery")
+            .await
+            .unwrap();
+        let third = store
+            .register_account("Third", "a third correct horse battery")
+            .await
+            .unwrap();
+        let admin_character = store
+            .load_or_create_character(admin.account.id, "Aster", "room:start")
+            .await
+            .unwrap();
+        let player_character = store
+            .load_or_create_character(player.account.id, "Bryn", "room:start")
+            .await
+            .unwrap();
+        let third_character = store
+            .load_or_create_character(third.account.id, "Cyra", "room:start")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.social_profile(admin_character.id).await.unwrap().role,
+            AccountRole::Admin
+        );
+        assert!(matches!(
+            store
+                .moderate_character(
+                    player_character.id,
+                    third_character.id,
+                    ModerationAction::Mute {
+                        expires_at: None,
+                        reason: "not authorized".into(),
+                    },
+                )
+                .await,
+            Err(StoreError::SocialForbidden)
+        ));
+
+        store
+            .set_social_relation(
+                player_character.id,
+                admin_character.id,
+                SocialRelationKind::Ignore,
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .social_delivery_allowed(admin_character.id, player_character.id)
+                .await
+                .unwrap()
+        );
+        store
+            .set_social_relation(
+                player_character.id,
+                third_character.id,
+                SocialRelationKind::Block,
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .social_delivery_allowed(player_character.id, third_character.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .social_delivery_allowed(third_character.id, player_character.id)
+                .await
+                .unwrap()
+        );
+
+        store
+            .moderate_character(
+                admin_character.id,
+                player_character.id,
+                ModerationAction::SetRole(AccountRole::Moderator),
+            )
+            .await
+            .unwrap();
+        store
+            .moderate_character(
+                player_character.id,
+                third_character.id,
+                ModerationAction::Mute {
+                    expires_at: None,
+                    reason: "repeated flooding".into(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .report_character(
+                player_character.id,
+                third_character.id,
+                "harassment in public chat",
+            )
+            .await
+            .unwrap();
+        store
+            .moderate_character(
+                admin_character.id,
+                third_character.id,
+                ModerationAction::Ban {
+                    expires_at: None,
+                    reason: "repeated severe abuse".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .login_account("Third", "a third correct horse battery")
+                .await,
+            Err(StoreError::AccountBanned)
+        ));
+
+        drop(store);
+        let reopened = SqliteCharacterStore::open(&path).await.unwrap();
+        assert_eq!(
+            reopened
+                .social_profile(player_character.id)
+                .await
+                .unwrap()
+                .role,
+            AccountRole::Moderator
+        );
+        assert!(
+            reopened
+                .social_profile(third_character.id)
+                .await
+                .unwrap()
+                .muted
+        );
+        assert!(
+            !reopened
+                .social_delivery_allowed(admin_character.id, player_character.id)
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            reopened
+                .login_account("Third", "a third correct horse battery")
+                .await,
+            Err(StoreError::AccountBanned)
+        ));
+        let actions = reopened
+            .audit_log()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.action)
+            .collect::<Vec<_>>();
+        for expected in [
+            "bootstrap_admin",
+            "ignore",
+            "block",
+            "set_role",
+            "mute",
+            "report",
+            "ban",
+        ] {
+            assert!(actions.iter().any(|action| action == expected));
+        }
+        let verification = Connection::open(&path).unwrap();
+        assert_eq!(
+            verification
+                .query_row(
+                    "SELECT reason FROM social_reports WHERE reporter_character_id = ?1",
+                    [player_character.id.0],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "harassment in public chat"
+        );
+    }
+
+    #[test]
+    fn temporary_and_permanent_bans_have_distinct_expiry_semantics() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let admin = register_account(
+            &mut connection,
+            "Admin",
+            "correct horse battery staple",
+            1_000,
+        )
+        .unwrap();
+        let player = register_account(
+            &mut connection,
+            "Player",
+            "another correct horse battery",
+            1_000,
+        )
+        .unwrap();
+        let admin_character =
+            load_or_create_character(&connection, admin.account.id, "Aster", "room:start").unwrap();
+        let player_character =
+            load_or_create_character(&connection, player.account.id, "Bryn", "room:start").unwrap();
+
+        moderate_character(
+            &mut connection,
+            admin_character.id,
+            player_character.id,
+            ModerationAction::Ban {
+                expires_at: Some(1_060),
+                reason: "temporary review".into(),
+            },
+            1_000,
+        )
+        .unwrap();
+        assert!(account_is_banned(&connection, player.account.id, 1_059).unwrap());
+        assert!(!account_is_banned(&connection, player.account.id, 1_060).unwrap());
+
+        moderate_character(
+            &mut connection,
+            admin_character.id,
+            player_character.id,
+            ModerationAction::Ban {
+                expires_at: None,
+                reason: "permanent ban".into(),
+            },
+            2_000,
+        )
+        .unwrap();
+        assert!(account_is_banned(&connection, player.account.id, i64::MAX).unwrap());
+    }
+
+    #[test]
+    fn refuses_to_open_a_database_from_a_newer_schema() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let future = tiamud_persistence_sqlite::SCHEMA_VERSION + 1;
+        connection
+            .pragma_update(None, "user_version", future)
+            .unwrap();
+
+        assert!(matches!(
+            initialise(&mut connection),
+            Err(StoreError::UnsupportedSchemaVersion {
+                found,
+                supported: tiamud_persistence_sqlite::SCHEMA_VERSION
+            }) if found == future
+        ));
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            future
+        );
     }
 }

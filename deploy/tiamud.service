@@ -1,0 +1,26 @@
+[Unit]
+Description=Tiamud multiplayer narrative server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tiamud
+Group=tiamud
+EnvironmentFile=-/etc/tiamud/tiamud.env
+WorkingDirectory=/var/lib/tiamud
+ExecStart=/usr/local/bin/tiamud-server
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tiamud
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

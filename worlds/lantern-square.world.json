@@ -1,0 +1,260 @@
+{
+  "schemaVersion": 2,
+  "id": "lantern-square",
+  "name": "Tiamud: Lantern Square",
+  "startRoomId": "demo:lantern-square",
+  "source": {
+    "format": "world-pack"
+  },
+  "items": [
+    {
+      "id": "tiamud:blue-lantern",
+      "name": "blue-glass lantern",
+      "description": "Cold blue light pools inside the rain-speckled glass, though no wick is visible.",
+      "aliases": ["lantern", "blue lantern", "lamp"]
+    },
+    {
+      "id": "tiamud:road-token",
+      "name": "iron road token",
+      "description": "A thumb-sized iron token stamped with a gate above a winding road.",
+      "aliases": ["token", "iron token"]
+    },
+    {
+      "id": "tiamud:weathered-map",
+      "name": "weathered map",
+      "description": "Rain-softened ink traces forgotten paths from Lantern Square into the northern wilds.",
+      "aliases": ["map", "old map"]
+    },
+    {
+      "id": "tiamud:bronze-sword",
+      "name": "notched bronze sword",
+      "description": "The old blade is nicked along one edge, but its leather grip remains sound.",
+      "aliases": ["sword", "bronze sword", "blade"]
+    },
+    {
+      "id": "tiamud:ember-tonic",
+      "name": "ember tonic",
+      "description": "A stoppered vial glows like banked coals and smells faintly of cinnamon.",
+      "aliases": ["tonic", "potion", "vial"]
+    },
+    {
+      "id": "tiamud:wolf-clasp",
+      "name": "silver wolf clasp",
+      "description": "A small silver clasp shaped like a running wolf, won from the gate-stalker.",
+      "aliases": ["clasp", "wolf clasp", "silver clasp"]
+    }
+  ],
+  "rooms": [
+    {
+      "id": "demo:lantern-square",
+      "title": "Lantern Square",
+      "description": "Rain has polished the old stones to a dark shine. Beneath the clock tower, a few late travellers gather around a blue-glass lantern.\n\nThe illustration, when available, is atmospheric only; the text remains the complete source of playable information.",
+      "assetManifest": "assets/8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/manifest.json",
+      "items": ["tiamud:blue-lantern", "tiamud:ember-tonic"],
+      "exits": [
+        {
+          "direction": "north",
+          "target": {
+            "kind": "room",
+            "room_id": "demo:north-gate"
+          }
+        },
+        {
+          "direction": "down",
+          "target": {
+            "kind": "room",
+            "room_id": "demo:archive"
+          }
+        }
+      ]
+    },
+    {
+      "id": "demo:north-gate",
+      "title": "The North Gate",
+      "description": "An iron-bound gate stands open between squat stone towers. The road continues into fields silvered by rain.",
+      "items": ["tiamud:road-token", "tiamud:wolf-clasp"],
+      "exits": [
+        {
+          "direction": "south",
+          "target": {
+            "kind": "room",
+            "room_id": "demo:lantern-square"
+          }
+        }
+      ]
+    },
+    {
+      "id": "demo:archive",
+      "title": "The Cartographer's Archive",
+      "description": "Shelves of annotated maps surround a broad oak table. A dry stair climbs back toward the square.",
+      "items": ["tiamud:weathered-map", "tiamud:bronze-sword"],
+      "exits": [
+        {
+          "direction": "up",
+          "target": {
+            "kind": "room",
+            "room_id": "demo:lantern-square"
+          }
+        }
+      ]
+    }
+  ],
+  "roomMedia": [
+    {
+      "roomId": "demo:lantern-square",
+      "imageAlt": {
+        "en": "Lantern Square after rain, its dark stones lit by a blue-glass lantern beneath the clock tower.",
+        "es": "La Plaza del Farol tras la lluvia, con las piedras oscuras iluminadas por un farol de cristal azul bajo la torre del reloj."
+      }
+    }
+  ],
+  "roomPerception": [
+    {
+      "roomId": "demo:lantern-square",
+      "light": "bright",
+      "secretExits": { "down": 8 }
+    },
+    {
+      "roomId": "demo:north-gate",
+      "light": "bright",
+      "hiddenItems": { "tiamud:road-token": 8 },
+      "hiddenNpcs": { "tiamud:gate-stalker-1": 8 }
+    },
+    {
+      "roomId": "demo:archive",
+      "light": "bright"
+    }
+  ],
+  "gameplay": {
+    "rngSeed": 6073466303471576068,
+    "itemRules": [
+      {
+        "itemId": "tiamud:bronze-sword",
+        "equipmentSlot": "weapon",
+        "attackBonus": 4
+      },
+      {
+        "itemId": "tiamud:blue-lantern",
+        "equipmentSlot": "trinket"
+      },
+      {
+        "itemId": "tiamud:ember-tonic",
+        "healAmount": 6,
+        "consumable": true,
+        "effect": {
+          "kind": "regeneration",
+          "magnitude": 2,
+          "remainingTicks": 3
+        }
+      }
+    ],
+    "npcPrototypes": [
+      {
+        "id": "tiamud:gate-stalker",
+        "name": "rain-dark gate-stalker",
+        "description": "A lean wolf-like creature watches the road through eyes the colour of storm glass.",
+        "level": 1,
+        "maxHealth": 18,
+        "strength": 3,
+        "defence": 1,
+        "experienceReward": 60,
+        "respawnTicks": 8,
+        "lootItemIds": ["tiamud:wolf-clasp"]
+      }
+    ],
+    "npcSpawns": [
+      {
+        "id": "tiamud:gate-stalker-1",
+        "prototypeId": "tiamud:gate-stalker",
+        "roomId": "demo:north-gate"
+      }
+    ]
+  },
+  "sceneVariants": [
+    {
+      "roomId": "demo:lantern-square",
+      "variants": [
+        {
+          "id": "lantern-awakened",
+          "priority": 30,
+          "when": {"contains": ["actor.flags", "heard-lantern-whisper"]},
+          "description": "Rain has polished the old stones to a dark shine. The blue-glass lantern now answers your presence with a pulse like a distant star.\n\nNo hidden state is named here: the changed atmosphere remains complete playable prose.",
+          "imageAlt": {
+            "en": "Lantern Square after rain as the blue-glass lantern pulses like a distant star beneath the clock tower.",
+            "es": "La Plaza del Farol tras la lluvia mientras el farol de cristal azul pulsa como una estrella lejana bajo la torre del reloj."
+          }
+        },
+        {
+          "id": "night-rain",
+          "priority": 20,
+          "when": {
+            "all": [
+              {"eq": ["world.time.period", "night"]},
+              {"eq": ["world.weather", "rain"]}
+            ]
+          },
+          "title": "Lantern Square at Midnight",
+          "description": "Rain threads the midnight square in silver lines while the clock tower keeps its own counsel.\n\nThe blue-glass lantern offers the only warm point beneath the storm-dark roofs.",
+          "imageAlt": {
+            "en": "Lantern Square at midnight, silver rain crossing the dark stones around one blue-glass lantern.",
+            "es": "La Plaza del Farol a medianoche, con lluvia plateada sobre las piedras oscuras alrededor de un único farol de cristal azul."
+          }
+        },
+        {
+          "id": "daylight-default",
+          "priority": 0,
+          "title": "Lantern Square"
+        }
+      ]
+    }
+  ],
+  "scripts": [
+    {
+      "id": "lantern-whisper",
+      "roomId": "demo:lantern-square",
+      "hooks": [
+        "on_enter",
+        "on_leave",
+        "on_look",
+        "on_use",
+        "on_talk",
+        "on_combat_start",
+        "on_defeat",
+        "on_timer",
+        "on_quest_event"
+      ],
+      "capabilities": ["narrate", "set_flag"],
+      "limits": {
+        "maxSourceBytes": 8192,
+        "maxMemoryBytes": 1048576,
+        "maxInstructions": 50000,
+        "maxWallTimeMillis": 20,
+        "maxEvents": 8,
+        "maxEventFieldBytes": 512
+      },
+      "source": "function on_enter(ctx) tiamud.emit('set_flag', 'self', 'heard-lantern-whisper') end\nfunction on_leave(ctx) tiamud.emit('narrate', 'self', 'The blue lantern dims behind you.') end\nfunction on_look(ctx) if tiamud.random(2) == 1 then tiamud.emit('narrate', 'self', 'For a heartbeat, the lantern flame resembles a tiny dragon.') end end\nfunction on_use(ctx) end\nfunction on_talk(ctx) end\nfunction on_combat_start(ctx) end\nfunction on_defeat(ctx) tiamud.emit('narrate', 'self', 'The lantern flares as the struggle ends.') end\nfunction on_timer(ctx) end\nfunction on_quest_event(ctx) end"
+    }
+  ],
+  "contentTests": [
+    {
+      "name": "authorized lantern flag changes prose without leaking author state",
+      "roomId": "demo:lantern-square",
+      "context": {
+        "worldTimePeriod": "day",
+        "worldWeather": "clear",
+        "worldTimeHour": 12,
+        "actorLevel": 1,
+        "actorFlags": ["heard-lantern-whisper"]
+      },
+      "expect": {
+        "descriptionContains": ["distant star"],
+        "outputExcludes": [
+          "lantern-awakened",
+          "heard-lantern-whisper",
+          "actor.flags",
+          "demo:lantern-square"
+        ]
+      }
+    }
+  ]
+}

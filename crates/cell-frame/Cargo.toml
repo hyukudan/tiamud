@@ -1,0 +1,13 @@
+[package]
+name = "tiamud-cell-frame"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Bounded transport-neutral terminal cell art for Tiamud"
+
+[dependencies]
+image.workspace = true
+serde.workspace = true
+thiserror.workspace = true

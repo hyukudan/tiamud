@@ -1,0 +1,25 @@
+#AREA
+Fuzz Area~
+#HELPS
+0 $~
+#0
+#RECALL
+100
+#MOBILES
+#0
+#OBJECTS
+#0
+#ROOMS
+#100
+Fuzz Room~
+A bounded historical area seed.~
+0 0
+S
+#0
+#RESETS
+S
+#SHOPS
+0
+#SPECIALS
+S
+#$
