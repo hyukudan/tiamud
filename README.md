@@ -303,11 +303,9 @@ historical [v0.2 specification](docs/spec-v0.2.md).
 
 The engine, default world, browser and Telnet paths, SQLite and PostgreSQL
 adapters, tooling and automated browser matrix are implemented with focused
-coverage. The exact candidate commit `a592eb7` entered its 24-hour candidate
-soak on **2026-07-15 20:37:47 UTC**, with completion expected around
-**2026-07-16 20:38 UTC**. A running soak is not acceptance; the report and
-deterministic verifier must both finish successfully before the matrix records
-criterion 19 as complete.
+coverage. Acceptance criterion 19 remains open until a successful 24-hour
+candidate report is retained and passes the deterministic verifier. A running
+soak, a shorter profile or an unverified JSON file is not acceptance.
 
 Remaining qualifications are kept visible rather than folded into broad
 “production-ready” language:
