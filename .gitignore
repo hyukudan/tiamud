@@ -1,0 +1,43 @@
+# Rust
+/target/
+**/target/
+
+# JavaScript / web builds
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.svelte-kit/
+
+# Runtime data and databases
+/data/
+/runtime/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+
+# Logs
+/log/
+/logs/
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local design material and AI reviews
+/docs/spec-v0.2.md
+/docs/reviews/

@@ -1,0 +1,29 @@
+[package]
+name = "envy-asset-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Bounded offline asset compiler for atmospheric MUD illustrations"
+
+[[bin]]
+name = "envy-assets"
+path = "src/main.rs"
+
+[features]
+default = ["webp-encoding"]
+webp-encoding = ["dep:webp"]
+
+[dependencies]
+clap.workspace = true
+hex.workspace = true
+image.workspace = true
+ravif.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+webp = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

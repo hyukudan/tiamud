@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.11.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify and build web client
+        working-directory: apps/web
+        run: |
+          pnpm check
+          pnpm test
+          pnpm build
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.93.1 --profile minimal --component rustfmt,clippy
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test Rust workspace
+        run: cargo test --workspace --locked
+
+      - name: Lint Rust workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run transport smoke test
+        run: node scripts/smoke.mjs
