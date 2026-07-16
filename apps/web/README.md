@@ -6,7 +6,9 @@ them or losing an asset never removes an action or gameplay fact.
 
 ## Development
 
-Node.js 20.19+ (or 22.12+) and pnpm 10+ are required.
+The client package supports Node.js 20.19+ (or 22.12+) and pnpm 10+. The
+repository's load and soak tooling requires Node.js 24, which is also used by
+the pinned complete-project verification profile.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -92,13 +94,17 @@ The application uses semantic landmarks, a `role="log"` narrative history,
 selective live announcements, meters, keyboard-operable native controls,
 forced-colors styles, configurable text and reduced-motion/reader modes.
 Playwright includes axe A/AA/WCAG 2.2 tags, keyboard, mobile overflow and fixed
-command checks across Chromium, Firefox and WebKit in CI.
+command checks for Chromium, Firefox and WebKit in CI.
 
 This automation is not a substitute for a real assistive-technology pass. A
-manual screen-reader audit is still pending. Chromium, Firefox and WebKit have
-all passed the automated suite; the retained project log records WebKit's
-temporary user-space host-library setup without treating it as a runtime
-dependency.
+manual screen-reader audit is still pending. The current combined tree passed
+22/22 Chromium and Firefox scenarios. WebKit discovered its eleven scenarios
+but could not load on the most recent validation host because the required
+GTK/GStreamer, media and related runtime libraries were absent; this is neither
+an observed application failure nor a current WebKit pass. A retained
+historical log records an earlier WebKit run with a temporary user-space
+host-library setup. The authoritative current status is kept in the
+[completion matrix](../../docs/project/COMPLETION_MATRIX.md).
 
 ## License
 

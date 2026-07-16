@@ -1,14 +1,17 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 
-async function installMockWorld(page: import('@playwright/test').Page): Promise<void> {
+async function installMockWorld(
+  page: import('@playwright/test').Page,
+  sceneImage?: Record<string, unknown>,
+): Promise<void> {
   await page.route('**/api/characters', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ characters: [{ id: 7, name: 'Aria' }] }),
     });
   });
-  await page.addInitScript(() => {
+  await page.addInitScript((initialSceneImage: Record<string, unknown> | null) => {
     const mockState = window as Window & {
       mockHellos?: unknown[];
       mockSocketCount?: number;
@@ -54,6 +57,7 @@ async function installMockWorld(page: import('@playwright/test').Page): Promise<
               viewId: 'o1111111111111111', revision: 1, title: 'Lantern Square',
               prose: ['Rain shines on the stones.'], exits: [], items: [], npcs: [],
               weather: { condition: 'rainy', day: 1, hour: 2, nextChangeInTicks: 3 },
+              ...(initialSceneImage ? { image: initialSceneImage } : {}),
             },
           },
           {
@@ -118,7 +122,7 @@ async function installMockWorld(page: import('@playwright/test').Page): Promise<
         }) }));
       }
     };
-  });
+  }, sceneImage ?? null);
 }
 
 async function installRejectedWorld(page: import('@playwright/test').Page): Promise<void> {
@@ -210,6 +214,64 @@ test('welcome falls through to a raster fallback when AVIF alone fails', async (
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.currentSrc)).not.toMatch(/\.avif(?:$|\?)/);
   await expect(image).toHaveAttribute('alt', /Lantern Square after rain/);
+});
+
+test('a manifest-only scene completes loading and renders its atmosphere', async ({ page }) => {
+  const hash = 'a'.repeat(64);
+  const imagePath = `/assets/${hash}/scene-640.png`;
+  let manifestRequests = 0;
+  await page.route(`**/assets/${hash}/manifest.json`, async (route) => {
+    manifestRequests += 1;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        schema: 2,
+        revision: 1,
+        assetId: `sha256:${hash}`,
+        kind: 'atmosphere',
+        alt: 'Lantern Square under a blue-glass light.',
+        focalPoint: { xPerMille: 500, yPerMille: 500 },
+        dominantColor: '#20251b',
+        author: 'Tiamud test suite',
+        license: 'CC-BY-4.0',
+        provenance: 'Deterministic test fixture.',
+        contentClassification: 'general',
+        humanReviewedAt: '2026-07-16T00:00:00Z',
+        source: { sha256: 'b'.repeat(64), width: 640, height: 280 },
+        variants: [{
+          format: 'png',
+          mediaType: 'image/png',
+          width: 640,
+          height: 280,
+          bytes: 68,
+          sha256: 'c'.repeat(64),
+          path: `${hash}/scene-640.png`,
+        }],
+      }),
+    });
+  });
+  await page.route(`**${imagePath}`, async (route) => {
+    await route.fulfill({
+      contentType: 'image/png',
+      body: Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHnOcQAAAAABJRU5ErkJggg==',
+        'base64',
+      ),
+    });
+  });
+  await installMockWorld(page, {
+    manifest: `/assets/${hash}/manifest.json`,
+    alt: 'Rain shines beneath the lantern.',
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+
+  const image = page.locator('picture.atmosphere img');
+  await expect(image).toBeVisible();
+  await expect(image).toHaveAttribute('src', imagePath);
+  await expect(image).toHaveAttribute('alt', 'Rain shines beneath the lantern.');
+  expect(manifestRequests).toBe(1);
 });
 
 test('an authenticated entry rejection returns to login without reconnecting', async ({ page }) => {

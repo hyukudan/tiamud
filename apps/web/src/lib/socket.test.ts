@@ -115,7 +115,7 @@ describe('TiamudConnection', () => {
   it('authenticates every socket hello with the selected character', () => {
     const connection = new TiamudConnection(
       'wss://tiamud.test/ws',
-      { token: 'secret', characterId: 42 },
+      { token: 'secret', characterId: 42, expiresAt: Date.now() + 60_000 },
       { onMessage: () => undefined, onStateChange: () => undefined },
     );
     connection.connect();
@@ -125,6 +125,10 @@ describe('TiamudConnection', () => {
     expect(JSON.parse(socket.sent[0] ?? '{}')).toMatchObject({
       type: 'client.hello',
       data: { auth: { token: 'secret', characterId: 42 } },
+    });
+    expect(JSON.parse(socket.sent[0] ?? '{}').data.auth).toEqual({
+      token: 'secret',
+      characterId: 42,
     });
     connection.close();
   });

@@ -1163,7 +1163,10 @@ export function createClientHello(
         reducedMotion,
         audio,
       },
-      auth,
+      auth: {
+        token: auth.token,
+        characterId: auth.characterId,
+      },
     },
   };
 }

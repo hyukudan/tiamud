@@ -60,7 +60,7 @@
   let scene = $state<SceneSnapshot>();
   let player = $state<PlayerStateSnapshot>();
   let manifestImage = $state<SceneSnapshot['image']>();
-  let activeAssetKey = $state<string>();
+  let activeAssetKey: string | undefined;
   let failedImageUrls = $state<string[]>([]);
   let notice = $state<ServerNoticeData>();
   let command = $state('');

@@ -22,6 +22,35 @@ The screen copy and layout are the shipped Svelte WelcomeGate, not generated
 UI. The background is the reviewed Lantern Square asset already recorded in
 its content-addressed manifest.
 
+## tiamud-gameplay.webp
+
+- Purpose: show a genuine authenticated browser session with the atmospheric
+  scene, text-complete prose, character state, world panels, command history
+  and command input visible together.
+- Dimensions: 1600 x 1000.
+- Final SHA-256: 137d985e8ef3a0f445f5b459217b296d0f4fdaffd3a069506ad45493d28c781e.
+- Lossless capture SHA-256: 806e63666387b5ae7fe9c6f67e660f15925bd422ac49ffcab40c4e05a76e68f6.
+- Capture: Playwright Chromium 1.61.1 against a disposable local Tiamud server
+  on 2026-07-16, with a 1600 x 1000 CSS viewport, device scale factor 1, dark
+  color scheme, reduced motion and `en-US` locale. The page was scrolled 72 CSS
+  pixels to frame both the scene and command input. The source base was commit
+  `ebaaeb38e43a8148f5d055df2f0430910d60d454`; the exact pending browser-fix
+  patch used for the capture had SHA-256
+  `46ac46b6f445c34039c2ea93357507a8efa4e01c8af429b7c8efca247e5a0d8e`.
+- Session conditions: real HTTP account login, real character selection and a
+  real authenticated `tiamud.v1` WebSocket session backed by temporary SQLite.
+  The disposable character `Elara` entered the embedded reviewed Lantern
+  Square WorldPack and submitted `look`. Its credentials, database and
+  lossless working capture were removed after publication.
+- Processing: encoded with cwebp 1.3.2 at quality 86 using
+  `cwebp -quiet -q 86 -metadata none /tmp/tiamud-readme-capture-ebaaeb3/tiamud-gameplay.png -o docs/images/tiamud-gameplay.webp`.
+  `webpinfo` reports one lossy VP8 chunk, with no alpha, animation or metadata
+  chunks.
+
+The interface, prose, state and atmosphere are all output from the shipped
+client, server and reviewed world/media. No generated or mocked UI appears in
+this capture.
+
 ## tiamud-worldpack.webp
 
 - Purpose: explain the concrete three-room Lantern Square WorldPack and its
