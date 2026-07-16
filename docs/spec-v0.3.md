@@ -1,319 +1,290 @@
-# Tiamud technical specification v0.3
+# Especificación técnica de Tiamud v0.3
 
-Status: pre-release implementation specification, 2026-07-16.
+Estado: especificación de implementación en prelanzamiento, 2026-07-16.
 
-This specification records the current product and architecture decisions for
-Tiamud, the browser-first narrative multiplayer engine inspired by EnvyMUD.
-It supersedes the character and multimedia planning portions of the historical
-Spanish [v0.2 specification](spec-v0.2.md). Accepted decisions and implemented
-code remain the final authority where this summary is less specific.
+Este documento registra las decisiones actuales de producto y arquitectura de
+Tiamud. Sustituye la planificación de personajes y multimedia de la
+[especificación histórica v0.2](spec-v0.2.md). Los ADR aceptados y el código
+implementado prevalecen cuando este resumen sea menos específico.
 
-## Product contract
+## Contrato de producto
 
-Tiamud is a persistent multiplayer text world with optional illustrated
-presentation. One authoritative world state serves the official browser,
-Telnet and compatible MUD clients.
+Tiamud es un mundo textual multijugador persistente con presentación ilustrada
+opcional. Un estado de mundo autoritativo sirve al navegador, Telnet y clientes
+MUD compatibles.
 
-The product must remain:
+El producto debe seguir siendo:
 
-- fully playable as plain text;
-- browser-first without making a browser authoritative;
-- simple to run on one ordinary machine;
-- deterministic and bounded at every untrusted boundary;
-- data-driven for world, character and media content;
-- accessible when images, colour, audio and motion are disabled;
-- compatible with reviewed Envy/Merc area import without executing historical
-  programs or assuming redistribution rights; and
-- independent of mandatory AI, GPU, Kubernetes, Redis or cloud services.
+- completamente jugable como texto plano;
+- orientado al navegador sin convertirlo en autoridad;
+- sencillo de ejecutar en un equipo corriente;
+- determinista y acotado en toda frontera no confiable;
+- definido por datos para mundo, personajes y medios;
+- accesible sin imágenes, color, audio ni movimiento;
+- compatible con importación Envy/Merc revisada, sin ejecutar programas
+  históricos ni presuponer derechos; e
+- independiente de IA, GPU, Kubernetes, Redis o cloud obligatorios.
 
-AI may assist development or offline editorial work. It is optional, bounded,
-reviewed and never participates in authoritative play.
+La IA puede ayudar al desarrollo o autoría sin conexión. Es opcional, acotada,
+revisada y nunca participa en el juego autoritativo.
 
-## Deployment and persistence
+## Despliegue y persistencia
 
-One Rust server process owns one world actor and exposes HTTP/WebSocket plus a
-Telnet listener. Static web/media resources may be served by that process or a
-same-host reverse proxy. PostgreSQL is recommended for a new public single-host
-installation; SQLite is the implemented zero-service local fallback. A server
-selects exactly one backend and never dual-writes.
+Un servidor Rust posee un actor de mundo y expone HTTP/WebSocket y Telnet. Los
+recursos web pueden servirse desde el proceso o un proxy en el mismo host.
+PostgreSQL se recomienda para instalaciones públicas nuevas; SQLite es la
+alternativa local sin servicio. Se selecciona uno y nunca se hace doble
+escritura.
 
-The operational baseline is documented in
-[single-host.md](operations/single-host.md). Microservices and orchestration
-are non-goals until measured load demonstrates a need.
+Ambos adaptadores usan el esquema v9. La migración aditiva v8→v9 incorpora
+suscripciones durables al conjunto cerrado `general`, `newbie`, `staff`; el
+traslado SQLite→PostgreSQL copia la relación. La aceptación PostgreSQL v8
+retenida precede esta migración y no se relabela como aceptación v9.
 
-## World data and authoring
+La operación está en [single-host.md](operations/single-host.md). Microservicios
+y orquestación no son objetivo sin carga medida que lo justifique.
 
-WorldPack v3 is the canonical runtime/authoring target. AreaPack v2 supports
-strict modular composition. WorldPack v2, AreaPack v1 and Envy/Merc data are
-normalized at an import or composition boundary; the v3 runtime does not keep
-legacy vocabulary as its public domain model.
+## Datos de mundo y autoría
 
-Required authoring properties:
+WorldPack v3 es el objetivo canónico. AreaPack v2 permite composición modular
+estricta. WorldPack v2, AreaPack v1 y Envy/Merc se normalizan al importar o
+componer; el dominio v3 no conserva vocabulario heredado.
 
-- stable lowercase namespaced IDs;
-- strict bounded structures and cross-reference validation;
-- deterministic canonical artifacts and digests;
-- reviewed content tests and preview tools;
-- no online image conversion or generative AI in the game loop;
-- source, license, provenance and review metadata for media; and
-- server-side resolution of every secret or perception-dependent variant.
+Propiedades obligatorias:
 
-The current authoring guide is [world-authoring.md](world-authoring.md); v3
-character details are in
+- IDs estables, namespaced, en minúscula;
+- estructuras acotadas y validación de referencias;
+- artefactos y digests canónicos deterministas;
+- pruebas de contenido y vistas previas revisadas;
+- sin conversión de imagen online ni IA generativa en juego;
+- origen, licencia, procedencia y revisión de medios; y
+- resolución en servidor de secretos y variantes de percepción.
+
+Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
 
-## Character model
-
-The v3 composition is:
+## Modelo de personaje
 
 ```text
-neutral engine sheet baseline
-  + lineage creation grants
-  + optional background grants
-  + base class creation grants
-  + active-class level grants
-  + acquired lineage/class talent ranks
-  + one-time advanced-class promotion grants
-  = permanent character sheet
+baseline neutral de ficha
+  + concesiones de creación del linaje
+  + concesiones del trasfondo opcional
+  + concesiones de creación de clase base
+  + concesiones de nivel de clase activa
+  + rangos adquiridos de talentos de linaje/clase
+  + concesiones únicas de promoción avanzada
+  = ficha permanente
 
-equipment + active statuses are applied afterwards
+equipo + estados activos se aplican después
 ```
 
-The neutral sheet baseline contributes no hidden attributes, skills or
-resource capacity. Base-class creation grants therefore define the real
-starting sheet, with optional lineage/background additions. Character creation
-fills health and resources once; later capacity grants preserve current values.
+El baseline neutral no aporta atributos, skills o capacidad oculta. La clase
+base define el inicio real, con adiciones de linaje/trasfondo. La creación llena
+vida y recursos una vez; aumentar capacidad después conserva valores actuales.
 
-Canonical terms are lineage, background, base class, talent or
-specialization, and advanced class. `Race` and `archetype` are import/UI
-synonyms only.
+Términos canónicos: linaje, trasfondo, clase base, talento/especialización y
+clase avanzada. `Race` y `archetype` solo son sinónimos de importación/UI.
 
-The first version uses:
+La primera versión usa:
 
-- one global cumulative XP and level curve;
-- one active class;
-- separate bounded point pools for class and lineage development;
-- explicit talent acquisition distinct from class promotion;
-- declarative promotion requirements and checked grants;
-- immutable lineage/background identity after creation;
-- no multiclassing, class XP, reversible promotion or arbitrary permanent
-  grant scripts.
+- una curva acumulada de XP/nivel global;
+- una clase activa;
+- reservas acotadas separadas para clase y linaje;
+- adquisición de talento distinta de promoción;
+- requisitos declarativos y concesiones verificadas;
+- linaje/trasfondo inmutables tras crear; y
+- sin multiclase, XP de clase, promoción reversible ni scripts arbitrarios de
+  concesiones permanentes.
 
-Lineage evolution means developing bounded lineage nodes; it does not replace
-the character's lineage. Advanced class promotion is an atomic identity
-transition that preserves global level and XP.
+Evolución de linaje desarrolla nodos acotados, no sustituye el linaje. La
+promoción avanzada cambia identidad atómicamente conservando XP/nivel.
 
-The initial demonstration catalog is:
-
-| Dimension | Definitions |
+| Dimensión | Definiciones de demostración |
 | --- | --- |
-| Lineages | Mortal, Stonekin, Embermarked |
-| Backgrounds | Caravan Scout, Archive Apprentice, City Guard |
-| Base classes | Wanderer, Vanguard, Arcanist |
-| Advanced classes | Pathfinder, Bastion, Stormcaller, Spellblade |
+| Linajes | Mortal, Stonekin, Embermarked |
+| Trasfondos | Caravan Scout, Archive Apprentice, City Guard |
+| Clases base | Wanderer, Vanguard, Arcanist |
+| Clases avanzadas | Pathfinder, Bastion, Stormcaller, Spellblade |
 
-The demo curve explicitly authors `100 × (level - 1)²` for levels 2–10.
-Pathfinder, Bastion and Stormcaller promote from their corresponding base at
-level 5; Spellblade permits a cross-discipline Vanguard or Arcanist entry at
-level 6 with reachable additional requirements.
+La curva de ejemplo define `100 × (level - 1)²` para niveles 2–10. Pathfinder,
+Bastion y Stormcaller parten de su base al nivel 5; Spellblade permite entrada
+Vanguard o Arcanist al nivel 6 con requisitos alcanzables.
 
-The requirement/grant grammar, graphs, invariants and examples are normative
-in [character-progression-v3.md](design/character-progression-v3.md) and
+Gramática, grafos e invariantes son normativos en el
+[diseño v3](design/character-progression-v3.md) y
 [ADR 0007](decisions/0007-worldpack-v3-character-model.md).
 
-## Combat, abilities and progression safety
+## Combate, habilidades y seguridad de progresión
 
-Martial actions, spells and utility actions use one bounded ability
-model with costs, cooldowns, targets, damage/healing, resistances and timed
-statuses. NPCs use the same definitions and deterministic rule-based choice,
-never runtime generative AI.
+Acciones marciales, hechizos y utilidad comparten un modelo acotado con costes,
+cooldowns, objetivos, daño/curación, resistencias y estados temporales. Los NPC
+usan definiciones iguales y decisión determinista por reglas, nunca IA
+generativa runtime.
 
-`martial`, `spell` and `utility` are the same category vocabulary in WorldPack
-authoring, the Rust runtime and the browser wire. The pre-v3 `innate` category
-name is not part of the clean model.
+`martial`, `spell`, `utility` son categorías comunes a WorldPack, Rust y wire
+del navegador. `innate` pre-v3 no forma parte del modelo limpio.
 
-Authoring and runtime validate cumulative attribute, skill, resource and
-resistance caps. Increasing maximum health is not a heal. Increasing resource
-capacity preserves the current amount; a new pool starts empty. Permanent
-progression actions apply atomically and exactly once.
+Autoría y runtime validan límites acumulados. Aumentar vida máxima no cura;
+aumentar capacidad de recurso no rellena y una reserva nueva empieza vacía.
+Las acciones permanentes se aplican atómicamente y una sola vez.
 
-The small hard-coded combat-skill and demonstration-quest rewards remain
-sample-world policy debt. They do not bypass the bounded progression model,
-but should move to authored signals/rewards before the first stable content
-contract.
+La recompensa hard-coded de skill de combate y la misión de demostración son
+deuda de política del ejemplo. Deben pasar a señales/recompensas de autoría
+antes de un contrato de contenido estable.
 
-## Social, parties, staff and loot
+## Sistemas sociales, grupos, staff y botín
 
-The implemented social surface is deliberately small. `say` is room-local;
-`tell` reaches one connected character; `who`, `help`, ignore, block, reports,
-mute/ban and role assignment use the same bounded server policy across browser
-and Telnet. There is no party/global channel, `reply`, offline mail or authored
-telepathy.
+La fase social 1 está implementada. `say` es local; `tell` llega a un personaje
+conectado; `reply` usa en memoria el ID del último remitente cuyo `tell` se
+entregó. Los grupos de hasta seis miembros persisten
+create/invite/accept/revoke/kick/transfer/disband/leave/status y ofrecen
+`party say`, `gsay`, `gtell`.
 
-Parties persist create/invite/accept/leave/status state for at most six
-members and transfer leadership when the leader leaves. They do not yet
-implement party chat, kick/disband, follow/assist/rescue, general ally
-targeting, shared XP/quest credit or loot distribution.
+`general`, `newbie`, `staff` exigen suscripción durable. Unirse, enviar y
+recibir `staff` requiere rol Moderator/Admin. La membresía del grupo sobrevive
+a la desconexión, pero accept/revoke/kick/transfer resuelven un nombre conectado
+y no administran un objetivo offline.
 
-Account authority is independent from the character sheet. The current closed
-roles are Player, Moderator and Admin; they are explicitly assigned and can
-never be earned through XP, level, class or talents. Moderation commands and
-role changes are durable and audited. Lore ranks such as Angel, Demigod or God
-and general wizard commands are not implemented. Any future rank labels must
-remain presentation over granular capabilities, not the authorization model.
+La misma política, rate limit, mute, ignore/block y buzones por sesión sirve a
+acciones web, comandos Telnet y `Comm.Channel.Text` GMCP. No existen correo o
+historial durable, shout/yell espacial, telepatía authored, follow/assist/
+rescue, selección general de aliados, XP/misión compartida ni reparto de botín.
 
-Current item IDs describe unique durable objects with one authoritative
-location. NPCs own validated fixed loot IDs and transfer them on defeat. The
-engine has no reusable item-prototype/instance split, stacks, capacity/weight,
-containers, give/trade, rarity/item level, affixes or weighted loot tables.
-Repeatable rewards require durable instance identity and explicit loot rights
-before random selection is added. Paid loot boxes and premium-currency random
-rolls are outside the baseline.
+La autoridad de cuenta es independiente de la ficha. Los roles cerrados son
+Player, Moderator, Admin; se asignan y nunca se ganan por XP, nivel, clase o
+talentos. Moderación/cambios son durables y auditados. Títulos Angel/Semidiós/
+Dios, perfiles granulares y comandos generales wizard siguen pendientes.
 
-The audited continuation model and phased acceptance rules are in the Spanish
-[social, staff and loot roadmap](design/social-staff-and-loot-roadmap.md).
+Los IDs de objeto describen objetos únicos con ubicación autoritativa. Los NPC
+poseen botín fijo validado y lo transfieren al morir. No hay split prototipo/
+instancia reutilizable, pilas, capacidad/peso, contenedores, give/trade,
+rareza/nivel, afijos ni tablas ponderadas. Las recompensas repetibles necesitan
+identidad durable y derechos de botín. Cajas de botín pagadas o tiradas con
+moneda prémium quedan fuera del baseline.
 
-## Semantic scenes and media
+Consulta la [hoja de ruta social/staff/botín](design/social-staff-and-loot-roadmap.md).
 
-A scene is a perception-safe semantic projection. Prose and structured
-entities contain every playable fact. The current atmospheric image remains an
-optional renderer.
+## Escenas semánticas y medios
 
-The optional entity compositor adds only presentation annotations for already
-visible entities:
+Una escena es una proyección semántica segura ante percepción. Prosa y
+entidades estructuradas contienen todo. La imagen atmosférica es opcional.
 
-- reviewed transparent item/NPC poses;
-- normalized footprint, priority and semantic layer;
-- client-side deterministic slots and safe-zone avoidance;
-- a ten-sprite browser cap with bounded overflow roster;
-- short, server-derived NPC attack/hit/defeat cues decorating the same
-  projected semantic event (`heal` remains a reserved client value); and
-- complete preference gating for screen readers, Save-Data, reduced motion,
-  forced colours and multimedia-off play.
+El compositor añade solo presentación a entidades visibles:
 
-Presentation annotations are a web sidecar rather than fields on the core
-`SceneView`, preventing accidental GMCP expansion or leakage. The server owns
-visibility and selected sprite; asset manifests own geometry; the browser owns
-responsive placement. Layout must be a pure function of the current snapshot,
-not connection history.
+- poses transparentes revisadas de objetos/NPC;
+- huella, prioridad y capa normalizadas;
+- slots deterministas y zonas seguras en cliente;
+- máximo de diez sprites y overflow semántico;
+- pistas cortas `attack`/`hit`/`defeat` derivadas por servidor (`heal` queda
+  reservado en cliente); y
+- gating completo para lector, Save-Data, movimiento, colores y multimedia.
 
-Gameplay never waits for media. Cues decay to a snapshot-reconstructable idle
-state and are never replayed after resync. A same-view snapshot retains a cue
-only while its opaque NPC remains visible; removal, view change and resync
-clear it. Player characters are not separately composited in v1, and defeated
-NPCs have no lingering visual tombstone. Full rules and budgets are in
-[scene-compositor-v1.md](design/scene-compositor-v1.md) and
+Las anotaciones viajan como sidecar web, no en `SceneView`, evitando expansión
+GMCP y fugas. El servidor decide visibilidad/sprite; manifiestos, geometría; el
+navegador, colocación adaptable. Layout es función pura del snapshot.
+
+El juego nunca espera medios. Las pistas decaen a `idle` y no se reproducen tras
+resync. Un snapshot de la misma vista retiene la pista solo si el NPC opaco
+sigue presentado; retirada/cambio/resync limpia. No hay jugador compuesto ni
+lápida persistente en v1. Consulta
+[scene-compositor-v1.md](design/scene-compositor-v1.md) y
 [ADR 0008](decisions/0008-optional-scene-compositor.md).
 
-## Media formats
+## Formatos multimedia
 
-- Opaque atmosphere: AVIF first, WebP and JPEG fallbacks.
-- Transparent static entity sprite: WebP alpha plus PNG fallback.
-- AVIF alpha: deferred until deterministic encode/decode tests demonstrate a
-  useful supported path.
-- Transparent/lossless atmosphere: PNG in the current pipeline.
-- SVG, HTML, CSS, JavaScript, arbitrary remote hosts and inline `data:` media:
-  rejected.
+- Atmósfera opaca: AVIF, luego WebP/JPEG.
+- Sprite transparente: WebP alfa + PNG.
+- AVIF alfa: aplazado hasta demostrar ruta RGBA determinista útil.
+- Atmósfera transparente/lossless: PNG.
+- SVG/HTML/CSS/JavaScript, hosts remotos arbitrarios y `data:` inline:
+  rechazados.
 
-Assets are same-origin, immutable and content-addressed. Sprite poses are
-static in v1. Animation is a bounded CSS presentation of a static pose; video,
-animated WebP and runtime composition are deferred.
+Recursos mismo-origen, inmutables y direccionados por contenido. Poses estáticas
+en v1; animación CSS acotada. Vídeo, WebP animado y composición runtime quedan
+aplazados.
 
-## Protocol
+## Protocolo
 
-The current `tiamud.v1` WebSocket protocol remains experimental. Clients
-receive salted opaque entity IDs, revisions and per-session sequence numbers.
-Text and observer projection precede every protocol representation.
+`tiamud.v1` WebSocket sigue experimental. Clientes reciben IDs opacos salados,
+revisiones y secuencias por sesión. Texto y percepción preceden cada
+representación.
 
-The implemented transport safeguards now include:
+Salvaguardas implementadas:
 
-- a compact-serialized 16 KiB gate on every outbound WebSocket frame;
-- correlated `sync.scene` and `sync.player` recovery frames, applied only as a
-  matching authoritative pair; and
-- oversized GMCP scenes degrading to a minimal structured scene plus an
-  explicit bounded overflow notice instead of disappearing silently.
+- 16 KiB compactos por frame WebSocket de salida;
+- recuperación correlacionada `sync.scene`/`sync.player`, aplicada como par; y
+- escena GMCP grande degradada a escena mínima más aviso acotado, nunca silencio.
 
-Before the first public compatibility milestone:
+Antes del primer hito público, cambios densos deberían migrar a batches
+atómicos `baseRevision`/`revision`. Las pistas decoran `message.append`; no crean
+secuencia ni se infieren de prosa. Referencia:
+[tiamud-v1.md](protocol/tiamud-v1.md).
 
-- dense scene changes should move toward atomic baseRevision/revision batches.
+## Invariantes de accesibilidad y seguridad
 
-The implemented cue bridge already decorates the existing projected
-`message.append`; it does not create a standalone sequence or infer animation
-from prose.
+- Una imagen nunca contiene información exclusiva.
+- Modo lector desactiva arte decorativo salvo petición explícita.
+- Texto de jugador no se convierte en ANSI/MXP/HTML/CSS/URL/alt sin escape y
+  validación contextual.
+- Gráficos terminales requieren capacidad y consentimiento explícitos.
+- Recursos pesados viajan por HTTPS, no GMCP/Telnet.
+- Parsers, subnegociaciones, profundidad JSON, colas, scripts, recursos y
+  descompresión tienen límites.
+- Entidades ocultas, salas secretas y variantes no resueltas no se precargan.
 
-The implemented wire reference is [tiamud-v1.md](protocol/tiamud-v1.md).
+## Estado de implementación
 
-## Accessibility and security invariants
-
-- The image never contains exclusive gameplay information.
-- Screen-reader mode disables decorative scene and cell art unless explicitly
-  requested.
-- Player-authored text cannot become ANSI, MXP, HTML, CSS, a URL or an alt
-  attribute without context-appropriate escaping and validation.
-- Native terminal graphics require explicit capability and consent.
-- Heavy assets travel over HTTPS, not GMCP or Telnet byte streams.
-- Parsers, subnegotiations, JSON depth, queues, scripts, assets and
-  decompression all have explicit limits.
-- Hidden entities, secret rooms and unresolved variants are never prefetched
-  or announced.
-
-## Implementation status
-
-| Area | Status at v0.3 drafting |
+| Área | Estado al actualizar v0.3 |
 | --- | --- |
-| Combat and bounded martial/spell/utility abilities | Implemented and tested baseline |
-| Cumulative progression caps and no-refill level-up | Implemented and tested |
-| WorldPack v3 schema, validator, normalizer and demo catalog | Implemented and integrated into the server |
-| Core lineage/class/talent/promotion runtime and persistence | Implemented and tested |
-| Browser and Telnet v3 character creation | Implemented with default/none/explicit background selection |
-| Browser progression sheet, talent and promotion actions | Implemented and tested |
-| Split WebSocket recovery, outbound frame gate and GMCP overflow fallback | Implemented and tested |
-| Browser compositor parser/layout/accessibility | Implemented and tested |
-| Transparent sprite asset profile | Implemented with WebP alpha + PNG |
-| Entity authoring and perception-safe server sidecar | Implemented and tested; no sample sprite set published yet |
-| Combat cue server projection | Implemented and tested for the closed NPC attack/hit/defeat mapping; no player sprite, heal emission or defeat tombstone in v1 |
-| Atomic dense-scene delta protocol | Pending |
+| Combate y habilidades acotadas | Baseline implementado y probado |
+| Límites acumulados y nivel sin relleno | Implementado y probado |
+| WorldPack v3, validador, normalizador y catálogo | Integrado en servidor |
+| Linaje/clase/talento/promoción y persistencia | Implementado y probado |
+| Creación v3 navegador/Telnet | Default/none/explícito implementado |
+| Ficha, talentos y promociones web | Implementado y probado |
+| Recuperación dividida, frame gate y fallback GMCP | Implementado y probado |
+| Compositor navegador y accesibilidad | Implementado y probado |
+| Perfil de sprite transparente | WebP alfa + PNG implementado |
+| Sidecar de entidades seguro | Implementado; sin sprites de muestra |
+| Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
+| Social fase 1 y esquema v9 | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL v9 completa aún no retenida |
+| Protocolo atómico de delta denso | Pendiente |
 
-Documentation and README claims must be refreshed when integration gates move;
-an isolated parser, schema or client component is not an end-to-end shipped
-feature.
+Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
+cuando las puertas de integración cambien.
 
-## Acceptance gates
+## Puertas de aceptación
 
-The v0.3 character integration is accepted only when:
+Personajes v3:
 
-1. A new character can select lineage, optional background and base class from
-   both browser and text flows.
-2. Creation derives the same bounded sheet on every persistence backend.
-3. Global XP awards class/lineage points without healing or refilling.
-4. Talent ranks and exclusions apply atomically and survive restart.
-5. Every bundled advanced class has an actually reachable promotion path.
-6. Cross-entry Spellblade is covered from Vanguard and Arcanist fixtures.
-7. Invalid/cyclic/over-cap graphs fail publication.
-8. WorldPack v2/Envy content normalizes deterministically or fails with an
-   actionable diagnostic.
+1. Selección de linaje/trasfondo/clase en navegador y texto.
+2. Ficha acotada idéntica en cada persistencia.
+3. XP concede puntos sin curar/recargar.
+4. Talentos/exclusiones atómicos y durables.
+5. Cada clase avanzada tiene ruta alcanzable.
+6. Spellblade cubierto desde Vanguard y Arcanist.
+7. Grafos inválidos/cíclicos/sobre límite no publican.
+8. V2/Envy normaliza determinista o falla con diagnóstico.
 
-The scene compositor is accepted end-to-end only when:
+Compositor:
 
-1. The server projects assets solely for visible entities.
-2. Missing/invalid assets leave semantic lists and actions unchanged.
-3. Layout is deterministic, responsive and bounded; overflow never hides text.
-4. Screen-reader/Save-Data modes fetch no sprite media.
-5. Reduced motion shows a static result without movement.
-6. Combat cues derive from projected semantic events and vanish on resync.
-7. No WebSocket/GMCP budget is exceeded by the added presentation.
-8. Plain Telnet remains complete and byte-clean.
+1. Assets solo para entidades visibles.
+2. Assets inválidos no cambian listas/acciones.
+3. Layout determinista, adaptable, acotado y overflow textual.
+4. Lector/Save-Data no descarga sprites.
+5. Movimiento reducido muestra resultado estático.
+6. Pistas derivadas de eventos y eliminadas en resync.
+7. Sin exceder presupuesto WebSocket/GMCP.
+8. Telnet plano completo y limpio.
 
-## Deferred and rejected work
+## Trabajo aplazado o rechazado
 
-Deferred until demonstrated necessary: transformations, culture content,
-talent respec, class ranks, graph editor, automated balance simulation,
-animated entity media, native terminal raster graphics and hot area loading.
-The compositor still needs reviewed demonstration sprites; a separately
-composited player avatar, server-emitted heal cue and post-removal defeat
-tombstone are optional future presentation work rather than v1 requirements.
+Aplazado hasta necesidad demostrada: transformaciones, culturas, respec,
+rangos de clase, editor de grafos, simulación de balance, medios animados,
+gráficos raster terminales y carga caliente. El compositor necesita sprites
+revisados; avatar, heal cue y lápida son mejoras opcionales.
 
-Rejected as baseline: Kubernetes, microservices, Redis, mandatory object
-storage, runtime image generation, runtime LLM decisions, server-side pixel
-layout, continuous spatial physics, Canvas/WebGL for ten sprites, general
-progression scripting and media blobs over Telnet.
+Rechazado como baseline: Kubernetes, microservicios, Redis, object storage
+obligatorio, generación de imagen runtime, decisiones LLM runtime, layout de
+píxeles en servidor, física espacial continua, Canvas/WebGL para diez sprites,
+scripts generales de progresión y blobs multimedia por Telnet.

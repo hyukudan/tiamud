@@ -11,10 +11,12 @@ sobre la aceptación de la especificación histórica.
 
 ## Resumen ejecutivo
 
-- Sí existen parties persistentes: crear, invitar, aceptar, salir y consultar
-  el estado, con un máximo de seis miembros.
-- No existe chat de party, `reply`, canales globales, correo offline ni una
-  habilidad de telepatía.
+- Sí existen grupos persistentes de hasta seis miembros: crear, invitar,
+  aceptar, revocar, expulsar, transferir liderazgo, disolver, salir y consultar
+  estado, además de `party say` con alias `gsay`/`gtell`.
+- Sí existen `reply` en línea y los canales suscritos `general`, `newbie` y
+  `staff`; este último exige rol Moderator o Admin. No existen correo sin
+  conexión, historial durable de conversación ni una habilidad de telepatía.
 - Sí existen los roles de cuenta `Player`, `Moderator` y `Admin`, separados de
   la progresión del personaje. Un Admin asigna los roles; la XP nunca los
   concede.
@@ -26,25 +28,38 @@ sobre la aceptación de la especificación histórica.
 - No existen rareza/tier, peso, capacidad, pilas, contenedores, comercio,
   objetos repetibles ni tablas de botín aleatorias.
 
-La secuencia recomendada es: comunicación y reglas de party; autoridad de
-staff por capacidades; prototipos e instancias de objetos; propiedad y reparto
-del botín; y, solo después, rareza y tablas aleatorias.
+La primera fase de comunicación y reglas de grupo ya está implementada. La
+secuencia pendiente es: autoridad de staff por capacidades; prototipos e
+instancias de objetos; propiedad y reparto del botín; y, solo después, rareza
+y tablas aleatorias.
 
 ## Estado verificado en el código
 
 ### Conversación y seguridad social
 
-`SocialAction` ofrece `Say`, `Tell`, `Who`, `Help`, ignore/block, reportes,
-mute/ban, reversión de sanciones y cambio de rol. `SocialChannel` solo contiene
-`Say` y `Tell`.
+`SocialAction` ofrece `Say`, `PartySay`, `Tell`, `Reply`, listado/alta/baja/envío
+de canal, `Who`, `Help`, ignore/block, reportes, mute/ban, reversión de
+sanciones y cambio de rol. `SocialChannel` contiene `Say`, `Tell`, `Party`,
+`General`, `Newbie` y `Staff`.
 
 - `say` se entrega a otros personajes conectados en la misma sala;
 - `tell` se entrega a un personaje conectado, aunque esté en otra sala;
+- `reply` conserva en memoria el ID interno del último remitente cuyo `tell`
+  se entregó y exige que siga conectado; no es correo durable;
+- `party say` se entrega solo a los demás miembros conectados del grupo;
+- `general`, `newbie` y `staff` exigen suscripción durable; `staff` solo está
+  disponible para cuentas Moderator/Admin, tanto al unirse o enviar como al
+  recibir;
 - un `tell` bloqueado o ignorado se confirma igual que uno entregado para no
   filtrar el estado privado del receptor;
 - el texto y el destinatario están acotados, y el chat tiene rate limit;
 - la entrega usa el router directo y los buzones acotados por sesión;
-- reportes, relaciones y sanciones sobreviven a un reinicio.
+- reportes, relaciones, sanciones y suscripciones sobreviven a un reinicio.
+
+SQLite y PostgreSQL usan actualmente el esquema v9. La migración v8→v9 añade
+la relación `social_channel_subscriptions`; el traslado sin conexión también
+la copia. La evidencia histórica PostgreSQL v8 sigue acreditando v8 y no se
+presenta como aceptación v9.
 
 Por tanto, `tell` sirve como mensaje privado online clásico, pero no debe
 presentarse como telepatía: no consume una habilidad o recurso, no aplica
@@ -53,20 +68,25 @@ personaje desconectado.
 
 ### Parties
 
-`PartyAction` implementa `Create`, `Invite`, `Accept`, `Leave` y `Status`.
+`PartyAction` implementa `Create`, `Invite`, `Accept`, `Revoke`, `Kick`,
+`Transfer`, `Disband`, `Leave` y `Status`.
 
 - máximo de seis miembros;
-- solo el líder invita;
+- solo el líder invita, revoca, expulsa, transfiere y disuelve;
 - máximo de doce invitaciones pendientes;
 - una invitación expira tras veinte ticks lógicos;
-- al salir el líder, el liderazgo pasa al primer miembro restante;
+- la transferencia explícita exige otro miembro; si el líder sale, el
+  liderazgo pasa de forma determinista al primer miembro restante;
 - un miembro desconectado sigue perteneciendo al grupo y aparece como
   acompañante ausente;
 - el snapshot durable conserva parties e invitaciones.
 
-No hay expulsión, disolución explícita, revocación de invitación, chat privado,
-seguimiento, asistencia/rescate, selección general de aliados, crédito de
-misión/XP compartido ni política de botín.
+Accept, revoke, kick y transfer resuelven el nombre de un personaje conectado.
+La persistencia de membresía offline no implica que esas operaciones dirigidas
+puedan gestionar a un objetivo desconectado.
+
+No hay seguimiento, asistencia/rescate, selección general de aliados, crédito
+de misión/XP compartido ni política de botín.
 
 ### Staff y moderación
 
@@ -79,7 +99,7 @@ offline de emergencia para una instalación que se quede sin administrador.
 Dentro del juego se pueden ejecutar `report`, `mute`, `unmute`, `ban`,
 `unban` y `role`. Las sanciones y los cambios de rol son durables y auditados.
 No existen `goto`, `transfer`, `restore`, `load/spawn`, `purge`, `stat`,
-`invis`, `holylight`, `wiznet`, `snoop`, `switch`, `force` ni edición online
+`invis`, `holylight`, `snoop`, `switch`, `force` ni edición online
 del mundo. `tiamud-admin` es una herramienta de operador fuera del juego.
 
 ### Inventario y botín
@@ -113,18 +133,19 @@ textos de ayuda o decisiones de seguridad. Tiamud es una implementación limpia
 y conserva sus propios límites de licencia, accesibilidad, autoridad,
 persistencia y single writer.
 
-## Comunicación objetivo
+## Comunicación implementada y ampliaciones futuras
 
-La ampliación debe conservar una sola política social. No conviene implementar
-cada canal directamente en WebSocket, Telnet o la interfaz.
+La fase 1 conserva una sola política social; ningún canal está implementado de
+forma independiente en WebSocket, Telnet o la interfaz. La futura telepatía
+deberá entrar por esa misma política.
 
 ```mermaid
 flowchart LR
-    accTitle: Enrutamiento objetivo de las comunicaciones de Tiamud
-    accDescr: Acciones de texto y efectos de telepatía autorizados entran en una política social común, que calcula destinatarios, aplica bloqueos y límites y entrega únicamente a buzones de sesión autorizados.
+    accTitle: Enrutamiento actual y futuro de las comunicaciones de Tiamud
+    accDescr: Las acciones de texto implementadas entran en una política social común que calcula destinatarios, aplica bloqueos y límites y entrega solo a buzones autorizados. La telepatía sigue siendo una ampliación futura que deberá reutilizar la misma política.
 
     Text[PlayerAction social] --> Policy[Política social común]
-    Ability[Habilidad de telepatía] --> Effect[Efecto de comunicación autorizado]
+    Ability[Habilidad futura de telepatía] -.-> Effect[Efecto autorizado]
     Effect --> Policy
     Policy --> Audience{Ámbito}
     Audience --> Room[Sala]
@@ -139,20 +160,25 @@ flowchart LR
     Safety --> Delivery
 ```
 
-### Primera entrega social
+### Fase 1 entregada
 
-1. `party say <texto>` con alias documentados `gtell`/`gsay`, usando la
+1. Implementado `party say <texto>` con alias `gtell`/`gsay`, usando la
    membresía durable actual.
-2. `reply <texto>` guardando un ID interno del último remitente válido, no un
-   nombre ambiguo ni un ID estable expuesto al cliente.
-3. Liderazgo: revocar invitación, expulsar, transferir y disolver.
-4. Canales opt-in iniciales: ayuda/newbie, conversación general y staff. Cada
-   canal necesita permiso, suscripción, rate limit, mute, ignore/block y
-   entrega limitada; no debe existir un broadcast sin política.
-5. `shout`/`yell` como propagación espacial authored y acotada, no como otro
-   nombre para el canal global.
-6. Emotes/sociales con plantillas estrictas que nunca conviertan texto del
-   jugador en ANSI, HTML, MXP o instrucciones evaluables.
+2. Implementado `reply <texto>` con el ID interno en memoria del último
+   remitente válido, no un nombre ambiguo ni un ID estable expuesto.
+3. Implementados revocar invitación, expulsar, transferir y disolver.
+4. Implementados los canales suscritos `newbie`, `general` y `staff`, con
+   permisos, rate limit, mute, ignore/block y entrega mediante buzones
+   acotados. La suscripción persiste en ambos adaptadores; `staff` exige rol.
+5. Pendiente `shout`/`yell` como propagación espacial definida por el mundo y
+   acotada, no como otro nombre para el canal global.
+6. Pendientes emotes/sociales con plantillas estrictas que nunca conviertan
+   texto del jugador en ANSI, HTML, MXP o instrucciones evaluables.
+
+Web usa acciones estructuradas y representa los seis valores de
+`SocialMessage`; Telnet comparte los comandos de texto y proyecta cada entrega
+como texto y como `Comm.Channel.Text` cuando GMCP `Comm` está negociado. Esta
+paridad no convierte GMCP en una segunda autoridad.
 
 El correo offline, tablones y guild/clan chat pueden seguir después. Requieren
 retención, límites, búsqueda/moderación, eliminación y reglas de privacidad
@@ -314,14 +340,15 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 
 ## Plan por fases y aceptación
 
-### Fase 1 — comunicación y party
+### Fase 1 — comunicación y grupo — implementada
 
-- party chat, reply, revocación/kick/transfer/disband;
-- canal newbie/general/staff opt-in y moderado;
-- paridad browser, texto Telnet y GMCP;
-- pruebas de ignore/block/mute, límites, desconexión y cero fuga entre parties.
+- chat de grupo, `reply`, revocación/expulsión/transferencia/disolución;
+- canales `newbie`/`general`/`staff` suscritos y moderados;
+- paridad navegador, texto Telnet y GMCP;
+- cobertura de ignore/block/mute, límites, desconexión, rol de `staff` y cero
+  fuga entre grupos.
 
-### Fase 2 — staff por capacidades
+### Fase 2 — staff por capacidades — pendiente
 
 - perfiles y capacidades separados de progresión;
 - cola de reportes y razones obligatorias;
@@ -329,14 +356,14 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 - autorización negativa, jerarquía, persistencia y auditoría en SQLite/Postgres;
 - ninguna autoridad obtenible mediante XP, clase, talento o WorldPack.
 
-### Fase 3 — objetos repetibles e inventario
+### Fase 3 — objetos repetibles e inventario — pendiente
 
 - migración prototype/instance;
 - slots/peso, stacks y contenedores acotados;
 - give e intercambio confirmado;
 - snapshot, rollback, migración y proyección opaca en ambos transportes.
 
-### Fase 4 — propiedad, rareza y botín aleatorio
+### Fase 4 — propiedad, rareza y botín aleatorio — pendiente
 
 - elegibilidad y distribución de party;
 - rareza/item level/afijos con presupuestos;
@@ -345,7 +372,7 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
   economía;
 - cofres solo como recompensa de juego en el baseline.
 
-### Fase 5 — comunidad y contenido
+### Fase 5 — comunidad y contenido — pendiente
 
 - emotes, mail/boards y guilds según necesidades observadas;
 - crafting/auction/housing solo con sinks, cuotas y moderación;

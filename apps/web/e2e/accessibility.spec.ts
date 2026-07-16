@@ -132,6 +132,14 @@ async function installMockWorld(
                 status: 'available', current: 0, target: 1,
                 actions: [{ label: 'Accept', command: 'quest accept first-hunt' }],
               }],
+              party: {
+                leader: true,
+                members: [
+                  { id: 'o3333333333333333', name: 'Aria', leader: true, online: true },
+                  { id: 'o4444444444444444', name: 'Bram', leader: false, online: true },
+                ],
+                actions: [],
+              },
               partyInvites: [],
               economy: { coins: 40, commodities: [], shopAvailable: false, shop: [] },
               social: {
@@ -544,6 +552,48 @@ test('progression controls send native promotion and talent actions', async ({ p
     expect.objectContaining({ action: 'progression.promote', classId: 'stormcaller' }),
     expect.objectContaining({
       action: 'progression.talent', graphId: 'mystic-path', nodeId: 'steady-flame',
+    }),
+  ]);
+});
+
+test('party and channel panels send structured social actions', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+
+  await page.locator('summary').filter({ hasText: 'Party' }).click();
+  await page.getByLabel('Message to party').fill('Hold the bridge.');
+  await page.getByRole('button', { name: 'Send to party' }).click();
+  await page.getByLabel('Invite or manage an adventurer').fill('Bram');
+  await page.getByRole('button', { name: 'Revoke invitation' }).click();
+  await page.getByRole('button', { name: 'Remove from party' }).click();
+  await page.getByRole('button', { name: 'Transfer leadership' }).click();
+  await page.getByRole('button', { name: 'Disband party' }).click();
+
+  await page.getByLabel('Reply to your latest direct message').fill('On my way.');
+  await page.getByRole('button', { name: 'Reply', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh channels' }).click();
+  await page.getByLabel('Channel', { exact: true }).selectOption('newbie');
+  await page.getByRole('button', { name: 'Join channel' }).click();
+  await page.getByRole('button', { name: 'Leave channel' }).click();
+  await page.getByLabel('Message to #newbie').fill('Where is the market?');
+  await page.getByRole('button', { name: 'Send to channel' }).click();
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.map((entry) => entry.data);
+  })).toEqual([
+    expect.objectContaining({ action: 'party.say', message: 'Hold the bridge.' }),
+    expect.objectContaining({ action: 'party.revoke', target: 'Bram' }),
+    expect.objectContaining({ action: 'party.kick', target: 'Bram' }),
+    expect.objectContaining({ action: 'party.transfer', target: 'Bram' }),
+    expect.objectContaining({ action: 'party.disband' }),
+    expect.objectContaining({ action: 'social.reply', message: 'On my way.' }),
+    expect.objectContaining({ action: 'social.channel.list' }),
+    expect.objectContaining({ action: 'social.channel.join', channel: 'newbie' }),
+    expect.objectContaining({ action: 'social.channel.leave', channel: 'newbie' }),
+    expect.objectContaining({
+      action: 'social.channel.say', channel: 'newbie', message: 'Where is the market?',
     }),
   ]);
 });

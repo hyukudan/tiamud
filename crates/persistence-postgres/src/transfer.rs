@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transaction};
 
-const TABLES: [&str; 13] = APPLICATION_TABLES;
+const TABLES: [&str; 14] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -107,6 +107,10 @@ pub fn copy_sqlite_to_postgres(
         rows: copy_social_relation(&source, &mut target, "social_blocks")?,
     });
     tables.push(TableCount {
+        table: "social_channel_subscriptions",
+        rows: copy_social_channel_subscriptions(&source, &mut target)?,
+    });
+    tables.push(TableCount {
         table: "moderation_mutes",
         rows: copy_moderation_decisions(&source, &mut target, "moderation_mutes")?,
     });
@@ -150,6 +154,7 @@ fn lock_target_tables<C: GenericClient>(target: &mut C) -> Result<(), postgres::
     target.batch_execute(
         "LOCK TABLE accounts, characters, auth_sessions, domain_events,
                     world_runtime, social_ignores, social_blocks,
+                    social_channel_subscriptions,
                     moderation_mutes, account_bans, social_reports,
                     moderation_audit, character_adventure, world_adventure
          IN ACCESS EXCLUSIVE MODE",
@@ -392,6 +397,32 @@ fn copy_social_relation<C: GenericClient>(
     Ok(count)
 }
 
+fn copy_social_channel_subscriptions<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT character_id, channel, created_at
+         FROM social_channel_subscriptions
+         ORDER BY character_id, channel",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let character_id: i64 = row.get(0)?;
+        let channel: String = row.get(1)?;
+        let created_at: i64 = row.get(2)?;
+        target.execute(
+            "INSERT INTO social_channel_subscriptions
+                 (character_id, channel, created_at)
+             VALUES ($1, $2, $3)",
+            &[&character_id, &channel, &created_at],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn copy_moderation_decisions<C: GenericClient>(
     source: &Connection,
     target: &mut C,
@@ -617,7 +648,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 8
+                required: 9
             }
         ));
         assert_eq!(
@@ -656,7 +687,7 @@ mod tests {
     fn transfer_manifest_is_parent_before_child_and_complete() {
         assert_eq!(TABLES[0], "accounts");
         assert_eq!(TABLES[1], "characters");
-        assert_eq!(TABLES.len(), 13);
+        assert_eq!(TABLES.len(), 14);
         assert_eq!(TABLES.last(), Some(&"world_adventure"));
     }
 }

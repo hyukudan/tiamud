@@ -221,10 +221,10 @@ character entry with a safe explanation.
 }
 ```
 
-The command is at most 1024 bytes without control characters. It reaches the
-same `PlayerAction` parser as Telnet.
+El comando ocupa como máximo 1024 bytes y no contiene caracteres de control.
+Llega al mismo analizador de `PlayerAction` que Telnet.
 
-### Structured action
+### Acción estructurada
 
 ```json
 {
@@ -234,27 +234,41 @@ same `PlayerAction` parser as Telnet.
 }
 ```
 
-Implemented action names are:
+Nombres de acción implementados:
 
 ```text
 look, inventory, move
 item.take, item.drop, item.examine, item.use, item.equip, item.unequip
 combat.attack, combat.ability
 progression.promote, progression.talent
-party.create, party.invite, party.accept, party.leave, party.status
+party.create, party.invite, party.accept, party.revoke, party.kick,
+party.transfer, party.disband, party.leave, party.status, party.say
 quest.list, quest.accept, quest.status, quest.complete
 economy.balance, economy.shop, economy.buy, economy.sell
 weather, time
-social.say, social.tell, social.who, social.help
+social.say, social.tell, social.reply, social.channel.list,
+social.channel.join, social.channel.leave, social.channel.say,
+social.who, social.help
 social.ignore, social.unignore, social.block, social.unblock, social.report
 moderation.mute, moderation.unmute, moderation.ban, moderation.unban,
 moderation.role
 ```
 
-Depending on the action, the strict payload may also contain `message`,
-`durationSeconds`, `reason` or `role` (`player`, `moderator`, `admin`). Unexpected
-fields or a missing/forbidden target are rejected. The normal authorization and
-perception checks still apply; structured actions are not trusted shortcuts.
+Según la acción, el payload estricto también puede contener `message`,
+`channel` (`general`, `newbie` or `staff`), `durationSeconds`, `reason` or
+`role` (`player`, `moderator`, `admin`). `party.revoke`, `party.kick` y
+`party.transfer` usan `target`; `party.say` y `social.reply` usan `message`;
+alta/baja de canal usa `channel`, y el envío requiere `channel` y `message`.
+Los campos inesperados y objetivos ausentes/prohibidos se rechazan. Se aplican
+las mismas reglas de autorización y percepción; una acción estructurada no es
+un atajo confiable. Accept/revoke/kick/transfer resuelven `target` como nombre
+de un personaje conectado, no como administración de membresía offline.
+
+Los equivalentes de texto usan `party say` (`gsay`/`gtell`), `party revoke`,
+`party kick`, `party transfer`, `party disband`, `reply`, `channel(s)`,
+`channel join`, `channel leave` y `channel say`. Los alias `gossip`, `newbie` y
+`wiznet` envían a `general`, `newbie`, `staff`. Unirse, enviar o recibir
+`staff` exige rol Moderator/Admin.
 
 An ability use has its own additive `abilityId` field; it does not overload the
 opaque target:
@@ -362,7 +376,7 @@ traffic.
 | `inventory.patch` | Complete current inventory/equipment fragment. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
-| `chat.message` | Authorized `say` or `tell` delivery. |
+| `chat.message` | Entrega autorizada de `say`, `tell`, `party`, `general`, `newbie` o `staff`. |
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
@@ -695,16 +709,23 @@ corresponding fragment at the stated revision. Other player changes use a new
 `player.snapshot`. A full scene/player snapshot may follow semantic updates to
 keep recovery deterministic under output coalescing.
 
-## Narrative, chat and media
+## Narrativa, conversación y medios
 
 `message.append.data` contains `revision`, `kind` (`characterMoved`,
 `itemTaken`, `itemDropped`, `gameplay` or `adventure`), safe text, opaque
 `actorId`, and optional opaque `targetId`/`itemId`. It is projected separately
 for every observer; inability to perceive a domain event means no message.
 
-`chat.message.data` contains `channel` (`say`/`tell`), `sender` and bounded
-plain text. Recipient ignore and either-side block policy is applied before
-delivery. Muted/banned state and chat rate limits are enforced server-side.
+`chat.message.data` contiene `channel` (`say`, `tell`, `party`, `general`,
+`newbie` o `staff`), `sender` y texto plano acotado. Ignore y block por cualquiera
+de las partes se aplican antes de entregar. Mute/ban y rate limit se aplican en
+servidor. `general`, `newbie`, `staff` requieren suscripción durable en esquema
+v9; `staff` exige además Moderator/Admin al unirse, enviar y recibir. La
+suscripción es durable, pero estado de `reply` e historial son solo memoria.
+
+Telnet representa el mismo `SocialMessage` autorizado como texto acotado. Si
+negoció GMCP `Comm`, recibe también `Comm.Channel.Text` con los seis canales,
+`talker`, `text`; GMCP no evita autorización ni crea otra fuente de verdad.
 
 Audio messages are sent only when `client.hello.capabilities.audio` is true:
 

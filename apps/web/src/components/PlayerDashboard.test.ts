@@ -2,6 +2,7 @@ import { render } from 'svelte/server';
 import { describe, expect, it } from 'vitest';
 import type { PlayerStateSnapshot } from '../lib/protocol';
 import PlayerDashboard from './PlayerDashboard.svelte';
+import dashboardSource from './PlayerDashboard.svelte?raw';
 
 const player: PlayerStateSnapshot = {
   revision: 4,
@@ -126,6 +127,10 @@ describe('PlayerDashboard', () => {
       'Health', 'Inventory', 'Discovered map', 'Quests', 'Party', 'Coin and market',
       'Chat and adventurers', 'Manage ignore list', 'Abilities', 'Mana', 'Agility', 'Resistances',
       'Progression', 'Class evolution', 'Advanced classes', 'Talent paths',
+      'Invite or manage an adventurer', 'Revoke invitation', 'Remove from party',
+      'Transfer leadership', 'Disband party', 'Message to party',
+      'Reply to your latest direct message', 'World channels', 'Channel',
+      'General', 'Newbie', 'Staff',
     ]) {
       expect(body).toContain(label);
     }
@@ -146,5 +151,17 @@ describe('PlayerDashboard', () => {
     expect(body).toContain('<button');
     expect(body).not.toContain('accountId');
     expect(body).not.toContain('characterId');
+  });
+
+  it('wires party and world-channel controls to structured actions', () => {
+    for (const action of [
+      'party.say', 'party.revoke', 'party.kick', 'party.transfer', 'party.disband',
+      'social.reply', 'social.channel.list', 'social.channel.join',
+      'social.channel.leave', 'social.channel.say',
+    ]) {
+      expect(dashboardSource).toContain(action);
+    }
+    expect(dashboardSource).toContain('{ channel: communityChannel, message }');
+    expect(dashboardSource).toContain('{ target }');
   });
 });

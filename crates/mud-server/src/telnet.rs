@@ -992,6 +992,32 @@ fn public_error(error: &GameError) -> String {
             | tiamud_core::WorldError::TalentUnavailable
             | tiamud_core::WorldError::InsufficientProgressionPoints),
         ) => error.to_string(),
+        GameError::World(
+            error @ (tiamud_core::WorldError::PartyUnavailable
+            | tiamud_core::WorldError::PartyForbidden
+            | tiamud_core::WorldError::PartyTargetNotFound),
+        ) => error.to_string(),
+        GameError::Persistence(StoreError::SocialTargetNotFound) => {
+            "No connected character matches that name.".to_owned()
+        }
+        GameError::Persistence(StoreError::AmbiguousSocialTarget) => {
+            "That character name is ambiguous.".to_owned()
+        }
+        GameError::Persistence(StoreError::SocialSelfTarget) => {
+            "You cannot target yourself with that action.".to_owned()
+        }
+        GameError::Persistence(StoreError::SocialForbidden) => {
+            "Your account is not authorized for that social action.".to_owned()
+        }
+        GameError::Persistence(StoreError::ChatMuted) => {
+            "You cannot send chat while your account is muted.".to_owned()
+        }
+        GameError::Persistence(StoreError::ChatRateLimited) => {
+            "Chat rate limit exceeded; wait before sending another message.".to_owned()
+        }
+        GameError::Persistence(StoreError::InvalidSocialInput) => {
+            "The social action is invalid or rate limited.".to_owned()
+        }
         GameError::Persistence(
             StoreError::InvalidSession | StoreError::SessionExpired | StoreError::SessionRevoked,
         ) => "Your account session is no longer valid.".to_owned(),
@@ -1196,15 +1222,25 @@ fn output_queue_bytes(output: &TelnetOutputQueue, bytes: Vec<u8>) -> io::Result<
     output.bytes(OutputPriority::Interactive, bytes)
 }
 
+const SOCIAL_CHANNEL_NAMES: [&str; 6] = ["say", "tell", "party", "general", "newbie", "staff"];
+
+fn social_channel_name(channel: SocialChannel) -> &'static str {
+    match channel {
+        SocialChannel::Say => "say",
+        SocialChannel::Tell => "tell",
+        SocialChannel::Party => "party",
+        SocialChannel::General => "general",
+        SocialChannel::Newbie => "newbie",
+        SocialChannel::Staff => "staff",
+    }
+}
+
 fn write_social_message(
     output: &TelnetOutputQueue,
     input: &TelnetInput,
     message: &SocialMessage,
 ) -> io::Result<()> {
-    let channel = match message.channel {
-        SocialChannel::Say => "say",
-        SocialChannel::Tell => "tell",
-    };
+    let channel = social_channel_name(message.channel);
     let mut bytes =
         format!("\r\n[{channel}] {}: {}\r\n", message.sender, message.text).into_bytes();
     let gmcp = input.negotiation.social_gmcp(message);
@@ -1904,7 +1940,7 @@ impl TelnetSession {
             append_gmcp(
                 response,
                 "Comm.Channel.List",
-                &json!({"channels": ["say", "tell"]}),
+                &json!({"channels": SOCIAL_CHANNEL_NAMES}),
             );
             self.gmcp.comm_stub_sent = true;
         }
@@ -2109,10 +2145,7 @@ impl TelnetSession {
         if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("comm") {
             return Vec::new();
         }
-        let channel = match message.channel {
-            SocialChannel::Say => "say",
-            SocialChannel::Tell => "tell",
-        };
+        let channel = social_channel_name(message.channel);
         let mut output = Vec::new();
         append_gmcp(
             &mut output,
@@ -2864,6 +2897,36 @@ mod tests {
     use tokio::net::TcpStream;
 
     #[test]
+    fn public_errors_expose_safe_party_and_social_failures_only() {
+        assert_eq!(
+            public_error(&GameError::World(tiamud_core::WorldError::PartyForbidden)),
+            "Only the party leader may do that."
+        );
+        assert_eq!(
+            public_error(&GameError::World(
+                tiamud_core::WorldError::PartyTargetNotFound
+            )),
+            "No connected character matches that party target."
+        );
+        assert_eq!(
+            public_error(&GameError::Persistence(StoreError::SocialTargetNotFound)),
+            "No connected character matches that name."
+        );
+        assert_eq!(
+            public_error(&GameError::Persistence(StoreError::SocialForbidden)),
+            "Your account is not authorized for that social action."
+        );
+        assert_eq!(
+            public_error(&GameError::Persistence(StoreError::ChatMuted)),
+            "You cannot send chat while your account is muted."
+        );
+        assert_eq!(
+            public_error(&GameError::World(tiamud_core::WorldError::InvalidEntity)),
+            "The world is temporarily unavailable."
+        );
+    }
+
+    #[test]
     fn parses_naws_with_telnet_escaped_width_byte() {
         let mut session = TelnetSession::default();
         session.begin_initial_negotiation();
@@ -3228,10 +3291,13 @@ mod tests {
         assert_eq!(session.gmcp.version.as_deref(), Some("2.02"));
         assert!(session.gmcp.supports("room"));
         let payloads = gmcp_payloads(&response);
-        assert!(
-            payloads
-                .iter()
-                .any(|payload| payload.starts_with(b"Comm.Channel.List "))
+        let channel_list = payloads
+            .iter()
+            .find(|payload| payload.starts_with(b"Comm.Channel.List "))
+            .expect("Comm support must advertise the complete channel list");
+        assert_eq!(
+            String::from_utf8(channel_list.clone()).unwrap(),
+            r#"Comm.Channel.List {"channels":["say","tell","party","general","newbie","staff"]}"#
         );
         assert!(
             payloads
@@ -3532,7 +3598,41 @@ mod tests {
     }
 
     #[test]
-    fn gmcp_social_delivery_is_bounded_to_the_safe_comm_projection() {
+    fn telnet_social_text_names_all_six_channels() {
+        let cases = [
+            (SocialChannel::Say, "say"),
+            (SocialChannel::Tell, "tell"),
+            (SocialChannel::Party, "party"),
+            (SocialChannel::General, "general"),
+            (SocialChannel::Newbie, "newbie"),
+            (SocialChannel::Staff, "staff"),
+        ];
+
+        for (channel, name) in cases {
+            let output = TelnetOutputQueue::new(1, 1_024);
+            let input = TelnetInput::default();
+            write_social_message(
+                &output,
+                &input,
+                &SocialMessage {
+                    channel,
+                    sender: "Mara".to_owned(),
+                    text: "Hold the gate.".to_owned(),
+                },
+            )
+            .unwrap();
+
+            let state = output.shared.state.lock().unwrap();
+            assert!(matches!(
+                &state.frames[0],
+                OutputFrame::Bytes { priority: OutputPriority::Interactive, bytes }
+                    if bytes == format!("\r\n[{name}] Mara: Hold the gate.\r\n").as_bytes()
+            ));
+        }
+    }
+
+    #[test]
+    fn gmcp_social_delivery_is_bounded_for_all_six_channels() {
         let mut session = TelnetSession::default();
         session.begin_initial_negotiation();
         session.handle(vec![TelnetEvent::Negotiation {
@@ -3544,22 +3644,33 @@ mod tests {
             data: br#"Core.Supports.Set ["Comm 1"]"#.to_vec(),
         }]);
 
-        let message = SocialMessage {
-            channel: SocialChannel::Tell,
-            sender: "Mara".to_owned(),
-            text: "Meet me by the north gate.".to_owned(),
-        };
-        let payloads = gmcp_payloads(&session.social_gmcp(&message));
+        let cases = [
+            (SocialChannel::Say, "say"),
+            (SocialChannel::Tell, "tell"),
+            (SocialChannel::Party, "party"),
+            (SocialChannel::General, "general"),
+            (SocialChannel::Newbie, "newbie"),
+            (SocialChannel::Staff, "staff"),
+        ];
+        for (channel, name) in cases {
+            let message = SocialMessage {
+                channel,
+                sender: "Mara".to_owned(),
+                text: "Meet me by the north gate.".to_owned(),
+            };
+            let payloads = gmcp_payloads(&session.social_gmcp(&message));
 
-        assert_eq!(payloads.len(), 1);
-        let payload = String::from_utf8(payloads[0].clone()).unwrap();
-        assert!(payload.starts_with("Comm.Channel.Text "));
-        assert!(payload.contains("\"channel\":\"tell\""));
-        assert!(payload.contains("\"talker\":\"Mara\""));
-        assert!(payload.contains("north gate"));
-        assert!(!payload.contains("characterId"));
-        assert!(!payload.contains("recipient"));
-        assert!(!payload.contains("moderation"));
+            assert_eq!(payloads.len(), 1);
+            assert!(payloads[0].len() <= MAX_GMCP_BYTES);
+            let payload = String::from_utf8(payloads[0].clone()).unwrap();
+            assert!(payload.starts_with("Comm.Channel.Text "));
+            assert!(payload.contains(&format!("\"channel\":\"{name}\"")));
+            assert!(payload.contains("\"talker\":\"Mara\""));
+            assert!(payload.contains("north gate"));
+            assert!(!payload.contains("characterId"));
+            assert!(!payload.contains("recipient"));
+            assert!(!payload.contains("moderation"));
+        }
     }
 
     #[test]

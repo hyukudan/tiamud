@@ -18,7 +18,8 @@ use std::{
 use thiserror::Error;
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
-    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, WorldRuntimeSnapshot,
+    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, SocialChannelName,
+    WorldRuntimeSnapshot,
 };
 use tiamud_persistence_sqlite::{SchemaError, migrate};
 use tokio::{
@@ -260,6 +261,33 @@ pub trait CharacterStore: Send + Sync {
         enabled: bool,
     ) -> Result<(), StoreError>;
 
+    /// Return the character's durable subscriptions in closed channel order.
+    async fn social_channel_subscriptions(
+        &self,
+        _character_id: CharacterId,
+    ) -> Result<Vec<SocialChannelName>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Return durable subscribers ordered by character identity so channel
+    /// fan-out does not require one database query per live session.
+    async fn social_channel_subscribers(
+        &self,
+        _channel: SocialChannelName,
+    ) -> Result<Vec<CharacterId>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Atomically add or remove one durable closed-channel subscription.
+    async fn set_social_channel_subscription(
+        &self,
+        _character_id: CharacterId,
+        _channel: SocialChannelName,
+        _subscribed: bool,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     async fn report_character(
         &self,
         actor: CharacterId,
@@ -456,6 +484,34 @@ impl CharacterStore for MeasuredCharacterStore {
         .await
     }
 
+    async fn social_channel_subscriptions(
+        &self,
+        character_id: CharacterId,
+    ) -> Result<Vec<SocialChannelName>, StoreError> {
+        self.inner.social_channel_subscriptions(character_id).await
+    }
+
+    async fn social_channel_subscribers(
+        &self,
+        channel: SocialChannelName,
+    ) -> Result<Vec<CharacterId>, StoreError> {
+        self.inner.social_channel_subscribers(channel).await
+    }
+
+    async fn set_social_channel_subscription(
+        &self,
+        character_id: CharacterId,
+        channel: SocialChannelName,
+        subscribed: bool,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.set_social_channel_subscription(
+            character_id,
+            channel,
+            subscribed,
+        ))
+        .await
+    }
+
     async fn report_character(
         &self,
         actor: CharacterId,
@@ -579,6 +635,20 @@ pub(super) enum Request {
         target: CharacterId,
         relation: SocialRelationKind,
         enabled: bool,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SocialChannelSubscriptions {
+        character_id: CharacterId,
+        reply: oneshot::Sender<Result<Vec<SocialChannelName>, StoreError>>,
+    },
+    SocialChannelSubscribers {
+        channel: SocialChannelName,
+        reply: oneshot::Sender<Result<Vec<CharacterId>, StoreError>>,
+    },
+    SetSocialChannelSubscription {
+        character_id: CharacterId,
+        channel: SocialChannelName,
+        subscribed: bool,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     ReportCharacter {
@@ -784,6 +854,30 @@ impl SqliteCharacterStore {
                                 target,
                                 relation,
                                 enabled,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::SocialChannelSubscriptions {
+                            character_id,
+                            reply,
+                        } => {
+                            let _ =
+                                reply.send(social_channel_subscriptions(&connection, character_id));
+                        }
+                        Request::SocialChannelSubscribers { channel, reply } => {
+                            let _ = reply.send(social_channel_subscribers(&connection, channel));
+                        }
+                        Request::SetSocialChannelSubscription {
+                            character_id,
+                            channel,
+                            subscribed,
+                            reply,
+                        } => {
+                            let _ = reply.send(set_social_channel_subscription(
+                                &mut connection,
+                                character_id,
+                                channel,
+                                subscribed,
                                 unix_timestamp(),
                             ));
                         }
@@ -1138,6 +1232,52 @@ impl CharacterStore for SqliteCharacterStore {
                 target,
                 relation,
                 enabled,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn social_channel_subscriptions(
+        &self,
+        character_id: CharacterId,
+    ) -> Result<Vec<SocialChannelName>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::SocialChannelSubscriptions {
+                character_id,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn social_channel_subscribers(
+        &self,
+        channel: SocialChannelName,
+    ) -> Result<Vec<CharacterId>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::SocialChannelSubscribers { channel, reply },
+            receive,
+        )
+        .await
+    }
+
+    async fn set_social_channel_subscription(
+        &self,
+        character_id: CharacterId,
+        channel: SocialChannelName,
+        subscribed: bool,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::SetSocialChannelSubscription {
+                character_id,
+                channel,
+                subscribed,
                 reply,
             },
             receive,
@@ -1539,6 +1679,31 @@ fn role_as_database(role: AccountRole) -> &'static str {
     }
 }
 
+fn social_channel_from_database(value: &str) -> Result<SocialChannelName, StoreError> {
+    match value {
+        "general" => Ok(SocialChannelName::General),
+        "newbie" => Ok(SocialChannelName::Newbie),
+        "staff" => Ok(SocialChannelName::Staff),
+        _ => Err(StoreError::InvalidSocialInput),
+    }
+}
+
+fn ensure_social_character_exists(
+    connection: &Connection,
+    character_id: CharacterId,
+) -> Result<(), StoreError> {
+    let exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM characters WHERE id = ?1)",
+        [character_id.0],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if exists {
+        Ok(())
+    } else {
+        Err(StoreError::SocialTargetNotFound)
+    }
+}
+
 fn social_profile(
     connection: &Connection,
     character_id: CharacterId,
@@ -1675,6 +1840,74 @@ fn set_social_relation(
         serde_json::json!({"targetCharacterId": target.0}),
         now,
     )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn social_channel_subscriptions(
+    connection: &Connection,
+    character_id: CharacterId,
+) -> Result<Vec<SocialChannelName>, StoreError> {
+    ensure_social_character_exists(connection, character_id)?;
+    let mut statement = connection.prepare(
+        "SELECT channel FROM social_channel_subscriptions
+         WHERE character_id = ?1
+         ORDER BY CASE channel
+             WHEN 'general' THEN 0
+             WHEN 'newbie' THEN 1
+             WHEN 'staff' THEN 2
+             ELSE 3
+         END",
+    )?;
+    let stored = statement
+        .query_map([character_id.0], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    stored
+        .iter()
+        .map(|channel| social_channel_from_database(channel))
+        .collect()
+}
+
+fn social_channel_subscribers(
+    connection: &Connection,
+    channel: SocialChannelName,
+) -> Result<Vec<CharacterId>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT character_id FROM social_channel_subscriptions
+         WHERE channel = ?1 ORDER BY character_id",
+    )?;
+    statement
+        .query_map([channel.as_str()], |row| {
+            row.get::<_, i64>(0).map(CharacterId)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(StoreError::from)
+}
+
+fn set_social_channel_subscription(
+    connection: &mut Connection,
+    character_id: CharacterId,
+    channel: SocialChannelName,
+    subscribed: bool,
+    now: i64,
+) -> Result<(), StoreError> {
+    let transaction = connection.transaction()?;
+    ensure_social_character_exists(&transaction, character_id)?;
+    if subscribed {
+        transaction.execute(
+            "INSERT INTO social_channel_subscriptions
+                 (character_id, channel, created_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(character_id, channel) DO NOTHING",
+            params![character_id.0, channel.as_str(), now],
+        )?;
+    } else {
+        transaction.execute(
+            "DELETE FROM social_channel_subscriptions
+             WHERE character_id = ?1 AND channel = ?2",
+            params![character_id.0, channel.as_str()],
+        )?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -3544,6 +3777,88 @@ mod tests {
                 )
                 .unwrap(),
             "harassment in public chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_channel_subscriptions_are_idempotent_and_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("channel-subscriptions.db");
+        let store = SqliteCharacterStore::open(&path).await.unwrap();
+        let account = store
+            .register_account("Channel Keeper", "correct horse battery staple")
+            .await
+            .unwrap();
+        let character = store
+            .load_or_create_character(account.account.id, "Aster", "room:start")
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .social_channel_subscriptions(character.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for channel in [
+            SocialChannelName::Staff,
+            SocialChannelName::General,
+            SocialChannelName::Newbie,
+            SocialChannelName::General,
+        ] {
+            store
+                .set_social_channel_subscription(character.id, channel, true)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .social_channel_subscriptions(character.id)
+                .await
+                .unwrap(),
+            vec![
+                SocialChannelName::General,
+                SocialChannelName::Newbie,
+                SocialChannelName::Staff,
+            ]
+        );
+        assert_eq!(
+            store
+                .social_channel_subscribers(SocialChannelName::General)
+                .await
+                .unwrap(),
+            vec![character.id]
+        );
+        for _ in 0..2 {
+            store
+                .set_social_channel_subscription(character.id, SocialChannelName::Newbie, false)
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            store
+                .social_channel_subscriptions(CharacterId(i64::MAX))
+                .await,
+            Err(StoreError::SocialTargetNotFound)
+        ));
+
+        store.shutdown().await.unwrap();
+        drop(store);
+        let reopened = SqliteCharacterStore::open(&path).await.unwrap();
+        assert_eq!(
+            reopened
+                .social_channel_subscriptions(character.id)
+                .await
+                .unwrap(),
+            vec![SocialChannelName::General, SocialChannelName::Staff]
+        );
+        assert!(
+            reopened
+                .social_channel_subscribers(SocialChannelName::Newbie)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

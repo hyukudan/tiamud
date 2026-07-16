@@ -161,13 +161,13 @@ impl DeliveryRouter {
         );
     }
 
-    pub fn send_social(&mut self, session: SessionId, delivery: SocialMessage) {
+    pub fn send_social(&mut self, session: SessionId, delivery: SocialMessage) -> bool {
         self.send(
             session,
             QueuedDelivery::Social(delivery),
             RoutedDeliveryKind::Social,
             SOCIAL_LAGGED,
-        );
+        )
     }
 
     fn send(
@@ -176,25 +176,28 @@ impl DeliveryRouter {
         delivery: QueuedDelivery,
         kind: RoutedDeliveryKind,
         lagged_flag: u8,
-    ) {
+    ) -> bool {
         let Some(mailbox) = self.mailboxes.get(&session) else {
-            return;
+            return false;
         };
         match mailbox.tx.try_send(delivery) {
             Ok(()) => {
                 if let Some(metrics) = &self.metrics {
                     metrics.delivery_enqueued(kind);
                 }
+                true
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 mailbox.lagged.fetch_or(lagged_flag, Ordering::Release);
                 if let Some(metrics) = &self.metrics {
                     metrics.delivery_dropped(kind);
                 }
+                false
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.mailboxes.remove(&session);
                 self.record_mailbox_count();
+                false
             }
         }
     }

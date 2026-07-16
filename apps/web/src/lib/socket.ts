@@ -8,6 +8,7 @@ import {
   createSyncRequest,
   createTalentPerform,
   parseServerMessage,
+  type ActionPerformFields,
   type ConnectionState,
   type LiveServerMessage,
   type ServerMessage,
@@ -215,12 +216,12 @@ export class TiamudConnection {
     return true;
   }
 
-  perform(action: string, target: string | undefined, requestId: string): boolean {
+  perform(action: string, fields: ActionPerformFields | undefined, requestId: string): boolean {
     if (this.#socket?.readyState !== WebSocket.OPEN) {
       return false;
     }
 
-    this.#socket.send(JSON.stringify(createActionPerform(action, target, requestId)));
+    this.#socket.send(JSON.stringify(createActionPerform(action, fields, requestId)));
     return true;
   }
 

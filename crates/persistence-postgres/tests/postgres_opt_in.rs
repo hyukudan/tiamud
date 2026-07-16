@@ -44,6 +44,9 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
              INSERT INTO social_ignores
                  (owner_character_id, target_character_id)
              VALUES (10, 11);
+             INSERT INTO social_channel_subscriptions
+                 (character_id, channel, created_at)
+             VALUES (10, 'general', 900);
              INSERT INTO domain_events (sequence, event_json)
              VALUES (7, '{\"type\":\"test\"}');
              INSERT INTO world_runtime
@@ -70,7 +73,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     let report =
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres).unwrap();
-    assert_eq!(report.total_rows, 10);
+    assert_eq!(report.total_rows, 11);
     assert_eq!(
         postgres
             .query_one("SELECT COUNT(*)::BIGINT FROM characters", &[])
@@ -108,8 +111,18 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         1
     );
     assert_eq!(
+        postgres
+            .query_one(
+                "SELECT channel FROM social_channel_subscriptions WHERE character_id = 10",
+                &[],
+            )
+            .unwrap()
+            .get::<_, String>(0),
+        "general"
+    );
+    assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 8, to: 8 }
+        tiamud_persistence_postgres::MigrationReport { from: 9, to: 9 }
     );
     assert_eq!(
         postgres
@@ -132,17 +145,27 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .batch_execute(
             "DROP TABLE character_adventure;
              DROP TABLE world_adventure;
+             DROP TABLE social_channel_subscriptions;
              ALTER TABLE world_runtime DROP COLUMN last_event_sequence;
              UPDATE tiamud_schema SET version = 6 WHERE singleton = 1",
         )
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 8 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 9 }
     );
     assert!(
         postgres
             .query_one("SELECT to_regclass('character_adventure') IS NOT NULL", &[])
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+    assert!(
+        postgres
+            .query_one(
+                "SELECT to_regclass('social_channel_subscriptions') IS NOT NULL",
+                &[],
+            )
             .unwrap()
             .get::<_, bool>(0)
     );

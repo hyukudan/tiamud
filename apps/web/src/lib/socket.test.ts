@@ -140,9 +140,20 @@ describe('TiamudConnection', () => {
       },
     });
 
-    expect(connection.perform('item.take', 'o8888888888888888', 'legacy-1')).toBe(true);
+    expect(connection.perform('item.take', { target: 'o8888888888888888' }, 'legacy-1')).toBe(true);
     expect(lastSent(socket)).toMatchObject({
       data: { requestId: 'legacy-1', action: 'item.take', target: 'o8888888888888888' },
+    });
+    expect(connection.perform(
+      'social.channel.say',
+      { channel: 'general', message: 'Lanterns are lit.' },
+      'channel-1',
+    )).toBe(true);
+    expect(lastSent(socket)).toMatchObject({
+      data: {
+        requestId: 'channel-1', action: 'social.channel.say',
+        channel: 'general', message: 'Lanterns are lit.',
+      },
     });
     expect(connection.promote('stormcaller', 'promote-1')).toBe(true);
     expect(lastSent(socket)).toMatchObject({

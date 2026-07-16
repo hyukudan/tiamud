@@ -1077,13 +1077,25 @@ main {
   color: #74796d;
 }
 
-.inline-form input {
+.inline-form input,
+.inline-form select {
   width: 100%;
   min-width: 0;
   padding: 0.42rem 0.55rem;
   border: 1px solid #4c503f;
   border-radius: 0.25rem;
   background: #11140f;
+}
+
+.inline-form small {
+  color: #999c91;
+  font-size: 0.66rem;
+}
+
+.channel-controls {
+  margin-top: 0.9rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid #383e32;
 }
 
 .visual-stage {

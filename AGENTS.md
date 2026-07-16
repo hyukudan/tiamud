@@ -1,317 +1,287 @@
-# Tiamud agent guide
+# Guía para agentes de Tiamud
 
-This file applies to the entire repository. It is the working contract for
-coding agents and contributors. Keep it aligned with the current code,
-accepted decisions and retained evidence.
+Este archivo se aplica a todo el repositorio. Es el contrato de trabajo para
+agentes de programación y contribuidores. Debe permanecer alineado con el
+código actual, las decisiones aceptadas y la evidencia retenida.
 
-## Read this first
+## Lectura inicial
 
-Before making a material change, read these sources in order:
+Antes de un cambio material, lee en este orden:
 
-1. [`docs/project/PROJECT_MEMORY.md`](docs/project/PROJECT_MEMORY.md) for the
-   durable technical context and current continuation notes.
-2. [`docs/project/COMPLETION_MATRIX.md`](docs/project/COMPLETION_MATRIX.md) for
-   authoritative implementation and acceptance status.
-3. The relevant accepted ADRs in [`docs/decisions/`](docs/decisions/).
-4. [`docs/spec-v0.3.md`](docs/spec-v0.3.md), the relevant design document and
-   the implementation itself.
-5. Dated records in [`docs/project/log/`](docs/project/log/) only when exact
-   historical commands or evidence matter.
+1. [`docs/project/PROJECT_MEMORY.md`](docs/project/PROJECT_MEMORY.md), contexto
+   técnico durable y notas de continuación.
+2. [`docs/project/COMPLETION_MATRIX.md`](docs/project/COMPLETION_MATRIX.md),
+   estado autoritativo de implementación y aceptación.
+3. Los ADR pertinentes en [`docs/decisions/`](docs/decisions/).
+4. [`docs/spec-v0.3.md`](docs/spec-v0.3.md), el diseño relevante y el código.
+5. Los registros fechados de [`docs/project/log/`](docs/project/log/) solo si
+   importan comandos o evidencia histórica exactos.
 
-Source precedence is deliberate:
+Precedencia de fuentes:
 
-- accepted ADRs define architectural decisions;
-- code and focused tests prove behavior;
-- the completion matrix defines whether a requirement is complete or partial;
-- project memory is the durable summary and hand-off;
-- dated logs describe a delivery at that time and may be superseded;
-- `docs/spec-v0.2.md` is the historical Spanish specification, not the current
-  character/media contract.
+- los ADR aceptados definen decisiones arquitectónicas;
+- el código y las pruebas enfocadas demuestran comportamiento;
+- la matriz determina si un requisito está completo o parcial;
+- la memoria es el resumen durable y punto de relevo;
+- los registros fechados describen la entrega de aquel momento y pueden quedar
+  superados;
+- `docs/spec-v0.2.md` es la especificación histórica en castellano, no el
+  contrato vigente de personajes, medios o sistemas sociales.
 
-Do not infer that a feature is implemented merely because an ADR or workflow
-describes it. Do not silently change an accepted decision; add or supersede an
-ADR and update the matrix, memory and user-facing documentation together.
+No deduzcas implementación porque un ADR o una hoja de ruta describa algo. No
+cambies una decisión aceptada en silencio: añade o sustituye un ADR y actualiza
+matriz, memoria y documentación pública a la vez.
 
-## Product and repository identity
+## Identidad del producto y repositorio
 
-- The definitive product name is **Tiamud**. Do not reintroduce a working title
-  or use the former repository name as product identity.
-- The canonical repository is `hyukudan/tiamud`; its default and only active
-  development branch is `main`.
-- `envy-import` is only the offline historical EnvyMUD/Merc-family compatibility
-  tool. Tiamud is a clean implementation inspired by classic MUDs, not a fork
-  of their source code.
-- The project is pre-release `0.1.0`, currently private, with no public
-  production deployment or stable protocol release.
-- Software, tests, configuration, scripts and binaries are `MIT OR
-  Apache-2.0`. Original prose, documentation, worlds and media are
-  `CC-BY-4.0`. Preserve the mixed-work boundary and asset-level provenance.
-- Never assume that historical or third-party input is redistributable.
-  Compatibility is not a license.
+- El nombre definitivo es **Tiamud**. No reintroduzcas un título provisional ni
+  el antiguo nombre del repositorio como identidad.
+- El repositorio canónico es `hyukudan/tiamud`; `main` es la rama predeterminada
+  y la única de desarrollo activa.
+- `envy-import` es solo la herramienta sin conexión para compatibilidad con
+  datos EnvyMUD/Merc. Tiamud es una implementación limpia, no un fork.
+- El proyecto privado está en prelanzamiento `0.1.0`; no existe despliegue
+  público de producción ni versión estable del protocolo.
+- Software, pruebas, configuración, scripts y binarios: `MIT OR Apache-2.0`.
+  Prosa, documentación, mundos y medios originales: `CC-BY-4.0`. Conserva la
+  frontera y la procedencia de cada recurso.
+- Nunca supongas que un input histórico o de terceros puede redistribuirse.
+  Compatibilidad no es licencia.
 
-## Current implemented baseline
+## Baseline implementado
 
-### Runtime and persistence
+### Entorno de ejecución y persistencia
 
-- Rust 2024 workspace, pinned toolchain 1.93.1, MSRV 1.88.
-- One Axum/Tokio `tiamud-server` process owns one authoritative single-writer
-  world actor and embeds the reviewed browser build and Lantern Square pack.
-- Browser and Telnet inputs become the same transport-neutral
-  `tiamud_core::PlayerAction` and enter the same authorization/domain path.
-- Mutations are serialized by the actor. A failed durable commit restores the
-  exact in-memory checkpoint; do not weaken this rollback boundary.
-- World and social updates use bounded 256-entry per-session mailboxes routed
-  directly by `SessionId`. Preserve O(S) observer fan-out, lag recovery and
-  cancellation-safe session cleanup.
-- PostgreSQL schema v8 is recommended for a new public single-host deployment.
-  SQLite schema v8 remains the zero-service local/default and legacy path.
-  Exactly one backend is authoritative; there is no dual write.
-- The offline `tiamud-migrate-postgres` command moves one current SQLite
-  snapshot into an empty PostgreSQL target transactionally.
-- Queryable state remains relational. Bounded gameplay/world snapshots are
-  opaque JSON stored as `TEXT` in both adapters; do not migrate them to `jsonb`
-  without a measured query requirement and an ADR.
-- Each committed runtime snapshot records its covered event sequence and
-  atomically retains only the covered 10,000-sequence diagnostic suffix.
-- Authentication is registered-account based across browser and Telnet.
-  Argon2id work, token/session lifetimes, connection caps and all queues are
-  bounded. Stored bearer credentials are SHA-256 digests, never raw tokens.
+- Workspace Rust 2024, toolchain 1.93.1 y MSRV 1.88.
+- Un proceso Axum/Tokio `tiamud-server` posee un actor de mundo con escritor
+  único e incluye el cliente web revisado y Lantern Square.
+- Navegador y Telnet producen la misma `tiamud_core::PlayerAction` y entran por
+  la misma autorización y dominio.
+- El actor serializa mutaciones. Un commit durable fallido restaura exactamente
+  el checkpoint en memoria; no debilites esa frontera.
+- Mundo y conversación usan buzones acotados de 256 entradas por sesión,
+  encaminados por `SessionId`. Conserva el fan-out O(S), recuperación por lag y
+  limpieza segura ante cancelación.
+- PostgreSQL esquema v9 es el perfil recomendado para un host público nuevo.
+  SQLite esquema v9 es la ruta local/predeterminada sin servicios. Se abre un
+  único sistema autoritativo; no hay doble escritura.
+- `tiamud-migrate-postgres` traslada sin conexión una instantánea SQLite actual
+  a PostgreSQL vacío en una transacción, incluidas suscripciones de canal.
+- Los datos consultables son relacionales. Las instantáneas JSON acotadas se
+  guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
+  medida y ADR.
+- Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
+  sufijo diagnóstico cubierto de 10.000 secuencias.
+- Autenticación registrada compartida entre web y Telnet. Trabajo Argon2id,
+  vidas de sesión, conexiones y colas están acotados. Solo se almacenan
+  resúmenes SHA-256 de credenciales bearer.
 
-### World, characters and gameplay
+### Mundo, personajes y juego
 
-- WorldPack v3 is canonical. Native modular authoring uses strict AreaPack v2.
-  WorldPack v2, AreaPack v1 and Envy/Merc data exist only at explicit
-  normalization/import boundaries.
-- The runtime validates and loads one complete WorldPack before opening
-  listeners. `TIAMUD_WORLD_PACK` selects an external reviewed pack; otherwise
-  the embedded pack is used.
-- `tiamud-world compose` provides deterministic offline modular composition.
-  Runtime hot loading, replacement and LRU eviction are **not implemented**.
-  ADR 0005 is the accepted future design, not a shipped feature.
-- The v3 character model is implemented end to end: lineage, optional
-  background, base and advanced class, one global XP curve, one active class,
-  class history, bounded point pools, ranked talent graphs and atomic
-  promotion.
-- `archetype` is not canonical runtime identity. Do not add a parallel legacy
-  model; normalize it at the boundary.
-- Permanent grants and requirements use closed bounded vocabularies. Capacity
-  increases never heal/refill; a newly granted resource starts empty.
-- Martial, spell and utility abilities share one definition model with bounded
-  costs, cooldowns, targets, damage/healing, resistance and statuses. Player
-  abilities also observe the one-logical-tick global cooldown.
-- NPC ability choice is deterministic and rule based with a basic-attack
-  fallback. Runtime generative AI is absent.
-- Items/equipment, combat, defeat/recovery, fixed NPC loot, logical time,
-  weather, quests, basic parties, economy, room-local `say`, online `tell` and
-  moderation are persistent across both backends. Do not broaden those claims:
-  there is no party chat, channel system, telepathy ability, item rarity or
-  random loot table.
-- Parties currently support create/invite/accept/leave/status with at most six
-  members. They do not yet provide kick/disband, follow/assist/rescue, shared
-  XP/quest credit, loot rights or distribution.
-- Account authority is separate from character progression and currently has
-  only `Player`, `Moderator` and `Admin`. Moderation and Admin role assignment
-  are available in game and durable; there is no immortal rank ladder,
-  capability matrix or general wizard command surface.
-- General use-based training is not implemented. The remaining legacy
-  post-defeat `combat` skill increment is sample-world policy debt, not a
-  general training system.
+- WorldPack v3 es canónico; AreaPack v2 es la autoría modular nativa.
+  WorldPack v2, AreaPack v1 y Envy/Merc solo entran por normalización/importación.
+- Se valida y carga un WorldPack completo antes de abrir listeners.
+  `TIAMUD_WORLD_PACK` selecciona uno externo revisado; si no, se usa el
+  embebido.
+- `tiamud-world compose` realiza composición modular determinista sin conexión.
+  Carga/reemplazo caliente y expulsión LRU **no están implementados**. ADR 0005
+  es diseño futuro.
+- El modelo v3 funciona de extremo a extremo: linaje, trasfondo opcional, clase
+  base/avanzada, XP global, clase activa, historial, reservas, talentos con
+  rango y promoción atómica.
+- `archetype` no es identidad canónica. Normalízalo en la frontera; no crees un
+  modelo heredado paralelo.
+- Concesiones y requisitos permanentes usan vocabularios cerrados y acotados.
+  Aumentar capacidad no cura/recarga; un recurso nuevo empieza vacío.
+- Habilidades marciales, mágicas y de utilidad comparten definición acotada con
+  costes, cooldown, objetivos, daño/curación, resistencia y estados. Las
+  habilidades del jugador respetan un cooldown global de un ciclo lógico.
+- Los NPC eligen habilidades de forma determinista y tienen ataque básico de
+  respaldo. No hay IA generativa en ejecución.
+- Objetos/equipo, combate, derrota/recuperación, botín fijo, tiempo, clima,
+  misiones, grupos, economía, conversación y moderación persisten en ambos
+  adaptadores. No amplíes la afirmación: no hay telepatía definida por el
+  mundo, tiers/rareza ni tablas de botín aleatorias.
+- Los grupos admiten hasta seis miembros y soportan
+  create/invite/accept/revoke/kick/transfer/disband/leave/status y `party say`
+  (`gsay`/`gtell`). No hay follow/assist/rescue, selección general de aliados,
+  XP/crédito de misión compartidos ni reparto de botín.
+- La membresía permanece al desconectar y el snapshot muestra miembros offline,
+  pero accept/revoke/kick/transfer resuelven un nombre conectado. No afirmes
+  administración dirigida de un líder/invitado/miembro desconectado.
+- La conversación incluye `say` local, `tell`, `reply` en memoria mientras el
+  destinatario siga conectado, chat de grupo y canales `general`, `newbie` y
+  `staff`. Suscripciones son durables en v9; `staff` requiere Moderator/Admin
+  al unirse, enviar y recibir. Web, Telnet y `Comm.Channel.Text` GMCP comparten
+  política. No hay correo/historial durable, shout/yell ni telepatía authored.
+- Autoridad de cuenta y progresión están separadas. Solo existen `Player`,
+  `Moderator`, `Admin`; moderación y asignación de rol son durables. No hay
+  escalera de inmortales, matriz de capacidades ni superficie general de
+  comandos wizard.
+- No existe entrenamiento general por uso. El incremento heredado de `combat`
+  tras una derrota de NPC es deuda del mundo de ejemplo.
 
-### Perception, protocol and clients
+### Percepción, protocolo y clientes
 
-- Domain actions produce persistent facts; perception then projects an
-  observer-specific scene, player state and events.
-- Stable world IDs, secret variants and hidden content stay server-side.
-  Browser/Telnet clients receive authorized, session-salted opaque IDs.
-- Text contains every playable fact. Images, audio, ANSI, terminal graphics
-  and scene composition are optional presentation only.
-- The experimental `tiamud.v1` protocol uses monotonic sequence numbers,
-  bounded request-result deduplication, heartbeats and fresh authoritative
-  recovery. It intentionally has no general event replay.
-- A recovery request returns correlated, independently 16 KiB-budgeted
-  `sync.scene` and `sync.player` frames. The browser must validate and apply
-  the matching pair atomically.
-- Every normal outbound WebSocket frame is also bounded to 16 KiB compact
-  JSON. Do not bypass frame, depth or queue limits for a new feature.
-- An oversized GMCP scene degrades to a bounded minimal structured fallback
-  and an observable metric; it must never disappear silently.
-- The Svelte 5 browser implements registered entry, the complete v3 character
-  sheet, creation, abilities, talents/promotions, inventory/equipment, map,
-  quests, party/economy/social functions and persistent accessibility/media
-  preferences.
-- Visible narrative scrollback is capped at 500 entries and command history at
-  100 entries. Preserve reader position and the unseen-entry jump behavior.
-- The Service Worker caches only a bounded same-origin shell; API, WebSocket,
-  image and audio responses are excluded.
-- Telnet is a first-class complete text client. The production byte parser is
-  the internal `tiamud-telnet-codec` crate shared with fuzzing. Preserve RFC
-  1143 negotiation, TTYPE/MTTS, NAWS, CHARSET, GMCP, MSSP, MCCP2 and opt-in
-  rich output behavior.
-- Direct Telnet TLS 1.2/1.3 is the fail-closed default. Plaintext is only the
-  exact `TIAMUD_TELNET_MODE=plaintext` development/private exception and must
-  never carry public credentials.
+- Las acciones producen hechos persistentes; percepción proyecta después
+  escena, jugador y eventos específicos del observador.
+- IDs estables, variantes secretas y contenido oculto quedan en el servidor.
+  Los clientes reciben IDs opacos y salados por sesión.
+- El texto contiene todos los hechos jugables. Imágenes, audio, ANSI, gráficos
+  y composición son solo presentación.
+- `tiamud.v1` experimental usa secuencias monótonas, deduplicación acotada,
+  heartbeats y recuperación autoritativa; no hay replay general de eventos.
+- Una recuperación devuelve `sync.scene` y `sync.player` correlacionados, cada
+  uno bajo 16 KiB; el navegador valida y aplica el par atómicamente.
+- Todo frame WebSocket normal está limitado a 16 KiB JSON compacto. No evites
+  límites de frame, profundidad o cola.
+- Una escena GMCP sobredimensionada degrada a un fallback estructurado acotado
+  y métrica observable; nunca desaparece en silencio.
+- El navegador Svelte 5 implementa acceso registrado, ficha v3, creación,
+  habilidades, talentos/promociones, inventario/equipo, mapa, misiones,
+  grupos/economía/conversación y preferencias accesibles persistentes.
+- Scrollback visible: 500; historial de comandos: 100. Conserva posición de
+  lectura y salto a entradas nuevas.
+- El Service Worker solo cachea una shell acotada del mismo origen; excluye
+  API, WebSocket, imágenes y audio.
+- Telnet es cliente textual completo. `tiamud-telnet-codec` es el parser de
+  producción compartido con fuzzing. Conserva RFC 1143, TTYPE/MTTS, NAWS,
+  CHARSET, GMCP, MSSP, MCCP2 y salida enriquecida opt-in.
+- Telnet TLS 1.2/1.3 directo es predeterminado y fail-closed. `plaintext` solo
+  es excepción explícita para desarrollo/privado y nunca debe llevar
+  credenciales públicas.
 
-### Media, scripts and optional AI
+### Medios, scripts e IA opcional
 
-- Atmospheric assets are offline, immutable and content addressed. Opaque
-  scenes prefer AVIF, then WebP/JPEG. Transparent entity sprites use alpha
-  WebP plus PNG; alpha AVIF is not yet claimed.
-- Media manifests preserve dimensions, hashes, license, provenance,
-  classification, review and localized alternative text.
-- Optional entity presentation is wired from strict authoring through
-  perception-safe server projection to deterministic browser layout. The
-  server caps the sidecar at 12 annotations/32 poses; the browser composes at
-  most 10 sprites and retains semantic overflow.
-- Combat cues are implemented for the closed NPC attack/hit/defeat mapping and
-  use projected opaque IDs. They are never inferred from prose. There is no
-  reviewed bundled demonstration sprite set, separate player composition,
-  server-emitted heal cue or post-removal defeat tombstone.
-- Screen-reader, Save-Data and multimedia-off modes fetch no sprite media;
-  reduced motion uses a static pose. Sprite layers are non-interactive.
-- Lua 5.4 hooks run in fresh capability-only VMs without filesystem, network,
-  process, native-module or debug access. Source, memory, instruction,
-  wall-time and event quotas are mandatory. A room/hook batch is capped at
-  eight modules and 50 ms aggregate wall time.
-- Editorial AI is optional, author-only and outside play. Provider `none` is
-  the default. Local endpoints must be loopback; explicitly configured remote
-  compatible endpoints must be HTTPS. Drafts never publish themselves and
-  require normal validation plus human review.
+- Recursos atmosféricos: sin conexión, inmutables y direccionados por
+  contenido. Escenas opacas: AVIF, WebP/JPEG. Sprites: WebP alfa + PNG.
+- Manifiestos conservan dimensiones, hashes, licencia, procedencia,
+  clasificación, revisión y alt localizado.
+- Presentación de entidades: autoría estricta, proyección segura y layout
+  determinista. Servidor: 12 anotaciones/32 poses; navegador: 10 sprites más
+  overflow semántico.
+- Pistas de combate: ataque/golpe/derrota de NPC con IDs opacos. No se infieren
+  de prosa. Faltan sprites demostrativos revisados, avatar separado, pista heal
+  del servidor y lápida tras derrota.
+- Modo lector, Save-Data y multimedia off no descargan sprites; movimiento
+  reducido usa pose estática. La capa no es interactiva.
+- Lua 5.4 se ejecuta en VM nueva, solo con capacidades, sin sistema de archivos,
+  red, procesos, módulos nativos ni debug. Código, memoria, instrucciones,
+  tiempo y eventos tienen cuotas; un batch admite ocho módulos y 50 ms.
+- IA editorial es opcional, solo de autoría y fuera del juego. `none` es el
+  proveedor predeterminado; endpoints locales usan loopback y remotos HTTPS.
+  Ningún borrador se publica sin validación y revisión humana.
 
-### Retained evidence snapshot
+### Evidencia histórica retenida
 
-The dated project memory records the following 2026-07-16 baseline. It is
-historical evidence for that tree, not permission to skip tests after a change:
+La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
+no autoriza saltarse pruebas tras cambios:
 
-- 409 locked Rust workspace tests and strict all-target clippy passed; the
-  focused `tiamud-server` suite contained 158 passing tests.
-- The final web invocation passed `svelte-check`, 96 unit tests in 16 files,
-  a production build and 28 combined Chromium/Firefox Playwright scenarios.
-- A disposable PostgreSQL 18.4 gate covered schema-v8 opt-in tests, verified
-  SQLite recovery, the public mover, mixed real-server gameplay and durable
-  authenticated restart.
-- The clean `2b18cfe` routing candidate passed the official 30-second mixed
-  WebSocket/real-Telnet profile with 66 rounds, 145 actions, 10/10 readiness,
-  zero domain/storage/script/transport/router errors or drops and zero live
-  mailboxes at shutdown.
-- The production Telnet parser completed a pinned 121-second cargo-fuzz
-  campaign: 3,081,428 executions with no crash, timeout, out-of-memory failure
-  or failure artifact.
-- A genuine authenticated Chromium capture against the real local server
-  exposed and closed strict-auth metadata and scene-manifest cancellation
-  defects. README hero art is explicitly decorative; the gameplay capture is
-  the product-evidence image.
+- 409 pruebas Rust bloqueadas y clippy estricto; 158 pruebas enfocadas de
+  `tiamud-server`.
+- 96 pruebas web y 28 escenarios combinados Chromium/Firefox.
+- PostgreSQL 18.4 validó **esquema v8**, restauración SQLite, mover, juego mixto
+  y reinicio autenticado. No se relabela como aceptación v9.
+- Perfil mixto de 30 s en `2b18cfe`: 66 rondas, 145 acciones, 10/10 readiness,
+  cero errores/drops y cero buzones vivos al apagar.
+- Fuzz del parser Telnet: 3.081.428 ejecuciones en 121 s sin crash, timeout, OOM
+  ni artefacto de fallo.
+- Una captura Chromium autenticada real detectó y cerró defectos de auth y
+  cancelación del manifiesto. El hero es decorativo; la captura de juego es
+  evidencia de producto.
 
-Remote GitHub Actions may still fail before running a step because of account
-billing/spending state. Always inspect the actual job; do not replace retained
-local evidence with a badge assumption.
+GitHub Actions puede fallar antes de ejecutar por facturación/límite de gasto.
+Inspecciona el job real; no conviertas una insignia en evidencia.
 
-## Non-negotiable design constraints
+## Restricciones de diseño no negociables
 
-Preserve all of these unless an accepted superseding ADR says otherwise:
+1. Un host y un servidor modular siguen siendo el despliegue de referencia. No
+   añadas Kubernetes, Redis, object storage obligatorio, microservicios o una
+   segunda autoridad como atajo.
+2. Conserva un escritor y un sistema de persistencia seleccionado. Nunca doble
+   escritura ni consistencia checkpoint/rollback debilitada.
+3. Dominio neutral al transporte. Una acción web no evita reglas de Telnet.
+4. Autorización y percepción antes de serializar. Presentación nunca revela ni
+   crea visibilidad.
+5. Texto plano completo y accesible. Perder medios/color no pierde acciones.
+6. Acota todo input/output no confiable: bytes, profundidad, cantidades, colas,
+   concurrencia, descompresión, scripts, recursos, reintentos y tiempo.
+7. Prefiere datos deterministas y transformaciones puras. Sin IA runtime,
+   guiones arbitrarios de progresión, medios remotos ni estado derivado de
+   prosa.
+8. IDs publicados son identidad durable. Tras release v3, renombrar exige
+   alias/tombstone/migración explícita.
+9. Autoridad futura de staff separada de XP, nivel, clase y talentos. Usa
+   capacidades auditables y títulos opcionales, no Angel/Dios como autorización.
+10. Antes de botín repetible/aleatorio, separa prototipo e instancia y define
+    propiedad/reparto atómicos. Cajas, llaves y tiradas pagadas quedan fuera.
+11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
+    conservando snapshot atómico.
+12. No afirmes áreas calientes actuales, producción pública, WebKit actual,
+    prueba manual de lector, soak 24 h, release pública/etiquetada ni procedencia
+    OIDC verificada.
 
-1. One ordinary host and one modular server process remain the reference
-   deployment. Do not introduce Kubernetes, Redis, mandatory object storage,
-   microservices or a second state authority as a shortcut.
-2. Keep one authoritative world writer and one selected persistence backend.
-   Never add dual writes or weaken checkpoint/rollback consistency.
-3. Keep domain behavior transport neutral. Browser structured actions must not
-   bypass the same rules used by Telnet text commands.
-4. Apply authorization and perception before serialization. Presentation may
-   annotate visible facts but must never introduce visibility or stable IDs.
-5. Keep plain text complete and accessible. Missing media, disabled colour or
-   a basic Telnet client must not lose a playable fact or action.
-6. Bound every untrusted input and output: bytes, nesting, counts, queues,
-   concurrency, decompression, scripts, assets, retries and time.
-7. Prefer deterministic data and pure transformations. Runtime AI, arbitrary
-   progression scripts, remote media and prose-derived gameplay are forbidden.
-8. Treat published content IDs as durable identity. Renames after a public v3
-   release require explicit aliases/tombstones/migrations.
-9. Keep future staff authority independent from XP, level, class and talents.
-   Prefer auditable capabilities with optional world-authored display titles;
-   do not encode Angel/Demigod/God labels as the authorization mechanism.
-10. Before repeatable or random loot, split authored item prototypes from
-    durable item instances and define atomic loot ownership/distribution. Paid
-    loot boxes, keys or premium-currency random rolls are outside the baseline.
-11. Optimize only from evidence. The next known scaling path is dirty-character
-   tracking and additive tick deltas/coalescing, while preserving the current
-   atomic runtime snapshot boundary.
-12. Do not claim current hot areas, public production, current WebKit coverage,
-    a manual screen-reader pass, a successful 24-hour soak, a public/tagged
-    release or independently verified OIDC provenance.
+## Mapa del repositorio
 
-## Repository map
-
-| Path | Responsibility |
+| Ruta | Responsabilidad |
 | --- | --- |
-| `crates/mud-core/` | Transport-independent domain, actions, progression and perception |
-| `crates/mud-server/` | Actor, auth, transports, routing, runtime loading and persistence facade |
-| `crates/persistence-sqlite/` | SQLite schema v8 and local storage implementation |
-| `crates/persistence-postgres/` | PostgreSQL schema v8, adapter and offline mover |
-| `crates/world-pack/` | WorldPack/AreaPack model, validation, composition and authoring CLI |
-| `crates/scripting/` | Quota-limited Lua capabilities |
-| `crates/asset-pipeline/` | Reviewed deterministic media compiler |
-| `crates/telnet-codec/` | Production Telnet byte parser shared with fuzzing |
-| `crates/cell-frame/` | Bounded consent-gated terminal cell rendering |
-| `crates/editorial-ai/` | Optional offline authoring adapters |
-| `crates/tiamud-admin/` | SQLite integrity, migration and recovery CLI |
-| `apps/web/` | Official Svelte browser client and Playwright coverage |
-| `clients/` | TinTin++ and Mudlet integrations |
-| `tools/envy-import/` | Offline conservative historical area importer |
-| `worlds/` | Reviewed canonical pack plus modular source areas |
-| `scripts/` | Smoke, load, soak, release and license tooling |
-| `fuzz/` | Bounded corpora, dictionaries and fuzz targets |
-| `docs/` | Specifications, ADRs, designs, operations, memory and evidence |
-| `deploy/` | Reviewed Caddy, systemd and environment examples |
+| `crates/mud-core/` | Dominio, acciones, progresión y percepción |
+| `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
+| `crates/persistence-sqlite/` | SQLite esquema v9 y almacenamiento local |
+| `crates/persistence-postgres/` | PostgreSQL esquema v9, adaptador y mover |
+| `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
+| `crates/scripting/` | Capacidades Lua con cuotas |
+| `crates/asset-pipeline/` | Compilador de medios determinista |
+| `crates/telnet-codec/` | Parser Telnet de producción compartido con fuzzing |
+| `crates/cell-frame/` | Renderizado de celdas acotado |
+| `crates/editorial-ai/` | Adaptadores opcionales de autoría |
+| `crates/tiamud-admin/` | Integridad, migración y recuperación SQLite |
+| `apps/web/` | Cliente Svelte y cobertura Playwright |
+| `clients/` | Integraciones TinTin++ y Mudlet |
+| `tools/envy-import/` | Importador histórico conservador |
+| `worlds/` | Paquete canónico y áreas fuente |
+| `scripts/` | Humo, carga, soak, release y licencias |
+| `fuzz/` | Corpus, diccionarios y targets acotados |
+| `docs/` | Especificaciones, ADR, operación, memoria y evidencia |
+| `deploy/` | Caddy, systemd y entorno revisados |
 
-## Change workflow
+## Flujo de cambios
 
-### Before editing
+### Antes de editar
 
-- Inspect `git status` and preserve all existing work. Never discard or rewrite
-  unrelated user changes.
-- Read the relevant module, tests, ADR/design, project memory and completion
-  matrix row before choosing a solution.
-- Identify the authoritative boundary first: domain, persistence, perception,
-  protocol, presentation or offline authoring.
-- Prefer focused, reversible changes. Do not use a client-only patch to mask a
-  server/domain defect.
+- Inspecciona `git status` y conserva todo trabajo existente.
+- Lee módulo, pruebas, ADR/diseño, memoria y fila de matriz relevantes.
+- Identifica primero la frontera autoritativa: dominio, persistencia,
+  percepción, protocolo, presentación o autoría.
+- Prefiere cambios enfocados y reversibles; no tapes defectos de dominio solo
+  en un cliente.
 
-### While editing
+### Durante la edición
 
-- Domain behavior belongs in `tiamud-core`; transports adapt it and must remain
-  behaviorally equivalent.
-- A persistence change normally requires SQLite and PostgreSQL parity,
-  migration/restore coverage and snapshot compatibility review.
-- A WorldPack change normally requires schema/validation, v2 normalization,
-  AreaPack composition, runtime loading, reviewed sample data and CLI tests.
-- A browser protocol change normally requires Rust serialization, strict
-  TypeScript parsing, socket/recovery tests and Playwright coverage. Check
-  Telnet/GMCP compatibility when the semantic projection changes.
-- Media changes must flow through reviewed content-addressed manifests and the
-  perception boundary. Never hand clients an arbitrary URL or hidden asset.
-- Use saturating/checked arithmetic and explicit caps for authored or runtime
-  values. Fail closed on ambiguous authority, schema or security state.
-- Update documentation claims with the implementation. When material status
-  changes, update the completion matrix, project memory and a dated project log.
+- El comportamiento vive en `tiamud-core`; transportes equivalentes lo adaptan.
+- Persistencia suele exigir paridad SQLite/PostgreSQL, migración/restore y
+  revisión de snapshot.
+- WorldPack suele exigir esquema, validador, normalización, composición,
+  loader, datos revisados y CLI tests.
+- Protocolo web suele exigir serialización Rust, parser TypeScript estricto,
+  socket/recovery, Playwright y revisión Telnet/GMCP.
+- Medios pasan por manifiestos revisados y percepción.
+- Usa aritmética checked/saturating y límites explícitos; falla cerrado ante
+  autoridad, esquema o seguridad ambiguos.
+- Un cambio material actualiza matriz, memoria y registro fechado.
 
-### Generated and sensitive files
+### Archivos generados y sensibles
 
-- Do not hand-edit `THIRD_PARTY_NOTICES.md`; regenerate/check it with
-  `scripts/generate-third-party-notices.mjs` and its policy file.
-- Preserve all complete license texts and `scripts/verify-project-licenses.sh`
-  hashes. A license boundary change requires deliberate legal-document updates.
-- Build world/media artifacts with repository tools; keep source and canonical
-  output synchronized and verify deterministic bytes.
-- Never commit `.env`, databases, operational logs, raw local reports,
-  credentials, tokens, private keys or certificates. A retained acceptance
-  report must be deliberately sanitized, verified and placed in a reviewed
-  documentation/evidence path rather than force-added from `/artifacts`.
-  `.gitignore` intentionally protects the raw classes.
+- No edites `THIRD_PARTY_NOTICES.md` a mano; regenera/verifica con el script.
+- Conserva licencias completas y hashes de verificación.
+- Construye artefactos mundo/medios con herramientas del repo.
+- Nunca comitees `.env`, bases, logs operativos, reportes locales crudos,
+  credenciales, tokens, claves o certificados.
 
-## Verification
+## Verificación
 
-Use the smallest relevant gate while iterating, then broaden in proportion to
-risk. Do not claim a pass for a command that was not run on the final tree.
+Usa la puerta mínima al iterar y amplía según riesgo. No afirmes un pase de un
+comando no ejecutado sobre el árbol final.
 
 ### Rust
 
@@ -321,20 +291,16 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Useful focused packages include `tiamud-core`, `tiamud-server`, `world-pack`,
-`tiamud-persistence-sqlite`, `tiamud-persistence-postgres`,
-`tiamud-telnet-codec`, `tiamud-asset-pipeline` and `envy-import`.
-
-PostgreSQL opt-in tests require a disposable database and explicit authority:
+PostgreSQL requiere una base desechable y autoridad explícita:
 
 ```sh
 TIAMUD_TEST_POSTGRES_URL='postgresql://.../postgres?sslmode=disable' \
   cargo test --locked -p tiamud-persistence-postgres --all-targets
 ```
 
-Never point destructive/migration tests at production data.
+Nunca apuntes pruebas destructivas a producción.
 
-### Browser
+### Navegador
 
 ```sh
 pnpm --dir apps/web install --frozen-lockfile
@@ -344,11 +310,10 @@ pnpm --dir apps/web build
 pnpm --dir apps/web e2e
 ```
 
-Use Node 24 and pnpm 11.11 when reproducing CI. The package accepts pnpm 10+.
-On the current local host, Chromium and Firefox run; WebKit lacks native
-GTK/GStreamer/media libraries. That host limitation is not a WebKit pass.
+Reproduce CI con Node 24/pnpm 11.11. El paquete acepta pnpm 10+. En el host
+actual Chromium/Firefox funcionan; WebKit carece de bibliotecas GTK/GStreamer.
 
-### Project, transport and supply chain
+### Proyecto, transporte y cadena de suministro
 
 ```sh
 bash scripts/verify-project-licenses.sh
@@ -359,11 +324,10 @@ node scripts/load.mjs --users 2 --telnet-users 1 --rounds 2 \
   --concurrency 2 --pace-ms 100
 ```
 
-The load/soak harness requires Node 24. A short profile is diagnostic evidence,
-not proof of the 24-hour acceptance criterion. The interrupted local run is not
-a successful retained report.
+El harness carga/soak necesita Node 24. Un perfil corto es diagnóstico, no
+prueba de 24 horas.
 
-### World authoring
+### Autoría
 
 ```sh
 mkdir -p build/worlds
@@ -375,13 +339,7 @@ cargo run --locked -p world-pack --bin tiamud-world -- validate \
 cargo test --locked -p world-pack
 ```
 
-Composition and publication must remain deterministic, strict,
-non-clobbering and safe against path/symlink escape.
-
 ### Fuzzing
-
-The production Telnet parser has a checked-in corpus/dictionary and a pinned
-bounded workflow. Reproduce it only with the documented toolchain and limits:
 
 ```sh
 cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
@@ -389,35 +347,29 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
   -max_len=262144 -timeout=5 -rss_limit_mb=1024 -max_total_time=120
 ```
 
-## Honest current limits
+## Límites actuales honestos
 
-Keep these visible in reviews, hand-offs and user-facing claims:
+- sin soak de 24 horas retenido;
+- sin WebKit local actual ni auditoría manual con lector real;
+- sin sprites de demostración revisados, aunque el puente técnico existe;
+- sin carga/reemplazo/LRU de áreas en ejecución;
+- sin despliegue/repo público, hito estable, release etiquetada o procedencia
+  verificada;
+- sin entrenamiento general, migración general de IDs, multiclase, sprite de
+  jugador, heal cue del servidor ni lápida de derrota;
+- fase social 1 implementada, pero sin correo/historial, shout/yell o telepatía;
+- sin perfiles de capacidades staff ni comandos generales de mundo;
+- sin tiers/rareza, prototipos repetibles, stacks, contenedores, trade o botín
+  aleatorio;
+- backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;
+- marca/dominios y derechos de terceros siguen siendo trabajo legal externo.
 
-- no successful retained 24-hour release-candidate soak;
-- no current local WebKit run and no manual real screen-reader audit;
-- no reviewed bundled sprite demonstration, although the technical bridge is
-  implemented and tested;
-- no runtime area hot-loading, replacement, checkpoint eviction or LRU;
-- no public deployment, public repository decision, stable protocol milestone,
-  tagged release or independently verified provenance bundle;
-- no general use-based training, content-ID migration framework, multiclassing,
-  player scene sprite, server heal cue or defeat tombstone;
-- no party chat, reply/global channels, offline mail or authored telepathy;
-- no immortal rank/capability ladder or world-manipulation staff commands;
-- no item rarity/tier, repeatable instances, stacks/containers/trade or random
-  loot tables;
-- PostgreSQL production backup/TLS/monitoring/recovery remain operator-specific;
-- trademark/domain clearance and third-party redistribution review remain
-  external legal work.
+Un workflow configurado no demuestra que se ejecutó. Inspecciona sus pasos.
 
-GitHub workflows are configured, but a workflow definition is not evidence of
-a successful run. Inspect the actual run and its steps; account billing may
-prevent jobs from starting before repository code executes.
+## Criterio de finalización
 
-## Completion standard
-
-A task is complete only when the requested behavior exists at every affected
-boundary, focused tests cover it, broader gates pass in proportion to risk,
-documentation is factual, generated artifacts are synchronized and `git diff`
-contains only intentional changes. Report limitations explicitly instead of
-turning planned architecture or configured CI into a completion claim.
+Una tarea termina cuando el comportamiento existe en todas las fronteras
+afectadas, hay pruebas enfocadas y puertas amplias proporcionales al riesgo, la
+documentación es factual, los artefactos generados están sincronizados y
+`git diff` contiene solo cambios intencionados. Expón límites; no conviertas una
+arquitectura prevista o CI configurada en una afirmación de implementación.

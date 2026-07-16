@@ -140,8 +140,8 @@ El proyecto proporcionará:
 ### 5.3 Perfil C: crecimiento futuro
 
 > **Estado implementado posterior.** PostgreSQL ya no pertenece a este perfil
-> futuro: el adaptador schema-v8, la selección exclusiva de backend y el
-> traslado offline desde SQLite están implementados. Es el perfil recomendado
+> futuro: el adaptador de esquema v9, la selección exclusiva del sistema de
+> persistencia y el traslado sin conexión desde SQLite están implementados. Es el perfil recomendado
 > para instalaciones públicas nuevas en un solo equipo. SQLite sigue siendo el
 > fallback sin servicios y la ruta heredada; no existe doble escritura.
 
@@ -288,7 +288,7 @@ Al aplicar presión:
 - rustls para TLS directo cuando se configure.
 - serde para serialización.
 - rusqlite con una conexión poseída por una tarea dedicada.
-- Adaptador PostgreSQL schema-v8 con conexión TLS seleccionable.
+- Adaptador PostgreSQL de esquema v9 con conexión TLS seleccionable.
 - tracing para registros y trazas.
 - clap para la interfaz de línea de comandos.
 
@@ -311,7 +311,7 @@ Si el equipo no dispone de experiencia suficiente en Rust, Go es la alternativa 
 > pública nueva en un solo equipo es PostgreSQL. El ejecutable sigue arrancando
 > sin variables con SQLite en `data/tiamud.db`, que conserva el desarrollo sin
 > servicios y la compatibilidad de instalaciones anteriores. Ambos adaptadores
-> comparten schema v8; el proceso abre exactamente uno. Esta recomendación
+> comparten el esquema v9; el proceso abre exactamente uno. Esta recomendación
 > operativa no añade Kubernetes ni cambia el actor autoritativo.
 
 SQLite fue la base de datos predeterminada de la propuesta original y sigue
@@ -662,11 +662,11 @@ El compilador detectará:
 ## 16. Paquetes WorldPack e importación
 
 > **Estado implementado posterior.** El servidor no carga esta estructura de
-> directorios: consume un único `WorldPackDocument` v2 plano y validado, sin
-> conservar una entidad `area` en el runtime ni componer varios packs durante
+> directorios: consume un único WorldPack v3 plano y validado, sin conservar
+> una entidad `area` en el entorno de ejecución ni componer varios paquetes durante
 > el arranque. La herramienta implementada `tiamud-world compose` fusiona sin
-> conexión un `WorldProjectManifest` v1 estricto y entre 1 y 256 módulos
-> `AreaPack` v1 en ese artefacto final; valida dependencias declaradas,
+> conexión un manifiesto de proyecto estricto y entre 1 y 256 módulos
+> AreaPack v2 en ese artefacto final; valida dependencias declaradas,
 > referencias y alcanzabilidad globales, colisiones de ID, recursos y límites.
 > La estructura y los comandos que siguen se conservan como propuesta
 > histórica. La [guía actual de autoría](world-authoring.md) documenta el
@@ -725,7 +725,15 @@ El importador produce un informe de:
 - MOBPROG o guiones no compatibles.
 - Referencias a contenido cuya licencia no está declarada.
 
-### 16.1 Ficha, arquetipos, evolución y habilidades implementados
+### 16.1 Entrega v2 histórica de ficha, arquetipos y habilidades
+
+> Este apartado conserva la terminología de la entrega v2 que siguió a la
+> propuesta original. El contrato vigente está en WorldPack v3: linaje,
+> trasfondo opcional, clase base/avanzada, XP global, reservas de puntos,
+> talentos con rango y promoción atómica. `archetype`/arquetipo solo se acepta
+> en límites explícitos de normalización. Véanse la
+> [especificación v0.3](spec-v0.3.md) y el
+> [diseño de progresión v3](design/character-progression-v3.md).
 
 El `gameplay` del WorldPack v2 admite de forma opcional un catálogo acotado de
 arquetipos, habilidades y repertorios de NPC. Que sean opcionales conserva los
@@ -1199,6 +1207,14 @@ Criterio:
 <a id="fase-1--vertical-browser-first-46-semanas"></a>
 
 ### Fase 1 — Vertical orientada al navegador (4–6 semanas)
+
+> **Estado implementado posterior.** Además de este corte original, la primera
+> ampliación social ya incorpora chat de grupo, revocación/expulsión/
+> transferencia/disolución, `reply` en línea y suscripciones durables a
+> `general`, `newbie` y `staff`. Navegador, texto Telnet y GMCP comparten la
+> misma política; el canal `staff` exige rol Moderator/Admin. Correo sin
+> conexión, telepatía definida por el mundo y capacidades avanzadas de staff
+> siguen pendientes.
 
 - Cuenta registrada y selección de personaje.
 - Personaje.

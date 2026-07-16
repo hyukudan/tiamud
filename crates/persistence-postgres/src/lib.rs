@@ -47,10 +47,10 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 8;
+pub const SCHEMA_VERSION: i32 = 9;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
-pub(crate) const APPLICATION_TABLES: [&str; 13] = [
+pub(crate) const APPLICATION_TABLES: [&str; 14] = [
     "accounts",
     "characters",
     "auth_sessions",
@@ -58,6 +58,7 @@ pub(crate) const APPLICATION_TABLES: [&str; 13] = [
     "world_runtime",
     "social_ignores",
     "social_blocks",
+    "social_channel_subscriptions",
     "moderation_mutes",
     "account_bans",
     "social_reports",
@@ -147,6 +148,15 @@ CREATE TABLE social_blocks (
     CHECK (owner_character_id <> target_character_id)
 );
 
+CREATE TABLE social_channel_subscriptions (
+    character_id BIGINT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL CHECK (channel IN ('general', 'newbie', 'staff')),
+    created_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
+    PRIMARY KEY (character_id, channel)
+);
+CREATE INDEX social_channel_subscriptions_channel_idx
+    ON social_channel_subscriptions (channel, character_id);
+
 CREATE TABLE moderation_mutes (
     id BIGSERIAL PRIMARY KEY,
     account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -211,7 +221,7 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 8);
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 9);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -236,6 +246,20 @@ ALTER TABLE world_runtime ADD COLUMN last_event_sequence BIGINT
 UPDATE tiamud_schema
 SET version = 8, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 7;
+"#;
+
+const UPGRADE_V8_TO_V9_SQL: &str = r#"
+CREATE TABLE social_channel_subscriptions (
+    character_id BIGINT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL CHECK (channel IN ('general', 'newbie', 'staff')),
+    created_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
+    PRIMARY KEY (character_id, channel)
+);
+CREATE INDEX social_channel_subscriptions_channel_idx
+    ON social_channel_subscriptions (channel, character_id);
+UPDATE tiamud_schema
+SET version = 9, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 8;
 "#;
 
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
@@ -276,17 +300,17 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v8 schema or migration from v6/v7"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v9 schema or migration from v6/v7/v8"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v8 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v9 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6/v7 are upgraded to v8, and v8 is verified.
+/// at the current version, v6/v7/v8 are upgraded to v9, and v9 is verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
     let report = migrate_in_transaction(&mut transaction)?;
@@ -323,8 +347,13 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
         6 => {
             client.batch_execute(UPGRADE_V6_TO_V7_SQL)?;
             client.batch_execute(UPGRADE_V7_TO_V8_SQL)?;
+            client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
         }
-        7 => client.batch_execute(UPGRADE_V7_TO_V8_SQL)?,
+        7 => {
+            client.batch_execute(UPGRADE_V7_TO_V8_SQL)?;
+            client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
+        }
+        8 => client.batch_execute(UPGRADE_V8_TO_V9_SQL)?,
         SCHEMA_VERSION => {}
         _ => return Err(SchemaError::UnsupportedVersion { found }),
     }
@@ -376,6 +405,7 @@ mod tests {
             "world_runtime",
             "social_ignores",
             "social_blocks",
+            "social_channel_subscriptions",
             "moderation_mutes",
             "account_bans",
             "social_reports",
@@ -388,7 +418,7 @@ mod tests {
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 8)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 9)"));
         assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
@@ -407,6 +437,14 @@ mod tests {
         assert!(UPGRADE_V7_TO_V8_SQL.contains("ADD COLUMN last_event_sequence"));
         assert!(!UPGRADE_V7_TO_V8_SQL.contains("DELETE FROM domain_events"));
         assert!(!UPGRADE_V7_TO_V8_SQL.contains("NOT NULL"));
+    }
+
+    #[test]
+    fn v9_upgrade_adds_only_the_closed_channel_subscription_contract() {
+        assert!(UPGRADE_V8_TO_V9_SQL.contains("CREATE TABLE social_channel_subscriptions"));
+        assert!(UPGRADE_V8_TO_V9_SQL.contains("'general', 'newbie', 'staff'"));
+        assert!(UPGRADE_V8_TO_V9_SQL.contains("PRIMARY KEY (character_id, channel)"));
+        assert!(UPGRADE_V8_TO_V9_SQL.contains("SET version = 9"));
     }
 
     #[test]

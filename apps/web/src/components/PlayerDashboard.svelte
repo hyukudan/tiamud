@@ -1,11 +1,16 @@
 <script lang="ts">
-  import type { PlayerStateSnapshot, SceneAction } from '../lib/protocol';
+  import type {
+    ActionPerformFields,
+    CommunityChannel,
+    PlayerStateSnapshot,
+    SceneAction,
+  } from '../lib/protocol';
 
   interface Props {
     value?: PlayerStateSnapshot;
     abilityTargets?: Array<{ id: string; label: string }>;
     oncommand: (command: string) => void;
-    onaction: (action: string, target: string | undefined, label: string) => void;
+    onaction: (action: string, fields: ActionPerformFields | undefined, label: string) => void;
     onability: (abilityId: string, target: string | undefined, label: string) => void;
     onpromote: (classId: string, label: string) => void;
     ontalent: (graphId: string, nodeId: string, label: string) => void;
@@ -17,6 +22,10 @@
   let socialTarget = $state('');
   let chatText = $state('');
   let partyTarget = $state('');
+  let partyMessage = $state('');
+  let replyMessage = $state('');
+  let communityChannel = $state<CommunityChannel>('general');
+  let communityMessage = $state('');
   let abilityTargetById = $state<Record<string, string>>({});
   const additionalAttributes = $derived(
     value?.character.attributes.filter((attribute) => attribute.id !== 'strength' && attribute.id !== 'defence') ?? [],
@@ -46,15 +55,21 @@
       sell: 'economy.sell',
     } as Record<string, string>)[verb.toLowerCase()];
     if (structured) {
-      onaction(structured, target, action.command);
+      onaction(structured, target ? { target } : undefined, action.command);
       return;
     }
     if (verb === 'quest' && tail.length >= 2) {
-      onaction(`quest.${tail[0]}`, tail.slice(1).join(' '), action.command);
+      onaction(`quest.${tail[0]}`, { target: tail.slice(1).join(' ') }, action.command);
       return;
     }
     if (verb === 'party' && tail.length >= 1) {
-      onaction(`party.${tail[0]}`, tail.slice(1).join(' ') || undefined, action.command);
+      const [partyAction = '', ...partyTail] = tail;
+      const argument = partyTail.join(' ');
+      onaction(
+        `party.${partyAction}`,
+        argument ? (partyAction === 'say' ? { message: argument } : { target: argument }) : undefined,
+        action.command,
+      );
       return;
     }
     oncommand(action.command);
@@ -71,8 +86,49 @@
   function invite(): void {
     const target = partyTarget.trim();
     if (!target) return;
-    onaction('party.invite', target, `party invite ${target}`);
+    onaction('party.invite', { target }, `party invite ${target}`);
     partyTarget = '';
+  }
+
+  function partyTargetAction(action: 'revoke' | 'kick' | 'transfer'): void {
+    const target = partyTarget.trim();
+    if (!target) return;
+    const actionName = {
+      revoke: 'party.revoke',
+      kick: 'party.kick',
+      transfer: 'party.transfer',
+    }[action];
+    onaction(actionName, { target }, `party ${action} ${target}`);
+  }
+
+  function sendPartyMessage(): void {
+    const message = partyMessage.trim();
+    if (!message) return;
+    onaction('party.say', { message }, 'party message');
+    partyMessage = '';
+  }
+
+  function sendReply(): void {
+    const message = replyMessage.trim();
+    if (!message) return;
+    onaction('social.reply', { message }, 'reply');
+    replyMessage = '';
+  }
+
+  function channelAction(action: 'join' | 'leave'): void {
+    const actionName = action === 'join' ? 'social.channel.join' : 'social.channel.leave';
+    onaction(actionName, { channel: communityChannel }, `${action} #${communityChannel}`);
+  }
+
+  function sendChannelMessage(): void {
+    const message = communityMessage.trim();
+    if (!message) return;
+    onaction(
+      'social.channel.say',
+      { channel: communityChannel, message },
+      `#${communityChannel} message`,
+    );
+    communityMessage = '';
   }
 
   const targetingLabel = (targeting: PlayerStateSnapshot['character']['abilities'][number]['targeting']): string => ({
@@ -454,10 +510,24 @@
           </div>
           {#if value.party.leader}
             <form class="inline-form" onsubmit={(event) => { event.preventDefault(); invite(); }}>
-              <label for="party-target">Invite adventurer</label>
-              <div><input id="party-target" maxlength="64" bind:value={partyTarget} /><button type="submit" disabled={!partyTarget.trim()}>Invite</button></div>
+              <label for="party-target">Invite or manage an adventurer</label>
+              <input id="party-target" maxlength="64" bind:value={partyTarget} aria-describedby="party-target-help" />
+              <small id="party-target-help">Enter the exact character name.</small>
+              <div class="dashboard-actions">
+                <button type="submit" disabled={!partyTarget.trim()}>Invite</button>
+                <button type="button" disabled={!partyTarget.trim()} onclick={() => partyTargetAction('revoke')}>Revoke invitation</button>
+                <button type="button" disabled={!partyTarget.trim()} onclick={() => partyTargetAction('kick')}>Remove from party</button>
+                <button type="button" disabled={!partyTarget.trim()} onclick={() => partyTargetAction('transfer')}>Transfer leadership</button>
+              </div>
             </form>
+            {#if !value.party.actions.some((action) => action.command.trim().toLowerCase() === 'party disband')}
+              <button type="button" onclick={() => onaction('party.disband', undefined, 'party disband')}>Disband party</button>
+            {/if}
           {/if}
+          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendPartyMessage(); }}>
+            <label for="party-message">Message to party</label>
+            <div><input id="party-message" maxlength="512" bind:value={partyMessage} /><button type="submit" disabled={!partyMessage.trim()}>Send to party</button></div>
+          </form>
         {:else}
           <p class="empty-copy">You are travelling alone.</p>
           <button type="button" onclick={() => onaction('party.create', undefined, 'party create')}>Create party</button>
@@ -525,7 +595,7 @@
               {#if !adventurer.selfCharacter}
                 <div class="dashboard-actions">
                   <button type="button" onclick={() => (socialTarget = adventurer.name)}>Tell</button>
-                  <button type="button" onclick={() => onaction('social.ignore', adventurer.name, `ignore ${adventurer.name}`)}>Ignore</button>
+                  <button type="button" onclick={() => onaction('social.ignore', { target: adventurer.name }, `ignore ${adventurer.name}`)}>Ignore</button>
                 </div>
               {/if}
             </li>
@@ -537,12 +607,38 @@
           <label for="chat-text">Message</label>
           <div><input id="chat-text" maxlength="512" bind:value={chatText} /><button type="submit" disabled={!chatText.trim()}>Send</button></div>
         </form>
+        <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendReply(); }}>
+          <label for="reply-text">Reply to your latest direct message</label>
+          <div><input id="reply-text" maxlength="512" bind:value={replyMessage} /><button type="submit" disabled={!replyMessage.trim()}>Reply</button></div>
+        </form>
+        <section class="channel-controls" aria-labelledby="channel-controls-title">
+          <div class="panel-heading-row">
+            <h3 id="channel-controls-title">World channels</h3>
+            <button type="button" onclick={() => onaction('social.channel.list', undefined, 'list channels')}>Refresh channels</button>
+          </div>
+          <div class="inline-form">
+            <label for="community-channel">Channel</label>
+            <select id="community-channel" bind:value={communityChannel}>
+              <option value="general">General</option>
+              <option value="newbie">Newbie</option>
+              <option value="staff">Staff (moderators only)</option>
+            </select>
+            <div class="dashboard-actions">
+              <button type="button" onclick={() => channelAction('join')}>Join channel</button>
+              <button type="button" onclick={() => channelAction('leave')}>Leave channel</button>
+            </div>
+          </div>
+          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendChannelMessage(); }}>
+            <label for="channel-message">Message to #{communityChannel}</label>
+            <div><input id="channel-message" maxlength="512" bind:value={communityMessage} /><button type="submit" disabled={!communityMessage.trim()}>Send to channel</button></div>
+          </form>
+        </section>
         <form class="inline-form" onsubmit={(event) => event.preventDefault()}>
           <label for="ignore-target">Manage ignore list</label>
           <div>
             <input id="ignore-target" maxlength="64" bind:value={socialTarget} />
-            <button type="button" disabled={!socialTarget.trim()} onclick={() => onaction('social.ignore', socialTarget.trim(), `ignore ${socialTarget.trim()}`)}>Ignore</button>
-            <button type="button" disabled={!socialTarget.trim()} onclick={() => onaction('social.unignore', socialTarget.trim(), `unignore ${socialTarget.trim()}`)}>Unignore</button>
+            <button type="button" disabled={!socialTarget.trim()} onclick={() => onaction('social.ignore', { target: socialTarget.trim() }, `ignore ${socialTarget.trim()}`)}>Ignore</button>
+            <button type="button" disabled={!socialTarget.trim()} onclick={() => onaction('social.unignore', { target: socialTarget.trim() }, `unignore ${socialTarget.trim()}`)}>Unignore</button>
           </div>
         </form>
       </div>

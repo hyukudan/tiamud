@@ -84,10 +84,23 @@ describe('protocol messages', () => {
   });
 
   it('creates structured actions, sync requests, and heartbeat acknowledgements', () => {
-    expect(createActionPerform('item.take', 'lantern', 'request-2')).toEqual({
+    expect(createActionPerform('item.take', { target: 'lantern' }, 'request-2')).toEqual({
       v: 1,
       type: 'action.perform',
       data: { requestId: 'request-2', action: 'item.take', target: 'lantern' },
+    });
+    expect(createActionPerform('party.say', { message: 'Hold the bridge.' }, 'request-party')).toMatchObject({
+      data: { requestId: 'request-party', action: 'party.say', message: 'Hold the bridge.' },
+    });
+    expect(createActionPerform(
+      'social.channel.say',
+      { channel: 'newbie', message: 'Where is the market?' },
+      'request-channel',
+    )).toMatchObject({
+      data: {
+        requestId: 'request-channel', action: 'social.channel.say',
+        channel: 'newbie', message: 'Where is the market?',
+      },
     });
     expect(createSyncRequest(12)).toEqual({
       v: 1,
@@ -905,6 +918,24 @@ describe('protocol messages', () => {
     });
     if (additive?.type !== 'chat.message') throw new Error('expected chat message');
     expect('blocked' in additive.data).toBe(false);
+
+    for (const channel of ['party', 'general', 'newbie', 'staff'] as const) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1,
+        type: 'chat.message',
+        seq: 20,
+        data: { channel, sender: 'Aria', text: 'The lantern is lit.' },
+      }))).toMatchObject({
+        type: 'chat.message',
+        data: { channel, sender: 'Aria', text: 'The lantern is lit.' },
+      });
+    }
+    expect(parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'chat.message',
+      seq: 21,
+      data: { channel: 'trade', sender: 'Aria', text: 'Lantern for sale.' },
+    }))).toBeUndefined();
   });
 
   it('ignores additive server fields in scene, player, message, and split sync envelopes', () => {

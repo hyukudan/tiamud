@@ -234,11 +234,18 @@ export interface MediaStopData {
   channel?: 'music' | 'ambience' | 'effects';
 }
 
-export interface ChatMessageData {
-  channel: 'say' | 'tell';
+export type CommunityChannel = 'general' | 'newbie' | 'staff';
+
+export type SocialMessageChannel = 'say' | 'tell' | 'party' | CommunityChannel;
+
+export interface SocialMessageData {
+  channel: SocialMessageChannel;
   sender: string;
   text: string;
 }
+
+/** Retained for the v1 `chat.message` envelope name. */
+export type ChatMessageData = SocialMessageData;
 
 export interface PlayerCharacterSnapshot {
   name: string;
@@ -459,12 +466,17 @@ export type CommandSubmit = Envelope<
   }
 >;
 
+export interface ActionPerformFields {
+  target?: string;
+  message?: string;
+  channel?: CommunityChannel;
+}
+
 export type ActionPerform = Envelope<
   'action.perform',
-  {
+  ActionPerformFields & {
     requestId: string;
     action: string;
-    target?: string;
     abilityId?: string;
     classId?: string;
     graphId?: string;
@@ -1701,7 +1713,14 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const sender = stringOrUndefined(candidate.data.sender);
       const text = stringOrUndefined(candidate.data.text);
       if (
-        (channel !== 'say' && channel !== 'tell') ||
+        (
+          channel !== 'say' &&
+          channel !== 'tell' &&
+          channel !== 'party' &&
+          channel !== 'general' &&
+          channel !== 'newbie' &&
+          channel !== 'staff'
+        ) ||
         !sender ||
         !text ||
         sender.length > 64 ||
@@ -1763,13 +1782,13 @@ export function createCommandSubmit(command: string, requestId: string): Command
 
 export function createActionPerform(
   action: string,
-  target: string | undefined,
+  fields: ActionPerformFields | undefined,
   requestId: string,
 ): ActionPerform {
   return {
     v: PROTOCOL_VERSION,
     type: 'action.perform',
-    data: { requestId, action, ...(target === undefined ? {} : { target }) },
+    data: { requestId, action, ...fields },
   };
 }
 

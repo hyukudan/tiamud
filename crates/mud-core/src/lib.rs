@@ -112,6 +112,10 @@ pub enum PartyAction {
     Create,
     Invite(String),
     Accept(String),
+    Revoke(String),
+    Kick(String),
+    Transfer(String),
+    Disband,
     Leave,
     Status,
 }
@@ -146,11 +150,49 @@ impl AccountRole {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocialChannelName {
+    General,
+    Newbie,
+    Staff,
+}
+
+impl SocialChannelName {
+    pub const ALL: [Self; 3] = [Self::General, Self::Newbie, Self::Staff];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Newbie => "newbie",
+            Self::Staff => "staff",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "general" | "gossip" => Some(Self::General),
+            "newbie" | "help" => Some(Self::Newbie),
+            "staff" | "wiznet" => Some(Self::Staff),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SocialAction {
     Say(String),
+    PartySay(String),
     Tell {
         target: String,
+        message: String,
+    },
+    Reply(String),
+    ChannelList,
+    ChannelJoin(SocialChannelName),
+    ChannelLeave(SocialChannelName),
+    ChannelSay {
+        channel: SocialChannelName,
         message: String,
     },
     Who,
@@ -251,6 +293,7 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     match normalised.as_str() {
         "party create" => return Ok(PlayerAction::Party(PartyAction::Create)),
+        "party disband" => return Ok(PlayerAction::Party(PartyAction::Disband)),
         "party leave" => return Ok(PlayerAction::Party(PartyAction::Leave)),
         "party" | "party status" => return Ok(PlayerAction::Party(PartyAction::Status)),
         "quest" | "quests" | "quest list" => {
@@ -265,6 +308,9 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
             PartyAction::Invite as fn(String) -> PartyAction,
         ),
         ("party accept", PartyAction::Accept),
+        ("party revoke", PartyAction::Revoke),
+        ("party kick", PartyAction::Kick),
+        ("party transfer", PartyAction::Transfer),
     ] {
         if normalised == command {
             return Err(ParseActionError::MissingTarget { command: "party" });
@@ -302,6 +348,16 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     if normalised == "say" {
         return Err(ParseActionError::MissingTarget { command: "say" });
     }
+    for command in ["party say", "gsay", "gtell"] {
+        if let Some(message) = command_tail_phrase(input, command) {
+            return Ok(PlayerAction::Social(SocialAction::PartySay(message)));
+        }
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget {
+                command: "party say",
+            });
+        }
+    }
     if let Some(rest) = command_tail(input, "tell") {
         let Some((target, message)) = rest.split_once(char::is_whitespace) else {
             return Err(ParseActionError::MissingTarget { command: "tell" });
@@ -317,6 +373,80 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if normalised == "tell" {
         return Err(ParseActionError::MissingTarget { command: "tell" });
+    }
+    if let Some(message) = command_tail(input, "reply") {
+        return Ok(PlayerAction::Social(SocialAction::Reply(message)));
+    }
+    if normalised == "reply" {
+        return Err(ParseActionError::MissingTarget { command: "reply" });
+    }
+    if matches!(
+        normalised.as_str(),
+        "channel" | "channels" | "channel list" | "channels list"
+    ) {
+        return Ok(PlayerAction::Social(SocialAction::ChannelList));
+    }
+    for (command, join) in [("channel join", true), ("channel leave", false)] {
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget { command: "channel" });
+        }
+        if let Some(channel) = command_tail_phrase(input, command) {
+            let channel = SocialChannelName::parse(&channel)
+                .ok_or_else(|| ParseActionError::Unknown(input.trim().to_owned()))?;
+            return Ok(PlayerAction::Social(if join {
+                SocialAction::ChannelJoin(channel)
+            } else {
+                SocialAction::ChannelLeave(channel)
+            }));
+        }
+    }
+    if let Some(rest) = command_tail_phrase(input, "channel say") {
+        let Some((channel, message)) = rest.split_once(char::is_whitespace) else {
+            return Err(ParseActionError::MissingTarget { command: "channel" });
+        };
+        let channel = SocialChannelName::parse(channel)
+            .ok_or_else(|| ParseActionError::Unknown(input.trim().to_owned()))?;
+        let message = message.trim();
+        if message.is_empty() {
+            return Err(ParseActionError::MissingTarget { command: "channel" });
+        }
+        return Ok(PlayerAction::Social(SocialAction::ChannelSay {
+            channel,
+            message: message.to_owned(),
+        }));
+    }
+    if normalised == "channel say" {
+        return Err(ParseActionError::MissingTarget { command: "channel" });
+    }
+    if let Some(rest) = command_tail(input, "channel") {
+        let Some((channel, message)) = rest.split_once(char::is_whitespace) else {
+            return Err(ParseActionError::MissingTarget { command: "channel" });
+        };
+        let channel = SocialChannelName::parse(channel)
+            .ok_or_else(|| ParseActionError::Unknown(input.trim().to_owned()))?;
+        let message = message.trim();
+        if message.is_empty() {
+            return Err(ParseActionError::MissingTarget { command: "channel" });
+        }
+        return Ok(PlayerAction::Social(SocialAction::ChannelSay {
+            channel,
+            message: message.to_owned(),
+        }));
+    }
+    for (command, channel) in [
+        ("gossip", SocialChannelName::General),
+        ("newbie", SocialChannelName::Newbie),
+        ("wiznet", SocialChannelName::Staff),
+    ] {
+        if let Some(message) = command_tail(input, command) {
+            return Ok(PlayerAction::Social(SocialAction::ChannelSay {
+                channel,
+                message,
+            }));
+        }
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget { command: "channel" });
+        }
     }
     for (command, constructor) in [
         ("ignore", SocialAction::Ignore as fn(String) -> SocialAction),
@@ -1648,6 +1778,8 @@ pub enum AdventureEvent {
     PartyChanged {
         character_id: CharacterId,
         party_id: u64,
+        #[serde(default)]
+        audience: Vec<CharacterId>,
         summary: String,
     },
     QuestChanged {
@@ -4693,12 +4825,14 @@ impl World {
                         invitations: BTreeMap::new(),
                     },
                 );
+                let audience = self.party_member_audience(party_id, &[]);
                 self.finish_adventure_action(
                     session,
                     "You create an adventuring party.\r\n".into(),
                     AdventureEvent::PartyChanged {
                         character_id: actor_id,
                         party_id,
+                        audience,
                         summary: format!("{actor_name} creates an adventuring party."),
                     },
                 )
@@ -4731,12 +4865,16 @@ impl World {
                 party
                     .invitations
                     .insert(target_id, self.logical_tick.saturating_add(20));
+                let mut audience = vec![actor_id, target_id];
+                audience.sort_unstable();
+                audience.dedup();
                 self.finish_adventure_action(
                     session,
                     format!("You invite {target} to your party.\r\n"),
                     AdventureEvent::PartyChanged {
                         character_id: actor_id,
                         party_id,
+                        audience,
                         summary: format!("{actor_name} sends a party invitation."),
                     },
                 )
@@ -4767,13 +4905,134 @@ impl World {
                 party.invitations.remove(&actor_id);
                 party.members.push(actor_id);
                 party.members.sort_unstable();
+                let audience = self.party_member_audience(party_id, &[]);
                 self.finish_adventure_action(
                     session,
                     format!("You join {leader}'s party.\r\n"),
                     AdventureEvent::PartyChanged {
                         character_id: actor_id,
                         party_id,
+                        audience,
                         summary: format!("{actor_name} joins an adventuring party."),
+                    },
+                )
+            }
+            PartyAction::Revoke(target) => {
+                let party_id = self
+                    .party_for_member(actor_id)
+                    .ok_or(WorldError::PartyUnavailable)?;
+                if self.adventure.parties[&party_id].leader != actor_id {
+                    return Err(WorldError::PartyForbidden);
+                }
+                let target_id = self.resolve_connected_character(&target)?;
+                let removed = self
+                    .adventure
+                    .parties
+                    .get_mut(&party_id)
+                    .ok_or(WorldError::PartyUnavailable)?
+                    .invitations
+                    .remove(&target_id)
+                    .is_some();
+                if !removed {
+                    return Err(WorldError::PartyUnavailable);
+                }
+                let mut audience = vec![actor_id, target_id];
+                audience.sort_unstable();
+                audience.dedup();
+                self.finish_adventure_action(
+                    session,
+                    format!("You revoke {target}'s party invitation.\r\n"),
+                    AdventureEvent::PartyChanged {
+                        character_id: actor_id,
+                        party_id,
+                        audience,
+                        summary: format!("{actor_name} revokes a party invitation."),
+                    },
+                )
+            }
+            PartyAction::Kick(target) => {
+                let party_id = self
+                    .party_for_member(actor_id)
+                    .ok_or(WorldError::PartyUnavailable)?;
+                if self.adventure.parties[&party_id].leader != actor_id {
+                    return Err(WorldError::PartyForbidden);
+                }
+                let target_id = self.resolve_connected_character(&target)?;
+                if target_id == actor_id
+                    || !self.adventure.parties[&party_id]
+                        .members
+                        .contains(&target_id)
+                {
+                    return Err(WorldError::PartyUnavailable);
+                }
+                let party = self
+                    .adventure
+                    .parties
+                    .get_mut(&party_id)
+                    .ok_or(WorldError::PartyUnavailable)?;
+                party.members.retain(|member| *member != target_id);
+                party.invitations.remove(&target_id);
+                let audience = self.party_member_audience(party_id, &[target_id]);
+                self.finish_adventure_action(
+                    session,
+                    format!("You remove {target} from your party.\r\n"),
+                    AdventureEvent::PartyChanged {
+                        character_id: actor_id,
+                        party_id,
+                        audience,
+                        summary: format!("{actor_name} removes a companion from the party."),
+                    },
+                )
+            }
+            PartyAction::Transfer(target) => {
+                let party_id = self
+                    .party_for_member(actor_id)
+                    .ok_or(WorldError::PartyUnavailable)?;
+                if self.adventure.parties[&party_id].leader != actor_id {
+                    return Err(WorldError::PartyForbidden);
+                }
+                let target_id = self.resolve_connected_character(&target)?;
+                if target_id == actor_id
+                    || !self.adventure.parties[&party_id]
+                        .members
+                        .contains(&target_id)
+                {
+                    return Err(WorldError::PartyUnavailable);
+                }
+                self.adventure
+                    .parties
+                    .get_mut(&party_id)
+                    .ok_or(WorldError::PartyUnavailable)?
+                    .leader = target_id;
+                let audience = self.party_member_audience(party_id, &[]);
+                self.finish_adventure_action(
+                    session,
+                    format!("You transfer party leadership to {target}.\r\n"),
+                    AdventureEvent::PartyChanged {
+                        character_id: actor_id,
+                        party_id,
+                        audience,
+                        summary: format!("{actor_name} transfers party leadership."),
+                    },
+                )
+            }
+            PartyAction::Disband => {
+                let party_id = self
+                    .party_for_member(actor_id)
+                    .ok_or(WorldError::PartyUnavailable)?;
+                if self.adventure.parties[&party_id].leader != actor_id {
+                    return Err(WorldError::PartyForbidden);
+                }
+                let audience = self.party_event_audience(party_id, &[]);
+                self.adventure.parties.remove(&party_id);
+                self.finish_adventure_action(
+                    session,
+                    "You disband your party.\r\n".into(),
+                    AdventureEvent::PartyChanged {
+                        character_id: actor_id,
+                        party_id,
+                        audience,
+                        summary: format!("{actor_name} disbands an adventuring party."),
                     },
                 )
             }
@@ -4781,6 +5040,7 @@ impl World {
                 let party_id = self
                     .party_for_member(actor_id)
                     .ok_or(WorldError::PartyUnavailable)?;
+                let audience = self.party_event_audience(party_id, &[actor_id]);
                 let mut remove_party = false;
                 {
                     let party = self
@@ -4805,6 +5065,7 @@ impl World {
                     AdventureEvent::PartyChanged {
                         character_id: actor_id,
                         party_id,
+                        audience,
                         summary: format!("{actor_name} leaves an adventuring party."),
                     },
                 )
@@ -5099,6 +5360,39 @@ impl World {
             .parties
             .iter()
             .find_map(|(id, party)| party.members.contains(&character_id).then_some(*id))
+    }
+
+    fn party_event_audience(&self, party_id: u64, additional: &[CharacterId]) -> Vec<CharacterId> {
+        let mut audience = self
+            .adventure
+            .parties
+            .get(&party_id)
+            .map(|party| {
+                party
+                    .members
+                    .iter()
+                    .chain(party.invitations.keys())
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        audience.extend_from_slice(additional);
+        audience.sort_unstable();
+        audience.dedup();
+        audience
+    }
+
+    fn party_member_audience(&self, party_id: u64, additional: &[CharacterId]) -> Vec<CharacterId> {
+        let mut audience = self
+            .adventure
+            .parties
+            .get(&party_id)
+            .map(|party| party.members.clone())
+            .unwrap_or_default();
+        audience.extend_from_slice(additional);
+        audience.sort_unstable();
+        audience.dedup();
+        audience
     }
 
     fn resolve_connected_character(&self, query: &str) -> Result<CharacterId, WorldError> {
@@ -6178,6 +6472,28 @@ impl World {
             .collect()
     }
 
+    /// Server-internal connected members of the caller's durable party. The
+    /// result includes the caller and never exposes party IDs to transports.
+    pub fn connected_party_members(
+        &self,
+        session: SessionId,
+    ) -> Result<Vec<ConnectedCharacter>, WorldError> {
+        let character = self.character(session)?;
+        let party_id = self
+            .party_for_member(character.id)
+            .ok_or(WorldError::PartyUnavailable)?;
+        let party = self
+            .adventure
+            .parties
+            .get(&party_id)
+            .ok_or(WorldError::PartyUnavailable)?;
+        Ok(self
+            .connected_characters()?
+            .into_iter()
+            .filter(|candidate| party.members.contains(&candidate.character_id))
+            .collect())
+    }
+
     pub fn current_scene(&self, session: SessionId) -> Result<SceneView, WorldError> {
         self.scene_for(session)
     }
@@ -6343,6 +6659,7 @@ impl World {
 
         let party = self.party_for_member(character.id).map(|party_id| {
             let party = &self.adventure.parties[&party_id];
+            let is_leader = party.leader == character.id;
             let members = party
                 .members
                 .iter()
@@ -6355,13 +6672,20 @@ impl World {
                     online: self.session_for_character(*member).is_some(),
                 })
                 .collect();
+            let mut actions = vec![SceneAction {
+                label: "Leave party".into(),
+                command: "party leave".into(),
+            }];
+            if is_leader {
+                actions.push(SceneAction {
+                    label: "Disband party".into(),
+                    command: "party disband".into(),
+                });
+            }
             PartyView {
-                leader: party.leader == character.id,
+                leader: is_leader,
                 members,
-                actions: vec![SceneAction {
-                    label: "Leave party".into(),
-                    command: "party leave".into(),
-                }],
+                actions,
             }
         });
         let mut party_invites = self
@@ -6699,6 +7023,7 @@ impl World {
                     character_id,
                     party_id,
                     summary,
+                    ..
                 } => (
                     ViewEventKind::Adventure,
                     opaque_id(observer.salt, "character", &character_id.0.to_string()),
@@ -6943,8 +7268,12 @@ impl World {
                 base && npc_visible && item_visible
             }
             DomainEvent::Adventure { event } => match event {
-                AdventureEvent::PartyChanged { character_id, .. }
-                | AdventureEvent::QuestChanged { character_id, .. }
+                AdventureEvent::PartyChanged {
+                    character_id,
+                    audience,
+                    ..
+                } => *character_id == viewer.id || audience.contains(&viewer.id),
+                AdventureEvent::QuestChanged { character_id, .. }
                 | AdventureEvent::EconomyChanged { character_id, .. } => *character_id == viewer.id,
                 AdventureEvent::WeatherChanged { .. } => true,
             },
@@ -8330,6 +8659,63 @@ mod tests {
                 message: "Meet Me There".into(),
             }))
         );
+        assert_eq!(
+            parse_action("party say Hold the North Gate!"),
+            Ok(PlayerAction::Social(SocialAction::PartySay(
+                "Hold the North Gate!".into()
+            )))
+        );
+        assert_eq!(
+            parse_action("reply I Am On My Way"),
+            Ok(PlayerAction::Social(SocialAction::Reply(
+                "I Am On My Way".into()
+            )))
+        );
+        assert_eq!(
+            parse_action("channel list"),
+            Ok(PlayerAction::Social(SocialAction::ChannelList))
+        );
+        assert_eq!(
+            parse_action("channel join newbie"),
+            Ok(PlayerAction::Social(SocialAction::ChannelJoin(
+                SocialChannelName::Newbie
+            )))
+        );
+        assert_eq!(
+            parse_action("channel leave general"),
+            Ok(PlayerAction::Social(SocialAction::ChannelLeave(
+                SocialChannelName::General
+            )))
+        );
+        assert_eq!(
+            parse_action("channel say general Keep This Case"),
+            Ok(PlayerAction::Social(SocialAction::ChannelSay {
+                channel: SocialChannelName::General,
+                message: "Keep This Case".into(),
+            }))
+        );
+        assert_eq!(
+            parse_action("party revoke Aria"),
+            Ok(PlayerAction::Party(PartyAction::Revoke("Aria".into())))
+        );
+        assert_eq!(
+            parse_action("party kick Aria"),
+            Ok(PlayerAction::Party(PartyAction::Kick("Aria".into())))
+        );
+        assert_eq!(
+            parse_action("party transfer Aria"),
+            Ok(PlayerAction::Party(PartyAction::Transfer("Aria".into())))
+        );
+        assert_eq!(
+            parse_action("party disband"),
+            Ok(PlayerAction::Party(PartyAction::Disband))
+        );
+        for command in ["party say", "reply", "channel join", "channel say general"] {
+            assert!(matches!(
+                parse_action(command),
+                Err(ParseActionError::MissingTarget { .. })
+            ));
+        }
         assert_eq!(
             parse_action("mute Griefer 2h repeated flooding"),
             Ok(PlayerAction::Social(SocialAction::Mute {
@@ -9885,15 +10271,51 @@ mod tests {
         world
             .apply(
                 leader_session,
+                PlayerAction::Party(PartyAction::Invite("Bram".into())),
+            )
+            .unwrap();
+        let invited_member = world
+            .apply(
+                leader_session,
                 PlayerAction::Party(PartyAction::Invite("Aria".into())),
             )
             .unwrap();
-        world
+        assert!(
+            world
+                .project_event(outsider_session, &invited_member.domain_events[0])
+                .unwrap()
+                .is_none()
+        );
+        let revoked = world
+            .apply(
+                leader_session,
+                PlayerAction::Party(PartyAction::Revoke("Bram".into())),
+            )
+            .unwrap();
+        assert!(
+            world
+                .project_event(outsider_session, &revoked.domain_events[0])
+                .unwrap()
+                .is_some()
+        );
+        let accepted = world
             .apply(
                 member_session,
                 PlayerAction::Party(PartyAction::Accept("Tester".into())),
             )
             .unwrap();
+        assert!(
+            world
+                .project_event(leader_session, &accepted.domain_events[0])
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            world
+                .project_event(outsider_session, &accepted.domain_events[0])
+                .unwrap()
+                .is_none()
+        );
         assert!(matches!(
             world.apply(
                 member_session,
@@ -9912,6 +10334,64 @@ mod tests {
         let json = serde_json::to_string(&world.runtime_snapshot()).unwrap();
         let restored: WorldRuntimeSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.adventure.parties.len(), 1);
+
+        assert!(matches!(
+            world.apply(
+                member_session,
+                PlayerAction::Party(PartyAction::Kick("Tester".into()))
+            ),
+            Err(WorldError::PartyForbidden)
+        ));
+        world
+            .apply(
+                leader_session,
+                PlayerAction::Party(PartyAction::Transfer("Aria".into())),
+            )
+            .unwrap();
+        assert!(
+            world
+                .player_state_view(member_session)
+                .unwrap()
+                .party
+                .unwrap()
+                .leader
+        );
+        assert!(matches!(
+            world.apply(
+                leader_session,
+                PlayerAction::Party(PartyAction::Kick("Aria".into()))
+            ),
+            Err(WorldError::PartyForbidden)
+        ));
+        let kicked = world
+            .apply(
+                member_session,
+                PlayerAction::Party(PartyAction::Kick("Tester".into())),
+            )
+            .unwrap();
+        assert!(
+            world
+                .project_event(leader_session, &kicked.domain_events[0])
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            world
+                .player_state_view(leader_session)
+                .unwrap()
+                .party
+                .is_none()
+        );
+        world
+            .apply(member_session, PlayerAction::Party(PartyAction::Disband))
+            .unwrap();
+        assert!(
+            world
+                .player_state_view(member_session)
+                .unwrap()
+                .party
+                .is_none()
+        );
     }
 
     #[test]

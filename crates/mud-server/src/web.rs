@@ -31,7 +31,8 @@ use std::{
 };
 use tiamud_core::{
     AccountRole, CharacterId, CharacterSnapshot, EconomyAction, PartyAction, PlayerAction,
-    PlayerStateView, QuestAction, SceneView, SessionId, SocialAction, WorldError, parse_action,
+    PlayerStateView, QuestAction, SceneView, SessionId, SocialAction, SocialChannelName,
+    WorldError, parse_action,
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
@@ -196,6 +197,8 @@ struct ActionPerformData {
     target: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    channel: Option<SocialChannelName>,
     #[serde(default)]
     duration_seconds: Option<u64>,
     #[serde(default)]
@@ -1922,7 +1925,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 return Err(ClientMessageError::InvalidEnvelope);
             }
             let signature = format!(
-                "action:{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{}\0{:?}",
+                "action:{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{:?}",
                 data.action,
                 data.ability_id.as_deref().unwrap_or_default(),
                 data.class_id.as_deref().unwrap_or_default(),
@@ -1930,6 +1933,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 data.node_id.as_deref().unwrap_or_default(),
                 data.target.as_deref().unwrap_or_default(),
                 data.message.as_deref().unwrap_or_default(),
+                data.channel,
                 data.duration_seconds,
                 data.reason.as_deref().unwrap_or_default(),
                 data.role,
@@ -2034,6 +2038,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             && data.graph_id.is_none()
             && data.node_id.is_none()
             && data.message.is_none()
+            && data.channel.is_none()
             && data.duration_seconds.is_none()
             && data.reason.is_none()
             && data.role.is_none())
@@ -2074,6 +2079,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 || data.graph_id.is_some()
                 || data.node_id.is_some()
                 || data.message.is_some()
+                || data.channel.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -2095,6 +2101,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 || data.graph_id.is_some()
                 || data.node_id.is_some()
                 || data.message.is_some()
+                || data.channel.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -2111,6 +2118,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 || data.ability_id.is_some()
                 || data.class_id.is_some()
                 || data.message.is_some()
+                || data.channel.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -2131,6 +2139,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "item.equip" => gameplay_target().map(PlayerAction::Equip),
         "item.unequip" => gameplay_target().map(PlayerAction::Unequip),
         "party.create" => exact_no_fields().map(|()| PlayerAction::Party(PartyAction::Create)),
+        "party.disband" => exact_no_fields().map(|()| PlayerAction::Party(PartyAction::Disband)),
         "party.leave" => exact_no_fields().map(|()| PlayerAction::Party(PartyAction::Leave)),
         "party.status" => exact_no_fields().map(|()| PlayerAction::Party(PartyAction::Status)),
         "party.invite" => {
@@ -2138,6 +2147,32 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "party.accept" => {
             gameplay_target().map(|target| PlayerAction::Party(PartyAction::Accept(target)))
+        }
+        "party.revoke" => {
+            gameplay_target().map(|target| PlayerAction::Party(PartyAction::Revoke(target)))
+        }
+        "party.kick" => {
+            gameplay_target().map(|target| PlayerAction::Party(PartyAction::Kick(target)))
+        }
+        "party.transfer" => {
+            gameplay_target().map(|target| PlayerAction::Party(PartyAction::Transfer(target)))
+        }
+        "party.say" => {
+            no_target()?;
+            if has_progression_fields()
+                || data.ability_id.is_some()
+                || data.channel.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
+                return Err("Party say has unexpected fields.".to_owned());
+            }
+            data.message
+                .clone()
+                .map(SocialAction::PartySay)
+                .map(PlayerAction::Social)
+                .ok_or_else(|| "Party say requires message.".to_owned())
         }
         "quest.list" => exact_no_fields().map(|()| PlayerAction::Quest(QuestAction::List)),
         "quest.status" => exact_no_fields().map(|()| PlayerAction::Quest(QuestAction::Status)),
@@ -2163,6 +2198,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             no_target()?;
             if has_progression_fields()
                 || data.ability_id.is_some()
+                || data.channel.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -2179,6 +2215,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             let target = social_target()?;
             if has_progression_fields()
                 || data.ability_id.is_some()
+                || data.channel.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -2191,11 +2228,74 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 .map(PlayerAction::Social)
                 .ok_or_else(|| "Social tell requires message.".to_owned())
         }
+        "social.reply" => {
+            no_target()?;
+            if has_progression_fields()
+                || data.ability_id.is_some()
+                || data.channel.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
+                return Err("Social reply has unexpected fields.".to_owned());
+            }
+            data.message
+                .clone()
+                .map(SocialAction::Reply)
+                .map(PlayerAction::Social)
+                .ok_or_else(|| "Social reply requires message.".to_owned())
+        }
+        "social.channel.list" => {
+            exact_no_fields().map(|()| PlayerAction::Social(SocialAction::ChannelList))
+        }
+        "social.channel.join" | "social.channel.leave" => {
+            no_target()?;
+            if has_progression_fields()
+                || data.ability_id.is_some()
+                || data.message.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
+                return Err("Social channel membership has unexpected fields.".to_owned());
+            }
+            let channel = data
+                .channel
+                .ok_or_else(|| "Social channel membership requires channel.".to_owned())?;
+            Ok(PlayerAction::Social(if action == "social.channel.join" {
+                SocialAction::ChannelJoin(channel)
+            } else {
+                SocialAction::ChannelLeave(channel)
+            }))
+        }
+        "social.channel.say" => {
+            no_target()?;
+            if has_progression_fields()
+                || data.ability_id.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
+                return Err("Social channel message has unexpected fields.".to_owned());
+            }
+            let channel = data
+                .channel
+                .ok_or_else(|| "Social channel message requires channel.".to_owned())?;
+            let message = data
+                .message
+                .clone()
+                .ok_or_else(|| "Social channel message requires message.".to_owned())?;
+            Ok(PlayerAction::Social(SocialAction::ChannelSay {
+                channel,
+                message,
+            }))
+        }
         "social.who" => exact_no_fields().map(|()| PlayerAction::Social(SocialAction::Who)),
         "social.help" => {
             if has_progression_fields()
                 || data.ability_id.is_some()
                 || data.message.is_some()
+                || data.channel.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -2222,6 +2322,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             if has_progression_fields()
                 || data.ability_id.is_some()
                 || data.message.is_some()
+                || data.channel.is_some()
                 || data.duration_seconds.is_some()
                 || data.role.is_some()
             {
@@ -2241,6 +2342,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             if has_progression_fields()
                 || data.ability_id.is_some()
                 || data.message.is_some()
+                || data.channel.is_some()
                 || data.role.is_some()
             {
                 return Err("Moderation action has unexpected fields.".to_owned());
@@ -2281,6 +2383,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             if has_progression_fields()
                 || data.ability_id.is_some()
                 || data.message.is_some()
+                || data.channel.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
             {
@@ -2331,7 +2434,7 @@ fn public_game_error(error: &GameError) -> String {
             "You cannot target yourself with that action.".to_owned()
         }
         GameError::Persistence(StoreError::SocialForbidden) => {
-            "Your account is not authorized for that moderation action.".to_owned()
+            "Your account is not authorized for that social action.".to_owned()
         }
         GameError::Persistence(StoreError::ChatMuted) => {
             "You cannot send chat while your account is muted.".to_owned()
@@ -2490,6 +2593,13 @@ fn websocket_request_allowed(headers: &HeaderMap) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn requested_action(message: &str) -> RequestedAction {
+        let ClientMessage::Action(action) = parse_client_message(message).unwrap() else {
+            panic!("message must parse as an action");
+        };
+        action
+    }
 
     fn test_entity_presentation() -> crate::runtime_content::ScenePresentation {
         let session = SessionId(8_800);
@@ -2985,6 +3095,97 @@ mod tests {
             parse_client_message(r#"{"v":1,"type":"unknown","data":{}}"#).unwrap_err(),
             ClientMessageError::UnknownType
         );
+    }
+
+    #[test]
+    fn structured_party_reply_and_channel_actions_map_exactly() {
+        let cases = [
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"party-disband","action":"party.disband"}}"#,
+                PlayerAction::Party(PartyAction::Disband),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"party-revoke","action":"party.revoke","target":"Aria"}}"#,
+                PlayerAction::Party(PartyAction::Revoke("Aria".into())),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"party-kick","action":"party.kick","target":"Aria"}}"#,
+                PlayerAction::Party(PartyAction::Kick("Aria".into())),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"party-transfer","action":"party.transfer","target":"Aria"}}"#,
+                PlayerAction::Party(PartyAction::Transfer("Aria".into())),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"party-say","action":"party.say","message":"Hold the line."}}"#,
+                PlayerAction::Social(SocialAction::PartySay("Hold the line.".into())),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"reply","action":"social.reply","message":"On my way."}}"#,
+                PlayerAction::Social(SocialAction::Reply("On my way.".into())),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"channel-list","action":"social.channel.list"}}"#,
+                PlayerAction::Social(SocialAction::ChannelList),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"channel-join","action":"social.channel.join","channel":"general"}}"#,
+                PlayerAction::Social(SocialAction::ChannelJoin(SocialChannelName::General)),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"channel-leave","action":"social.channel.leave","channel":"newbie"}}"#,
+                PlayerAction::Social(SocialAction::ChannelLeave(SocialChannelName::Newbie)),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"channel-say","action":"social.channel.say","channel":"staff","message":"Status clear."}}"#,
+                PlayerAction::Social(SocialAction::ChannelSay {
+                    channel: SocialChannelName::Staff,
+                    message: "Status clear.".into(),
+                }),
+            ),
+        ];
+
+        for (message, expected) in cases {
+            assert_eq!(requested_action(message).action, Ok(expected));
+        }
+    }
+
+    #[test]
+    fn structured_social_actions_reject_unexpected_fields_and_sign_channels() {
+        for message in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"extra-party-say","action":"party.say","target":"Aria","message":"Hello"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"extra-reply","action":"social.reply","target":"Aria","message":"Hello"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"extra-list","action":"social.channel.list","channel":"general"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"extra-join","action":"social.channel.join","channel":"general","message":"Hello"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"extra-channel-say","action":"social.channel.say","channel":"general","target":"Aria","message":"Hello"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"extra-tell","action":"social.tell","target":"Aria","channel":"general","message":"Hello"}}"#,
+        ] {
+            assert!(requested_action(message).action.is_err(), "{message}");
+        }
+
+        assert_eq!(
+            parse_client_message(
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"unknown-field","action":"party.disband","unexpected":true}}"#,
+            )
+            .unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
+        assert_eq!(
+            parse_client_message(
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"unknown-channel","action":"social.channel.join","channel":"trade"}}"#,
+            )
+            .unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
+
+        let general = requested_action(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same-request","action":"social.channel.say","channel":"general","message":"Hello"}}"#,
+        );
+        let newbie = requested_action(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same-request","action":"social.channel.say","channel":"newbie","message":"Hello"}}"#,
+        );
+        assert_eq!(general.request_id, newbie.request_id);
+        assert_ne!(general.signature, newbie.signature);
     }
 
     #[test]

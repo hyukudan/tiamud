@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MigrationReport {
@@ -122,6 +122,15 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              PRIMARY KEY(owner_character_id, target_character_id),
              CHECK(owner_character_id != target_character_id)
          );
+         CREATE TABLE IF NOT EXISTS social_channel_subscriptions (
+             character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+             channel TEXT NOT NULL
+                 CHECK(channel IN ('general', 'newbie', 'staff')),
+             created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+             PRIMARY KEY(character_id, channel)
+         );
+         CREATE INDEX IF NOT EXISTS social_channel_subscriptions_channel_idx
+             ON social_channel_subscriptions(channel, character_id);
          CREATE TABLE IF NOT EXISTS moderation_mutes (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -180,7 +189,7 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              state_json TEXT NOT NULL CHECK(length(state_json) <= 1048576),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         PRAGMA user_version = 8;",
+         PRAGMA user_version = 9;",
     )?;
     // A legacy snapshot does not prove which event sequence it covers. Keep a
     // NULL watermark until the next successful runtime commit establishes it;
@@ -286,12 +295,12 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let report = migrate(&mut connection).unwrap();
 
-        assert_eq!(report, MigrationReport { from: 0, to: 8 });
+        assert_eq!(report, MigrationReport { from: 0, to: 9 });
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            8
+            9
         );
         assert!(
             connection
@@ -327,6 +336,14 @@ mod tests {
         assert!(
             connection
                 .prepare("SELECT singleton, state_json FROM world_adventure")
+                .is_ok()
+        );
+        assert!(
+            connection
+                .prepare(
+                    "SELECT character_id, channel, created_at
+                     FROM social_channel_subscriptions",
+                )
                 .is_ok()
         );
     }
@@ -393,7 +410,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 3, to: 8 }
+            MigrationReport { from: 3, to: 9 }
         );
         assert_eq!(
             connection
@@ -437,7 +454,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 4, to: 8 }
+            MigrationReport { from: 4, to: 9 }
         );
         let gameplay: String = connection
             .query_row(
@@ -502,7 +519,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 5, to: 8 }
+            MigrationReport { from: 5, to: 9 }
         );
         assert_eq!(
             connection
@@ -559,7 +576,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 6, to: 8 }
+            MigrationReport { from: 6, to: 9 }
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
@@ -611,7 +628,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 7, to: 8 }
+            MigrationReport { from: 7, to: 9 }
         );
         assert_eq!(
             connection
@@ -684,6 +701,51 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_v8_by_adding_closed_channel_subscriptions_without_losing_characters() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO accounts (id, name, auth_state, role)
+                     VALUES (1, 'Legacy', 'registered', 'player');
+                 INSERT INTO characters (id, account_id, name, room_id)
+                     VALUES (7, 1, 'Veteran', 'demo:square');
+                 DROP TABLE social_channel_subscriptions;
+                 PRAGMA user_version = 8;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 8, to: 9 }
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT name FROM characters WHERE id = 7", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "Veteran"
+        );
+        connection
+            .execute(
+                "INSERT INTO social_channel_subscriptions (character_id, channel)
+                 VALUES (7, 'general')",
+                [],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO social_channel_subscriptions (character_id, channel)
+                     VALUES (7, 'unknown')",
+                    [],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
     fn current_schema_never_silently_recreates_an_admin() {
         let mut connection = Connection::open_in_memory().unwrap();
         migrate(&mut connection).unwrap();
@@ -697,7 +759,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 8, to: 8 }
+            MigrationReport { from: 9, to: 9 }
         );
         assert_eq!(
             connection

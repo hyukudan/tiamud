@@ -1,5 +1,4 @@
 use crate::{
-    delivery::DeliveryRouter,
     persistence::{
         CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, ModerationAction,
         SocialRelationKind, StoreError,
@@ -8,10 +7,13 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tiamud_core::{CharacterId, ConnectedCharacter, SessionId, SocialAction, World};
+use tiamud_core::{
+    AccountId, AccountRole, CharacterId, ConnectedCharacter, SessionId, SocialAction,
+    SocialChannelName, World,
+};
 
 pub const MAX_CHAT_MESSAGE_BYTES: usize = 512;
 pub const MAX_SOCIAL_TARGET_BYTES: usize = 64;
@@ -25,6 +27,20 @@ pub const MAX_MODERATION_DURATION_SECONDS: u64 = 365 * 24 * 60 * 60;
 pub enum SocialChannel {
     Say,
     Tell,
+    Party,
+    General,
+    Newbie,
+    Staff,
+}
+
+impl From<SocialChannelName> for SocialChannel {
+    fn from(value: SocialChannelName) -> Self {
+        match value {
+            SocialChannelName::General => Self::General,
+            SocialChannelName::Newbie => Self::Newbie,
+            SocialChannelName::Staff => Self::Staff,
+        }
+    }
 }
 
 /// This is the complete client-visible social projection. Durable IDs,
@@ -47,6 +63,7 @@ struct ChatBucket {
 #[derive(Debug)]
 pub struct SocialRuntime {
     buckets: HashMap<CharacterId, ChatBucket>,
+    last_tell_senders: HashMap<CharacterId, CharacterId>,
 }
 
 #[derive(Debug)]
@@ -54,15 +71,38 @@ pub struct SocialOutcome {
     pub output: String,
 }
 
+#[derive(Debug)]
+pub struct PlannedSocialDelivery {
+    pub session_id: SessionId,
+    pub recipient_id: CharacterId,
+    pub message: SocialMessage,
+    pub reply_from: Option<CharacterId>,
+}
+
+#[derive(Debug)]
+pub struct AppliedSocial {
+    pub outcome: SocialOutcome,
+    pub deliveries: Vec<PlannedSocialDelivery>,
+    pub role_update: Option<(AccountId, AccountRole)>,
+}
+
 impl SocialRuntime {
     pub fn new() -> Self {
         Self {
             buckets: HashMap::new(),
+            last_tell_senders: HashMap::new(),
         }
     }
 
     pub fn disconnected(&mut self, character_id: CharacterId) {
         self.buckets.remove(&character_id);
+        self.last_tell_senders.remove(&character_id);
+        self.last_tell_senders
+            .retain(|_, sender| *sender != character_id);
+    }
+
+    pub fn record_delivered_tell(&mut self, recipient: CharacterId, sender: CharacterId) {
+        self.last_tell_senders.insert(recipient, sender);
     }
 
     fn chat_allowed(&mut self, character_id: CharacterId, now: Instant) -> bool {
@@ -86,14 +126,17 @@ impl SocialRuntime {
 
 pub async fn apply_social(
     runtime: &mut SocialRuntime,
-    delivery: &mut DeliveryRouter,
     world: &mut World,
     store: &dyn CharacterStore,
     session: SessionId,
+    actor_role: AccountRole,
+    session_roles: &HashMap<SessionId, AccountRole>,
     action: SocialAction,
-) -> Result<SocialOutcome, GameError> {
+) -> Result<AppliedSocial, GameError> {
     let actor = world.character_snapshot(session)?;
-    match action {
+    let mut deliveries = Vec::new();
+    let mut role_update = None;
+    let outcome = match action {
         SocialAction::Say(message) => {
             let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
             ensure_chat_allowed(runtime, store, actor.id).await?;
@@ -105,8 +148,8 @@ pub async fn apply_social(
             let recipients = connected.iter().filter(|candidate| {
                 candidate.character_id != actor.id && candidate.room_id == actor_presence.room_id
             });
-            deliver_allowed(
-                delivery,
+            plan_allowed(
+                &mut deliveries,
                 store,
                 actor.id,
                 recipients,
@@ -115,10 +158,35 @@ pub async fn apply_social(
                     sender: actor.name.clone(),
                     text: message.clone(),
                 },
+                None,
             )
             .await?;
             Ok(SocialOutcome {
                 output: format!("You say, \"{message}\"\r\n"),
+            })
+        }
+        SocialAction::PartySay(message) => {
+            let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
+            ensure_chat_allowed(runtime, store, actor.id).await?;
+            let members = world.connected_party_members(session)?;
+            let recipients = members
+                .iter()
+                .filter(|candidate| candidate.character_id != actor.id);
+            plan_allowed(
+                &mut deliveries,
+                store,
+                actor.id,
+                recipients,
+                SocialMessage {
+                    channel: SocialChannel::Party,
+                    sender: actor.name.clone(),
+                    text: message.clone(),
+                },
+                None,
+            )
+            .await?;
+            Ok(SocialOutcome {
+                output: format!("You tell your party, \"{message}\"\r\n"),
             })
         }
         SocialAction::Tell { target, message } => {
@@ -132,8 +200,8 @@ pub async fn apply_social(
             }
             // A blocked or ignored delivery is acknowledged identically to a
             // delivered tell so policy state cannot be probed remotely.
-            deliver_allowed(
-                delivery,
+            plan_allowed(
+                &mut deliveries,
                 store,
                 actor.id,
                 std::iter::once(recipient),
@@ -142,10 +210,124 @@ pub async fn apply_social(
                     sender: actor.name.clone(),
                     text: message.clone(),
                 },
+                Some(actor.id),
             )
             .await?;
             Ok(SocialOutcome {
                 output: format!("You tell {}, \"{message}\"\r\n", recipient.name),
+            })
+        }
+        SocialAction::Reply(message) => {
+            let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
+            ensure_chat_allowed(runtime, store, actor.id).await?;
+            let recipient_id = runtime
+                .last_tell_senders
+                .get(&actor.id)
+                .copied()
+                .ok_or(StoreError::SocialTargetNotFound)?;
+            let connected = world.connected_characters()?;
+            let recipient = resolve_connected_id(&connected, recipient_id)?;
+            plan_allowed(
+                &mut deliveries,
+                store,
+                actor.id,
+                std::iter::once(recipient),
+                SocialMessage {
+                    channel: SocialChannel::Tell,
+                    sender: actor.name.clone(),
+                    text: message.clone(),
+                },
+                Some(actor.id),
+            )
+            .await?;
+            Ok(SocialOutcome {
+                output: format!("You tell {}, \"{message}\"\r\n", recipient.name),
+            })
+        }
+        SocialAction::ChannelList => {
+            let joined = store
+                .social_channel_subscriptions(actor.id)
+                .await?
+                .into_iter()
+                .collect::<HashSet<_>>();
+            let lines = SocialChannelName::ALL
+                .into_iter()
+                .map(|channel| {
+                    let state = if !channel_allowed(actor_role, channel) {
+                        "unavailable"
+                    } else if joined.contains(&channel) {
+                        "joined"
+                    } else {
+                        "not joined"
+                    };
+                    format!("- {}: {state}", channel.as_str())
+                })
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            Ok(SocialOutcome {
+                output: format!("Channels:\r\n{lines}\r\n"),
+            })
+        }
+        SocialAction::ChannelJoin(channel) => {
+            ensure_channel_allowed(actor_role, channel)?;
+            store
+                .set_social_channel_subscription(actor.id, channel, true)
+                .await?;
+            Ok(SocialOutcome {
+                output: format!("You join the {} channel.\r\n", channel.as_str()),
+            })
+        }
+        SocialAction::ChannelLeave(channel) => {
+            store
+                .set_social_channel_subscription(actor.id, channel, false)
+                .await?;
+            Ok(SocialOutcome {
+                output: format!("You leave the {} channel.\r\n", channel.as_str()),
+            })
+        }
+        SocialAction::ChannelSay { channel, message } => {
+            ensure_channel_allowed(actor_role, channel)?;
+            let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
+            ensure_chat_allowed(runtime, store, actor.id).await?;
+            let joined = store.social_channel_subscriptions(actor.id).await?;
+            if !joined.contains(&channel) {
+                return Err(StoreError::SocialForbidden.into());
+            }
+            let subscribers = store
+                .social_channel_subscribers(channel)
+                .await?
+                .into_iter()
+                .collect::<HashSet<_>>();
+            let connected = world.connected_characters()?;
+            let recipients = connected.iter().filter(|candidate| {
+                candidate.character_id != actor.id
+                    && subscribers.contains(&candidate.character_id)
+                    && channel_allowed(
+                        session_roles
+                            .get(&candidate.session_id)
+                            .copied()
+                            .unwrap_or(AccountRole::Player),
+                        channel,
+                    )
+            });
+            plan_allowed(
+                &mut deliveries,
+                store,
+                actor.id,
+                recipients,
+                SocialMessage {
+                    channel: channel.into(),
+                    sender: actor.name.clone(),
+                    text: message.clone(),
+                },
+                None,
+            )
+            .await?;
+            Ok(SocialOutcome {
+                output: format!(
+                    "You tell the {} channel, \"{message}\"\r\n",
+                    channel.as_str()
+                ),
             })
         }
         SocialAction::Who => {
@@ -270,11 +452,17 @@ pub async fn apply_social(
                     ModerationAction::SetRole(role),
                 )
                 .await?;
+            role_update = Some((target.account_id, role));
             Ok(SocialOutcome {
                 output: format!("{} now has the {role:?} role.\r\n", target.character_name),
             })
         }
-    }
+    }?;
+    Ok(AppliedSocial {
+        outcome,
+        deliveries,
+        role_update,
+    })
 }
 
 async fn change_relation(
@@ -374,19 +562,25 @@ async fn ensure_chat_allowed(
     Ok(())
 }
 
-async fn deliver_allowed<'a>(
-    delivery: &mut DeliveryRouter,
+async fn plan_allowed<'a>(
+    deliveries: &mut Vec<PlannedSocialDelivery>,
     store: &dyn CharacterStore,
     sender: CharacterId,
     recipients: impl Iterator<Item = &'a ConnectedCharacter>,
     message: SocialMessage,
+    reply_from: Option<CharacterId>,
 ) -> Result<(), StoreError> {
     for recipient in recipients {
         if store
             .social_delivery_allowed(sender, recipient.character_id)
             .await?
         {
-            delivery.send_social(recipient.session_id, message.clone());
+            deliveries.push(PlannedSocialDelivery {
+                session_id: recipient.session_id,
+                recipient_id: recipient.character_id,
+                message: message.clone(),
+                reply_from,
+            });
         }
     }
     Ok(())
@@ -405,6 +599,26 @@ fn resolve_connected<'a>(
         [] => Err(StoreError::SocialTargetNotFound),
         [_, ..] => Err(StoreError::AmbiguousSocialTarget),
     }
+}
+
+fn resolve_connected_id(
+    connected: &[ConnectedCharacter],
+    target: CharacterId,
+) -> Result<&ConnectedCharacter, StoreError> {
+    connected
+        .iter()
+        .find(|candidate| candidate.character_id == target)
+        .ok_or(StoreError::SocialTargetNotFound)
+}
+
+fn channel_allowed(role: AccountRole, channel: SocialChannelName) -> bool {
+    channel != SocialChannelName::Staff || role >= AccountRole::Moderator
+}
+
+fn ensure_channel_allowed(role: AccountRole, channel: SocialChannelName) -> Result<(), StoreError> {
+    channel_allowed(role, channel)
+        .then_some(())
+        .ok_or(StoreError::SocialForbidden)
 }
 
 fn normalise_text(value: &str, maximum: usize) -> Result<String, StoreError> {
@@ -443,15 +657,18 @@ fn help_text(topic: Option<&str>) -> String {
         )
         .to_owned(),
         Some(topic) if topic.eq_ignore_ascii_case("social") => concat!(
-            "Social: say <message>, tell <name> <message>, who, ignore/unignore, ",
-            "block/unblock and report <name> <reason>.\r\n"
+            "Social: say <message>, tell <name> <message>, reply <message>, who.\r\n",
+            "Party: party say/invite/accept/revoke/kick/transfer/disband/leave/status.\r\n",
+            "Channels: channel list, channel join/leave <general|newbie|staff>, ",
+            "channel say <channel> <message>. Staff requires a moderator or administrator.\r\n",
+            "Safety: ignore/unignore, block/unblock and report <name> <reason>.\r\n"
         )
         .to_owned(),
         Some(_) => "No help entry matches that topic. Try: help social.\r\n".to_owned(),
         None => concat!(
             "Movement: north/east/south/west/up/down, look.\r\n",
             "Items: inventory, take, drop, examine, use, equip, unequip.\r\n",
-            "Social: say, tell, who, ignore, unignore, block, unblock, report.\r\n",
+            "Social: say, tell, reply, party say, channels, who, ignore, block, report.\r\n",
             "More: help social.\r\n"
         )
         .to_owned(),

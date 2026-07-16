@@ -19,6 +19,14 @@ describe('Tiamud entry flow', () => {
     expect(appSource).not.toContain("notice = { level: 'info', message: message.data.text }");
   });
 
+  it('labels local, direct, party, and world-channel social messages in history', () => {
+    expect(appSource).toContain("case 'say'");
+    expect(appSource).toContain("case 'tell'");
+    expect(appSource).toContain("case 'party'");
+    expect(appSource).toContain('in #${message.channel}');
+    expect(appSource).toContain('socialHistoryLabel(message.data)');
+  });
+
   it('keeps a 500-entry anchored scrollback with an explicit latest affordance', () => {
     expect(appSource).toContain('MAX_SCROLLBACK_ENTRIES');
     expect(appSource).toContain('isScrollAnchored');

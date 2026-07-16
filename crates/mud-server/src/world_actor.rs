@@ -375,7 +375,7 @@ impl WorldHandle {
                                 runtime_content: &runtime_content,
                                 social: &mut social,
                                 store: actor_store.as_ref(),
-                                session_roles: &session_roles,
+                                session_roles: &mut session_roles,
                                 delivery: &mut actor_delivery,
                             },
                             session,
@@ -847,7 +847,7 @@ struct ApplyResources<'a> {
     runtime_content: &'a RuntimeContent,
     social: &'a mut SocialRuntime,
     store: &'a dyn CharacterStore,
-    session_roles: &'a HashMap<SessionId, AccountRole>,
+    session_roles: &'a mut HashMap<SessionId, AccountRole>,
     delivery: &'a mut DeliveryRouter,
 }
 
@@ -867,8 +867,21 @@ async fn apply(
     } = resources;
     let checkpoint = world.checkpoint();
     if let PlayerAction::Social(action) = action {
-        let outcome = apply_social(social, delivery, world, store, session, action).await?;
-        let hook = runtime_content.run_hook(world, session, role, ScriptHook::OnTalk);
+        let talks = matches!(
+            &action,
+            tiamud_core::SocialAction::Say(_)
+                | tiamud_core::SocialAction::PartySay(_)
+                | tiamud_core::SocialAction::Tell { .. }
+                | tiamud_core::SocialAction::Reply(_)
+                | tiamud_core::SocialAction::ChannelSay { .. }
+        );
+        let applied =
+            apply_social(social, world, store, session, role, session_roles, action).await?;
+        let hook = if talks {
+            runtime_content.run_hook(world, session, role, ScriptHook::OnTalk)
+        } else {
+            crate::runtime_content::ScriptBatchOutcome::default()
+        };
         if (hook.changed || !hook.domain_events.is_empty())
             && let Err(error) = store
                 .commit_action(
@@ -880,6 +893,20 @@ async fn apply(
         {
             world.restore_checkpoint(checkpoint);
             return Err(error.into());
+        }
+        for planned in applied.deliveries {
+            if delivery.send_social(planned.session_id, planned.message)
+                && let Some(sender) = planned.reply_from
+            {
+                social.record_delivered_tell(planned.recipient_id, sender);
+            }
+        }
+        if let Some((account_id, updated_role)) = applied.role_update {
+            for connected in world.connected_characters()? {
+                if connected.account_id == account_id {
+                    session_roles.insert(connected.session_id, updated_role);
+                }
+            }
         }
         let mut scene = world.current_scene(session)?;
         runtime_content.resolve_scene(world, session, role, &mut scene);
@@ -898,7 +925,7 @@ async fn apply(
             scene,
             presentation: runtime_content.resolve_entity_presentation(world, session),
             player: world.player_state_view(session)?,
-            output: combine_output(Some(outcome.output), hook.narration),
+            output: combine_output(Some(applied.outcome.output), hook.narration),
             events,
         });
     }
@@ -1411,7 +1438,8 @@ mod tests {
     use tiamud_core::{
         AccountRole, ActiveEffect, CharacterGameplaySnapshot, Direction, EconomyAction, EffectKind,
         EquipmentSlot, ItemDefinition, ItemGameplayDefinition, NpcDefinition, PartyAction,
-        QuestAction, RoomDefinition, SocialAction, WorldDefinition, WorldRuntimeSnapshot,
+        QuestAction, RoomDefinition, SocialAction, SocialChannelName, WorldDefinition,
+        WorldRuntimeSnapshot,
     };
     use tiamud_scripting::{ScriptCapability, ScriptLimits};
 
@@ -1431,6 +1459,7 @@ mod tests {
         banned: HashSet<AccountId>,
         ignores: HashSet<(CharacterId, CharacterId)>,
         blocks: HashSet<(CharacterId, CharacterId)>,
+        channel_subscriptions: BTreeSet<(CharacterId, SocialChannelName)>,
         audit: Vec<crate::persistence::AuditEntry>,
     }
 
@@ -1884,6 +1913,51 @@ mod tests {
                 Some(target_profile.account_id),
                 action,
             );
+            Ok(())
+        }
+
+        async fn social_channel_subscriptions(
+            &self,
+            character_id: CharacterId,
+        ) -> Result<Vec<SocialChannelName>, StoreError> {
+            let state = self.state.lock().unwrap();
+            memory_social_profile(&state, character_id)?;
+            Ok(state
+                .channel_subscriptions
+                .iter()
+                .filter_map(|(candidate, channel)| (*candidate == character_id).then_some(*channel))
+                .collect())
+        }
+
+        async fn social_channel_subscribers(
+            &self,
+            channel: SocialChannelName,
+        ) -> Result<Vec<CharacterId>, StoreError> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .channel_subscriptions
+                .iter()
+                .filter_map(|(character_id, candidate)| {
+                    (*candidate == channel).then_some(*character_id)
+                })
+                .collect())
+        }
+
+        async fn set_social_channel_subscription(
+            &self,
+            character_id: CharacterId,
+            channel: SocialChannelName,
+            subscribed: bool,
+        ) -> Result<(), StoreError> {
+            let mut state = self.state.lock().unwrap();
+            memory_social_profile(&state, character_id)?;
+            if subscribed {
+                state.channel_subscriptions.insert((character_id, channel));
+            } else {
+                state.channel_subscriptions.remove(&(character_id, channel));
+            }
             Ok(())
         }
 
@@ -3137,6 +3211,321 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(20), player_entered.deliveries.recv())
                 .await
                 .is_err()
+        );
+        assert!(matches!(
+            world
+                .apply(
+                    player_entered.session_id,
+                    PlayerAction::Social(SocialAction::Reply("No reply target".into())),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::SocialTargetNotFound))
+        ));
+    }
+
+    async fn next_social(inbox: &mut DeliveryInbox) -> crate::social::SocialMessage {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match inbox.recv().await {
+                    Some(crate::delivery::SessionDelivery::Social(message)) => break message,
+                    Some(_) => continue,
+                    None => panic!("delivery inbox closed"),
+                }
+            }
+        })
+        .await
+        .expect("social delivery timed out")
+    }
+
+    fn drain_deliveries(inbox: &mut DeliveryInbox) {
+        while inbox.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn failed_on_talk_commit_does_not_publish_the_social_plan() {
+        let store = Arc::new(MemoryStore::default());
+        let content = RuntimeContent::new(
+            Vec::new(),
+            vec![RuntimeScript {
+                id: "script:transactional-talk".into(),
+                room_id: "demo:lantern-square".into(),
+                hooks: BTreeSet::from([ScriptHook::OnTalk]),
+                capabilities: BTreeSet::from([ScriptCapability::SetFlag]),
+                limits: ScriptLimits::default(),
+                source: r#"
+                    function on_talk(ctx)
+                        tiamud.emit('set_flag', 'self', 'spoke')
+                    end
+                "#
+                .into(),
+            }],
+            11,
+        );
+        let world = WorldHandle::spawn_with_scheduler_and_content(
+            World::demo(),
+            store.clone(),
+            WorldSchedulerConfig::default(),
+            content,
+        )
+        .await
+        .unwrap();
+        let sender = world.enter("Sender".into()).await.unwrap();
+        let mut recipient = world.enter("Recipient".into()).await.unwrap();
+        store.fail_saves.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Social(SocialAction::Say("not committed".into())),
+                )
+                .await,
+            Err(GameError::Persistence(_))
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                .await
+                .is_err()
+        );
+
+        store.fail_saves.store(false, Ordering::SeqCst);
+        world
+            .apply(
+                sender.session_id,
+                PlayerAction::Social(SocialAction::Say("committed".into())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            next_social(&mut recipient.deliveries).await.text,
+            "committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn party_chat_and_reply_route_only_to_the_intended_characters() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
+        let mut leader = world.enter("Aster".into()).await.unwrap();
+        let mut member = world.enter("Bryn".into()).await.unwrap();
+        let mut outsider = world.enter("Cato".into()).await.unwrap();
+
+        world
+            .apply(leader.session_id, PlayerAction::Party(PartyAction::Create))
+            .await
+            .unwrap();
+        world
+            .apply(
+                leader.session_id,
+                PlayerAction::Party(PartyAction::Invite("Bryn".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                member.session_id,
+                PlayerAction::Party(PartyAction::Accept("Aster".into())),
+            )
+            .await
+            .unwrap();
+        drain_deliveries(&mut leader.deliveries);
+        drain_deliveries(&mut member.deliveries);
+        drain_deliveries(&mut outsider.deliveries);
+
+        world
+            .apply(
+                leader.session_id,
+                PlayerAction::Social(SocialAction::PartySay("Rally at the gate".into())),
+            )
+            .await
+            .unwrap();
+        let party = next_social(&mut member.deliveries).await;
+        assert_eq!(party.channel, crate::social::SocialChannel::Party);
+        assert_eq!(party.sender, "Aster");
+        assert_eq!(party.text, "Rally at the gate");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), outsider.deliveries.recv())
+                .await
+                .is_err()
+        );
+
+        world
+            .apply(
+                leader.session_id,
+                PlayerAction::Social(SocialAction::Tell {
+                    target: "Bryn".into(),
+                    message: "Ready?".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_social(&mut member.deliveries).await.text, "Ready?");
+        world
+            .apply(
+                member.session_id,
+                PlayerAction::Social(SocialAction::Reply("Ready.".into())),
+            )
+            .await
+            .unwrap();
+        let reply = next_social(&mut leader.deliveries).await;
+        assert_eq!(reply.channel, crate::social::SocialChannel::Tell);
+        assert_eq!(reply.sender, "Bryn");
+        assert_eq!(reply.text, "Ready.");
+    }
+
+    #[tokio::test]
+    async fn durable_channels_enforce_membership_and_live_staff_roles() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let admin = world
+            .register_account("Admin".into(), "correct horse battery staple".into())
+            .await
+            .unwrap();
+        let player = world
+            .register_account("Player".into(), "another correct horse battery".into())
+            .await
+            .unwrap();
+        let outsider_account = world
+            .register_account("Outsider".into(), "a third correct horse battery".into())
+            .await
+            .unwrap();
+        let admin_character = world
+            .create_authenticated_character(admin.token.as_str().into(), "Aster".into())
+            .await
+            .unwrap();
+        let player_character = world
+            .create_authenticated_character(player.token.as_str().into(), "Bryn".into())
+            .await
+            .unwrap();
+        let outsider_character = world
+            .create_authenticated_character(outsider_account.token.as_str().into(), "Cato".into())
+            .await
+            .unwrap();
+        let mut admin_entered = world
+            .enter_authenticated_character(admin.token.as_str().into(), admin_character.id)
+            .await
+            .unwrap();
+        let mut player_entered = world
+            .enter_authenticated_character(player.token.as_str().into(), player_character.id)
+            .await
+            .unwrap();
+        let mut outsider_entered = world
+            .enter_authenticated_character(
+                outsider_account.token.as_str().into(),
+                outsider_character.id,
+            )
+            .await
+            .unwrap();
+
+        for session in [admin_entered.session_id, player_entered.session_id] {
+            world
+                .apply(
+                    session,
+                    PlayerAction::Social(SocialAction::ChannelJoin(SocialChannelName::General)),
+                )
+                .await
+                .unwrap();
+        }
+        world
+            .apply(
+                admin_entered.session_id,
+                PlayerAction::Social(SocialAction::ChannelSay {
+                    channel: SocialChannelName::General,
+                    message: "Welcome everyone".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        let general = next_social(&mut player_entered.deliveries).await;
+        assert_eq!(general.channel, crate::social::SocialChannel::General);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                outsider_entered.deliveries.recv()
+            )
+            .await
+            .is_err()
+        );
+        assert!(matches!(
+            world
+                .apply(
+                    player_entered.session_id,
+                    PlayerAction::Social(SocialAction::ChannelJoin(SocialChannelName::Staff)),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::SocialForbidden))
+        ));
+
+        world
+            .apply(
+                admin_entered.session_id,
+                PlayerAction::Social(SocialAction::SetRole {
+                    target: "Bryn".into(),
+                    role: AccountRole::Moderator,
+                }),
+            )
+            .await
+            .unwrap();
+        for session in [admin_entered.session_id, player_entered.session_id] {
+            world
+                .apply(
+                    session,
+                    PlayerAction::Social(SocialAction::ChannelJoin(SocialChannelName::Staff)),
+                )
+                .await
+                .unwrap();
+        }
+        world
+            .apply(
+                player_entered.session_id,
+                PlayerAction::Social(SocialAction::ChannelSay {
+                    channel: SocialChannelName::Staff,
+                    message: "Live role update works".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        let staff = next_social(&mut admin_entered.deliveries).await;
+        assert_eq!(staff.channel, crate::social::SocialChannel::Staff);
+
+        world
+            .apply(
+                admin_entered.session_id,
+                PlayerAction::Social(SocialAction::SetRole {
+                    target: "Bryn".into(),
+                    role: AccountRole::Player,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            world
+                .apply(
+                    player_entered.session_id,
+                    PlayerAction::Social(SocialAction::ChannelSay {
+                        channel: SocialChannelName::Staff,
+                        message: "Should be denied".into(),
+                    }),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::SocialForbidden))
+        ));
+        let list = world
+            .apply(
+                player_entered.session_id,
+                PlayerAction::Social(SocialAction::ChannelList),
+            )
+            .await
+            .unwrap();
+        assert!(list.output.unwrap().contains("staff: unavailable"));
+        assert_eq!(
+            store
+                .social_channel_subscriptions(player_character.id)
+                .await
+                .unwrap(),
+            vec![SocialChannelName::General, SocialChannelName::Staff]
         );
     }
 

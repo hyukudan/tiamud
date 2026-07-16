@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import type {
     ActionResultData,
+    ActionPerformFields,
     ConnectionState,
     LiveServerMessage,
     MessageAppendData,
@@ -10,6 +11,7 @@
     SceneEntityVisualSource,
     SceneSnapshot,
     ServerNoticeData,
+    SocialMessageData,
     SyncRecoveryData,
   } from './lib/protocol';
   import { localizedImageAlt } from './lib/protocol';
@@ -323,6 +325,19 @@
     ));
   }
 
+  function socialHistoryLabel(message: SocialMessageData): string {
+    switch (message.channel) {
+      case 'say':
+        return `${message.sender} says`;
+      case 'tell':
+        return `${message.sender} tells you`;
+      case 'party':
+        return `${message.sender} to the party`;
+      default:
+        return `${message.sender} in #${message.channel}`;
+    }
+  }
+
   function directVisualSource(
     source: SceneEntityVisualSource | undefined,
   ): SceneEntityVisualSource | undefined {
@@ -504,9 +519,7 @@
           ...history,
           {
             id: `chat-${message.seq ?? createRequestId()}`,
-            command: message.data.channel === 'tell'
-              ? `${message.data.sender} tells you`
-              : `${message.data.sender} says`,
+            command: socialHistoryLabel(message.data),
             state: 'complete',
             response: message.data.text,
           },
@@ -532,9 +545,9 @@
     recordSubmission(submitted, id, sent);
   }
 
-  function submitAction(action: string, target: string | undefined, label: string): void {
+  function submitAction(action: string, fields: ActionPerformFields | undefined, label: string): void {
     const id = createRequestId();
-    const sent = connection?.perform(action, target, id) ?? false;
+    const sent = connection?.perform(action, fields, id) ?? false;
     recordSubmission(label, id, sent);
   }
 
@@ -830,7 +843,7 @@
               <h2>Ways onward</h2>
               <ul>
                 {#each scene.exits as exit (exit.id)}
-                  <li><button onclick={() => submitAction('move', exit.command, exit.command)}>{exit.label}</button></li>
+                  <li><button onclick={() => submitAction('move', { target: exit.command }, exit.command)}>{exit.label}</button></li>
                 {/each}
               </ul>
             </nav>
@@ -852,7 +865,7 @@
                           type="button"
                           onclick={() => {
                             const actionName = itemActionName(action.command);
-                            if (actionName) submitAction(actionName, item.id, action.command);
+                            if (actionName) submitAction(actionName, { target: item.id }, action.command);
                             else submitCommand(action.command);
                           }}
                         >{action.label}</button>
@@ -884,7 +897,7 @@
                         <button
                           type="button"
                           onclick={() => action.command.trim().toLowerCase().startsWith('attack ')
-                            ? submitAction('combat.attack', npc.id, action.command)
+                            ? submitAction('combat.attack', { target: npc.id }, action.command)
                             : submitCommand(action.command)}
                         >{action.label}</button>
                       {/each}

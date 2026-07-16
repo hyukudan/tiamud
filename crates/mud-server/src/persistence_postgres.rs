@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use postgres::{Client, GenericClient};
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
-    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, WorldRuntimeSnapshot,
+    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, SocialChannelName,
+    WorldRuntimeSnapshot,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -234,6 +235,31 @@ impl PostgresCharacterStore {
                                 target,
                                 relation,
                                 enabled,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::SocialChannelSubscriptions {
+                            character_id,
+                            reply,
+                        } => {
+                            let _ = reply
+                                .send(social_channel_subscriptions(&mut connection, character_id));
+                        }
+                        Request::SocialChannelSubscribers { channel, reply } => {
+                            let _ =
+                                reply.send(social_channel_subscribers(&mut connection, channel));
+                        }
+                        Request::SetSocialChannelSubscription {
+                            character_id,
+                            channel,
+                            subscribed,
+                            reply,
+                        } => {
+                            let _ = reply.send(set_social_channel_subscription(
+                                &mut connection,
+                                character_id,
+                                channel,
+                                subscribed,
                                 unix_timestamp(),
                             ));
                         }
@@ -587,6 +613,52 @@ impl CharacterStore for PostgresCharacterStore {
                 target,
                 relation,
                 enabled,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn social_channel_subscriptions(
+        &self,
+        character_id: CharacterId,
+    ) -> Result<Vec<SocialChannelName>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::SocialChannelSubscriptions {
+                character_id,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn social_channel_subscribers(
+        &self,
+        channel: SocialChannelName,
+    ) -> Result<Vec<CharacterId>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::SocialChannelSubscribers { channel, reply },
+            receive,
+        )
+        .await
+    }
+
+    async fn set_social_channel_subscription(
+        &self,
+        character_id: CharacterId,
+        channel: SocialChannelName,
+        subscribed: bool,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::SetSocialChannelSubscription {
+                character_id,
+                channel,
+                subscribed,
                 reply,
             },
             receive,
@@ -1237,6 +1309,32 @@ fn role_as_database(role: AccountRole) -> &'static str {
     }
 }
 
+fn social_channel_from_database(value: &str) -> Result<SocialChannelName, StoreError> {
+    match value {
+        "general" => Ok(SocialChannelName::General),
+        "newbie" => Ok(SocialChannelName::Newbie),
+        "staff" => Ok(SocialChannelName::Staff),
+        _ => Err(StoreError::InvalidSocialInput),
+    }
+}
+
+fn ensure_social_character_exists<C: GenericClient>(
+    connection: &mut C,
+    character_id: CharacterId,
+) -> Result<(), StoreError> {
+    let exists: bool = connection
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM characters WHERE id = $1)",
+            &[&character_id.0],
+        )?
+        .get(0);
+    if exists {
+        Ok(())
+    } else {
+        Err(StoreError::SocialTargetNotFound)
+    }
+}
+
 fn social_profile<C: GenericClient>(
     connection: &mut C,
     character_id: CharacterId,
@@ -1370,6 +1468,74 @@ fn set_social_relation(
         serde_json::json!({"targetCharacterId": target.0}),
         now,
     )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn social_channel_subscriptions<C: GenericClient>(
+    connection: &mut C,
+    character_id: CharacterId,
+) -> Result<Vec<SocialChannelName>, StoreError> {
+    ensure_social_character_exists(connection, character_id)?;
+    connection
+        .query(
+            "SELECT channel FROM social_channel_subscriptions
+             WHERE character_id = $1
+             ORDER BY CASE channel
+                 WHEN 'general' THEN 0
+                 WHEN 'newbie' THEN 1
+                 WHEN 'staff' THEN 2
+                 ELSE 3
+             END",
+            &[&character_id.0],
+        )?
+        .into_iter()
+        .map(|row| {
+            let channel: String = row.get(0);
+            social_channel_from_database(&channel)
+        })
+        .collect()
+}
+
+fn social_channel_subscribers<C: GenericClient>(
+    connection: &mut C,
+    channel: SocialChannelName,
+) -> Result<Vec<CharacterId>, StoreError> {
+    Ok(connection
+        .query(
+            "SELECT character_id FROM social_channel_subscriptions
+             WHERE channel = $1 ORDER BY character_id",
+            &[&channel.as_str()],
+        )?
+        .into_iter()
+        .map(|row| CharacterId(row.get(0)))
+        .collect())
+}
+
+fn set_social_channel_subscription(
+    connection: &mut Client,
+    character_id: CharacterId,
+    channel: SocialChannelName,
+    subscribed: bool,
+    now: i64,
+) -> Result<(), StoreError> {
+    let mut transaction = connection.transaction()?;
+    ensure_social_character_exists(&mut transaction, character_id)?;
+    if subscribed {
+        transaction.execute(
+            "INSERT INTO social_channel_subscriptions
+                 (character_id, channel, created_at)
+             VALUES ($1, $2, $3)
+             ON CONFLICT(character_id, channel) DO NOTHING",
+            &[&character_id.0, &channel.as_str(), &now],
+        )?;
+    } else {
+        transaction.execute(
+            "DELETE FROM social_channel_subscriptions
+             WHERE character_id = $1 AND channel = $2",
+            &[&character_id.0, &channel.as_str()],
+        )?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -1864,6 +2030,37 @@ mod tests {
                 .unwrap()
                 .role,
             AccountRole::Admin
+        );
+        assert!(
+            store
+                .social_channel_subscriptions(player_character.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for channel in [SocialChannelName::Newbie, SocialChannelName::General] {
+            store
+                .set_social_channel_subscription(player_character.id, channel, true)
+                .await
+                .unwrap();
+        }
+        store
+            .set_social_channel_subscription(keeper_character.id, SocialChannelName::General, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .social_channel_subscriptions(player_character.id)
+                .await
+                .unwrap(),
+            vec![SocialChannelName::General, SocialChannelName::Newbie]
+        );
+        assert_eq!(
+            store
+                .social_channel_subscribers(SocialChannelName::General)
+                .await
+                .unwrap(),
+            vec![keeper_character.id, player_character.id]
         );
         store
             .set_social_relation(

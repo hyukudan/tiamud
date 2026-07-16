@@ -172,8 +172,8 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In schema v8, both SQLite and PostgreSQL record the last domain-event sequence
-covered by each committed world snapshot. The same transaction retains the
+In current schema v9, both SQLite and PostgreSQL retain the v8
+`last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
 snapshot is never compacted. This keeps normal runtime storage bounded without
@@ -307,7 +307,8 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema, refuses a non-empty target and
+The mover requires the current SQLite schema v9, including durable social
+channel subscriptions, refuses a non-empty target and
 commits schema plus rows in one PostgreSQL transaction. Configure exactly one
 line in the service environment and remove/comment the other:
 
@@ -318,11 +319,13 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 
 Exercise registration, login, movement, combat, social state, restart and
 readiness before deleting or archiving the SQLite rollback copy.
-The repository's [current PostgreSQL 18 schema-v8 acceptance
-run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the adapter,
+The repository's retained [PostgreSQL 18 schema-v8 acceptance
+run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the earlier v8 adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
 authenticated restart against a separate disposable server process. It does
-not replace this exercise or establish monitoring, TLS, PostgreSQL
+not prove or claim a schema-v9 acceptance run. Focused v9 migration, store and
+transfer tests cover the additive subscription table, but they do not replace
+this exercise or establish monitoring, TLS, PostgreSQL
 backup/restore or point-in-time recovery for a production installation.
 
 ## Binary and world update
