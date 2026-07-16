@@ -226,6 +226,11 @@ pub struct RuntimeMetrics {
     script_errors_total: AtomicU64,
     script_timeouts_total: AtomicU64,
     script_latency_microseconds: AtomicU64,
+    delivery_mailboxes: AtomicUsize,
+    world_delivery_enqueued_total: AtomicU64,
+    social_delivery_enqueued_total: AtomicU64,
+    world_delivery_dropped_total: AtomicU64,
+    social_delivery_dropped_total: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -239,6 +244,12 @@ pub enum ScriptMetricOutcome {
     Success,
     Error,
     Timeout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoutedDeliveryKind {
+    World,
+    Social,
 }
 
 impl RuntimeMetrics {
@@ -368,6 +379,26 @@ impl RuntimeMetrics {
         }
     }
 
+    pub fn set_delivery_mailboxes(&self, count: usize) {
+        self.delivery_mailboxes.store(count, Ordering::Relaxed);
+    }
+
+    pub fn delivery_enqueued(&self, kind: RoutedDeliveryKind) {
+        let counter = match kind {
+            RoutedDeliveryKind::World => &self.world_delivery_enqueued_total,
+            RoutedDeliveryKind::Social => &self.social_delivery_enqueued_total,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn delivery_dropped(&self, kind: RoutedDeliveryKind) {
+        let counter = match kind {
+            RoutedDeliveryKind::World => &self.world_delivery_dropped_total,
+            RoutedDeliveryKind::Social => &self.social_delivery_dropped_total,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn prometheus(&self, world_queue_depth: usize) -> String {
         format!(
             concat!(
@@ -420,6 +451,14 @@ impl RuntimeMetrics {
                 "tiamud_script_timeouts_total {}\n",
                 "# TYPE tiamud_script_latency_seconds_sum counter\n",
                 "tiamud_script_latency_seconds_sum {:.6}\n",
+                "# TYPE tiamud_delivery_mailboxes gauge\n",
+                "tiamud_delivery_mailboxes {}\n",
+                "# TYPE tiamud_delivery_enqueued_total counter\n",
+                "tiamud_delivery_enqueued_total{{kind=\"world\"}} {}\n",
+                "tiamud_delivery_enqueued_total{{kind=\"social\"}} {}\n",
+                "# TYPE tiamud_delivery_dropped_total counter\n",
+                "tiamud_delivery_dropped_total{{kind=\"world\"}} {}\n",
+                "tiamud_delivery_dropped_total{{kind=\"social\"}} {}\n",
                 "# TYPE process_resident_memory_bytes gauge\n",
                 "process_resident_memory_bytes {}\n",
             ),
@@ -452,6 +491,11 @@ impl RuntimeMetrics {
             self.script_errors_total.load(Ordering::Relaxed),
             self.script_timeouts_total.load(Ordering::Relaxed),
             self.script_latency_microseconds.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            self.delivery_mailboxes.load(Ordering::Relaxed),
+            self.world_delivery_enqueued_total.load(Ordering::Relaxed),
+            self.social_delivery_enqueued_total.load(Ordering::Relaxed),
+            self.world_delivery_dropped_total.load(Ordering::Relaxed),
+            self.social_delivery_dropped_total.load(Ordering::Relaxed),
             process_resident_memory_bytes(),
         )
     }

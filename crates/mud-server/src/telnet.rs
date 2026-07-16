@@ -1,4 +1,5 @@
 use crate::{
+    delivery::SessionDelivery,
     operations::{
         ActiveSessionLimit, ActiveSessionLimiter, AuthRateLimiter, CommandRateLimiter,
         OutputTransport, RuntimeMetrics,
@@ -23,7 +24,7 @@ use tiamud_telnet_codec::{DO, DONT, IAC, SB, SE, TelnetEvent, TelnetParser, WILL
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf},
     net::TcpListener,
-    sync::{Notify, broadcast, watch},
+    sync::{Notify, watch},
     task::JoinHandle,
 };
 use tracing::{debug, info, warn};
@@ -480,6 +481,56 @@ impl TelnetRuntime {
     }
 }
 
+/// Cancellation-safe ownership of a world session after Telnet authentication.
+/// `serve` closes it explicitly on the ordinary path; `Drop` provides the same
+/// cleanup if the connection task is aborted or unwinds while awaiting I/O.
+struct TelnetSessionLease {
+    world: WorldHandle,
+    session: Option<tiamud_core::SessionId>,
+    metrics: Arc<RuntimeMetrics>,
+    counted: bool,
+}
+
+impl TelnetSessionLease {
+    fn new(
+        world: WorldHandle,
+        session: tiamud_core::SessionId,
+        metrics: Arc<RuntimeMetrics>,
+    ) -> Self {
+        Self {
+            world,
+            session: Some(session),
+            metrics,
+            counted: false,
+        }
+    }
+
+    fn activate(&mut self) {
+        if self.counted {
+            return;
+        }
+        self.metrics.session_opened();
+        self.counted = true;
+    }
+
+    fn close(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        self.world.leave_nowait(session);
+        if self.counted {
+            self.metrics.session_closed();
+            self.counted = false;
+        }
+    }
+}
+
+impl Drop for TelnetSessionLease {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 pub(crate) async fn run(
     listener: TcpListener,
     runtime: TelnetRuntime,
@@ -584,13 +635,14 @@ async fn serve(
         return Ok(());
     };
     let session_id = entered.session_id;
+    let mut session_lease =
+        TelnetSessionLease::new(runtime.world.clone(), session_id, runtime.metrics.clone());
     let _active_session_permit = match runtime
         .active_session_limiter
         .acquire(entered.account_id, peer_address)
     {
         Ok(permit) => permit,
         Err(limit) => {
-            runtime.world.leave(session_id).await;
             let message = match limit {
                 ActiveSessionLimit::Account => {
                     b"This account has reached its concurrent session limit.\r\n".as_slice()
@@ -604,7 +656,7 @@ async fn serve(
             return Ok(());
         }
     };
-    runtime.metrics.session_opened();
+    session_lease.activate();
     let mut queued = connection.into_queued(Some(runtime.metrics.clone()));
     let result = serve_entered(
         EnteredTelnetIo {
@@ -622,8 +674,7 @@ async fn serve(
     .await;
 
     info!(session = session_id.0, "telnet client disconnected");
-    runtime.world.leave(session_id).await;
-    runtime.metrics.session_closed();
+    session_lease.close();
     let compression_result = queued.finish().await;
     result.and(compression_result)
 }
@@ -830,9 +881,8 @@ async fn serve_entered(
     write_scene(output, input, &entered.scene, &entered.player)?;
     write_prompt(output, input)?;
     let mut last_revision = entered.scene.revision;
-
-    let mut social = world.subscribe_social();
-    let mut world_updates = world.subscribe_world();
+    let mut ignore_world_through_revision = None;
+    let mut deliveries = entered.deliveries;
     let mut command_limiter =
         CommandRateLimiter::per_second(command_rate_per_second, command_burst, Instant::now());
     let mut rate_violations = 0_u8;
@@ -855,26 +905,26 @@ async fn serve_entered(
                     ));
                 }
             }
-            delivery = social.recv() => {
+            delivery = deliveries.recv() => {
                 match delivery {
-                    Ok(delivery) if delivery.recipient == entered.character_id => {
-                        write_social_message(output, input, &delivery.message)?;
+                    Some(SessionDelivery::Social(delivery)) => {
+                        write_social_message(output, input, &delivery)?;
                         write_prompt(output, input)?;
                     }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                    Some(SessionDelivery::SocialLagged) => {
                         output.bytes(
                             OutputPriority::Critical,
                             b"\r\nSome chat messages were skipped because this client is too slow.\r\n".to_vec(),
                         )?;
                         write_prompt(output, input)?;
                     }
-                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
-                }
-            }
-            delivery = world_updates.recv() => {
-                match delivery {
-                    Ok(delivery) if delivery.session_id == entered.session_id => {
+                    Some(SessionDelivery::World(delivery)) => {
+                        if ignore_world_through_revision
+                            .is_some_and(|revision| delivery.scene.revision <= revision)
+                        {
+                            continue;
+                        }
+                        ignore_world_through_revision = None;
                         if !delivery.events.is_empty() {
                             let mut bytes = Vec::new();
                             for event in delivery.events {
@@ -891,8 +941,7 @@ async fn serve_entered(
                         write_scene(output, input, &delivery.scene, &delivery.player)?;
                         write_prompt(output, input)?;
                     }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                    Some(SessionDelivery::WorldLagged) => {
                         output.bytes(
                             OutputPriority::Critical,
                             b"\r\nWorld updates were coalesced; an authoritative snapshot follows.\r\n".to_vec(),
@@ -902,10 +951,11 @@ async fn serve_entered(
                             .await
                             .map_err(io::Error::other)?;
                         last_revision = scene.revision;
+                        ignore_world_through_revision = Some(scene.revision);
                         write_scene(output, input, &scene, &player)?;
                         write_prompt(output, input)?;
                     }
-                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                    None => return Ok(()),
                 }
             }
             event = input.read_line_queued(reader, output) => {
@@ -3592,6 +3642,73 @@ mod tests {
                 .unwrap()
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn aborted_telnet_task_releases_world_session_mailbox_and_metric() {
+        let store: Arc<dyn crate::persistence::CharacterStore> = Arc::new(
+            crate::persistence::SqliteCharacterStore::open(":memory:")
+                .await
+                .unwrap(),
+        );
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let content = crate::runtime_content::RuntimeContent::default()
+            .with_operational_metrics(metrics.clone());
+        let world = WorldHandle::spawn_with_scheduler_and_content(
+            tiamud_core::World::demo(),
+            store,
+            crate::world_actor::WorldSchedulerConfig::default(),
+            content,
+        );
+        let entered = world.enter("Cancelled Telnet".into()).await.unwrap();
+        let session = entered.session_id;
+        assert!(
+            metrics
+                .prometheus(0)
+                .contains("tiamud_delivery_mailboxes 1")
+        );
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (_hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+        let lease_world = world.clone();
+        let lease_metrics = metrics.clone();
+        let task = tokio::spawn(async move {
+            let mut lease = TelnetSessionLease::new(lease_world, session, lease_metrics);
+            lease.activate();
+            let _ = started_tx.send(());
+            let _ = hold_rx.await;
+        });
+        started_rx.await.unwrap();
+        assert!(
+            metrics
+                .prometheus(0)
+                .contains("tiamud_authenticated_sessions 1")
+        );
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        world.health_check().await.unwrap();
+
+        assert!(matches!(
+            world.current_state(session).await,
+            Err(GameError::World(tiamud_core::WorldError::UnknownSession))
+        ));
+        let output = metrics.prometheus(0);
+        assert!(output.contains("tiamud_authenticated_sessions 0"));
+        assert!(output.contains("tiamud_delivery_mailboxes 0"));
+
+        let entered = world.enter("Orderly Telnet".into()).await.unwrap();
+        let mut lease = TelnetSessionLease::new(world.clone(), entered.session_id, metrics.clone());
+        lease.activate();
+        lease.activate();
+        lease.close();
+        lease.close();
+        drop(lease);
+        world.health_check().await.unwrap();
+        let output = metrics.prometheus(0);
+        assert!(output.contains("tiamud_authenticated_sessions 0"));
+        assert!(output.contains("tiamud_delivery_mailboxes 0"));
+        world.shutdown().await.unwrap();
     }
 
     fn gmcp_payloads(bytes: &[u8]) -> Vec<Vec<u8>> {

@@ -1,4 +1,5 @@
 use crate::{
+    delivery::DeliveryRouter,
     persistence::{
         CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, ModerationAction,
         SocialRelationKind, StoreError,
@@ -11,7 +12,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tiamud_core::{CharacterId, ConnectedCharacter, SessionId, SocialAction, World};
-use tokio::sync::broadcast;
 
 pub const MAX_CHAT_MESSAGE_BYTES: usize = 512;
 pub const MAX_SOCIAL_TARGET_BYTES: usize = 64;
@@ -19,7 +19,6 @@ pub const CHAT_BURST: u32 = 4;
 pub const CHAT_MESSAGES_PER_SECOND: u32 = 1;
 pub const MIN_MODERATION_DURATION_SECONDS: u64 = 60;
 pub const MAX_MODERATION_DURATION_SECONDS: u64 = 365 * 24 * 60 * 60;
-const SOCIAL_BROADCAST_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -39,12 +38,6 @@ pub struct SocialMessage {
     pub text: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct SocialDelivery {
-    pub recipient: CharacterId,
-    pub message: SocialMessage,
-}
-
 #[derive(Debug)]
 struct ChatBucket {
     tokens: f64,
@@ -54,7 +47,6 @@ struct ChatBucket {
 #[derive(Debug)]
 pub struct SocialRuntime {
     buckets: HashMap<CharacterId, ChatBucket>,
-    delivery: broadcast::Sender<SocialDelivery>,
 }
 
 #[derive(Debug)]
@@ -64,15 +56,9 @@ pub struct SocialOutcome {
 
 impl SocialRuntime {
     pub fn new() -> Self {
-        let (delivery, _) = broadcast::channel(SOCIAL_BROADCAST_CAPACITY);
         Self {
             buckets: HashMap::new(),
-            delivery,
         }
-    }
-
-    pub fn sender(&self) -> broadcast::Sender<SocialDelivery> {
-        self.delivery.clone()
     }
 
     pub fn disconnected(&mut self, character_id: CharacterId) {
@@ -100,6 +86,7 @@ impl SocialRuntime {
 
 pub async fn apply_social(
     runtime: &mut SocialRuntime,
+    delivery: &mut DeliveryRouter,
     world: &mut World,
     store: &dyn CharacterStore,
     session: SessionId,
@@ -119,7 +106,7 @@ pub async fn apply_social(
                 candidate.character_id != actor.id && candidate.room_id == actor_presence.room_id
             });
             deliver_allowed(
-                runtime,
+                delivery,
                 store,
                 actor.id,
                 recipients,
@@ -146,7 +133,7 @@ pub async fn apply_social(
             // A blocked or ignored delivery is acknowledged identically to a
             // delivered tell so policy state cannot be probed remotely.
             deliver_allowed(
-                runtime,
+                delivery,
                 store,
                 actor.id,
                 std::iter::once(recipient),
@@ -388,7 +375,7 @@ async fn ensure_chat_allowed(
 }
 
 async fn deliver_allowed<'a>(
-    runtime: &SocialRuntime,
+    delivery: &mut DeliveryRouter,
     store: &dyn CharacterStore,
     sender: CharacterId,
     recipients: impl Iterator<Item = &'a ConnectedCharacter>,
@@ -399,10 +386,7 @@ async fn deliver_allowed<'a>(
             .social_delivery_allowed(sender, recipient.character_id)
             .await?
         {
-            let _ = runtime.delivery.send(SocialDelivery {
-                recipient: recipient.character_id,
-                message: message.clone(),
-            });
+            delivery.send_social(recipient.session_id, message.clone());
         }
     }
     Ok(())

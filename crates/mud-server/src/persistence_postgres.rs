@@ -1178,9 +1178,11 @@ fn commit_action(
         &[&snapshot_version, &runtime_json, &last_event_sequence],
     )?;
     transaction.execute(
+        // Prepared parameters are initially `unknown` to PostgreSQL. Keep the
+        // casts on both arithmetic operands so PostgreSQL 18 can resolve `-`.
         "DELETE FROM domain_events
-         WHERE sequence <= $1 - $2
-           AND sequence <= $1",
+         WHERE sequence <= ($1::BIGINT - $2::BIGINT)
+           AND sequence <= $1::BIGINT",
         &[&last_event_sequence, &DOMAIN_EVENT_RETENTION],
     )?;
     transaction.commit()?;

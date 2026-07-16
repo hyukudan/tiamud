@@ -287,11 +287,12 @@ The runtime PostgreSQL connector uses Rustls and the operating-system trust
 store; URL `sslmode` remains authoritative, including an explicit local
 plaintext choice. Exercise registration, login, movement, combat, social state,
 restart and readiness before deleting or archiving the SQLite rollback copy.
-The repository's [retained PostgreSQL 18 acceptance
-run](../project/log/2026-07-15-postgresql-acceptance.md) proves the adapter,
-atomic mover, runtime gameplay and restart against a separate disposable
-server process. It does not replace this exercise or establish monitoring,
-TLS, backup/restore or point-in-time recovery for a production installation.
+The repository's [current PostgreSQL 18 schema-v8 acceptance
+run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the adapter,
+verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
+authenticated restart against a separate disposable server process. It does
+not replace this exercise or establish monitoring, TLS, PostgreSQL
+backup/restore or point-in-time recovery for a production installation.
 
 ## Binary and world update
 

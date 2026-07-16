@@ -1,4 +1,5 @@
 use crate::{
+    delivery::SessionDelivery,
     operations::{
         ActiveSessionLimit, ActiveSessionLimiter, AuthRateLimiter, CommandRateLimiter,
         OutputTransport, RuntimeMetrics,
@@ -716,9 +717,6 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
     let character_id = CharacterId(credentials.character_id);
     let audio_enabled = credentials.audio;
     let mut shutdown = state.shutdown.clone();
-    let mut social_delivery = state.world.subscribe_social();
-    let mut world_delivery = state.world.subscribe_world();
-
     let entered = match state
         .world
         .enter_authenticated_character(credentials.token, character_id)
@@ -769,6 +767,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
         metrics: state.metrics.clone(),
     };
     state.metrics.session_opened();
+    let mut deliveries = entered.deliveries;
 
     let outbound = Arc::new(OutboundHandle::new(
         WS_OUTBOUND_CAPACITY,
@@ -780,6 +779,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
     let mut sequence = 1_u64;
     let mut last_scene = entered.scene;
     let mut last_player = entered.player;
+    let mut ignore_world_through_revision = None;
     if !queue_sequenced(
         &outbound,
         &mut sequence,
@@ -838,9 +838,15 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                     break;
                 }
             }
-            delivery = world_delivery.recv() => {
+            delivery = deliveries.recv() => {
                 match delivery {
-                    Ok(delivery) if delivery.session_id == entered.session_id => {
+                    Some(SessionDelivery::World(delivery)) => {
+                        if ignore_world_through_revision
+                            .is_some_and(|revision| delivery.scene.revision <= revision)
+                        {
+                            continue;
+                        }
+                        ignore_world_through_revision = None;
                         for event in delivery.events {
                             if !queue_view_event(&outbound, &mut sequence, event) {
                                 break 'session;
@@ -875,11 +881,11 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             break;
                         }
                     }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Some(SessionDelivery::WorldLagged) => {
                         match state.world.current_state(entered.session_id).await {
                             Ok((scene, player)) => {
                                 let previous_audio = last_scene.audio.clone();
+                                ignore_world_through_revision = Some(scene.revision);
                                 last_scene = scene;
                                 last_player = player;
                                 if !queue_notice(
@@ -905,25 +911,19 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             Err(_) => break,
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            delivery = social_delivery.recv() => {
-                match delivery {
-                    Ok(delivery) if delivery.recipient == character_id => {
+                    Some(SessionDelivery::Social(delivery)) => {
                         if !queue_sequenced(
                             &outbound,
                             &mut sequence,
                             OutboundPriority::Narrative,
                             None,
                             "chat.message",
-                            json!(delivery.message),
+                            json!(delivery),
                         ) {
                             break;
                         }
                     }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Some(SessionDelivery::SocialLagged) => {
                         if !queue_notice(
                             &outbound,
                             &mut sequence,
@@ -932,7 +932,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    None => break,
                 }
             }
             inbound = inbound_rx.recv() => {

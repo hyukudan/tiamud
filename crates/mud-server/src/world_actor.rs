@@ -1,8 +1,9 @@
 use crate::{
     auth::AuthenticatedSession,
+    delivery::{DeliveryInbox, DeliveryRouter},
     persistence::{CharacterStore, StoreError},
     runtime_content::RuntimeContent,
-    social::{SocialDelivery, SocialRuntime, apply_social},
+    social::{SocialRuntime, apply_social},
 };
 use std::{
     collections::HashMap,
@@ -16,11 +17,10 @@ use tiamud_core::{
     SceneView, SessionId, ViewEvent, World, WorldError as CoreWorldError,
 };
 use tiamud_scripting::ScriptHook;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
 const WORLD_COMMAND_QUEUE_CAPACITY: usize = 256;
-const WORLD_DELIVERY_CHANNEL_CAPACITY: usize = 256;
 const PERSIST_TICK_SCRIPT_WALL_BUDGET: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Error)]
@@ -37,9 +37,17 @@ pub enum GameError {
 pub struct EnteredWorld {
     pub session_id: SessionId,
     pub account_id: AccountId,
-    pub character_id: CharacterId,
     pub scene: SceneView,
     pub player: PlayerStateView,
+    pub deliveries: DeliveryInbox,
+}
+
+#[derive(Debug)]
+struct PreparedWorldEntry {
+    session_id: SessionId,
+    account_id: AccountId,
+    scene: SceneView,
+    player: PlayerStateView,
 }
 
 #[derive(Debug)]
@@ -51,11 +59,10 @@ pub struct AppliedAction {
 }
 
 /// A fresh perception-safe projection caused by another actor or by a world
-/// tick. Transports subscribe once and retain only deliveries for their own
-/// session; no stable room, entity, account or character IDs cross this edge.
-#[derive(Clone, Debug)]
+/// tick. The router addresses each projection directly to one session; no
+/// stable room, entity, account or character IDs cross the transport edge.
+#[derive(Debug)]
 pub struct WorldDelivery {
-    pub session_id: SessionId,
     pub scene: SceneView,
     pub player: PlayerStateView,
     pub events: Vec<ViewEvent>,
@@ -91,8 +98,6 @@ enum Command {
 #[derive(Clone)]
 pub struct WorldHandle {
     tx: mpsc::Sender<Command>,
-    social_delivery: broadcast::Sender<SocialDelivery>,
-    world_delivery: broadcast::Sender<WorldDelivery>,
     store: Arc<dyn CharacterStore>,
     start_room_id: Arc<str>,
 }
@@ -133,10 +138,8 @@ impl WorldHandle {
     ) -> Self {
         let (tx, mut rx) = mpsc::channel(WORLD_COMMAND_QUEUE_CAPACITY);
         let mut social = SocialRuntime::new();
-        let social_delivery = social.sender();
-        let (world_delivery, _) = broadcast::channel(WORLD_DELIVERY_CHANNEL_CAPACITY);
-        let actor_delivery = world_delivery.clone();
         let operational_metrics = runtime_content.operational_metrics();
+        let mut actor_delivery = DeliveryRouter::new(operational_metrics.clone());
         let start_room_id: Arc<str> = Arc::from(world.start_room_id());
         let actor_store = Arc::clone(&store);
         tokio::spawn(async move {
@@ -180,7 +183,7 @@ impl WorldHandle {
                                 &runtime_content,
                                 &session_roles,
                                 actor_store.as_ref(),
-                                &actor_delivery,
+                                &mut actor_delivery,
                             ).await;
                             if let Some(metrics) = &operational_metrics {
                                 metrics.tick_finished(started.elapsed(), succeeded);
@@ -223,12 +226,26 @@ impl WorldHandle {
                             &runtime_content,
                             &mut session_roles,
                             actor_store.as_ref(),
-                            &actor_delivery,
+                            &mut actor_delivery,
                             role,
                             result,
                         )
-                        .await;
-                        let _ = reply.send(result);
+                        .await
+                        .map(|entered| EnteredWorld {
+                            session_id: entered.session_id,
+                            account_id: entered.account_id,
+                            scene: entered.scene,
+                            player: entered.player,
+                            deliveries: actor_delivery.register(session),
+                        });
+                        if let Err(Ok(entered)) = reply.send(result) {
+                            session_roles.remove(&entered.session_id);
+                            if let Ok(character) = world.character_snapshot(entered.session_id) {
+                                social.disconnected(character.id);
+                            }
+                            world.disconnect(entered.session_id);
+                            actor_delivery.unregister(entered.session_id);
+                        }
                     }
                     Command::Apply {
                         session,
@@ -246,7 +263,7 @@ impl WorldHandle {
                                 social: &mut social,
                                 store: actor_store.as_ref(),
                                 session_roles: &session_roles,
-                                delivery: &actor_delivery,
+                                delivery: &mut actor_delivery,
                             },
                             session,
                             role,
@@ -284,13 +301,14 @@ impl WorldHandle {
                                 &session_roles,
                                 Some(session),
                                 &hook.domain_events,
-                                &actor_delivery,
+                                &mut actor_delivery,
                             );
                         }
                         if let Ok(character) = world.character_snapshot(session) {
                             social.disconnected(character.id);
                         }
                         world.disconnect(session);
+                        actor_delivery.unregister(session);
                     }
                     Command::Shutdown { reply } => {
                         rx.close();
@@ -302,8 +320,6 @@ impl WorldHandle {
         });
         Self {
             tx,
-            social_delivery,
-            world_delivery,
             store,
             start_room_id,
         }
@@ -484,14 +500,6 @@ impl WorldHandle {
         receive.await.map_err(|_| GameError::ActorStopped)?
     }
 
-    pub fn subscribe_social(&self) -> broadcast::Receiver<SocialDelivery> {
-        self.social_delivery.subscribe()
-    }
-
-    pub fn subscribe_world(&self) -> broadcast::Receiver<WorldDelivery> {
-        self.world_delivery.subscribe()
-    }
-
     pub async fn current_state(
         &self,
         session: SessionId,
@@ -572,7 +580,7 @@ async fn enter_prepared_character(
     session: SessionId,
     snapshot: CharacterSnapshot,
     gameplay: CharacterGameplaySnapshot,
-) -> Result<EnteredWorld, GameError> {
+) -> Result<PreparedWorldEntry, GameError> {
     let checkpoint = world.checkpoint();
     world.restore_character_gameplay(snapshot.id, gameplay)?;
     let scene = match world.connect(session, snapshot.clone()) {
@@ -593,10 +601,9 @@ async fn enter_prepared_character(
     }
 
     let player = world.player_state_view(session)?;
-    Ok(EnteredWorld {
+    Ok(PreparedWorldEntry {
         session_id: session,
         account_id: resolved.account_id,
-        character_id: resolved.id,
         scene,
         player,
     })
@@ -607,10 +614,10 @@ async fn finish_enter(
     runtime_content: &RuntimeContent,
     session_roles: &mut HashMap<SessionId, AccountRole>,
     store: &dyn CharacterStore,
-    delivery: &broadcast::Sender<WorldDelivery>,
+    delivery: &mut DeliveryRouter,
     role: AccountRole,
-    result: Result<EnteredWorld, GameError>,
-) -> Result<EnteredWorld, GameError> {
+    result: Result<PreparedWorldEntry, GameError>,
+) -> Result<PreparedWorldEntry, GameError> {
     let mut entered = result?;
     world.set_observer_role(entered.session_id, role)?;
     let checkpoint = world.checkpoint();
@@ -651,7 +658,7 @@ struct ApplyResources<'a> {
     social: &'a mut SocialRuntime,
     store: &'a dyn CharacterStore,
     session_roles: &'a HashMap<SessionId, AccountRole>,
-    delivery: &'a broadcast::Sender<WorldDelivery>,
+    delivery: &'a mut DeliveryRouter,
 }
 
 async fn apply(
@@ -670,7 +677,7 @@ async fn apply(
     } = resources;
     let checkpoint = world.checkpoint();
     if let PlayerAction::Social(action) = action {
-        let outcome = apply_social(social, world, store, session, action).await?;
+        let outcome = apply_social(social, delivery, world, store, session, action).await?;
         let hook = runtime_content.run_hook(world, session, role, ScriptHook::OnTalk);
         if (hook.changed || !hook.domain_events.is_empty())
             && let Err(error) = store
@@ -842,7 +849,7 @@ fn broadcast_world_deliveries(
     session_roles: &HashMap<SessionId, AccountRole>,
     excluded_session: Option<SessionId>,
     domain_events: &[DomainEvent],
-    delivery: &broadcast::Sender<WorldDelivery>,
+    delivery: &mut DeliveryRouter,
 ) {
     let refreshes_state = domain_events.iter().any(is_internal_tick_event);
     for observer in world
@@ -861,12 +868,14 @@ fn broadcast_world_deliveries(
         let state = current_state(world, runtime_content, session_roles, observer);
         match (projected, state) {
             (Ok(events), Ok((scene, player))) => {
-                let _ = delivery.send(WorldDelivery {
-                    session_id: observer,
-                    scene,
-                    player,
-                    events,
-                });
+                delivery.send_world(
+                    observer,
+                    WorldDelivery {
+                        scene,
+                        player,
+                        events,
+                    },
+                );
             }
             (Err(error), _) | (_, Err(GameError::World(error))) => {
                 tracing::warn!(%error, ?observer, "could not project world delivery");
@@ -884,7 +893,7 @@ fn send_targeted_narration_delivery(
     session_roles: &HashMap<SessionId, AccountRole>,
     session: SessionId,
     narration: Vec<String>,
-    delivery: &broadcast::Sender<WorldDelivery>,
+    delivery: &mut DeliveryRouter,
 ) {
     let events = narration
         .iter()
@@ -893,12 +902,14 @@ fn send_targeted_narration_delivery(
     let state = current_state(world, runtime_content, session_roles, session);
     match (events, state) {
         (Ok(events), Ok((scene, player))) => {
-            let _ = delivery.send(WorldDelivery {
-                session_id: session,
-                scene,
-                player,
-                events,
-            });
+            delivery.send_world(
+                session,
+                WorldDelivery {
+                    scene,
+                    player,
+                    events,
+                },
+            );
         }
         (Err(error), _) | (_, Err(GameError::World(error))) => {
             tracing::warn!(%error, ?session, "could not project targeted script narration");
@@ -947,7 +958,7 @@ async fn persist_tick(
     runtime_content: &RuntimeContent,
     session_roles: &HashMap<SessionId, AccountRole>,
     store: &dyn CharacterStore,
-    delivery: &broadcast::Sender<WorldDelivery>,
+    delivery: &mut DeliveryRouter,
 ) -> bool {
     persist_tick_with_script_budget(
         world,
@@ -965,7 +976,7 @@ async fn persist_tick_with_script_budget(
     runtime_content: &RuntimeContent,
     session_roles: &HashMap<SessionId, AccountRole>,
     store: &dyn CharacterStore,
-    delivery: &broadcast::Sender<WorldDelivery>,
+    delivery: &mut DeliveryRouter,
     script_wall_budget: Duration,
 ) -> bool {
     let checkpoint = world.checkpoint();
@@ -1770,8 +1781,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         let world = WorldHandle::spawn(World::demo(), store);
         let actor = world.enter("Actor".into()).await.unwrap();
-        let observer = world.enter("Observer".into()).await.unwrap();
-        let mut deliveries = world.subscribe_world();
+        let mut observer = world.enter("Observer".into()).await.unwrap();
 
         world
             .apply(
@@ -1780,12 +1790,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let delivery = tokio::time::timeout(Duration::from_secs(1), deliveries.recv())
+        let delivery = tokio::time::timeout(Duration::from_secs(1), observer.deliveries.recv())
             .await
             .unwrap()
             .unwrap();
+        let crate::delivery::SessionDelivery::World(delivery) = delivery else {
+            panic!("world delivery expected");
+        };
 
-        assert_eq!(delivery.session_id, observer.session_id);
         assert!(delivery.scene.items.is_empty());
         assert!(delivery.player.inventory.is_empty());
         assert_eq!(delivery.events.len(), 1);
@@ -2112,21 +2124,22 @@ mod tests {
         );
         let content = timer_narration_content(None);
         let roles = HashMap::from([(target, AccountRole::Player), (peer, AccountRole::Player)]);
-        let (delivery, mut receiver) = broadcast::channel(16);
+        let mut delivery = DeliveryRouter::new(None);
+        let mut target_inbox = delivery.register(target);
+        let mut peer_inbox = delivery.register(peer);
 
-        assert!(persist_tick(&mut world, &content, &roles, &store, &delivery).await);
+        assert!(persist_tick(&mut world, &content, &roles, &store, &mut delivery).await);
 
         let mut deliveries = Vec::new();
-        while let Ok(delivery) = receiver.try_recv() {
-            deliveries.push(delivery);
+        for (session, inbox) in [(target, &mut target_inbox), (peer, &mut peer_inbox)] {
+            while let Ok(crate::delivery::SessionDelivery::World(delivery)) = inbox.try_recv() {
+                deliveries.push((session, delivery));
+            }
         }
         let narration = deliveries
             .iter()
-            .flat_map(|delivery| {
-                delivery
-                    .events
-                    .iter()
-                    .map(move |event| (delivery.session_id, event))
+            .flat_map(|(session, delivery)| {
+                delivery.events.iter().map(move |event| (*session, event))
             })
             .collect::<Vec<_>>();
         assert_eq!(narration.len(), 1);
@@ -2136,8 +2149,8 @@ mod tests {
         assert!(
             deliveries
                 .iter()
-                .filter(|delivery| delivery.session_id == peer)
-                .all(|delivery| delivery.events.is_empty())
+                .filter(|(session, _)| *session == peer)
+                .all(|(_, delivery)| delivery.events.is_empty())
         );
     }
 
@@ -2158,7 +2171,8 @@ mod tests {
         let metrics = Arc::new(crate::operations::RuntimeMetrics::default());
         let content = timer_narration_content(Some(metrics.clone()));
         let roles = HashMap::from([(session, AccountRole::Player)]);
-        let (delivery, mut receiver) = broadcast::channel(16);
+        let mut delivery = DeliveryRouter::new(None);
+        let mut receiver = delivery.register(session);
 
         assert!(
             persist_tick_with_script_budget(
@@ -2166,7 +2180,7 @@ mod tests {
                 &content,
                 &roles,
                 &store,
-                &delivery,
+                &mut delivery,
                 Duration::ZERO,
             )
             .await
@@ -2193,7 +2207,7 @@ mod tests {
             Some(before.logical_tick + 1)
         );
         let mut received = Vec::new();
-        while let Ok(delivery) = receiver.try_recv() {
+        while let Ok(crate::delivery::SessionDelivery::World(delivery)) = receiver.try_recv() {
             received.push(delivery);
         }
         assert!(!received.is_empty());
@@ -2430,12 +2444,10 @@ mod tests {
             .enter_authenticated_character(admin.token.as_str().into(), admin_character.id)
             .await
             .unwrap();
-        let player_entered = world
+        let mut player_entered = world
             .enter_authenticated_character(player.token.as_str().into(), player_character.id)
             .await
             .unwrap();
-        let mut delivery = world.subscribe_social();
-
         world
             .apply(
                 player_entered.session_id,
@@ -2451,7 +2463,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), delivery.recv())
+            tokio::time::timeout(Duration::from_millis(20), player_entered.deliveries.recv())
                 .await
                 .is_err()
         );
@@ -2485,7 +2497,7 @@ mod tests {
             Some("You tell Bryn, \"Can you hear me?\"\r\n")
         );
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), delivery.recv())
+            tokio::time::timeout(Duration::from_millis(20), player_entered.deliveries.recv())
                 .await
                 .is_err()
         );
@@ -2595,13 +2607,9 @@ mod tests {
     #[tokio::test]
     async fn actor_command_queue_is_strictly_bounded_and_auth_bypasses_it() {
         let (tx, _rx) = mpsc::channel(WORLD_COMMAND_QUEUE_CAPACITY);
-        let social = SocialRuntime::new();
-        let (world_delivery, _) = broadcast::channel(WORLD_DELIVERY_CHANNEL_CAPACITY);
         let store: Arc<dyn CharacterStore> = Arc::new(MemoryStore::default());
         let handle = WorldHandle {
             tx,
-            social_delivery: social.sender(),
-            world_delivery,
             store,
             start_room_id: Arc::from("demo:lantern-square"),
         };

@@ -35,7 +35,9 @@ requirements.
 - **A capable terminal experience.** Fragment-safe Telnet negotiation, ANSI,
   GMCP, MSSP, MCCP2, optional safe links, direct TLS, and opt-in graphical
   capabilities; official TinTin++ and Mudlet integrations are included. The
-  production byte parser is shared with its bounded fuzz target.
+  production byte parser is shared with its bounded fuzz target, and live
+  world/chat updates use bounded session-addressed mailboxes instead of a
+  global broadcast fan-out.
 - **Authored worlds with guardrails.** Versioned WorldPacks, deterministic
   build/diff/preview/test/publish/rollback tools, compile-validated and
   aggregate-bounded Lua hooks, immutable assets and explicit provenance.

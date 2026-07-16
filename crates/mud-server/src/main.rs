@@ -1,4 +1,5 @@
 mod auth;
+mod delivery;
 mod operations;
 mod persistence;
 mod persistence_postgres;
