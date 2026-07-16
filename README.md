@@ -1,10 +1,14 @@
-# Tiamud
+<h1 align="center">
+  <img src="docs/images/tiamud-logo.svg" alt="Tiamud" width="720">
+</h1>
 
-[![CI](https://github.com/hyukudan/tiamud/actions/workflows/ci.yml/badge.svg)](https://github.com/hyukudan/tiamud/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licensing)
-[![MSRV: Rust 1.88](https://img.shields.io/badge/MSRV-Rust%201.88-b7410e.svg)](https://www.rust-lang.org/)
+<p align="center">
+  <a href="https://github.com/hyukudan/tiamud/actions/workflows/ci.yml"><img src="https://github.com/hyukudan/tiamud/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="#licensing"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/MSRV-Rust%201.88-b7410e.svg" alt="MSRV: Rust 1.88"></a>
+</p>
 
-![Tiamud sign-in screen over Lantern Square at night, with account fields and a notice that every place, action and route is also fully described in text.](docs/images/tiamud-client.webp)
+![Painterly panorama of Tiamud's rain-polished medieval crossroads at blue hour, where a blue-glass lantern lights branching roads toward a distant city and travelers.](docs/images/tiamud-hero.webp)
 
 **A multiplayer narrative engine for worlds that read beautifully, run
 locally and remain playable everywhere.**

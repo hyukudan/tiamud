@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200"
+     height="240"
+     viewBox="0 0 1200 240"
+     role="img"
+     aria-labelledby="tiamud-logo-title tiamud-logo-description">
+  <title id="tiamud-logo-title">Tiamud</title>
+  <desc id="tiamud-logo-description">Tiamud wordmark with a blue-glass lantern integrated into the letter I.</desc>
+
+  <defs>
+    <linearGradient id="lantern-glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d8f6ff"/>
+      <stop offset="0.42" stop-color="#72d0ee"/>
+      <stop offset="1" stop-color="#237fa8"/>
+    </linearGradient>
+    <radialGradient id="lantern-light">
+      <stop offset="0" stop-color="#8cddf5" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#8cddf5" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- The light is deliberately quiet so the word remains legible at mobile sizes. -->
+  <ellipse cx="377" cy="119" rx="76" ry="68" fill="url(#lantern-light)"/>
+
+  <g fill="#f4ead7"
+     stroke="#20251b"
+     stroke-width="4"
+     stroke-linejoin="round"
+     paint-order="stroke fill">
+    <!-- T -->
+    <path d="M143 48H318L313 82H267V167H288V188H218V167H239V82H193L188 91H159Z"/>
+
+    <!-- I -->
+    <path d="M339 48H415V68H399V168H415V188H339V168H355V68H339Z"/>
+
+    <!-- A -->
+    <path fill-rule="evenodd" d="M425 188L487 48H513L576 188H540L527 155H474L461 188ZM484 130H517L501 88Z"/>
+
+    <!-- M -->
+    <path d="M585 188V48H620L663 130L706 48H741V188H706V108L675 168H652L620 108V188Z"/>
+
+    <!-- U -->
+    <path d="M753 48H808V68H795V137Q795 162 820 162Q845 162 845 137V68H832V48H887V68H873V139Q873 191 820 191Q767 191 767 139V68H753Z"/>
+
+    <!-- D -->
+    <path fill-rule="evenodd" d="M897 48H959Q1048 48 1048 118Q1048 188 959 188H897V168H914V68H897ZM948 78V158H959Q1012 158 1012 118Q1012 78 959 78Z"/>
+  </g>
+
+  <!-- Blue-glass lantern integrated into the I. -->
+  <g stroke="#20251b" stroke-linejoin="round" paint-order="stroke fill">
+    <path d="M364 91L370 80H384L390 91" fill="none" stroke="#c7b174" stroke-width="6" stroke-linecap="round"/>
+    <path d="M360 93H394L400 137H354Z" fill="url(#lantern-glass)" stroke-width="4"/>
+    <path d="M360 93H394M354 137H400" fill="none" stroke="#c7b174" stroke-width="6"/>
+    <path d="M369 96L366 133M385 96L389 133" fill="none" stroke="#e4d3a8" stroke-width="3" opacity="0.78"/>
+    <path d="M377 102V130" fill="none" stroke="#ecfbff" stroke-width="3" stroke-linecap="round" opacity="0.72"/>
+  </g>
+
+  <!-- A restrained rule ties the mark visually to the panoramic README hero. -->
+  <path d="M154 213H348M406 213H1046" fill="none" stroke="#20251b" stroke-width="5" stroke-linecap="round"/>
+  <path d="M154 213H348M406 213H1046" fill="none" stroke="#b8a16b" stroke-width="2" stroke-linecap="round"/>
+  <path d="M362 213L377 201L392 213L377 225Z" fill="#61c0df" stroke="#20251b" stroke-width="4" stroke-linejoin="round" paint-order="stroke fill"/>
+</svg>

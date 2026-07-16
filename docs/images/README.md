@@ -7,6 +7,64 @@ contributors hold rights in the rendered material. The underlying software
 and UI source keep their MIT OR Apache-2.0 terms. See
 ../../LICENSE-CONTENT.md, ../../LICENSE-CC-BY-4.0 and ../../LICENSE.
 
+## tiamud-logo.svg
+
+- Purpose: provide a reusable Tiamud wordmark for the repository header and
+  future project surfaces.
+- Dimensions: 1200 x 240 with a transparent background.
+- Final SHA-256:
+  `30960f18d077a3e4dedc48c669e076e40aca00bc4bedf6e29c8a69564166f76b`.
+- Design: original deterministic vector artwork created for Tiamud on
+  2026-07-16. Custom ivory letter paths avoid any font dependency; a restrained
+  aged-gold rule and blue-glass lantern integrated into the letter I connect
+  the mark to Lantern Square and the panoramic hero.
+- Accessibility and safety: the SVG has an accessible title and description,
+  uses only local paths, gradients and shapes, and contains no scripts,
+  `foreignObject`, external resources, embedded raster data or font files.
+- Review: parsed as XML, rendered in Chromium at 1200 x 240 and 480 x 96, and
+  visually reviewed for light and dark GitHub themes and mobile legibility.
+
+## tiamud-hero.webp
+
+- Purpose: provide an inviting, decorative fantasy hero for the repository
+  landing page while establishing Lantern Square as a crossroads into a larger
+  shared world. It is concept art, not a gameplay capture.
+- Dimensions: 1760 x 652 (2.70:1).
+- Generated source: 2060 x 763 RGB PNG, SHA-256
+  `c2bb74a4c32d93059158c7b9629c7446b484f909cc6ab853c5bc53fb6d8b4be2`.
+- Final SHA-256:
+  `c455a736dce2e9c129684cd5d13ea71a364731c6ed83802bb8c61f63d8b542c9`.
+- Generation: OpenAI built-in image generation, directed and reviewed by a
+  Tiamud project contributor on 2026-07-16. The built-in path did not expose a
+  model identifier.
+- Reference-image role: `apps/web/artwork/lantern-square-source.png` was
+  supplied only as a reference for Tiamud's reviewed palette, atmosphere and
+  world language. It was not an edit target, and the prompt explicitly required
+  original composition, architecture and object placement rather than a copy.
+- Human review: the generated source and encoded WebP were visually inspected
+  for composition, responsive center safety, environmental detail, palette,
+  traveler scale, unwanted text and prohibited UI, logo, watermark, border and
+  horror elements. No corrective generation was needed; the final encoding was
+  inspected again for visible compression damage.
+- Processing: no crop was applied because the generated 2.70:1 source already
+  matched the intended 2.5:1 to 3:1 banner. It was resized without stretching
+  and encoded with cwebp 1.3.2 using
+  `cwebp -quiet -q 82 -m 6 -pass 10 -resize 1760 0 -metadata none generated-source.png -o docs/images/tiamud-hero.webp`.
+  `webpinfo` reports one lossy VP8 chunk and no alpha, animation or metadata
+  chunks; the final file is 137,886 bytes.
+
+Prompt summary: create original, extremely wide painterly narrative-game key
+art for Tiamud, centered on a sapphire-blue glass lantern at a rain-polished
+medieval route junction during blue hour. Show old stone arches and several
+roads receding into warm-lit districts and distant horizons, with a few small
+traveler silhouettes implying shared exploration. Use deep navy, slate,
+charcoal, rain-blue and restrained amber; keep the essential scene and lantern
+safe in the central horizontal band for responsive display. Make the mood
+mysterious, elegant and inviting rather than horrific. Include no readable
+text, title, logo, signage, runes, UI, fake screenshot, watermark, border,
+clock tower, close-up characters, monsters, combat, gore, neon treatment or
+glossy 3D-render appearance.
+
 ## tiamud-client.webp
 
 - Purpose: show the real browser entry surface instead of a conceptual mockup.
