@@ -9,6 +9,8 @@ const EQUIPMENT_SLOTS = new Set(['weapon', 'body', 'trinket']);
 const MAX_ITEM_LEVEL = 1_000;
 const MAX_ITEM_WEIGHT_GRAMS = 1_000_000;
 const MAX_ITEM_SLOT_COST = 100;
+const MAX_ITEM_STACK_UNITS = 1_000;
+const MAX_ITEM_TOTAL_WEIGHT_GRAMS = 65_536_000_000;
 const MAX_INVENTORY_SLOTS = 1_000;
 const MAX_INVENTORY_WEIGHT_GRAMS = 1_000_000;
 const MAX_SCENE_PRESENTATION_ENTITIES = 12;
@@ -520,6 +522,9 @@ export function parseServerMessage(raw) {
     case 'inventory.patch':
       validateInventoryPatch(message.data);
       break;
+    case 'container.contents':
+      validateContainerContents(message.data);
+      break;
     case 'map.snapshot':
       validateMapSnapshot(message.data);
       break;
@@ -672,6 +677,41 @@ function validateInventoryPatch(data) {
     data.inventoryCapacity,
     'inventory patch',
   );
+}
+
+function validateContainerContents(data) {
+  assertRecord(data, 'container.contents.data');
+  assertOnlyKeys(
+    data,
+    ['container', 'items', 'page', 'totalPages', 'capacity'],
+    'container.contents.data',
+  );
+  assertOpaqueId(data.container, 'container contents selector');
+  assertPositiveInteger(data.page, 'container contents page');
+  assertPositiveInteger(data.totalPages, 'container contents total pages');
+  if (data.page > data.totalPages || data.totalPages > 0xffff) {
+    throw new Error('Container contents page is invalid.');
+  }
+  assertArrayMax(data.items, 20, 'container contents items');
+  const ids = new Set();
+  for (const item of data.items) {
+    assertRecord(item, 'container contents item');
+    assertOnlyKeys(
+      item,
+      [
+        'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
+        'totalWeightGrams', 'containerCapacity', 'actions',
+      ],
+      'container contents item',
+    );
+    assertOpaqueId(item.id, 'container contents item id');
+    if (ids.has(item.id)) throw new Error('Container contents contains a duplicate item id.');
+    ids.add(item.id);
+    assertBoundedString(item.label, 256, 'container contents item label');
+    validateItemMetadata(item, 'container contents item');
+    validateActions(item.actions, 'container contents item actions');
+  }
+  validateCapacityShape(data.capacity, 'container contents capacity');
 }
 
 function validateMapSnapshot(data) {
@@ -946,7 +986,12 @@ function validateVisualText(value, maximum, decorative, label) {
 
 function validateSceneEntity(entity, kind, extraKeys = []) {
   assertRecord(entity, `scene ${kind}`);
-  const itemKeys = kind === 'item' ? ['rarity', 'itemLevel', 'weightGrams'] : [];
+  const itemKeys = kind === 'item'
+    ? [
+        'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
+        'totalWeightGrams', 'containerCapacity',
+      ]
+    : [];
   assertOnlyKeys(
     entity,
     ['id', 'label', 'description', 'actions', ...itemKeys, ...extraKeys],
@@ -1423,7 +1468,10 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
     assertRecord(item, itemLabel);
     assertOnlyKeys(
       item,
-      ['id', 'label', 'description', 'rarity', 'itemLevel', 'weightGrams', 'actions'],
+      [
+        'id', 'label', 'description', 'rarity', 'itemLevel', 'weightGrams', 'quantity',
+        'stackSlots', 'totalWeightGrams', 'containerCapacity', 'actions',
+      ],
       itemLabel,
     );
     assertOpaqueId(item.id, `${itemLabel} id`);
@@ -1441,7 +1489,10 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
     assertRecord(item, itemLabel);
     assertOnlyKeys(
       item,
-      ['id', 'slot', 'label', 'rarity', 'itemLevel', 'weightGrams', 'actions'],
+      [
+        'id', 'slot', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity',
+        'stackSlots', 'totalWeightGrams', 'containerCapacity', 'actions',
+      ],
       itemLabel,
     );
     assertOpaqueId(item.id, `${itemLabel} id`);
@@ -1468,14 +1519,47 @@ function validateItemMetadata(item, label) {
   if (item.weightGrams > MAX_ITEM_WEIGHT_GRAMS) {
     throw new Error(`${label} weightGrams exceeds ${MAX_ITEM_WEIGHT_GRAMS}.`);
   }
+  assertPositiveInteger(item.quantity, `${label} quantity`);
+  if (item.quantity > MAX_ITEM_STACK_UNITS) throw new Error(`${label} quantity is too large.`);
+  assertPositiveInteger(item.stackSlots, `${label} stackSlots`);
+  if (item.stackSlots > MAX_ITEM_SLOT_COST) throw new Error(`${label} stackSlots is too large.`);
+  assertNonNegativeInteger(item.totalWeightGrams, `${label} totalWeightGrams`);
+  if (item.totalWeightGrams > MAX_ITEM_TOTAL_WEIGHT_GRAMS) {
+    throw new Error(`${label} totalWeightGrams is too large.`);
+  }
+  const unitTotal = item.weightGrams * item.quantity;
+  if (item.containerCapacity === undefined) {
+    if (item.totalWeightGrams !== unitTotal) throw new Error(`${label} total weight is inconsistent.`);
+  } else {
+    if (
+      item.quantity !== 1 ||
+      item.totalWeightGrams !== unitTotal + item.containerCapacity.usedWeightGrams
+    ) {
+      throw new Error(`${label} container total weight is inconsistent.`);
+    }
+    validateCapacityShape(item.containerCapacity, `${label} container capacity`);
+  }
 }
 
 function validateInventoryCapacity(capacity, inventory, equipment, label) {
-  assertRecord(capacity, `${label} inventory capacity`);
+  validateCapacityShape(capacity, `${label} inventory capacity`);
+  const projectedWeight = [...inventory, ...equipment]
+    .reduce((total, item) => total + item.totalWeightGrams, 0);
+  if (capacity.usedWeightGrams !== projectedWeight) {
+    throw new Error(`${label} used weight does not match its projected items.`);
+  }
+  const projectedSlots = inventory.reduce((total, item) => total + item.stackSlots, 0);
+  if (capacity.usedSlots !== projectedSlots) {
+    throw new Error(`${label} used slots do not match its projected inventory.`);
+  }
+}
+
+function validateCapacityShape(capacity, label) {
+  assertRecord(capacity, label);
   assertOnlyKeys(
     capacity,
     ['usedSlots', 'maxSlots', 'usedWeightGrams', 'maxWeightGrams'],
-    `${label} inventory capacity`,
+    label,
   );
   assertNonNegativeInteger(capacity.usedSlots, `${label} used slots`);
   assertPositiveInteger(capacity.maxSlots, `${label} max slots`);
@@ -1491,16 +1575,6 @@ function validateInventoryCapacity(capacity, inventory, equipment, label) {
     throw new Error(`${label} inventory weight capacity is inconsistent.`);
   }
 
-  const projectedWeight = [...inventory, ...equipment]
-    .reduce((total, item) => total + item.weightGrams, 0);
-  if (capacity.usedWeightGrams !== projectedWeight) {
-    throw new Error(`${label} used weight does not match its projected items.`);
-  }
-  const minimumSlots = inventory.length;
-  const maximumSlots = inventory.length * MAX_ITEM_SLOT_COST;
-  if (capacity.usedSlots < minimumSlots || capacity.usedSlots > maximumSlots) {
-    throw new Error(`${label} used slots cannot describe its projected inventory.`);
-  }
 }
 
 function validateActions(actions, label) {

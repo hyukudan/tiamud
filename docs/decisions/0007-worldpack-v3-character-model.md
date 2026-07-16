@@ -4,8 +4,10 @@
 - Date: 2026-07-16
 
 Serialization note: ADR 0009 later raised the enclosing pack to WorldPack v4
-and AreaPack v3 for item identity. The v3 character vocabulary decided here
-remains implemented and unchanged inside those current formats.
+and AreaPack v3 for item identity; ADR 0010 then raised them to WorldPack v5
+and AreaPack v4 for derived stacks and bounded containers. The v3 character
+vocabulary decided here remains implemented and unchanged inside the current
+formats.
 
 ## Context
 

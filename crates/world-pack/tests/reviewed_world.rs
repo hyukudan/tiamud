@@ -1,12 +1,12 @@
 use world_pack::{
     AbilityCategory, AbilityStatusEffect, CURRENT_SCHEMA_VERSION, ExitTarget, GrantDefinition,
-    WorldPackDocument,
+    InitialItemLocation, ItemStackPolicy, WorldPackDocument,
 };
 
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 #[test]
-fn reviewed_runtime_fixture_matches_world_pack_v4() {
+fn reviewed_runtime_fixture_matches_world_pack_v5() {
     let document = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap();
     let pack = document.world;
 
@@ -14,8 +14,8 @@ fn reviewed_runtime_fixture_matches_world_pack_v4() {
     assert_eq!(pack.schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(pack.start_room_id, "demo:lantern-square");
     assert!(pack.rooms.iter().any(|room| room.id == pack.start_room_id));
-    assert_eq!(pack.item_prototypes.len(), 6);
-    assert_eq!(pack.initial_item_instances.len(), 6);
+    assert_eq!(pack.item_prototypes.len(), 7);
+    assert_eq!(pack.initial_item_instances.len(), 8);
     assert!(
         pack.item_prototypes
             .iter()
@@ -46,6 +46,35 @@ fn reviewed_runtime_fixture_matches_world_pack_v4() {
             .count(),
         3
     );
+    let tonic = pack
+        .item_prototypes
+        .iter()
+        .find(|prototype| prototype.id == "tiamud:ember-tonic")
+        .unwrap();
+    assert_eq!(tonic.stack_policy, ItemStackPolicy::Fungible);
+    assert_eq!(tonic.max_stack_units, 20);
+    assert_eq!(
+        pack.initial_item_instances
+            .iter()
+            .filter(|instance| instance.prototype_id == tonic.id)
+            .count(),
+        2
+    );
+    let satchel = pack
+        .item_prototypes
+        .iter()
+        .find(|prototype| prototype.id == "tiamud:archive-satchel")
+        .unwrap();
+    assert_eq!(satchel.container.unwrap().max_slots, 8);
+    assert!(pack.initial_item_instances.iter().any(|instance| {
+        instance.id == "tiamud:weathered-map"
+            && matches!(
+                &instance.location,
+                InitialItemLocation::Container {
+                    container_instance_id
+                } if container_instance_id == "tiamud:archive-satchel"
+            )
+    }));
     assert_eq!(pack.gameplay.npc_prototypes.len(), 1);
     assert_eq!(pack.gameplay.npc_spawns.len(), 1);
     assert!(pack.gameplay.default_archetype_id.is_none());

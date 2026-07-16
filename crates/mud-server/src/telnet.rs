@@ -19,7 +19,9 @@ use std::{
     time::Instant,
 };
 use tiamud_cell_frame::{AnsiProfile, Cell, CellAttributes, CellFrame, NativeProtocol, RgbColor};
-use tiamud_core::{CharacterSnapshot, PlayerStateView, SceneAudio, SceneView, parse_action};
+use tiamud_core::{
+    CharacterSnapshot, ContainerContentsView, PlayerStateView, SceneAudio, SceneView, parse_action,
+};
 use tiamud_telnet_codec::{DO, DONT, IAC, SB, SE, TelnetEvent, TelnetParser, WILL, WONT};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf},
@@ -56,6 +58,7 @@ const MAX_GMCP_PACKAGE_BYTES: usize = 64;
 const MAX_GMCP_SUPPORTS: usize = 64;
 const MAX_GMCP_CLIENT_VALUE_BYTES: usize = 128;
 const MAX_GMCP_FALLBACK_TITLE_CHARS: usize = 256;
+const MAX_GMCP_CONTAINER_FALLBACK_LABEL_BYTES: usize = 32;
 const MAX_AUTH_ATTEMPTS: u8 = 5;
 const MAX_TTYPE_REQUESTS: u8 = 8;
 const MAX_RATE_VIOLATIONS: u8 = 3;
@@ -1203,6 +1206,15 @@ async fn serve_entered(
                                         bytes.extend_from_slice(b"\r\n");
                                         output_queue_bytes(output, bytes)?;
                                     }
+                                    if let Some(contents) = &outcome.container_contents {
+                                        let gmcp = input.negotiation.container_gmcp(
+                                            contents,
+                                            outcome.player.revision,
+                                        );
+                                        if !gmcp.is_empty() {
+                                            output_queue_bytes(output, gmcp)?;
+                                        }
+                                    }
                                     write_scene(output, input, &outcome.scene, &outcome.player)?;
                                 }
                                 Err(error) => {
@@ -2110,13 +2122,20 @@ impl TelnetSession {
                 .inventory
                 .iter()
                 .map(|item| {
-                    json!({
+                    let mut value = json!({
                         "id": item.id,
                         "name": item.label,
                         "rarity": item.rarity,
                         "itemLevel": item.item_level,
                         "weightGrams": item.weight_grams,
-                    })
+                        "quantity": item.quantity,
+                        "stackSlots": item.stack_slots,
+                        "totalWeightGrams": item.total_weight_grams,
+                    });
+                    if let Some(capacity) = &item.container_capacity {
+                        value["containerCapacity"] = json!(capacity);
+                    }
+                    value
                 })
                 .collect::<Vec<_>>();
             append_gmcp(
@@ -2133,14 +2152,21 @@ impl TelnetSession {
                 .equipment
                 .iter()
                 .map(|item| {
-                    json!({
+                    let mut value = json!({
                         "id": item.id,
                         "name": item.label,
                         "slot": item.slot,
                         "rarity": item.rarity,
                         "itemLevel": item.item_level,
                         "weightGrams": item.weight_grams,
-                    })
+                        "quantity": item.quantity,
+                        "stackSlots": item.stack_slots,
+                        "totalWeightGrams": item.total_weight_grams,
+                    });
+                    if let Some(capacity) = &item.container_capacity {
+                        value["containerCapacity"] = json!(capacity);
+                    }
+                    value
                 })
                 .collect::<Vec<_>>();
             append_gmcp(
@@ -2173,6 +2199,90 @@ impl TelnetSession {
                 "Group.Info",
                 &json!({"members": members, "revision": player.revision}),
             );
+        }
+        output
+    }
+
+    fn container_gmcp(&self, contents: &ContainerContentsView, revision: u64) -> Vec<u8> {
+        if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("char.items") {
+            return Vec::new();
+        }
+        let items = contents
+            .items
+            .iter()
+            .map(|item| {
+                let mut value = json!({
+                    "id": item.id,
+                    "name": item.label,
+                    "rarity": item.rarity,
+                    "itemLevel": item.item_level,
+                    "weightGrams": item.weight_grams,
+                    "quantity": item.quantity,
+                    "stackSlots": item.stack_slots,
+                    "totalWeightGrams": item.total_weight_grams,
+                });
+                if let Some(capacity) = &item.container_capacity {
+                    value["containerCapacity"] = json!(capacity);
+                }
+                value
+            })
+            .collect::<Vec<_>>();
+        let mut output = Vec::new();
+        let full = json!({
+            "location": "container",
+            "container": contents.selector,
+            "items": items,
+            "page": contents.page,
+            "totalPages": contents.total_pages,
+            "capacity": contents.capacity,
+            "revision": revision,
+        });
+        if append_gmcp(&mut output, "Char.Items.List", &full) {
+            return output;
+        }
+
+        // Telnet already carried the complete textual page. Keep GMCP
+        // actionable and observable as well, but shed optional actions and
+        // bound labels when a pathological reviewed name would exceed 8 KiB.
+        let items = contents
+            .items
+            .iter()
+            .map(|item| {
+                let (name, label_truncated) =
+                    bounded_utf8_prefix(&item.label, MAX_GMCP_CONTAINER_FALLBACK_LABEL_BYTES);
+                let mut value = json!({
+                    "id": item.id,
+                    "name": name,
+                    "labelTruncated": label_truncated,
+                    "rarity": item.rarity,
+                    "itemLevel": item.item_level,
+                    "weightGrams": item.weight_grams,
+                    "quantity": item.quantity,
+                    "stackSlots": item.stack_slots,
+                    "totalWeightGrams": item.total_weight_grams,
+                });
+                if let Some(capacity) = &item.container_capacity {
+                    value["containerCapacity"] = json!(capacity);
+                }
+                value
+            })
+            .collect::<Vec<_>>();
+        let fallback = json!({
+            "location": "container",
+            "container": contents.selector,
+            "items": items,
+            "page": contents.page,
+            "totalPages": contents.total_pages,
+            "capacity": contents.capacity,
+            "revision": revision,
+            "truncated": true,
+            "overflow": {
+                "reason": "messageTooLarge",
+                "maximumBytes": MAX_GMCP_BYTES,
+            },
+        });
+        if !append_gmcp(&mut output, "Char.Items.List", &fallback) {
+            warn!("failed to encode bounded Char.Items.List overflow fallback");
         }
         output
     }
@@ -2357,6 +2467,19 @@ fn bounded_gmcp_fallback_title(value: &str) -> (String, bool) {
         .take(MAX_GMCP_FALLBACK_TITLE_CHARS)
         .collect();
     (title, characters.next().is_some())
+}
+
+fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> (String, bool) {
+    if value.len() <= maximum_bytes {
+        return (value.to_owned(), false);
+    }
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= maximum_bytes)
+        .last()
+        .unwrap_or(0);
+    (value[..end].to_owned(), true)
 }
 
 fn append_telnet_escaped(output: &mut Vec<u8>, bytes: &[u8]) {
@@ -2688,9 +2811,35 @@ fn render_scene(scene: &SceneView, session: &TelnetSession) -> String {
                 .items
                 .iter()
                 .map(|item| {
+                    let stack_slots = if item.stack_slots == 1 {
+                        "stack slot"
+                    } else {
+                        "stack slots"
+                    };
+                    let container =
+                        item.container_capacity
+                            .as_ref()
+                            .map_or_else(String::new, |capacity| {
+                                format!(
+                                    " · container {}/{} slots · {}/{} g",
+                                    capacity.used_slots,
+                                    capacity.max_slots,
+                                    capacity.used_weight_grams,
+                                    capacity.max_weight_grams,
+                                )
+                            });
                     format!(
-                        "{} [{} · level {} · {} g · ref {}]",
-                        item.label, item.rarity, item.item_level, item.weight_grams, item.id
+                        "{} × {} [{} · level {} · {} g each · {} {} · {} g total{} · ref {}]",
+                        item.quantity,
+                        item.label,
+                        item.rarity,
+                        item.item_level,
+                        item.weight_grams,
+                        item.stack_slots,
+                        stack_slots,
+                        item.total_weight_grams,
+                        container,
+                        item.id,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -3608,7 +3757,9 @@ mod tests {
         world
             .apply(
                 session_id,
-                tiamud_core::PlayerAction::Take("blue-glass lantern".into()),
+                tiamud_core::PlayerAction::Take(tiamud_core::ItemSelection::one(
+                    "blue-glass lantern",
+                )),
             )
             .unwrap();
         let player = world.player_state_view(session_id).unwrap();
@@ -3643,9 +3794,108 @@ mod tests {
         assert!(wire.contains("\"capacity\""));
         assert!(wire.contains("\"rarity\""));
         assert!(wire.contains("\"itemLevel\""));
+        assert!(wire.contains("\"quantity\":1"));
+        assert!(wire.contains("\"stackSlots\":1"));
+        assert!(wire.contains("\"totalWeightGrams\":1000"));
         assert!(!wire.contains("demo:lantern-square"));
         assert!(!wire.contains("prototypeId"));
         assert!(!wire.contains("characterId"));
+
+        let contents = tiamud_core::ContainerContentsView {
+            selector: "o9999999999999999".into(),
+            items: player.inventory.clone(),
+            page: 1,
+            total_pages: 2,
+            capacity: tiamud_core::InventoryCapacityView {
+                used_slots: 1,
+                max_slots: 8,
+                used_weight_grams: 1_000,
+                max_weight_grams: 5_000,
+            },
+        };
+        let container_payloads = gmcp_payloads(&session.container_gmcp(&contents, player.revision));
+        assert_eq!(container_payloads.len(), 1);
+        let json: Value = serde_json::from_slice(
+            container_payloads[0]
+                .strip_prefix(b"Char.Items.List ")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["location"], "container");
+        assert_eq!(json["container"], "o9999999999999999");
+        assert_eq!(json["page"], 1);
+        assert_eq!(json["totalPages"], 2);
+        assert_eq!(json["capacity"]["maxSlots"], 8);
+        assert!(container_payloads[0].len() <= MAX_GMCP_BYTES);
+    }
+
+    #[test]
+    fn oversized_container_gmcp_keeps_a_bounded_actionable_fallback() {
+        let mut session = TelnetSession::default();
+        session.begin_initial_negotiation();
+        session.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        session.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Char.Items 1"]"#.to_vec(),
+        }]);
+        let contents = tiamud_core::ContainerContentsView {
+            selector: "o9999999999999999".into(),
+            items: (0..20)
+                .map(|index| tiamud_core::PlayerItemView {
+                    id: format!("o{index:016x}"),
+                    label: "é".repeat(256),
+                    description: "prose is text-only in this view".into(),
+                    rarity: "legendary".into(),
+                    item_level: 1_000,
+                    weight_grams: 1_000_000,
+                    quantity: 1,
+                    stack_slots: 100,
+                    total_weight_grams: 1_000_000,
+                    container_capacity: Some(tiamud_core::InventoryCapacityView {
+                        used_slots: 0,
+                        max_slots: 1_000,
+                        used_weight_grams: 0,
+                        max_weight_grams: 1_000_000,
+                    }),
+                    actions: vec![tiamud_core::SceneAction {
+                        label: "Get".into(),
+                        command: "x".repeat(1_024),
+                    }],
+                })
+                .collect(),
+            page: 1,
+            total_pages: 1,
+            capacity: tiamud_core::InventoryCapacityView {
+                used_slots: 20,
+                max_slots: 1_000,
+                used_weight_grams: 1_000_000,
+                max_weight_grams: 1_000_000,
+            },
+        };
+
+        let payloads = gmcp_payloads(&session.container_gmcp(&contents, 7));
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].len() <= MAX_GMCP_BYTES);
+        let payload: Value =
+            serde_json::from_slice(payloads[0].strip_prefix(b"Char.Items.List ").unwrap()).unwrap();
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(payload["overflow"]["maximumBytes"], MAX_GMCP_BYTES);
+        assert_eq!(payload["items"].as_array().unwrap().len(), 20);
+        for item in payload["items"].as_array().unwrap() {
+            assert!(item["labelTruncated"].as_bool().unwrap());
+            assert!(
+                item["name"].as_str().unwrap().len() <= MAX_GMCP_CONTAINER_FALLBACK_LABEL_BYTES
+            );
+            assert!(item.get("actions").is_none());
+            assert!(item["id"].as_str().unwrap().starts_with('o'));
+            assert_eq!(item["quantity"], 1);
+            assert_eq!(item["stackSlots"], 100);
+            assert_eq!(item["totalWeightGrams"], 1_000_000);
+            assert_eq!(item["containerCapacity"]["maxSlots"], 1_000);
+        }
     }
 
     #[test]
@@ -4288,7 +4538,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_telnet_scene_names_item_rarity_level_and_weight() {
+    fn plain_telnet_scene_names_all_item_stack_and_weight_facts() {
         let mut world = tiamud_core::World::demo();
         let mut runtime = world.runtime_snapshot();
         runtime.item_instances.insert(
@@ -4323,7 +4573,10 @@ mod tests {
 
         assert!(rendered.contains(&item.rarity));
         assert!(rendered.contains(&format!("level {}", item.item_level)));
-        assert!(rendered.contains(&format!("{} g", item.weight_grams)));
+        assert!(rendered.contains(&format!("1 × {}", item.label)));
+        assert!(rendered.contains(&format!("{} g each", item.weight_grams)));
+        assert!(rendered.contains("1 stack slot"));
+        assert!(rendered.contains(&format!("{} g total", item.total_weight_grams)));
         assert!(scene.items.iter().all(|item| rendered.contains(&item.id)));
         assert!(!rendered.contains("prototype"));
         assert!(!rendered.contains("demo:blue-lantern"));
@@ -4331,12 +4584,46 @@ mod tests {
         world
             .apply(
                 session_id,
-                tiamud_core::PlayerAction::Take(selected_reference.clone()),
+                tiamud_core::PlayerAction::Take(tiamud_core::ItemSelection::one(
+                    selected_reference.clone(),
+                )),
             )
             .unwrap();
         assert_eq!(world.current_scene(session_id).unwrap().items.len(), 1);
         let inventory = world.inventory_as_plain_text(session_id).unwrap();
         assert!(inventory.contains(&format!("ref {selected_reference}")));
+    }
+
+    #[test]
+    fn plain_telnet_scene_names_container_capacity_without_internal_ids() {
+        let mut value = sample_scene();
+        value.items.push(tiamud_core::SceneItem {
+            id: "o1111111111111111".into(),
+            label: "archive satchel".into(),
+            description: "A bounded satchel.".into(),
+            rarity: "uncommon".into(),
+            item_level: 2,
+            weight_grams: 500,
+            quantity: 1,
+            stack_slots: 1,
+            total_weight_grams: 700,
+            container_capacity: Some(tiamud_core::InventoryCapacityView {
+                used_slots: 1,
+                max_slots: 8,
+                used_weight_grams: 200,
+                max_weight_grams: 5_000,
+            }),
+            actions: Vec::new(),
+        });
+
+        let rendered = render_scene(&value, &TelnetSession::default());
+
+        assert!(rendered.contains("1 × archive satchel"));
+        assert!(rendered.contains("1 stack slot"));
+        assert!(rendered.contains("700 g total"));
+        assert!(rendered.contains("container 1/8 slots · 200/5000 g"));
+        assert!(rendered.contains("ref o1111111111111111"));
+        assert!(!rendered.contains("prototypeId"));
     }
 
     #[test]

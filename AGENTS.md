@@ -71,10 +71,11 @@ matriz, memoria y documentación pública a la vez.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
-- `WorldRuntimeSnapshot` v2 es la única autoridad durable de las instancias de
+- `WorldRuntimeSnapshot` v3 es la única autoridad durable de las instancias de
   objeto. SQLite y PostgreSQL la confirman con personajes/eventos en su
-  transacción existente; no hay esquema v11 ni tabla espejo. La lectura v1
-  usa una migración explícita y falla cerrada ante referencias o contador
+  transacción existente; no hay esquema v11 ni tabla espejo. Las lecturas v1
+  y v2 usan DTO y migraciones explícitos dirigidos por `snapshotVersion`, y
+  fallan cerradas ante campos de otra versión, referencias, grafo o contador
   inválidos. Al restaurar un snapshot anterior se conservan las nuevas
   instancias iniciales del WorldPack y se superponen las ubicaciones durables;
   una instancia creada en runtime que no esté en el snapshot no reaparece.
@@ -86,8 +87,8 @@ matriz, memoria y documentación pública a la vez.
 
 ### Mundo, personajes y juego
 
-- WorldPack v4 es canónico; AreaPack v3 es la autoría modular nativa.
-  WorldPack v3/v2, AreaPack v2/v1 y Envy/Merc solo entran por
+- WorldPack v5 es canónico; AreaPack v4 es la autoría modular nativa.
+  WorldPack v4/v3/v2, AreaPack v3/v2/v1 y Envy/Merc solo entran por
   normalización/importación.
 - Se valida y carga un WorldPack completo antes de abrir listeners.
   `TIAMUD_WORLD_PACK` selecciona uno externo revisado; si no, se usa el
@@ -96,7 +97,7 @@ matriz, memoria y documentación pública a la vez.
   Carga/reemplazo caliente y expulsión LRU **no están implementados**. ADR 0005
   es diseño futuro.
 - El modelo de personaje v3 funciona de extremo a extremo dentro de WorldPack
-  v4: linaje, trasfondo opcional, clase
+  v5: linaje, trasfondo opcional, clase
   base/avanzada, XP global, clase activa, historial, reservas, talentos con
   rango y promoción atómica.
 - `archetype` no es identidad canónica. Normalízalo en la frontera; no crees un
@@ -113,14 +114,20 @@ matriz, memoria y documentación pública a la vez.
   adaptadores. Los objetos separan `itemPrototypes` de instancias durables;
   cada personaje tiene capacidad autoritativa por slots/peso y rareza cerrada
   `common|uncommon|rare|epic|legendary` más `itemLevel` textual en Web, Telnet
-  y GMCP. Los clientes solo reciben IDs opacos distintos por instancia,
-  derivados de una sal criptográficamente aleatoria nueva por sesión. Telnet
-  muestra la referencia opaca y permite usarla en comandos. En autoría,
+  y GMCP. Las unidades únicas reciben IDs opacos por instancia; una pila usa el
+  selector opaco de su primer miembro visible ordenado. Todos se derivan de una
+  sal criptográficamente aleatoria nueva por sesión. Telnet muestra la
+  referencia opaca y permite usarla en comandos. En autoría,
   `entityMedia(kind=item)` referencia el prototipo reusable, mientras
-  `roomPerception.hiddenItems` referencia la instancia concreta. En 3A solo
-  se acepta `transferable`. No
-  amplíes la afirmación: no hay telepatía definida por el mundo, pilas,
-  contenedores, give/trade, reparto de grupo ni tablas de botín aleatorias.
+  `roomPerception.hiddenItems` referencia la instancia concreta. En 3B las
+  pilas fungibles son vistas derivadas por ubicación/prototipo: no persisten
+  cantidad ni identidad de pila. Los contenedores son instancias únicas con
+  slots/peso propios, peso recursivo, profundidad máxima cuatro y grafo
+  validado. `take`/`drop`/`put`/`get` aceptan 1..=256 unidades y `contents`
+  pagina 20 grupos; Web, Telnet y GMCP reciben cantidad, slots, peso total y
+  capacidad con referencias opacas. Solo se acepta `transferable`. No amplíes
+  la afirmación: no hay telepatía definida por el mundo, give/trade, reparto
+  de grupo ni tablas de botín aleatorias.
 - El arranque enumera de forma acotada los personajes que poseen instancias,
   carga temporalmente sus agregados y valida existencia, equipo y capacidad,
   incluidos los desconectados. Esos agregados no quedan retenidos como
@@ -213,7 +220,7 @@ matriz, memoria y documentación pública a la vez.
   proveedor predeterminado; endpoints locales usan loopback y remotos HTTPS.
   Ningún borrador se publica sin validación y revisión humana.
 
-### Evidencia actual de fase 3A
+### Evidencia retenida de fase 3A y estado de fase 3B
 
 El árbol integrado de inventario 3A supera formato, pruebas bloqueadas del
 workspace y clippy estricto. Las suites enfocadas pasan 77 pruebas de core, 80
@@ -227,6 +234,16 @@ dos usuarios (64 rondas, readiness 8/8) terminan sin errores y con todos los
 veredictos en `pass`. No se ejecutaron PostgreSQL real v10, WebKit local ni soak
 de 24 horas. La evidencia operacional procede de un árbol dirty precommit: es
 diagnóstico local, no evidencia publicable ni de CI.
+
+La fase 3B está implementada en el árbol de trabajo mediante WorldPack v5,
+AreaPack v4, snapshot v3, pilas derivadas, contenedores acotados y paridad de
+acciones/proyecciones. El árbol integrado pasa formato/check/clippy, 499/499
+pruebas Rust (88 core, 93 WorldPack, 28 importador, 202 servidor y 88
+restantes), 103/103 web, 30/30 Playwright Chromium/Firefox, 80/80 Node, humo,
+carga CI 16 usuarios y soak corto de 66 rondas/10 readiness. También pasan
+`cargo-deny`, licencias y avisos 307 Rust/76 web. No hubo PostgreSQL real v10,
+WebKit local ni soak de 24 horas; no conviertas este pase local precommit en
+evidencia de CI o producción.
 
 ### Evidencia histórica retenida
 
@@ -270,8 +287,10 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 9. Autoridad de staff separada de XP, nivel, clase y talentos. Usa la capacidad
    concreta y auditoría append-only; perfiles y títulos son asignación/presentación,
    no autorización implícita.
-10. La fase 3A ya separa prototipo/instancia y aplica capacidad. Antes de botín
-    repetible/aleatorio, define propiedad, procedencia y reparto atómicos.
+10. La fase 3B ya separa prototipo/instancia, deriva pilas y aplica capacidad
+    recursiva de contenedores. Antes de botín repetible/aleatorio, implementa
+    transferencias/políticas y trade confirmado, y después define propiedad,
+    procedencia y reparto atómicos.
     Cajas, llaves y tiradas pagadas quedan fuera.
 11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
     conservando snapshot atómico.
@@ -418,9 +437,10 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - fase social 1 implementada, pero sin correo/historial, shout/yell o telepatía;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
-- fase 3A de inventario implementada: prototipos/instancias, creación durable,
-  capacidad por slots/peso, rareza e `itemLevel`; sin stacks, contenedores,
-  give/trade, derechos/reparto ni botín aleatorio;
+- fase 3B de inventario implementada: prototipos/instancias, creación durable,
+  pilas derivadas, contenedores con capacidad/profundidad acotadas, cantidades,
+  paginación, rareza e `itemLevel`; sin give/trade, políticas de vinculación,
+  derechos/reparto ni botín aleatorio;
 - backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;
 - marca/dominios y derechos de terceros siguen siendo trabajo legal externo.
 

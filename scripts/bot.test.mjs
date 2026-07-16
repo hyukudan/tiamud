@@ -26,6 +26,9 @@ function sceneItem(overrides = {}) {
     rarity: 'uncommon',
     itemLevel: 3,
     weightGrams: 800,
+    quantity: 1,
+    stackSlots: 1,
+    totalWeightGrams: 800,
     actions: [{ label: 'Take', command: `take ${OPAQUE_ITEM}` }],
     ...overrides,
   };
@@ -84,6 +87,9 @@ function inventoryPatch(overrides = {}) {
         rarity: 'common',
         itemLevel: 2,
         weightGrams: 2_200,
+        quantity: 1,
+        stackSlots: 1,
+        totalWeightGrams: 2_200,
         actions: [{ label: 'Unequip', command: 'unequip weapon' }],
       }],
       inventoryCapacity: {
@@ -152,7 +158,7 @@ function playerSnapshot(characterOverrides = {}) {
   };
 }
 
-test('strict bot accepts the complete bounded phase-3A scene item contract', () => {
+test('strict bot accepts the complete bounded phase-3B scene item contract', () => {
   assert.equal(parseServerMessage(JSON.stringify(sceneEnvelope())).data.items[0].rarity, 'uncommon');
 
   for (const invalid of [
@@ -161,6 +167,13 @@ test('strict bot accepts the complete bounded phase-3A scene item contract', () 
     sceneItem({ itemLevel: 1_001 }),
     sceneItem({ weightGrams: -1 }),
     sceneItem({ weightGrams: 1_000_001 }),
+    sceneItem({ quantity: 0 }),
+    sceneItem({ quantity: 2, totalWeightGrams: 800 }),
+    sceneItem({ stackSlots: 0 }),
+    sceneItem({
+      containerCapacity: { usedSlots: 1, maxSlots: 8, usedWeightGrams: 100, maxWeightGrams: 5000 },
+      totalWeightGrams: 800,
+    }),
   ]) {
     assert.throws(() => parseServerMessage(JSON.stringify(sceneEnvelope(invalid))));
   }
@@ -352,6 +365,9 @@ test('strict bot validates inventory, equipment, and capacity as one coherent pr
         rarity: 'rare',
         itemLevel: 1,
         weightGrams: 2_200,
+        quantity: 1,
+        stackSlots: 1,
+        totalWeightGrams: 2_200,
         actions: [],
       }],
     }),
@@ -359,6 +375,34 @@ test('strict bot validates inventory, equipment, and capacity as one coherent pr
   for (const invalid of invalidPatches) {
     assert.throws(() => parseServerMessage(JSON.stringify(invalid)));
   }
+});
+
+test('strict bot validates paginated container summaries without durable ids or prose trees', () => {
+  const data = {
+    container: OPAQUE_EQUIPMENT,
+    items: [sceneItem({
+      description: undefined,
+      quantity: 3,
+      totalWeightGrams: 2_400,
+      actions: [{
+        label: 'Get',
+        command: `get 3 ${OPAQUE_ITEM} from ${OPAQUE_EQUIPMENT}`,
+      }],
+    })],
+    page: 1,
+    totalPages: 2,
+    capacity: { usedSlots: 1, maxSlots: 8, usedWeightGrams: 2_400, maxWeightGrams: 5_000 },
+  };
+  assert.equal(parseEnvelope('container.contents', data).data.items[0].quantity, 3);
+  assert.throws(() => parseEnvelope('container.contents', { ...data, page: 3 }));
+  assert.throws(() => parseEnvelope('container.contents', {
+    ...data,
+    items: Array.from({ length: 21 }, () => data.items[0]),
+  }));
+  assert.throws(() => parseEnvelope('container.contents', {
+    ...data,
+    prototypeId: 'tiamud:archive-satchel',
+  }), /unknown keys: prototypeId/);
 });
 
 test('strict bot accepts the current v3 character projection and fails closed', () => {

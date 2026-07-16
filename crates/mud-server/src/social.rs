@@ -735,7 +735,7 @@ fn help_text(topic: Option<&str>) -> String {
         Some(_) => "No help entry matches that topic. Try: help social.\r\n".to_owned(),
         None => concat!(
             "Movement: north/east/south/west/up/down, look.\r\n",
-            "Items: inventory, take, drop, examine, use, equip, unequip.\r\n",
+            "Items: inventory, take/drop [quantity], contents, put/get [quantity], examine, use, equip, unequip.\r\n",
             "Social: say, tell, reply, party say, channels, who, ignore, block, report.\r\n",
             "More: help social.\r\n"
         )

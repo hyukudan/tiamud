@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transaction};
 
 const TABLES: [&str; 17] = APPLICATION_TABLES;
+const MAX_RUNTIME_SNAPSHOT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -44,6 +45,10 @@ pub enum TransferError {
     SourceIntegrity { problems: Vec<String> },
     #[error("SQLite source has {violations} foreign-key violation(s)")]
     SourceForeignKeys { violations: usize },
+    #[error("SQLite source world runtime snapshot exceeds {maximum} bytes")]
+    RuntimeSnapshotTooLarge { maximum: usize },
+    #[error("SQLite source contains an invalid world runtime snapshot")]
+    InvalidRuntimeSnapshot,
     #[error(
         "PostgreSQL target table {table} contains {rows} row(s); refusing to merge or overwrite"
     )]
@@ -367,6 +372,7 @@ fn copy_world_runtime<C: GenericClient>(
     else {
         return Ok(0);
     };
+    validate_runtime_snapshot(snapshot_version, &snapshot_json)?;
     target.execute(
         "INSERT INTO world_runtime
              (singleton, snapshot_version, snapshot_json,
@@ -381,6 +387,22 @@ fn copy_world_runtime<C: GenericClient>(
         ],
     )?;
     Ok(1)
+}
+
+fn validate_runtime_snapshot(
+    snapshot_version: i64,
+    snapshot_json: &str,
+) -> Result<(), TransferError> {
+    if snapshot_json.len() > MAX_RUNTIME_SNAPSHOT_BYTES {
+        return Err(TransferError::RuntimeSnapshotTooLarge {
+            maximum: MAX_RUNTIME_SNAPSHOT_BYTES,
+        });
+    }
+    let runtime_version =
+        u32::try_from(snapshot_version).map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
+    tiamud_core::decode_world_runtime_snapshot(runtime_version, snapshot_json)
+        .map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
+    Ok(())
 }
 
 fn copy_social_relation<C: GenericClient>(
@@ -767,6 +789,17 @@ mod tests {
         let connection = current_source(&path);
 
         validate_source(&connection).unwrap();
+    }
+
+    #[test]
+    fn runtime_copy_validates_the_original_version_before_normalizing() {
+        let runtime = tiamud_core::World::demo().runtime_snapshot();
+        let json = serde_json::to_string(&runtime).unwrap();
+        validate_runtime_snapshot(i64::from(runtime.snapshot_version), &json).unwrap();
+        assert!(matches!(
+            validate_runtime_snapshot(2, &json),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
     }
 
     #[test]

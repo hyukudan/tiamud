@@ -10,14 +10,14 @@ use tiamud_scripting::{MAX_MODULES_PER_ROOM_HOOK_BATCH, ScriptLimits, validate_m
 pub use tiamud_scripting::{ScriptCapability, ScriptHook};
 
 use super::{
-    Direction, EffectRule, EquipmentSlot, ValidationError, ValidationErrors, WorldPack,
-    valid_content_addressed_audio_path, valid_relative_asset_path,
+    Direction, EffectRule, EquipmentSlot, InitialItemLocation, ValidationError, ValidationErrors,
+    WorldPack, valid_content_addressed_audio_path, valid_relative_asset_path,
 };
 
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 1_024;
 
-/// A WorldPack v4 plus optional authoring data ignored by older runtime readers.
+/// A WorldPack v5 plus optional authoring data ignored by older runtime readers.
 ///
 /// Keeping the additions at the top level preserves Rust source compatibility for
 /// existing `WorldPack` and `Room` struct literals. Serde's default unknown-field
@@ -1107,7 +1107,7 @@ pub enum DocumentToolError {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyItem {
     id: String,
     name: String,
@@ -1117,7 +1117,7 @@ struct LegacyItem {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyItemRule {
     item_id: String,
     #[serde(default)]
@@ -1137,7 +1137,7 @@ pub(crate) fn normalize_legacy_items(value: &mut serde_json::Value) -> Result<()
         .as_object_mut()
         .ok_or_else(|| "WorldPack root must be an object".to_owned())?;
     if root.contains_key("itemPrototypes") || root.contains_key("initialItemInstances") {
-        return Err("legacy schemas cannot also declare native v4 item fields".to_owned());
+        return Err("legacy schemas cannot also declare native item fields".to_owned());
     }
 
     let legacy_items: Vec<LegacyItem> = serde_json::from_value(
@@ -1269,6 +1269,37 @@ pub(crate) fn normalize_legacy_items(value: &mut serde_json::Value) -> Result<()
     let mut item_prototypes = Vec::with_capacity(legacy_items.len());
     let mut initial_instances = Vec::with_capacity(legacy_items.len());
     for item in legacy_items {
+        if !crate::valid_gameplay_identifier(&item.id) {
+            return Err(format!(
+                "legacy item id {:?} must contain 1..=128 lowercase namespaced identifier bytes",
+                item.id
+            ));
+        }
+        if !crate::safe_gameplay_label(&item.name, crate::MAX_ITEM_NAME_BYTES) {
+            return Err(format!(
+                "legacy item {:?} name must contain 1..={} safe bytes without control characters",
+                item.id,
+                crate::MAX_ITEM_NAME_BYTES
+            ));
+        }
+        if !crate::safe_gameplay_text(&item.description, crate::MAX_ITEM_DESCRIPTION_BYTES) {
+            return Err(format!(
+                "legacy item {:?} description must contain 1..={} safe bytes",
+                item.id,
+                crate::MAX_ITEM_DESCRIPTION_BYTES
+            ));
+        }
+        if item
+            .aliases
+            .iter()
+            .any(|alias| !crate::safe_gameplay_label(alias, crate::MAX_ITEM_ALIAS_BYTES))
+        {
+            return Err(format!(
+                "legacy item {:?} alias must contain 1..={} safe bytes without control characters",
+                item.id,
+                crate::MAX_ITEM_ALIAS_BYTES
+            ));
+        }
         if !seen_items.insert(item.id.clone()) {
             return Err(format!(
                 "legacy item id {:?} appears more than once",
@@ -1301,6 +1332,7 @@ pub(crate) fn normalize_legacy_items(value: &mut serde_json::Value) -> Result<()
             "rarity": "common",
             "itemLevel": 1,
             "stackPolicy": "unique",
+            "maxStackUnits": 1,
             "transferPolicy": "transferable"
         }));
         initial_instances.push(serde_json::json!({
@@ -1352,14 +1384,14 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
             .get("gameplay")
             .is_some_and(|gameplay| gameplay.get("itemRules").is_some())
     {
-        return Err("WorldPack v4 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("WorldPack v5 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("WorldPack v4 rooms cannot declare legacy items".to_owned());
+        return Err("WorldPack v5 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("gameplay")
@@ -1371,25 +1403,72 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("WorldPack v4 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("WorldPack v5 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
+    Ok(())
+}
+
+fn normalize_v4_items(value: &mut serde_json::Value) -> Result<(), String> {
+    reject_native_legacy_item_fields(value)?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "WorldPack root must be an object".to_owned())?;
+    let prototypes = root
+        .entry("itemPrototypes")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "WorldPack v4 itemPrototypes must be an array".to_owned())?;
+    for prototype in prototypes {
+        let prototype = prototype
+            .as_object_mut()
+            .ok_or_else(|| "WorldPack v4 item prototype must be an object".to_owned())?;
+        if prototype.contains_key("maxStackUnits") || prototype.contains_key("container") {
+            return Err(
+                "WorldPack v4 cannot declare v5 maxStackUnits or container fields".to_owned(),
+            );
+        }
+        if prototype
+            .get("stackPolicy")
+            .and_then(serde_json::Value::as_str)
+            != Some("unique")
+        {
+            return Err("WorldPack v4 item prototypes must use stackPolicy unique".to_owned());
+        }
+        prototype.insert("maxStackUnits".to_owned(), serde_json::json!(1));
+    }
+    let instances = root
+        .entry("initialItemInstances")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array()
+        .ok_or_else(|| "WorldPack v4 initialItemInstances must be an array".to_owned())?;
+    if instances.iter().any(|instance| {
+        instance.get("location").is_some_and(|location| {
+            location.get("kind").and_then(serde_json::Value::as_str) == Some("container")
+                || location.get("containerInstanceId").is_some()
+        })
+    }) {
+        return Err("WorldPack v4 cannot declare v5 container locations".to_owned());
+    }
+    root.insert(
+        "schemaVersion".to_owned(),
+        serde_json::json!(crate::CURRENT_SCHEMA_VERSION),
+    );
     Ok(())
 }
 
 impl WorldPackDocument {
     pub fn from_json(bytes: &[u8]) -> Result<Self, DocumentToolError> {
         let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
-        let legacy_schema = value
+        let schema_version = value
             .get("schemaVersion")
             .and_then(serde_json::Value::as_u64)
-            .is_some_and(|version| version == 2 || version == 3);
+            .unwrap_or_default();
+        let legacy_schema = schema_version == 2 || schema_version == 3;
         if legacy_schema {
             normalize_legacy_items(&mut value).map_err(DocumentToolError::LegacyItems)?;
-        } else if value
-            .get("schemaVersion")
-            .and_then(serde_json::Value::as_u64)
-            == Some(u64::from(crate::CURRENT_SCHEMA_VERSION))
-        {
+        } else if schema_version == 4 {
+            normalize_v4_items(&mut value).map_err(DocumentToolError::LegacyItems)?;
+        } else if schema_version == u64::from(crate::CURRENT_SCHEMA_VERSION) {
             reject_native_legacy_item_fields(&value).map_err(DocumentToolError::LegacyItems)?;
         }
         let mut document: Self = serde_json::from_value(value)?;
@@ -1478,12 +1557,12 @@ impl WorldPackDocument {
         if self.entity_media.len() > MAX_ENTITY_MEDIA_DEFINITIONS {
             errors.push(ValidationError::TooManyEntityMedia);
         }
-        let item_ids = self
+        let item_locations = self
             .world
             .initial_item_instances
             .iter()
-            .map(|item| item.id.as_str())
-            .collect::<HashSet<_>>();
+            .map(|item| (item.id.as_str(), &item.location))
+            .collect::<HashMap<_, _>>();
         let item_prototype_ids = self
             .world
             .item_prototypes
@@ -1597,11 +1676,20 @@ impl WorldPackDocument {
                 });
             }
             for (item_id, difficulty) in &perception.hidden_items {
-                if !item_ids.contains(item_id.as_str()) || !(1..=100).contains(difficulty) {
+                let is_top_level_in_room =
+                    item_locations
+                        .get(item_id.as_str())
+                        .is_some_and(|location| match location {
+                            InitialItemLocation::Room { room_id } => room_id == &perception.room_id,
+                            InitialItemLocation::NpcSpawn { .. }
+                            | InitialItemLocation::Container { .. }
+                            | InitialItemLocation::Staged => false,
+                        });
+                if !is_top_level_in_room || !(1..=100).contains(difficulty) {
                     errors.push(ValidationError::InvalidPerception {
                         room_id: perception.room_id.clone(),
                         reason: format!(
-                            "hidden item {item_id:?} must exist and have difficulty 1..=100"
+                            "hidden item {item_id:?} must be a top-level item in this room and have difficulty 1..=100"
                         ),
                     });
                 }
@@ -2720,6 +2808,8 @@ mod tests {
                     rarity: ItemRarity::Common,
                     item_level: 1,
                     stack_policy: ItemStackPolicy::Unique,
+                    max_stack_units: 1,
+                    container: None,
                     transfer_policy: ItemTransferPolicy::Transferable,
                 }],
                 initial_item_instances: vec![InitialItemInstance {
@@ -2775,6 +2865,80 @@ mod tests {
         assert!(document.validate().unwrap_err().0.iter().any(|error| {
             matches!(error, ValidationError::InvalidPerception { room_id, .. } if room_id == "demo:square")
         }));
+    }
+
+    #[test]
+    fn hidden_items_must_be_top_level_instances_in_the_declared_room() {
+        let mut document = document();
+        document.room_perception.push(RoomPerceptionDefinition {
+            room_id: "demo:square".into(),
+            light: LightLevel::Bright,
+            hidden_items: BTreeMap::from([("demo:lantern".into(), 10)]),
+            hidden_npcs: BTreeMap::new(),
+            secret_exits: BTreeMap::new(),
+        });
+
+        let mut bag = document.world.item_prototypes[0].clone();
+        bag.id = "demo:bag".into();
+        bag.name = "canvas bag".into();
+        bag.description = "A canvas bag.".into();
+        bag.aliases = vec!["bag".into()];
+        bag.container = Some(crate::ItemContainerDefinition {
+            max_slots: 4,
+            max_weight_grams: 2_000,
+        });
+        document.world.item_prototypes.push(bag);
+        document
+            .world
+            .initial_item_instances
+            .push(InitialItemInstance {
+                id: "demo:bag".into(),
+                prototype_id: "demo:bag".into(),
+                location: InitialItemLocation::Room {
+                    room_id: "demo:square".into(),
+                },
+            });
+        document
+            .world
+            .gameplay
+            .npc_prototypes
+            .push(crate::NpcPrototype {
+                id: "demo:keeper".into(),
+                name: "keeper".into(),
+                description: "A quiet keeper.".into(),
+                level: 1,
+                max_health: 10,
+                strength: 1,
+                defence: 0,
+                experience_reward: 0,
+                respawn_ticks: 1,
+            });
+        document.world.gameplay.npc_spawns.push(crate::NpcSpawn {
+            id: "demo:keeper-1".into(),
+            prototype_id: "demo:keeper".into(),
+            room_id: "demo:square".into(),
+        });
+        document.validate().unwrap();
+
+        for location in [
+            InitialItemLocation::Room {
+                room_id: "demo:gate".into(),
+            },
+            InitialItemLocation::Staged,
+            InitialItemLocation::NpcSpawn {
+                npc_spawn_id: "demo:keeper-1".into(),
+            },
+            InitialItemLocation::Container {
+                container_instance_id: "demo:bag".into(),
+            },
+        ] {
+            let mut candidate = document.clone();
+            candidate.world.initial_item_instances[0].location = location;
+            assert!(candidate.validate().unwrap_err().0.iter().any(|error| {
+                matches!(error, ValidationError::InvalidPerception { room_id, reason }
+                    if room_id == "demo:square" && reason.contains("top-level item"))
+            }));
+        }
     }
 
     fn add_variants(document: &mut WorldPackDocument) {
@@ -2997,7 +3161,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_items_normalize_to_typed_v4_identity_without_duplicate_authorities() {
+    fn v3_items_normalize_to_typed_v5_identity_without_duplicate_authorities() {
         let legacy = serde_json::json!({
             "schemaVersion": 3,
             "id": "legacy",
@@ -3033,21 +3197,182 @@ mod tests {
             "legacy:blade"
         );
         assert_eq!(document.world.item_prototypes[0].attack_bonus, 4);
+        assert_eq!(document.world.item_prototypes[0].max_stack_units, 1);
+        assert!(document.world.item_prototypes[0].container.is_none());
 
         let artifact = document.deterministic_artifact().unwrap();
         let artifact: serde_json::Value = serde_json::from_slice(&artifact).unwrap();
         assert!(artifact.get("items").is_none());
         assert!(artifact["rooms"][0].get("items").is_none());
         assert!(artifact["gameplay"].get("itemRules").is_none());
+
+        for schema_version in [2, 3] {
+            let mut smuggled_item = legacy.clone();
+            smuggled_item["schemaVersion"] = serde_json::json!(schema_version);
+            smuggled_item["items"][0]["maxStackUnits"] = serde_json::json!(20);
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&smuggled_item).unwrap()),
+                Err(DocumentToolError::LegacyItems(_))
+            ));
+
+            let mut smuggled_rule = legacy.clone();
+            smuggled_rule["schemaVersion"] = serde_json::json!(schema_version);
+            smuggled_rule["gameplay"]["itemRules"][0]["container"] =
+                serde_json::json!({"maxSlots": 4, "maxWeightGrams": 1000});
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&smuggled_rule).unwrap()),
+                Err(DocumentToolError::LegacyItems(_))
+            ));
+        }
     }
 
     #[test]
-    fn v4_rejects_legacy_item_authorities() {
+    fn legacy_item_normalization_rejects_oversized_and_control_text() {
+        let legacy = serde_json::json!({
+            "schemaVersion": 3,
+            "id": "legacy",
+            "name": "Legacy",
+            "startRoomId": "legacy:start",
+            "items": [{
+                "id": "legacy:blade",
+                "name": "blade",
+                "description": "A legacy blade.",
+                "aliases": ["sword"]
+            }],
+            "rooms": [{
+                "id": "legacy:start",
+                "title": "Start",
+                "description": "A starting room.",
+                "items": ["legacy:blade"]
+            }]
+        });
+
+        for (field, value) in [
+            (
+                "name",
+                serde_json::json!("n".repeat(crate::MAX_ITEM_NAME_BYTES + 1)),
+            ),
+            ("name", serde_json::json!("unsafe\u{1b}name")),
+            (
+                "description",
+                serde_json::json!("d".repeat(crate::MAX_ITEM_DESCRIPTION_BYTES + 1)),
+            ),
+            ("description", serde_json::json!("unsafe\u{1b}description")),
+        ] {
+            let mut candidate = legacy.clone();
+            candidate["items"][0][field] = value;
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&candidate).unwrap()),
+                Err(DocumentToolError::LegacyItems(_))
+            ));
+        }
+
+        for alias in [
+            "a".repeat(crate::MAX_ITEM_ALIAS_BYTES + 1),
+            "unsafe\u{1b}alias".to_owned(),
+        ] {
+            let mut candidate = legacy.clone();
+            candidate["items"][0]["aliases"] = serde_json::json!([alias]);
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&candidate).unwrap()),
+                Err(DocumentToolError::LegacyItems(_))
+            ));
+        }
+
+        let mut v4 = serde_json::to_value(document()).unwrap();
+        v4["schemaVersion"] = serde_json::json!(4);
+        v4["itemPrototypes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxStackUnits");
+        v4["itemPrototypes"][0]["name"] =
+            serde_json::json!("n".repeat(crate::MAX_ITEM_NAME_BYTES + 1));
+        let normalized = WorldPackDocument::from_json(&serde_json::to_vec(&v4).unwrap()).unwrap();
+        assert!(normalized.validate().unwrap_err().0.iter().any(|error| {
+            error
+                .to_string()
+                .contains("name must contain 1..=128 safe bytes")
+        }));
+    }
+
+    #[test]
+    fn legacy_item_normalization_rejects_ids_outside_the_runtime_contract() {
+        let legacy = serde_json::json!({
+            "schemaVersion": 3,
+            "id": "legacy",
+            "name": "Legacy",
+            "startRoomId": "legacy:start",
+            "items": [{
+                "id": "Legacy:Blade",
+                "name": "blade",
+                "description": "A legacy blade."
+            }],
+            "rooms": [{
+                "id": "legacy:start",
+                "title": "Start",
+                "description": "A starting room.",
+                "items": ["Legacy:Blade"]
+            }]
+        });
+
+        assert!(matches!(
+            WorldPackDocument::from_json(&serde_json::to_vec(&legacy).unwrap()),
+            Err(DocumentToolError::LegacyItems(error))
+                if error.contains("lowercase namespaced identifier")
+        ));
+    }
+
+    #[test]
+    fn v5_rejects_legacy_item_authorities() {
         let mut native = serde_json::to_value(document()).unwrap();
         native["rooms"][0]["items"] = serde_json::json!(["demo:lantern"]);
         let error =
             WorldPackDocument::from_json(&serde_json::to_vec(&native).unwrap()).unwrap_err();
         assert!(matches!(error, DocumentToolError::LegacyItems(_)));
+    }
+
+    #[test]
+    fn v4_normalizes_to_v5_but_rejects_schema_smuggling() {
+        let mut legacy = serde_json::to_value(document()).unwrap();
+        legacy["schemaVersion"] = serde_json::json!(4);
+        legacy["itemPrototypes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxStackUnits");
+        let normalized =
+            WorldPackDocument::from_json(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        normalized.validate().unwrap();
+        assert_eq!(
+            normalized.world.schema_version,
+            crate::CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(normalized.world.item_prototypes[0].max_stack_units, 1);
+        assert!(normalized.world.item_prototypes[0].container.is_none());
+
+        for (field, value) in [
+            ("maxStackUnits", serde_json::json!(2)),
+            (
+                "container",
+                serde_json::json!({"maxSlots": 1, "maxWeightGrams": 0}),
+            ),
+        ] {
+            let mut smuggled = legacy.clone();
+            smuggled["itemPrototypes"][0][field] = value;
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&smuggled).unwrap()),
+                Err(DocumentToolError::LegacyItems(_))
+            ));
+        }
+
+        let mut smuggled_location = legacy;
+        smuggled_location["initialItemInstances"][0]["location"] = serde_json::json!({
+            "kind": "container",
+            "containerInstanceId": "demo:lantern"
+        });
+        assert!(matches!(
+            WorldPackDocument::from_json(&serde_json::to_vec(&smuggled_location).unwrap()),
+            Err(DocumentToolError::LegacyItems(_))
+        ));
     }
 
     #[test]

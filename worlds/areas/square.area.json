@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "id": "square",
   "dependsOn": [
     "archive",
@@ -21,6 +21,7 @@
       "rarity": "common",
       "itemLevel": 1,
       "stackPolicy": "unique",
+      "maxStackUnits": 1,
       "transferPolicy": "transferable"
     },
     {
@@ -43,7 +44,8 @@
       "slotCost": 1,
       "rarity": "uncommon",
       "itemLevel": 1,
-      "stackPolicy": "unique",
+      "stackPolicy": "fungible",
+      "maxStackUnits": 20,
       "transferPolicy": "transferable"
     }
   ],
@@ -58,6 +60,14 @@
     },
     {
       "id": "tiamud:ember-tonic",
+      "prototypeId": "tiamud:ember-tonic",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:lantern-square"
+      }
+    },
+    {
+      "id": "tiamud:ember-tonic:2",
       "prototypeId": "tiamud:ember-tonic",
       "location": {
         "kind": "room",

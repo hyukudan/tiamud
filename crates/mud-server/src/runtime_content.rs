@@ -919,6 +919,8 @@ mod tests {
                 rarity: tiamud_core::ItemRarity::Uncommon,
                 item_level: 3,
                 stack_policy: tiamud_core::ItemStackPolicy::Unique,
+                max_stack_units: 1,
+                container: None,
                 transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
             }],
             initial_item_instances: vec![first_instance, second_instance]

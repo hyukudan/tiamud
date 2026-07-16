@@ -30,9 +30,10 @@ use std::{
     time::Instant,
 };
 use tiamud_core::{
-    AccountRole, CharacterId, CharacterSnapshot, EconomyAction, PartyAction, PlayerAction,
-    PlayerStateView, QuestAction, SceneView, SessionId, SocialAction, SocialChannelName,
-    StaffAction, StaffCapability, StaffProfileKey, StaffReportResolution, WorldError, parse_action,
+    AccountRole, CharacterId, CharacterSnapshot, ContainerContentsView, EconomyAction,
+    ItemSelection, PartyAction, PlayerAction, PlayerStateView, QuestAction, SceneView, SessionId,
+    SocialAction, SocialChannelName, StaffAction, StaffCapability, StaffProfileKey,
+    StaffReportResolution, WorldError, parse_action,
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
@@ -198,6 +199,12 @@ struct ActionPerformData {
     node_id: Option<String>,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    container: Option<String>,
+    #[serde(default)]
+    quantity: Option<u16>,
+    #[serde(default)]
+    page: Option<u16>,
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
@@ -497,6 +504,27 @@ struct CachedActionResult {
     signature: String,
     ok: bool,
     message: Option<String>,
+    container_contents: Option<ContainerContentsView>,
+    projection_session: SessionId,
+}
+
+impl CachedActionResult {
+    fn container_contents_for(&self, session: SessionId) -> Option<&ContainerContentsView> {
+        (self.projection_session == session)
+            .then_some(self.container_contents.as_ref())
+            .flatten()
+    }
+
+    fn message_for(&self, session: SessionId) -> Option<String> {
+        if self.projection_session != session {
+            Some(
+                "This request was already handled on a previous connection; the current state follows."
+                    .into(),
+            )
+        } else {
+            self.message.clone()
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1142,8 +1170,10 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 &mut sequence,
                                 &requested.request_id,
                                 cached.ok,
-                                cached.message,
-                            ) || !queue_scene(
+                                cached.message_for(entered.session_id),
+                            ) || cached.container_contents_for(entered.session_id).is_some_and(|contents| {
+                                !queue_container_contents(&outbound, &mut sequence, contents)
+                            }) || !queue_scene(
                                 &outbound,
                                 &mut sequence,
                                 "scene.snapshot",
@@ -1175,24 +1205,29 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         let previous_scene = last_scene.clone();
                         let previous_presentation = last_presentation.clone();
                         let previous_player = last_player.clone();
-                        let (ok, message, events) = match requested.action {
+                        let (ok, message, events, container_contents) = match requested.action {
                             Ok(action) => match state.world.apply(entered.session_id, action).await {
                                 Ok(outcome) => {
                                     state.metrics.action_finished(action_started.elapsed(), true);
                                     last_scene = outcome.scene;
                                     last_presentation = outcome.presentation;
                                     last_player = outcome.player;
-                                    (true, outcome.output, outcome.events)
+                                    (
+                                        true,
+                                        outcome.output,
+                                        outcome.events,
+                                        outcome.container_contents,
+                                    )
                                 }
                                 Err(error) => {
                                     state.metrics.action_finished(action_started.elapsed(), false);
                                     warn!(%error, "game action failed");
-                                    (false, Some(public_game_error(&error)), Vec::new())
+                                    (false, Some(public_game_error(&error)), Vec::new(), None)
                                 }
                             },
                             Err(error) => {
                                 state.metrics.action_finished(action_started.elapsed(), false);
-                                (false, Some(error), Vec::new())
+                                (false, Some(error), Vec::new(), None)
                             }
                         };
                         state
@@ -1205,6 +1240,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                     signature: requested.signature,
                                     ok,
                                     message: message.clone(),
+                                    container_contents: container_contents.clone(),
+                                    projection_session: entered.session_id,
                                 },
                             );
                         if !queue_action_result(
@@ -1214,6 +1251,11 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             ok,
                             message,
                         ) {
+                            break;
+                        }
+                        if let Some(contents) = &container_contents
+                            && !queue_container_contents(&outbound, &mut sequence, contents)
+                        {
                             break;
                         }
                         for event in events {
@@ -1738,6 +1780,42 @@ fn queue_action_result(
     )
 }
 
+fn queue_container_contents(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    contents: &ContainerContentsView,
+) -> bool {
+    // A container page is an actionable summary. Descriptions remain available
+    // through `examine`, avoiding twenty unbounded prose fields in one 16 KiB
+    // WebSocket frame while preserving every selector and capacity fact.
+    let items = contents
+        .items
+        .iter()
+        .map(|item| {
+            let mut summary = json!(item);
+            summary
+                .as_object_mut()
+                .expect("player item views serialize as objects")
+                .remove("description");
+            summary
+        })
+        .collect::<Vec<_>>();
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        "container.contents",
+        json!({
+            "container": contents.selector,
+            "items": items,
+            "page": contents.page,
+            "totalPages": contents.total_pages,
+            "capacity": contents.capacity,
+        }),
+    )
+}
+
 fn queue_notice(outbound: &OutboundHandle, sequence: &mut u64, message: &str) -> bool {
     queue_sequenced(
         outbound,
@@ -1947,6 +2025,15 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         || target.len() > MAX_ACTION_TARGET_BYTES
                         || target.chars().any(char::is_control)
                 })
+                || data.container.as_deref().is_some_and(|container| {
+                    container.is_empty()
+                        || container.len() > MAX_ACTION_TARGET_BYTES
+                        || container.chars().any(char::is_control)
+                })
+                || data
+                    .quantity
+                    .is_some_and(|quantity| quantity == 0 || quantity > 256)
+                || data.page == Some(0)
                 || data.message.as_deref().is_some_and(|message| {
                     message.is_empty()
                         || message.len() > MAX_CHAT_MESSAGE_BYTES
@@ -1968,24 +2055,33 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 return Err(ClientMessageError::InvalidEnvelope);
             }
             let signature = format!(
-                "action:{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}",
-                data.action,
-                data.ability_id.as_deref().unwrap_or_default(),
-                data.class_id.as_deref().unwrap_or_default(),
-                data.graph_id.as_deref().unwrap_or_default(),
-                data.node_id.as_deref().unwrap_or_default(),
-                data.target.as_deref().unwrap_or_default(),
-                data.message.as_deref().unwrap_or_default(),
-                data.channel,
-                data.duration_seconds,
-                data.reason.as_deref().unwrap_or_default(),
-                data.role,
-                data.report_id,
-                data.resolution,
-                data.profile,
-                data.lore_title,
-                data.capability,
-                data.enabled,
+                "action:{:?}",
+                (
+                    (
+                        &data.action,
+                        &data.ability_id,
+                        &data.class_id,
+                        &data.graph_id,
+                        &data.node_id,
+                        &data.target,
+                        &data.container,
+                        data.quantity,
+                        data.page,
+                        &data.message,
+                    ),
+                    (
+                        data.channel,
+                        data.duration_seconds,
+                        &data.reason,
+                        data.role,
+                        data.report_id,
+                        data.resolution,
+                        &data.profile,
+                        &data.lore_title,
+                        data.capability,
+                        data.enabled,
+                    ),
+                )
             );
             let action = structured_action(&data);
             Ok(ClientMessage::Action(RequestedAction {
@@ -2067,6 +2163,15 @@ fn valid_definition_id(value: &str, maximum: usize) -> bool {
 
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
+    let has_item_fields =
+        data.container.is_some() || data.quantity.is_some() || data.page.is_some();
+    if !matches!(
+        action,
+        "item.take" | "item.drop" | "item.put" | "item.get" | "item.contents"
+    ) && has_item_fields
+    {
+        return Err(format!("Action {action:?} has unexpected fields."));
+    }
     let has_staff_fields = data.report_id.is_some()
         || data.resolution.is_some()
         || !matches!(data.profile, NullableField::Missing)
@@ -2095,6 +2200,9 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             && data.class_id.is_none()
             && data.graph_id.is_none()
             && data.node_id.is_none()
+            && data.container.is_none()
+            && data.quantity.is_none()
+            && data.page.is_none()
             && data.message.is_none()
             && data.channel.is_none()
             && data.duration_seconds.is_none()
@@ -2123,6 +2231,37 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let gameplay_target = || {
         no_social_extras()?;
         required_target()
+    };
+    let no_item_extras = || {
+        (data.ability_id.is_none()
+            && data.class_id.is_none()
+            && data.graph_id.is_none()
+            && data.node_id.is_none()
+            && data.message.is_none()
+            && data.channel.is_none()
+            && data.duration_seconds.is_none()
+            && data.reason.is_none()
+            && data.role.is_none()
+            && data.report_id.is_none()
+            && data.resolution.is_none()
+            && matches!(data.profile, NullableField::Missing)
+            && matches!(data.lore_title, NullableField::Missing)
+            && data.capability.is_none()
+            && data.enabled.is_none())
+        .then_some(())
+        .ok_or_else(|| format!("Action {action:?} has unexpected fields."))
+    };
+    let item_selection = || {
+        no_item_extras()?;
+        Ok(ItemSelection {
+            query: required_target()?,
+            quantity: data.quantity.unwrap_or(1),
+        })
+    };
+    let item_container = || {
+        data.container
+            .clone()
+            .ok_or_else(|| format!("Action {action:?} requires container."))
     };
     let no_non_staff_fields = || {
         (data.ability_id.is_none()
@@ -2172,8 +2311,47 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 _ => Err(format!("Unknown movement direction: {target}")),
             }
         }
-        "item.take" => gameplay_target().map(PlayerAction::Take),
-        "item.drop" => gameplay_target().map(PlayerAction::Drop),
+        "item.take" => {
+            if data.container.is_some() || data.page.is_some() {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            item_selection().map(PlayerAction::Take)
+        }
+        "item.drop" => {
+            if data.container.is_some() || data.page.is_some() {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            item_selection().map(PlayerAction::Drop)
+        }
+        "item.put" => {
+            if data.page.is_some() {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            Ok(PlayerAction::Put {
+                selection: item_selection()?,
+                container: item_container()?,
+            })
+        }
+        "item.get" => {
+            if data.page.is_some() {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            Ok(PlayerAction::Get {
+                selection: item_selection()?,
+                container: item_container()?,
+            })
+        }
+        "item.contents" => {
+            no_item_extras()?;
+            no_target()?;
+            if data.quantity.is_some() {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            Ok(PlayerAction::Contents {
+                container: item_container()?,
+                page: data.page.unwrap_or(1),
+            })
+        }
         "item.examine" => gameplay_target().map(PlayerAction::Examine),
         "combat.attack" => gameplay_target().map(PlayerAction::Attack),
         "combat.ability" => {
@@ -3175,8 +3353,78 @@ mod tests {
         };
         assert_eq!(
             action.action,
-            Ok(PlayerAction::Take("blue lantern".to_owned()))
+            Ok(PlayerAction::Take(ItemSelection::one("blue lantern")))
         );
+
+        let ClientMessage::Action(put) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-put","action":"item.put","target":"o1111111111111111","container":"o2222222222222222","quantity":12}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("structured item.put must parse as an action");
+        };
+        assert_eq!(
+            put.action,
+            Ok(PlayerAction::Put {
+                selection: ItemSelection {
+                    query: "o1111111111111111".into(),
+                    quantity: 12,
+                },
+                container: "o2222222222222222".into(),
+            })
+        );
+        let ClientMessage::Action(contents) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-contents","action":"item.contents","container":"o2222222222222222","page":2}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("structured item.contents must parse as an action");
+        };
+        assert_eq!(
+            contents.action,
+            Ok(PlayerAction::Contents {
+                container: "o2222222222222222".into(),
+                page: 2,
+            })
+        );
+        assert_ne!(action.signature, put.signature);
+        let signatures = [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.put","target":"o1111111111111111","container":"o2222222222222222","quantity":12}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.put","target":"o1111111111111111","container":"o2222222222222222","quantity":13}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.put","target":"o1111111111111111","container":"o3333333333333333","quantity":12}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.contents","container":"o2222222222222222","page":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.contents","container":"o2222222222222222","page":2}}"#,
+        ]
+        .map(|raw| match parse_client_message(raw).unwrap() {
+            ClientMessage::Action(action) => action.signature,
+            _ => panic!("structured inventory request must parse as an action"),
+        });
+        assert_eq!(
+            signatures
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            signatures.len()
+        );
+
+        for invalid in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-1","action":"item.take","target":"tonic","quantity":0}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-2","action":"item.drop","target":"tonic","quantity":257}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-3","action":"item.contents","container":"bag","page":0}}"#,
+        ] {
+            assert_eq!(
+                parse_client_message(invalid).unwrap_err(),
+                ClientMessageError::InvalidEnvelope
+            );
+        }
+        let ClientMessage::Action(extra_item_field) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-extra","action":"look","quantity":1}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("well-formed invalid structured action must produce a result");
+        };
+        assert!(extra_item_field.action.is_err());
 
         let ClientMessage::Action(ability) = parse_client_message(
             r#"{"v":1,"type":"action.perform","data":{"requestId":"request-ability","action":"combat.ability","abilityId":"ember-bolt","target":"guardian"}}"#,
@@ -3692,6 +3940,8 @@ mod tests {
             signature: signature.to_owned(),
             ok: true,
             message: Some("Done.".to_owned()),
+            container_contents: None,
+            projection_session: SessionId(1),
         };
         cache.insert("request-1".to_owned(), result("look"));
         cache.insert("request-2".to_owned(), result("north"));
@@ -3711,12 +3961,72 @@ mod tests {
             signature: "north".into(),
             ok: true,
             message: None,
+            container_contents: None,
+            projection_session: SessionId(11),
         };
         shared.lock().unwrap().insert(first.clone(), cached.clone());
 
         let cache = shared.lock().unwrap();
         assert_eq!(cache.get(&first), Some(&cached));
         assert!(cache.get(&second).is_none());
+    }
+
+    #[test]
+    fn cached_container_projection_never_crosses_session_salts() {
+        let contents = ContainerContentsView {
+            selector: "o9999999999999999".into(),
+            items: Vec::new(),
+            page: 1,
+            total_pages: 1,
+            capacity: tiamud_core::InventoryCapacityView {
+                used_slots: 0,
+                max_slots: 8,
+                used_weight_grams: 0,
+                max_weight_grams: 5_000,
+            },
+        };
+        let cached = CachedActionResult {
+            signature: "contents".into(),
+            ok: true,
+            message: Some("It is empty.".into()),
+            container_contents: Some(contents.clone()),
+            projection_session: SessionId(11),
+        };
+
+        assert_eq!(
+            cached.container_contents_for(SessionId(11)),
+            Some(&contents)
+        );
+        assert_eq!(
+            cached.message_for(SessionId(11)).as_deref(),
+            Some("It is empty.")
+        );
+        assert!(cached.container_contents_for(SessionId(12)).is_none());
+        let foreign_message = cached.message_for(SessionId(12)).unwrap();
+        assert!(foreign_message.contains("previous connection"));
+        assert!(!foreign_message.contains("o9999999999999999"));
+    }
+
+    #[test]
+    fn cached_inventory_text_never_crosses_session_salts() {
+        let cached = CachedActionResult {
+            signature: "inventory".into(),
+            ok: true,
+            message: Some("You are carrying a lantern [ref o1111111111111111].\r\n".into()),
+            container_contents: None,
+            projection_session: SessionId(21),
+        };
+
+        assert!(
+            cached
+                .message_for(SessionId(21))
+                .unwrap()
+                .contains("o1111111111111111")
+        );
+        let foreign_message = cached.message_for(SessionId(22)).unwrap();
+        assert!(foreign_message.contains("previous connection"));
+        assert!(!foreign_message.contains("o1111111111111111"));
+        assert!(cached.container_contents_for(SessionId(22)).is_none());
     }
 
     fn queued_frame(
@@ -4000,7 +4310,7 @@ mod tests {
             )
             .unwrap();
         world
-            .apply(session, PlayerAction::Take("lantern".into()))
+            .apply(session, PlayerAction::Take(ItemSelection::one("lantern")))
             .unwrap();
         let scene = world.current_scene(session).unwrap();
         let player = world.player_state_view(session).unwrap();
@@ -4125,6 +4435,10 @@ mod tests {
                 rarity: "common".into(),
                 item_level: 1,
                 weight_grams: 1,
+                quantity: 1,
+                stack_slots: 1,
+                total_weight_grams: 1,
+                container_capacity: None,
                 actions: Vec::new(),
             })
             .collect();
@@ -4293,6 +4607,10 @@ mod tests {
                 rarity: "common".into(),
                 item_level: 1,
                 weight_grams: 1,
+                quantity: 1,
+                stack_slots: 1,
+                total_weight_grams: 1,
+                container_capacity: None,
                 actions: Vec::new(),
             })
             .collect();
@@ -4325,6 +4643,55 @@ mod tests {
     }
 
     #[test]
+    fn container_pages_shed_prose_and_stay_inside_the_websocket_frame_budget() {
+        let contents = ContainerContentsView {
+            selector: "o9999999999999999".into(),
+            items: (0..20)
+                .map(|index| tiamud_core::PlayerItemView {
+                    id: format!("o{index:016x}"),
+                    label: format!("{index:02}{}", "l".repeat(254)),
+                    description: "p".repeat(4_096),
+                    rarity: "common".into(),
+                    item_level: 1,
+                    weight_grams: 1,
+                    quantity: 1,
+                    stack_slots: 1,
+                    total_weight_grams: 1,
+                    container_capacity: None,
+                    actions: vec![tiamud_core::SceneAction {
+                        label: "Get".into(),
+                        command: format!("get o{index:016x} from o9999999999999999"),
+                    }],
+                })
+                .collect(),
+            page: 1,
+            total_pages: 1,
+            capacity: tiamud_core::InventoryCapacityView {
+                used_slots: 20,
+                max_slots: 20,
+                used_weight_grams: 20,
+                max_weight_grams: 20,
+            },
+        };
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+
+        assert!(queue_container_contents(
+            &outbound,
+            &mut sequence,
+            &contents
+        ));
+        let frame = outbound.pop().unwrap();
+        let encoded = serde_json::to_vec(&frame.value).unwrap();
+        assert!(encoded.len() <= MAX_WS_MESSAGE_BYTES);
+        assert!(
+            !String::from_utf8(encoded)
+                .unwrap()
+                .contains(&"p".repeat(256))
+        );
+    }
+
+    #[test]
     fn semantic_updates_are_typed_bounded_and_keep_domain_ids_private() {
         let mut world = tiamud_core::World::demo();
         let session = SessionId(81);
@@ -4343,7 +4710,7 @@ mod tests {
         let before_scene = world.current_scene(session).unwrap();
         let before_player = world.player_state_view(session).unwrap();
         world
-            .apply(session, PlayerAction::Take("lantern".into()))
+            .apply(session, PlayerAction::Take(ItemSelection::one("lantern")))
             .unwrap();
         let scene = world.current_scene(session).unwrap();
         let player = world.player_state_view(session).unwrap();

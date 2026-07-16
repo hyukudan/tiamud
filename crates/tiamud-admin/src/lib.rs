@@ -21,6 +21,7 @@ use world_pack::{DocumentToolError, ValidationErrors, WorldPack, WorldPackDocume
 /// this value remain supported because the server can migrate them on startup.
 pub const SUPPORTED_DATABASE_SCHEMA_VERSION: i64 = SCHEMA_VERSION;
 const MAX_WORLD_PACK_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RUNTIME_SNAPSHOT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckReport {
@@ -94,6 +95,10 @@ pub enum AdminError {
         found: i64,
         supported: i64,
     },
+    #[error("database {path:?} contains a world runtime snapshot larger than {maximum} bytes")]
+    RuntimeSnapshotTooLarge { path: PathBuf, maximum: usize },
+    #[error("database {0:?} contains an invalid world runtime snapshot")]
+    InvalidRuntimeSnapshot(PathBuf),
     #[error("could not open WorldPack {path:?}: {source}")]
     OpenWorldPack {
         path: PathBuf,
@@ -613,7 +618,47 @@ fn validate_database(connection: &Connection, path: &Path) -> Result<i64, AdminE
             supported: SUPPORTED_DATABASE_SCHEMA_VERSION,
         });
     }
+    validate_runtime_snapshot(connection, path)?;
     Ok(version)
+}
+
+fn validate_runtime_snapshot(connection: &Connection, path: &Path) -> Result<(), AdminError> {
+    let has_table = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'world_runtime'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|source| database_error(path, source))?;
+    if !has_table {
+        return Ok(());
+    }
+    let snapshot = connection
+        .query_row(
+            "SELECT snapshot_version, snapshot_json
+             FROM world_runtime WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|source| database_error(path, source))?;
+    let Some((version, json)) = snapshot else {
+        return Ok(());
+    };
+    if json.len() > MAX_RUNTIME_SNAPSHOT_BYTES {
+        return Err(AdminError::RuntimeSnapshotTooLarge {
+            path: path.to_owned(),
+            maximum: MAX_RUNTIME_SNAPSHOT_BYTES,
+        });
+    }
+    let version =
+        u32::try_from(version).map_err(|_| AdminError::InvalidRuntimeSnapshot(path.to_owned()))?;
+    tiamud_core::decode_world_runtime_snapshot(version, &json)
+        .map_err(|_| AdminError::InvalidRuntimeSnapshot(path.to_owned()))?;
+    Ok(())
 }
 
 fn database_error(path: &Path, source: rusqlite::Error) -> AdminError {
@@ -730,6 +775,31 @@ mod tests {
         assert_eq!(report.world_pack_id, "test-world");
         assert_eq!(report.room_count, 1);
         assert_eq!(report.item_count, 1);
+    }
+
+    #[test]
+    fn check_rejects_a_runtime_snapshot_with_a_discordant_original_version() {
+        let temporary = TempDir::new().unwrap();
+        let database = temporary.path().join("tiamud.sqlite3");
+        let world = temporary.path().join("world.json");
+        let mut connection = Connection::open(&database).unwrap();
+        migrate_schema(&mut connection).unwrap();
+        let runtime = tiamud_core::World::demo().runtime_snapshot();
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 2, ?1, unixepoch())",
+                [serde_json::to_string(&runtime).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+        create_world_pack(&world);
+
+        assert!(matches!(
+            check(&database, &world),
+            Err(AdminError::InvalidRuntimeSnapshot(path)) if path == database
+        ));
     }
 
     #[test]

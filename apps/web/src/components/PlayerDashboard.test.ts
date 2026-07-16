@@ -67,7 +67,24 @@ const player: PlayerStateSnapshot = {
     rarity: 'uncommon',
     itemLevel: 3,
     weightGrams: 800,
+    quantity: 2,
+    stackSlots: 1,
+    totalWeightGrams: 1600,
     actions: [{ label: 'Drop', command: 'drop o1111111111111111' }],
+  }, {
+    id: 'o6666666666666666',
+    label: 'archive satchel',
+    description: 'A compact field satchel.',
+    rarity: 'common',
+    itemLevel: 1,
+    weightGrams: 400,
+    quantity: 1,
+    stackSlots: 1,
+    totalWeightGrams: 650,
+    containerCapacity: {
+      usedSlots: 1, maxSlots: 8, usedWeightGrams: 250, maxWeightGrams: 5000,
+    },
+    actions: [{ label: 'Contents', command: 'contents o6666666666666666' }],
   }],
   equipment: [{
     id: 'o2222222222222222',
@@ -76,6 +93,12 @@ const player: PlayerStateSnapshot = {
     rarity: 'common',
     itemLevel: 2,
     weightGrams: 2200,
+    quantity: 1,
+    stackSlots: 1,
+    totalWeightGrams: 2300,
+    containerCapacity: {
+      usedSlots: 2, maxSlots: 5, usedWeightGrams: 100, maxWeightGrams: 1000,
+    },
     actions: [{ label: 'Unequip', command: 'unequip weapon' }],
   }],
   inventoryCapacity: {
@@ -126,6 +149,17 @@ describe('PlayerDashboard', () => {
     const { body } = render(PlayerDashboard, {
       props: {
         value: player,
+        containerContents: {
+          container: 'o6666666666666666',
+          items: [{
+            id: 'o7777777777777777', label: 'healing tonic', rarity: 'uncommon',
+            itemLevel: 2, weightGrams: 250, quantity: 3, stackSlots: 1,
+            totalWeightGrams: 750, actions: [],
+          }],
+          page: 1,
+          totalPages: 2,
+          capacity: { usedSlots: 1, maxSlots: 8, usedWeightGrams: 750, maxWeightGrams: 5000 },
+        },
         abilityTargets: [{ id: 'owolf000000000001', label: 'rain wolf' }],
         oncommand: () => undefined,
         onaction: () => undefined,
@@ -147,6 +181,18 @@ describe('PlayerDashboard', () => {
       expect(body).toContain(label);
     }
     expect(body).toContain('blue lantern');
+    expect(body).toContain('blue lantern ×2');
+    expect(body).toContain('archive satchel');
+    expect(body).toContain('0.3/');
+    expect(body).toContain('5.0 kg');
+    expect(body).toContain('bronze sword');
+    expect(body).toContain('stack slot');
+    expect(body).toContain('2/5');
+    expect(body).toContain('0.1/');
+    expect(body).toContain('1.0 kg');
+    expect(body).toContain('Container contents');
+    expect(body).toContain('Page 1 of 2');
+    expect(body).toContain('healing tonic');
     expect(body).toContain('First Hunt');
     expect(body).toContain('Lantern Market');
     expect(body).toContain('Spellblade');
@@ -175,6 +221,9 @@ describe('PlayerDashboard', () => {
     }
     expect(dashboardSource).toContain('{ channel: communityChannel, message }');
     expect(dashboardSource).toContain('{ target }');
+    expect(dashboardSource).toContain("'item.contents'");
+    expect(dashboardSource).toContain("'item.put'");
+    expect(dashboardSource).toContain("'item.get'");
     expect(dashboardSource).toContain('<option value="staff">');
     expect(dashboardSource).not.toContain('<option value="announcement">');
   });

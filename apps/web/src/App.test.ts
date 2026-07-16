@@ -73,4 +73,20 @@ describe('Tiamud entry flow', () => {
     expect(appSource).not.toContain("case 'sync.player'");
     expect(appSource).not.toContain("case 'sync.snapshot'");
   });
+
+  it('never carries a paginated container view across mutations, recovery, or sessions', () => {
+    expect(appSource).toMatch(
+      /function submitAction[\s\S]*?if \(sent && \[[\s\S]*?'item\.put'[\s\S]*?'item\.get'[\s\S]*?'item\.contents'[\s\S]*?containerContents = undefined;/,
+    );
+    for (const boundary of [
+      'function handleSyncRecovery',
+      'function enterWorld',
+      'function returnToLogin',
+      'async function signOut',
+    ]) {
+      const start = appSource.indexOf(boundary);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(appSource.slice(start, start + 800)).toContain('containerContents = undefined;');
+    }
+  });
 });

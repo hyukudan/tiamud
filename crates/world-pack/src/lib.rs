@@ -37,13 +37,20 @@ pub use progression::{
     RequirementPredicate, TalentGraphDefinition, TalentNodeDefinition, TalentRankDefinition,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 pub const MAX_ITEM_PROTOTYPES: usize = 1_024;
 pub const MAX_INITIAL_ITEM_INSTANCES: usize = 8_192;
 pub const MAX_ITEM_ALIASES: usize = 32;
+pub const MAX_ITEM_NAME_BYTES: usize = 128;
+pub const MAX_ITEM_DESCRIPTION_BYTES: usize = 2_048;
+pub const MAX_ITEM_ALIAS_BYTES: usize = 64;
 pub const MAX_ITEM_WEIGHT_GRAMS: u32 = 1_000_000;
 pub const MAX_ITEM_SLOT_COST: u16 = 100;
 pub const MAX_ITEM_LEVEL: u16 = 1_000;
+pub const MAX_ITEM_STACK_UNITS: u16 = 1_000;
+pub const MAX_ITEM_CONTAINER_SLOTS: u16 = 1_000;
+pub const MAX_ITEM_CONTAINER_WEIGHT_GRAMS: u32 = 1_000_000;
+pub const MAX_ITEM_CONTAINER_DEPTH: usize = 4;
 pub const MAX_ARCHETYPES: usize = 32;
 pub const MAX_ABILITIES: usize = 512;
 pub const MAX_NPC_ABILITY_SETS: usize = 512;
@@ -131,7 +138,17 @@ pub struct ItemPrototype {
     pub rarity: ItemRarity,
     pub item_level: u16,
     pub stack_policy: ItemStackPolicy,
+    pub max_stack_units: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<ItemContainerDefinition>,
     pub transfer_policy: ItemTransferPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ItemContainerDefinition {
+    pub max_slots: u16,
+    pub max_weight_grams: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +168,7 @@ pub struct InitialItemInstance {
 pub enum InitialItemLocation {
     Room { room_id: String },
     NpcSpawn { npc_spawn_id: String },
+    Container { container_instance_id: String },
     Staged,
 }
 
@@ -168,6 +186,7 @@ pub enum ItemRarity {
 #[serde(rename_all = "snake_case")]
 pub enum ItemStackPolicy {
     Unique,
+    Fungible,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -609,14 +628,29 @@ impl WorldPack {
         for prototype in &self.item_prototypes {
             if prototype.id.trim().is_empty() {
                 errors.push(ValidationError::EmptyItemId);
+            } else if !valid_gameplay_identifier(&prototype.id) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "item prototype id {:?} must contain 1..=128 lowercase namespaced identifier bytes",
+                    prototype.id
+                )));
             } else if !item_prototype_ids.insert(prototype.id.as_str()) {
                 errors.push(ValidationError::DuplicateItemId(prototype.id.clone()));
             }
             if prototype.name.trim().is_empty() {
                 errors.push(ValidationError::EmptyItemName(prototype.id.clone()));
+            } else if !safe_gameplay_label(&prototype.name, MAX_ITEM_NAME_BYTES) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "item prototype {:?} name must contain 1..={MAX_ITEM_NAME_BYTES} safe bytes without control characters",
+                    prototype.id
+                )));
             }
             if prototype.description.trim().is_empty() {
                 errors.push(ValidationError::EmptyItemDescription(prototype.id.clone()));
+            } else if !safe_gameplay_text(&prototype.description, MAX_ITEM_DESCRIPTION_BYTES) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "item prototype {:?} description must contain 1..={MAX_ITEM_DESCRIPTION_BYTES} safe bytes",
+                    prototype.id
+                )));
             }
             if prototype.aliases.len() > MAX_ITEM_ALIASES {
                 errors.push(ValidationError::InvalidGameplay(format!(
@@ -626,13 +660,12 @@ impl WorldPack {
                 )));
             }
             let mut aliases = HashSet::new();
-            if prototype
-                .aliases
-                .iter()
-                .any(|alias| alias.trim().is_empty() || !aliases.insert(alias.to_ascii_lowercase()))
-            {
+            if prototype.aliases.iter().any(|alias| {
+                !safe_gameplay_label(alias, MAX_ITEM_ALIAS_BYTES)
+                    || !aliases.insert(alias.to_ascii_lowercase())
+            }) {
                 errors.push(ValidationError::InvalidGameplay(format!(
-                    "item prototype {:?} has an empty or duplicate alias",
+                    "item prototype {:?} has an unsafe, oversized, empty, or duplicate alias; aliases are limited to {MAX_ITEM_ALIAS_BYTES} bytes without control characters",
                     prototype.id
                 )));
             }
@@ -670,6 +703,42 @@ impl WorldPack {
                     prototype.id
                 )));
             }
+            match prototype.stack_policy {
+                ItemStackPolicy::Unique if prototype.max_stack_units != 1 => {
+                    errors.push(ValidationError::InvalidGameplay(format!(
+                        "unique item prototype {:?} must declare maxStackUnits 1",
+                        prototype.id
+                    )));
+                }
+                ItemStackPolicy::Fungible
+                    if !(2..=MAX_ITEM_STACK_UNITS).contains(&prototype.max_stack_units) =>
+                {
+                    errors.push(ValidationError::InvalidGameplay(format!(
+                        "fungible item prototype {:?} must declare maxStackUnits between 2 and {MAX_ITEM_STACK_UNITS}",
+                        prototype.id
+                    )));
+                }
+                _ => {}
+            }
+            if let Some(container) = prototype.container {
+                if prototype.stack_policy != ItemStackPolicy::Unique
+                    || prototype.max_stack_units != 1
+                    || prototype.consumable
+                {
+                    errors.push(ValidationError::InvalidGameplay(format!(
+                        "container item prototype {:?} must be unique, have maxStackUnits 1, and not be consumable",
+                        prototype.id
+                    )));
+                }
+                if !(1..=MAX_ITEM_CONTAINER_SLOTS).contains(&container.max_slots)
+                    || container.max_weight_grams > MAX_ITEM_CONTAINER_WEIGHT_GRAMS
+                {
+                    errors.push(ValidationError::InvalidGameplay(format!(
+                        "container item prototype {:?} exceeds a container capacity bound",
+                        prototype.id
+                    )));
+                }
+            }
         }
 
         if self.initial_item_instances.len() > MAX_INITIAL_ITEM_INSTANCES {
@@ -705,6 +774,11 @@ impl WorldPack {
                 )));
             }
         }
+        validate_initial_item_containers(
+            &self.item_prototypes,
+            &self.initial_item_instances,
+            &mut errors,
+        );
 
         let mut prototypes = HashMap::new();
         for prototype in &self.gameplay.npc_prototypes {
@@ -780,13 +854,19 @@ impl WorldPack {
         }
 
         for instance in &self.initial_item_instances {
-            if let InitialItemLocation::NpcSpawn { npc_spawn_id } = &instance.location
-                && !spawn_ids.contains(npc_spawn_id.as_str())
-            {
-                errors.push(ValidationError::InvalidGameplay(format!(
-                    "initial item instance {:?} references missing NPC spawn {:?}",
-                    instance.id, npc_spawn_id
-                )));
+            match &instance.location {
+                InitialItemLocation::NpcSpawn { npc_spawn_id }
+                    if !spawn_ids.contains(npc_spawn_id.as_str()) =>
+                {
+                    errors.push(ValidationError::InvalidGameplay(format!(
+                        "initial item instance {:?} references missing NPC spawn {:?}",
+                        instance.id, npc_spawn_id
+                    )));
+                }
+                InitialItemLocation::Room { .. }
+                | InitialItemLocation::NpcSpawn { .. }
+                | InitialItemLocation::Container { .. }
+                | InitialItemLocation::Staged => {}
             }
         }
 
@@ -844,6 +924,167 @@ impl WorldPack {
             })
             .collect()
     }
+}
+
+fn validate_initial_item_containers(
+    prototypes: &[ItemPrototype],
+    instances: &[InitialItemInstance],
+    errors: &mut Vec<ValidationError>,
+) {
+    let prototypes_by_id = prototypes
+        .iter()
+        .map(|prototype| (prototype.id.as_str(), prototype))
+        .collect::<HashMap<_, _>>();
+    let instances_by_id = instances
+        .iter()
+        .map(|instance| (instance.id.as_str(), instance))
+        .collect::<HashMap<_, _>>();
+    let mut children_by_container: HashMap<&str, Vec<&InitialItemInstance>> = HashMap::new();
+
+    for instance in instances {
+        let InitialItemLocation::Container {
+            container_instance_id,
+        } = &instance.location
+        else {
+            continue;
+        };
+        if container_instance_id == &instance.id {
+            errors.push(ValidationError::InvalidGameplay(format!(
+                "initial item instance {:?} cannot contain itself",
+                instance.id
+            )));
+            continue;
+        }
+        let Some(container_instance) = instances_by_id.get(container_instance_id.as_str()) else {
+            errors.push(ValidationError::InvalidGameplay(format!(
+                "initial item instance {:?} references missing container instance {:?}",
+                instance.id, container_instance_id
+            )));
+            continue;
+        };
+        let is_container = prototypes_by_id
+            .get(container_instance.prototype_id.as_str())
+            .is_some_and(|prototype| prototype.container.is_some());
+        if !is_container {
+            errors.push(ValidationError::InvalidGameplay(format!(
+                "initial item instance {:?} references non-container instance {:?}",
+                instance.id, container_instance_id
+            )));
+            continue;
+        }
+        children_by_container
+            .entry(container_instance_id)
+            .or_default()
+            .push(instance);
+    }
+
+    for instance in instances {
+        let mut seen = HashSet::from([instance.id.as_str()]);
+        let mut current = instance;
+        let mut depth = 0usize;
+        while let InitialItemLocation::Container {
+            container_instance_id,
+        } = &current.location
+        {
+            depth += 1;
+            if depth > MAX_ITEM_CONTAINER_DEPTH {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "initial item instance {:?} exceeds maximum container depth {MAX_ITEM_CONTAINER_DEPTH}",
+                    instance.id
+                )));
+                break;
+            }
+            if !seen.insert(container_instance_id.as_str()) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "initial item instance {:?} participates in a container cycle",
+                    instance.id
+                )));
+                break;
+            }
+            let Some(next) = instances_by_id.get(container_instance_id.as_str()) else {
+                break;
+            };
+            current = next;
+        }
+    }
+
+    for container_instance in instances {
+        let Some(prototype) = prototypes_by_id.get(container_instance.prototype_id.as_str()) else {
+            continue;
+        };
+        let Some(container) = prototype.container else {
+            continue;
+        };
+        let children = children_by_container
+            .get(container_instance.id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut units_by_prototype: HashMap<&str, u32> = HashMap::new();
+        for child in children {
+            *units_by_prototype
+                .entry(child.prototype_id.as_str())
+                .or_default() += 1;
+        }
+        let slots = units_by_prototype
+            .into_iter()
+            .try_fold(0u32, |used, (prototype_id, units)| {
+                let child_prototype = prototypes_by_id.get(prototype_id)?;
+                let max_stack_units = u32::from(child_prototype.max_stack_units);
+                if max_stack_units == 0 {
+                    return None;
+                }
+                let stacks = units.div_ceil(max_stack_units);
+                used.checked_add(stacks.checked_mul(u32::from(child_prototype.slot_cost))?)
+            });
+        if slots.is_none_or(|slots| slots > u32::from(container.max_slots)) {
+            errors.push(ValidationError::InvalidGameplay(format!(
+                "container instance {:?} exceeds its authored slot capacity",
+                container_instance.id
+            )));
+        }
+
+        let weight = children.iter().try_fold(0u64, |used, child| {
+            used.checked_add(authored_item_total_weight(
+                &child.id,
+                &prototypes_by_id,
+                &instances_by_id,
+                &children_by_container,
+            )?)
+        });
+        if weight.is_none_or(|weight| weight > u64::from(container.max_weight_grams)) {
+            errors.push(ValidationError::InvalidGameplay(format!(
+                "container instance {:?} exceeds its authored weight capacity",
+                container_instance.id
+            )));
+        }
+    }
+}
+
+fn authored_item_total_weight<'a>(
+    instance_id: &'a str,
+    prototypes_by_id: &HashMap<&'a str, &'a ItemPrototype>,
+    instances_by_id: &HashMap<&'a str, &'a InitialItemInstance>,
+    children_by_container: &HashMap<&'a str, Vec<&'a InitialItemInstance>>,
+) -> Option<u64> {
+    let mut pending = vec![(instance_id, 0usize)];
+    let mut visited = HashSet::new();
+    let mut weight = 0u64;
+    while let Some((current_id, depth)) = pending.pop() {
+        if depth > MAX_ITEM_CONTAINER_DEPTH || !visited.insert(current_id) {
+            return None;
+        }
+        let instance = instances_by_id.get(current_id)?;
+        let prototype = prototypes_by_id.get(instance.prototype_id.as_str())?;
+        weight = weight.checked_add(u64::from(prototype.weight_grams))?;
+        if let Some(children) = children_by_container.get(current_id) {
+            pending.extend(
+                children
+                    .iter()
+                    .map(|child| (child.id.as_str(), depth.saturating_add(1))),
+            );
+        }
+    }
+    Some(weight)
 }
 
 fn validate_character_and_abilities(
@@ -1645,6 +1886,11 @@ fn safe_gameplay_text(value: &str, maximum_bytes: usize) -> bool {
             .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
 }
 
+fn safe_gameplay_label(value: &str, maximum_bytes: usize) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed.len() <= maximum_bytes && !trimmed.chars().any(char::is_control)
+}
+
 fn invalid_gameplay(errors: &mut Vec<ValidationError>, message: String) {
     errors.push(ValidationError::InvalidGameplay(message));
 }
@@ -1936,6 +2182,8 @@ mod tests {
             rarity: ItemRarity::Common,
             item_level: 1,
             stack_policy: ItemStackPolicy::Unique,
+            max_stack_units: 1,
+            container: None,
             transfer_policy: ItemTransferPolicy::Transferable,
         }
     }
@@ -2457,5 +2705,383 @@ mod tests {
                     matches!(error, ValidationError::TooManyInitialItemInstances { .. })
                 })
         );
+    }
+
+    #[test]
+    fn item_display_text_is_byte_bounded_and_control_safe() {
+        let mut boundary = pack();
+        let mut prototype = item_prototype("test:text-boundary");
+        prototype.name = "n".repeat(MAX_ITEM_NAME_BYTES);
+        prototype.description = format!("{}\n{}", "d".repeat(MAX_ITEM_DESCRIPTION_BYTES - 2), "d");
+        prototype.aliases = vec!["a".repeat(MAX_ITEM_ALIAS_BYTES)];
+        boundary.item_prototypes.push(prototype);
+        boundary.validate().unwrap();
+
+        for (field, mutate) in [
+            (
+                "name",
+                (|prototype: &mut ItemPrototype| {
+                    prototype.name = "n".repeat(MAX_ITEM_NAME_BYTES + 1);
+                }) as fn(&mut ItemPrototype),
+            ),
+            ("name", |prototype: &mut ItemPrototype| {
+                prototype.name = "unsafe\u{1b}name".into()
+            }),
+            ("description", |prototype: &mut ItemPrototype| {
+                prototype.description = "d".repeat(MAX_ITEM_DESCRIPTION_BYTES + 1);
+            }),
+            ("description", |prototype: &mut ItemPrototype| {
+                prototype.description = "unsafe\u{1b}description".into();
+            }),
+            ("alias", |prototype: &mut ItemPrototype| {
+                prototype.aliases = vec!["a".repeat(MAX_ITEM_ALIAS_BYTES + 1)];
+            }),
+            ("alias", |prototype: &mut ItemPrototype| {
+                prototype.aliases = vec!["unsafe\u{1b}alias".into()];
+            }),
+        ] {
+            let mut candidate = pack();
+            let mut prototype = item_prototype("test:unsafe-text");
+            mutate(&mut prototype);
+            candidate.item_prototypes.push(prototype);
+            let message = candidate
+                .validate()
+                .unwrap_err()
+                .0
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(message.contains(field), "unexpected validation: {message}");
+        }
+    }
+
+    #[test]
+    fn item_prototype_ids_use_the_runtime_identifier_contract() {
+        for invalid_id in [
+            "Test:uppercase".to_owned(),
+            "test:trailing-".to_owned(),
+            format!("test:{}", "a".repeat(124)),
+        ] {
+            let mut candidate = pack();
+            candidate.item_prototypes.push(item_prototype(&invalid_id));
+            let errors = candidate.validate().unwrap_err().0;
+            assert!(errors.iter().any(|error| {
+                error
+                    .to_string()
+                    .contains("lowercase namespaced identifier")
+            }));
+        }
+    }
+
+    #[test]
+    fn stack_and_container_prototype_bounds_are_closed() {
+        let mut valid = pack();
+        let mut fungible = item_prototype("test:tonic");
+        fungible.stack_policy = ItemStackPolicy::Fungible;
+        fungible.max_stack_units = 2;
+        valid.item_prototypes.push(fungible);
+        let mut container = item_prototype("test:satchel");
+        container.container = Some(ItemContainerDefinition {
+            max_slots: 1,
+            max_weight_grams: 0,
+        });
+        valid.item_prototypes.push(container);
+        valid.validate().unwrap();
+
+        for mutate in [
+            |prototype: &mut ItemPrototype| prototype.max_stack_units = 0,
+            |prototype: &mut ItemPrototype| prototype.max_stack_units = 2,
+        ] {
+            let mut candidate = pack();
+            let mut prototype = item_prototype("test:unique");
+            mutate(&mut prototype);
+            candidate.item_prototypes.push(prototype);
+            assert!(candidate.validate().is_err());
+        }
+
+        for max_stack_units in [1, MAX_ITEM_STACK_UNITS + 1] {
+            let mut candidate = pack();
+            let mut prototype = item_prototype("test:fungible");
+            prototype.stack_policy = ItemStackPolicy::Fungible;
+            prototype.max_stack_units = max_stack_units;
+            candidate.item_prototypes.push(prototype);
+            assert!(candidate.validate().is_err());
+        }
+
+        let mut invalid_container = pack();
+        let mut prototype = item_prototype("test:container");
+        prototype.consumable = true;
+        prototype.container = Some(ItemContainerDefinition {
+            max_slots: 0,
+            max_weight_grams: MAX_ITEM_CONTAINER_WEIGHT_GRAMS + 1,
+        });
+        invalid_container.item_prototypes.push(prototype);
+        let messages = invalid_container
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(messages.contains("must be unique"));
+        assert!(messages.contains("container capacity bound"));
+    }
+
+    #[test]
+    fn authored_container_graph_rejects_bad_targets_cycles_and_depth_five() {
+        let container_prototype = || {
+            let mut prototype = item_prototype("test:container");
+            prototype.container = Some(ItemContainerDefinition {
+                max_slots: 100,
+                max_weight_grams: MAX_ITEM_CONTAINER_WEIGHT_GRAMS,
+            });
+            prototype
+        };
+
+        let mut missing = pack();
+        missing.item_prototypes.push(item_prototype("test:item"));
+        missing.initial_item_instances.push(InitialItemInstance {
+            id: "test:item-1".into(),
+            prototype_id: "test:item".into(),
+            location: InitialItemLocation::Container {
+                container_instance_id: "test:missing".into(),
+            },
+        });
+        assert!(
+            missing
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| error.to_string().contains("missing container instance"))
+        );
+
+        let mut non_container = pack();
+        non_container
+            .item_prototypes
+            .push(item_prototype("test:item"));
+        non_container.initial_item_instances.extend([
+            InitialItemInstance {
+                id: "test:item-1".into(),
+                prototype_id: "test:item".into(),
+                location: InitialItemLocation::Container {
+                    container_instance_id: "test:item-2".into(),
+                },
+            },
+            InitialItemInstance {
+                id: "test:item-2".into(),
+                prototype_id: "test:item".into(),
+                location: InitialItemLocation::Staged,
+            },
+        ]);
+        assert!(
+            non_container
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| error.to_string().contains("non-container"))
+        );
+
+        let mut self_contained = pack();
+        self_contained.item_prototypes.push(container_prototype());
+        self_contained
+            .initial_item_instances
+            .push(InitialItemInstance {
+                id: "test:self".into(),
+                prototype_id: "test:container".into(),
+                location: InitialItemLocation::Container {
+                    container_instance_id: "test:self".into(),
+                },
+            });
+        assert!(
+            self_contained
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| error.to_string().contains("cannot contain itself"))
+        );
+
+        let mut cycle = pack();
+        cycle.item_prototypes.push(container_prototype());
+        cycle.initial_item_instances.extend([
+            InitialItemInstance {
+                id: "test:a".into(),
+                prototype_id: "test:container".into(),
+                location: InitialItemLocation::Container {
+                    container_instance_id: "test:b".into(),
+                },
+            },
+            InitialItemInstance {
+                id: "test:b".into(),
+                prototype_id: "test:container".into(),
+                location: InitialItemLocation::Container {
+                    container_instance_id: "test:a".into(),
+                },
+            },
+        ]);
+        assert!(
+            cycle
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| error.to_string().contains("container cycle"))
+        );
+
+        let mut depth = pack();
+        depth.item_prototypes.push(container_prototype());
+        depth.item_prototypes.push(item_prototype("test:leaf"));
+        depth.initial_item_instances.push(InitialItemInstance {
+            id: "test:leaf-1".into(),
+            prototype_id: "test:leaf".into(),
+            location: InitialItemLocation::Container {
+                container_instance_id: "test:c1".into(),
+            },
+        });
+        for index in 1..=4 {
+            depth.initial_item_instances.push(InitialItemInstance {
+                id: format!("test:c{index}"),
+                prototype_id: "test:container".into(),
+                location: if index == 4 {
+                    InitialItemLocation::Room {
+                        room_id: "test:1".into(),
+                    }
+                } else {
+                    InitialItemLocation::Container {
+                        container_instance_id: format!("test:c{}", index + 1),
+                    }
+                },
+            });
+        }
+        depth.validate().unwrap();
+        depth
+            .initial_item_instances
+            .iter_mut()
+            .find(|instance| instance.id == "test:c4")
+            .unwrap()
+            .location = InitialItemLocation::Container {
+            container_instance_id: "test:c5".into(),
+        };
+        depth.initial_item_instances.push(InitialItemInstance {
+            id: "test:c5".into(),
+            prototype_id: "test:container".into(),
+            location: InitialItemLocation::Room {
+                room_id: "test:1".into(),
+            },
+        });
+        assert!(
+            depth
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| error.to_string().contains("maximum container depth 4"))
+        );
+    }
+
+    #[test]
+    fn authored_container_capacity_uses_derived_stacks_and_recursive_weight() {
+        let mut value = pack();
+        let mut tonic = item_prototype("test:tonic");
+        tonic.stack_policy = ItemStackPolicy::Fungible;
+        tonic.max_stack_units = 2;
+        tonic.slot_cost = 2;
+        tonic.weight_grams = 100;
+        let mut outer = item_prototype("test:outer");
+        outer.weight_grams = 50;
+        outer.container = Some(ItemContainerDefinition {
+            max_slots: 5,
+            max_weight_grams: 350,
+        });
+        let mut inner = item_prototype("test:inner");
+        inner.weight_grams = 50;
+        inner.container = Some(ItemContainerDefinition {
+            max_slots: 4,
+            max_weight_grams: 300,
+        });
+        value.item_prototypes.extend([tonic, outer, inner]);
+        value.initial_item_instances.extend([
+            InitialItemInstance {
+                id: "test:outer-1".into(),
+                prototype_id: "test:outer".into(),
+                location: InitialItemLocation::Room {
+                    room_id: "test:1".into(),
+                },
+            },
+            InitialItemInstance {
+                id: "test:inner-1".into(),
+                prototype_id: "test:inner".into(),
+                location: InitialItemLocation::Container {
+                    container_instance_id: "test:outer-1".into(),
+                },
+            },
+        ]);
+        for index in 1..=3 {
+            value.initial_item_instances.push(InitialItemInstance {
+                id: format!("test:tonic-{index}"),
+                prototype_id: "test:tonic".into(),
+                location: InitialItemLocation::Container {
+                    container_instance_id: "test:inner-1".into(),
+                },
+            });
+        }
+        value.validate().unwrap();
+
+        value
+            .item_prototypes
+            .iter_mut()
+            .find(|prototype| prototype.id == "test:inner")
+            .unwrap()
+            .container
+            .as_mut()
+            .unwrap()
+            .max_slots = 3;
+        assert!(
+            value
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| error.to_string().contains("slot capacity"))
+        );
+
+        value
+            .item_prototypes
+            .iter_mut()
+            .find(|prototype| prototype.id == "test:inner")
+            .unwrap()
+            .container
+            .as_mut()
+            .unwrap()
+            .max_slots = 4;
+        value
+            .item_prototypes
+            .iter_mut()
+            .find(|prototype| prototype.id == "test:outer")
+            .unwrap()
+            .container
+            .as_mut()
+            .unwrap()
+            .max_weight_grams = 349;
+        assert!(
+            value
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| error.to_string().contains("weight capacity"))
+        );
+
+        value
+            .item_prototypes
+            .iter_mut()
+            .find(|prototype| prototype.id == "test:tonic")
+            .unwrap()
+            .max_stack_units = 0;
+        assert!(value.validate().is_err());
     }
 }

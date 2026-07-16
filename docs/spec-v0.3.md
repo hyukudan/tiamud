@@ -48,9 +48,9 @@ y orquestación no son objetivo sin carga medida que lo justifique.
 
 ## Datos de mundo y autoría
 
-WorldPack v4 es el objetivo canónico. AreaPack v3 permite composición modular
-estricta. WorldPack v3/v2, AreaPack v2/v1 y Envy/Merc se normalizan al importar
-o componer; el dominio no conserva vocabulario heredado.
+WorldPack v5 es el objetivo canónico. AreaPack v4 permite composición modular
+estricta. WorldPack v4/v3/v2, AreaPack v3/v2/v1 y Envy/Merc se normalizan al
+importar o componer; el dominio no conserva vocabulario heredado.
 
 Propiedades obligatorias:
 
@@ -65,53 +65,81 @@ Propiedades obligatorias:
 Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
 
-### Objetos e inventario 3A
+### Objetos e inventario 3A–3B
 
-WorldPack v4 separa `itemPrototypes`, que contienen contenido y reglas
+WorldPack v5 separa `itemPrototypes`, que contienen contenido y reglas
 reutilizables, de `initialItemInstances`, que asignan cada unidad durable a una
-sala, un `npc_spawn` o `staged`. En runtime `ItemInstanceId` es una cadena
-tipada interna; las instancias nuevas usan una secuencia monotónica incluida en
-checkpoint, rollback y snapshot. Los clientes nunca reciben esa identidad ni
-`prototypeId`: Web, Telnet y GMCP operan con IDs opacos derivados de una sal
-criptográficamente aleatoria nueva por sesión. Telnet muestra la referencia de
-cada unidad visible o portada y permite emplearla como selector exacto.
+sala, un `npc_spawn`, `staged` o a otra instancia contenedor. En runtime
+`ItemInstanceId` es una cadena tipada interna; las instancias nuevas usan una
+secuencia monotónica incluida en checkpoint, rollback y snapshot. Los clientes
+nunca reciben esa identidad ni `prototypeId`: Web, Telnet y GMCP operan con IDs
+opacos derivados de una sal criptográficamente aleatoria nueva por sesión.
 
 `entityMedia(kind=item)` referencia un prototipo reusable; el servidor aplica
 esa presentación solo a sus instancias ya visibles. En cambio,
-`roomPerception.hiddenItems` referencia la instancia concreta y no cambia la
-visibilidad de las demás unidades del mismo prototipo.
+`roomPerception.hiddenItems` referencia la instancia concreta. La percepción se
+resuelve antes de agrupar, por lo que una unidad oculta no incrementa la
+cantidad visible.
 
 Cada prototipo declara peso, coste de slot, rareza cerrada
 `common|uncommon|rare|epic|legendary`, `itemLevel`, política de pila y política
-de transferencia. La fase 3A acepta solo `unique` y `transferable`; los valores
-`character_bound` y `non_transferable` están definidos pero se rechazan como
-reservados hasta que 3C ejecute sus reglas. No hay pilas. Cada personaje tiene
-límites de slots y peso. El peso incluye inventario
-y equipo; los slots cuentan las unidades portadas, por lo que equipar libera
-slots y desequipar debe reservarlos. Take, unequip, reemplazo de equipo y
-concesiones de script prevalidan la operación completa y fallan sin mutación si
-excede capacidad.
+de transferencia. `unique` exige `maxStackUnits: 1`; `fungible` admite
+`2..=1000`. Las pilas son vistas deterministas por ubicación/prototipo,
+ordenadas por ID de instancia y partidas por ese máximo. No se persisten
+`quantity`, identidad de pila ni una lista duplicada de miembros:
 
-Rareza, nivel y peso aparecen como texto en escena, inventario y equipo. El
-color nunca es la única señal. La capacidad se calcula exclusivamente en el
-servidor y se proyecta como uso/máximo.
+```text
+stackSlots = ceil(quantity / maxStackUnits) × slotCost
+totalWeightGrams = quantity × weightGrams
+```
 
-`WorldRuntimeSnapshot` v2 conserva `itemInstances` y el siguiente contador. La
-lectura de v1 pasa por un DTO y una conversión explícitos; referencias
-huérfanas, ubicaciones incompatibles o contadores inválidos bloquean el
-arranque. La restauración conserva instancias iniciales nuevas del WorldPack
-actual y superpone el estado durable, sin resucitar instancias runtime ausentes
-del snapshot. Antes de abrir listeners se leen por lotes, se validan y se
-descartan los agregados de propietarios conectados o desconectados: existencia,
-equipo y capacidad deben concordar con las ubicaciones de instancia. En 3A ese
-snapshot acotado sigue siendo la única autoridad durable:
-SQLite y PostgreSQL lo confirman en su transacción de esquema v10 junto con los
-demás cambios. No hay tabla espejo ni esquema v11.
+Un contenedor debe ser una instancia `unique`, no consumible, con
+`maxSlots: 1..=1000` y `maxWeightGrams: 0..=1_000_000`. Sus slots cuentan hijos
+directos ya agrupados; su peso usado cuenta todos los descendientes. El peso
+del personaje incluye raíces portadas/equipadas y todo su contenido, mientras
+sus slots solo cuentan raíces portadas. El grafo rechaza autorreferencias,
+ciclos, referencias inválidas y una quinta arista de profundidad.
+
+```mermaid
+flowchart TD
+    Character[Personaje] -->|raíz carried: slots + peso| Bag[Bolsa única]
+    Bag -->|hijos directos: slots agrupados| PotionA[Tónica A]
+    Bag --> PotionB[Tónica B]
+    Bag --> Box[Caja hija]
+    Box --> Map[Mapa]
+    PotionA -. una pila derivada x2 .- PotionB
+    Character -. peso recursivo .-> Map
+```
+
+Antes de mutar se valida una ubicación prospectiva completa; un error no mueve
+ninguna unidad ni avanza revisión, RNG o contador. `take` y `drop` aceptan una
+cantidad opcional, `put <objeto> in <contenedor>` mueve raíces portadas y
+`get <objeto> from <contenedor>` solo hijos directos. Cada mutación admite
+1..=256 unidades. `contents` pagina veinte grupos y evita incrustar árboles
+recursivos en las fichas o escenas.
+
+Rareza, nivel, peso unitario/total, cantidad, slots y capacidad aparecen como
+texto en escena, inventario, equipo y contenidos. El color nunca es la única
+señal. Web usa `container.contents`; Telnet ofrece texto equivalente y GMCP
+proyecta `Char.Items.List` con ubicación `container`.
+
+`WorldRuntimeSnapshot` v3 conserva `itemInstances`, su grafo de ubicaciones y
+el siguiente contador. El decoder lee primero `snapshotVersion` y usa DTO
+explícitos v1, v2 y v3; campos de una versión nueva inyectados en una antigua,
+referencias huérfanas, ciclos, profundidad o contadores inválidos bloquean el
+arranque. La restauración conserva instancias iniciales nuevas del WorldPack y
+superpone el estado durable, sin resucitar instancias runtime ausentes. Antes
+de abrir listeners se validan por lotes propietarios conectados o
+desconectados, equipo, grafo y capacidad, descartando después esos agregados.
+SQLite y PostgreSQL confirman el snapshot como única autoridad en su
+transacción de esquema v10; no hay tabla espejo ni esquema v11.
 
 Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
 WorldPack, 65.536 instancias runtime, 1 MiB para el snapshot y 1 MiB agregado
 para las fichas de propietarios inspeccionadas al arrancar; cada ficha tiene un
-máximo de 64 KiB.
+máximo de 64 KiB. En 3B solo se acepta `transferable`; `give`, trade,
+`character_bound`, `non_transferable`, derechos/reparto y tablas de botín
+aleatorias pertenecen a fases posteriores.
 
 ## Modelo de personaje
 
@@ -253,9 +281,11 @@ analizador; los anuncios llegan como `announcement` en texto, Web
 Los objetos separan prototipo reutilizable e instancia durable con ubicación
 autoritaria. Los NPC poseen instancias de botín fijo validadas y las
 transfieren al morir. Capacidad por slots/peso, rareza textual y `itemLevel`
-están implementados. Faltan pilas, contenedores, give/trade, afijos, propiedad y
-reparto de grupo, procedencia de drops repetibles y tablas ponderadas. Cajas de
-botín pagadas o tiradas con moneda prémium quedan fuera del baseline.
+están implementados junto con pilas fungibles derivadas, contenedores acotados,
+cantidades y consulta paginada. Faltan `give`/trade, políticas ligadas, afijos,
+propiedad y reparto de grupo, procedencia de drops repetibles y tablas
+ponderadas. Cajas de botín pagadas o tiradas con moneda prémium quedan fuera
+del baseline.
 
 Consulta la [hoja de ruta social/staff/botín](design/social-staff-and-loot-roadmap.md).
 
@@ -333,7 +363,7 @@ secuencia ni se infieren de prosa. Referencia:
 | --- | --- |
 | Combate y habilidades acotadas | Baseline implementado y probado |
 | Límites acumulados y nivel sin relleno | Implementado y probado |
-| WorldPack v4/AreaPack v3, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v3/v2 y AreaPack v2/v1 se normalizan |
+| WorldPack v5/AreaPack v4, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v4/v3/v2 y AreaPack v3/v2/v1 se normalizan |
 | Linaje/clase/talento/promoción y persistencia | Implementado y probado |
 | Creación v3 navegador/Telnet | Default/none/explícito implementado |
 | Ficha, talentos y promociones web | Implementado y probado |
@@ -345,6 +375,7 @@ secuencia ni se infieren de prosa. Referencia:
 | Social fase 1 y esquema v10 | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v10 aún no retenida |
 | Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v10 aún no retenida |
 | Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
+| Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Protocolo atómico de delta denso | Pendiente |
 
 En el árbol integrado de fase 3A pasan formato, pruebas bloqueadas del workspace
@@ -353,6 +384,12 @@ del servidor; `svelte-check` sin errores ni avisos, 100/100 pruebas web y build;
 30/30 escenarios Playwright soportados; y las comprobaciones de licencias y
 avisos generados para 307 dependencias Rust y 76 web. No se ejecutaron
 PostgreSQL real v10, WebKit local ni soak de 24 horas. Estas puertas locales no
+demuestran por sí solas publicación o CI.
+
+La integración 3B pasa formato/check/clippy, 499/499 pruebas Rust, 103/103 web,
+30/30 Playwright Chromium/Firefox, 80/80 Node, humo, carga CI y soak corto.
+También pasan `cargo-deny`, licencias y avisos 307 Rust/76 web. No se ejecutaron
+PostgreSQL real v10, WebKit local ni soak de 24 horas; las puertas locales no
 demuestran por sí solas publicación o CI.
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
@@ -381,6 +418,17 @@ Compositor:
 6. Pistas derivadas de eventos y eliminadas en resync.
 7. Sin exceder presupuesto WebSocket/GMCP.
 8. Telnet plano completo y limpio.
+
+Inventario 3B:
+
+1. Pilas derivadas nunca crean cantidad o identidad durable duplicada.
+2. Límites de pila y slots/peso se cumplen con aritmética comprobada.
+3. El peso recursivo incluye descendientes y los slots solo hijos directos.
+4. Ciclos, profundidad 5 y sobrecapacidad fallan sin mutación parcial.
+5. Selectores opacos y percepción preceden a la agrupación.
+6. Cantidad máxima 256 y `contents` máximo 20 grupos por página.
+7. Snapshot v1/v2/v3 falla cerrado y conserva propietarios offline válidos.
+8. Web, texto Telnet y GMCP expresan los mismos hechos autorizados.
 
 ## Trabajo aplazado o rechazado
 

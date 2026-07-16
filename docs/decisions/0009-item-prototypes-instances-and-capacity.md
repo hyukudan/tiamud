@@ -1,6 +1,7 @@
 # ADR 0009: prototipos, instancias y capacidad de inventario
 
-- Estado: aceptado; fase 3A implementada, fases 3B–4 pendientes.
+- Estado: aceptado; fase 3A implementada. Fase 3B implementada por
+  [ADR 0010](0010-derived-stacks-and-bounded-containers.md); fases 3C–4 pendientes.
 - Fecha: 2026-07-16.
 - Alcance: identidad de objetos, autoría, snapshot, capacidad y presentación.
 
@@ -155,8 +156,8 @@ oculte instancias heterogéneas.
 ## Secuencia posterior
 
 1. Fase 3A: split prototipo/instancia, snapshot v2, capacidad y rareza textual.
-2. Fase 3B: pilas fungibles y contenedores con profundidad, peso y capacidad
-   máximos.
+2. Fase 3B, implementada por ADR 0010: pilas fungibles derivadas y contenedores
+   con profundidad, peso y capacidad máximos.
 3. Fase 3C: `give` atómico y políticas bound/quest/no-transfer.
 4. Fase 3D: intercambio con escrow, doble aceptación e invalidación ante
    cualquier cambio.
@@ -177,5 +178,7 @@ pero autores y herramientas nuevas deben usar los dos catálogos.
 La migración transversal de fase 3A está integrada en WorldPack, core,
 compositor, snapshot, Web y Telnet/GMCP. Tiamud obtiene así una base única para
 objetos repetibles sin introducir todavía tablas de botín, comercio o una
-segunda autoridad persistente prematura. Pilas, contenedores, transferencias,
-derechos/reparto y botín aleatorio permanecen en las fases posteriores.
+segunda autoridad persistente prematura. ADR 0010 añade pilas derivadas y
+contenedores acotados sobre esa base sin reinterpretar esta decisión. Las
+transferencias, derechos/reparto y botín aleatorio permanecen en las fases
+posteriores.

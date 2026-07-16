@@ -21,7 +21,8 @@ use tiamud_core::{
     DamageType as CoreDamageType, Direction as CoreDirection, EffectKind as CoreEffectKind,
     EquipmentSlot as CoreEquipmentSlot, ExitDefinition, GrantDefinition as CoreGrantDefinition,
     InitialItemInstanceDefinition as CoreInitialItemInstanceDefinition,
-    InitialItemLocation as CoreInitialItemLocation, ItemInstanceId,
+    InitialItemLocation as CoreInitialItemLocation,
+    ItemContainerDefinition as CoreItemContainerDefinition, ItemInstanceId,
     ItemPrototypeDefinition as CoreItemPrototypeDefinition, ItemRarity as CoreItemRarity,
     ItemStackPolicy as CoreItemStackPolicy, ItemTransferPolicy as CoreItemTransferPolicy,
     LevelGrantDefinition as CoreLevelGrantDefinition,
@@ -39,9 +40,10 @@ use tiamud_core::{
 use world_pack::{
     AudioCue, Direction as PackDirection, EffectKind as PackEffectKind,
     EquipmentSlot as PackEquipmentSlot, ExitTarget, InitialItemLocation as PackInitialItemLocation,
-    ItemRarity as PackItemRarity, ItemStackPolicy as PackItemStackPolicy,
-    ItemTransferPolicy as PackItemTransferPolicy, LightLevel as PackLightLevel,
-    RoomMediaDefinition, RoomPerceptionDefinition, ValidationErrors, WorldPack, WorldPackDocument,
+    ItemContainerDefinition as PackItemContainerDefinition, ItemRarity as PackItemRarity,
+    ItemStackPolicy as PackItemStackPolicy, ItemTransferPolicy as PackItemTransferPolicy,
+    LightLevel as PackLightLevel, RoomMediaDefinition, RoomPerceptionDefinition, ValidationErrors,
+    WorldPack, WorldPackDocument,
 };
 
 const MAX_WORLD_PACK_BYTES: usize = 16 * 1024 * 1024;
@@ -234,6 +236,8 @@ fn convert_pack(
             rarity: map_item_rarity(item.rarity),
             item_level: item.item_level,
             stack_policy: map_item_stack_policy(item.stack_policy),
+            max_stack_units: item.max_stack_units,
+            container: item.container.map(map_item_container),
             transfer_policy: map_item_transfer_policy(item.transfer_policy),
         })
         .collect::<Vec<_>>();
@@ -247,6 +251,9 @@ fn convert_pack(
                 PackInitialItemLocation::NpcSpawn { npc_spawn_id } => {
                     CoreInitialItemLocation::NpcSpawn(npc_spawn_id)
                 }
+                PackInitialItemLocation::Container {
+                    container_instance_id,
+                } => CoreInitialItemLocation::Container(ItemInstanceId(container_instance_id)),
                 PackInitialItemLocation::Staged => CoreInitialItemLocation::Staged,
             },
         })
@@ -828,6 +835,14 @@ fn map_item_rarity(rarity: PackItemRarity) -> CoreItemRarity {
 fn map_item_stack_policy(policy: PackItemStackPolicy) -> CoreItemStackPolicy {
     match policy {
         PackItemStackPolicy::Unique => CoreItemStackPolicy::Unique,
+        PackItemStackPolicy::Fungible => CoreItemStackPolicy::Fungible,
+    }
+}
+
+fn map_item_container(container: PackItemContainerDefinition) -> CoreItemContainerDefinition {
+    CoreItemContainerDefinition {
+        max_slots: container.max_slots,
+        max_weight_grams: container.max_weight_grams,
     }
 }
 
@@ -1032,8 +1047,8 @@ mod tests {
     #[test]
     fn reviewed_pack_loads_item_prototypes_instances_and_an_npc_spawn() {
         let loaded = default_loaded_world().unwrap();
-        assert_eq!(loaded.definition.item_prototypes.len(), 6);
-        assert_eq!(loaded.definition.initial_item_instances.len(), 6);
+        assert_eq!(loaded.definition.item_prototypes.len(), 7);
+        assert_eq!(loaded.definition.initial_item_instances.len(), 8);
         let tonic = loaded
             .definition
             .item_prototypes
@@ -1050,6 +1065,28 @@ mod tests {
         ));
         assert!(tonic.item_level > 0);
         assert!(tonic.weight_grams > 0);
+        assert_eq!(tonic.stack_policy, CoreItemStackPolicy::Fungible);
+        assert_eq!(tonic.max_stack_units, 20);
+        let satchel = loaded
+            .definition
+            .item_prototypes
+            .iter()
+            .find(|prototype| prototype.prototype_id == "tiamud:archive-satchel")
+            .unwrap();
+        assert_eq!(satchel.container.as_ref().unwrap().max_slots, 8);
+        assert!(
+            loaded
+                .definition
+                .initial_item_instances
+                .iter()
+                .any(|instance| {
+                    instance.instance_id == ItemInstanceId("tiamud:weathered-map".into())
+                        && instance.location
+                            == CoreInitialItemLocation::Container(ItemInstanceId(
+                                "tiamud:archive-satchel".into(),
+                            ))
+                })
+        );
         assert_eq!(
             loaded.character_progression.defaults.lineage_id,
             "tiamud:mortal"

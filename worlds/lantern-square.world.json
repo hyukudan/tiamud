@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "id": "lantern-square",
   "name": "Tiamud: Lantern Square",
   "startRoomId": "demo:lantern-square",
@@ -7,6 +7,30 @@
     "format": "world-pack"
   },
   "itemPrototypes": [
+    {
+      "id": "tiamud:archive-satchel",
+      "name": "canvas archive satchel",
+      "description": "A sturdy waxed-canvas satchel fitted with dividers for fragile maps and field notes.",
+      "aliases": [
+        "bag",
+        "canvas satchel",
+        "satchel"
+      ],
+      "attackBonus": 0,
+      "healAmount": 0,
+      "consumable": false,
+      "weightGrams": 450,
+      "slotCost": 2,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "maxStackUnits": 1,
+      "container": {
+        "maxSlots": 8,
+        "maxWeightGrams": 5000
+      },
+      "transferPolicy": "transferable"
+    },
     {
       "id": "tiamud:blue-lantern",
       "name": "blue-glass lantern",
@@ -25,6 +49,7 @@
       "rarity": "common",
       "itemLevel": 1,
       "stackPolicy": "unique",
+      "maxStackUnits": 1,
       "transferPolicy": "transferable"
     },
     {
@@ -45,6 +70,7 @@
       "rarity": "common",
       "itemLevel": 1,
       "stackPolicy": "unique",
+      "maxStackUnits": 1,
       "transferPolicy": "transferable"
     },
     {
@@ -68,7 +94,8 @@
       "slotCost": 1,
       "rarity": "uncommon",
       "itemLevel": 1,
-      "stackPolicy": "unique",
+      "stackPolicy": "fungible",
+      "maxStackUnits": 20,
       "transferPolicy": "transferable"
     },
     {
@@ -87,6 +114,7 @@
       "rarity": "common",
       "itemLevel": 1,
       "stackPolicy": "unique",
+      "maxStackUnits": 1,
       "transferPolicy": "transferable"
     },
     {
@@ -105,6 +133,7 @@
       "rarity": "common",
       "itemLevel": 1,
       "stackPolicy": "unique",
+      "maxStackUnits": 1,
       "transferPolicy": "transferable"
     },
     {
@@ -124,10 +153,19 @@
       "rarity": "uncommon",
       "itemLevel": 1,
       "stackPolicy": "unique",
+      "maxStackUnits": 1,
       "transferPolicy": "transferable"
     }
   ],
   "initialItemInstances": [
+    {
+      "id": "tiamud:archive-satchel",
+      "prototypeId": "tiamud:archive-satchel",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:archive"
+      }
+    },
     {
       "id": "tiamud:blue-lantern",
       "prototypeId": "tiamud:blue-lantern",
@@ -153,6 +191,14 @@
       }
     },
     {
+      "id": "tiamud:ember-tonic:2",
+      "prototypeId": "tiamud:ember-tonic",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:lantern-square"
+      }
+    },
+    {
       "id": "tiamud:road-token",
       "prototypeId": "tiamud:road-token",
       "location": {
@@ -164,8 +210,8 @@
       "id": "tiamud:weathered-map",
       "prototypeId": "tiamud:weathered-map",
       "location": {
-        "kind": "room",
-        "roomId": "demo:archive"
+        "kind": "container",
+        "containerInstanceId": "tiamud:archive-satchel"
       }
     },
     {

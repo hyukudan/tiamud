@@ -95,6 +95,10 @@ export interface SceneItem {
   rarity: ItemRarity;
   itemLevel: number;
   weightGrams: number;
+  quantity: number;
+  stackSlots: number;
+  totalWeightGrams: number;
+  containerCapacity?: InventoryCapacitySnapshot;
   actions: SceneAction[];
 }
 
@@ -389,6 +393,10 @@ export interface PlayerItemSnapshot {
   rarity: ItemRarity;
   itemLevel: number;
   weightGrams: number;
+  quantity: number;
+  stackSlots: number;
+  totalWeightGrams: number;
+  containerCapacity?: InventoryCapacitySnapshot;
   actions: SceneAction[];
 }
 
@@ -399,6 +407,10 @@ export interface EquippedItemSnapshot {
   rarity: ItemRarity;
   itemLevel: number;
   weightGrams: number;
+  quantity: number;
+  stackSlots: number;
+  totalWeightGrams: number;
+  containerCapacity?: InventoryCapacitySnapshot;
   actions: SceneAction[];
 }
 
@@ -409,6 +421,16 @@ export interface InventoryCapacitySnapshot {
   maxSlots: number;
   usedWeightGrams: number;
   maxWeightGrams: number;
+}
+
+export type ContainerItemSnapshot = Omit<PlayerItemSnapshot, 'description'>;
+
+export interface ContainerContentsData {
+  container: string;
+  items: ContainerItemSnapshot[];
+  page: number;
+  totalPages: number;
+  capacity: InventoryCapacitySnapshot;
 }
 
 export interface PlayerStateSnapshot {
@@ -469,6 +491,7 @@ export type ServerMessage =
   | Envelope<'player.snapshot', PlayerStateSnapshot>
   | Envelope<'vitals.update', VitalsUpdateData>
   | Envelope<'inventory.patch', InventoryPatchData>
+  | Envelope<'container.contents', ContainerContentsData>
   | Envelope<'map.snapshot', MapSnapshotData>
   | Envelope<'action.result', ActionResultData>
   | Envelope<'server.notice', ServerNoticeData>
@@ -511,6 +534,9 @@ export type CommandSubmit = Envelope<
 
 export interface ActionPerformFields {
   target?: string;
+  container?: string;
+  quantity?: number;
+  page?: number;
   message?: string;
   channel?: CommunityChannel;
   reason?: string;
@@ -573,6 +599,32 @@ const parseInventoryCapacity = (value: unknown): InventoryCapacitySnapshot | und
   return { usedSlots, maxSlots, usedWeightGrams, maxWeightGrams };
 };
 
+interface ItemStackProjection {
+  quantity: number;
+  stackSlots: number;
+  totalWeightGrams: number;
+  containerCapacity?: InventoryCapacitySnapshot;
+}
+
+const parseItemStackProjection = (value: Record<string, unknown>): ItemStackProjection | undefined => {
+  const quantity = positiveIntegerOrUndefined(value.quantity);
+  const stackSlots = positiveIntegerOrUndefined(value.stackSlots);
+  const totalWeightGrams = nonNegativeIntegerOrUndefined(value.totalWeightGrams);
+  const containerCapacity = value.containerCapacity === undefined
+    ? undefined
+    : parseInventoryCapacity(value.containerCapacity);
+  if (quantity === undefined || quantity > 1_000 || stackSlots === undefined ||
+    stackSlots > 0xffff_ffff || totalWeightGrams === undefined ||
+    totalWeightGrams > 65_536_000_000 ||
+    (value.containerCapacity !== undefined && !containerCapacity)) return undefined;
+  return {
+    quantity,
+    stackSlots,
+    totalWeightGrams,
+    ...(containerCapacity ? { containerCapacity } : {}),
+  };
+};
+
 const boundedString = (value: unknown, maximum: number): string | undefined => {
   const text = stringOrUndefined(value);
   return text && text.length <= maximum ? text : undefined;
@@ -580,6 +632,11 @@ const boundedString = (value: unknown, maximum: number): string | undefined => {
 
 const boundedPossiblyEmptyString = (value: unknown, maximum: number): string | undefined =>
   typeof value === 'string' && value.length <= maximum ? value : undefined;
+
+const hasOnlyKeys = (value: Record<string, unknown>, allowed: readonly string[]): boolean => {
+  const keys = new Set(allowed);
+  return Object.keys(value).every((key) => keys.has(key));
+};
 
 const opaqueId = (value: unknown): string | undefined => {
   const id = stringOrUndefined(value);
@@ -612,6 +669,49 @@ const parseActions = (value: unknown): SceneAction[] | undefined => {
     actions.push({ label, command });
   }
   return actions;
+};
+
+const parseContainerContents = (value: unknown): ContainerContentsData | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'container', 'items', 'page', 'totalPages', 'capacity',
+  ]) || !Array.isArray(value.items) || value.items.length > 20 ||
+    !isRecord(value.capacity) || !hasOnlyKeys(value.capacity, [
+      'usedSlots', 'maxSlots', 'usedWeightGrams', 'maxWeightGrams',
+    ])) return undefined;
+  const container = opaqueId(value.container);
+  const page = positiveIntegerOrUndefined(value.page);
+  const totalPages = positiveIntegerOrUndefined(value.totalPages);
+  const capacity = parseInventoryCapacity(value.capacity);
+  if (!container || page === undefined || totalPages === undefined || page > totalPages ||
+    totalPages > 0xffff || !capacity) return undefined;
+  const ids = new Set<string>();
+  const items: ContainerItemSnapshot[] = [];
+  for (const entry of value.items) {
+    if (!isRecord(entry) || !hasOnlyKeys(entry, [
+      'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
+      'totalWeightGrams', 'containerCapacity', 'actions',
+    ]) || (entry.containerCapacity !== undefined &&
+      (!isRecord(entry.containerCapacity) || !hasOnlyKeys(entry.containerCapacity, [
+        'usedSlots', 'maxSlots', 'usedWeightGrams', 'maxWeightGrams',
+      ]))) || (Array.isArray(entry.actions) && entry.actions.some((action) =>
+      !isRecord(action) || !hasOnlyKeys(action, ['label', 'command'])))) return undefined;
+    const id = opaqueId(entry.id);
+    const label = boundedString(entry.label, 256);
+    const rarity = itemRarityOrUndefined(entry.rarity);
+    const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
+    const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
+    const stack = parseItemStackProjection(entry);
+    const actions = parseActions(entry.actions);
+    if (!id || ids.has(id) || !label || !rarity || itemLevel === undefined || itemLevel > 1_000 ||
+      weightGrams === undefined || weightGrams > 1_000_000 || !stack ||
+      (stack.containerCapacity
+        ? stack.quantity !== 1 || stack.totalWeightGrams !==
+          weightGrams + stack.containerCapacity.usedWeightGrams
+        : stack.totalWeightGrams !== weightGrams * stack.quantity) || !actions) return undefined;
+    ids.add(id);
+    items.push({ id, label, rarity, itemLevel, weightGrams, ...stack, actions });
+  }
+  return { container, items, page, totalPages, capacity };
 };
 
 type ProgressionOption = PlayerCharacterSnapshot['lineage'];
@@ -942,12 +1042,17 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const rarity = itemRarityOrUndefined(entry.rarity);
     const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
+    const stack = parseItemStackProjection(entry);
     const actions = parseActions(entry.actions);
     if (!id || !label || description === undefined || !rarity || itemLevel === undefined ||
-      itemLevel > 1_000 || weightGrams === undefined || weightGrams > 1_000_000 || !actions) {
+      itemLevel > 1_000 || weightGrams === undefined || weightGrams > 1_000_000 || !stack ||
+      (stack.containerCapacity
+        ? stack.quantity !== 1 || stack.totalWeightGrams !==
+          weightGrams + stack.containerCapacity.usedWeightGrams
+        : stack.totalWeightGrams !== weightGrams * stack.quantity) || !actions) {
       return undefined;
     }
-    inventory.push({ id, label, description, rarity, itemLevel, weightGrams, actions });
+    inventory.push({ id, label, description, rarity, itemLevel, weightGrams, ...stack, actions });
   }
 
   if (!Array.isArray(value.equipment) || value.equipment.length > 3) return undefined;
@@ -960,13 +1065,17 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const rarity = itemRarityOrUndefined(entry.rarity);
     const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
+    const stack = parseItemStackProjection(entry);
     const actions = parseActions(entry.actions);
     if (!id || (slot !== 'weapon' && slot !== 'body' && slot !== 'trinket') || !label ||
       !rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
-      weightGrams > 1_000_000 || !actions) {
+      weightGrams > 1_000_000 || !stack || stack.quantity !== 1 ||
+      (stack.containerCapacity
+        ? stack.totalWeightGrams !== weightGrams + stack.containerCapacity.usedWeightGrams
+        : stack.totalWeightGrams !== weightGrams) || !actions) {
       return undefined;
     }
-    equipment.push({ id, slot, label, rarity, itemLevel, weightGrams, actions });
+    equipment.push({ id, slot, label, rarity, itemLevel, weightGrams, ...stack, actions });
   }
 
   const inventoryCapacity = parseInventoryCapacity(value.inventoryCapacity);
@@ -1438,8 +1547,12 @@ const toItems = (value: unknown): SceneItem[] => {
     const rarity = itemRarityOrUndefined(entry.rarity);
     const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
+    const stack = parseItemStackProjection(entry);
     if (!rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
-      weightGrams > 1_000_000) return [];
+      weightGrams > 1_000_000 || !stack || (stack.containerCapacity
+        ? stack.quantity !== 1 || stack.totalWeightGrams !==
+          weightGrams + stack.containerCapacity.usedWeightGrams
+        : stack.totalWeightGrams !== weightGrams * stack.quantity)) return [];
     const suppliedActions = toActions(entry.actions);
     return [{
       id,
@@ -1448,6 +1561,7 @@ const toItems = (value: unknown): SceneItem[] => {
       rarity,
       itemLevel,
       weightGrams,
+      ...stack,
       actions: suppliedActions.length > 0
         ? suppliedActions
         : [
@@ -1667,6 +1781,10 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
             },
           }
         : undefined;
+    }
+    case 'container.contents': {
+      const contents = parseContainerContents(candidate.data);
+      return contents ? { ...base, type: candidate.type, data: contents } : undefined;
     }
     case 'map.snapshot': {
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
@@ -1895,6 +2013,17 @@ export function createActionPerform(
   if (fields?.channel !== undefined &&
     !(['general', 'newbie', 'staff'] as const).includes(fields.channel)) {
     throw new RangeError('channel is not sendable');
+  }
+  if (fields?.quantity !== undefined &&
+    (!Number.isSafeInteger(fields.quantity) || fields.quantity < 1 || fields.quantity > 256)) {
+    throw new RangeError('quantity must be an integer between 1 and 256');
+  }
+  if (fields?.page !== undefined &&
+    (!Number.isSafeInteger(fields.page) || fields.page < 1 || fields.page > 0xffff)) {
+    throw new RangeError('page must be a positive 16-bit integer');
+  }
+  if (fields?.container !== undefined && fields.container.length === 0) {
+    throw new RangeError('container must not be empty');
   }
   return {
     v: PROTOCOL_VERSION,

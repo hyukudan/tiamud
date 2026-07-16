@@ -2,12 +2,16 @@
   import type {
     ActionPerformFields,
     CommunityChannel,
+    ContainerContentsData,
+    ContainerItemSnapshot,
+    PlayerItemSnapshot,
     PlayerStateSnapshot,
     SceneAction,
   } from '../lib/protocol';
 
   interface Props {
     value?: PlayerStateSnapshot;
+    containerContents?: ContainerContentsData;
     abilityTargets?: Array<{ id: string; label: string }>;
     oncommand: (command: string) => void;
     onaction: (action: string, fields: ActionPerformFields | undefined, label: string) => void;
@@ -17,7 +21,7 @@
   }
 
   let {
-    value, abilityTargets = [], oncommand, onaction, onability, onpromote, ontalent,
+    value, containerContents, abilityTargets = [], oncommand, onaction, onability, onpromote, ontalent,
   }: Props = $props();
   let socialTarget = $state('');
   let chatText = $state('');
@@ -27,6 +31,9 @@
   let communityChannel = $state<CommunityChannel>('general');
   let communityMessage = $state('');
   let abilityTargetById = $state<Record<string, string>>({});
+  let itemQuantity = $state(1);
+  let destinationContainer = $state('');
+  const carriedContainers = $derived(value?.inventory.filter((item) => item.containerCapacity) ?? []);
   const additionalAttributes = $derived(
     value?.character.attributes.filter((attribute) => attribute.id !== 'strength' && attribute.id !== 'defence') ?? [],
   );
@@ -51,11 +58,18 @@
       use: 'item.use',
       equip: 'item.equip',
       unequip: 'item.unequip',
+      contents: 'item.contents',
       buy: 'economy.buy',
       sell: 'economy.sell',
     } as Record<string, string>)[verb.toLowerCase()];
     if (structured) {
-      onaction(structured, target ? { target } : undefined, action.command);
+      onaction(
+        structured,
+        structured === 'item.contents'
+          ? (target ? { container: target, page: 1 } : undefined)
+          : (target ? { target } : undefined),
+        action.command,
+      );
       return;
     }
     if (verb === 'quest' && tail.length >= 2) {
@@ -73,6 +87,34 @@
       return;
     }
     oncommand(action.command);
+  }
+
+  function boundedItemQuantity(maximum: number): number {
+    return Math.max(1, Math.min(256, maximum, Math.trunc(itemQuantity) || 1));
+  }
+
+  function putItem(item: PlayerItemSnapshot): void {
+    if (!destinationContainer || destinationContainer === item.id) return;
+    const quantity = boundedItemQuantity(item.quantity);
+    onaction(
+      'item.put',
+      { target: item.id, container: destinationContainer, quantity },
+      `put ${quantity} ${item.label}`,
+    );
+  }
+
+  function getItem(item: ContainerItemSnapshot): void {
+    if (!containerContents) return;
+    const quantity = boundedItemQuantity(item.quantity);
+    onaction(
+      'item.get',
+      { target: item.id, container: containerContents.container, quantity },
+      `get ${quantity} ${item.label}`,
+    );
+  }
+
+  function openContainer(container: string, page = 1): void {
+    onaction('item.contents', { container, page }, `contents page ${page}`);
   }
 
   function sendChat(): void {
@@ -424,6 +466,23 @@
         </span>
       </summary>
       <div class="panel-body">
+        <div class="field-grid inventory-transfer-controls">
+          <label>
+            Quantity (maximum 256)
+            <input type="number" min="1" max="256" step="1" bind:value={itemQuantity} />
+          </label>
+          {#if carriedContainers.length > 0}
+            <label>
+              Destination container
+              <select bind:value={destinationContainer}>
+                <option value="">Choose a container</option>
+                {#each carriedContainers as container (container.id)}
+                  <option value={container.id}>{container.label}</option>
+                {/each}
+              </select>
+            </label>
+          {/if}
+        </div>
         {#if value.inventory.length === 0 && value.equipment.length === 0}
           <p class="empty-copy">You are carrying nothing.</p>
         {/if}
@@ -433,14 +492,36 @@
             {#each value.inventory as item (item.id)}
               <li>
                 <div>
-                  <strong>{item.label}</strong>
-                  <p>{item.rarity} · level {item.itemLevel} · {(item.weightGrams / 1000).toFixed(1)} kg</p>
+                  <strong>{item.label} ×{item.quantity}</strong>
+                  <p>
+                    {item.rarity} · level {item.itemLevel} ·
+                    {(item.weightGrams / 1000).toFixed(1)} kg each ·
+                    {(item.totalWeightGrams / 1000).toFixed(1)} kg total ·
+                    {item.stackSlots} {item.stackSlots === 1 ? 'stack slot' : 'stack slots'}
+                  </p>
+                  {#if item.containerCapacity}
+                    <p>
+                      Container: {item.containerCapacity.usedSlots}/{item.containerCapacity.maxSlots} slots ·
+                      {(item.containerCapacity.usedWeightGrams / 1000).toFixed(1)}/
+                      {(item.containerCapacity.maxWeightGrams / 1000).toFixed(1)} kg
+                    </p>
+                  {/if}
                   <p>{item.description}</p>
                 </div>
                 <div class="dashboard-actions">
                   {#each item.actions as action (action.command)}
                     <button type="button" onclick={() => perform(action)}>{action.label}</button>
                   {/each}
+                  {#if item.containerCapacity && !item.actions.some((action) => action.command.startsWith('contents '))}
+                    <button type="button" onclick={() => openContainer(item.id)}>Contents</button>
+                  {/if}
+                  {#if carriedContainers.length > 0}
+                    <button
+                      type="button"
+                      disabled={!destinationContainer || destinationContainer === item.id}
+                      onclick={() => putItem(item)}
+                    >Put</button>
+                  {/if}
                 </div>
               </li>
             {/each}
@@ -452,17 +533,76 @@
             {#each value.equipment as item (item.slot)}
               <li>
                 <span>
-                  <small>{item.slot}</small> <strong>{item.label}</strong>
-                  · {item.rarity} · level {item.itemLevel} · {(item.weightGrams / 1000).toFixed(1)} kg
+                  <small>{item.slot}</small> <strong>{item.label} ×{item.quantity}</strong>
+                  · {item.rarity} · level {item.itemLevel} ·
+                  {(item.weightGrams / 1000).toFixed(1)} kg each ·
+                  {(item.totalWeightGrams / 1000).toFixed(1)} kg total ·
+                  {item.stackSlots} {item.stackSlots === 1 ? 'stack slot' : 'stack slots'}
                 </span>
+                {#if item.containerCapacity}
+                  <p>
+                    Container: {item.containerCapacity.usedSlots}/{item.containerCapacity.maxSlots} slots ·
+                    {(item.containerCapacity.usedWeightGrams / 1000).toFixed(1)}/
+                    {(item.containerCapacity.maxWeightGrams / 1000).toFixed(1)} kg
+                  </p>
+                {/if}
                 <div class="dashboard-actions">
                   {#each item.actions as action (action.command)}
                     <button type="button" onclick={() => perform(action)}>{action.label}</button>
                   {/each}
+                  {#if item.containerCapacity}
+                    <button type="button" onclick={() => openContainer(item.id)}>Contents</button>
+                  {/if}
                 </div>
               </li>
             {/each}
           </ul>
+        {/if}
+        {#if containerContents}
+          <section aria-labelledby="container-contents-title">
+            <h3 id="container-contents-title">Container contents</h3>
+            <p>
+              Page {containerContents.page} of {containerContents.totalPages} ·
+              {containerContents.capacity.usedSlots}/{containerContents.capacity.maxSlots} slots ·
+              {(containerContents.capacity.usedWeightGrams / 1000).toFixed(1)}/
+              {(containerContents.capacity.maxWeightGrams / 1000).toFixed(1)} kg
+            </p>
+            {#if containerContents.items.length === 0}
+              <p class="empty-copy">This container is empty.</p>
+            {:else}
+              <ul class="dashboard-list inventory-list">
+                {#each containerContents.items as item (item.id)}
+                  <li>
+                    <span>
+                      <strong>{item.label} ×{item.quantity}</strong>
+                      · {item.rarity} · level {item.itemLevel} ·
+                      {(item.weightGrams / 1000).toFixed(1)} kg each ·
+                      {(item.totalWeightGrams / 1000).toFixed(1)} kg total ·
+                      {item.stackSlots} {item.stackSlots === 1 ? 'stack slot' : 'stack slots'}
+                    </span>
+                    <div class="dashboard-actions">
+                      <button type="button" onclick={() => getItem(item)}>Get</button>
+                      {#if item.containerCapacity}
+                        <button type="button" onclick={() => openContainer(item.id)}>Open</button>
+                      {/if}
+                    </div>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <div class="dashboard-actions" aria-label="Container pages">
+              <button
+                type="button"
+                disabled={containerContents.page <= 1}
+                onclick={() => openContainer(containerContents.container, containerContents.page - 1)}
+              >Previous</button>
+              <button
+                type="button"
+                disabled={containerContents.page >= containerContents.totalPages}
+                onclick={() => openContainer(containerContents.container, containerContents.page + 1)}
+              >Next</button>
+            </div>
+          </section>
         {/if}
       </div>
     </details>

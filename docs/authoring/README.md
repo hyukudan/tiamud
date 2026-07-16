@@ -1,8 +1,8 @@
 # World authoring
 
 This is the current English entry point for creating Tiamud content. The
-runtime consumes one canonical **WorldPack v4**. Authors can maintain that
-world as strict **AreaPack v3** modules and compose them offline; areas are not
+runtime consumes one canonical **WorldPack v5**. Authors can maintain that
+world as strict **AreaPack v4** modules and compose them offline; areas are not
 services and are not loaded independently at runtime.
 
 The Rust types, validators and tests in `crates/world-pack` are the exact schema
@@ -62,8 +62,10 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
 - Stable namespaced IDs are content identity. Rename them only as an explicit
   migration decision.
 - Item content belongs in `itemPrototypes`; every authored unit belongs in
-  `initialItemInstances` with exactly one `room`, `npc_spawn` or `staged`
-  location. Do not restore v3 `items`, `itemRules` or `lootItemIds` fields.
+  `initialItemInstances` with exactly one `room`, `npc_spawn`, `container` or
+  `staged` location. Fungible stacks remain derived from individual instances;
+  do not author or persist stack IDs/quantities. Do not restore v3 `items`,
+  `itemRules` or `lootItemIds` fields.
 - Item `entityMedia` targets the reusable prototype, while
   `roomPerception.hiddenItems` targets one durable instance. Do not use an
   instance ID as the media subject or a prototype ID as the hidden-item key.
@@ -82,12 +84,13 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
 - [Character progression v3 design](../design/character-progression-v3.md)
 - [Optional scene compositor design](../design/scene-compositor-v1.md)
 - [WorldPack v3 character-model decision](../decisions/0007-worldpack-v3-character-model.md)
-- [WorldPack v4 item prototype/instance decision](../decisions/0009-item-prototypes-instances-and-capacity.md)
+- [WorldPack v4 item prototype/instance foundation](../decisions/0009-item-prototypes-instances-and-capacity.md)
+- [WorldPack v5 derived stacks and bounded containers](../decisions/0010-derived-stacks-and-bounded-containers.md)
 - [Scene compositor decision](../decisions/0008-optional-scene-compositor.md)
 - [Asset compiler](../../crates/asset-pipeline/README.md)
 - [Lua runtime](../../crates/scripting/README.md)
 - [Optional editorial AI](../../crates/editorial-ai/README.md)
 - [Historical Envy/Merc importer](../../tools/envy-import/README.md)
 
-The [Spanish WorldPack v4/AreaPack v3 guide](../world-authoring.md) is the
+The [Spanish WorldPack v5/AreaPack v4 guide](../world-authoring.md) is the
 current compact schema and workflow reference.

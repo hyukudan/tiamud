@@ -120,6 +120,7 @@ async function installMockWorld(
               inventory: [{
                 id: 'o2222222222222222', label: 'blue lantern', description: 'Cold blue light.',
                 rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
+                quantity: 1, stackSlots: 1, totalWeightGrams: 800,
                 actions: [{ label: 'Drop', command: 'drop o2222222222222222' }],
               }],
               equipment: [],
@@ -497,7 +498,7 @@ test('authenticated mobile play exposes complete accessible panels and a fixed c
 
   await expect(page.getByRole('heading', { name: 'Lantern Square' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Aria' })).toBeVisible();
-  await expect(page.getByText('blue lantern', { exact: true })).toBeVisible();
+  await expect(page.getByText(/^blue lantern ×1$/).first()).toBeVisible();
   await expect(page.locator('summary').filter({ hasText: 'Inventory' })).toBeVisible();
   await expect(page.locator('summary').filter({ hasText: 'Discovered map' })).toBeVisible();
   await expect(page.locator('summary').filter({ hasText: 'Quests' })).toBeVisible();

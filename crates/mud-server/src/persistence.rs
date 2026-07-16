@@ -19,8 +19,8 @@ use std::{
 use thiserror::Error;
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
-    CharacterSnapshot, CompatibleWorldRuntimeSnapshot, DomainEvent, DurableCharacterSnapshot,
-    MAX_ITEM_INSTANCES, SocialChannelName, StaffCapability, StaffProfileKey, StaffReportResolution,
+    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, MAX_ITEM_INSTANCES,
+    SocialChannelName, StaffCapability, StaffProfileKey, StaffReportResolution,
     WorldRuntimeSnapshot,
 };
 use tiamud_persistence_sqlite::{SchemaError, migrate};
@@ -3491,17 +3491,9 @@ pub(super) fn decode_runtime_snapshot(
             maximum: MAX_RUNTIME_JSON_BYTES,
         });
     }
-    let compatible =
-        serde_json::from_str::<CompatibleWorldRuntimeSnapshot>(json).map_err(StoreError::from)?;
-    let payload_version = match &compatible {
-        CompatibleWorldRuntimeSnapshot::V2(snapshot) => snapshot.snapshot_version,
-        CompatibleWorldRuntimeSnapshot::V1(snapshot) => snapshot.snapshot_version,
-    };
-    if i64::from(payload_version) != durable_version {
-        return Err(StoreError::InvalidRuntimeSnapshot);
-    }
-    let snapshot = compatible
-        .into_current()
+    let durable_version =
+        u32::try_from(durable_version).map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
+    let snapshot = tiamud_core::decode_world_runtime_snapshot(durable_version, json)
         .map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
     if snapshot.snapshot_version != tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
         return Err(StoreError::InvalidRuntimeSnapshot);
@@ -3708,8 +3700,9 @@ mod tests {
     };
     use tiamud_core::{
         ActiveEffect, BackgroundSelection, Direction, EffectKind, EquipmentSlot, ItemInstanceId,
-        ItemLocationSnapshot, PlayerAction, RuntimeItemLocation, SessionId, World, WorldError,
-        WorldRuntimeSnapshotV1,
+        ItemLocationSnapshot, PlayerAction, RuntimeItemInstanceSnapshotV2, RuntimeItemLocation,
+        RuntimeItemLocationV2, SessionId, World, WorldError, WorldRuntimeSnapshotV1,
+        WorldRuntimeSnapshotV2,
     };
 
     async fn account(store: &SqliteCharacterStore, name: &str) -> AccountSnapshot {
@@ -4416,7 +4409,7 @@ mod tests {
             rng_state: 42,
             item_locations: BTreeMap::from([(
                 "legacy:lamp".into(),
-                RuntimeItemLocation::Room {
+                RuntimeItemLocationV2::Room {
                     room_id: "demo:lantern-square".into(),
                 },
             )]),
@@ -4447,6 +4440,51 @@ mod tests {
             item.location,
             RuntimeItemLocation::Room {
                 room_id: "demo:lantern-square".into()
+            }
+        );
+    }
+
+    #[test]
+    fn sqlite_runtime_loader_upgrades_v2_before_validating_current_version() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let legacy = WorldRuntimeSnapshotV2 {
+            snapshot_version: 2,
+            revision: 7,
+            logical_tick: 3,
+            rng_state: 42,
+            next_item_instance_sequence: 2,
+            item_instances: BTreeMap::from([(
+                ItemInstanceId("runtime:1".into()),
+                RuntimeItemInstanceSnapshotV2 {
+                    prototype_id: "legacy:lamp".into(),
+                    location: RuntimeItemLocationV2::Room {
+                        room_id: "demo:lantern-square".into(),
+                    },
+                },
+            )]),
+            npcs: BTreeMap::new(),
+            adventure: tiamud_core::AdventureRuntimeSnapshot::default(),
+            progression_flags: Default::default(),
+        };
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 2, ?1, unixepoch())",
+                [serde_json::to_string(&legacy).unwrap()],
+            )
+            .unwrap();
+
+        let upgraded = load_runtime_snapshot(&connection).unwrap().unwrap();
+        assert_eq!(
+            upgraded.snapshot_version,
+            tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION
+        );
+        assert_eq!(
+            upgraded.item_instances[&ItemInstanceId("runtime:1".into())].location,
+            RuntimeItemLocation::Room {
+                room_id: "demo:lantern-square".into(),
             }
         );
     }

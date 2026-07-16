@@ -1,6 +1,6 @@
 # Character progression v3
 
-Status: implemented v3 character-model design, carried by WorldPack v4.
+Status: implemented v3 character-model design, carried by WorldPack v5.
 
 This document defines Tiamud's canonical character vocabulary and the first
 bounded progression model. It replaces the overloaded v2 `archetype` concept
@@ -176,13 +176,13 @@ starts empty.
 
 ## Authoring shape
 
-The exact serialized shape is owned by the WorldPack v4 Rust types and tests;
+The exact serialized shape is owned by the WorldPack v5 Rust types and tests;
 “v3” in this document names the character model, not the current pack schema.
 This reduced example illustrates the intended ergonomics:
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 5,
   "gameplay": {
     "characterProgression": {
       "defaults": {

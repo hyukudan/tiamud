@@ -1,8 +1,8 @@
 # Projects, areas and composition
 
 The current modular source format is a **WorldProject manifest v2** containing
-strict **AreaPack v3** files. `tiamud-world compose` validates the complete
-graph and produces one canonical **WorldPack v4** document.
+strict **AreaPack v4** files. `tiamud-world compose` validates the complete
+graph and produces one canonical **WorldPack v5** document.
 
 Use [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json)
 and [`worlds/areas/square.area.json`](../../worlds/areas/square.area.json) as
@@ -29,7 +29,7 @@ dependency.
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "id": "north-gate",
   "dependsOn": ["square"],
   "itemPrototypes": [],
@@ -65,7 +65,7 @@ reproducibility checks useful.
 
 ## Direct WorldPack authoring
 
-A monolithic WorldPack v4 remains valid, but AreaPacks are preferable once
+A monolithic WorldPack v5 remains valid, but AreaPacks are preferable once
 multiple builders or regions are involved. Use `tiamud-world build` to validate
 and canonicalize a direct document:
 

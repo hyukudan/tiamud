@@ -28,13 +28,14 @@ sobre la aceptación de la especificación histórica.
   anuncios y consulta de auditoría, con motivos obligatorios y límites.
 - Sí existen inventario, equipo, consumibles, botín fijo de NPC, prototipos
   reutilizables, instancias durables, capacidad por slots/peso y
-  rareza/`itemLevel` textual.
-- No existen pilas, contenedores, give/trade, derechos o reparto de botín,
-  afijos ni tablas de botín aleatorias.
+  rareza/`itemLevel` textual. También existen pilas fungibles derivadas,
+  contenedores acotados, cantidades y consulta paginada.
+- No existen `give`/trade, políticas ligadas ejecutables, derechos o reparto de
+  botín, afijos ni tablas de botín aleatorias.
 
-Las fases 1, comunicación/grupo, 2, staff por capacidades, y 3A, fundamento de
-objetos, están implementadas. La secuencia pendiente es: pilas/contenedores y
-transferencias; propiedad y reparto del botín; y, solo después, drops
+Las fases 1, comunicación/grupo, 2, staff por capacidades, 3A, fundamento de
+objetos, y 3B, pilas/contenedores, están implementadas. La secuencia pendiente
+es: transferencias y trade confirmado; propiedad y reparto del botín; y después, drops
 repetibles, afijos y tablas aleatorias.
 
 ## Estado verificado en el código
@@ -163,20 +164,21 @@ capa de operador.
 
 ### Inventario y botín
 
-WorldPack v4/AreaPack v3 separan `itemPrototypes` de
+WorldPack v5/AreaPack v4 separan `itemPrototypes` de
 `initialItemInstances`. El prototipo contiene nombre, descripción, aliases,
 equipo/ataque/curación/efecto, peso, coste de slot, rareza, nivel y políticas
 cerradas. Cada instancia durable referencia un prototipo y comienza en una
-sala, un `npc_spawn` o `staged`. En runtime puede estar además en inventario,
-equipada, en poder de un NPC o consumida. Los slots de equipo actuales son
-arma, cuerpo y abalorio.
+sala, un `npc_spawn`, `staged` o dentro de otra instancia contenedor. En runtime
+puede estar además en inventario, equipada, en poder de un NPC o consumida. Los
+slots de equipo actuales son arma, cuerpo y abalorio.
 
 El runtime crea instancias distintas del mismo prototipo con una secuencia
 monotónica persistida. `ItemInstanceId`, `prototypeId` y spawn no salen del
 servidor; Web, Telnet y GMCP reciben un ID opaco distinto por unidad, derivado
 de una sal criptográficamente aleatoria nueva por sesión. Telnet lo muestra
-como referencia y permite usarlo como selector exacto. Las consultas textuales
-ambiguas fallan en vez de escoger una unidad arbitraria. 3A no almacena origen
+como referencia y permite usarlo como selector exacto. Una pila visible usa la
+referencia opaca de su primer miembro visible ordenado; las consultas textuales
+ambiguas fallan en vez de escoger una unidad arbitraria. 3B no almacena origen
 o procedencia durable: la ubicación inicial authored no sustituye ese futuro
 registro de fase 4.
 
@@ -186,22 +188,32 @@ registro `entityMedia` se comparte por prototipo. La política
 visibilidad para todas las unidades del prototipo.
 
 Cada personaje tiene capacidad por slots y peso. El peso suma inventario y
-equipo; los slots cuentan solo inventario. Equipar libera slots y desequipar o
-reemplazar equipo prevalidan la capacidad antes de mutar. La rareza cerrada
-`common`, `uncommon`, `rare`, `epic`, `legendary`, el `itemLevel` y el peso se
-muestran como texto; la capacidad usada/máxima se calcula en el servidor.
+equipo y todos sus descendientes; los slots cuentan solo raíces de inventario,
+agrupadas por pila. Un contenedor `unique` no consumible cuenta slots de hijos
+directos agrupados y peso de todos sus descendientes. El grafo rechaza ciclos y
+una quinta arista. Equipar, desequipar, reemplazar, tomar, soltar, introducir y
+extraer prevalidan el estado prospectivo completo antes de mutar.
+
+Las pilas `fungible` se derivan por ubicación/prototipo, ordenan unidades por
+ID y se dividen por `maxStackUnits`; no se persiste `quantity` ni un ID de pila.
+`take`/`drop`/`put`/`get` mueven 1..=256 unidades y `contents` pagina 20 grupos.
+La rareza cerrada, `itemLevel`, peso unitario/total, cantidad, slots y capacidad
+se muestran como texto; Web usa `container.contents`, Telnet texto equivalente
+y GMCP `Char.Items.List` con ubicación `container`.
 
 El botín fijo actual es una instancia inicial ubicada en `npc_spawn`. El
 validador exige prototipo, instancia, spawn y ubicación coherentes. La unidad
 se entrega al NPC al cargar y se transfiere al derrotarlo. Esto sigue siendo
 botín fijo y determinista, no una tabla aleatoria repetible.
 
-`WorldRuntimeSnapshot` v2 persiste instancias y contador; la lectura v1 usa una
-conversión explícita. SQLite y PostgreSQL confirman ese snapshot único en la
+`WorldRuntimeSnapshot` v3 persiste instancias, contención y contador; las
+lecturas v1/v2 usan DTO y conversiones explícitos dirigidos por versión. SQLite
+y PostgreSQL confirman ese snapshot único en la
 transacción existente de esquema v10. Al restaurar se conservan nuevas
 instancias iniciales del WorldPack y se superpone el estado durable, sin
 recuperar instancias runtime ausentes del snapshot. La barrera de arranque
-valida propietarios, equipo y capacidad de personajes conectados o
+valida propietarios siguiendo contenedores hasta su raíz, equipo, grafo y
+capacidad de personajes conectados o
 desconectados mediante agregados acotados que descarta después. No hay tabla
 espejo ni esquema v11.
 
@@ -344,21 +356,22 @@ Son sistemas distintos y deben modelarse por separado.
 
 ```mermaid
 flowchart LR
-    accTitle: Fundamento implementado y ampliaciones de objetos repetibles
-    accDescr: Un prototipo ya define propiedades comunes y el runtime crea instancias durables distintas con capacidad e identidad segura. Tablas, derechos, contenedores y comercio siguen como fases posteriores.
+    accTitle: Inventario implementado y ampliaciones de transferencia y botín
+    accDescr: Cada unidad conserva identidad durable; pilas y contenedores ya forman una vista y un grafo acotados. Transferencias, derechos y tablas siguen como fases posteriores.
 
     Prototype[ItemPrototype implementado<br/>nombre · reglas · rareza · peso] --> Instance[ItemInstance implementada<br/>ID durable · prototypeId · ubicación]
     Sequence[(Secuencia persistida)] --> Instance
-    Instance --> Current[Inventario / equipo / NPC / sala]
-    Current --> Capacity[Slots + peso<br/>implementado]
+    Instance --> Current[Inventario / equipo / NPC / sala / contenedor]
+    Current --> Stack[Pila derivada<br/>sin identidad durable]
+    Current --> Container[Contenedor acotado<br/>slots + peso recursivo]
 
     Prototype -. fase 4 .-> Table[LootTable validada]
     RNG[(RNG persistido)] --> Roll[Tirada entera determinista]
     Table --> Roll
     Roll --> Generated[Instancia nueva + procedencia]
     Generated --> Rights[Elegibilidad y propietario]
-    Rights --> Future[Contenedor / reparto]
-    Current -. fase 3B/3C .-> Trade[Dar / intercambio confirmado]
+    Rights --> Future[Reparto]
+    Current -. fase 3C/3D .-> Trade[Dar / intercambio confirmado]
 ```
 
 ### Fundamento y secuencia
@@ -366,12 +379,12 @@ flowchart LR
 1. Implementado: `ItemPrototype`, contenido authored estable y reutilizable.
 2. Implementado: `ItemInstance`, ID durable único, `prototypeId` y ubicación;
    el snapshot y rollback incluyen la secuencia creadora.
-3. Implementado: inventario acotado por slots y peso. Pendiente: contenedores
-   con capacidad/profundidad máximas y pilas que solo agrupen unidades
-   fungibles con metadatos idénticos.
+3. Implementado: inventario acotado por slots/peso, contenedores con capacidad
+   y profundidad máximas, y pilas derivadas que agrupan unidades fungibles por
+   ubicación/prototipo sin persistir cantidad.
 4. Pendiente: transferencia atómica, con `give` para casos simples e intercambio confirmado
    por ambas partes para objetos valiosos. Objetos de quest, ligados o no
-   transferibles deben declararlo. En 3A solo se acepta `transferable`;
+   transferibles deben declararlo. En 3B solo se acepta `transferable`;
    `character_bound` y `non_transferable` se rechazan como valores reservados
    hasta que 3C ejecute su semántica.
 5. Pendiente: derechos de botín con ventana exclusiva y política inicial determinista, por
@@ -413,7 +426,7 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 | Emotes/sociales | Ausente. | Con el router social ampliado y plantillas seguras. |
 | Mail y tablones | Ausente. | Después de definir retención, cuotas, moderación y privacidad. |
 | Guilds/clanes | Ausente. | Tras estabilizar parties, canales y autoridad comunitaria. |
-| Puertas, llaves y contenedores | Ausente como sistema general. | Con instancias, profundidad acotada y persistencia de estado. |
+| Puertas y llaves | Ausentes como sistema general; los contenedores de inventario sí existen. | Cuando el estado abierto/cerrado, acceso y llaves tenga autoría/persistencia explícita. |
 | Give/trade/auction | Ausente. | Tras propiedad durable, operación atómica y antifraude básico. |
 | Crafting | Ausente. | Cuando haya prototipos repetibles y sinks económicos. |
 | Housing | Ausente. | Cuando el contenido necesite instancias persistentes privadas. |
@@ -451,9 +464,17 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 - slots/peso, rareza/`itemLevel` textual e IDs opacos en ambos transportes;
 - snapshot único en SQLite/PostgreSQL v10, sin tabla espejo ni esquema v11.
 
-### Fase 3B/3C/3D — inventario y transferencias — pendiente
+### Fase 3B — pilas y contenedores — implementada
 
-- pilas fungibles y contenedores con profundidad/capacidad acotadas;
+- WorldPack v5/AreaPack v4 y snapshot v3 con conversión explícita v1/v2/v3;
+- pilas fungibles derivadas, sin cantidad ni identidad de pila durable;
+- contenedores únicos con slots, peso recursivo, profundidad cuatro y ciclos
+  rechazados antes de mutar;
+- cantidades máximas 256, `contents` paginado a 20 grupos y selectores opacos;
+- paridad de datos/acciones en Web, Telnet y `Char.Items.List` GMCP.
+
+### Fase 3C/3D — transferencias — pendiente
+
 - `give` atómico y políticas de transferencia ejecutables;
 - intercambio con escrow, doble aceptación e invalidación ante cambios.
 

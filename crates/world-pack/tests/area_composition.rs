@@ -3,8 +3,8 @@ use std::{fs, path::Path, process::Command};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use world_pack::{
-    AreaPack, CompositionError, MAX_AREA_FILE_BYTES, MAX_PROJECT_MANIFEST_BYTES, WorldPackDocument,
-    compose_world_project,
+    AreaPack, CompositionError, MAX_AREA_FILE_BYTES, MAX_ITEM_ALIAS_BYTES,
+    MAX_PROJECT_MANIFEST_BYTES, WorldPackDocument, compose_world_project,
 };
 
 fn run(arguments: &[&str]) -> std::process::Output {
@@ -236,6 +236,113 @@ fn real_three_area_project_has_no_semantic_or_canonical_drift() {
 }
 
 #[test]
+fn native_area_item_text_bounds_are_enforced_by_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let area = json!({
+        "schemaVersion": 4,
+        "id": "a",
+        "itemPrototypes": [{
+            "id": "a:lantern",
+            "name": "Lantern",
+            "description": "A bounded lantern.",
+            "aliases": ["a".repeat(MAX_ITEM_ALIAS_BYTES + 1)],
+            "weightGrams": 100,
+            "slotCost": 1,
+            "rarity": "common",
+            "itemLevel": 1,
+            "stackPolicy": "unique",
+            "maxStackUnits": 1,
+            "transferPolicy": "transferable"
+        }],
+        "rooms": [room("a:start", None)]
+    });
+    write_json(&temp.path().join("a.json"), &area);
+    let manifest = temp.path().join("world.project.json");
+    write_json(
+        &manifest,
+        &json!({
+            "schemaVersion": 2,
+            "id": "demo",
+            "name": "Demo",
+            "startRoomId": "a:start",
+            "areas": [{"id": "a", "path": "a.json"}]
+        }),
+    );
+
+    let error = compose_world_project(&manifest).unwrap_err();
+    let CompositionError::InvalidWorld(errors) = error else {
+        panic!("unexpected composition error: {error}");
+    };
+    assert!(
+        errors
+            .0
+            .iter()
+            .any(|error| error.to_string().contains("alias"))
+    );
+
+    let mut legacy_area = area;
+    legacy_area["schemaVersion"] = json!(3);
+    legacy_area["itemPrototypes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("maxStackUnits");
+    write_json(&temp.path().join("a.json"), &legacy_area);
+    let error = compose_world_project(&manifest).unwrap_err();
+    let CompositionError::InvalidWorld(errors) = error else {
+        panic!("unexpected normalized AreaPack error: {error}");
+    };
+    assert!(
+        errors
+            .0
+            .iter()
+            .any(|error| error.to_string().contains("alias"))
+    );
+}
+
+#[test]
+fn normalized_area_item_ids_match_the_runtime_identifier_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let area = json!({
+        "schemaVersion": 3,
+        "id": "a",
+        "itemPrototypes": [{
+            "id": "A:Lantern",
+            "name": "Lantern",
+            "description": "A legacy modular lantern.",
+            "weightGrams": 100,
+            "slotCost": 1,
+            "rarity": "common",
+            "itemLevel": 1,
+            "stackPolicy": "unique",
+            "transferPolicy": "transferable"
+        }],
+        "rooms": [room("a:start", None)]
+    });
+    write_json(&temp.path().join("a.json"), &area);
+    let manifest = temp.path().join("world.project.json");
+    write_json(
+        &manifest,
+        &json!({
+            "schemaVersion": 2,
+            "id": "demo",
+            "name": "Demo",
+            "startRoomId": "a:start",
+            "areas": [{"id": "a", "path": "a.json"}]
+        }),
+    );
+
+    let error = compose_world_project(&manifest).unwrap_err();
+    let CompositionError::InvalidWorld(errors) = error else {
+        panic!("unexpected normalized AreaPack error: {error}");
+    };
+    assert!(errors.0.iter().any(|error| {
+        error
+            .to_string()
+            .contains("lowercase namespaced identifier")
+    }));
+}
+
+#[test]
 fn duplicate_area_ids_and_paths_fail_closed() {
     let duplicate_id = tempfile::tempdir().unwrap();
     let manifest = duplicate_id.path().join("world.project.json");
@@ -412,7 +519,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
     }
 
     for bad_area in [
-        json!({"schemaVersion":4,"id":"a","rooms":[room("a:start", None)]}),
+        json!({"schemaVersion":5,"id":"a","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","rooms":[room("a:start", None)],"unknown":true}),
         json!({"schemaVersion":1,"id":"wrong","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","dependsOn":["missing"],"rooms":[room("a:start", None)]}),
@@ -424,6 +531,124 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
         write_json(&manifest, &project(vec![("a", "a.json")]));
         assert!(compose_world_project(manifest).is_err());
     }
+}
+
+#[test]
+fn area_v3_normalizes_to_v4_but_rejects_container_schema_smuggling() {
+    let legacy = json!({
+        "schemaVersion": 3,
+        "id": "a",
+        "itemPrototypes": [{
+            "id": "a:item",
+            "name": "Item",
+            "description": "A legacy unique item.",
+            "weightGrams": 0,
+            "slotCost": 1,
+            "rarity": "common",
+            "itemLevel": 1,
+            "stackPolicy": "unique",
+            "transferPolicy": "transferable"
+        }],
+        "initialItemInstances": [{
+            "id": "a:item-1",
+            "prototypeId": "a:item",
+            "location": {"kind": "staged"}
+        }]
+    });
+    let normalized: AreaPack = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(
+        normalized.schema_version,
+        world_pack::AREA_PACK_SCHEMA_VERSION
+    );
+    assert_eq!(normalized.item_prototypes[0].max_stack_units, 1);
+    assert!(normalized.item_prototypes[0].container.is_none());
+
+    let mut smuggled = legacy.clone();
+    smuggled["itemPrototypes"][0]["maxStackUnits"] = json!(20);
+    assert!(serde_json::from_value::<AreaPack>(smuggled).is_err());
+
+    let mut smuggled = legacy;
+    smuggled["initialItemInstances"][0]["location"] = json!({
+        "kind": "container",
+        "containerInstanceId": "a:item-1"
+    });
+    assert!(serde_json::from_value::<AreaPack>(smuggled).is_err());
+}
+
+#[test]
+fn contained_instances_require_a_declared_cross_area_dependency() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = temp.path().join("world.project.json");
+    write_json(&manifest, &project(vec![("a", "a.json"), ("b", "b.json")]));
+    let child_area = json!({
+        "schemaVersion": 4,
+        "id": "a",
+        "itemPrototypes": [{
+            "id": "a:map",
+            "name": "Map",
+            "description": "A folded map.",
+            "weightGrams": 100,
+            "slotCost": 1,
+            "rarity": "common",
+            "itemLevel": 1,
+            "stackPolicy": "unique",
+            "maxStackUnits": 1,
+            "transferPolicy": "transferable"
+        }],
+        "initialItemInstances": [{
+            "id": "a:map-1",
+            "prototypeId": "a:map",
+            "location": {"kind": "container", "containerInstanceId": "b:satchel-1"}
+        }],
+        "rooms": [room("a:start", None)]
+    });
+    let container_area = json!({
+        "schemaVersion": 4,
+        "id": "b",
+        "itemPrototypes": [{
+            "id": "b:satchel",
+            "name": "Satchel",
+            "description": "A sturdy satchel.",
+            "weightGrams": 200,
+            "slotCost": 1,
+            "rarity": "common",
+            "itemLevel": 1,
+            "stackPolicy": "unique",
+            "maxStackUnits": 1,
+            "container": {"maxSlots": 4, "maxWeightGrams": 1000},
+            "transferPolicy": "transferable"
+        }],
+        "initialItemInstances": [{
+            "id": "b:satchel-1",
+            "prototypeId": "b:satchel",
+            "location": {"kind": "staged"}
+        }]
+    });
+    write_json(&temp.path().join("a.json"), &child_area);
+    write_json(&temp.path().join("b.json"), &container_area);
+    assert!(matches!(
+        compose_world_project(&manifest),
+        Err(CompositionError::UndeclaredDependency {
+            kind: world_pack::AreaCrossReferenceKind::ItemInstanceContainer,
+            ..
+        })
+    ));
+
+    let mut declared = child_area;
+    declared["dependsOn"] = json!(["b"]);
+    write_json(&temp.path().join("a.json"), &declared);
+    let composed = compose_world_project(&manifest).unwrap();
+    assert!(
+        composed
+            .report
+            .cross_area_references
+            .iter()
+            .any(|reference| {
+                reference.kind == world_pack::AreaCrossReferenceKind::ItemInstanceContainer
+                    && reference.source_id == "a:map-1"
+                    && reference.target_id == "b:satchel-1"
+            })
+    );
 }
 
 #[test]
@@ -647,7 +872,7 @@ fn compose_is_present_in_top_level_and_subcommand_help() {
     let help = String::from_utf8_lossy(&compose.stdout);
     assert!(help.contains("world.project.json") || help.contains("<PROJECT>"));
     assert!(help.contains("--output"));
-    assert!(help.contains("AreaPack v3"));
+    assert!(help.contains("AreaPack v4"));
 }
 
 #[test]

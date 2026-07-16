@@ -17,7 +17,9 @@ cargo run --locked -p world-pack --bin tiamud-world -- test \
 creation combinations, scripts, media records and resolved local assets.
 For objects, media subjects must be prototype IDs and `hiddenItems` keys must be
 instance IDs; the validator rejects the opposite pairing. It also rejects any
-phase-3A transfer policy other than `transferable`.
+phase-3B transfer policy other than `transferable`, invalid stack bounds,
+fungible or consumable containers, containment cycles, depth above four and
+container over-capacity.
 `test` runs the document's embedded content expectations. Run both explicitly;
 publishing does not replace content tests or human play review.
 

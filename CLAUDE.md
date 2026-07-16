@@ -32,15 +32,19 @@ describe el baseline vigente de personajes y medios.
   la ruta local sin servicios. Cada proceso abre uno y nunca doble-escribe.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
-- WorldPack v4 y AreaPack v3 son actuales. WorldPack v3/v2, AreaPack v2/v1 y
-  Envy se normalizan en fronteras explícitas. El servidor carga un paquete
+- WorldPack v5 y AreaPack v4 son actuales. WorldPack v4/v3/v2,
+  AreaPack v3/v2/v1 y Envy se normalizan en fronteras explícitas. El servidor carga un paquete
   completo; ADR 0005 para carga caliente/LRU es futuro.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
-- La fase de inventario 3A separa `itemPrototypes` de instancias durables,
-  persiste `WorldRuntimeSnapshot` v2 con conversión explícita desde v1 y aplica
-  capacidad por slots/peso. Rareza cerrada, `itemLevel` y peso se proyectan
+- La fase de inventario 3B separa `itemPrototypes` de instancias durables,
+  persiste `WorldRuntimeSnapshot` v3 con conversiones explícitas desde v1/v2 y
+  aplica capacidad por slots/peso. Las pilas fungibles se derivan por
+  ubicación/prototipo y no persisten cantidad ni ID de pila. Los contenedores
+  únicos tienen capacidad propia, peso recursivo, profundidad máxima cuatro y
+  rechazo atómico de ciclos/sobrecapacidad. Rareza cerrada, `itemLevel`, peso
+  unitario/total, cantidad, slots y capacidad se proyectan
   como texto con IDs opacos derivados de una sal aleatoria por sesión; Telnet
   muestra y acepta esas referencias para desambiguar. Los medios de objeto
   referencian el prototipo y `hiddenItems` la instancia. El arranque valida de
@@ -48,8 +52,9 @@ describe el baseline vigente de personajes y medios.
   sin retener sus agregados en el mundo activo. SQLite/PostgreSQL conservan el
   snapshot único en esquema v10; restore conserva nuevas instancias iniciales
   del WorldPack y superpone el snapshot sin resucitar instancias runtime
-  ausentes. No existe tabla espejo ni esquema v11. En 3A solo se acepta
-  `transferable`.
+  ausentes. No existe tabla espejo ni esquema v11. En 3B solo se acepta
+  `transferable`; `give`, trade, políticas ligadas, derechos y tablas aleatorias
+  siguen pendientes.
 - La fase social 1 está implementada: `say`, `tell`, `reply` online, grupos de
   seis miembros con chat y liderazgo, y suscripciones durables a `general`,
   `newbie`, `staff`. `staff` exige perfil `moderator`, `administrator` o
@@ -88,6 +93,13 @@ veredictos en `pass`. No se ejecutaron PostgreSQL real v10, WebKit local ni soak
 de 24 horas. Esa evidencia operacional procede de un árbol dirty precommit: es
 diagnóstico local, no evidencia publicable ni de CI.
 
+La integración 3B pasa formato/check/clippy y 499/499 pruebas Rust: 88 core, 93
+WorldPack, 28 importador, 202 servidor y 88 restantes. También pasan
+`svelte-check` 0/0, 103/103 web, build, 30/30 Playwright Chromium/Firefox,
+80/80 Node, humo, carga CI con 16 usuarios, soak corto de 66 rondas/10
+readiness, `cargo-deny`, licencias y avisos 307 Rust/76 web. PostgreSQL real
+v10, WebKit local y soak de 24 horas no se ejecutaron.
+
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
 mixto limpio y 3.081.428 ejecuciones fuzz Telnet. Vincula aquel árbol: no es
@@ -114,9 +126,11 @@ por facturación antes de ejecutar.
 - Protocolo requiere Rust, TypeScript estricto, socket/recovery, Playwright y
   paridad Telnet/GMCP.
 - Medios pasan por pipeline y manifiesto revisado; perderlos no cambia juego.
-- La identidad durable prototype/instance ya existe. Antes de botín
-  repetible/aleatorio, implementa propiedad, procedencia y derechos de reparto
-  atómicos. No añadas cajas de botín pagadas al baseline.
+- La identidad durable prototype/instance, las pilas derivadas y los
+  contenedores acotados ya existen. Antes de botín repetible/aleatorio,
+  implementa transferencias/políticas, trade confirmado y después propiedad,
+  procedencia y derechos de reparto atómicos. No añadas cajas de botín pagadas
+  al baseline.
 - Las acciones staff que tocan el mundo resuelven un personaje conectado y
   comprueban una capacidad concreta. Conserva la sintaxis textual con `|` para
   separar cuerpo y motivo en inspect/where/goto/transfer/restore, announce,

@@ -4,6 +4,7 @@
     ActionResultData,
     ActionPerformFields,
     ConnectionState,
+    ContainerContentsData,
     LiveServerMessage,
     MessageAppendData,
     MessagePresentationCue,
@@ -86,6 +87,7 @@
   let hasEntered = $state(false);
   let scene = $state<SceneSnapshot>();
   let player = $state<PlayerStateSnapshot>();
+  let containerContents = $state<ContainerContentsData>();
   let manifestImage = $state<SceneSnapshot['image']>();
   let activeAssetKey: string | undefined;
   let failedImageUrls = $state<string[]>([]);
@@ -479,7 +481,11 @@
             equipment: message.data.equipment,
             inventoryCapacity: message.data.inventoryCapacity,
           };
+          containerContents = undefined;
         }
+        break;
+      case 'container.contents':
+        containerContents = message.data;
         break;
       case 'map.snapshot':
         if (player && player.revision <= message.data.revision) {
@@ -487,6 +493,7 @@
         }
         break;
       case 'message.append':
+        if (message.data.kind === 'characterMoved') containerContents = undefined;
         eventCounter += 1;
         replaceHistory([
           ...history,
@@ -535,6 +542,7 @@
     resetVisualPresentation();
     scene = recovery.scene;
     player = recovery.player;
+    containerContents = undefined;
   }
 
   function submitCommand(value = command): void {
@@ -551,6 +559,12 @@
   function submitAction(action: string, fields: ActionPerformFields | undefined, label: string): void {
     const id = createRequestId();
     const sent = connection?.perform(action, fields, id) ?? false;
+    if (sent && [
+      'item.take', 'item.drop', 'item.put', 'item.get', 'item.contents',
+      'item.use', 'item.equip', 'item.unequip',
+    ].includes(action)) {
+      containerContents = undefined;
+    }
     recordSubmission(label, id, sent);
   }
 
@@ -594,7 +608,7 @@
 
   function itemActionName(commandValue: string): string | undefined {
     const verb = commandValue.trim().split(/\s+/, 1)[0]?.toLowerCase();
-    return verb && ['take', 'drop', 'examine', 'use', 'equip', 'unequip'].includes(verb)
+    return verb && ['take', 'drop', 'examine', 'use', 'equip', 'unequip', 'contents'].includes(verb)
       ? `item.${verb}`
       : undefined;
   }
@@ -619,6 +633,7 @@
       returnToLogin('Your session has expired. Sign in again.');
       return;
     }
+    containerContents = undefined;
     accessError = undefined;
     selectedAccess = selection;
     if (!connection) {
@@ -637,6 +652,7 @@
             if (state === 'disconnected') {
               markPendingInterrupted();
               cancelVisualCues();
+              containerContents = undefined;
             }
           },
           onProtocolError: () => {
@@ -665,6 +681,7 @@
     scene = undefined;
     resetVisualPresentation();
     player = undefined;
+    containerContents = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -684,6 +701,7 @@
     scene = undefined;
     resetVisualPresentation();
     player = undefined;
+    containerContents = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -859,8 +877,20 @@
                 {#each scene.items as item (item.id)}
                   <li>
                     <div>
-                      <strong>{item.label}</strong>
-                      <p>{item.rarity} · level {item.itemLevel} · {(item.weightGrams / 1000).toFixed(1)} kg</p>
+                      <strong>{item.label} ×{item.quantity}</strong>
+                      <p>
+                        {item.rarity} · level {item.itemLevel} ·
+                        {(item.weightGrams / 1000).toFixed(1)} kg each ·
+                        {(item.totalWeightGrams / 1000).toFixed(1)} kg total ·
+                        {item.stackSlots} {item.stackSlots === 1 ? 'stack slot' : 'stack slots'}
+                      </p>
+                      {#if item.containerCapacity}
+                        <p>
+                          Container: {item.containerCapacity.usedSlots}/{item.containerCapacity.maxSlots} slots ·
+                          {(item.containerCapacity.usedWeightGrams / 1000).toFixed(1)}/
+                          {(item.containerCapacity.maxWeightGrams / 1000).toFixed(1)} kg
+                        </p>
+                      {/if}
                       {#if item.description}<p>{item.description}</p>{/if}
                     </div>
                     <div class="item-actions">
@@ -869,7 +899,11 @@
                           type="button"
                           onclick={() => {
                             const actionName = itemActionName(action.command);
-                            if (actionName) submitAction(actionName, { target: item.id }, action.command);
+                            if (actionName === 'item.contents') {
+                              submitAction(actionName, { container: item.id, page: 1 }, action.command);
+                            } else if (actionName) {
+                              submitAction(actionName, { target: item.id }, action.command);
+                            }
                             else submitCommand(action.command);
                           }}
                         >{action.label}</button>
@@ -925,6 +959,7 @@
     <div class="side-stack">
       <PlayerDashboard
         value={player}
+        {containerContents}
         abilityTargets={scene?.npcs ?? []}
         oncommand={submitCommand}
         onaction={submitAction}

@@ -76,6 +76,9 @@ fn only_unconditional_room_object_resets_become_world_pack_items() {
     assert_eq!(prototype.id, "synthetic-full:object:2000");
     assert_eq!(prototype.name, "a brass lantern");
     assert!(prototype.aliases.iter().any(|alias| alias == "lantern"));
+    assert_eq!(prototype.stack_policy, world_pack::ItemStackPolicy::Unique);
+    assert_eq!(prototype.max_stack_units, 1);
+    assert!(prototype.container.is_none());
     assert_eq!(
         result.world_pack.initial_item_instances[0].id,
         "synthetic-full:object:2000:1"
@@ -105,6 +108,7 @@ fn diagnostics_are_actionable_for_every_lossy_construct() {
     for expected in [
         "mobile_preserved_not_converted",
         "object_prototype_not_placed",
+        "container_reset_not_converted",
         "reset_preserved_not_converted",
         "shop_preserved_not_converted",
         "special_never_executed",

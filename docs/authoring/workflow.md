@@ -23,7 +23,8 @@ AreaPack sources + reviewed assets
 
 ## Recommended loop
 
-1. Work on a branch and edit the smallest owning AreaPack.
+1. Work on the canonical `main` branch and edit the smallest owning AreaPack;
+   Tiamud currently has no parallel development branch.
 2. Compile new raster assets offline; record provenance, license and review.
 3. Compose a fresh candidate path.
 4. Validate, run embedded content tests and preview affected scenes.

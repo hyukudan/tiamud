@@ -37,7 +37,7 @@ try {
     verifyAtmosphericAsset(httpPort),
   ]);
   console.log(
-    'Smoke test passed: auth, reconnect, inventory, WorldPack, SQLite, assets, tiamud.v1, and Telnet share one server.',
+    'Smoke test passed: auth, reconnect, inventory/containers, WorldPack, SQLite, assets, tiamud.v1, and Telnet share one server.',
   );
 } catch (error) {
   console.error(output);
@@ -131,6 +131,31 @@ function browserJourney(port, credentials, reconnecting) {
     });
     websocket.addEventListener('message', (event) => {
       const message = JSON.parse(event.data);
+      if (message.type === 'container.contents' && state === 'contents') {
+        const map = message.data.items?.find((item) => item.label === 'weathered map');
+        if (
+          !/^o[0-9a-f]{16}$/.test(message.data.container) || message.data.page !== 1 ||
+          message.data.totalPages !== 1 || message.data.items?.length !== 1 ||
+          !map || !/^o[0-9a-f]{16}$/.test(map.id) || map.quantity !== 1 ||
+          map.stackSlots !== 1 || map.weightGrams !== 200 || map.totalWeightGrams !== 200 ||
+          map.description !== undefined || JSON.stringify(message.data).includes('tiamud:') ||
+          message.data.capacity?.usedSlots !== 1 || message.data.capacity?.maxSlots !== 8 ||
+          message.data.capacity?.usedWeightGrams !== 200 ||
+          message.data.capacity?.maxWeightGrams !== 5_000
+        ) {
+          reject(new Error(`Container page is invalid or leaks durable data: ${JSON.stringify(message.data)}.`));
+          return;
+        }
+        state = 'returning';
+        websocket.send(
+          JSON.stringify({
+            v: 1,
+            type: 'command.submit',
+            data: { requestId: 'smoke-browser-up', command: 'up' },
+          }),
+        );
+        return;
+      }
       if (message.type === 'action.result' && state === 'inventory') {
         if (!message.data.ok || !message.data.message?.toLowerCase().includes('lantern')) {
           reject(new Error(`Inventory was not restored after reconnect: ${message.data.message}`));
@@ -157,6 +182,15 @@ function browserJourney(port, credentials, reconnecting) {
           reject(new Error('Initial browser scene is missing the blue lantern.'));
           return;
         }
+        const tonic = message.data.items?.find((item) => item.label === 'ember tonic');
+        if (
+          !tonic || tonic.quantity !== 2 || tonic.weightGrams !== 250 ||
+          tonic.totalWeightGrams !== 500 || tonic.stackSlots !== 1 ||
+          tonic.containerCapacity !== undefined
+        ) {
+          reject(new Error(`Initial browser scene has an invalid derived stack: ${JSON.stringify(tonic)}.`));
+          return;
+        }
         state = 'taken';
         websocket.send(
           JSON.stringify({
@@ -166,6 +200,34 @@ function browserJourney(port, credentials, reconnecting) {
           }),
         );
       } else if (state === 'taken' && message.data.title === 'Lantern Square') {
+        state = 'to-archive';
+        websocket.send(
+          JSON.stringify({
+            v: 1,
+            type: 'command.submit',
+            data: { requestId: 'smoke-browser-down', command: 'down' },
+          }),
+        );
+      } else if (state === 'to-archive' && message.data.title === "The Cartographer's Archive") {
+        const satchel = message.data.items?.find((item) => item.label === 'canvas archive satchel');
+        if (!satchel || !/^o[0-9a-f]{16}$/.test(satchel.id) || !satchel.containerCapacity) {
+          reject(new Error(`Archive scene has no safe container selector: ${JSON.stringify(satchel)}.`));
+          return;
+        }
+        state = 'contents';
+        websocket.send(
+          JSON.stringify({
+            v: 1,
+            type: 'action.perform',
+            data: {
+              requestId: 'smoke-browser-contents',
+              action: 'item.contents',
+              container: satchel.id,
+              page: 1,
+            },
+          }),
+        );
+      } else if (state === 'returning' && message.data.title === 'Lantern Square') {
         state = 'moving';
         websocket.send(
           JSON.stringify({

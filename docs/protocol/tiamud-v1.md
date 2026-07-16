@@ -238,7 +238,8 @@ Nombres de acción implementados:
 
 ```text
 look, inventory, move
-item.take, item.drop, item.examine, item.use, item.equip, item.unequip
+item.take, item.drop, item.contents, item.put, item.get,
+item.examine, item.use, item.equip, item.unequip
 combat.attack, combat.ability
 progression.promote, progression.talent
 party.create, party.invite, party.accept, party.revoke, party.kick,
@@ -252,6 +253,9 @@ social.who, social.help
 social.ignore, social.unignore, social.block, social.unblock, social.report
 moderation.mute, moderation.unmute, moderation.ban, moderation.unban,
 moderation.role
+staff.status, staff.reports, staff.report.resolve,
+staff.inspect, staff.where, staff.goto, staff.transfer, staff.restore,
+staff.announce, staff.audit, staff.profile.set, staff.capability.set
 ```
 
 Según la acción, el payload estricto también puede contener `message`,
@@ -264,11 +268,42 @@ las mismas reglas de autorización y percepción; una acción estructurada no es
 un atajo confiable. Accept/revoke/kick/transfer resuelven `target` como nombre
 de un personaje conectado, no como administración de membresía offline.
 
+Salvo `staff.status`, que solo muestra la asignación propia, cada acción
+`staff.*` exige una capacidad concreta y `reason`; las acciones dirigidas
+vuelven a comprobar además la jerarquía en el actor. Un rol legado nunca basta.
+La resolución usa `reportId` positivo y `resolution`
+(`dismissed`, `action_taken` o `no_action`). `staff.profile.set` exige
+`target`, `profile` y `loreTitle`, donde estos dos últimos aceptan `null` para
+retirar la asignación o el título; los perfiles no nulos son `helper`,
+`builder`, `moderator`, `administrator` e `implementor`.
+`staff.capability.set` exige `target`, `enabled` y una capacidad de este
+vocabulario cerrado: `reports.view`, `reports.resolve`, `moderation.mute`,
+`moderation.ban`, `staff.assign`, `staff.inspect`, `staff.where`, `staff.goto`,
+`staff.transfer`, `staff.restore`, `staff.announce` o `staff.audit`. El objetivo
+está limitado a 64 bytes, el motivo a 1.024 y el título narrativo a 128. Los
+campos que no pertenecen a la acción se rechazan.
+
+Las acciones de objeto usan combinaciones cerradas de `target`, `container`,
+`quantity` y `page`. `quantity` es opcional, vale uno por defecto y debe estar
+en 1..=256. `item.put`/`item.get` exigen ambos selectores opacos;
+`item.contents` exige `container`, admite una página positiva y prohíbe
+cantidad. Todos esos campos forman parte de la firma de deduplicación:
+
+```json
+{"v":1,"type":"action.perform","data":{
+  "requestId":"put-1",
+  "action":"item.put",
+  "target":"o51a4c0311f262a90",
+  "container":"o848103fdc4e0992b",
+  "quantity":12
+}}
+```
+
 Los equivalentes de texto usan `party say` (`gsay`/`gtell`), `party revoke`,
 `party kick`, `party transfer`, `party disband`, `reply`, `channel(s)`,
 `channel join`, `channel leave` y `channel say`. Los alias `gossip`, `newbie` y
 `wiznet` envían a `general`, `newbie`, `staff`. Unirse, enviar o recibir
-`staff` exige rol Moderator/Admin.
+`staff` exige perfil `moderator`, `administrator` o `implementor`.
 
 An ability use has its own additive `abilityId` field; it does not overload the
 opaque target:
@@ -374,9 +409,10 @@ traffic.
 | `entity.upsert`, `entity.remove` | Changed visible item/NPC. |
 | `vitals.update` | Complete current character sheet/vitals/resources/abilities fragment. |
 | `inventory.patch` | Complete current inventory/equipment fragment. |
+| `container.contents` | Página autorizada de hasta 20 grupos hijos directos, con capacidad del contenedor. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
-| `chat.message` | Entrega autorizada de `say`, `tell`, `party`, `general`, `newbie` o `staff`. |
+| `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `party`, `general`, `newbie` o `staff`. |
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
@@ -704,6 +740,15 @@ resistance at most 90 percent; cooldown/status duration at most 10,000 ticks.
 These are projection/parser limits, not policy hints for clients to bypass
 server validation.
 
+Los objetos de escena, inventario, equipo y contenidos conservan
+`weightGrams` como peso unitario y añaden `quantity`, `stackSlots` y
+`totalWeightGrams`. Una instancia contenedor añade `containerCapacity` con
+slots/peso usados y máximos. Una pila no es identidad wire durable: su selector
+opaco representa el grupo visible actual y puede cambiar al variar sesión,
+ubicación o miembros. `container.contents` contiene `container`, `page`,
+`totalPages`, `capacity` e `items`; cada página incluye como máximo veinte
+grupos y debe caber en el límite normal de 16 KiB.
+
 `vitals.update`, `inventory.patch` and `map.snapshot` replace their complete
 corresponding fragment at the stated revision. Other player changes use a new
 `player.snapshot`. A full scene/player snapshot may follow semantic updates to
@@ -716,16 +761,21 @@ keep recovery deterministic under output coalescing.
 `actorId`, and optional opaque `targetId`/`itemId`. It is projected separately
 for every observer; inability to perceive a domain event means no message.
 
-`chat.message.data` contiene `channel` (`say`, `tell`, `party`, `general`,
-`newbie` o `staff`), `sender` y texto plano acotado. Ignore y block por cualquiera
-de las partes se aplican antes de entregar. Mute/ban y rate limit se aplican en
-servidor. `general`, `newbie`, `staff` requieren suscripción durable en esquema
-v9; `staff` exige además Moderator/Admin al unirse, enviar y recibir. La
-suscripción es durable, pero estado de `reply` e historial son solo memoria.
+`chat.message.data` contiene `channel` (`announcement`, `say`, `tell`, `party`,
+`general`, `newbie` o `staff`), `sender` y texto plano acotado. Ignore y block
+por cualquiera de las partes se aplican antes de entregar. Mute/ban y rate
+limit se aplican en servidor. `general`, `newbie` y `staff` requieren
+suscripción durable en esquema v10; `staff` exige además perfil `moderator`,
+`administrator` o `implementor` al unirse, enviar y recibir. `helper`,
+`builder` y los roles legados `Player`/`Moderator`/`Admin` no conceden ese
+acceso. `announcement` es entrega del servidor, no un canal suscribible. La
+suscripción es durable, pero el estado de `reply` y el historial son solo
+memoria.
 
 Telnet representa el mismo `SocialMessage` autorizado como texto acotado. Si
-negoció GMCP `Comm`, recibe también `Comm.Channel.Text` con los seis canales,
-`talker`, `text`; GMCP no evita autorización ni crea otra fuente de verdad.
+negoció GMCP `Comm`, recibe también `Comm.Channel.Text` con el mismo alcance,
+incluido `announcement`, y los campos `talker` y `text`; GMCP no evita
+autorización ni crea otra fuente de verdad.
 
 Audio messages are sent only when `client.hello.capabilities.audio` is true:
 

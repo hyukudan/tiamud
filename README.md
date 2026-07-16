@@ -37,7 +37,8 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
 - **Mundo persistente:** cuentas, personajes, salas, objetos, NPC, equipo,
   combate, misiones, grupos, economía, tiempo lógico y clima. Los objetos
   separan prototipos reutilizables e instancias durables, con capacidad por
-  slots/peso y botín fijo; pilas, contenedores y tablas aleatorias aún no.
+  slots/peso, pilas fungibles derivadas, contenedores acotados y botín fijo;
+  `give`, intercambio confirmado y tablas aleatorias aún no.
 - **Personajes definidos por datos:** el modelo de personaje v3 modela linajes, trasfondo
   opcional, clases base y avanzadas, una curva global de XP, talentos con rango
   y promociones atómicas. Atributos, habilidades, recursos, resistencias,
@@ -57,8 +58,8 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
 - **Multimedia segura:** imagen de escena y audio opcionales, recursos
   inmutables direccionados por contenido, texto alternativo y preferencias de
   medios, movimiento, contraste y lector de pantalla.
-- **Autoría modular:** AreaPack v3 permite dividir un mundo en áreas; la
-  composición sin conexión produce un WorldPack v4 canónico, determinista y
+- **Autoría modular:** AreaPack v4 permite dividir un mundo en áreas; la
+  composición sin conexión produce un WorldPack v5 canónico, determinista y
   revisable. El servidor aún carga un único paquete completo al arrancar.
 - **Operación en un host:** adaptadores PostgreSQL/SQLite, credenciales
   Argon2id, sesiones revocables, colas acotadas, salud, métricas Prometheus,
@@ -128,8 +129,12 @@ Comandos representativos:
 
 ```text
 look                       north / east / south / west
-inventory                  take / drop / examine / use <objetivo>
-equip / unequip <objetivo> attack <objetivo>
+inventory                  take / drop [cantidad] <objeto>
+contents <contenedor> [página]
+put [cantidad] <objeto> in <contenedor>
+get [cantidad] <objeto> from <contenedor>
+examine / use <objetivo>   equip / unequip <objetivo>
+attack <objetivo>
 ability <id> [objetivo]    cast <id> [objetivo]
 promote <class-id>         talent learn <graph-id> <node-id>
 weather                    time
@@ -201,7 +206,7 @@ de referencia de Caddy no publica métricas.
 
 ## Personajes, clases y progresión
 
-WorldPack v4 conserva el modelo de personaje v3: compone un personaje con
+WorldPack v5 conserva el modelo de personaje v3: compone un personaje con
 linaje, trasfondo opcional y clase base.
 Una XP acumulada gobierna el nivel global, las concesiones de clase y reservas
 de puntos separadas. Hay una clase activa y un historial ordenado, no
@@ -209,7 +214,7 @@ multiclase libre.
 
 ```mermaid
 flowchart LR
-    accTitle: Composición y avance de un personaje v3 en WorldPack v4
+    accTitle: Composición y avance de un personaje v3 en WorldPack v5
     accDescr: Linaje, trasfondo opcional y clase base forman la ficha permanente. El nivel concede mejoras y puntos; los talentos modifican la ficha y una promoción atómica activa una clase avanzada cuando se cumplen sus requisitos.
 
     Lineage[Linaje] --> Sheet[Ficha permanente]
@@ -246,9 +251,10 @@ del trasfondo predeterminado. Telnet recibe además la ficha mediante
 | Clases base | Wanderer, Vanguard, Arcanist |
 | Clases avanzadas | Pathfinder, Bastion, Stormcaller, Spellblade |
 
-WorldPack v3/v2, AreaPack v2/v1 y Envy/Merc solo entran por límites explícitos
-de normalización/importación; `archetype` no es una segunda identidad del
-personaje. Los IDs publicados son la frontera de migración de contenido.
+WorldPack v4/v3/v2, AreaPack v3/v2/v1 y Envy/Merc solo entran por límites
+explícitos de normalización/importación; `archetype` no es una segunda
+identidad del personaje. Los IDs publicados son la frontera de migración de
+contenido.
 
 No existe entrenamiento general por uso. El crecimiento permanente procede de
 concesiones de creación, nivel, talento y promoción. El incremento heredado de
@@ -268,9 +274,9 @@ implementado de la hoja de ruta.
 | Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`. | Correo e historial durable, shout/yell espacial, emotes, tablones y telepatía definida por el mundo. `tell` no es telepatía. |
 | Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos, elegibilidad y reparto de botín. |
 | Canales | Suscripción persistente en SQLite/PostgreSQL v10; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
-| Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Fases restantes de inventario/botín 3B–4. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
-| Inventario | WorldPack v4 separa `itemPrototypes` reutilizables de `initialItemInstances`; cada unidad tiene identidad durable y el runtime puede crear más instancias del mismo prototipo. Take/drop/use/equip/unequip validan capacidad autoritativa por slots y peso. Escena, inventario, equipo, Web, Telnet y GMCP muestran rareza textual, nivel y peso con referencias opacas distintas por instancia. Telnet imprime esas referencias y las acepta en comandos para desambiguar. | Pilas fungibles, contenedores, give/trade, durabilidad y afijos. En 3A solo se publican unidades `unique` y `transferable`; `character_bound`/`non_transferable` quedan reservadas y rechazadas hasta ejecutar su semántica en 3C. |
-| Botín | El botín fijo es una instancia inicial cuya ubicación es `npc_spawn`; se transfiere al derrotar al NPC y conserva identidad. El RNG y el snapshot son seguros ante reinicio. | Derechos y reparto de grupo, tablas ponderadas, cantidades, tiradas aleatorias, procedencia de drops repetibles y contenedores aleatorios. |
+| Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Transferencias/trade 3C–3D y botín 4. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
+| Inventario | WorldPack v5 separa `itemPrototypes` reutilizables de `initialItemInstances`; cada unidad conserva identidad durable. Las pilas fungibles son vistas derivadas por ubicación/prototipo: no se persisten cantidades ni IDs de pila. Los contenedores únicos aplican slots, peso recursivo, profundidad máxima cuatro y rechazo atómico de ciclos/sobrecapacidad. `take`/`drop`/`put`/`get` aceptan cantidades 1..=256 y `contents` pagina 20 grupos. Web, Telnet y GMCP proyectan cantidad, slots, peso unitario/total, capacidad e IDs opacos. | `give`, políticas `character_bound`/`non_transferable`, intercambio confirmado, durabilidad y afijos. |
+| Botín | El botín fijo es una instancia inicial cuya ubicación es `npc_spawn`; se transfiere al derrotar al NPC y conserva identidad. Varias unidades fungibles se agrupan solo al proyectarlas. El RNG y el snapshot son seguros ante reinicio. | Derechos y reparto de grupo, tablas ponderadas, tiradas/cantidades aleatorias, procedencia de drops repetibles y contenedores aleatorios. |
 
 `reply` no persiste el destinatario: conserva en memoria el ID interno del
 último remitente cuyo `tell` se entregó. Al desconectar o reiniciar no se
@@ -331,8 +337,8 @@ mantiene estos límites explícitos.
 
 ![Ilustración técnica de las tres salas de Lantern Square y sus módulos de medios, percepción, variantes, guiones y pruebas.](docs/images/tiamud-worldpack.webp)
 
-El entorno de ejecución consume **un WorldPack v4 canónico**. Para trabajar con
-menos acoplamiento, los autores dividen el proyecto en **AreaPack v3** con
+El entorno de ejecución consume **un WorldPack v5 canónico**. Para trabajar con
+menos acoplamiento, los autores dividen el proyecto en **AreaPack v4** con
 dependencias y propiedad declaradas, y los componen sin conexión:
 
 ```sh
@@ -350,11 +356,19 @@ jugadores son arquitectura futura de
 [ADR 0005](docs/decisions/0005-hot-area-lifecycle.md), no funcionalidad
 publicada.
 
-El vocabulario v4 separa la definición reusable en `itemPrototypes` de cada
+El vocabulario v5 separa la definición reusable en `itemPrototypes` de cada
 unidad inicial en `initialItemInstances`. Una instancia empieza en una sala,
-un `npc_spawn` o `staged`; los IDs durables y de prototipo permanecen en el
-servidor y cada sesión recibe solo IDs opacos. WorldPack v3/v2 y AreaPack v2/v1
-se aceptan únicamente para normalización determinista.
+un `npc_spawn`, `staged` o dentro de otra instancia contenedor; los IDs durables
+y de prototipo permanecen en el servidor y cada sesión recibe solo IDs opacos.
+WorldPack v4/v3/v2 y AreaPack v3/v2/v1 se aceptan únicamente para
+normalización determinista. Las entradas antiguas no pueden introducir campos
+de 3B: deben publicar la versión nueva.
+
+Las instancias fungibles comparten `stackPolicy: fungible` y
+`maxStackUnits: 2..=1000`; el runtime deriva grupos ordenados sin persistir una
+segunda autoridad de cantidad. Un prototipo contenedor declara `maxSlots` y
+`maxWeightGrams`, debe ser `unique` y puede anidarse hasta cuatro aristas. Sus
+hijos directos consumen slots agrupados; todos los descendientes consumen peso.
 
 Los sprites `entityMedia` de objeto pertenecen al **prototipo**, de modo que
 pueden decorar todas sus unidades visibles. La percepción `hiddenItems`
@@ -365,7 +379,9 @@ Al arrancar con un snapshot anterior, Tiamud conserva las nuevas instancias
 iniciales del WorldPack y superpone las ubicaciones durables, sin resucitar
 instancias runtime ausentes. Antes de abrir listeners valida también
 propietarios desconectados, equipo y capacidad mediante lecturas acotadas que
-descarta después; no convierte esas fichas en personajes activos.
+descarta después; no convierte esas fichas en personajes activos. El snapshot
+vigente es v3 y el decoder separa explícitamente las formas v1, v2 y v3 antes
+de normalizar; SQLite y PostgreSQL continúan en esquema v10.
 
 | Herramienta | Finalidad |
 | --- | --- |
@@ -475,6 +491,18 @@ No se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24 horas; estas
 puertas operacionales se ejecutaron sobre un árbol dirty precommit y son
 diagnóstico local, no evidencia publicable ni de ejecución de CI.
 
+La fase 3B implementa pilas derivadas, contenedores acotados, cantidades y
+paginación en autoría, dominio, snapshot, navegador y Telnet/GMCP. Sobre el
+árbol integrado pasan formato, check y clippy estricto, 499/499 pruebas Rust
+(88 core, 93 WorldPack, 28 importador, 202 servidor y 88 restantes),
+`svelte-check` 0/0, 103/103 unitarias web, build, 30/30 Playwright soportados,
+80/80 del harness Node, humo, licencias, `cargo-deny` y avisos para 307
+dependencias Rust/76 web. La carga exacta de CI completa 16 bootstraps/32
+rondas con 15 WebSocket + un Telnet y cero errores; el soak corto completa 66
+rondas, 10/10 readiness y 146 acciones sin errores ni crecimiento continuo
+sospechoso. Consulta el
+[registro de fase 3B](docs/project/log/2026-07-16-derived-stacks-and-containers-phase-3b.md).
+
 Una prueba corta de carga no sustituye al soak de 24 horas. WebKit no arranca
 en el host local actual por bibliotecas GTK/GStreamer/medios ausentes; eso no
 es un pase ni un fallo de aplicación.
@@ -498,8 +526,8 @@ Siguientes líneas técnicas y de producto:
 - añadir correo/historial/emotes solo con retención y moderación explícitas;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
-- ampliar la base prototype/instance, capacidad y rareza ya implementada con
-  pilas fungibles, contenedores y `give`/intercambio confirmado;
+- ampliar las pilas y contenedores ya implementados con `give`, políticas de
+  transferencia ejecutables e intercambio confirmado;
 - definir después derechos/reparto de grupo, procedencia y tablas de botín
   enteras restart-safe;
 - mantener fuera del baseline las cajas de botín pagadas;
@@ -539,7 +567,7 @@ deploy/                      ejemplos Caddy, systemd y entorno
 - **Operación:** [host único](docs/operations/single-host.md) ·
   [releases](docs/operations/releases.md) ·
   [carga y soak](docs/operations/soak-testing.md).
-- **Autoría:** [WorldPack v4](docs/authoring/README.md) ·
+- **Autoría:** [WorldPack v5](docs/authoring/README.md) ·
   [progresión v3](docs/design/character-progression-v3.md) ·
   [compositor de escena](docs/design/scene-compositor-v1.md) ·
   [hoja social/staff/botín](docs/design/social-staff-and-loot-roadmap.md) ·
@@ -556,7 +584,8 @@ deploy/                      ejemplos Caddy, systemd y entorno
   [PostgreSQL/progresión](docs/decisions/0006-character-progression-and-postgresql-first.md) ·
   [personajes v3](docs/decisions/0007-worldpack-v3-character-model.md) ·
   [compositor](docs/decisions/0008-optional-scene-compositor.md) ·
-  [prototipos, instancias y capacidad](docs/decisions/0009-item-prototypes-instances-and-capacity.md).
+  [prototipos, instancias y capacidad](docs/decisions/0009-item-prototypes-instances-and-capacity.md) ·
+  [pilas derivadas y contenedores](docs/decisions/0010-derived-stacks-and-bounded-containers.md).
 - **Estado:** [matriz](docs/project/COMPLETION_MATRIX.md) ·
   [especificación v0.3](docs/spec-v0.3.md) ·
   [memoria](docs/project/PROJECT_MEMORY.md) ·

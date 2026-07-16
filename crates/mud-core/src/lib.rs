@@ -83,8 +83,20 @@ pub enum PlayerAction {
     Look,
     Move(Direction),
     Inventory,
-    Take(String),
-    Drop(String),
+    Take(ItemSelection),
+    Drop(ItemSelection),
+    Contents {
+        container: String,
+        page: u16,
+    },
+    Put {
+        selection: ItemSelection,
+        container: String,
+    },
+    Get {
+        selection: ItemSelection,
+        container: String,
+    },
     Examine(String),
     Attack(String),
     Ability {
@@ -108,6 +120,35 @@ pub enum PlayerAction {
     Time,
     Social(SocialAction),
     Staff(StaffAction),
+}
+
+pub const MAX_ITEM_SELECTION_QUANTITY: u16 = 256;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemSelection {
+    pub query: String,
+    pub quantity: u16,
+}
+
+impl ItemSelection {
+    pub fn one(query: impl Into<String>) -> Self {
+        Self {
+            query: query.into(),
+            quantity: 1,
+        }
+    }
+}
+
+impl From<String> for ItemSelection {
+    fn from(query: String) -> Self {
+        Self::one(query)
+    }
+}
+
+impl From<&str> for ItemSelection {
+    fn from(query: &str) -> Self {
+        Self::one(query)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -955,14 +996,98 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
             });
         }
     }
+    if let Some(rest) = command_tail(input, "contents") {
+        let rest = rest.to_ascii_lowercase();
+        let (container, page) = if let Some((container, page)) = rest.rsplit_once(" page ") {
+            let page = page
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|page| *page > 0)
+                .ok_or_else(|| ParseActionError::Unknown(input.to_owned()))?;
+            (container.trim(), page)
+        } else if let Some((container, page)) = rest.rsplit_once(char::is_whitespace)
+            && let Ok(page) = page.trim().parse::<u16>()
+        {
+            if page == 0 {
+                return Err(ParseActionError::Unknown(input.to_owned()));
+            }
+            (container.trim(), page)
+        } else {
+            (rest.trim(), 1)
+        };
+        if container.is_empty() {
+            return Err(ParseActionError::MissingTarget {
+                command: "contents",
+            });
+        }
+        return Ok(PlayerAction::Contents {
+            container: container.to_owned(),
+            page,
+        });
+    }
+    if normalised == "contents" {
+        return Err(ParseActionError::MissingTarget {
+            command: "contents",
+        });
+    }
+    if let Some(rest) = command_tail(input, "put") {
+        let rest = rest.to_ascii_lowercase();
+        let (selection, container) = rest
+            .rsplit_once(" in ")
+            .ok_or(ParseActionError::MissingTarget { command: "put" })?;
+        let selection = parse_item_selection(selection, input)?;
+        let container = container.trim();
+        if container.is_empty() {
+            return Err(ParseActionError::MissingTarget { command: "put" });
+        }
+        return Ok(PlayerAction::Put {
+            selection,
+            container: container.to_owned(),
+        });
+    }
+    if normalised == "put" {
+        return Err(ParseActionError::MissingTarget { command: "put" });
+    }
+    // Container retrieval must be parsed before the historical `get` alias
+    // for room pickup.
+    if let Some(rest) = command_tail(input, "get").map(|rest| rest.to_ascii_lowercase())
+        && let Some((selection, container)) = rest.rsplit_once(" from ")
+    {
+        let selection = parse_item_selection(selection, input)?;
+        let container = container.trim();
+        if container.is_empty() {
+            return Err(ParseActionError::MissingTarget { command: "get" });
+        }
+        return Ok(PlayerAction::Get {
+            selection,
+            container: container.to_owned(),
+        });
+    }
+    for (command, aliases, take) in [
+        ("take", &["take", "get"][..], true),
+        ("drop", &["drop"][..], false),
+    ] {
+        for alias in aliases {
+            if normalised == *alias {
+                return Err(ParseActionError::MissingTarget { command });
+            }
+            if let Some(target) = command_tail(input, alias) {
+                let selection = parse_item_selection(&target.to_ascii_lowercase(), input)?;
+                return Ok(if take {
+                    PlayerAction::Take(selection)
+                } else {
+                    PlayerAction::Drop(selection)
+                });
+            }
+        }
+    }
     for (command, aliases, action) in [
         (
-            "take",
-            &["take", "get"][..],
-            PlayerAction::Take as fn(String) -> PlayerAction,
+            "examine",
+            &["examine", "x"][..],
+            PlayerAction::Examine as fn(String) -> PlayerAction,
         ),
-        ("drop", &["drop"][..], PlayerAction::Drop),
-        ("examine", &["examine", "x"][..], PlayerAction::Examine),
         ("attack", &["attack", "kill"][..], PlayerAction::Attack),
         ("use", &["use"][..], PlayerAction::Use),
         ("equip", &["equip", "wear"][..], PlayerAction::Equip),
@@ -982,6 +1107,27 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
         }
     }
     Err(ParseActionError::Unknown(input.trim().to_owned()))
+}
+
+fn parse_item_selection(value: &str, original: &str) -> Result<ItemSelection, ParseActionError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ParseActionError::MissingTarget { command: "item" });
+    }
+    let Some((first, rest)) = value.split_once(char::is_whitespace) else {
+        return Ok(ItemSelection::one(value));
+    };
+    let Some(quantity) = first.parse::<u16>().ok() else {
+        return Ok(ItemSelection::one(value));
+    };
+    let query = rest.trim();
+    if quantity == 0 || quantity > MAX_ITEM_SELECTION_QUANTITY || query.is_empty() {
+        return Err(ParseActionError::Unknown(original.trim().to_owned()));
+    }
+    Ok(ItemSelection {
+        query: query.to_owned(),
+        quantity,
+    })
 }
 
 fn split_staff_reason(value: &str) -> Option<(String, String)> {
@@ -1115,6 +1261,11 @@ pub struct SceneItem {
     pub rarity: String,
     pub item_level: u16,
     pub weight_grams: u32,
+    pub quantity: u16,
+    pub stack_slots: u32,
+    pub total_weight_grams: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_capacity: Option<InventoryCapacityView>,
     pub actions: Vec<SceneAction>,
 }
 
@@ -1224,6 +1375,11 @@ pub struct PlayerItemView {
     pub rarity: String,
     pub item_level: u16,
     pub weight_grams: u32,
+    pub quantity: u16,
+    pub stack_slots: u32,
+    pub total_weight_grams: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_capacity: Option<InventoryCapacityView>,
     pub actions: Vec<SceneAction>,
 }
 
@@ -1236,6 +1392,11 @@ pub struct EquippedItemView {
     pub rarity: String,
     pub item_level: u16,
     pub weight_grams: u32,
+    pub quantity: u16,
+    pub stack_slots: u32,
+    pub total_weight_grams: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_capacity: Option<InventoryCapacityView>,
     pub actions: Vec<SceneAction>,
 }
 
@@ -1246,6 +1407,16 @@ pub struct InventoryCapacityView {
     pub max_slots: u16,
     pub used_weight_grams: u32,
     pub max_weight_grams: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerContentsView {
+    pub selector: String,
+    pub items: Vec<PlayerItemView>,
+    pub page: u16,
+    pub total_pages: u16,
+    pub capacity: InventoryCapacityView,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1490,6 +1661,14 @@ impl ItemRarity {
 #[serde(rename_all = "snake_case")]
 pub enum ItemStackPolicy {
     Unique,
+    Fungible,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemContainerDefinition {
+    pub max_slots: u16,
+    pub max_weight_grams: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -1533,6 +1712,8 @@ pub struct ItemPrototypeDefinition {
     pub rarity: ItemRarity,
     pub item_level: u16,
     pub stack_policy: ItemStackPolicy,
+    pub max_stack_units: u16,
+    pub container: Option<ItemContainerDefinition>,
     pub transfer_policy: ItemTransferPolicy,
 }
 
@@ -1540,6 +1721,7 @@ pub struct ItemPrototypeDefinition {
 pub enum InitialItemLocation {
     Room(String),
     NpcSpawn(String),
+    Container(ItemInstanceId),
     Staged,
 }
 
@@ -1836,12 +2018,12 @@ pub struct DurableCharacterSnapshot {
     pub gameplay: CharacterGameplaySnapshot,
 }
 
-pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 2;
+pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 3;
 const MAX_ACTIVE_EFFECTS: usize = 32;
 pub const MAX_ITEM_INSTANCES: usize = 65_536;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum RuntimeItemLocation {
     /// Reserved during world construction for a content-defined initial owner.
     /// Staged items are never projected into a room scene.
@@ -1859,11 +2041,52 @@ pub enum RuntimeItemLocation {
     HeldByNpc {
         npc_id: String,
     },
+    Contained {
+        container_id: ItemInstanceId,
+    },
     Consumed,
 }
 
+/// Exact pre-container location vocabulary retained only for snapshot v1/v2
+/// conversion. Keeping it separate prevents a v2 payload from smuggling a v3
+/// `contained` edge.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum RuntimeItemLocationV2 {
+    Staged,
+    Carried {
+        character_id: CharacterId,
+    },
+    Room {
+        room_id: String,
+    },
+    Equipped {
+        character_id: CharacterId,
+        slot: EquipmentSlot,
+    },
+    HeldByNpc {
+        npc_id: String,
+    },
+    Consumed,
+}
+
+impl From<RuntimeItemLocationV2> for RuntimeItemLocation {
+    fn from(location: RuntimeItemLocationV2) -> Self {
+        match location {
+            RuntimeItemLocationV2::Staged => Self::Staged,
+            RuntimeItemLocationV2::Carried { character_id } => Self::Carried { character_id },
+            RuntimeItemLocationV2::Room { room_id } => Self::Room { room_id },
+            RuntimeItemLocationV2::Equipped { character_id, slot } => {
+                Self::Equipped { character_id, slot }
+            }
+            RuntimeItemLocationV2::HeldByNpc { npc_id } => Self::HeldByNpc { npc_id },
+            RuntimeItemLocationV2::Consumed => Self::Consumed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeItemInstanceSnapshot {
     pub prototype_id: String,
     pub location: RuntimeItemLocation,
@@ -1903,7 +2126,7 @@ pub struct NpcRuntimeSnapshot {
 /// Portable shared-world state. It deliberately excludes sessions and opaque
 /// observer IDs, which are transport lifetime state and are rebuilt on start.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorldRuntimeSnapshot {
     pub snapshot_version: u32,
     pub revision: u64,
@@ -1918,17 +2141,41 @@ pub struct WorldRuntimeSnapshot {
     pub progression_flags: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeItemInstanceSnapshotV2 {
+    pub prototype_id: String,
+    pub location: RuntimeItemLocationV2,
+}
+
+/// Exact snapshot shape produced by inventory phase 3A.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldRuntimeSnapshotV2 {
+    pub snapshot_version: u32,
+    pub revision: u64,
+    pub logical_tick: u64,
+    pub rng_state: u64,
+    pub next_item_instance_sequence: u64,
+    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshotV2>,
+    pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
+    #[serde(default)]
+    pub adventure: AdventureRuntimeSnapshot,
+    #[serde(default)]
+    pub progression_flags: BTreeSet<String>,
+}
+
 /// Exact portable shape written before the prototype/instance split.
 /// Callers must inspect `snapshot_version` and opt into this conversion rather
 /// than allowing missing v2 fields to deserialize as an empty inventory.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorldRuntimeSnapshotV1 {
     pub snapshot_version: u32,
     pub revision: u64,
     pub logical_tick: u64,
     pub rng_state: u64,
-    pub item_locations: BTreeMap<String, RuntimeItemLocation>,
+    pub item_locations: BTreeMap<String, RuntimeItemLocationV2>,
     pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
     #[serde(default)]
     pub adventure: AdventureRuntimeSnapshot,
@@ -1937,6 +2184,41 @@ pub struct WorldRuntimeSnapshotV1 {
 }
 
 impl WorldRuntimeSnapshot {
+    pub fn upgrade_v1(snapshot: WorldRuntimeSnapshotV1) -> Result<Self, WorldError> {
+        Self::upgrade_v2(WorldRuntimeSnapshotV2::upgrade_v1(snapshot)?)
+    }
+
+    pub fn upgrade_v2(snapshot: WorldRuntimeSnapshotV2) -> Result<Self, WorldError> {
+        if snapshot.snapshot_version != 2 {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        Ok(Self {
+            snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
+            revision: snapshot.revision,
+            logical_tick: snapshot.logical_tick,
+            rng_state: snapshot.rng_state,
+            next_item_instance_sequence: snapshot.next_item_instance_sequence,
+            item_instances: snapshot
+                .item_instances
+                .into_iter()
+                .map(|(item_id, instance)| {
+                    (
+                        item_id,
+                        RuntimeItemInstanceSnapshot {
+                            prototype_id: instance.prototype_id,
+                            location: instance.location.into(),
+                        },
+                    )
+                })
+                .collect(),
+            npcs: snapshot.npcs,
+            adventure: snapshot.adventure,
+            progression_flags: snapshot.progression_flags,
+        })
+    }
+}
+
+impl WorldRuntimeSnapshotV2 {
     pub fn upgrade_v1(snapshot: WorldRuntimeSnapshotV1) -> Result<Self, WorldError> {
         if snapshot.snapshot_version != 1 {
             return Err(WorldError::InvalidRuntimeSnapshot);
@@ -1947,7 +2229,7 @@ impl WorldRuntimeSnapshot {
             .map(|(legacy_id, location)| {
                 (
                     ItemInstanceId(legacy_id.clone()),
-                    RuntimeItemInstanceSnapshot {
+                    RuntimeItemInstanceSnapshotV2 {
                         prototype_id: legacy_id,
                         location,
                     },
@@ -1955,7 +2237,7 @@ impl WorldRuntimeSnapshot {
             })
             .collect();
         Ok(Self {
-            snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
+            snapshot_version: 2,
             revision: snapshot.revision,
             logical_tick: snapshot.logical_tick,
             rng_state: snapshot.rng_state,
@@ -1968,20 +2250,66 @@ impl WorldRuntimeSnapshot {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompatibleWorldRuntimeSnapshot {
-    V2(WorldRuntimeSnapshot),
+    V3(WorldRuntimeSnapshot),
+    V2(WorldRuntimeSnapshotV2),
     V1(WorldRuntimeSnapshotV1),
+}
+
+impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let version = value
+            .get("snapshotVersion")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| serde::de::Error::custom("missing snapshotVersion"))?;
+        match version {
+            1 => serde_json::from_value(value)
+                .map(Self::V1)
+                .map_err(serde::de::Error::custom),
+            2 => serde_json::from_value(value)
+                .map(Self::V2)
+                .map_err(serde::de::Error::custom),
+            3 => serde_json::from_value(value)
+                .map(Self::V3)
+                .map_err(serde::de::Error::custom),
+            _ => Err(serde::de::Error::custom("unsupported snapshotVersion")),
+        }
+    }
 }
 
 impl CompatibleWorldRuntimeSnapshot {
     pub fn into_current(self) -> Result<WorldRuntimeSnapshot, WorldError> {
         match self {
-            Self::V2(snapshot) => Ok(snapshot),
+            Self::V3(snapshot) => Ok(snapshot),
+            Self::V2(snapshot) => WorldRuntimeSnapshot::upgrade_v2(snapshot),
             Self::V1(snapshot) => WorldRuntimeSnapshot::upgrade_v1(snapshot),
         }
     }
+}
+
+/// Decode one durable runtime payload only after comparing the storage column
+/// with the payload's original version. Normalization never erases evidence of
+/// a mismatched column/version pair.
+pub fn decode_world_runtime_snapshot(
+    durable_version: u32,
+    json: &str,
+) -> Result<WorldRuntimeSnapshot, WorldError> {
+    let compatible: CompatibleWorldRuntimeSnapshot =
+        serde_json::from_str(json).map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
+    let payload_version = match &compatible {
+        CompatibleWorldRuntimeSnapshot::V3(snapshot) => snapshot.snapshot_version,
+        CompatibleWorldRuntimeSnapshot::V2(snapshot) => snapshot.snapshot_version,
+        CompatibleWorldRuntimeSnapshot::V1(snapshot) => snapshot.snapshot_version,
+    };
+    if payload_version != durable_version {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+    compatible.into_current()
 }
 
 impl Default for CharacterGameplaySnapshot {
@@ -2194,6 +2522,8 @@ struct ItemPrototype {
     rarity: ItemRarity,
     item_level: u16,
     stack_policy: ItemStackPolicy,
+    max_stack_units: u16,
+    container: Option<ItemContainerDefinition>,
     transfer_policy: ItemTransferPolicy,
 }
 
@@ -2228,6 +2558,7 @@ enum SharedItemLocation {
     Room(String),
     Equipped(CharacterId, EquipmentSlot),
     HeldByNpc(String),
+    Contained(ItemInstanceId),
     Consumed,
 }
 
@@ -2421,12 +2752,30 @@ pub enum DomainEvent {
         item_name: String,
         room_id: String,
     },
+    ItemsMoved {
+        actor_id: CharacterId,
+        actor_name: String,
+        item_ids: Vec<ItemInstanceId>,
+        item_name: String,
+        container_id: Option<ItemInstanceId>,
+        operation: ContainerMoveOperation,
+        room_id: String,
+    },
     Gameplay {
         event: GameplayEvent,
     },
     Adventure {
         event: AdventureEvent,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContainerMoveOperation {
+    Take,
+    Drop,
+    Put,
+    Get,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2653,6 +3002,8 @@ pub struct ViewEvent {
 #[derive(Clone, Debug)]
 pub struct ActionOutcome {
     pub scene: SceneView,
+    /// Present only for an explicit, paginated container inspection.
+    pub container_contents: Option<ContainerContentsView>,
     /// Optional transport-independent, plain-text response to the command.
     pub output: Option<String>,
     /// Present when the action changed persistent character state.
@@ -2738,12 +3089,34 @@ impl World {
             if item.name.trim().is_empty() {
                 return Err(WorldBuildError::EmptyItemName(item.prototype_id));
             }
-            if item.weight_grams > 1_000_000
+            let stack_valid = match item.stack_policy {
+                ItemStackPolicy::Unique => item.max_stack_units == 1,
+                ItemStackPolicy::Fungible => (2..=1_000).contains(&item.max_stack_units),
+            };
+            let container_valid = item.container.as_ref().is_none_or(|container| {
+                item.stack_policy == ItemStackPolicy::Unique
+                    && item.max_stack_units == 1
+                    && !item.consumable
+                    && (1..=1_000).contains(&container.max_slots)
+                    && container.max_weight_grams <= 1_000_000
+            });
+            let presentation_valid = valid_definition_id(&item.prototype_id)
+                && safe_definition_text(&item.name, 128)
+                && safe_definition_multiline_text(&item.description, 2_048)
+                && item.aliases.len() <= 32
+                && item
+                    .aliases
+                    .iter()
+                    .all(|alias| safe_definition_text(alias, 64));
+            if !presentation_valid
+                || item.weight_grams > 1_000_000
                 || item.slot_cost == 0
                 || item.slot_cost > 1_000
                 || item.item_level == 0
                 || item.item_level > 1_000
                 || item.transfer_policy != ItemTransferPolicy::Transferable
+                || !stack_valid
+                || !container_valid
             {
                 return Err(WorldBuildError::InvalidItemPrototype(item.prototype_id));
             }
@@ -2767,6 +3140,8 @@ impl World {
                     rarity: item.rarity,
                     item_level: item.item_level,
                     stack_policy: item.stack_policy,
+                    max_stack_units: item.max_stack_units,
+                    container: item.container,
                     transfer_policy: item.transfer_policy,
                 },
             );
@@ -2845,6 +3220,9 @@ impl World {
                     SharedItemLocation::Room(room_id)
                 }
                 InitialItemLocation::NpcSpawn(npc_id) => SharedItemLocation::HeldByNpc(npc_id),
+                InitialItemLocation::Container(container_id) => {
+                    SharedItemLocation::Contained(container_id)
+                }
                 InitialItemLocation::Staged => SharedItemLocation::Staged,
             };
             item_instances.insert(
@@ -2857,6 +3235,11 @@ impl World {
         }
         if item_instances.len() > MAX_ITEM_INSTANCES {
             return Err(WorldBuildError::TooManyItemInstances);
+        }
+        if validate_item_graph(&item_instances, &item_prototypes).is_err() {
+            return Err(WorldBuildError::InvalidItemPrototype(
+                "container graph".into(),
+            ));
         }
         let mut staged = std::collections::HashSet::new();
         for item_id in staged_item_ids {
@@ -2946,6 +3329,8 @@ impl World {
                 rarity: ItemRarity::Common,
                 item_level: 1,
                 stack_policy: ItemStackPolicy::Unique,
+                max_stack_units: 1,
+                container: None,
                 transfer_policy: ItemTransferPolicy::Transferable,
             }],
             initial_item_instances: vec![InitialItemInstanceDefinition {
@@ -3181,7 +3566,6 @@ impl World {
             .item_prototypes
             .get(&instance.prototype_id)
             .ok_or(WorldError::InvalidEntity)?;
-        debug_assert_eq!(prototype.stack_policy, ItemStackPolicy::Unique);
         debug_assert!(matches!(
             prototype.transfer_policy,
             ItemTransferPolicy::Transferable
@@ -3276,6 +3660,11 @@ impl World {
                         SharedItemLocation::HeldByNpc(npc_id) => RuntimeItemLocation::HeldByNpc {
                             npc_id: npc_id.clone(),
                         },
+                        SharedItemLocation::Contained(container_id) => {
+                            RuntimeItemLocation::Contained {
+                                container_id: container_id.clone(),
+                            }
+                        }
                         SharedItemLocation::Consumed => RuntimeItemLocation::Consumed,
                     };
                     (
@@ -3542,6 +3931,9 @@ impl World {
                     }
                     SharedItemLocation::HeldByNpc(npc_id.clone())
                 }
+                RuntimeItemLocation::Contained { container_id } => {
+                    SharedItemLocation::Contained(container_id.clone())
+                }
                 RuntimeItemLocation::Consumed => SharedItemLocation::Consumed,
             };
             item_instances.insert(
@@ -3553,19 +3945,22 @@ impl World {
             );
         }
 
-        if npcs.values().any(|npc| {
-            npc.loot_item_ids
-                .iter()
-                .any(|item_id| !item_instances.contains_key(item_id))
-        }) || item_instances.iter().any(|(item_id, instance)| {
-            matches!(
-                &instance.location,
-                SharedItemLocation::HeldByNpc(owner)
-                    if npcs
-                        .get(owner)
-                        .is_none_or(|npc| !npc.loot_item_ids.contains(item_id))
-            )
-        }) {
+        if validate_item_graph(&item_instances, &self.item_prototypes).is_err()
+            || npcs.values().any(|npc| {
+                npc.loot_item_ids
+                    .iter()
+                    .any(|item_id| !item_instances.contains_key(item_id))
+            })
+            || item_instances.iter().any(|(item_id, instance)| {
+                matches!(
+                    &instance.location,
+                    SharedItemLocation::HeldByNpc(owner)
+                        if npcs
+                            .get(owner)
+                            .is_none_or(|npc| !npc.loot_item_ids.contains(item_id))
+                )
+            })
+        {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
 
@@ -3769,15 +4164,18 @@ impl World {
             .item_prototype_for(&item_id)
             .map_err(|_| WorldError::ItemNotFound(item_id.0.clone()))?;
         let item_name = item.name.clone();
-        let slot_cost = item.slot_cost;
-        let weight_grams = item.weight_grams;
         match self.item_location(&item_id) {
             Some(SharedItemLocation::Carried(owner)) if *owner == actor_id => return Ok(None),
             Some(SharedItemLocation::Room(owner_room)) if owner_room == &room_id => {}
             _ => return Err(WorldError::GameplayUnavailable),
         }
-        self.ensure_inventory_capacity_for(actor_id, slot_cost, weight_grams)?;
-        self.set_item_location(&item_id, SharedItemLocation::Carried(actor_id))?;
+        let mut prospective = self.item_instances.clone();
+        prospective
+            .get_mut(&item_id)
+            .ok_or(WorldError::InvalidEntity)?
+            .location = SharedItemLocation::Carried(actor_id);
+        self.validate_prospective_item_locations(&prospective, [actor_id])?;
+        self.item_instances = prospective;
         self.revision = self.revision.wrapping_add(1).max(1);
         let event = DomainEvent::ItemTaken {
             actor_id,
@@ -4034,16 +4432,31 @@ impl World {
 
     pub fn runtime_item_owner_ids(&self) -> BTreeSet<CharacterId> {
         self.item_instances
-            .values()
-            .filter_map(|instance| match &instance.location {
+            .keys()
+            .filter_map(|item_id| self.item_root_owner(item_id).ok().flatten())
+            .collect()
+    }
+
+    fn item_root_owner(&self, item_id: &ItemInstanceId) -> Result<Option<CharacterId>, WorldError> {
+        let mut current = item_id;
+        for _ in 0..=MAX_CONTAINER_DEPTH {
+            let instance = self
+                .item_instances
+                .get(current)
+                .ok_or(WorldError::InvalidEntity)?;
+            match &instance.location {
                 SharedItemLocation::Carried(character_id)
-                | SharedItemLocation::Equipped(character_id, _) => Some(*character_id),
+                | SharedItemLocation::Equipped(character_id, _) => {
+                    return Ok(Some(*character_id));
+                }
+                SharedItemLocation::Contained(parent) => current = parent,
                 SharedItemLocation::Staged
                 | SharedItemLocation::Room(_)
                 | SharedItemLocation::HeldByNpc(_)
-                | SharedItemLocation::Consumed => None,
-            })
-            .collect()
+                | SharedItemLocation::Consumed => return Ok(None),
+            }
+        }
+        Err(WorldError::InvalidEntity)
     }
 
     pub fn configure_item_gameplay(
@@ -5103,6 +5516,61 @@ impl World {
                 self.revision = self.revision.wrapping_add(1).max(1);
                 Ok(())
             }
+            DomainEvent::ItemsMoved {
+                actor_id,
+                item_ids,
+                container_id,
+                operation,
+                room_id,
+                ..
+            } => {
+                self.validate_items_moved_event(event)?;
+                let mut prospective = self.item_instances.clone();
+                for item_id in item_ids {
+                    let expected = match operation {
+                        ContainerMoveOperation::Take => SharedItemLocation::Room(room_id.clone()),
+                        ContainerMoveOperation::Drop | ContainerMoveOperation::Put => {
+                            SharedItemLocation::Carried(*actor_id)
+                        }
+                        ContainerMoveOperation::Get => SharedItemLocation::Contained(
+                            container_id
+                                .clone()
+                                .ok_or(WorldError::InvalidDomainTransition)?,
+                        ),
+                    };
+                    let destination = match operation {
+                        ContainerMoveOperation::Take | ContainerMoveOperation::Get => {
+                            SharedItemLocation::Carried(*actor_id)
+                        }
+                        ContainerMoveOperation::Drop => SharedItemLocation::Room(room_id.clone()),
+                        ContainerMoveOperation::Put => SharedItemLocation::Contained(
+                            container_id
+                                .clone()
+                                .ok_or(WorldError::InvalidDomainTransition)?,
+                        ),
+                    };
+                    let instance = prospective
+                        .get_mut(item_id)
+                        .ok_or(WorldError::InvalidDomainTransition)?;
+                    if instance.location != expected {
+                        return Err(WorldError::InvalidDomainTransition);
+                    }
+                    instance.location = destination;
+                }
+                // A cold event replay deliberately supports an offline owner:
+                // the durable character aggregate is loaded and checked by
+                // the startup ownership barrier. When the aggregate is
+                // already present, retain the stronger immediate capacity
+                // check as well.
+                if self.character_gameplay.contains_key(actor_id) {
+                    self.validate_prospective_item_locations(&prospective, [*actor_id])?;
+                } else {
+                    validate_item_graph(&prospective, &self.item_prototypes)?;
+                }
+                self.item_instances = prospective;
+                self.revision = self.revision.wrapping_add(1).max(1);
+                Ok(())
+            }
         }
     }
 
@@ -5111,6 +5579,7 @@ impl World {
     pub fn rollback_domain_events(&mut self, events: &[DomainEvent]) -> Result<(), WorldError> {
         let mut restored = self.item_instances.clone();
         let mut item_event_count = 0_u64;
+        let mut affected_characters = BTreeSet::new();
         for event in events.iter().rev() {
             match event {
                 DomainEvent::CharacterMoved { .. }
@@ -5136,6 +5605,7 @@ impl World {
                         .get_mut(item_id)
                         .expect("validated item exists")
                         .location = SharedItemLocation::Room(room_id.clone());
+                    affected_characters.insert(*actor_id);
                     item_event_count += 1;
                 }
                 DomainEvent::ItemDropped {
@@ -5157,9 +5627,63 @@ impl World {
                         .get_mut(item_id)
                         .expect("validated item exists")
                         .location = SharedItemLocation::Carried(*actor_id);
+                    affected_characters.insert(*actor_id);
+                    item_event_count += 1;
+                }
+                DomainEvent::ItemsMoved {
+                    actor_id,
+                    item_ids,
+                    container_id,
+                    operation,
+                    room_id,
+                    ..
+                } => {
+                    self.validate_items_moved_event(event)?;
+                    for item_id in item_ids {
+                        let expected = match operation {
+                            ContainerMoveOperation::Take | ContainerMoveOperation::Get => {
+                                SharedItemLocation::Carried(*actor_id)
+                            }
+                            ContainerMoveOperation::Drop => {
+                                SharedItemLocation::Room(room_id.clone())
+                            }
+                            ContainerMoveOperation::Put => SharedItemLocation::Contained(
+                                container_id
+                                    .clone()
+                                    .ok_or(WorldError::InvalidDomainTransition)?,
+                            ),
+                        };
+                        let destination = match operation {
+                            ContainerMoveOperation::Take => {
+                                SharedItemLocation::Room(room_id.clone())
+                            }
+                            ContainerMoveOperation::Drop | ContainerMoveOperation::Put => {
+                                SharedItemLocation::Carried(*actor_id)
+                            }
+                            ContainerMoveOperation::Get => SharedItemLocation::Contained(
+                                container_id
+                                    .clone()
+                                    .ok_or(WorldError::InvalidDomainTransition)?,
+                            ),
+                        };
+                        let instance = restored
+                            .get_mut(item_id)
+                            .ok_or(WorldError::InvalidDomainTransition)?;
+                        if instance.location != expected {
+                            return Err(WorldError::InvalidDomainTransition);
+                        }
+                        instance.location = destination;
+                    }
+                    affected_characters.insert(*actor_id);
                     item_event_count += 1;
                 }
             }
+        }
+        if !affected_characters.is_empty() {
+            self.validate_prospective_item_locations(
+                &restored,
+                affected_characters.iter().copied(),
+            )?;
         }
         self.item_instances = restored;
         if item_event_count > 0 {
@@ -5406,6 +5930,7 @@ impl World {
             .insert(to_room_id);
         Ok(ActionOutcome {
             scene: self.scene_for(response_session)?,
+            container_contents: None,
             output: Some(output.to_owned()),
             changed_character: Some(self.character_snapshot(moving)?),
             domain_events: vec![event],
@@ -5456,6 +5981,7 @@ impl World {
         self.bump_view_revisions(&event)?;
         Ok(ActionOutcome {
             scene: self.scene_for(actor)?,
+            container_contents: None,
             output: Some("The target has been fully restored.\r\n".to_owned()),
             changed_character: Some(self.character_snapshot(target)?),
             domain_events: vec![event],
@@ -5512,6 +6038,7 @@ impl World {
                 PlayerAction::Look
                     | PlayerAction::Inventory
                     | PlayerAction::Examine(_)
+                    | PlayerAction::Contents { .. }
                     | PlayerAction::Party(_)
                     | PlayerAction::Quest(_)
                     | PlayerAction::Economy(EconomyAction::Balance)
@@ -5527,6 +6054,7 @@ impl World {
                 PlayerAction::Look
                     | PlayerAction::Inventory
                     | PlayerAction::Examine(_)
+                    | PlayerAction::Contents { .. }
                     | PlayerAction::Weather
                     | PlayerAction::Time
             )
@@ -5536,12 +6064,14 @@ impl World {
         match action {
             PlayerAction::Look => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
+                container_contents: None,
                 output: None,
                 changed_character: None,
                 domain_events: Vec::new(),
             }),
             PlayerAction::Inventory => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
+                container_contents: None,
                 output: Some(self.inventory_as_plain_text(session)?),
                 changed_character: None,
                 domain_events: Vec::new(),
@@ -5552,13 +6082,25 @@ impl World {
                 let item = self.item_prototype_for(&item_id)?;
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
+                    container_contents: None,
                     output: Some(format!("{}\r\n", item.description)),
                     changed_character: None,
                     domain_events: Vec::new(),
                 })
             }
-            PlayerAction::Take(query) => self.move_item(session, &query, true),
-            PlayerAction::Drop(query) => self.move_item(session, &query, false),
+            PlayerAction::Take(selection) => self.move_item(session, &selection, true),
+            PlayerAction::Drop(selection) => self.move_item(session, &selection, false),
+            PlayerAction::Contents { container, page } => {
+                self.inspect_container(session, &container, page)
+            }
+            PlayerAction::Put {
+                selection,
+                container,
+            } => self.move_item_to_container(session, &selection, &container, true),
+            PlayerAction::Get {
+                selection,
+                container,
+            } => self.move_item_to_container(session, &selection, &container, false),
             PlayerAction::Attack(query) => self.start_combat(session, &query),
             PlayerAction::Ability { ability_id, target } => {
                 self.use_ability(session, &ability_id, target.as_deref())
@@ -5575,6 +6117,7 @@ impl World {
             PlayerAction::Economy(action) => self.apply_economy(session, action),
             PlayerAction::Weather => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
+                container_contents: None,
                 output: Some(format!(
                     "The weather is {}.\r\n",
                     weather_label(self.adventure.weather)
@@ -5584,6 +6127,7 @@ impl World {
             }),
             PlayerAction::Time => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
+                container_contents: None,
                 output: Some(format!(
                     "It is hour {} of day {} (world tick {}).\r\n",
                     self.logical_tick % 24,
@@ -5638,6 +6182,7 @@ impl World {
                     .insert(to_room_id);
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
+                    container_contents: None,
                     output: None,
                     changed_character: Some(self.character_snapshot(session)?),
                     domain_events: vec![event],
@@ -5650,6 +6195,7 @@ impl World {
         let current_room = room_checked(&self.entities, self.character(session)?.location)?;
         let observer = self.observer(session)?;
         let visual_scene = self.can_receive_visual_scene(session)?;
+        let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
         let mut exits = Vec::new();
         for (direction, destination) in &current_room.exits {
             if !self.exit_visible_to(session, &current_room.stable_id, *direction)? {
@@ -5662,7 +6208,7 @@ impl World {
                 command: direction.as_str().to_owned(),
             });
         }
-        let mut items = self
+        let visible_item_ids = self
             .item_instances
             .iter()
             .filter_map(|(item_id, instance)| match &instance.location {
@@ -5674,6 +6220,7 @@ impl World {
                 | SharedItemLocation::Room(_)
                 | SharedItemLocation::Equipped(_, _)
                 | SharedItemLocation::HeldByNpc(_)
+                | SharedItemLocation::Contained(_)
                 | SharedItemLocation::Consumed => None,
             })
             .map(|item_id| {
@@ -5683,30 +6230,75 @@ impl World {
             .collect::<Result<Vec<_>, WorldError>>()?
             .into_iter()
             .flatten()
-            .map(|item_id| {
-                let item = self.item_prototype_for(item_id)?;
-                let view_item_id = opaque_id(observer.salt, "item", item_id.as_str());
-                Ok(SceneItem {
-                    id: view_item_id.clone(),
-                    label: item.name.clone(),
-                    description: item.description.clone(),
-                    rarity: item.rarity.as_str().into(),
-                    item_level: item.item_level,
-                    weight_grams: item.weight_grams,
-                    actions: vec![
-                        SceneAction {
-                            label: "Examine".into(),
-                            command: format!("examine {view_item_id}"),
-                        },
-                        SceneAction {
-                            label: "Take".into(),
-                            command: format!("take {view_item_id}"),
-                        },
-                    ],
-                })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut items = derive_stack_groups(
+            &self.item_instances,
+            &self.item_prototypes,
+            visible_item_ids.iter(),
+        )?
+        .into_iter()
+        .map(|group| {
+            let item = self
+                .item_prototypes
+                .get(&group.prototype_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            let selector = group.members.first().ok_or(WorldError::InvalidEntity)?;
+            let view_item_id = opaque_id(observer.salt, "item", selector.as_str());
+            let quantity =
+                u16::try_from(group.members.len()).map_err(|_| WorldError::InvalidEntity)?;
+            let total_weight_grams = group.members.iter().try_fold(0_u64, |total, item_id| {
+                total
+                    .checked_add(item_graph.subtree_weight(item_id)?)
+                    .ok_or(WorldError::InvalidEntity)
+            })?;
+            let mut actions = vec![
+                SceneAction {
+                    label: "Examine".into(),
+                    command: format!("examine {view_item_id}"),
+                },
+                SceneAction {
+                    label: "Take".into(),
+                    command: format!("take {view_item_id}"),
+                },
+            ];
+            if item.container.is_some() {
+                actions.push(SceneAction {
+                    label: "Contents".into(),
+                    command: format!("contents {view_item_id}"),
+                });
+            }
+            Ok(SceneItem {
+                id: view_item_id.clone(),
+                label: item.name.clone(),
+                description: item.description.clone(),
+                rarity: item.rarity.as_str().into(),
+                item_level: item.item_level,
+                weight_grams: item.weight_grams,
+                quantity,
+                stack_slots: stack_slots(item, group.members.len())?,
+                total_weight_grams,
+                container_capacity: item
+                    .container
+                    .as_ref()
+                    .map(|_| {
+                        container_usage(
+                            selector,
+                            &self.item_instances,
+                            &self.item_prototypes,
+                            &item_graph,
+                        )
+                    })
+                    .transpose()?,
+                actions,
             })
-            .collect::<Result<Vec<_>, WorldError>>()?;
-        items.sort_by(|left, right| left.label.cmp(&right.label));
+        })
+        .collect::<Result<Vec<_>, WorldError>>()?;
+        items.sort_by(|left, right| {
+            left.label
+                .cmp(&right.label)
+                .then_with(|| left.id.cmp(&right.id))
+        });
         let npcs = self
             .npcs
             .values()
@@ -5775,32 +6367,39 @@ impl World {
     ) -> Result<VisibleSceneEntityIds, WorldError> {
         let current_room = room_checked(&self.entities, self.character(session)?.location)?;
         let observer = self.observer(session)?;
-        let mut items = self
+        let visible_ids = self
             .item_instances
             .iter()
             .filter_map(|(stable_id, instance)| {
                 matches!(&instance.location, SharedItemLocation::Room(room_id) if room_id == &current_room.stable_id)
                     .then_some(stable_id)
             })
-            .map(|stable_id| {
-                self.item_visible_to(session, stable_id, &current_room.stable_id)
-                    .map(|visible| {
-                        visible.then(|| VisibleSceneEntityId {
-                            stable_id: stable_id.0.clone(),
-                            prototype_id: self
-                                .item_instances
-                                .get(stable_id)
-                                .expect("visible instance exists")
-                                .prototype_id
-                                .clone(),
-                            opaque_id: opaque_id(observer.salt, "item", stable_id.as_str()),
-                        })
-                    })
+            .map(|item_id| {
+                self.item_visible_to(session, item_id, &current_room.stable_id)
+                    .map(|visible| visible.then_some(item_id.clone()))
             })
             .collect::<Result<Vec<_>, WorldError>>()?
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+        let mut items = derive_stack_groups(
+            &self.item_instances,
+            &self.item_prototypes,
+            visible_ids.iter(),
+        )?
+        .into_iter()
+        .map(|group| {
+            let first = group
+                .members
+                .first()
+                .expect("derived stack groups are non-empty");
+            VisibleSceneEntityId {
+                stable_id: first.0.clone(),
+                prototype_id: group.prototype_id,
+                opaque_id: opaque_id(observer.salt, "item", first.as_str()),
+            }
+        })
+        .collect::<Vec<_>>();
         let mut npcs = self
             .npcs
             .values()
@@ -5844,25 +6443,7 @@ impl World {
     }
 
     fn inventory_totals(&self, character_id: CharacterId) -> Result<(u32, u64), WorldError> {
-        let mut used_slots = 0_u32;
-        let mut used_weight_grams = 0_u64;
-        for (instance_id, instance) in &self.item_instances {
-            let carried = matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character_id);
-            let equipped = matches!(&instance.location, SharedItemLocation::Equipped(owner, _) if *owner == character_id);
-            if !carried && !equipped {
-                continue;
-            }
-            let prototype = self.item_prototype_for(instance_id)?;
-            if carried {
-                used_slots = used_slots
-                    .checked_add(u32::from(prototype.slot_cost))
-                    .ok_or(WorldError::InvalidEntity)?;
-            }
-            used_weight_grams = used_weight_grams
-                .checked_add(u64::from(prototype.weight_grams))
-                .ok_or(WorldError::InvalidEntity)?;
-        }
-        Ok((used_slots, used_weight_grams))
+        character_inventory_totals(character_id, &self.item_instances, &self.item_prototypes)
     }
 
     fn inventory_usage_for_capacity(
@@ -5877,21 +6458,30 @@ impl World {
         )
     }
 
-    fn ensure_inventory_capacity_for(
+    fn validate_prospective_item_locations(
         &self,
-        character_id: CharacterId,
-        add_slots: u16,
-        add_weight_grams: u32,
+        instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+        character_ids: impl IntoIterator<Item = CharacterId>,
     ) -> Result<(), WorldError> {
-        let usage = self.inventory_usage(character_id)?;
-        let slots = u32::from(usage.used_slots)
-            .checked_add(u32::from(add_slots))
-            .ok_or(WorldError::InventoryCapacityExceeded)?;
-        let weight = u64::from(usage.used_weight_grams)
-            .checked_add(u64::from(add_weight_grams))
-            .ok_or(WorldError::InventoryCapacityExceeded)?;
-        if slots > u32::from(usage.max_slots) || weight > u64::from(usage.max_weight_grams) {
-            return Err(WorldError::InventoryCapacityExceeded);
+        let graph = build_item_graph_index(instances, &self.item_prototypes)?;
+        validate_container_capacities(instances, &self.item_prototypes, &graph)?;
+        for character_id in character_ids {
+            let capacity = &self
+                .character_gameplay
+                .get(&character_id)
+                .ok_or(WorldError::InvalidEntity)?
+                .inventory_capacity;
+            let (slots, weight) = character_inventory_totals_with_graph(
+                character_id,
+                instances,
+                &self.item_prototypes,
+                &graph,
+            )?;
+            if slots > u32::from(capacity.max_slots)
+                || weight > u64::from(capacity.max_weight_grams)
+            {
+                return Err(WorldError::InventoryCapacityExceeded);
+            }
         }
         Ok(())
     }
@@ -5899,27 +6489,61 @@ impl World {
     pub fn inventory_as_plain_text(&self, session: SessionId) -> Result<String, WorldError> {
         let character = self.character(session)?;
         let observer_salt = self.observer(session)?.salt;
-        let mut item_rows = self
+        let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        let carried_ids = self
             .item_instances
             .iter()
             .filter_map(|(item_id, instance)| {
                 matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
                     .then_some(item_id)
             })
-            .map(|item_id| {
-                self.item_prototype_for(item_id).map(|item| {
-                    (
-                        item.name.as_str(),
-                        item.rarity,
-                        item.item_level,
-                        item.weight_grams,
-                        opaque_id(observer_salt, "item", item_id.as_str()),
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut item_rows = derive_stack_groups(
+            &self.item_instances,
+            &self.item_prototypes,
+            carried_ids.iter(),
+        )?
+        .into_iter()
+        .map(|group| {
+            let item = self
+                .item_prototypes
+                .get(&group.prototype_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            let first = group.members.first().ok_or(WorldError::InvalidEntity)?;
+            let total_weight = group.members.iter().try_fold(0_u64, |total, item_id| {
+                total
+                    .checked_add(item_graph.subtree_weight(item_id)?)
+                    .ok_or(WorldError::InvalidEntity)
+            })?;
+            let container_capacity = item
+                .container
+                .as_ref()
+                .map(|_| {
+                    container_usage(
+                        first,
+                        &self.item_instances,
+                        &self.item_prototypes,
+                        &item_graph,
                     )
                 })
-            })
-            .collect::<Result<Vec<_>, WorldError>>()?;
-        item_rows
-            .sort_unstable_by(|left, right| left.0.cmp(right.0).then_with(|| left.4.cmp(&right.4)));
+                .transpose()?;
+            Ok((
+                item.name.clone(),
+                item.rarity,
+                item.item_level,
+                item.weight_grams,
+                group.members.len(),
+                stack_slots(item, group.members.len())?,
+                total_weight,
+                opaque_id(observer_salt, "item", first.as_str()),
+                container_capacity,
+            ))
+        })
+        .collect::<Result<Vec<_>, WorldError>>()?;
+        item_rows.sort_unstable_by(|left, right| {
+            left.0.cmp(&right.0).then_with(|| left.7.cmp(&right.7))
+        });
         let gameplay = self
             .character_gameplay
             .get(&character.id)
@@ -5939,9 +6563,34 @@ impl World {
         }
         if !item_rows.is_empty() {
             output.push_str("You are carrying:\r\n");
-            for (name, rarity, level, weight, reference) in item_rows {
+            for (
+                name,
+                rarity,
+                level,
+                unit_weight,
+                quantity,
+                slots,
+                total_weight,
+                reference,
+                container_capacity,
+            ) in item_rows
+            {
+                let stack_slots = if slots == 1 {
+                    "stack slot"
+                } else {
+                    "stack slots"
+                };
+                let container = container_capacity.map_or_else(String::new, |capacity| {
+                    format!(
+                        "; container {}/{} slots; {}/{} g",
+                        capacity.used_slots,
+                        capacity.max_slots,
+                        capacity.used_weight_grams,
+                        capacity.max_weight_grams,
+                    )
+                });
                 output.push_str(&format!(
-                    "- {name} [{}; level {level}; {weight} g; ref {reference}]\r\n",
+                    "- {quantity} × {name} [{}; level {level}; {unit_weight} g each; {slots} {stack_slots}; {total_weight} g total{container}; ref {reference}]\r\n",
                     rarity.as_str()
                 ));
             }
@@ -5950,8 +6599,36 @@ impl World {
             output.push_str("Equipped:\r\n");
             for (slot, item_id) in &gameplay.equipment {
                 let item = self.item_prototype_for(item_id)?;
+                let total_weight = item_graph.subtree_weight(item_id)?;
+                let slots = stack_slots(item, 1)?;
+                let stack_slots = if slots == 1 {
+                    "stack slot"
+                } else {
+                    "stack slots"
+                };
+                let container = item
+                    .container
+                    .as_ref()
+                    .map(|_| {
+                        container_usage(
+                            item_id,
+                            &self.item_instances,
+                            &self.item_prototypes,
+                            &item_graph,
+                        )
+                    })
+                    .transpose()?
+                    .map_or_else(String::new, |capacity| {
+                        format!(
+                            "; container {}/{} slots; {}/{} g",
+                            capacity.used_slots,
+                            capacity.max_slots,
+                            capacity.used_weight_grams,
+                            capacity.max_weight_grams,
+                        )
+                    });
                 output.push_str(&format!(
-                    "- {}: {} [{}; level {}; {} g; ref {}]\r\n",
+                    "- {}: 1 × {} [{}; level {}; {} g each; {slots} {stack_slots}; {total_weight} g total{container}; ref {}]\r\n",
                     slot.as_str(),
                     item.name,
                     item.rarity.as_str(),
@@ -6253,6 +6930,7 @@ impl World {
                 };
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
+                    container_contents: None,
                     output: Some(output),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -6276,6 +6954,7 @@ impl World {
         match action {
             QuestAction::List => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
+                container_contents: None,
                 output: Some("Available quest: first-hunt — defeat one hostile creature; reward 25 coin and 50 experience.\r\n".into()),
                 changed_character: None,
                 domain_events: Vec::new(),
@@ -6294,6 +6973,7 @@ impl World {
                 };
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
+                    container_contents: None,
                     output: Some(output),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -6403,6 +7083,7 @@ impl World {
                     .coins;
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
+                    container_contents: None,
                     output: Some(format!("You have {coins} coin.\r\n")),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -6421,6 +7102,7 @@ impl World {
                     .collect::<String>();
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
+                    container_contents: None,
                     output: Some(format!("Lantern Market:\r\n{output}")),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -6514,6 +7196,7 @@ impl World {
         self.bump_view_revisions(&event)?;
         Ok(ActionOutcome {
             scene: self.scene_for(session)?,
+            container_contents: None,
             output: Some(output),
             changed_character: None,
             domain_events: vec![event],
@@ -7049,38 +7732,38 @@ impl World {
             .equipment
             .get(&slot)
             .cloned();
+        let mut prospective = self.item_instances.clone();
+        prospective
+            .get_mut(&item_id)
+            .ok_or(WorldError::InvalidEntity)?
+            .location = SharedItemLocation::Equipped(character_id, slot);
         if let Some(previous_item_id) = &previous_item_id {
-            let usage = self.inventory_usage(character_id)?;
-            let incoming = self.item_prototype_for(&item_id)?;
-            let outgoing = self.item_prototype_for(previous_item_id)?;
-            let resulting_slots = u32::from(usage.used_slots)
-                .saturating_sub(u32::from(incoming.slot_cost))
-                .checked_add(u32::from(outgoing.slot_cost))
-                .ok_or(WorldError::InventoryCapacityExceeded)?;
-            if resulting_slots > u32::from(usage.max_slots) {
-                return Err(WorldError::InventoryCapacityExceeded);
-            }
+            prospective
+                .get_mut(previous_item_id)
+                .ok_or(WorldError::InvalidEntity)?
+                .location = SharedItemLocation::Carried(character_id);
         }
-        let state = self
-            .character_gameplay
-            .get_mut(&character_id)
-            .ok_or(WorldError::InvalidEntity)?;
+        self.validate_prospective_item_locations(&prospective, [character_id])?;
         let mut events = Vec::new();
-        if let Some(previous_item_id) = state.equipment.insert(slot, item_id.clone()) {
-            self.set_item_location(&previous_item_id, SharedItemLocation::Carried(character_id))?;
-            let previous_name = self.item_prototype_for(&previous_item_id)?.name.clone();
+        if let Some(previous_item_id) = &previous_item_id {
+            let previous_name = self.item_prototype_for(previous_item_id)?.name.clone();
             events.push(DomainEvent::Gameplay {
                 event: GameplayEvent::ItemUnequipped {
                     character_id,
                     character_name: character_name.clone(),
-                    item_id: previous_item_id,
+                    item_id: previous_item_id.clone(),
                     item_name: previous_name,
                     slot,
                     room_id: room_id.clone(),
                 },
             });
         }
-        self.set_item_location(&item_id, SharedItemLocation::Equipped(character_id, slot))?;
+        self.character_gameplay
+            .get_mut(&character_id)
+            .ok_or(WorldError::InvalidEntity)?
+            .equipment
+            .insert(slot, item_id.clone());
+        self.item_instances = prospective;
         events.push(DomainEvent::Gameplay {
             event: GameplayEvent::ItemEquipped {
                 character_id,
@@ -7115,17 +7798,22 @@ impl World {
             .get(&slot)
             .cloned()
             .ok_or(WorldError::EquipmentSlotEmpty)?;
-        let (item_name, slot_cost) = {
+        let item_name = {
             let item = self.item_prototype_for(&item_id)?;
-            (item.name.clone(), item.slot_cost)
+            item.name.clone()
         };
-        self.ensure_inventory_capacity_for(character_id, slot_cost, 0)?;
+        let mut prospective = self.item_instances.clone();
+        prospective
+            .get_mut(&item_id)
+            .ok_or(WorldError::InvalidEntity)?
+            .location = SharedItemLocation::Carried(character_id);
+        self.validate_prospective_item_locations(&prospective, [character_id])?;
         self.character_gameplay
             .get_mut(&character_id)
             .ok_or(WorldError::InvalidEntity)?
             .equipment
             .remove(&slot);
-        self.set_item_location(&item_id, SharedItemLocation::Carried(character_id))?;
+        self.item_instances = prospective;
         let event = DomainEvent::Gameplay {
             event: GameplayEvent::ItemUnequipped {
                 character_id,
@@ -7155,6 +7843,7 @@ impl World {
         }
         Ok(ActionOutcome {
             scene: self.scene_for(session)?,
+            container_contents: None,
             output: Some(output),
             changed_character: None,
             domain_events: events,
@@ -7334,7 +8023,7 @@ impl World {
     fn move_item(
         &mut self,
         session: SessionId,
-        query: &str,
+        selection: &ItemSelection,
         take: bool,
     ) -> Result<ActionOutcome, WorldError> {
         let scope = if take {
@@ -7342,51 +8031,488 @@ impl World {
         } else {
             ItemScope::Carried
         };
-        let item_id = self.resolve_accessible_item(session, query, scope)?;
-        let item = self.item_prototype_for(&item_id)?;
+        let candidates = self.item_candidates(session, scope, None)?;
+        let item_ids = self.resolve_item_selection(session, selection, candidates)?;
+        let first_item_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
+        let item = self.item_prototype_for(first_item_id)?;
         let item_name = item.name.clone();
-        let slot_cost = item.slot_cost;
-        let weight_grams = item.weight_grams;
         let room_id = room_checked(&self.entities, self.character(session)?.location)?
             .stable_id
             .clone();
         let character = self.character(session)?;
         let actor_id = character.id;
         let actor_name = character.name.clone();
-        if take {
-            self.ensure_inventory_capacity_for(actor_id, slot_cost, weight_grams)?;
-        }
         let destination = if take {
             SharedItemLocation::Carried(actor_id)
         } else {
             SharedItemLocation::Room(room_id.clone())
         };
-        self.set_item_location(&item_id, destination)?;
+        let mut prospective = self.item_instances.clone();
+        for item_id in &item_ids {
+            prospective
+                .get_mut(item_id)
+                .ok_or(WorldError::InvalidEntity)?
+                .location = destination.clone();
+        }
+        self.validate_prospective_item_locations(&prospective, [actor_id])?;
+        self.item_instances = prospective;
         self.revision = self.revision.wrapping_add(1).max(1);
-        let event = if take {
-            DomainEvent::ItemTaken {
-                actor_id,
-                actor_name,
-                item_id,
-                item_name: item_name.clone(),
-                room_id,
+        let event = if let [item_id] = item_ids.as_slice() {
+            if take {
+                DomainEvent::ItemTaken {
+                    actor_id,
+                    actor_name: actor_name.clone(),
+                    item_id: item_id.clone(),
+                    item_name: item_name.clone(),
+                    room_id: room_id.clone(),
+                }
+            } else {
+                DomainEvent::ItemDropped {
+                    actor_id,
+                    actor_name: actor_name.clone(),
+                    item_id: item_id.clone(),
+                    item_name: item_name.clone(),
+                    room_id: room_id.clone(),
+                }
             }
         } else {
-            DomainEvent::ItemDropped {
+            DomainEvent::ItemsMoved {
                 actor_id,
                 actor_name,
-                item_id,
+                item_ids,
                 item_name: item_name.clone(),
+                container_id: None,
+                operation: if take {
+                    ContainerMoveOperation::Take
+                } else {
+                    ContainerMoveOperation::Drop
+                },
                 room_id,
             }
+        };
+        let events = vec![event];
+        self.bump_view_revisions_for_events(&events)?;
+        Ok(ActionOutcome {
+            scene: self.scene_for(session)?,
+            container_contents: None,
+            output: Some(match (take, selection.quantity) {
+                (true, 1) => format!("You take the {item_name}.\r\n"),
+                (false, 1) => format!("You drop the {item_name}.\r\n"),
+                (true, quantity) => format!("You take {quantity} × {item_name}.\r\n"),
+                (false, quantity) => format!("You drop {quantity} × {item_name}.\r\n"),
+            }),
+            changed_character: None,
+            domain_events: events,
+        })
+    }
+
+    fn item_candidates(
+        &self,
+        session: SessionId,
+        scope: ItemScope,
+        direct_container: Option<&ItemInstanceId>,
+    ) -> Result<Vec<ItemInstanceId>, WorldError> {
+        let character = self.character(session)?;
+        let room_id = &room_checked(&self.entities, character.location)?.stable_id;
+        self.item_instances
+            .iter()
+            .map(|(item_id, instance)| {
+                let accessible = if let Some(container_id) = direct_container {
+                    matches!(&instance.location, SharedItemLocation::Contained(parent) if parent == container_id)
+                } else {
+                    match scope {
+                        ItemScope::Carried => {
+                            matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
+                        }
+                        ItemScope::CurrentRoom => {
+                            matches!(&instance.location, SharedItemLocation::Room(item_room) if item_room == room_id)
+                        }
+                        ItemScope::Accessible => {
+                            matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
+                                || matches!(&instance.location, SharedItemLocation::Room(item_room) if item_room == room_id)
+                        }
+                    }
+                };
+                let visible = match &instance.location {
+                    SharedItemLocation::Room(item_room) => {
+                        self.item_visible_to(session, item_id, item_room)?
+                    }
+                    SharedItemLocation::Carried(owner) => *owner == character.id,
+                    SharedItemLocation::Contained(parent) => direct_container == Some(parent),
+                    SharedItemLocation::Staged
+                    | SharedItemLocation::Equipped(_, _)
+                    | SharedItemLocation::HeldByNpc(_)
+                    | SharedItemLocation::Consumed => false,
+                };
+                Ok((accessible && visible).then_some(item_id.clone()))
+            })
+            .collect::<Result<Vec<_>, WorldError>>()
+            .map(|items| items.into_iter().flatten().collect())
+    }
+
+    fn resolve_item_selection(
+        &self,
+        session: SessionId,
+        selection: &ItemSelection,
+        mut candidates: Vec<ItemInstanceId>,
+    ) -> Result<Vec<ItemInstanceId>, WorldError> {
+        if selection.quantity == 0 || selection.quantity > MAX_ITEM_SELECTION_QUANTITY {
+            return Err(WorldError::GameplayUnavailable);
+        }
+        candidates.sort();
+        let observer_salt = self.observer(session)?.salt;
+        let query = selection.query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return Err(WorldError::ItemNotFound(query));
+        }
+
+        if let Some(exact_id) = candidates
+            .iter()
+            .find(|item_id| opaque_id(observer_salt, "item", item_id.as_str()) == query)
+        {
+            let instance = self
+                .item_instances
+                .get(exact_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            let prototype = self
+                .item_prototypes
+                .get(&instance.prototype_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            let eligible = if prototype.stack_policy == ItemStackPolicy::Fungible {
+                derive_stack_groups(
+                    &self.item_instances,
+                    &self.item_prototypes,
+                    candidates.iter().filter(|candidate| {
+                        self.item_instances
+                            .get(*candidate)
+                            .is_some_and(|candidate_instance| {
+                                candidate_instance.prototype_id == instance.prototype_id
+                            })
+                    }),
+                )?
+                .into_iter()
+                .find(|group| group.members.contains(exact_id))
+                .ok_or_else(|| WorldError::ItemNotFound(query.clone()))?
+                .members
+            } else {
+                vec![exact_id.clone()]
+            };
+            return take_selected_quantity(eligible, selection.quantity, &query);
+        }
+
+        let mut representatives = Vec::new();
+        let mut represented_fungible = BTreeSet::new();
+        for item_id in &candidates {
+            let instance = self
+                .item_instances
+                .get(item_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            let prototype = self
+                .item_prototypes
+                .get(&instance.prototype_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            if prototype.stack_policy == ItemStackPolicy::Unique
+                || represented_fungible.insert(instance.prototype_id.clone())
+            {
+                representatives.push(item_id);
+            }
+        }
+        let resolved = resolve_item_query(
+            &self.item_instances,
+            &self.item_prototypes,
+            representatives.into_iter(),
+            &query,
+            observer_salt,
+        )?;
+        let instance = self
+            .item_instances
+            .get(&resolved)
+            .ok_or(WorldError::InvalidEntity)?;
+        let prototype = self
+            .item_prototypes
+            .get(&instance.prototype_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        let eligible = if prototype.stack_policy == ItemStackPolicy::Fungible {
+            candidates
+                .into_iter()
+                .filter(|candidate| {
+                    self.item_instances
+                        .get(candidate)
+                        .is_some_and(|candidate_instance| {
+                            candidate_instance.prototype_id == instance.prototype_id
+                        })
+                })
+                .collect()
+        } else {
+            vec![resolved]
+        };
+        take_selected_quantity(eligible, selection.quantity, &query)
+    }
+
+    fn item_accessible_as_container(
+        &self,
+        session: SessionId,
+        item_id: &ItemInstanceId,
+    ) -> Result<bool, WorldError> {
+        let character = self.character(session)?;
+        let room_id = &room_checked(&self.entities, character.location)?.stable_id;
+        let mut current = item_id;
+        for _ in 0..=MAX_CONTAINER_DEPTH {
+            let instance = self
+                .item_instances
+                .get(current)
+                .ok_or(WorldError::InvalidEntity)?;
+            match &instance.location {
+                SharedItemLocation::Carried(owner) | SharedItemLocation::Equipped(owner, _) => {
+                    return Ok(*owner == character.id);
+                }
+                SharedItemLocation::Room(root_room) => {
+                    return Ok(root_room == room_id
+                        && self.item_visible_to(session, current, root_room)?);
+                }
+                SharedItemLocation::Contained(parent) => current = parent,
+                SharedItemLocation::Staged
+                | SharedItemLocation::HeldByNpc(_)
+                | SharedItemLocation::Consumed => return Ok(false),
+            }
+        }
+        Err(WorldError::InvalidEntity)
+    }
+
+    fn resolve_accessible_container(
+        &self,
+        session: SessionId,
+        query: &str,
+    ) -> Result<ItemInstanceId, WorldError> {
+        let candidates = self
+            .item_instances
+            .iter()
+            .map(|(item_id, instance)| {
+                let is_container = self
+                    .item_prototypes
+                    .get(&instance.prototype_id)
+                    .is_some_and(|prototype| prototype.container.is_some());
+                self.item_accessible_as_container(session, item_id)
+                    .map(|accessible| (is_container && accessible).then_some(item_id))
+            })
+            .collect::<Result<Vec<_>, WorldError>>()?;
+        resolve_item_query(
+            &self.item_instances,
+            &self.item_prototypes,
+            candidates.into_iter().flatten(),
+            query,
+            self.observer(session)?.salt,
+        )
+    }
+
+    fn inspect_container(
+        &self,
+        session: SessionId,
+        query: &str,
+        page: u16,
+    ) -> Result<ActionOutcome, WorldError> {
+        if page == 0 {
+            return Err(WorldError::GameplayUnavailable);
+        }
+        let container_id = self.resolve_accessible_container(session, query)?;
+        let observer = self.observer(session)?;
+        let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        let selector = opaque_id(observer.salt, "item", container_id.as_str());
+        let direct_ids =
+            self.item_candidates(session, ItemScope::Accessible, Some(&container_id))?;
+        let groups = derive_stack_groups(
+            &self.item_instances,
+            &self.item_prototypes,
+            direct_ids.iter(),
+        )?;
+        let total_pages = groups.len().max(1).div_ceil(CONTAINER_PAGE_SIZE);
+        let page_index = usize::from(page.saturating_sub(1));
+        if page_index >= total_pages {
+            return Err(WorldError::GameplayUnavailable);
+        }
+        let start = page_index
+            .checked_mul(CONTAINER_PAGE_SIZE)
+            .ok_or(WorldError::GameplayUnavailable)?;
+        let items = groups
+            .into_iter()
+            .skip(start)
+            .take(CONTAINER_PAGE_SIZE)
+            .map(|group| {
+                let prototype = self
+                    .item_prototypes
+                    .get(&group.prototype_id)
+                    .ok_or(WorldError::InvalidEntity)?;
+                let first = group.members.first().ok_or(WorldError::InvalidEntity)?;
+                let item_selector = opaque_id(observer.salt, "item", first.as_str());
+                let total_weight_grams =
+                    group.members.iter().try_fold(0_u64, |total, item_id| {
+                        total
+                            .checked_add(item_graph.subtree_weight(item_id)?)
+                            .ok_or(WorldError::InvalidEntity)
+                    })?;
+                Ok(PlayerItemView {
+                    id: item_selector.clone(),
+                    label: prototype.name.clone(),
+                    description: prototype.description.clone(),
+                    rarity: prototype.rarity.as_str().into(),
+                    item_level: prototype.item_level,
+                    weight_grams: prototype.weight_grams,
+                    quantity: u16::try_from(group.members.len())
+                        .map_err(|_| WorldError::InvalidEntity)?,
+                    stack_slots: stack_slots(prototype, group.members.len())?,
+                    total_weight_grams,
+                    container_capacity: prototype
+                        .container
+                        .as_ref()
+                        .map(|_| {
+                            container_usage(
+                                first,
+                                &self.item_instances,
+                                &self.item_prototypes,
+                                &item_graph,
+                            )
+                        })
+                        .transpose()?,
+                    actions: vec![
+                        SceneAction {
+                            label: "Examine".into(),
+                            command: format!("examine {item_selector}"),
+                        },
+                        SceneAction {
+                            label: "Get".into(),
+                            command: format!("get {item_selector} from {selector}"),
+                        },
+                    ],
+                })
+            })
+            .collect::<Result<Vec<_>, WorldError>>()?;
+        let capacity = container_usage(
+            &container_id,
+            &self.item_instances,
+            &self.item_prototypes,
+            &item_graph,
+        )?;
+        let total_pages = u16::try_from(total_pages).map_err(|_| WorldError::InvalidEntity)?;
+        let mut output = format!(
+            "Container capacity: {}/{} slots; {}/{} g. Page {page}/{total_pages}.\r\n",
+            capacity.used_slots,
+            capacity.max_slots,
+            capacity.used_weight_grams,
+            capacity.max_weight_grams,
+        );
+        if items.is_empty() {
+            output.push_str("It is empty.\r\n");
+        } else {
+            for item in &items {
+                let stack_slots = if item.stack_slots == 1 {
+                    "stack slot"
+                } else {
+                    "stack slots"
+                };
+                let container =
+                    item.container_capacity
+                        .as_ref()
+                        .map_or_else(String::new, |capacity| {
+                            format!(
+                                "; container {}/{} slots; {}/{} g",
+                                capacity.used_slots,
+                                capacity.max_slots,
+                                capacity.used_weight_grams,
+                                capacity.max_weight_grams,
+                            )
+                        });
+                output.push_str(&format!(
+                    "- {} × {} [{}; level {}; {} g each; {} {stack_slots}; {} g total{container}; ref {}]\r\n",
+                    item.quantity,
+                    item.label,
+                    item.rarity,
+                    item.item_level,
+                    item.weight_grams,
+                    item.stack_slots,
+                    item.total_weight_grams,
+                    item.id,
+                ));
+            }
+        }
+        Ok(ActionOutcome {
+            scene: self.scene_for(session)?,
+            container_contents: Some(ContainerContentsView {
+                selector,
+                items,
+                page,
+                total_pages,
+                capacity,
+            }),
+            output: Some(output),
+            changed_character: None,
+            domain_events: Vec::new(),
+        })
+    }
+
+    fn move_item_to_container(
+        &mut self,
+        session: SessionId,
+        selection: &ItemSelection,
+        container_query: &str,
+        put: bool,
+    ) -> Result<ActionOutcome, WorldError> {
+        let container_id = self.resolve_accessible_container(session, container_query)?;
+        let candidates = if put {
+            self.item_candidates(session, ItemScope::Carried, None)?
+        } else {
+            self.item_candidates(session, ItemScope::Accessible, Some(&container_id))?
+        };
+        let item_ids = self.resolve_item_selection(session, selection, candidates)?;
+        let first_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
+        let item_name = self.item_prototype_for(first_id)?.name.clone();
+        let character = self.character(session)?;
+        let actor_id = character.id;
+        let actor_name = character.name.clone();
+        let room_id = room_checked(&self.entities, character.location)?
+            .stable_id
+            .clone();
+        let destination = if put {
+            SharedItemLocation::Contained(container_id.clone())
+        } else {
+            SharedItemLocation::Carried(actor_id)
+        };
+        let mut prospective = self.item_instances.clone();
+        for item_id in &item_ids {
+            prospective
+                .get_mut(item_id)
+                .ok_or(WorldError::InvalidEntity)?
+                .location = destination.clone();
+        }
+        self.validate_prospective_item_locations(&prospective, [actor_id])?;
+        self.item_instances = prospective;
+        self.revision = self.revision.wrapping_add(1).max(1);
+        let event = DomainEvent::ItemsMoved {
+            actor_id,
+            actor_name,
+            item_ids,
+            item_name: item_name.clone(),
+            container_id: Some(container_id),
+            operation: if put {
+                ContainerMoveOperation::Put
+            } else {
+                ContainerMoveOperation::Get
+            },
+            room_id,
         };
         self.bump_view_revisions(&event)?;
         Ok(ActionOutcome {
             scene: self.scene_for(session)?,
-            output: Some(if take {
-                format!("You take the {item_name}.\r\n")
+            container_contents: None,
+            output: Some(if put {
+                format!(
+                    "You put {} × {item_name} in the container.\r\n",
+                    selection.quantity
+                )
             } else {
-                format!("You drop the {item_name}.\r\n")
+                format!(
+                    "You get {} × {item_name} from the container.\r\n",
+                    selection.quantity
+                )
             }),
             changed_character: None,
             domain_events: vec![event],
@@ -7418,12 +8544,18 @@ impl World {
                     ItemScope::Accessible => {
                         matches!(location, SharedItemLocation::Carried(owner) if *owner == character.id)
                             || matches!(location, SharedItemLocation::Room(item_room) if item_room == room_id)
+                            || (matches!(location, SharedItemLocation::Contained(_))
+                                && self.item_accessible_as_container(session, item_id)?)
                     }
                 };
                 let visible = match location {
                     SharedItemLocation::Room(item_room) => self
                         .item_visible_to(session, item_id, item_room)?,
                     SharedItemLocation::Carried(owner) => *owner == character.id,
+                    SharedItemLocation::Contained(_) => {
+                        scope == ItemScope::Accessible
+                            && self.item_accessible_as_container(session, item_id)?
+                    }
                     SharedItemLocation::Staged
                     | SharedItemLocation::Equipped(_, _)
                     | SharedItemLocation::HeldByNpc(_)
@@ -7678,52 +8810,85 @@ impl World {
             .character_gameplay
             .get(&character.id)
             .ok_or(WorldError::InvalidEntity)?;
+        let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
 
-        let mut inventory = self
+        let carried_item_ids = self
             .item_instances
             .iter()
             .filter_map(|(item_id, instance)| {
                 matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
                     .then_some(item_id)
             })
-            .map(|item_id| {
-                let item = self.item_prototype_for(item_id)?;
-                let id = opaque_id(observer.salt, "item", item_id.as_str());
-                let mut actions = vec![
-                    SceneAction {
-                        label: "Examine".into(),
-                        command: format!("examine {id}"),
-                    },
-                    SceneAction {
-                        label: "Drop".into(),
-                        command: format!("drop {id}"),
-                    },
-                ];
-                {
-                    if item.heal_amount != 0 || item.effect.is_some() {
-                        actions.push(SceneAction {
-                            label: "Use".into(),
-                            command: format!("use {id}"),
-                        });
-                    }
-                    if item.equipment_slot.is_some() {
-                        actions.push(SceneAction {
-                            label: "Equip".into(),
-                            command: format!("equip {id}"),
-                        });
-                    }
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut inventory = derive_stack_groups(
+            &self.item_instances,
+            &self.item_prototypes,
+            carried_item_ids.iter(),
+        )?
+        .into_iter()
+        .map(|group| {
+            let item = self
+                .item_prototypes
+                .get(&group.prototype_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            let selector = group.members.first().ok_or(WorldError::InvalidEntity)?;
+            let id = opaque_id(observer.salt, "item", selector.as_str());
+            let mut actions = vec![
+                SceneAction {
+                    label: "Examine".into(),
+                    command: format!("examine {id}"),
+                },
+                SceneAction {
+                    label: "Drop".into(),
+                    command: format!("drop {id}"),
+                },
+            ];
+            {
+                if item.heal_amount != 0 || item.effect.is_some() {
+                    actions.push(SceneAction {
+                        label: "Use".into(),
+                        command: format!("use {id}"),
+                    });
                 }
-                Ok(PlayerItemView {
-                    id,
-                    label: item.name.clone(),
-                    description: item.description.clone(),
-                    rarity: item.rarity.as_str().into(),
-                    item_level: item.item_level,
-                    weight_grams: item.weight_grams,
-                    actions,
-                })
+                if item.equipment_slot.is_some() {
+                    actions.push(SceneAction {
+                        label: "Equip".into(),
+                        command: format!("equip {id}"),
+                    });
+                }
+            }
+            Ok(PlayerItemView {
+                id,
+                label: item.name.clone(),
+                description: item.description.clone(),
+                rarity: item.rarity.as_str().into(),
+                item_level: item.item_level,
+                weight_grams: item.weight_grams,
+                quantity: u16::try_from(group.members.len())
+                    .map_err(|_| WorldError::InvalidEntity)?,
+                stack_slots: stack_slots(item, group.members.len())?,
+                total_weight_grams: group.members.iter().try_fold(0_u64, |total, item_id| {
+                    total
+                        .checked_add(item_graph.subtree_weight(item_id)?)
+                        .ok_or(WorldError::InvalidEntity)
+                })?,
+                container_capacity: item
+                    .container
+                    .as_ref()
+                    .map(|_| {
+                        container_usage(
+                            selector,
+                            &self.item_instances,
+                            &self.item_prototypes,
+                            &item_graph,
+                        )
+                    })
+                    .transpose()?,
+                actions,
             })
-            .collect::<Result<Vec<_>, WorldError>>()?;
+        })
+        .collect::<Result<Vec<_>, WorldError>>()?;
         inventory.sort_by(|left, right| left.label.cmp(&right.label));
 
         let equipment = gameplay
@@ -7738,6 +8903,21 @@ impl World {
                     rarity: item.rarity.as_str().into(),
                     item_level: item.item_level,
                     weight_grams: item.weight_grams,
+                    quantity: 1,
+                    stack_slots: stack_slots(item, 1)?,
+                    total_weight_grams: item_graph.subtree_weight(item_id)?,
+                    container_capacity: item
+                        .container
+                        .as_ref()
+                        .map(|_| {
+                            container_usage(
+                                item_id,
+                                &self.item_instances,
+                                &self.item_prototypes,
+                                &item_graph,
+                            )
+                        })
+                        .transpose()?,
                     actions: vec![SceneAction {
                         label: "Unequip".into(),
                         command: format!("unequip {}", slot.as_str()),
@@ -8210,6 +9390,78 @@ impl World {
                     Some(opaque_id(observer.salt, "item", item_id.as_str())),
                 )
             }
+            DomainEvent::ItemsMoved {
+                actor_id,
+                actor_name,
+                item_ids,
+                item_name,
+                container_id,
+                operation,
+                room_id,
+            } => {
+                let visible_item_ids = self
+                    .perceived_moved_item_ids(session, *actor_id, item_ids, *operation, room_id)?;
+                let actor_is_viewer = viewer.id == *actor_id;
+                let quantity = if actor_is_viewer
+                    || matches!(
+                        operation,
+                        ContainerMoveOperation::Take | ContainerMoveOperation::Drop
+                    ) {
+                    visible_item_ids.len()
+                } else {
+                    // Putting/getting is observable room narration, like
+                    // equip/use, but another player never receives selectors
+                    // for the actor's private inventory or container.
+                    item_ids.len()
+                };
+                let text = match (viewer.id == *actor_id, operation) {
+                    (true, ContainerMoveOperation::Take) => {
+                        format!("You take {quantity} × {item_name}.")
+                    }
+                    (true, ContainerMoveOperation::Drop) => {
+                        format!("You drop {quantity} × {item_name}.")
+                    }
+                    (true, ContainerMoveOperation::Put) => {
+                        format!("You put {quantity} × {item_name} in the container.")
+                    }
+                    (true, ContainerMoveOperation::Get) => {
+                        format!("You get {quantity} × {item_name} from the container.")
+                    }
+                    (false, ContainerMoveOperation::Take) => {
+                        format!("{actor_name} takes {quantity} × {item_name}.")
+                    }
+                    (false, ContainerMoveOperation::Drop) => {
+                        format!("{actor_name} drops {quantity} × {item_name}.")
+                    }
+                    (false, ContainerMoveOperation::Put) => {
+                        format!("{actor_name} puts {quantity} × {item_name} in a container.")
+                    }
+                    (false, ContainerMoveOperation::Get) => {
+                        format!("{actor_name} gets {quantity} × {item_name} from a container.")
+                    }
+                };
+                (
+                    match operation {
+                        ContainerMoveOperation::Take => ViewEventKind::ItemTaken,
+                        ContainerMoveOperation::Drop => ViewEventKind::ItemDropped,
+                        ContainerMoveOperation::Put | ContainerMoveOperation::Get => {
+                            ViewEventKind::Gameplay
+                        }
+                    },
+                    opaque_id(observer.salt, "character", &actor_id.0.to_string()),
+                    actor_is_viewer
+                        .then(|| {
+                            container_id.as_ref().map(|container_id| {
+                                opaque_id(observer.salt, "item", container_id.as_str())
+                            })
+                        })
+                        .flatten(),
+                    text,
+                    visible_item_ids
+                        .first()
+                        .map(|item_id| opaque_id(observer.salt, "item", item_id.as_str())),
+                )
+            }
             DomainEvent::Gameplay { event } => {
                 let (actor_id, target_id, text, item_id) =
                     project_gameplay_event(observer.salt, viewer.id, event);
@@ -8407,6 +9659,118 @@ impl World {
         }
     }
 
+    fn validate_items_moved_event(&self, event: &DomainEvent) -> Result<(), WorldError> {
+        let DomainEvent::ItemsMoved {
+            actor_id,
+            actor_name,
+            item_ids,
+            item_name,
+            container_id,
+            operation,
+            room_id,
+        } = event
+        else {
+            return Err(WorldError::InvalidDomainEvent);
+        };
+        let container_shape_valid = match operation {
+            ContainerMoveOperation::Take | ContainerMoveOperation::Drop => container_id.is_none(),
+            ContainerMoveOperation::Put | ContainerMoveOperation::Get => {
+                container_id.as_ref().is_some_and(|container_id| {
+                    self.item_instances
+                        .get(container_id)
+                        .and_then(|instance| self.item_prototypes.get(&instance.prototype_id))
+                        .is_some_and(|prototype| prototype.container.is_some())
+                        && self
+                            .container_root_matches_event(container_id, *actor_id, room_id)
+                            .unwrap_or(false)
+                })
+            }
+        };
+        let unique = item_ids.iter().collect::<BTreeSet<_>>().len() == item_ids.len();
+        let first_prototype = item_ids.first().and_then(|item_id| {
+            self.item_instances
+                .get(item_id)
+                .map(|instance| instance.prototype_id.as_str())
+        });
+        let items_valid = !item_ids.is_empty()
+            && item_ids.len() <= usize::from(MAX_ITEM_SELECTION_QUANTITY)
+            && unique
+            && first_prototype.is_some()
+            && item_ids.iter().all(|item_id| {
+                self.item_instances
+                    .get(item_id)
+                    .is_some_and(|instance| Some(instance.prototype_id.as_str()) == first_prototype)
+                    && self
+                        .item_prototype_for(item_id)
+                        .is_ok_and(|prototype| prototype.name == item_name.as_str())
+            });
+        if actor_id.0 <= 0
+            || actor_name.trim().is_empty()
+            || item_name.trim().is_empty()
+            || !self.stable_rooms.contains_key(room_id)
+            || !container_shape_valid
+            || !items_valid
+        {
+            return Err(WorldError::InvalidDomainEvent);
+        }
+        Ok(())
+    }
+
+    fn container_root_matches_event(
+        &self,
+        container_id: &ItemInstanceId,
+        actor_id: CharacterId,
+        room_id: &str,
+    ) -> Result<bool, WorldError> {
+        let mut current = container_id;
+        for _ in 0..=MAX_CONTAINER_DEPTH {
+            let instance = self
+                .item_instances
+                .get(current)
+                .ok_or(WorldError::InvalidEntity)?;
+            match &instance.location {
+                SharedItemLocation::Carried(owner) | SharedItemLocation::Equipped(owner, _) => {
+                    return Ok(*owner == actor_id);
+                }
+                SharedItemLocation::Room(root_room) => return Ok(root_room == room_id),
+                SharedItemLocation::Contained(parent) => current = parent,
+                SharedItemLocation::Staged
+                | SharedItemLocation::HeldByNpc(_)
+                | SharedItemLocation::Consumed => return Ok(false),
+            }
+        }
+        Err(WorldError::InvalidEntity)
+    }
+
+    fn perceived_moved_item_ids(
+        &self,
+        session: SessionId,
+        actor_id: CharacterId,
+        item_ids: &[ItemInstanceId],
+        operation: ContainerMoveOperation,
+        room_id: &str,
+    ) -> Result<Vec<ItemInstanceId>, WorldError> {
+        let viewer = self.character(session)?;
+        if viewer.id == actor_id {
+            return Ok(item_ids.to_vec());
+        }
+        let viewer_room = room_checked(&self.entities, viewer.location)?;
+        if viewer_room.stable_id != room_id {
+            return Ok(Vec::new());
+        }
+        match operation {
+            ContainerMoveOperation::Take | ContainerMoveOperation::Drop => item_ids
+                .iter()
+                .map(|item_id| {
+                    self.item_visible_to(session, item_id, room_id)
+                        .map(|visible| visible.then_some(item_id.clone()))
+                })
+                .collect::<Result<Vec<_>, WorldError>>()
+                .map(|items| items.into_iter().flatten().collect()),
+            ContainerMoveOperation::Put | ContainerMoveOperation::Get => Ok(Vec::new()),
+        }
+    }
+
     fn perceives_event(&self, session: SessionId, event: &DomainEvent) -> Result<bool, WorldError> {
         let viewer = self.character(session)?;
         let viewer_room = room_checked(&self.entities, viewer.location)?
@@ -8447,6 +9811,20 @@ impl World {
                     || (viewer_room == room_id
                         && self.item_visible_to(session, item_id, room_id)?)
             }
+            DomainEvent::ItemsMoved {
+                actor_id,
+                item_ids,
+                operation,
+                room_id,
+                ..
+            } => match operation {
+                ContainerMoveOperation::Take | ContainerMoveOperation::Drop => !self
+                    .perceived_moved_item_ids(session, *actor_id, item_ids, *operation, room_id)?
+                    .is_empty(),
+                ContainerMoveOperation::Put | ContainerMoveOperation::Get => {
+                    viewer.id == *actor_id || viewer_room == room_id
+                }
+            },
             DomainEvent::Gameplay { event } => {
                 let base = matches!(event, GameplayEvent::TickAdvanced { .. })
                     || (gameplay_event_character(event).is_some_and(|id| id == viewer.id)
@@ -8511,11 +9889,304 @@ impl World {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ItemScope {
     Carried,
     CurrentRoom,
     Accessible,
+}
+
+const MAX_CONTAINER_DEPTH: usize = 4;
+const CONTAINER_PAGE_SIZE: usize = 20;
+
+#[derive(Clone, Debug)]
+struct ItemStackGroup {
+    prototype_id: String,
+    members: Vec<ItemInstanceId>,
+}
+
+fn derive_stack_groups<'a>(
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+    item_ids: impl Iterator<Item = &'a ItemInstanceId>,
+) -> Result<Vec<ItemStackGroup>, WorldError> {
+    let mut by_prototype = BTreeMap::<String, Vec<ItemInstanceId>>::new();
+    for item_id in item_ids {
+        let instance = instances.get(item_id).ok_or(WorldError::InvalidEntity)?;
+        by_prototype
+            .entry(instance.prototype_id.clone())
+            .or_default()
+            .push(item_id.clone());
+    }
+    let mut groups = Vec::new();
+    for (prototype_id, mut members) in by_prototype {
+        let prototype = prototypes
+            .get(&prototype_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        members.sort();
+        for chunk in members.chunks(usize::from(prototype.max_stack_units)) {
+            groups.push(ItemStackGroup {
+                prototype_id: prototype_id.clone(),
+                members: chunk.to_vec(),
+            });
+        }
+    }
+    groups.sort_by(|left, right| left.members[0].cmp(&right.members[0]));
+    Ok(groups)
+}
+
+fn take_selected_quantity(
+    mut eligible: Vec<ItemInstanceId>,
+    quantity: u16,
+    query: &str,
+) -> Result<Vec<ItemInstanceId>, WorldError> {
+    eligible.sort();
+    let quantity = usize::from(quantity);
+    if eligible.len() < quantity {
+        return Err(WorldError::ItemNotFound(query.to_owned()));
+    }
+    eligible.truncate(quantity);
+    Ok(eligible)
+}
+
+fn stack_slots(prototype: &ItemPrototype, quantity: usize) -> Result<u32, WorldError> {
+    let max = usize::from(prototype.max_stack_units);
+    if max == 0 {
+        return Err(WorldError::InvalidEntity);
+    }
+    let chunks = quantity
+        .checked_add(max - 1)
+        .ok_or(WorldError::InvalidEntity)?
+        / max;
+    u32::try_from(chunks)
+        .ok()
+        .and_then(|chunks| chunks.checked_mul(u32::from(prototype.slot_cost)))
+        .ok_or(WorldError::InvalidEntity)
+}
+
+#[derive(Clone, Debug)]
+struct ItemGraphIndex {
+    children: BTreeMap<ItemInstanceId, Vec<ItemInstanceId>>,
+    subtree_weights: BTreeMap<ItemInstanceId, u64>,
+}
+
+impl ItemGraphIndex {
+    fn subtree_weight(&self, item_id: &ItemInstanceId) -> Result<u64, WorldError> {
+        self.subtree_weights
+            .get(item_id)
+            .copied()
+            .ok_or(WorldError::InvalidEntity)
+    }
+}
+
+fn build_item_graph_index(
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+) -> Result<ItemGraphIndex, WorldError> {
+    let mut children = BTreeMap::<ItemInstanceId, Vec<ItemInstanceId>>::new();
+    let mut subtree_weights = BTreeMap::<ItemInstanceId, u64>::new();
+    for (item_id, instance) in instances {
+        let prototype = prototypes
+            .get(&instance.prototype_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        subtree_weights.insert(item_id.clone(), u64::from(prototype.weight_grams));
+        if let SharedItemLocation::Contained(parent) = &instance.location {
+            let parent_instance = instances.get(parent).ok_or(WorldError::InvalidEntity)?;
+            if prototypes
+                .get(&parent_instance.prototype_id)
+                .and_then(|prototype| prototype.container.as_ref())
+                .is_none()
+            {
+                return Err(WorldError::InvalidEntity);
+            }
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(item_id.clone());
+        }
+    }
+
+    // Parent chains are at most four edges, so this is O(N) with a small,
+    // explicit constant and detects cycles before any recursive accounting.
+    let mut depths = BTreeMap::<ItemInstanceId, usize>::new();
+    for item_id in instances.keys() {
+        let mut current = item_id;
+        let mut visited = BTreeSet::new();
+        let mut depth = 0_usize;
+        while let Some(ItemInstance {
+            location: SharedItemLocation::Contained(parent),
+            ..
+        }) = instances.get(current)
+        {
+            if !visited.insert(current.clone()) || parent == current {
+                return Err(WorldError::InvalidEntity);
+            }
+            depth = depth.checked_add(1).ok_or(WorldError::InvalidEntity)?;
+            if depth > MAX_CONTAINER_DEPTH {
+                return Err(WorldError::InvalidEntity);
+            }
+            current = parent;
+        }
+        depths.insert(item_id.clone(), depth);
+    }
+
+    // Descendants contribute once to their parent after their own descendants
+    // have already been folded in. This avoids rescanning all N instances for
+    // every container or root inventory item.
+    let mut deepest_first = depths.into_iter().collect::<Vec<_>>();
+    deepest_first.sort_by(|(left_id, left_depth), (right_id, right_depth)| {
+        right_depth
+            .cmp(left_depth)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    for (item_id, depth) in deepest_first {
+        if depth == 0 {
+            continue;
+        }
+        let parent = match &instances
+            .get(&item_id)
+            .ok_or(WorldError::InvalidEntity)?
+            .location
+        {
+            SharedItemLocation::Contained(parent) => parent,
+            _ => return Err(WorldError::InvalidEntity),
+        };
+        let child_weight = subtree_weights
+            .get(&item_id)
+            .copied()
+            .ok_or(WorldError::InvalidEntity)?;
+        let parent_weight = subtree_weights
+            .get_mut(parent)
+            .ok_or(WorldError::InvalidEntity)?;
+        *parent_weight = parent_weight
+            .checked_add(child_weight)
+            .ok_or(WorldError::InvalidEntity)?;
+    }
+
+    Ok(ItemGraphIndex {
+        children,
+        subtree_weights,
+    })
+}
+
+fn container_usage(
+    container_id: &ItemInstanceId,
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+    graph: &ItemGraphIndex,
+) -> Result<InventoryCapacityView, WorldError> {
+    let container_instance = instances
+        .get(container_id)
+        .ok_or(WorldError::InvalidEntity)?;
+    let container_prototype = prototypes
+        .get(&container_instance.prototype_id)
+        .ok_or(WorldError::InvalidEntity)?;
+    let capacity = container_prototype
+        .container
+        .as_ref()
+        .ok_or(WorldError::GameplayUnavailable)?;
+    let direct = graph
+        .children
+        .get(container_id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut quantities = BTreeMap::<String, usize>::new();
+    let mut used_weight = 0_u64;
+    for item_id in direct {
+        let instance = instances.get(item_id).ok_or(WorldError::InvalidEntity)?;
+        *quantities.entry(instance.prototype_id.clone()).or_default() += 1;
+        used_weight = used_weight
+            .checked_add(graph.subtree_weight(item_id)?)
+            .ok_or(WorldError::InvalidEntity)?;
+    }
+    let mut used_slots = 0_u32;
+    for (prototype_id, quantity) in quantities {
+        let prototype = prototypes
+            .get(&prototype_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        used_slots = used_slots
+            .checked_add(stack_slots(prototype, quantity)?)
+            .ok_or(WorldError::InvalidEntity)?;
+    }
+    Ok(InventoryCapacityView {
+        used_slots: u16::try_from(used_slots).map_err(|_| WorldError::InvalidEntity)?,
+        max_slots: capacity.max_slots,
+        used_weight_grams: u32::try_from(used_weight).map_err(|_| WorldError::InvalidEntity)?,
+        max_weight_grams: capacity.max_weight_grams,
+    })
+}
+
+fn character_inventory_totals(
+    character_id: CharacterId,
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+) -> Result<(u32, u64), WorldError> {
+    let graph = build_item_graph_index(instances, prototypes)?;
+    character_inventory_totals_with_graph(character_id, instances, prototypes, &graph)
+}
+
+fn character_inventory_totals_with_graph(
+    character_id: CharacterId,
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+    graph: &ItemGraphIndex,
+) -> Result<(u32, u64), WorldError> {
+    let mut carried_quantities = BTreeMap::<String, usize>::new();
+    let mut weight = 0_u64;
+    for (item_id, instance) in instances {
+        let carried = matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character_id);
+        let equipped = matches!(&instance.location, SharedItemLocation::Equipped(owner, _) if *owner == character_id);
+        if !carried && !equipped {
+            continue;
+        }
+        if carried {
+            *carried_quantities
+                .entry(instance.prototype_id.clone())
+                .or_default() += 1;
+        }
+        weight = weight
+            .checked_add(graph.subtree_weight(item_id)?)
+            .ok_or(WorldError::InvalidEntity)?;
+    }
+    let mut slots = 0_u32;
+    for (prototype_id, quantity) in carried_quantities {
+        let prototype = prototypes
+            .get(&prototype_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        slots = slots
+            .checked_add(stack_slots(prototype, quantity)?)
+            .ok_or(WorldError::InvalidEntity)?;
+    }
+    Ok((slots, weight))
+}
+
+fn validate_item_graph(
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+) -> Result<(), WorldError> {
+    let graph = build_item_graph_index(instances, prototypes)?;
+    validate_container_capacities(instances, prototypes, &graph)
+}
+
+fn validate_container_capacities(
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+    graph: &ItemGraphIndex,
+) -> Result<(), WorldError> {
+    for (item_id, instance) in instances {
+        let prototype = prototypes
+            .get(&instance.prototype_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        if let Some(capacity) = &prototype.container {
+            let usage = container_usage(item_id, instances, prototypes, graph)?;
+            if usage.used_slots > capacity.max_slots
+                || usage.used_weight_grams > capacity.max_weight_grams
+            {
+                return Err(WorldError::InventoryCapacityExceeded);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn quest_matches(query: &str) -> bool {
@@ -8650,6 +10321,16 @@ fn safe_definition_text(value: &str, maximum_bytes: usize) -> bool {
         && !trimmed
             .chars()
             .any(|character| character.is_control() || character == '\u{7f}')
+}
+
+fn safe_definition_multiline_text(value: &str, maximum_bytes: usize) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= maximum_bytes
+        && !trimmed.chars().any(|character| {
+            (character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+                || character == '\u{7f}'
+        })
 }
 
 fn validate_active_status(
@@ -9587,6 +11268,8 @@ mod tests {
             rarity: ItemRarity::Common,
             item_level: 1,
             stack_policy: ItemStackPolicy::Unique,
+            max_stack_units: 1,
+            container: None,
             transfer_policy: ItemTransferPolicy::Transferable,
         }
     }
@@ -9632,6 +11315,24 @@ mod tests {
                     account_id: AccountId(10),
                     name: "Tester".into(),
                     room_id: world.start_room_id().to_owned(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        (world, session)
+    }
+
+    fn connect_definition(definition: WorldDefinition) -> (World, SessionId) {
+        let mut world = World::from_definition(definition).unwrap();
+        let session = SessionId(71);
+        world
+            .connect(
+                session,
+                CharacterSnapshot {
+                    id: CharacterId(701),
+                    account_id: AccountId(70),
+                    name: "Stack Tester".into(),
+                    room_id: "test:start".into(),
                     item_locations: BTreeMap::new(),
                 },
             )
@@ -10508,7 +12209,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             redact_and_validate_opaque_item_refs(&inventory),
-            "Capacity: 1/24 slots; 1000/50000 g.\r\nYou are carrying:\r\n- blue-glass lantern [common; level 1; 1000 g]\r\n"
+            "Capacity: 1/24 slots; 1000/50000 g.\r\nYou are carrying:\r\n- 1 × blue-glass lantern [common; level 1; 1000 g each; 1 stack slot; 1000 g total]\r\n"
         );
 
         world
@@ -10804,7 +12505,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             redact_and_validate_opaque_item_refs(&inventory),
-            "Capacity: 1/24 slots; 1000/50000 g.\r\nYou are carrying:\r\n- blue-glass lantern [common; level 1; 1000 g]\r\n"
+            "Capacity: 1/24 slots; 1000/50000 g.\r\nYou are carrying:\r\n- 1 × blue-glass lantern [common; level 1; 1000 g each; 1 stack slot; 1000 g total]\r\n"
         );
 
         let mut dropped_world = World::demo();
@@ -10952,7 +12653,7 @@ mod tests {
         let inventory = world.inventory_as_plain_text(actor).unwrap();
         assert_eq!(
             redact_and_validate_opaque_item_refs(&inventory),
-            "Capacity: 1/24 slots; 1000/50000 g.\r\nYou are carrying:\r\n- blue-glass lantern [common; level 1; 1000 g]\r\n"
+            "Capacity: 1/24 slots; 1000/50000 g.\r\nYou are carrying:\r\n- 1 × blue-glass lantern [common; level 1; 1000 g each; 1 stack slot; 1000 g total]\r\n"
         );
     }
 
@@ -11763,21 +13464,27 @@ mod tests {
         assert!(!scene_json.contains("test:repeated"));
 
         world
-            .apply(session, PlayerAction::Take(scene.items[0].id.clone()))
+            .apply(
+                session,
+                PlayerAction::Take(scene.items[0].id.clone().into()),
+            )
             .unwrap();
         let before = world.runtime_snapshot();
         let revision = world.revision();
         let remaining = world.scene_for(session).unwrap().items[0].id.clone();
         assert!(matches!(
-            world.apply(session, PlayerAction::Take(remaining)),
+            world.apply(session, PlayerAction::Take(remaining.into())),
             Err(WorldError::InventoryCapacityExceeded)
         ));
         assert_eq!(world.runtime_snapshot(), before);
         assert_eq!(world.revision(), revision);
         let text = world.inventory_as_plain_text(session).unwrap();
         assert!(text.contains("1/1 slots"));
-        assert!(text.contains("[rare; level 7; 600 g; ref o"));
-        assert!(redact_and_validate_opaque_item_refs(&text).contains("[rare; level 7; 600 g]"));
+        assert!(text.contains("[rare; level 7; 600 g each; 1 stack slot; 600 g total; ref o"));
+        assert!(
+            redact_and_validate_opaque_item_refs(&text)
+                .contains("[rare; level 7; 600 g each; 1 stack slot; 600 g total]")
+        );
     }
 
     #[test]
@@ -11869,7 +13576,35 @@ mod tests {
             item_locations: current
                 .item_instances
                 .iter()
-                .map(|(id, instance)| (id.0.clone(), instance.location.clone()))
+                .map(|(id, instance)| {
+                    let location = match &instance.location {
+                        RuntimeItemLocation::Staged => RuntimeItemLocationV2::Staged,
+                        RuntimeItemLocation::Carried { character_id } => {
+                            RuntimeItemLocationV2::Carried {
+                                character_id: *character_id,
+                            }
+                        }
+                        RuntimeItemLocation::Room { room_id } => RuntimeItemLocationV2::Room {
+                            room_id: room_id.clone(),
+                        },
+                        RuntimeItemLocation::Equipped { character_id, slot } => {
+                            RuntimeItemLocationV2::Equipped {
+                                character_id: *character_id,
+                                slot: *slot,
+                            }
+                        }
+                        RuntimeItemLocation::HeldByNpc { npc_id } => {
+                            RuntimeItemLocationV2::HeldByNpc {
+                                npc_id: npc_id.clone(),
+                            }
+                        }
+                        RuntimeItemLocation::Consumed => RuntimeItemLocationV2::Consumed,
+                        RuntimeItemLocation::Contained { .. } => {
+                            panic!("v1 fixture must not contain nested items")
+                        }
+                    };
+                    (id.0.clone(), location)
+                })
                 .collect(),
             npcs: current.npcs,
             adventure: current.adventure,
@@ -12483,5 +14218,874 @@ mod tests {
         assert!(!json.contains("characterId"));
         assert!(!json.contains("partyId"));
         assert!(!json.contains("\"id\":101"));
+    }
+
+    #[test]
+    fn parses_bounded_stack_and_container_commands() {
+        assert_eq!(
+            parse_action("take 3 tonic").unwrap(),
+            PlayerAction::Take(ItemSelection {
+                query: "tonic".into(),
+                quantity: 3,
+            })
+        );
+        assert_eq!(
+            parse_action("get 2 tonic from SATCHEL").unwrap(),
+            PlayerAction::Get {
+                selection: ItemSelection {
+                    query: "tonic".into(),
+                    quantity: 2,
+                },
+                container: "satchel".into(),
+            }
+        );
+        assert_eq!(
+            parse_action("put tonic in satchel").unwrap(),
+            PlayerAction::Put {
+                selection: ItemSelection::one("tonic"),
+                container: "satchel".into(),
+            }
+        );
+        assert_eq!(
+            parse_action("contents satchel 2").unwrap(),
+            PlayerAction::Contents {
+                container: "satchel".into(),
+                page: 2,
+            }
+        );
+        assert!(parse_action("take 257 tonic").is_err());
+        assert!(parse_action("take 0 tonic").is_err());
+    }
+
+    #[test]
+    fn fungible_stacks_and_containers_are_derived_atomic_and_opaque() {
+        let mut tonic = item_prototype("test:tonic", "healing tonic", "Restorative.", &["tonic"]);
+        tonic.stack_policy = ItemStackPolicy::Fungible;
+        tonic.max_stack_units = 2;
+        tonic.weight_grams = 100;
+        let mut satchel = item_prototype(
+            "test:satchel",
+            "archive satchel",
+            "A bounded satchel.",
+            &["satchel"],
+        );
+        satchel.weight_grams = 500;
+        satchel.container = Some(ItemContainerDefinition {
+            max_slots: 2,
+            max_weight_grams: 500,
+        });
+        let instances = vec![
+            item_instance(
+                "test:satchel-instance",
+                "test:satchel",
+                InitialItemLocation::Room("test:start".into()),
+            ),
+            item_instance(
+                "test:tonic-a",
+                "test:tonic",
+                InitialItemLocation::Room("test:start".into()),
+            ),
+            item_instance(
+                "test:tonic-b",
+                "test:tonic",
+                InitialItemLocation::Room("test:start".into()),
+            ),
+            item_instance(
+                "test:tonic-c",
+                "test:tonic",
+                InitialItemLocation::Room("test:start".into()),
+            ),
+        ];
+        let (mut world, session) = connect_definition(WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![tonic, satchel],
+            initial_item_instances: instances,
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        });
+
+        let scene = world.scene_for(session).unwrap();
+        let tonic_groups = scene
+            .items
+            .iter()
+            .filter(|item| item.label == "healing tonic")
+            .collect::<Vec<_>>();
+        assert_eq!(tonic_groups.len(), 2);
+        assert_eq!(
+            tonic_groups.iter().map(|item| item.quantity).sum::<u16>(),
+            3
+        );
+        assert!(tonic_groups.iter().all(|item| item.id.starts_with('o')));
+
+        let before_take = world.runtime_snapshot();
+        let before_take_revision = world.revision();
+        let take = world
+            .apply(
+                session,
+                PlayerAction::Take(ItemSelection {
+                    query: "tonic".into(),
+                    quantity: 3,
+                }),
+            )
+            .unwrap();
+        assert_eq!(world.revision(), before_take_revision + 1);
+        assert!(matches!(
+            take.domain_events.as_slice(),
+            [DomainEvent::ItemsMoved {
+                item_ids,
+                operation: ContainerMoveOperation::Take,
+                container_id: None,
+                ..
+            }] if item_ids.len() == 3
+        ));
+        let projected = world
+            .project_event(session, &take.domain_events[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.kind, ViewEventKind::ItemTaken);
+        assert!(projected.target_id.is_none());
+        let after_take = world.runtime_snapshot();
+        world.rollback_domain_events(&take.domain_events).unwrap();
+        assert_eq!(world.runtime_snapshot(), before_take);
+        let mut forged = take.domain_events[0].clone();
+        if let DomainEvent::ItemsMoved { item_ids, .. } = &mut forged {
+            item_ids[1] = item_ids[0].clone();
+        }
+        assert!(matches!(
+            world.replay_persisted_event(&forged),
+            Err(WorldError::InvalidDomainEvent)
+        ));
+        assert_eq!(world.runtime_snapshot(), before_take);
+        world
+            .replay_persisted_event(&take.domain_events[0])
+            .unwrap();
+        assert_eq!(world.runtime_snapshot(), after_take);
+        world
+            .apply(session, PlayerAction::Take(ItemSelection::one("satchel")))
+            .unwrap();
+        let player = world.player_state_view(session).unwrap();
+        assert_eq!(player.inventory_capacity.used_slots, 3);
+        assert_eq!(player.inventory_capacity.used_weight_grams, 800);
+
+        world
+            .apply(
+                session,
+                PlayerAction::Put {
+                    selection: ItemSelection {
+                        query: "tonic".into(),
+                        quantity: 2,
+                    },
+                    container: "satchel".into(),
+                },
+            )
+            .unwrap();
+        let contents = world
+            .apply(
+                session,
+                PlayerAction::Contents {
+                    container: "satchel".into(),
+                    page: 1,
+                },
+            )
+            .unwrap()
+            .container_contents
+            .unwrap();
+        assert!(contents.selector.starts_with('o'));
+        assert_eq!(contents.items.len(), 1);
+        assert_eq!(contents.items[0].quantity, 2);
+        assert_eq!(contents.capacity.used_slots, 1);
+        assert_eq!(contents.capacity.used_weight_grams, 200);
+
+        let before_get = world.runtime_snapshot();
+        let get = world
+            .apply(
+                session,
+                PlayerAction::Get {
+                    selection: ItemSelection {
+                        query: "tonic".into(),
+                        quantity: 2,
+                    },
+                    container: "satchel".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(get.domain_events.as_slice(), [DomainEvent::ItemsMoved { item_ids, .. }] if item_ids.len() == 2)
+        );
+        world.rollback_domain_events(&get.domain_events).unwrap();
+        assert_eq!(world.runtime_snapshot(), before_get);
+    }
+
+    #[test]
+    fn container_text_and_actions_keep_capacity_stack_and_weight_facts() {
+        let mut satchel = item_prototype(
+            "test:satchel",
+            "archive satchel",
+            "A bounded satchel.",
+            &["satchel"],
+        );
+        satchel.weight_grams = 500;
+        satchel.equipment_slot = Some(EquipmentSlot::Trinket);
+        satchel.container = Some(ItemContainerDefinition {
+            max_slots: 4,
+            max_weight_grams: 1_000,
+        });
+        let mut box_item = item_prototype("test:box", "map box", "A smaller container.", &["box"]);
+        box_item.weight_grams = 100;
+        box_item.container = Some(ItemContainerDefinition {
+            max_slots: 2,
+            max_weight_grams: 500,
+        });
+        let mut tonic = item_prototype("test:tonic", "healing tonic", "Restorative.", &["tonic"]);
+        tonic.weight_grams = 100;
+        let (mut world, session) = connect_definition(WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![satchel, box_item, tonic],
+            initial_item_instances: vec![
+                item_instance(
+                    "test:satchel-instance",
+                    "test:satchel",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+                item_instance(
+                    "test:box-instance",
+                    "test:box",
+                    InitialItemLocation::Container(ItemInstanceId("test:satchel-instance".into())),
+                ),
+                item_instance(
+                    "test:tonic-instance",
+                    "test:tonic",
+                    InitialItemLocation::Container(ItemInstanceId("test:box-instance".into())),
+                ),
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        });
+
+        let scene_satchel = world
+            .scene_for(session)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.label == "archive satchel")
+            .unwrap();
+        assert_eq!(scene_satchel.quantity, 1);
+        assert_eq!(scene_satchel.stack_slots, 1);
+        assert_eq!(scene_satchel.total_weight_grams, 700);
+        assert!(
+            scene_satchel
+                .actions
+                .iter()
+                .any(|action| action.label == "Contents"
+                    && action.command == format!("contents {}", scene_satchel.id))
+        );
+
+        world
+            .apply(session, PlayerAction::Take(ItemSelection::one("satchel")))
+            .unwrap();
+        let carried = world.inventory_as_plain_text(session).unwrap();
+        assert!(carried.contains("1 × archive satchel"));
+        assert!(carried.contains("1 stack slot"));
+        assert!(carried.contains("700 g total"));
+        assert!(carried.contains("container 1/4 slots; 200/1000 g"));
+
+        world
+            .apply(session, PlayerAction::Equip("satchel".into()))
+            .unwrap();
+        let equipped = world.inventory_as_plain_text(session).unwrap();
+        assert!(equipped.contains("trinket: 1 × archive satchel"));
+        assert!(equipped.contains("1 stack slot"));
+        assert!(equipped.contains("container 1/4 slots; 200/1000 g"));
+
+        let contents = world
+            .apply(
+                session,
+                PlayerAction::Contents {
+                    container: "satchel".into(),
+                    page: 1,
+                },
+            )
+            .unwrap();
+        let text = contents.output.unwrap();
+        assert!(text.contains("1 × map box"));
+        assert!(text.contains("1 stack slot"));
+        assert!(text.contains("200 g total"));
+        assert!(text.contains("container 1/2 slots; 100/500 g"));
+    }
+
+    #[test]
+    fn container_cycles_and_capacity_fail_without_partial_mutation() {
+        let mut bag = item_prototype("test:bag", "canvas bag", "A bag.", &["bag"]);
+        bag.container = Some(ItemContainerDefinition {
+            max_slots: 2,
+            max_weight_grams: 10_000,
+        });
+        let (mut world, session) = connect_definition(WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![bag],
+            initial_item_instances: vec![
+                item_instance(
+                    "test:bag-a",
+                    "test:bag",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+                item_instance(
+                    "test:bag-b",
+                    "test:bag",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        });
+        let ids = world.scene_for(session).unwrap().items;
+        world
+            .apply(session, PlayerAction::Take(ids[0].id.clone().into()))
+            .unwrap();
+        world
+            .apply(session, PlayerAction::Take(ids[1].id.clone().into()))
+            .unwrap();
+        let carried = world.player_state_view(session).unwrap().inventory;
+        world
+            .apply(
+                session,
+                PlayerAction::Put {
+                    selection: ItemSelection::one(carried[0].id.clone()),
+                    container: carried[1].id.clone(),
+                },
+            )
+            .unwrap();
+        let before = world.runtime_snapshot();
+        let nested = world
+            .apply(
+                session,
+                PlayerAction::Contents {
+                    container: carried[1].id.clone(),
+                    page: 1,
+                },
+            )
+            .unwrap()
+            .container_contents
+            .unwrap()
+            .items[0]
+            .id
+            .clone();
+        assert!(
+            world
+                .apply(
+                    session,
+                    PlayerAction::Put {
+                        selection: ItemSelection::one(carried[1].id.clone()),
+                        container: nested,
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(world.runtime_snapshot(), before);
+    }
+
+    #[test]
+    fn fungible_equipment_uses_prospective_stack_capacity() {
+        let mut blade = item_prototype("test:blade", "thin blade", "A blade.", &["blade"]);
+        blade.stack_policy = ItemStackPolicy::Fungible;
+        blade.max_stack_units = 10;
+        blade.equipment_slot = Some(EquipmentSlot::Weapon);
+        let (mut world, session) = connect_definition(WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![blade],
+            initial_item_instances: vec![
+                item_instance(
+                    "test:blade-a",
+                    "test:blade",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+                item_instance(
+                    "test:blade-b",
+                    "test:blade",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        });
+        world
+            .character_gameplay
+            .get_mut(&CharacterId(701))
+            .unwrap()
+            .inventory_capacity
+            .max_slots = 1;
+        world
+            .apply(
+                session,
+                PlayerAction::Take(ItemSelection {
+                    query: "blade".into(),
+                    quantity: 2,
+                }),
+            )
+            .unwrap();
+        let selector = world.player_state_view(session).unwrap().inventory[0]
+            .id
+            .clone();
+        world.apply(session, PlayerAction::Equip(selector)).unwrap();
+        world
+            .apply(session, PlayerAction::Unequip("weapon".into()))
+            .unwrap();
+        let player = world.player_state_view(session).unwrap();
+        assert_eq!(player.inventory.len(), 1);
+        assert_eq!(player.inventory[0].quantity, 2);
+        assert_eq!(player.inventory_capacity.used_slots, 1);
+    }
+
+    #[test]
+    fn snapshot_decoder_is_version_directed_and_rejects_v2_containment_smuggling() {
+        let (world, _) = connected_world();
+        let json = serde_json::to_string(&world.runtime_snapshot()).unwrap();
+        assert_eq!(
+            decode_world_runtime_snapshot(3, &json)
+                .unwrap()
+                .snapshot_version,
+            3
+        );
+        assert!(decode_world_runtime_snapshot(2, &json).is_err());
+        let mut smuggled: serde_json::Value = serde_json::from_str(&json).unwrap();
+        smuggled["snapshotVersion"] = serde_json::json!(2);
+        let instance = smuggled["itemInstances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        instance["location"] = serde_json::json!({
+            "kind": "contained",
+            "containerId": "demo:blue-lantern"
+        });
+        let smuggled = serde_json::to_string(&smuggled).unwrap();
+        assert!(decode_world_runtime_snapshot(2, &smuggled).is_err());
+
+        let mut unknown_root: serde_json::Value = serde_json::from_str(&json).unwrap();
+        unknown_root["quantity"] = serde_json::json!(1);
+        assert!(
+            decode_world_runtime_snapshot(3, &serde_json::to_string(&unknown_root).unwrap())
+                .is_err()
+        );
+
+        let mut unknown_instance: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let instance = unknown_instance["itemInstances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        instance["quantity"] = serde_json::json!(1);
+        assert!(
+            decode_world_runtime_snapshot(3, &serde_json::to_string(&unknown_instance).unwrap())
+                .is_err()
+        );
+
+        let mut unknown_location: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let location = &mut unknown_location["itemInstances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap()["location"];
+        location["containerId"] = serde_json::json!("demo:blue-lantern");
+        assert!(
+            decode_world_runtime_snapshot(3, &serde_json::to_string(&unknown_location).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_item_projection_filters_hidden_units_and_private_container_selectors() {
+        let mut tonic = item_prototype("test:tonic", "healing tonic", "Restorative.", &["tonic"]);
+        tonic.stack_policy = ItemStackPolicy::Fungible;
+        tonic.max_stack_units = 20;
+        let mut satchel = item_prototype(
+            "test:satchel",
+            "archive satchel",
+            "A bounded satchel.",
+            &["satchel"],
+        );
+        satchel.container = Some(ItemContainerDefinition {
+            max_slots: 20,
+            max_weight_grams: 20_000,
+        });
+        let (mut world, actor) = connect_definition(WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![tonic, satchel],
+            initial_item_instances: vec![
+                item_instance(
+                    "test:tonic-visible",
+                    "test:tonic",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+                item_instance(
+                    "test:tonic-hidden",
+                    "test:tonic",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+                item_instance(
+                    "test:satchel-instance",
+                    "test:satchel",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        });
+        world
+            .configure_hidden_item("test:tonic-hidden", 20)
+            .unwrap();
+        world.set_observer_role(actor, AccountRole::Admin).unwrap();
+        let peer = SessionId(72);
+        world
+            .connect(
+                peer,
+                CharacterSnapshot {
+                    id: CharacterId(702),
+                    account_id: AccountId(72),
+                    name: "Witness".into(),
+                    room_id: "test:start".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let peer_visible_tonic = world
+            .scene_for(peer)
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|item| item.label == "healing tonic")
+            .unwrap()
+            .id;
+
+        let take = world
+            .apply(
+                actor,
+                PlayerAction::Take(ItemSelection {
+                    query: "tonic".into(),
+                    quantity: 2,
+                }),
+            )
+            .unwrap();
+        let actor_event = world
+            .project_event(actor, &take.domain_events[0])
+            .unwrap()
+            .unwrap();
+        let peer_event = world
+            .project_event(peer, &take.domain_events[0])
+            .unwrap()
+            .unwrap();
+        assert!(actor_event.text.contains("2 × healing tonic"));
+        assert!(peer_event.text.contains("1 × healing tonic"));
+        assert_eq!(
+            peer_event.item_id.as_deref(),
+            Some(peer_visible_tonic.as_str())
+        );
+
+        world
+            .apply(actor, PlayerAction::Take(ItemSelection::one("satchel")))
+            .unwrap();
+        let put = world
+            .apply(
+                actor,
+                PlayerAction::Put {
+                    selection: ItemSelection::one("tonic"),
+                    container: "satchel".into(),
+                },
+            )
+            .unwrap();
+        let peer_put = world
+            .project_event(peer, &put.domain_events[0])
+            .unwrap()
+            .unwrap();
+        assert!(peer_put.text.contains("puts 1 × healing tonic"));
+        assert!(peer_put.target_id.is_none());
+        assert!(peer_put.item_id.is_none());
+    }
+
+    #[test]
+    fn batch_replay_supports_offline_owners_but_rejects_foreign_container_roots() {
+        let mut tonic = item_prototype("test:tonic", "healing tonic", "Restorative.", &["tonic"]);
+        tonic.stack_policy = ItemStackPolicy::Fungible;
+        tonic.max_stack_units = 20;
+        let mut satchel = item_prototype(
+            "test:satchel",
+            "archive satchel",
+            "A bounded satchel.",
+            &["satchel"],
+        );
+        satchel.container = Some(ItemContainerDefinition {
+            max_slots: 20,
+            max_weight_grams: 20_000,
+        });
+        let definition = WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![tonic, satchel],
+            initial_item_instances: vec![
+                item_instance(
+                    "test:tonic-a",
+                    "test:tonic",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+                item_instance(
+                    "test:tonic-b",
+                    "test:tonic",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+                item_instance(
+                    "test:satchel-instance",
+                    "test:satchel",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        };
+        let offline_owner = CharacterId(900);
+        let offline_take = DomainEvent::ItemsMoved {
+            actor_id: offline_owner,
+            actor_name: "Offline owner".into(),
+            item_ids: vec!["test:tonic-a".into(), "test:tonic-b".into()],
+            item_name: "healing tonic".into(),
+            container_id: None,
+            operation: ContainerMoveOperation::Take,
+            room_id: "test:start".into(),
+        };
+        let mut offline_world = World::from_definition(definition.clone()).unwrap();
+        offline_world.replay_persisted_event(&offline_take).unwrap();
+        assert_eq!(
+            offline_world.runtime_item_owner_ids(),
+            BTreeSet::from([offline_owner])
+        );
+
+        let (mut world, actor) = connect_definition(definition);
+        let victim = SessionId(73);
+        world
+            .connect(
+                victim,
+                CharacterSnapshot {
+                    id: CharacterId(703),
+                    account_id: AccountId(73),
+                    name: "Other owner".into(),
+                    room_id: "test:start".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        world
+            .apply(actor, PlayerAction::Take(ItemSelection::one("tonic")))
+            .unwrap();
+        world
+            .apply(victim, PlayerAction::Take(ItemSelection::one("satchel")))
+            .unwrap();
+        let forged = DomainEvent::ItemsMoved {
+            actor_id: CharacterId(701),
+            actor_name: "Stack Tester".into(),
+            item_ids: vec!["test:tonic-a".into()],
+            item_name: "healing tonic".into(),
+            container_id: Some("test:satchel-instance".into()),
+            operation: ContainerMoveOperation::Put,
+            room_id: "test:start".into(),
+        };
+        let before = world.runtime_snapshot();
+        assert!(matches!(
+            world.replay_persisted_event(&forged),
+            Err(WorldError::InvalidDomainEvent)
+        ));
+        assert_eq!(world.runtime_snapshot(), before);
+    }
+
+    #[test]
+    fn rollback_revalidates_inventory_capacity_before_publishing_locations() {
+        let tonic = item_prototype("test:tonic", "healing tonic", "Restorative.", &["tonic"]);
+        let mut satchel = item_prototype(
+            "test:satchel",
+            "archive satchel",
+            "A bounded satchel.",
+            &["satchel"],
+        );
+        satchel.container = Some(ItemContainerDefinition {
+            max_slots: 20,
+            max_weight_grams: 20_000,
+        });
+        let (mut world, actor) = connect_definition(WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![tonic, satchel],
+            initial_item_instances: vec![
+                item_instance(
+                    "test:tonic-a",
+                    "test:tonic",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+                item_instance(
+                    "test:satchel-instance",
+                    "test:satchel",
+                    InitialItemLocation::Room("test:start".into()),
+                ),
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        });
+        world
+            .apply(actor, PlayerAction::Take(ItemSelection::one("tonic")))
+            .unwrap();
+        world
+            .apply(actor, PlayerAction::Take(ItemSelection::one("satchel")))
+            .unwrap();
+        let put = world
+            .apply(
+                actor,
+                PlayerAction::Put {
+                    selection: ItemSelection::one("tonic"),
+                    container: "satchel".into(),
+                },
+            )
+            .unwrap();
+        world
+            .character_gameplay
+            .get_mut(&CharacterId(701))
+            .unwrap()
+            .inventory_capacity
+            .max_slots = 1;
+        let before = world.runtime_snapshot();
+        assert!(matches!(
+            world.rollback_domain_events(&put.domain_events),
+            Err(WorldError::InventoryCapacityExceeded)
+        ));
+        assert_eq!(world.runtime_snapshot(), before);
+    }
+
+    #[test]
+    fn item_graph_index_handles_thousands_of_empty_containers_in_one_pass() {
+        let mut container = item_prototype(
+            "test:container",
+            "empty container",
+            "A bounded container.",
+            &["container"],
+        );
+        container.container = Some(ItemContainerDefinition {
+            max_slots: 1,
+            max_weight_grams: 1,
+        });
+        let instances = (0..4_096)
+            .map(|index| {
+                item_instance(
+                    &format!("test:container-{index}"),
+                    "test:container",
+                    InitialItemLocation::Staged,
+                )
+            })
+            .collect();
+        let world = World::from_definition(WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![container],
+            initial_item_instances: instances,
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        })
+        .unwrap();
+        let graph = build_item_graph_index(&world.item_instances, &world.item_prototypes).unwrap();
+        assert_eq!(graph.subtree_weights.len(), 4_096);
+        assert!(graph.children.is_empty());
+    }
+
+    #[test]
+    fn item_presentation_text_is_bounded_before_it_reaches_transports() {
+        let definition_for = |item: ItemPrototypeDefinition| WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![item],
+            initial_item_instances: Vec::new(),
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Start".into(),
+                prose: vec!["A test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        };
+        let mut oversized = item_prototype("test:item", "safe", "Safe.", &["item"]);
+        oversized.name = "x".repeat(129);
+        assert!(matches!(
+            World::from_definition(definition_for(oversized)),
+            Err(WorldBuildError::InvalidItemPrototype(_))
+        ));
+
+        let mut control = item_prototype("test:item", "safe", "Safe.", &["item"]);
+        control.description = "unsafe\u{1b}line".into();
+        assert!(matches!(
+            World::from_definition(definition_for(control)),
+            Err(WorldBuildError::InvalidItemPrototype(_))
+        ));
+
+        let mut aliases = item_prototype("test:item", "safe", "Safe.", &["item"]);
+        aliases.aliases = (0..33).map(|index| format!("alias-{index}")).collect();
+        assert!(matches!(
+            World::from_definition(definition_for(aliases)),
+            Err(WorldBuildError::InvalidItemPrototype(_))
+        ));
+
+        let mut multiline = item_prototype("test:item", "safe", "Safe.", &["item"]);
+        multiline.description = "First line.\n\tSecond line.".into();
+        assert!(World::from_definition(definition_for(multiline)).is_ok());
     }
 }

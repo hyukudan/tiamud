@@ -33,11 +33,13 @@ const validPlayerState = () => ({
   inventory: [{
     id: 'o1111111111111111', label: 'blue lantern', description: 'Cold light.',
     rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
+    quantity: 1, stackSlots: 1, totalWeightGrams: 800,
     actions: [{ label: 'Drop', command: 'drop o1111111111111111' }],
   }],
   equipment: [{
     id: 'o2222222222222222', slot: 'weapon', label: 'bronze sword',
     rarity: 'common', itemLevel: 2, weightGrams: 2200,
+    quantity: 1, stackSlots: 1, totalWeightGrams: 2200,
     actions: [{ label: 'Unequip', command: 'unequip weapon' }],
   }],
   inventoryCapacity: {
@@ -95,6 +97,23 @@ describe('protocol messages', () => {
       type: 'action.perform',
       data: { requestId: 'request-2', action: 'item.take', target: 'lantern' },
     });
+    expect(createActionPerform(
+      'item.put',
+      { target: 'o1111111111111111', container: 'o2222222222222222', quantity: 12 },
+      'request-put',
+    )).toMatchObject({
+      data: {
+        action: 'item.put', target: 'o1111111111111111',
+        container: 'o2222222222222222', quantity: 12,
+      },
+    });
+    expect(createActionPerform(
+      'item.contents',
+      { container: 'o2222222222222222', page: 2 },
+      'request-contents',
+    )).toMatchObject({
+      data: { action: 'item.contents', container: 'o2222222222222222', page: 2 },
+    });
     expect(createActionPerform('party.say', { message: 'Hold the bridge.' }, 'request-party')).toMatchObject({
       data: { requestId: 'request-party', action: 'party.say', message: 'Hold the bridge.' },
     });
@@ -136,6 +155,13 @@ describe('protocol messages', () => {
         requestId: 'request-5', action: 'progression.talent', graphId: 'wayfarer', nodeId: 'sure-step',
       },
     });
+  });
+
+  it('bounds structured item quantities and pages before sending', () => {
+    expect(() => createActionPerform('item.take', { target: 'tonic', quantity: 0 }, 'bad')).toThrow(RangeError);
+    expect(() => createActionPerform('item.drop', { target: 'tonic', quantity: 257 }, 'bad')).toThrow(RangeError);
+    expect(() => createActionPerform('item.contents', { container: 'bag', page: 0 }, 'bad')).toThrow(RangeError);
+    expect(() => createActionPerform('item.contents', { container: '', page: 1 }, 'bad')).toThrow(RangeError);
   });
 
   it('creates the exact structured staff phase-2 payloads', () => {
@@ -367,6 +393,9 @@ describe('protocol messages', () => {
           rarity: 'uncommon',
           itemLevel: 3,
           weightGrams: 800,
+          quantity: 2,
+          stackSlots: 1,
+          totalWeightGrams: 1600,
           actions: [
             { label: 'Examine', command: 'examine tiamud:blue-lantern' },
             { label: 'Take', command: 'take tiamud:blue-lantern' },
@@ -488,7 +517,8 @@ describe('protocol messages', () => {
         items: unsafeVisuals.map((_visual, index) => ({
           id: `o${String(index + 1).padStart(16, '0')}`,
           label: `item ${index}`, description: 'Still usable.',
-          rarity: 'common', itemLevel: 1, weightGrams: 100, actions: [],
+          rarity: 'common', itemLevel: 1, weightGrams: 100,
+          quantity: 1, stackSlots: 1, totalWeightGrams: 100, actions: [],
         })),
         npcs: [],
         presentation: {
@@ -620,6 +650,7 @@ describe('protocol messages', () => {
         entity: {
           id: 'o8888888888888888', label: 'lantern', description: 'Still usable.', actions: [],
           rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
+          quantity: 1, stackSlots: 1, totalWeightGrams: 800,
           visual,
           presentation: { entities: [{ id: 'o8888888888888888', ...visual }] },
         },
@@ -650,6 +681,7 @@ describe('protocol messages', () => {
         entity: {
           id: itemId, label: 'blue lantern', description: 'Cold light.',
           rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
+          quantity: 1, stackSlots: 1, totalWeightGrams: 800,
           actions: [{ label: 'Take', command: `take ${itemId}` }],
         },
       },
@@ -673,6 +705,47 @@ describe('protocol messages', () => {
       v: 1, type: 'map.snapshot', seq: 14,
       data: { revision: 4, map: player.map },
     }))).toMatchObject({ type: 'map.snapshot', data: { revision: 4, map: { currentRoomId: 'o3333333333333333' } } });
+  });
+
+  it('validates bounded paginated container summaries', () => {
+    const item = {
+      id: 'o1111111111111111', label: 'healing tonic', rarity: 'uncommon', itemLevel: 2,
+      weightGrams: 250, quantity: 12, stackSlots: 1, totalWeightGrams: 3000,
+      actions: [{ label: 'Get', command: 'get 12 o1111111111111111 from o2222222222222222' }],
+    };
+    const envelope = (overrides: Record<string, unknown> = {}) => ({
+      v: 1, type: 'container.contents', seq: 21,
+      data: {
+        container: 'o2222222222222222', items: [item], page: 1, totalPages: 2,
+        capacity: { usedSlots: 1, maxSlots: 8, usedWeightGrams: 3000, maxWeightGrams: 5000 },
+        ...overrides,
+      },
+    });
+    expect(parseServerMessage(JSON.stringify(envelope()))).toMatchObject({
+      type: 'container.contents',
+      data: { container: 'o2222222222222222', page: 1, totalPages: 2, items: [{ quantity: 12 }] },
+    });
+    expect(parseServerMessage(JSON.stringify(envelope({ page: 3 })))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify(envelope({ items: Array.from({ length: 21 }, () => item) })))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify(envelope({
+      items: [{ ...item, totalWeightGrams: 2999 }],
+    })))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify(envelope({
+      items: [{
+        ...item, quantity: 1, totalWeightGrams: 250,
+        containerCapacity: { usedSlots: 1, maxSlots: 8, usedWeightGrams: 100, maxWeightGrams: 5000 },
+      }],
+    })))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify(envelope({ prototypeId: 'tiamud:tonic' })))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify(envelope({
+      items: [{ ...item, description: 'Prose is deliberately absent from this page.' }],
+    })))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify(envelope({
+      capacity: {
+        usedSlots: 1, maxSlots: 8, usedWeightGrams: 3000, maxWeightGrams: 5000,
+        durableContainerId: 'tiamud:satchel',
+      },
+    })))).toBeUndefined();
   });
 
   it('preserves a manifest-only atmospheric image reference', () => {

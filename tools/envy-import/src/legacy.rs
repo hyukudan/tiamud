@@ -892,6 +892,8 @@ fn translate_object_resets(
                 rarity: ItemRarity::Common,
                 item_level: 1,
                 stack_policy: ItemStackPolicy::Unique,
+                max_stack_units: 1,
+                container: None,
                 transfer_policy: ItemTransferPolicy::Transferable,
             });
         }
@@ -1083,6 +1085,14 @@ fn append_reference_diagnostics(
                     &object_vnums,
                     diagnostics,
                 );
+                diagnostics.push(warning(
+                    "container_reset_not_converted",
+                    "RESETS",
+                    Some(reset.line),
+                    reset.arguments.first().copied(),
+                    "P reset container placement is preserved inert and was not converted",
+                    "author an explicit WorldPack v5 container instance after reviewing reset limits and ordering",
+                ));
             }
             "G" | "E" => {
                 check_reset_reference(reset, 0, "object", &object_vnums, diagnostics);

@@ -1,8 +1,8 @@
 //! Strict, bounded, offline composition of modular authoring areas.
 //!
-//! AreaPack v3 is deliberately an authoring format, not a runtime hot-load
+//! AreaPack v4 is deliberately an authoring format, not a runtime hot-load
 //! protocol. Composition resolves and validates the complete graph, then emits
-//! one validated [`WorldPackDocument`] v4 consumed by the runtime.
+//! one validated [`WorldPackDocument`] v5 consumed by the runtime.
 //! Area identities, source digests, ownership and cross-area edges are exposed
 //! in [`CompositionReport`] so a later catalog/activation design can build on
 //! stable facts without weakening today's all-or-nothing runtime validation.
@@ -29,7 +29,7 @@ use crate::{
 };
 
 pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 2;
-pub const AREA_PACK_SCHEMA_VERSION: u32 = 3;
+pub const AREA_PACK_SCHEMA_VERSION: u32 = 4;
 pub const MAX_PROJECT_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_AREA_COUNT: usize = 256;
 pub const MAX_AREA_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -257,12 +257,15 @@ impl<'de> Deserialize<'de> for AreaPack {
             .ok_or_else(|| D::Error::custom("AreaPack schemaVersion is required"))?;
         if schema_version == 1 || schema_version == 2 {
             normalize_legacy_area_items(&mut value).map_err(D::Error::custom)?;
+        } else if schema_version == 3 {
+            normalize_v3_area_items(&mut value).map_err(D::Error::custom)?;
         } else if schema_version == u64::from(AREA_PACK_SCHEMA_VERSION) {
             reject_native_area_legacy_item_fields(&value).map_err(D::Error::custom)?;
         }
         let raw: RawAreaPack = serde_json::from_value(value).map_err(D::Error::custom)?;
         if raw.schema_version != 1
             && raw.schema_version != 2
+            && raw.schema_version != 3
             && raw.schema_version != AREA_PACK_SCHEMA_VERSION
         {
             return Err(D::Error::custom(format!(
@@ -322,14 +325,14 @@ fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<()
         return Ok(());
     };
     if root.contains_key("items") || root.contains_key("itemRules") {
-        return Err("AreaPack v3 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("AreaPack v4 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("AreaPack v3 rooms cannot declare legacy items".to_owned());
+        return Err("AreaPack v4 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("npcPrototypes")
@@ -340,8 +343,56 @@ fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<()
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("AreaPack v3 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("AreaPack v4 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
+    Ok(())
+}
+
+fn normalize_v3_area_items(value: &mut serde_json::Value) -> Result<(), String> {
+    reject_native_area_legacy_item_fields(value)?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "AreaPack root must be an object".to_owned())?;
+    let prototypes = root
+        .entry("itemPrototypes")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "AreaPack v3 itemPrototypes must be an array".to_owned())?;
+    for prototype in prototypes {
+        let prototype = prototype
+            .as_object_mut()
+            .ok_or_else(|| "AreaPack v3 item prototype must be an object".to_owned())?;
+        if prototype.contains_key("maxStackUnits") || prototype.contains_key("container") {
+            return Err(
+                "AreaPack v3 cannot declare v4 maxStackUnits or container fields".to_owned(),
+            );
+        }
+        if prototype
+            .get("stackPolicy")
+            .and_then(serde_json::Value::as_str)
+            != Some("unique")
+        {
+            return Err("AreaPack v3 item prototypes must use stackPolicy unique".to_owned());
+        }
+        prototype.insert("maxStackUnits".to_owned(), serde_json::json!(1));
+    }
+    let instances = root
+        .entry("initialItemInstances")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array()
+        .ok_or_else(|| "AreaPack v3 initialItemInstances must be an array".to_owned())?;
+    if instances.iter().any(|instance| {
+        instance.get("location").is_some_and(|location| {
+            location.get("kind").and_then(serde_json::Value::as_str) == Some("container")
+                || location.get("containerInstanceId").is_some()
+        })
+    }) {
+        return Err("AreaPack v3 cannot declare v4 container locations".to_owned());
+    }
+    root.insert(
+        "schemaVersion".to_owned(),
+        serde_json::json!(AREA_PACK_SCHEMA_VERSION),
+    );
     Ok(())
 }
 
@@ -388,6 +439,7 @@ pub enum AreaCrossReferenceKind {
     ItemInstancePrototype,
     ItemInstanceRoom,
     ItemInstanceNpcSpawn,
+    ItemInstanceContainer,
     NpcSpawnPrototype,
     NpcSpawnRoom,
     ArchetypeAbility,
@@ -1114,10 +1166,10 @@ fn compose_loaded(
                 unreachable!("artifact generation does not resolve scenes: {error}")
             }
             crate::DocumentToolError::LegacyProgression(error) => {
-                unreachable!("composed artifacts are already WorldPack v4: {error}")
+                unreachable!("composed artifacts are already WorldPack v5: {error}")
             }
             crate::DocumentToolError::LegacyItems(error) => {
-                unreachable!("composed artifacts already use native v4 items: {error}")
+                unreachable!("composed artifacts already use native v5 items: {error}")
             }
         })?;
     if artifact.len() > MAX_COMPOSED_WORLD_BYTES {
@@ -1310,6 +1362,20 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                             AreaCrossReferenceKind::ItemInstanceNpcSpawn,
                             &instance.id,
                             npc_spawn_id,
+                        );
+                    }
+                }
+                crate::InitialItemLocation::Container {
+                    container_instance_id,
+                } => {
+                    if let Some(owner) = item_instance_owner.get(container_instance_id.as_str()) {
+                        add_edge(
+                            &mut edges,
+                            from,
+                            owner,
+                            AreaCrossReferenceKind::ItemInstanceContainer,
+                            &instance.id,
+                            container_instance_id,
                         );
                     }
                 }
@@ -1943,7 +2009,7 @@ fn safe_identifier(value: &str) -> bool {
 }
 
 /// Existing runtime WorldPack readers intentionally tolerate future fields.
-/// AreaPack v3 does not: this format-specific key audit makes every structured
+/// AreaPack v4 does not: this format-specific key audit makes every structured
 /// authoring record fail closed without changing runtime deserialization.
 fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionError> {
     let Some(area) = audit_object(
@@ -2049,6 +2115,8 @@ fn audit_item_prototype(value: &serde_json::Value, path: &str) -> Result<(), Com
             "rarity",
             "itemLevel",
             "stackPolicy",
+            "maxStackUnits",
+            "container",
             "transferPolicy",
         ],
         path,
@@ -2061,6 +2129,13 @@ fn audit_item_prototype(value: &serde_json::Value, path: &str) -> Result<(), Com
             effect,
             &["kind", "magnitude", "remainingTicks"],
             &format!("{path}.effect"),
+        )?;
+    }
+    if let Some(container) = prototype.get("container") {
+        audit_object(
+            container,
+            &["maxSlots", "maxWeightGrams"],
+            &format!("{path}.container"),
         )?;
     }
     Ok(())
@@ -2076,7 +2151,7 @@ fn audit_initial_item_instance(
     if let Some(location) = instance.get("location") {
         audit_object(
             location,
-            &["kind", "roomId", "npcSpawnId"],
+            &["kind", "roomId", "npcSpawnId", "containerInstanceId"],
             &format!("{path}.location"),
         )?;
     }

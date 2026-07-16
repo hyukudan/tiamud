@@ -26,6 +26,8 @@ fn property_world() -> (World, SessionId) {
             rarity: ItemRarity::Common,
             item_level: 1,
             stack_policy: ItemStackPolicy::Unique,
+            max_stack_units: 1,
+            container: None,
             transfer_policy: ItemTransferPolicy::Transferable,
         };
     let mut world = World::from_definition(WorldDefinition {

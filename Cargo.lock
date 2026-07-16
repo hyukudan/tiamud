@@ -2777,8 +2777,10 @@ dependencies = [
  "rusqlite",
  "rustls",
  "rustls-native-certs",
+ "serde_json",
  "tempfile",
  "thiserror",
+ "tiamud-core",
  "tiamud-persistence-sqlite",
  "tokio-postgres-rustls",
 ]

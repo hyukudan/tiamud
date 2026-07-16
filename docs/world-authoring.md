@@ -1,7 +1,7 @@
 # Autoría, validación y publicación de mundos
 
-Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v4**
-como artefacto canónico de ejecución, **AreaPack v3** como módulo de autoría y
+Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v5**
+como artefacto canónico de ejecución, **AreaPack v4** como módulo de autoría y
 `WorldProjectManifest` v2 como composición fuera de línea. La autoridad exacta
 son los tipos y validadores de `crates/world-pack`; el ejemplo revisado es
 [`worlds/lantern-square.world.json`](../worlds/lantern-square.world.json).
@@ -12,7 +12,7 @@ variantes, scripts y pruebas de contenido.
 
 ## Frontera de ejecución
 
-El servidor valida y carga un único `WorldPackDocument` v4 completo antes de
+El servidor valida y carga un único `WorldPackDocument` v5 completo antes de
 abrir sus listeners. `TIAMUD_WORLD_PACK` permite seleccionar un artefacto
 externo revisado; si no se define, se usa Lantern Square embebido.
 
@@ -34,9 +34,9 @@ flowchart LR
     accDescr: Las áreas se componen y validan fuera de línea para producir un solo WorldPack canónico que el servidor carga al arrancar. No existe carga caliente.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
-    Areas[AreaPack v3<br/>1..=256 módulos] --> Compose
+    Areas[AreaPack v4<br/>1..=256 módulos] --> Compose
     Compose --> Validate[Validación global<br/>referencias · límites · Lua]
-    Validate --> Artifact[WorldPack v4 canónico]
+    Validate --> Artifact[WorldPack v5 canónico]
     Artifact --> Server[Servidor único<br/>carga al arrancar]
     Hot[Catálogo caliente/LRU] -. futuro .-> Server
 ```
@@ -45,16 +45,20 @@ flowchart LR
 
 | Entrada | Tratamiento |
 | --- | --- |
-| WorldPack v4 | Formato canónico nativo. |
-| WorldPack v3/v2 | Se normaliza de forma determinista a v4 antes de validar. |
-| AreaPack v3 | Formato modular nativo. |
-| AreaPack v2/v1 | Se normaliza a v3 antes de componer. |
+| WorldPack v5 | Formato canónico nativo. |
+| WorldPack v4/v3/v2 | Se normaliza de forma determinista a v5 antes de validar. |
+| AreaPack v4 | Formato modular nativo. |
+| AreaPack v3/v2/v1 | Se normaliza a v4 antes de componer. |
 | Envy/Merc | Solo pasa por `envy-import`; los programas históricos nunca se ejecutan. |
 
 La compatibilidad antigua no permite escribir vocabulario legado en un
-documento nativo. WorldPack v4 y AreaPack v3 rechazan `items`, `room.items`,
+documento nativo. WorldPack v5 y AreaPack v4 rechazan `items`, `room.items`,
 `itemRules` y `lootItemIds`: usan `itemPrototypes` e
 `initialItemInstances`.
+
+WorldPack v4 y AreaPack v3 reciben por normalización `maxStackUnits: 1` y sin
+contenedor. Si una entrada antigua intenta declarar campos de 3B, se rechaza en
+vez de ignorarlos: debe declarar la versión nueva.
 
 Los objetos v3/v2 antiguos se convierten uno a uno, sin deduplicar por nombre o
 contenido. El prototipo y la instancia pueden conservar la misma cadena
@@ -100,15 +104,15 @@ Ejemplo:
 }
 ```
 
-## AreaPack v3
+## AreaPack v4
 
 Cada área reutiliza los mismos registros del WorldPack; no crea una segunda
 representación de salas, objetos o NPC. Solo añade `id` y `dependsOn` como
 frontera de propiedad.
 
 ```text
-AreaPack v3
-├── schemaVersion! = 3
+AreaPack v4
+├── schemaVersion! = 4
 ├── id!
 ├── dependsOn[]?
 ├── itemPrototypes[]?
@@ -137,7 +141,7 @@ caso normal. Toda referencia estructurada a una entidad de otra área debe
 declarar su `id` en `dependsOn`. Esto incluye:
 
 - salidas a salas ajenas;
-- instancia→prototipo y ubicación de instancia en sala o spawn ajenos;
+- instancia→prototipo y ubicación de instancia en sala, spawn o contenedor ajenos;
 - spawn→prototipo NPC y spawn→sala;
 - concesiones/requisitos de progresión y habilidades;
 - multimedia, percepción, variantes, scripts y pruebas.
@@ -151,7 +155,7 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "id": "plaza",
   "dependsOn": ["puerta"],
   "itemPrototypes": [
@@ -166,6 +170,7 @@ referencias opacas dentro de `source` son responsabilidad del autor.
       "rarity": "common",
       "itemLevel": 1,
       "stackPolicy": "unique",
+      "maxStackUnits": 1,
       "transferPolicy": "transferable"
     }
   ],
@@ -196,7 +201,7 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "id": "puerta",
   "dependsOn": ["plaza"],
   "rooms": [
@@ -243,6 +248,7 @@ referencias opacas dentro de `source` son responsabilidad del autor.
       "rarity": "uncommon",
       "itemLevel": 1,
       "stackPolicy": "unique",
+      "maxStackUnits": 1,
       "transferPolicy": "transferable"
     }
   ],
@@ -262,15 +268,15 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 El botín no vive en `npcPrototypes`. La ubicación `npc_spawn` de la instancia
 es la asignación inicial, única y validada.
 
-## WorldPack v4
+## WorldPack v5
 
 El artefacto plano conserva identidad, catálogos de objeto, salas y gameplay.
 Las extensiones de multimedia/percepción/scripts se aplanan en el documento
 por `WorldPackDocument` aunque la estructura Rust separa el núcleo del mundo.
 
 ```text
-WorldPack v4
-├── schemaVersion! = 4
+WorldPack v5
+├── schemaVersion! = 5
 ├── id!
 ├── name!
 ├── startRoomId!
@@ -297,7 +303,7 @@ Un mundo mínimo sin objetos:
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "id": "ejemplo",
   "name": "Mundo de ejemplo",
   "startRoomId": "ejemplo:entrada",
@@ -331,8 +337,12 @@ ItemPrototype
 ├── slotCost!            1..=100
 ├── rarity!              common | uncommon | rare | epic | legendary
 ├── itemLevel!           1..=1_000
-├── stackPolicy!         unique en fase 3A
-└── transferPolicy!      transferable en fase 3A
+├── stackPolicy!         unique | fungible
+├── maxStackUnits!       unique = 1; fungible = 2..=1.000
+├── container?
+│   ├── maxSlots!        1..=1.000
+│   └── maxWeightGrams!  0..=1.000.000
+└── transferPolicy!      transferable en fase 3B
 
 InitialItemInstance
 ├── id!                  ID durable interno
@@ -340,6 +350,7 @@ InitialItemInstance
 └── location!
     ├── { kind: room, roomId }
     ├── { kind: npc_spawn, npcSpawnId }
+    ├── { kind: container, containerInstanceId }
     └── { kind: staged }
 ```
 
@@ -350,6 +361,10 @@ Invariantes:
 - un prototipo no tiene ubicación;
 - dos instancias pueden compartir prototipo, nunca identidad;
 - una instancia `npc_spawn` referencia un spawn existente;
+- una instancia `container` referencia otra instancia cuyo prototipo define
+  contenedor;
+- el grafo de contención no admite autorreferencia, ciclos ni más de cuatro
+  aristas;
 - las instancias nuevas de runtime usan una secuencia durable incluida en
   checkpoint y rollback;
 - el servidor resuelve nombre, descripción, peso, rareza y reglas desde el
@@ -361,21 +376,46 @@ Invariantes:
   criptográficamente aleatoria nueva por sesión;
 - Telnet muestra esas referencias en escena, inventario y equipo y las acepta
   como selector exacto; y
-- una consulta textual que coincide con varias unidades falla como ambigua.
+- una referencia opaca selecciona la unidad o grupo exactos; una consulta
+  textual ambigua falla en vez de escoger una unidad arbitraria.
 
 La capacidad de personaje no se autoriza en el WorldPack ni se calcula en el
-cliente. Los slots cuentan objetos portados; el peso incluye objetos portados y
-equipados. Equipar libera slots; desequipar y reemplazar equipo prevalidan el
-resultado completo. La rareza y `itemLevel` son ejes de texto/presupuesto, no
-autoridad ni sustitutos de requisitos.
+cliente. Los slots del personaje cuentan raíces portadas, agrupadas por
+prototipo; el peso incluye raíces portadas/equipadas y todos sus descendientes.
+Los slots de un contenedor cuentan hijos directos agrupados y su peso usado
+cuenta todo el subárbol, sin incluir la carcasa del propio contenedor. Equipar,
+desequipar, reemplazar, tomar, soltar, introducir y extraer prevalidan el
+resultado completo.
 
-Fase 3A acepta únicamente `stackPolicy: unique` y
-`transferPolicy: transferable`. Los valores `character_bound` y
-`non_transferable` existen en el vocabulario cerrado pero el validador los
-rechaza como reservados hasta que 3C pueda ejecutar su semántica. Fase 3A no
-implementa pilas, contenedores, `give`, intercambio, afijos,
-elegibilidad/reparto ni tablas aleatorias. Las políticas ya tienen vocabulario
-cerrado para que las fases siguientes no inventen datos incompatibles.
+```mermaid
+flowchart TD
+    Character[Personaje] -->|slots: solo raíz| Bag[Bolsa unique]
+    Bag -->|slots directos| TonicA[Tónica]
+    Bag --> TonicB[Tónica]
+    Bag --> Box[Caja unique]
+    Box --> Map[Mapa]
+    TonicA -. pila fungible derivada x2 .- TonicB
+    Character -. peso: carcasa y descendientes .-> Map
+```
+
+Las pilas nunca son entidades durables. Se derivan por ubicación/prototipo,
+ordenan sus instancias por ID y se dividen por `maxStackUnits`:
+
+```text
+stackSlots = ceil(quantity / maxStackUnits) * slotCost
+totalWeightGrams = quantity * weightGrams
+```
+
+La cantidad predeterminada es uno y una mutación acepta como máximo 256
+unidades. `put` opera sobre raíces portadas; `get` solo sobre hijos directos;
+`contents` pagina veinte grupos. Mover una instancia contenedor conserva las
+ubicaciones relativas de todo su subárbol.
+
+Fase 3B acepta únicamente `transferPolicy: transferable`. Los valores
+`character_bound` y `non_transferable` existen en el vocabulario cerrado pero
+el validador los rechaza como reservados hasta que 3C ejecute su semántica. 3B
+no implementa `give`, intercambio, afijos, elegibilidad/reparto, procedencia de
+drops ni tablas aleatorias.
 
 ## Composición, validación y digest
 
@@ -401,12 +441,12 @@ La composición:
 - produce bytes y reportes deterministas; y
 - escribe el destino completo de forma atómica sin sobreescribirlo.
 
-Lantern Square se compone desde tres áreas y produce seis prototipos y seis
+Lantern Square se compone desde tres áreas y produce siete prototipos y ocho
 instancias iniciales. El artefacto es byte a byte idéntico al WorldPack
 canónico y su SHA-256 es:
 
 ```text
-5a7657377a63518302a164119a1487020e8c1e103859806f0d087d2891fc207c
+080dbc59fccde2327754d9e2834b8b98040905c15753062731d7b968e8cc0855
 ```
 
 Límites principales:
@@ -425,6 +465,12 @@ Límites principales:
 | Peso de un prototipo | 0..=1.000.000 g |
 | Coste de slots de un prototipo | 1..=100 |
 | `itemLevel` | 1..=1.000 |
+| Unidades máximas por pila | 1.000 |
+| Slots de un contenedor | 1..=1.000 |
+| Peso de contenido por contenedor | 0..=1.000.000 g |
+| Profundidad de contención | 4 aristas |
+| Unidades movidas por acción | 256 |
+| Grupos por página de `contents` | 20 |
 
 ## Flujo editorial
 
@@ -460,13 +506,16 @@ validación y revisión humana.
 
 ## Persistencia y evolución del formato
 
-WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v2 define dónde están
+WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v3 define dónde están
 las instancias después de jugar y conserva el siguiente contador de identidad.
-La conversión desde snapshot v1 es explícita y falla cerrada. Al restaurar un
+El decoder elige primero por `snapshotVersion`; las conversiones desde v1 y v2
+usan DTO explícitos y fallan cerradas ante campos cruzados, referencias, ciclos,
+profundidad, capacidad o contador inválidos. Al restaurar un
 snapshot anterior, las instancias iniciales nuevas del WorldPack se conservan y
 el estado durable se superpone; una instancia creada en runtime que no figure
 en el snapshot no reaparece. Antes de abrir listeners se validan por lotes los
-propietarios de objetos, sus equipos y su capacidad, incluidos personajes
+propietarios de objetos siguiendo padres `Contained` hasta la raíz, sus equipos,
+el grafo y su capacidad, incluidos personajes
 desconectados, y esos agregados temporales no quedan en el mundo activo.
 El runtime admite hasta 65.536 instancias; tanto el snapshot como la suma de
 fichas inspeccionadas en esa barrera están limitados a 1 MiB, y cada ficha a

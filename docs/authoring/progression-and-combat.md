@@ -1,6 +1,6 @@
 # Progression, abilities and combat
 
-The v3 character model in WorldPack v4 separates character identity from role:
+The v3 character model in WorldPack v5 separates character identity from role:
 
 - a lineage is an inherited or supernatural origin;
 - an optional background is learned personal history;
@@ -57,11 +57,13 @@ NPC prototypes author level, health, strength, defence, XP and respawn.
 NPC ability sets attach resources, regeneration, resistances and known
 abilities. Reusable item prototypes attach equipment slots, attack bonuses,
 healing, consumption, weight, slot cost, rarity, item level, transfer/stack
-policy and short regeneration or strength effects. Phase 3A accepts only
-`unique` plus `transferable`; bound/non-transferable values are reserved and
-rejected until their runtime semantics land. Fixed NPC loot is an
-`initialItemInstances` unit whose location is the intended `npc_spawn`; it is
-not a list on the NPC prototype.
+policy, optional bounded-container capacity and short regeneration or strength
+effects. Phase 3B accepts `unique` or `fungible` stacks but still accepts only
+`transferable`; bound/non-transferable values are reserved and rejected until
+their runtime semantics land. Fungible stacks are derived from durable units
+and never author a quantity or stack ID. A container must be unique and
+non-consumable. Fixed NPC loot is an `initialItemInstances` unit whose location
+is the intended `npc_spawn`; it is not a list on the NPC prototype.
 
 All actions still pass through the same authoritative world actor. Browser and
 Telnet commands do not implement separate combat rules. Definitions are

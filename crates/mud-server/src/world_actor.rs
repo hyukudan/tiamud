@@ -15,8 +15,8 @@ use thiserror::Error;
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, AdventureEvent, BackgroundSelection,
     CharacterCreationCatalogView, CharacterGameplaySnapshot, CharacterId, CharacterSnapshot,
-    DomainEvent, GameplayEvent, PlayerAction, PlayerStateView, SceneView, SessionId, ViewEvent,
-    World, WorldError as CoreWorldError,
+    ContainerContentsView, DomainEvent, GameplayEvent, PlayerAction, PlayerStateView, SceneView,
+    SessionId, ViewEvent, World, WorldError as CoreWorldError,
 };
 use tiamud_scripting::ScriptHook;
 use tokio::sync::{mpsc, oneshot};
@@ -64,6 +64,7 @@ pub struct AppliedAction {
     pub(crate) presentation: ScenePresentation,
     pub player: PlayerStateView,
     pub output: Option<String>,
+    pub container_contents: Option<ContainerContentsView>,
     pub events: Vec<ProjectedViewEvent>,
 }
 
@@ -985,6 +986,7 @@ async fn apply(
                 presentation: runtime_content.resolve_entity_presentation(world, session),
                 player: world.player_state_view(session)?,
                 output: Some(applied.output),
+                container_contents: None,
                 events,
             });
         }
@@ -1069,6 +1071,7 @@ async fn apply(
             presentation: runtime_content.resolve_entity_presentation(world, session),
             player: world.player_state_view(session)?,
             output: combine_output(Some(applied.outcome.output), hook.narration),
+            container_contents: None,
             events,
         });
     }
@@ -1173,6 +1176,7 @@ async fn apply(
         presentation: runtime_content.resolve_entity_presentation(world, session),
         player: world.player_state_view(session)?,
         output: combine_output(outcome.output, narration),
+        container_contents: outcome.container_contents,
         events,
     })
 }
@@ -1679,6 +1683,8 @@ mod tests {
                     rarity: ItemRarity::Common,
                     item_level: 1,
                     stack_policy: ItemStackPolicy::Unique,
+                    max_stack_units: 1,
+                    container: None,
                     transfer_policy: ItemTransferPolicy::Transferable,
                 },
                 ItemPrototypeDefinition {
@@ -1700,6 +1706,8 @@ mod tests {
                     rarity: ItemRarity::Uncommon,
                     item_level: 2,
                     stack_policy: ItemStackPolicy::Unique,
+                    max_stack_units: 1,
+                    container: None,
                     transfer_policy: ItemTransferPolicy::Transferable,
                 },
                 ItemPrototypeDefinition {
@@ -1717,6 +1725,8 @@ mod tests {
                     rarity: ItemRarity::Rare,
                     item_level: 2,
                     stack_policy: ItemStackPolicy::Unique,
+                    max_stack_units: 1,
+                    container: None,
                     transfer_policy: ItemTransferPolicy::Transferable,
                 },
             ],
@@ -2798,6 +2808,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_counts_contained_descendants_against_an_offline_owner() {
+        let store = Arc::new(MemoryStore::default());
+        let character_id = CharacterId(81);
+        let loaded = crate::world_loader::default_loaded_world().unwrap();
+        let mut world = crate::world_loader::build_loaded_world(&loaded).unwrap();
+        let mut gameplay = world
+            .initial_gameplay(None, BackgroundSelection::Default, None)
+            .unwrap();
+        gameplay.inventory_capacity.max_weight_grams = 500;
+        seed_offline_character(&store, character_id, gameplay);
+        let mut runtime = world.runtime_snapshot();
+        runtime
+            .item_instances
+            .get_mut(&ItemInstanceId("tiamud:archive-satchel".into()))
+            .unwrap()
+            .location = tiamud_core::RuntimeItemLocation::Carried { character_id };
+        world.restore_runtime_snapshot(runtime.clone()).unwrap();
+        assert_eq!(world.runtime_item_owner_ids(), [character_id].into());
+        store.state.lock().unwrap().runtime = Some(runtime);
+
+        let result = WorldHandle::spawn(
+            crate::world_loader::build_loaded_world(&loaded).unwrap(),
+            store,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(GameError::Startup {
+                stage: "validate_character_aggregates",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn startup_accepts_valid_offline_equipment_owner() {
         let store = Arc::new(MemoryStore::default());
         let character_id = CharacterId(9);
@@ -2921,7 +2967,7 @@ mod tests {
         let failed = world
             .apply(
                 entered.session_id,
-                PlayerAction::Take("blue-glass lantern".into()),
+                PlayerAction::Take(tiamud_core::ItemSelection::one("blue-glass lantern")),
             )
             .await;
         assert!(matches!(failed, Err(GameError::Persistence(_))));
@@ -2946,7 +2992,7 @@ mod tests {
         world
             .apply(
                 actor.session_id,
-                PlayerAction::Take("blue-glass lantern".into()),
+                PlayerAction::Take(tiamud_core::ItemSelection::one("blue-glass lantern")),
             )
             .await
             .unwrap();
@@ -3146,7 +3192,10 @@ mod tests {
             .await
             .unwrap();
         world
-            .apply(entered.session_id, PlayerAction::Take("potion".into()))
+            .apply(
+                entered.session_id,
+                PlayerAction::Take(tiamud_core::ItemSelection::one("potion")),
+            )
             .await
             .unwrap();
         store.fail_saves.store(true, Ordering::SeqCst);
@@ -3250,7 +3299,7 @@ mod tests {
         first_world
             .apply(
                 collector.session_id,
-                PlayerAction::Take("blue-glass lantern".into()),
+                PlayerAction::Take(tiamud_core::ItemSelection::one("blue-glass lantern")),
             )
             .await
             .unwrap();
@@ -3277,7 +3326,7 @@ mod tests {
         assert!(output.starts_with(
             "Capacity: 1/24 slots; 1000/50000 g.\r\n\
                  You are carrying:\r\n\
-                 - blue-glass lantern [common; level 1; 1000 g; ref o"
+                 - 1 × blue-glass lantern [common; level 1; 1000 g each; 1 stack slot; 1000 g total; ref o"
         ));
         assert!(output.ends_with("]\r\n"));
         assert!(!output.contains("demo:blue-lantern"));
@@ -3747,9 +3796,9 @@ mod tests {
         for action in [
             PlayerAction::Quest(QuestAction::Accept("first-hunt".into())),
             PlayerAction::Economy(EconomyAction::Buy("tonic".into())),
-            PlayerAction::Take("potion".into()),
+            PlayerAction::Take(tiamud_core::ItemSelection::one("potion")),
             PlayerAction::Use("potion".into()),
-            PlayerAction::Take("sword".into()),
+            PlayerAction::Take(tiamud_core::ItemSelection::one("sword")),
             PlayerAction::Equip("sword".into()),
             PlayerAction::Attack("guardian".into()),
         ] {
@@ -3832,7 +3881,9 @@ mod tests {
             .apply(entered.session_id, PlayerAction::Inventory)
             .await
             .unwrap();
-        assert!(inventory.output.unwrap().contains("weapon: bronze sword"));
+        assert!(inventory.output.unwrap().contains(
+            "weapon: 1 × bronze sword [common; level 1; 2000 g each; 1 stack slot; 2000 g total; ref o"
+        ));
         assert_eq!(entered.player.inventory_capacity.used_slots, 0);
         assert_eq!(entered.player.inventory_capacity.used_weight_grams, 2_000);
         assert_eq!(entered.player.equipment[0].rarity, "common");
