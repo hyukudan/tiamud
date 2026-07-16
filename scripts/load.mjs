@@ -8,6 +8,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { provisionBot } from './bot.mjs';
+import { parseTelnetEndpoint, provisionTelnetBot } from './telnet-bot.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const MAX_LOG_TAIL_BYTES = 64 * 1024;
@@ -19,15 +20,33 @@ class Metrics {
   warnings = [];
   bootstrapCompleted = 0;
   roundsCompleted = 0;
+  transports = new Map([
+    ['websocket', { users: 0, bootstraps: 0, rounds: 0, errors: [] }],
+    ['telnet', { users: 0, bootstraps: 0, rounds: 0, errors: [] }],
+  ]);
 
-  recordLatency(name, milliseconds) {
-    const samples = this.latencies.get(name) ?? [];
+  recordLatency(transport, name, milliseconds) {
+    const key = `${transport}.${name}`;
+    const samples = this.latencies.get(key) ?? [];
     samples.push(milliseconds);
-    this.latencies.set(name, samples);
+    this.latencies.set(key, samples);
   }
 
-  recordError(phase, error) {
-    this.errors.push({ phase, message: errorMessage(error) });
+  configureUsers(websocket, telnet) {
+    this.transports.get('websocket').users = websocket;
+    this.transports.get('telnet').users = telnet;
+  }
+
+  completed(transport, kind) {
+    this.transports.get(transport)[kind] += 1;
+    if (kind === 'bootstraps') this.bootstrapCompleted += 1;
+    else this.roundsCompleted += 1;
+  }
+
+  recordError(phase, error, transport) {
+    const entry = { phase, message: errorMessage(error), ...(transport ? { transport } : {}) };
+    this.errors.push(entry);
+    if (transport) this.transports.get(transport).errors.push(entry);
   }
 
   latencyReport() {
@@ -35,6 +54,23 @@ class Metrics {
       [...this.latencies.entries()]
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([name, samples]) => [name, summarize(samples)]),
+    );
+  }
+
+  transportReport() {
+    return Object.fromEntries(
+      [...this.transports.entries()].map(([name, statistics]) => [
+        name,
+        {
+          ...statistics,
+          latenciesMs: Object.fromEntries(
+            [...this.latencies.entries()]
+              .filter(([metric]) => metric.startsWith(`${name}.`))
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([metric, samples]) => [metric.slice(name.length + 1), summarize(samples)]),
+          ),
+        },
+      ]),
     );
   }
 }
@@ -75,6 +111,7 @@ let rssFinal;
 let rssPeak;
 let monitoredPid = options.pid;
 let interruptedSignal;
+let telnetEndpoint = options.telnet;
 
 const interrupt = (signal) => {
   interruptedSignal ??= signal;
@@ -92,6 +129,7 @@ try {
   } else {
     server = await startTemporaryServer(temporary, options);
     baseUrl = server.baseUrl;
+    telnetEndpoint = server.telnetEndpoint;
     monitoredPid = server.child.pid;
   }
 
@@ -106,23 +144,48 @@ try {
   }
 
   const runId = `${Date.now().toString(36)}-${process.pid.toString(36)}`;
+  const websocketUsers = options.users - options.telnetUsers;
+  metrics.configureUsers(websocketUsers, options.telnetUsers);
+  const botPlans = [
+    ...Array.from({ length: websocketUsers }, (_, index) => ({
+      transport: 'websocket',
+      index: index + 1,
+    })),
+    ...Array.from({ length: options.telnetUsers }, (_, index) => ({
+      transport: 'telnet',
+      index: websocketUsers + index + 1,
+    })),
+  ];
   bots = await mapLimit(
-    Array.from({ length: options.users }, (_, index) => index + 1),
+    botPlans,
     options.concurrency,
-    async (index) => {
+    async (plan) => {
       throwIfInterrupted();
-      const bot = await provisionBot(baseUrl, runId, index, (name, milliseconds) =>
-        metrics.recordLatency(name, milliseconds),
-      );
-      bot.paceMs = options.paceMs;
-      return bot;
+      try {
+        const recordLatency = (name, milliseconds) =>
+          metrics.recordLatency(plan.transport, name, milliseconds);
+        const bot =
+          plan.transport === 'telnet'
+            ? await provisionTelnetBot(telnetEndpoint, runId, plan.index, recordLatency)
+            : await provisionBot(baseUrl, runId, plan.index, recordLatency);
+        bot.paceMs = options.paceMs;
+        return bot;
+      } catch (error) {
+        metrics.recordError('provision', error, plan.transport);
+        throw error;
+      }
     },
   );
 
   await mapLimit(bots, options.concurrency, async (bot) => {
     throwIfInterrupted();
-    await bot.bootstrap();
-    metrics.bootstrapCompleted += 1;
+    try {
+      await bot.bootstrap();
+      metrics.completed(bot.transport, 'bootstraps');
+    } catch (error) {
+      metrics.recordError('bootstrap', error, bot.transport);
+      throw error;
+    }
   });
 
   if (options.durationMs !== undefined) {
@@ -131,16 +194,26 @@ try {
       throwIfInterrupted();
       await mapLimit(bots, options.concurrency, async (bot) => {
         if (performance.now() >= deadline) return;
-        await bot.runRound();
-        metrics.roundsCompleted += 1;
+        try {
+          await bot.runRound();
+          metrics.completed(bot.transport, 'rounds');
+        } catch (error) {
+          metrics.recordError('round', error, bot.transport);
+          throw error;
+        }
       });
     }
   } else {
     for (let round = 0; round < options.rounds; round += 1) {
       throwIfInterrupted();
       await mapLimit(bots, options.concurrency, async (bot) => {
-        await bot.runRound();
-        metrics.roundsCompleted += 1;
+        try {
+          await bot.runRound();
+          metrics.completed(bot.transport, 'rounds');
+        } catch (error) {
+          metrics.recordError('round', error, bot.transport);
+          throw error;
+        }
       });
     }
   }
@@ -186,6 +259,8 @@ const report = {
   success: metrics.errors.length === 0,
   mode: options.url ? 'existing-server' : 'temporary-server',
   users: options.users,
+  telnetUsers: options.telnetUsers,
+  websocketUsers: options.users - options.telnetUsers,
   concurrency: options.concurrency,
   paceMs: options.paceMs,
   requested:
@@ -198,6 +273,7 @@ const report = {
   },
   elapsedMs: rounded(performance.now() - startedAt),
   latenciesMs: metrics.latencyReport(),
+  transports: metrics.transportReport(),
   rss: {
     pid: monitoredPid ?? null,
     initialBytes: rssInitial ?? null,
@@ -253,7 +329,12 @@ async function startTemporaryServer(directory, settings) {
   const baseUrl = new URL(`http://127.0.0.1:${httpPort}/`);
   try {
     await waitUntilReady(baseUrl, child);
-    return { child, baseUrl, logTail };
+    return {
+      child,
+      baseUrl,
+      telnetEndpoint: { host: '127.0.0.1', port: telnetPort, display: `127.0.0.1:${telnetPort}` },
+      logTail,
+    };
   } catch (error) {
     await stopServer(child);
     throw new Error(`${errorMessage(error)}\nServer log tail:\n${logTail.value}`);
@@ -377,12 +458,14 @@ function percentile(sorted, quantile) {
 function parseArguments(arguments_) {
   const parsed = {
     users: 4,
+    telnetUsers: 0,
     rounds: undefined,
     durationMs: undefined,
     concurrency: undefined,
     paceMs: 100,
     maxRssGrowthMb: 64,
     url: undefined,
+    telnet: undefined,
     pid: undefined,
     binary: undefined,
     skipBuild: false,
@@ -407,6 +490,9 @@ function parseArguments(arguments_) {
       case '--users':
         parsed.users = boundedInteger(value(argument, index++), argument, 1, 64);
         break;
+      case '--telnet-users':
+        parsed.telnetUsers = boundedInteger(value(argument, index++), argument, 0, 64);
+        break;
       case '--rounds':
         parsed.rounds = boundedInteger(value(argument, index++), argument, 1, 100_000);
         break;
@@ -424,6 +510,9 @@ function parseArguments(arguments_) {
         break;
       case '--url':
         parsed.url = value(argument, index++);
+        break;
+      case '--telnet':
+        parsed.telnet = parseTelnetEndpoint(value(argument, index++));
         break;
       case '--pid':
         parsed.pid = boundedInteger(value(argument, index++), argument, 1, 2 ** 31 - 1);
@@ -445,9 +534,21 @@ function parseArguments(arguments_) {
   parsed.rounds ??= parsed.durationMs === undefined ? 3 : undefined;
   parsed.concurrency ??= Math.min(4, parsed.users);
   if (parsed.concurrency > parsed.users) throw new Error('--concurrency cannot exceed --users.');
+  if (parsed.telnetUsers > parsed.users) {
+    throw new Error('--telnet-users cannot exceed --users.');
+  }
   if (!parsed.url && parsed.pid) throw new Error('--pid is only used with --url.');
   if (parsed.url && (parsed.binary || parsed.skipBuild)) {
     throw new Error('--binary and --skip-build cannot be combined with --url.');
+  }
+  if (parsed.url && parsed.telnetUsers > 0 && !parsed.telnet) {
+    throw new Error('--telnet host:port is required with --url when Telnet bots are enabled.');
+  }
+  if (!parsed.url && parsed.telnet) {
+    throw new Error('--telnet is only used with --url; temporary mode supplies its own port.');
+  }
+  if (parsed.telnet && parsed.telnetUsers === 0) {
+    throw new Error('--telnet requires --telnet-users greater than zero.');
   }
   return parsed;
 }
@@ -522,12 +623,16 @@ Server mode:
   database and temporary HTTP/Telnet ports, then stops and removes it.
 
   --url <http(s)://host>       Target an already-running server instead.
+  --telnet <host:port>         Plaintext Telnet target for --url mode; required
+                               when --telnet-users is greater than zero.
   --pid <pid>                  Measure an existing server's Linux RSS in --url mode.
   --binary <path>              Start this prebuilt server binary; skips cargo build.
   --skip-build                 Use target/debug/tiamud-server without rebuilding.
 
 Bounded workload:
   --users <1..64>              Users and characters to create (default: 4).
+  --telnet-users <0..users>    Number of users using real plaintext Telnet
+                               instead of WebSocket (default: 0).
   --rounds <1..100000>         Rounds per user (default: 3).
   --duration <1s..24h>         Run until a duration instead of --rounds; units ms/s/m/h.
   --concurrency <1..16>        Maximum simultaneous bots (default: min(users, 4)).
@@ -536,20 +641,22 @@ Bounded workload:
                                Fail if final server RSS growth exceeds this (default: 64).
   -h, --help                   Show this help.
 
-Each bot provisions a registered account and character, negotiates only tiamud.v1,
-validates every server frame strictly, checks opaque per-view IDs, moves north,
-replays the same requestId to prove idempotence, requests sync.snapshot, reconnects,
-then exercises south/north/look. Output includes p50/p95/p99/max latency, errors,
-and initial/final/peak Linux RSS. Any protocol/action error or suspected RSS leak
+WebSocket bots provision over HTTP, validate every tiamud.v1 frame, exercise
+idempotence and sync, and reconnect. Telnet bots register, create, login, move,
+look, speak and reconnect over real TCP while filtering bounded incremental IAC
+negotiation. Output includes latency and errors globally and per transport plus
+initial/final/peak Linux RSS. Any protocol/action error or suspected RSS leak
 returns a non-zero exit status.
 
 Short local profile:
-  node scripts/load.mjs --users 2 --rounds 2 --concurrency 2
+  node scripts/load.mjs --users 2 --telnet-users 1 --rounds 2 --concurrency 2
 
 Existing server (RSS checking enabled when its PID is supplied):
-  node scripts/load.mjs --url http://127.0.0.1:8080 --pid 1234 --users 4 --rounds 10
+  node scripts/load.mjs --url http://127.0.0.1:8080 --telnet 127.0.0.1:4000 \\
+    --pid 1234 --users 4 --telnet-users 1 --rounds 10
 
 Manual 24-hour soak recipe (this command is documented, not claimed as executed):
-  node scripts/load.mjs --duration 24h --users 16 --concurrency 4 --pace-ms 150
+  node scripts/load.mjs --duration 24h --users 16 --telnet-users 4 \
+    --concurrency 4 --pace-ms 150
 `);
 }

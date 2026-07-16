@@ -707,7 +707,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
     let Some(credentials) = credentials else {
         let _ = send_json(
             &mut socket,
-            json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "message": "Expected an authenticated client.hello"}}),
+            json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "code": "access.protocol_rejected", "message": "Expected an authenticated client.hello"}}),
         )
         .await;
         let _ = socket.send(Message::Close(None)).await;
@@ -727,9 +727,10 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
         Ok(entered) => entered,
         Err(error) => {
             warn!(%error, "authenticated client could not enter the world");
+            let code = access_rejection_code(&error);
             let _ = send_json(
                 &mut socket,
-                json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "message": public_game_error(&error)}}),
+                json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "code": code, "message": public_game_error(&error)}}),
             )
             .await;
             let _ = socket.send(Message::Close(None)).await;
@@ -753,7 +754,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
             };
             let _ = send_json(
                 &mut socket,
-                json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "message": message}}),
+                json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "code": "access.session_limit", "message": message}}),
             )
             .await;
             let _ = socket.send(Message::Close(None)).await;
@@ -1990,7 +1991,28 @@ fn public_game_error(error: &GameError) -> String {
         GameError::Persistence(StoreError::AccountBanned) => {
             "This account is suspended.".to_owned()
         }
+        GameError::Persistence(StoreError::SessionExpired) => {
+            "This session has expired. Sign in again.".to_owned()
+        }
+        GameError::Persistence(StoreError::InvalidSession | StoreError::SessionRevoked) => {
+            "This session is no longer valid. Sign in again.".to_owned()
+        }
+        GameError::Persistence(StoreError::CharacterNotFound { .. }) => {
+            "The selected character is no longer available.".to_owned()
+        }
         _ => "The world is temporarily unavailable.".to_owned(),
+    }
+}
+
+fn access_rejection_code(error: &GameError) -> &'static str {
+    match error {
+        GameError::Persistence(StoreError::SessionExpired) => "access.session_expired",
+        GameError::Persistence(StoreError::InvalidSession | StoreError::SessionRevoked) => {
+            "access.session_invalid"
+        }
+        GameError::Persistence(StoreError::CharacterNotFound { .. }) => "access.character_invalid",
+        GameError::World(WorldError::CharacterAlreadyConnected) => "access.character_connected",
+        _ => "access.temporarily_unavailable",
     }
 }
 
@@ -2194,6 +2216,30 @@ mod tests {
         assert_eq!(
             public_game_error(&GameError::World(WorldError::NoExit)),
             "There is no exit in that direction."
+        );
+    }
+
+    #[test]
+    fn websocket_entry_rejections_distinguish_credentials_from_capacity() {
+        assert_eq!(
+            access_rejection_code(&GameError::Persistence(StoreError::SessionExpired)),
+            "access.session_expired"
+        );
+        assert_eq!(
+            access_rejection_code(&GameError::Persistence(StoreError::InvalidSession)),
+            "access.session_invalid"
+        );
+        assert_eq!(
+            access_rejection_code(&GameError::World(WorldError::CharacterAlreadyConnected)),
+            "access.character_connected"
+        );
+        assert_eq!(
+            access_rejection_code(&GameError::ActorStopped),
+            "access.temporarily_unavailable"
+        );
+        assert_eq!(
+            public_game_error(&GameError::Persistence(StoreError::SessionExpired)),
+            "This session has expired. Sign in again."
         );
     }
 

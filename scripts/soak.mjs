@@ -8,6 +8,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { collectCandidateEvidence, fileEvidence } from './soak-evidence.mjs';
+import { parseTelnetEndpoint } from './telnet-bot.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const options = parseArguments(process.argv.slice(2));
@@ -39,6 +40,7 @@ const harnessEvidence = {
   evidence: await fileEvidence(path.join(root, 'scripts', 'soak-evidence.mjs')),
   load: await fileEvidence(path.join(root, 'scripts', 'load.mjs')),
   bot: await fileEvidence(path.join(root, 'scripts', 'bot.mjs')),
+  telnetBot: await fileEvidence(path.join(root, 'scripts', 'telnet-bot.mjs')),
 };
 const candidateEvidence = await collectCandidateEvidence(root).catch((error) => {
   errors.push(`candidate evidence failed: ${errorMessage(error)}`);
@@ -68,6 +70,7 @@ process.once('SIGTERM', onSigterm);
 
 let baseUrl;
 let monitoredPid;
+let telnetEndpoint = options.telnet;
 
 try {
   if (options.url) {
@@ -80,6 +83,7 @@ try {
     server = await startServer(temporary, options.binary, options.users);
     serverConfiguration = server.configuration;
     baseUrl = server.baseUrl;
+    telnetEndpoint = server.telnetEndpoint;
     monitoredPid = server.child.pid;
   }
 
@@ -95,7 +99,7 @@ try {
     }
   }, options.sampleIntervalMs);
 
-  const loadResult = await runLoad(baseUrl, monitoredPid, options);
+  const loadResult = await runLoad(baseUrl, monitoredPid, telnetEndpoint, options);
   loadChild = undefined;
   loadStderr = loadResult.stderr;
   loadReport = parseLoadReport(loadResult.stdout);
@@ -155,6 +159,7 @@ const report = {
   target: {
     mode: options.url ? 'existing-server' : 'temporary-server',
     url: baseUrl?.origin ?? null,
+    telnet: telnetEndpoint?.display ?? null,
     pid: monitoredPid ?? null,
     binary: binaryEvidence,
     configuration: serverConfiguration,
@@ -162,6 +167,7 @@ const report = {
   profile: {
     durationMs: options.durationMs,
     users: options.users,
+    telnetUsers: options.telnetUsers,
     concurrency: options.concurrency,
     paceMs: options.paceMs,
     sampleIntervalMs: options.sampleIntervalMs,
@@ -244,10 +250,20 @@ async function startServer(directory, binaryValue, users) {
     await stopServer(child);
     throw new Error(`${errorMessage(error)}\nServer log tail:\n${log.value}`);
   }
-  return { child, baseUrl: serverUrl, log, configuration };
+  return {
+    child,
+    baseUrl: serverUrl,
+    telnetEndpoint: {
+      host: '127.0.0.1',
+      port: telnetPort,
+      display: `127.0.0.1:${telnetPort}`,
+    },
+    log,
+    configuration,
+  };
 }
 
-async function runLoad(url, pid, settings) {
+async function runLoad(url, pid, telnetEndpoint, settings) {
   const arguments_ = [
     path.join(root, 'scripts', 'load.mjs'),
     '--url',
@@ -258,6 +274,8 @@ async function runLoad(url, pid, settings) {
     settings.duration,
     '--users',
     String(settings.users),
+    '--telnet-users',
+    String(settings.telnetUsers),
     '--concurrency',
     String(settings.concurrency),
     '--pace-ms',
@@ -265,6 +283,9 @@ async function runLoad(url, pid, settings) {
     '--max-rss-growth-mb',
     String(settings.maxRssGrowthMb),
   ];
+  if (settings.telnetUsers > 0) {
+    arguments_.push('--telnet', telnetEndpoint.display);
+  }
   return new Promise((resolve, reject) => {
     let stdout = '';
     let stderr = '';
@@ -487,6 +508,7 @@ function parseArguments(arguments_) {
     duration: '5m',
     durationMs: 300_000,
     users: 8,
+    telnetUsers: 0,
     concurrency: 4,
     paceMs: 150,
     sampleIntervalMs: 10_000,
@@ -495,6 +517,7 @@ function parseArguments(arguments_) {
     maxSustainedGrowthMb: 16,
     maxRssSlopeMbPerHour: 1,
     url: undefined,
+    telnet: undefined,
     pid: undefined,
     binary: path.join(root, 'target', 'release', 'tiamud-server'),
     report: undefined,
@@ -524,6 +547,9 @@ function parseArguments(arguments_) {
       case '--users':
         parsed.users = boundedInteger(value(argument, index++), argument, 1, 64);
         break;
+      case '--telnet-users':
+        parsed.telnetUsers = boundedInteger(value(argument, index++), argument, 0, 64);
+        break;
       case '--concurrency':
         parsed.concurrency = boundedInteger(value(argument, index++), argument, 1, 16);
         break;
@@ -548,6 +574,9 @@ function parseArguments(arguments_) {
       case '--url':
         parsed.url = value(argument, index++);
         break;
+      case '--telnet':
+        parsed.telnet = parseTelnetEndpoint(value(argument, index++));
+        break;
       case '--pid':
         parsed.pid = boundedInteger(value(argument, index++), argument, 1, 2 ** 31 - 1);
         break;
@@ -563,10 +592,22 @@ function parseArguments(arguments_) {
   }
 
   if (parsed.concurrency > parsed.users) throw new Error('--concurrency cannot exceed --users');
+  if (parsed.telnetUsers > parsed.users) {
+    throw new Error('--telnet-users cannot exceed --users');
+  }
   if (parsed.warmupMs >= parsed.durationMs) throw new Error('--warmup must be shorter than --duration');
   if (parsed.url && !parsed.pid) throw new Error('--pid is required with --url for RSS evidence');
   if (!parsed.url && seen.has('--pid')) throw new Error('--pid is only valid with --url');
   if (parsed.url && seen.has('--binary')) throw new Error('--binary cannot be combined with --url');
+  if (parsed.url && parsed.telnetUsers > 0 && !parsed.telnet) {
+    throw new Error('--telnet host:port is required with --url when Telnet bots are enabled');
+  }
+  if (!parsed.url && parsed.telnet) {
+    throw new Error('--telnet is only used with --url; temporary mode supplies its own port');
+  }
+  if (parsed.telnet && parsed.telnetUsers === 0) {
+    throw new Error('--telnet requires --telnet-users greater than zero');
+  }
   return parsed;
 }
 
@@ -647,11 +688,14 @@ Target:
   --binary <path>                    Start this server binary with temporary state.
                                      Default: target/release/tiamud-server
   --url <http(s)://host> --pid <pid> Exercise an existing server and sample its RSS.
+  --telnet <host:port>                Plaintext target required with --url when
+                                      Telnet bots are enabled.
   --report <path>                    Also write the complete JSON report to this path.
 
 Workload:
   --duration <1s..24h>               Default: 5m
   --users <1..64>                    Default: 8
+  --telnet-users <0..users>          Real plaintext Telnet users; default: 0
   --concurrency <1..16>              Default: 4
   --pace-ms <0..60000>               Default: 150
 
@@ -670,10 +714,11 @@ slope limits are exceeded; total RSS growth has its own independent limit.
 Short evidence profile:
   node scripts/soak.mjs --binary target/debug/tiamud-server --duration 30s \\
     --warmup 5s --sample-interval 5s --users 2 --concurrency 2 \\
-    --report artifacts/soak-short.json
+    --telnet-users 1 --report artifacts/soak-short.json
 
 24-hour acceptance profile (an invocation is not evidence until it completes):
   node scripts/soak.mjs --duration 24h --warmup 30m --sample-interval 1m \\
-    --users 16 --concurrency 4 --pace-ms 150 --report artifacts/soak-24h.json
+    --users 16 --telnet-users 4 --concurrency 4 --pace-ms 150 \\
+    --report artifacts/soak-24h.json
 `);
 }

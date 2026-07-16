@@ -19,8 +19,8 @@ and periodically records:
 
 The schema-v2 JSON report records the exact duration, concurrency, thresholds,
 runner, checked-out commit and tree, clean-tree state, SHA-256/size evidence for
-the server binary and all four harness scripts (including the shared evidence
-helper), timestamps, and every sample.
+the server binary and all five harness scripts (including the shared evidence
+helper and the real Telnet bot), timestamps, and every sample.
 It also binds the default WorldPack and public asset tree to deterministic
 digests; the asset digest hashes sorted `path\0bytes\0sha256\n` records without
 embedding an absolute local path. A run fails for any gameplay/protocol error,
@@ -41,6 +41,15 @@ recover sequence gaps with `sync.request`, repeat idempotency checks, and force
 additional reconnects. This keeps the workload deterministic while exercising
 ticks, scripts, persistence, broadcast fan-out, coalescing, and recovery.
 
+`--telnet-users N` selects how many of the total `--users` use a real plaintext
+TCP Telnet session; the remainder use WebSocket. Telnet bots parse IAC
+negotiation separately from visible text, register or log in, create/select a
+character, move, look and speak, periodically reconnect, and close cleanly.
+Reports separate user, completion, latency, and error data by transport. A
+temporary-server run automatically uses its selected Telnet port. With `--url`,
+the harness cannot infer a TCP endpoint, so a mixed run must also pass an
+explicit plaintext endpoint such as `--telnet 127.0.0.1:4000`.
+
 Two failure modes remain intentionally focused tests instead of mutations of
 the default 24-hour world:
 
@@ -56,8 +65,9 @@ ambiguous and would not improve the retained memory trend.
 
 ## Short regression profile
 
-CI runs and retains this 30-second profile. It proves that evidence collection
-and failure gates work, but it is not the 24-hour acceptance result:
+CI is configured to run and retain this 30-second profile. A successful run
+proves that evidence collection and failure gates work, but it is not the
+24-hour acceptance result:
 
 ```sh
 node scripts/soak.mjs \
@@ -66,6 +76,7 @@ node scripts/soak.mjs \
   --warmup 5s \
   --sample-interval 5s \
   --users 2 \
+  --telnet-users 1 \
   --concurrency 2 \
   --pace-ms 100 \
   --max-rss-growth-mb 96 \
@@ -90,6 +101,7 @@ node scripts/soak.mjs \
   --warmup 30m \
   --sample-interval 1m \
   --users 16 \
+  --telnet-users 4 \
   --concurrency 4 \
   --pace-ms 150 \
   --max-rss-growth-mb 96 \
@@ -120,7 +132,8 @@ node scripts/verify-soak-report.mjs \
   artifacts/soak-24h.json
 ```
 
-It requires the exact 24-hour profile, at least 16 users, concurrency of at
+It requires the exact 24-hour profile, at least 16 users including at least one
+real Telnet user, concurrency of at
 least 4, the documented pace/warmup/sample cadence and no-weaker RSS limits.
 The temporary server
 must report its canonical isolated SQLite/embedded-WorldPack configuration; the
@@ -136,3 +149,14 @@ identity, and attach provenance when release infrastructure supports it.
 For a public candidate, archive the successful JSON outside transient CI
 storage alongside the release record. Repeat after changes to the actor,
 persistence, transport queues, scripting limits, or long-lived session state.
+
+## Production Telnet parser fuzzing
+
+Load and soak exercise valid mixed sessions; they do not replace malformed-byte
+testing. The internal `tiamud-telnet-codec` crate contains the same incremental
+IAC/subnegotiation parser used by the server and by `fuzz/telnet_parser`. A
+weekly/manual workflow is configured to run a bounded 120-second libFuzzer
+campaign with the checked-in corpus and dictionary and to retain crash
+artifacts. Its configuration is not evidence that a campaign completed. See
+[`fuzz/README.md`](../../fuzz/README.md) for local commands and toolchain
+requirements.

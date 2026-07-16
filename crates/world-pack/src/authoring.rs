@@ -1,10 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tiamud_scripting::{MAX_MODULES_PER_ROOM_HOOK_BATCH, ScriptLimits, validate_module};
+pub use tiamud_scripting::{ScriptCapability, ScriptHook};
 
 use super::{
     Direction, ValidationError, ValidationErrors, WorldPack, valid_content_addressed_audio_path,
@@ -214,32 +217,6 @@ pub struct ScriptDefinition {
     #[serde(default)]
     pub limits: ScriptLimitsDefinition,
     pub source: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScriptHook {
-    OnEnter,
-    OnLeave,
-    OnLook,
-    OnUse,
-    OnTalk,
-    OnCombatStart,
-    OnDefeat,
-    OnTimer,
-    OnQuestEvent,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScriptCapability {
-    Narrate,
-    SetFlag,
-    Damage,
-    Heal,
-    GiveItem,
-    StartQuest,
-    Schedule,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1172,6 +1149,7 @@ impl WorldPackDocument {
             errors.push(ValidationError::TooManyScripts);
         }
         let mut script_ids = HashSet::new();
+        let mut room_hook_module_counts = BTreeMap::new();
         for script in &self.scripts {
             if script.id.trim().is_empty() {
                 errors.push(ValidationError::EmptyScriptId);
@@ -1184,7 +1162,22 @@ impl WorldPackDocument {
                     room_id: script.room_id.clone(),
                 });
             }
+            for hook in script.hooks.iter().copied().collect::<BTreeSet<_>>() {
+                *room_hook_module_counts
+                    .entry((script.room_id.as_str(), hook))
+                    .or_insert(0_usize) += 1;
+            }
             validate_script(script, &mut errors);
+        }
+        for ((room_id, hook), actual) in room_hook_module_counts {
+            if actual > MAX_MODULES_PER_ROOM_HOOK_BATCH {
+                errors.push(ValidationError::TooManyScriptsForRoomHook {
+                    room_id: room_id.to_owned(),
+                    hook,
+                    actual,
+                    maximum: MAX_MODULES_PER_ROOM_HOOK_BATCH,
+                });
+            }
         }
 
         let mut test_names = HashSet::new();
@@ -1548,19 +1541,22 @@ impl WorldPackDocument {
 }
 
 fn validate_script(script: &ScriptDefinition, errors: &mut Vec<ValidationError>) {
+    let mut can_compile = true;
     if script.hooks.is_empty() {
         errors.push(ValidationError::EmptyScriptHooks(script.id.clone()));
+        can_compile = false;
     }
-    let mut hooks = HashSet::new();
+    let mut hooks = BTreeSet::new();
     for hook in &script.hooks {
         if !hooks.insert(*hook) {
             errors.push(ValidationError::DuplicateScriptHook {
                 script_id: script.id.clone(),
                 hook: *hook,
             });
+            can_compile = false;
         }
     }
-    let mut capabilities = HashSet::new();
+    let mut capabilities = BTreeSet::new();
     for capability in &script.capabilities {
         if !capabilities.insert(*capability) {
             errors.push(ValidationError::DuplicateScriptCapability {
@@ -1571,6 +1567,7 @@ fn validate_script(script: &ScriptDefinition, errors: &mut Vec<ValidationError>)
     }
     if script.source.trim().is_empty() {
         errors.push(ValidationError::EmptyScriptSource(script.id.clone()));
+        can_compile = false;
     }
     if script.source.len() > script.limits.max_source_bytes {
         errors.push(ValidationError::ScriptSourceTooLarge {
@@ -1578,9 +1575,10 @@ fn validate_script(script: &ScriptDefinition, errors: &mut Vec<ValidationError>)
             actual: script.source.len(),
             maximum: script.limits.max_source_bytes,
         });
+        can_compile = false;
     }
     let limits = script.limits;
-    if limits.max_source_bytes == 0
+    let invalid_limits = limits.max_source_bytes == 0
         || limits.max_source_bytes > default_script_source_bytes()
         || limits.max_memory_bytes < 64 * 1024
         || limits.max_memory_bytes > 8 * 1024 * 1024
@@ -1591,9 +1589,27 @@ fn validate_script(script: &ScriptDefinition, errors: &mut Vec<ValidationError>)
         || limits.max_events == 0
         || limits.max_events > 64
         || limits.max_event_field_bytes == 0
-        || limits.max_event_field_bytes > 2_048
-    {
+        || limits.max_event_field_bytes > 2_048;
+    if invalid_limits {
         errors.push(ValidationError::InvalidScriptLimits(script.id.clone()));
+        can_compile = false;
+    }
+    if can_compile {
+        let declared_hooks = script.hooks.iter().copied().collect::<BTreeSet<_>>();
+        let runtime_limits = ScriptLimits {
+            max_source_bytes: limits.max_source_bytes,
+            max_memory_bytes: limits.max_memory_bytes,
+            max_instructions: limits.max_instructions,
+            max_wall_time: Duration::from_millis(limits.max_wall_time_millis),
+            max_events: limits.max_events,
+            max_event_field_bytes: limits.max_event_field_bytes,
+        };
+        if let Err(error) = validate_module(&script.source, &declared_hooks, runtime_limits) {
+            errors.push(ValidationError::InvalidScriptModule {
+                script_id: script.id.clone(),
+                reason: error.to_string(),
+            });
+        }
     }
 }
 
@@ -2345,6 +2361,81 @@ mod tests {
                 .iter()
                 .any(|error| matches!(error, ValidationError::InvalidSceneVariantCondition { .. }))
         );
+    }
+
+    #[test]
+    fn script_validation_compiles_lua_and_checks_every_declared_hook() {
+        let definition = |source: &str, hooks: Vec<ScriptHook>| ScriptDefinition {
+            id: "demo:square-script".into(),
+            room_id: "demo:square".into(),
+            hooks,
+            capabilities: vec![ScriptCapability::Narrate],
+            limits: ScriptLimitsDefinition::default(),
+            source: source.into(),
+        };
+
+        let mut valid = document();
+        valid.scripts.push(definition(
+            "function on_enter(ctx) return ctx end\nfunction on_leave(ctx) return ctx end",
+            vec![ScriptHook::OnEnter, ScriptHook::OnLeave],
+        ));
+        valid.validate().unwrap();
+
+        let mut malformed = document();
+        malformed.scripts.push(definition(
+            "function on_enter(ctx) this is not lua end",
+            vec![ScriptHook::OnEnter],
+        ));
+        assert!(malformed.validate().unwrap_err().0.iter().any(|error| {
+            matches!(
+                error,
+                ValidationError::InvalidScriptModule { script_id, .. }
+                    if script_id == "demo:square-script"
+            )
+        }));
+
+        let mut missing_hook = document();
+        missing_hook.scripts.push(definition(
+            "function on_enter(ctx) return ctx end",
+            vec![ScriptHook::OnEnter, ScriptHook::OnLeave],
+        ));
+        assert!(missing_hook.validate().unwrap_err().0.iter().any(|error| {
+            matches!(
+                error,
+                ValidationError::InvalidScriptModule { script_id, reason }
+                    if script_id == "demo:square-script" && reason.contains("on_leave")
+            )
+        }));
+    }
+
+    #[test]
+    fn authoring_rejects_a_room_hook_batch_larger_than_the_runtime_cap() {
+        let script = |index: usize| ScriptDefinition {
+            id: format!("demo:timer-{index:02}"),
+            room_id: "demo:square".into(),
+            hooks: vec![ScriptHook::OnTimer],
+            capabilities: vec![ScriptCapability::Narrate],
+            limits: ScriptLimitsDefinition::default(),
+            source: "function on_timer() tiamud.emit('narrate', 'self', 'tick') end".into(),
+        };
+        let mut at_limit = document();
+        at_limit.scripts = (0..MAX_MODULES_PER_ROOM_HOOK_BATCH).map(script).collect();
+        at_limit.validate().unwrap();
+
+        let mut over_limit = at_limit;
+        over_limit
+            .scripts
+            .push(script(MAX_MODULES_PER_ROOM_HOOK_BATCH));
+        let errors = over_limit.validate().unwrap_err().0;
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            ValidationError::TooManyScriptsForRoomHook {
+                room_id,
+                hook: ScriptHook::OnTimer,
+                actual: 9,
+                maximum: 8,
+            } if room_id == "demo:square"
+        )));
     }
 
     #[test]

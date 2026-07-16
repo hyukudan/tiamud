@@ -97,6 +97,7 @@ export interface ActionResultData {
 
 export interface ServerNoticeData {
   level?: 'info' | 'warning' | 'error';
+  code?: string;
   message: string;
 }
 
@@ -1017,6 +1018,7 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
     }
     case 'server.notice': {
       const message = stringOrUndefined(candidate.data.message);
+      const code = stringOrUndefined(candidate.data.code);
       const level = candidate.data.level;
       if (!message || (level !== 'info' && level !== 'warning' && level !== 'error')) {
         return undefined;
@@ -1027,6 +1029,7 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
         type: candidate.type,
         data: {
           level,
+          code,
           message,
         },
       };

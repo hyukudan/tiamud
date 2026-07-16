@@ -1,9 +1,11 @@
-use rustls::ServerConfig;
+use rustls::{
+    ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+};
 use std::{
     env,
     ffi::OsString,
-    fs::File,
-    io::{self, BufReader},
+    io,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -194,16 +196,13 @@ fn parse_bounded_usize(
 }
 
 fn load_tls_acceptor(certificate_path: &Path, private_key_path: &Path) -> io::Result<TlsAcceptor> {
-    let mut certificate_reader = BufReader::new(File::open(certificate_path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
+    let certificates = CertificateDer::pem_file_iter(certificate_path)
+        .map_err(|error| {
+            invalid_config(format!(
                 "could not open Telnet TLS certificate {}: {error}",
                 certificate_path.display()
-            ),
-        )
-    })?);
-    let certificates = rustls_pemfile::certs(&mut certificate_reader)
+            ))
+        })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| {
             invalid_config(format!(
@@ -218,28 +217,12 @@ fn load_tls_acceptor(certificate_path: &Path, private_key_path: &Path) -> io::Re
         )));
     }
 
-    let mut key_reader = BufReader::new(File::open(private_key_path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "could not open Telnet TLS private key {}: {error}",
-                private_key_path.display()
-            ),
-        )
-    })?);
-    let private_key = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|error| {
-            invalid_config(format!(
-                "could not parse Telnet TLS private key {}: {error}",
-                private_key_path.display()
-            ))
-        })?
-        .ok_or_else(|| {
-            invalid_config(format!(
-                "Telnet TLS private key {} contains no supported private key",
-                private_key_path.display()
-            ))
-        })?;
+    let private_key = PrivateKeyDer::from_pem_file(private_key_path).map_err(|error| {
+        invalid_config(format!(
+            "could not parse Telnet TLS private key {}: {error}",
+            private_key_path.display()
+        ))
+    })?;
 
     let config =
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))

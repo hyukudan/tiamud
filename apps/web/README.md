@@ -35,7 +35,9 @@ text-complete welcome screen. After selection it exposes:
 
 - atmospheric scene prose, localized alternative text, exits, items, NPCs and
   weather;
-- feed/command history, structured contextual actions and free-text commands;
+- 500-entry feed/command scrollback that preserves a reader's position and
+  offers an explicit jump-to-latest control, plus structured contextual actions
+  and free-text commands;
 - vitals, skills, effects, inventory/equipment, discovered map, quests,
   parties, economy, chat, who and ignore controls;
 - persistent validated command history (100 entries), suggestions and
@@ -59,12 +61,21 @@ The client opens `/ws` with subprotocol `tiamud.v1` and authenticates its first
 `client.hello` with the bearer token and character ID. It declares image,
 reduced-motion and audio capabilities.
 
+Changing a declared presentation capability performs a clean reconnect and a
+new v1 hello without clearing the scene or scrollback. A typed pre-welcome
+access rejection stops automatic reconnect and returns to the account flow.
+Only an invalid or expired session clears local credentials; capacity,
+selection and temporary operational rejections retain the reusable account
+session.
+
 It accepts complete scene/player snapshots and typed scene/entity/vitals/
 inventory/map/chat/media updates. Server messages are bounded and validated;
 opaque view/entity IDs are required where appropriate. It discards duplicate
 or backwards sequence numbers, requests `sync.snapshot` after a gap and answers
 unsequenced server heartbeats. A 45-second silence watchdog closes the socket so
 the bounded exponential reconnect can obtain a fresh authoritative snapshot.
+An unanswered synchronization request similarly reconnects after ten seconds,
+preventing the client from suppressing state snapshots forever.
 The client never automatically replays an unconfirmed command.
 
 The server keeps a short bounded result cache by character and `requestId`, so

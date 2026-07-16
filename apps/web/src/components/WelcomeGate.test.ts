@@ -1,6 +1,7 @@
 import { render } from 'svelte/server';
 import { describe, expect, it } from 'vitest';
 import WelcomeGate from './WelcomeGate.svelte';
+import welcomeSource from './WelcomeGate.svelte?raw';
 
 describe('WelcomeGate', () => {
   it('introduces Tiamud with a clear entry action and complete text', () => {
@@ -20,5 +21,8 @@ describe('WelcomeGate', () => {
     expect(body).toContain('type="image/webp"');
     expect(body).toContain('scene-1280.jpg');
     expect(body).toContain('Lantern Square after rain');
+    expect(welcomeSource).toContain('imageAfterFailures(ENTRY_IMAGE, failedArtworkUrls)');
+    expect(welcomeSource).toContain('failedArtworkUrls = [...failedArtworkUrls, failed]');
+    expect(welcomeSource).toContain('{#key artworkRenderKey}');
   });
 });

@@ -17,7 +17,10 @@ PNG-only variants at both widths so alpha and lossless pixels are preserved.
 
 Every output has a SHA-256 digest. The bundle directory and `assetId` are
 derived from the normalized metadata and encoded bytes, so identical inputs and
-settings produce the same manifest. Published bundles are treated as immutable.
+settings produce the same manifest. AVIF encoding is pinned to one worker so
+thread scheduling cannot affect its content address, and published manifests
+must remain within the official client's 64 KiB limit. Published bundles are
+treated as immutable.
 
 ## Usage
 

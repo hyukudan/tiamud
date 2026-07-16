@@ -2,6 +2,7 @@ use envy_import::{
     LicenseReviewStatus, ProgramOwner, TextEncoding, parse_import, parse_world_pack,
 };
 use std::process::Command;
+use world_pack::LegacyBitvector;
 
 const FULL_AREA: &[u8] = include_bytes!("fixtures/full_merc_family.are");
 
@@ -207,6 +208,61 @@ fn unknown_descriptors_and_broken_cross_references_are_actionable() {
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "unknown_reset_command" && diagnostic.vnum == Some(9000)
     }));
+}
+
+#[test]
+fn rom_alphabetic_bitvectors_are_preserved_without_inventing_numeric_masks() {
+    let source = String::from_utf8(FULL_AREA.to_vec())
+        .unwrap()
+        .replacen("0 1\nD0", "AB 1\nD0", 1)
+        .replacen("5 0 1\n0 0 0 0", "5 CD E\n0 0 0 0", 1);
+    let result = parse_import(source.as_bytes(), "rom-flags", None, TextEncoding::Ascii).unwrap();
+
+    assert_eq!(
+        result.world_pack.rooms[0].legacy.as_ref().unwrap().flags,
+        LegacyBitvector::Alphabetic("AB".into())
+    );
+    assert_eq!(
+        result.legacy.objects[0].extra_flags,
+        LegacyBitvector::Alphabetic("CD".into())
+    );
+    assert_eq!(
+        result.legacy.objects[0].wear_flags,
+        LegacyBitvector::Alphabetic("E".into())
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "rom_alphabetic_room_bitvector_preserved" })
+    );
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "rom_alphabetic_object_bitvector_preserved"
+            && diagnostic.message.contains("was not converted")
+    }));
+    result.world_pack.validate().unwrap();
+}
+
+#[test]
+fn directed_unreachable_rooms_are_imported_with_a_conservative_diagnostic() {
+    let source = String::from_utf8(FULL_AREA.to_vec())
+        .unwrap()
+        .replace("D0\nA test road leads north.~\nroad~\n0 -1 101\n", "");
+    let result = parse_import(
+        source.as_bytes(),
+        "one-way-topology",
+        None,
+        TextEncoding::Ascii,
+    )
+    .unwrap();
+
+    assert_eq!(result.world_pack.rooms.len(), 2);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "directed_unreachable_room_preserved"
+            && diagnostic.vnum == Some(101)
+            && diagnostic.recommendation.contains("teleportation")
+    }));
+    result.world_pack.validate().unwrap();
 }
 
 #[test]

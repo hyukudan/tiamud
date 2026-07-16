@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WEBSOCKET_SUBPROTOCOL } from './brand';
-import { SERVER_SILENCE_TIMEOUT_MS, TiamudConnection } from './socket';
+import {
+  SERVER_SILENCE_TIMEOUT_MS,
+  SYNC_RESPONSE_TIMEOUT_MS,
+  TiamudConnection,
+} from './socket';
 import type { ConnectionState, ServerMessage } from './protocol';
 
 type SocketListener = (event: unknown) => void;
@@ -125,6 +129,46 @@ describe('TiamudConnection', () => {
     connection.close();
   });
 
+  it('reconnects immediately and announces changed presentation capabilities', () => {
+    const states: ConnectionState[] = [];
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'secret', characterId: 42 },
+      { onMessage: () => undefined, onStateChange: (state) => states.push(state) },
+      { images: true, reducedMotion: false, audio: false },
+    );
+    connection.connect();
+    const first = TestWebSocket.instances[0]!;
+    first.open();
+
+    expect(connection.updateCapabilities({
+      images: false,
+      reducedMotion: true,
+      audio: true,
+    })).toBe(true);
+    expect(first.closeCalls).toContainEqual({
+      code: 4001,
+      reason: 'Client capabilities changed',
+    });
+    expect(TestWebSocket.instances).toHaveLength(2);
+
+    const second = TestWebSocket.instances[1]!;
+    second.open();
+    expect(JSON.parse(second.sent[0] ?? '{}')).toMatchObject({
+      type: 'client.hello',
+      data: {
+        capabilities: { images: [], reducedMotion: true, audio: true },
+      },
+    });
+    expect(states.slice(-2)).toEqual(['connecting', 'connected']);
+    expect(connection.updateCapabilities({
+      images: false,
+      reducedMotion: true,
+      audio: true,
+    })).toBe(false);
+    connection.close();
+  });
+
   it('acknowledges server heartbeats without exposing them as game messages', () => {
     const received: ServerMessage[] = [];
     const connection = new TiamudConnection(
@@ -211,6 +255,70 @@ describe('TiamudConnection', () => {
     connection.close();
   });
 
+  it('reconnects instead of suppressing snapshots forever when sync is unanswered', () => {
+    vi.useFakeTimers();
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'secret', characterId: 42 },
+      { onMessage: () => undefined, onStateChange: () => undefined },
+    );
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+    socket.receive(JSON.stringify({ v: 1, type: 'server.welcome', seq: 1, data: {} }));
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'action.result',
+      seq: 3,
+      data: { requestId: 'request-1', ok: true, message: null },
+    }));
+
+    vi.advanceTimersByTime(SYNC_RESPONSE_TIMEOUT_MS);
+
+    expect(socket.closeCalls).toContainEqual({
+      code: 4002,
+      reason: 'State synchronization timeout',
+    });
+    connection.close();
+  });
+
+  it('cancels the sync timeout after an authoritative sync snapshot', () => {
+    vi.useFakeTimers();
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'secret', characterId: 42 },
+      { onMessage: () => undefined, onStateChange: () => undefined },
+    );
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+    socket.receive(JSON.stringify({ v: 1, type: 'server.welcome', seq: 1, data: {} }));
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'action.result',
+      seq: 3,
+      data: { requestId: 'request-1', ok: true, message: null },
+    }));
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'sync.snapshot',
+      seq: 4,
+      data: {
+        afterSeq: 1,
+        scene: { title: 'Lantern Square', prose: [], exits: [], items: [] },
+        player: validPlayerState(),
+      },
+    }));
+
+    vi.advanceTimersByTime(SYNC_RESPONSE_TIMEOUT_MS);
+
+    expect(socket.closeCalls).not.toContainEqual({
+      code: 4002,
+      reason: 'State synchronization timeout',
+    });
+    connection.close();
+  });
+
   it('ignores replayed sequence numbers', () => {
     const received: ServerMessage[] = [];
     const connection = new TiamudConnection(
@@ -251,5 +359,138 @@ describe('TiamudConnection', () => {
     expect(socket.closeCalls).toContainEqual({ code: 4000, reason: 'Server heartbeat timeout' });
     expect(states.at(-1)).toBe('disconnected');
     connection.close();
+  });
+
+  it('stops reconnecting and reports an authenticated entry rejection', () => {
+    vi.useFakeTimers();
+    const rejections: string[] = [];
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'expired', characterId: 42 },
+      {
+        onMessage: () => undefined,
+        onStateChange: () => undefined,
+        onAccessRejected: (message) => rejections.push(message),
+      },
+    );
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'server.notice',
+      seq: 1,
+      data: {
+        level: 'error',
+        code: 'access.session_expired',
+        message: 'Your session has expired.',
+      },
+    }));
+
+    vi.advanceTimersByTime(60_000);
+
+    expect(rejections).toEqual(['Your session has expired.']);
+    expect(socket.closeCalls).toContainEqual({ code: 4003, reason: 'Access rejected' });
+    expect(TestWebSocket.instances).toHaveLength(1);
+  });
+
+  it('stops retrying a transient entry rejection without invalidating credentials', () => {
+    vi.useFakeTimers();
+    const rejections: Array<{ message: string; clearCredentials: boolean }> = [];
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'active', characterId: 42 },
+      {
+        onMessage: () => undefined,
+        onStateChange: () => undefined,
+        onAccessRejected: (message, clearCredentials) =>
+          rejections.push({ message, clearCredentials }),
+      },
+    );
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'server.notice',
+      seq: 1,
+      data: {
+        level: 'error',
+        code: 'access.session_limit',
+        message: 'This account has reached its concurrent session limit.',
+      },
+    }));
+
+    vi.advanceTimersByTime(60_000);
+
+    expect(rejections).toEqual([{
+      message: 'This account has reached its concurrent session limit.',
+      clearCredentials: false,
+    }]);
+    expect(TestWebSocket.instances).toHaveLength(1);
+  });
+
+  it('does not confuse an operational error after welcome with access rejection', () => {
+    const rejections: string[] = [];
+    const received: ServerMessage[] = [];
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'active', characterId: 42 },
+      {
+        onMessage: (message) => received.push(message),
+        onStateChange: () => undefined,
+        onAccessRejected: (message) => rejections.push(message),
+      },
+    );
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'server.welcome',
+      seq: 1,
+      data: { serverName: 'Tiamud' },
+    }));
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'server.notice',
+      seq: 2,
+      data: { level: 'error', message: 'A command failed.' },
+    }));
+
+    expect(rejections).toEqual([]);
+    expect(received.map((message) => message.type)).toEqual([
+      'server.welcome',
+      'server.notice',
+    ]);
+    expect(socket.closeCalls).toEqual([]);
+    connection.close();
+  });
+
+  it('expires a live client credential without entering the reconnect loop', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-16T00:00:00Z'));
+    const rejections: string[] = [];
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      {
+        token: 'expiring',
+        characterId: 42,
+        expiresAt: Date.now() + 1_000,
+      },
+      {
+        onMessage: () => undefined,
+        onStateChange: () => undefined,
+        onAccessRejected: (message) => rejections.push(message),
+      },
+    );
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(rejections).toEqual(['Your session has expired. Sign in again.']);
+    expect(TestWebSocket.instances).toHaveLength(1);
   });
 });

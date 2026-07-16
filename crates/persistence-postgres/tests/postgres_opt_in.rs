@@ -47,8 +47,8 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
              INSERT INTO domain_events (sequence, event_json)
              VALUES (7, '{\"type\":\"test\"}');
              INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json)
-             VALUES (1, 4, '{\"tick\":4}');
+                 (singleton, snapshot_version, snapshot_json, last_event_sequence)
+             VALUES (1, 4, '{\"tick\":4}', 7);
              INSERT INTO character_adventure (character_id, state_json)
              VALUES (10, '{\"coins\":40}');
              INSERT INTO world_adventure (singleton, state_json)
@@ -94,7 +94,17 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 7, to: 7 }
+        tiamud_persistence_postgres::MigrationReport { from: 8, to: 8 }
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, Option<i64>>(0),
+        Some(7)
     );
     assert!(matches!(
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres),
@@ -107,18 +117,36 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .batch_execute(
             "DROP TABLE character_adventure;
              DROP TABLE world_adventure;
+             ALTER TABLE world_runtime DROP COLUMN last_event_sequence;
              UPDATE tiamud_schema SET version = 6 WHERE singleton = 1",
         )
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 7 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 8 }
     );
     assert!(
         postgres
             .query_one("SELECT to_regclass('character_adventure') IS NOT NULL", &[])
             .unwrap()
             .get::<_, bool>(0)
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, Option<i64>>(0),
+        None
+    );
+    assert_eq!(
+        postgres
+            .query_one("SELECT COUNT(*)::BIGINT FROM domain_events", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
     );
 
     postgres.batch_execute("SET search_path TO public").unwrap();

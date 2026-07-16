@@ -1,8 +1,9 @@
 //! PostgreSQL implementation of the transport-independent character store.
 //!
 //! `postgres::Client` is synchronous, so one dedicated owner thread performs
-//! all database and Argon2 work behind the same bounded Tokio channel used by
-//! SQLite. No PostgreSQL call runs on an async executor thread.
+//! database work behind the same bounded Tokio channel used by SQLite. Argon2
+//! runs in a separately bounded blocking service, and no PostgreSQL call runs
+//! on an async executor thread.
 
 use std::{
     thread,
@@ -22,11 +23,12 @@ use tokio::{
 
 use crate::{
     auth::{
-        AuthenticatedSession, DEFAULT_SESSION_TTL, SessionToken, digest_token, hash_password,
-        validate_password, verify_password,
+        AuthenticatedSession, DEFAULT_SESSION_TTL, PasswordService, PasswordWorkError,
+        SessionToken, digest_token, validate_password,
     },
     persistence::{
-        CharacterStore, ModerationAction, Request, SocialProfile, SocialRelationKind, StoreError,
+        CharacterStore, DOMAIN_EVENT_RETENTION, ModerationAction, PreparedLogin, Request,
+        SocialProfile, SocialRelationKind, StoreError,
     },
 };
 
@@ -48,10 +50,18 @@ const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct PostgresCharacterStore {
     tx: mpsc::Sender<Request>,
+    passwords: PasswordService,
 }
 
 impl PostgresCharacterStore {
     pub async fn open(database_url: &str) -> Result<Self, StoreError> {
+        Self::open_with_password_service(database_url, PasswordService::default()).await
+    }
+
+    async fn open_with_password_service(
+        database_url: &str,
+        passwords: PasswordService,
+    ) -> Result<Self, StoreError> {
         let database_url = database_url.to_owned();
         let (tx, mut rx) = mpsc::channel(PERSISTENCE_REQUEST_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -88,27 +98,25 @@ impl PostgresCharacterStore {
                                 .map_err(StoreError::from);
                             let _ = reply.send(result);
                         }
-                        Request::RegisterAccount {
+                        Request::FinishRegisterAccount {
                             name,
-                            password,
+                            password_hash,
                             reply,
                         } => {
-                            let _ = reply.send(register_account(
+                            let _ = reply.send(finish_register_account(
                                 &mut connection,
                                 &name,
-                                &password,
+                                &password_hash,
                                 unix_timestamp(),
                             ));
                         }
-                        Request::LoginAccount {
-                            name,
-                            password,
-                            reply,
-                        } => {
-                            let _ = reply.send(login_account(
+                        Request::PrepareLoginAccount { name, reply } => {
+                            let _ = reply.send(prepare_login_account(&mut connection, &name));
+                        }
+                        Request::FinishLoginAccount { prepared, reply } => {
+                            let _ = reply.send(finish_login_account(
                                 &mut connection,
-                                &name,
-                                &password,
+                                &prepared,
                                 unix_timestamp(),
                             ));
                         }
@@ -265,7 +273,7 @@ impl PostgresCharacterStore {
             .map_err(StoreError::ThreadSpawn)?;
 
         ready_rx.await.map_err(|_| StoreError::WorkerStopped)??;
-        Ok(Self { tx })
+        Ok(Self { tx, passwords })
     }
 
     async fn request<T>(
@@ -284,6 +292,23 @@ impl PostgresCharacterStore {
             .await
             .map_err(|_| StoreError::RequestTimeout)?
             .map_err(|_| StoreError::WorkerStopped)?
+    }
+
+    /// Bound admission, then await the definitive result of an accepted
+    /// mutation so a local deadline cannot race a later database commit.
+    async fn request_commit<T>(
+        &self,
+        request: Request,
+        receive: oneshot::Receiver<Result<T, StoreError>>,
+    ) -> Result<T, StoreError> {
+        self.tx
+            .send_timeout(request, PERSISTENCE_REQUEST_TIMEOUT)
+            .await
+            .map_err(|error| match error {
+                mpsc::error::SendTimeoutError::Timeout(_) => StoreError::RequestTimeout,
+                mpsc::error::SendTimeoutError::Closed(_) => StoreError::WorkerStopped,
+            })?;
+        receive.await.map_err(|_| StoreError::WorkerStopped)?
     }
 }
 
@@ -304,7 +329,8 @@ impl CharacterStore for PostgresCharacterStore {
 
     async fn shutdown(&self) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(Request::Shutdown { reply }, receive).await
+        self.request_commit(Request::Shutdown { reply }, receive)
+            .await
     }
 
     async fn register_account(
@@ -312,11 +338,20 @@ impl CharacterStore for PostgresCharacterStore {
         name: &str,
         password: &str,
     ) -> Result<AuthenticatedSession, StoreError> {
+        let name = normalise_name(name, "account")?;
+        if !validate_password(password) {
+            return Err(StoreError::InvalidPassword);
+        }
+        let password_hash = self
+            .passwords
+            .hash(password.to_owned())
+            .await
+            .map_err(map_password_work_error)?;
         let (reply, receive) = oneshot::channel();
-        self.request(
-            Request::RegisterAccount {
-                name: name.to_owned(),
-                password: password.to_owned(),
+        self.request_commit(
+            Request::FinishRegisterAccount {
+                name,
+                password_hash,
                 reply,
             },
             receive,
@@ -329,16 +364,32 @@ impl CharacterStore for PostgresCharacterStore {
         name: &str,
         password: &str,
     ) -> Result<AuthenticatedSession, StoreError> {
+        let name = normalise_name(name, "account")?;
+        if !validate_password(password) {
+            return Err(StoreError::InvalidPassword);
+        }
         let (reply, receive) = oneshot::channel();
-        self.request(
-            Request::LoginAccount {
-                name: name.to_owned(),
-                password: password.to_owned(),
-                reply,
-            },
-            receive,
-        )
-        .await
+        let prepared = self
+            .request(Request::PrepareLoginAccount { name, reply }, receive)
+            .await?;
+        let Some(prepared) = prepared else {
+            self.passwords
+                .dummy(password.to_owned())
+                .await
+                .map_err(map_password_work_error)?;
+            return Err(StoreError::InvalidCredentials);
+        };
+        let valid = self
+            .passwords
+            .verify(password.to_owned(), prepared.encoded_hash.clone())
+            .await
+            .map_err(map_password_work_error)?;
+        if !valid {
+            return Err(StoreError::InvalidCredentials);
+        }
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::FinishLoginAccount { prepared, reply }, receive)
+            .await
     }
 
     async fn resolve_session(&self, token: &str) -> Result<AccountSnapshot, StoreError> {
@@ -355,7 +406,7 @@ impl CharacterStore for PostgresCharacterStore {
 
     async fn revoke_session(&self, token: &str) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::RevokeSession {
                 token: token.to_owned(),
                 reply,
@@ -368,7 +419,7 @@ impl CharacterStore for PostgresCharacterStore {
     #[cfg(test)]
     async fn load_or_create_account(&self, name: &str) -> Result<AccountSnapshot, StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::LoadOrCreateAccount {
                 name: name.to_owned(),
                 reply,
@@ -394,7 +445,7 @@ impl CharacterStore for PostgresCharacterStore {
         start_room: &str,
     ) -> Result<CharacterSnapshot, StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::LoadOrCreateCharacter {
                 account_id,
                 name: name.to_owned(),
@@ -425,7 +476,7 @@ impl CharacterStore for PostgresCharacterStore {
 
     async fn save(&self, snapshot: CharacterSnapshot) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(Request::Save { snapshot, reply }, receive)
+        self.request_commit(Request::Save { snapshot, reply }, receive)
             .await
     }
 
@@ -505,7 +556,7 @@ impl CharacterStore for PostgresCharacterStore {
         enabled: bool,
     ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::SetSocialRelation {
                 actor,
                 target,
@@ -525,7 +576,7 @@ impl CharacterStore for PostgresCharacterStore {
         reason: &str,
     ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::ReportCharacter {
                 actor,
                 target,
@@ -544,7 +595,7 @@ impl CharacterStore for PostgresCharacterStore {
         action: ModerationAction,
     ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::ModerateCharacter {
                 actor,
                 target,
@@ -569,7 +620,7 @@ impl CharacterStore for PostgresCharacterStore {
         events: Vec<DomainEvent>,
     ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::CommitAction {
                 characters,
                 runtime,
@@ -591,6 +642,13 @@ fn normalise_name(name: &str, kind: &'static str) -> Result<String, StoreError> 
     Ok(name.to_owned())
 }
 
+fn map_password_work_error(error: PasswordWorkError) -> StoreError {
+    match error {
+        PasswordWorkError::Overloaded | PasswordWorkError::Timeout => StoreError::RequestTimeout,
+        PasswordWorkError::Execution => StoreError::PasswordHashing,
+    }
+}
+
 fn unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -600,18 +658,12 @@ fn unix_timestamp() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn register_account(
+fn finish_register_account(
     connection: &mut Client,
     name: &str,
-    password: &str,
+    password_hash: &str,
     now: i64,
 ) -> Result<AuthenticatedSession, StoreError> {
-    let name = normalise_name(name, "account")?;
-    if !validate_password(password) {
-        return Err(StoreError::InvalidPassword);
-    }
-    let password_hash = hash_password(password).map_err(|_| StoreError::PasswordHashing)?;
-
     let mut transaction = connection.transaction()?;
     // Serialises first-account bootstrap and cross-process duplicate checks.
     transaction.batch_execute("LOCK TABLE accounts IN SHARE ROW EXCLUSIVE MODE")?;
@@ -645,7 +697,7 @@ fn register_account(
         .get(0);
     let account = AccountSnapshot {
         id: AccountId(id),
-        name,
+        name: name.to_owned(),
     };
     if role == AccountRole::Admin {
         append_audit(
@@ -662,42 +714,54 @@ fn register_account(
     Ok(session)
 }
 
-fn login_account(
-    connection: &mut Client,
+fn prepare_login_account<C: GenericClient>(
+    connection: &mut C,
     name: &str,
-    password: &str,
+) -> Result<Option<PreparedLogin>, StoreError> {
+    let prepared = connection
+        .query_opt(
+            "SELECT id, password_hash FROM accounts
+         WHERE lower(name) = lower($1) AND auth_state = 'registered'",
+            &[&name],
+        )?
+        .and_then(|row| {
+            row.get::<_, Option<String>>(1)
+                .map(|encoded_hash| PreparedLogin {
+                    account_id: AccountId(row.get(0)),
+                    encoded_hash,
+                })
+        });
+    Ok(prepared)
+}
+
+fn finish_login_account(
+    connection: &mut Client,
+    prepared: &PreparedLogin,
     now: i64,
 ) -> Result<AuthenticatedSession, StoreError> {
-    let name = normalise_name(name, "account")?;
-    if !validate_password(password) {
-        return Err(StoreError::InvalidPassword);
-    }
-
-    let account_and_hash = connection.query_opt(
-        "SELECT id, name, password_hash FROM accounts
-         WHERE lower(name) = lower($1) AND auth_state = 'registered'",
-        &[&name],
+    let mut transaction = connection.transaction()?;
+    let current = transaction.query_opt(
+        "SELECT name, password_hash FROM accounts
+         WHERE id = $1 AND auth_state = 'registered'",
+        &[&prepared.account_id.0],
     )?;
-    let Some(row) = account_and_hash else {
-        let _ = hash_password(password);
+    let Some(row) = current else {
         return Err(StoreError::InvalidCredentials);
     };
-    let Some(encoded_hash) = row.get::<_, Option<String>>(2) else {
-        let _ = hash_password(password);
+    let Some(encoded_hash) = row.get::<_, Option<String>>(1) else {
         return Err(StoreError::InvalidCredentials);
     };
-    let account = AccountSnapshot {
-        id: AccountId(row.get(0)),
-        name: row.get(1),
-    };
-    if !verify_password(password, &encoded_hash).map_err(|_| StoreError::PasswordHashing)? {
+    if encoded_hash != prepared.encoded_hash {
         return Err(StoreError::InvalidCredentials);
     }
-    if account_is_banned(connection, account.id, now)? {
+    let account = AccountSnapshot {
+        id: prepared.account_id,
+        name: row.get(0),
+    };
+    if account_is_banned(&mut transaction, account.id, now)? {
         return Err(StoreError::AccountBanned);
     }
 
-    let mut transaction = connection.transaction()?;
     let session = issue_session(&mut transaction, account, now)?;
     transaction.commit()?;
     Ok(session)
@@ -1076,17 +1140,6 @@ fn commit_action(
             &[&snapshot.character.id.0, &adventure_json],
         )?;
     }
-    let snapshot_version = i64::from(runtime.snapshot_version);
-    transaction.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json, updated_at)
-         VALUES (1, $1, $2, floor(extract(epoch FROM now()))::BIGINT)
-         ON CONFLICT(singleton) DO UPDATE SET
-             snapshot_version = excluded.snapshot_version,
-             snapshot_json = excluded.snapshot_json,
-             updated_at = excluded.updated_at",
-        &[&snapshot_version, &runtime_json],
-    )?;
     transaction.execute(
         "INSERT INTO world_adventure (singleton, state_json, updated_at)
          VALUES (1, $1, floor(extract(epoch FROM now()))::BIGINT)
@@ -1101,6 +1154,35 @@ fn commit_action(
             &[&json],
         )?;
     }
+    let last_event_sequence: i64 = transaction
+        .query_one(
+            "SELECT GREATEST(
+                 COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
+                 COALESCE((SELECT last_event_sequence FROM world_runtime
+                           WHERE singleton = 1), 0)
+             )",
+            &[],
+        )?
+        .get(0);
+    let snapshot_version = i64::from(runtime.snapshot_version);
+    transaction.execute(
+        "INSERT INTO world_runtime
+             (singleton, snapshot_version, snapshot_json,
+              last_event_sequence, updated_at)
+         VALUES (1, $1, $2, $3, floor(extract(epoch FROM now()))::BIGINT)
+         ON CONFLICT(singleton) DO UPDATE SET
+             snapshot_version = excluded.snapshot_version,
+             snapshot_json = excluded.snapshot_json,
+             last_event_sequence = excluded.last_event_sequence,
+             updated_at = excluded.updated_at",
+        &[&snapshot_version, &runtime_json, &last_event_sequence],
+    )?;
+    transaction.execute(
+        "DELETE FROM domain_events
+         WHERE sequence <= $1 - $2
+           AND sequence <= $1",
+        &[&last_event_sequence, &DOMAIN_EVENT_RETENTION],
+    )?;
     transaction.commit()?;
     Ok(())
 }
@@ -1663,8 +1745,24 @@ mod tests {
                 .unwrap(),
             gameplay
         );
-        assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
-        assert_eq!(store.load_domain_events().await.unwrap(), vec![event]);
+        assert_eq!(
+            store.load_runtime_snapshot().await.unwrap(),
+            Some(runtime.clone())
+        );
+        assert_eq!(
+            store.load_domain_events().await.unwrap(),
+            vec![event.clone()]
+        );
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!(
+                    "SELECT last_event_sequence FROM {schema}.world_runtime WHERE singleton = 1"
+                ),
+            )
+            .await,
+            1
+        );
         assert_eq!(
             admin_count(
                 &base_url,
@@ -1735,6 +1833,89 @@ mod tests {
             .await
             .unwrap();
         assert!(store.audit_log().await.unwrap().len() >= 4);
+
+        admin_batch(
+            &base_url,
+            format!(
+                "INSERT INTO {schema}.domain_events (event_json)
+                 SELECT '{{\"type\":\"retained-test\"}}'
+                 FROM generate_series(1, {DOMAIN_EVENT_RETENTION})"
+            ),
+        )
+        .await;
+        store
+            .commit_action(Vec::new(), runtime.clone(), vec![event.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!("SELECT COUNT(*)::BIGINT FROM {schema}.domain_events"),
+            )
+            .await,
+            DOMAIN_EVENT_RETENTION
+        );
+        let compacted_watermark = DOMAIN_EVENT_RETENTION + 2;
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!(
+                    "SELECT last_event_sequence FROM {schema}.world_runtime WHERE singleton = 1"
+                ),
+            )
+            .await,
+            compacted_watermark
+        );
+
+        admin_batch(
+            &base_url,
+            format!(
+                "CREATE FUNCTION {schema}.reject_domain_event_compaction()
+                 RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN
+                     RAISE EXCEPTION 'injected compaction failure';
+                 END $$;
+                 CREATE TRIGGER reject_domain_event_compaction
+                 BEFORE DELETE ON {schema}.domain_events
+                 FOR EACH STATEMENT
+                 EXECUTE FUNCTION {schema}.reject_domain_event_compaction();"
+            ),
+        )
+        .await;
+        let mut rejected_runtime = runtime.clone();
+        rejected_runtime.logical_tick += 1;
+        assert!(
+            store
+                .commit_action(Vec::new(), rejected_runtime, vec![event])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!("SELECT COUNT(*)::BIGINT FROM {schema}.domain_events"),
+            )
+            .await,
+            DOMAIN_EVENT_RETENTION
+        );
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!(
+                    "SELECT last_event_sequence FROM {schema}.world_runtime WHERE singleton = 1"
+                ),
+            )
+            .await,
+            compacted_watermark
+        );
+        admin_batch(
+            &base_url,
+            format!(
+                "DROP TRIGGER reject_domain_event_compaction ON {schema}.domain_events;
+                 DROP FUNCTION {schema}.reject_domain_event_compaction();"
+            ),
+        )
+        .await;
 
         store.revoke_session(login.token.as_str()).await.unwrap();
         assert!(matches!(

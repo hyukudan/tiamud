@@ -172,10 +172,43 @@ pub struct NpcSpawn {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LegacyRoomData {
-    pub flags: i64,
+    pub flags: LegacyBitvector,
     pub sector: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix_values: Vec<i64>,
+}
+
+/// A historical flag field whose source dialect may encode either a numeric
+/// mask or ROM-style alphabetic letters. Alphabetic values are kept verbatim:
+/// mapping letters to bits without the originating flag table would invent
+/// semantics that the importer cannot prove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LegacyBitvector {
+    Numeric(i64),
+    Alphabetic(String),
+}
+
+impl LegacyBitvector {
+    pub const fn is_zero(&self) -> bool {
+        matches!(self, Self::Numeric(0))
+    }
+
+    pub fn raw(&self) -> String {
+        match self {
+            Self::Numeric(value) => value.to_string(),
+            Self::Alphabetic(value) => value.clone(),
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        match self {
+            Self::Numeric(_) => true,
+            Self::Alphabetic(value) => {
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_alphabetic())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +292,14 @@ impl WorldPack {
                     path: path.clone(),
                 });
             }
+            if let Some(legacy) = &room.legacy
+                && !legacy.flags.is_valid()
+            {
+                errors.push(ValidationError::InvalidLegacyRoomBitvector {
+                    room_id: room.id.clone(),
+                    value: legacy.flags.raw(),
+                });
+            }
 
             let mut directions = HashSet::new();
             for exit in &room.exits {
@@ -276,36 +317,6 @@ impl WorldPack {
                     errors.push(ValidationError::DuplicateRoomItem {
                         room_id: room.id.clone(),
                         item_id: item_id.clone(),
-                    });
-                }
-            }
-        }
-
-        if room_ids.contains(self.start_room_id.as_str()) {
-            let mut reachable = HashSet::from([self.start_room_id.as_str()]);
-            let mut pending = VecDeque::from([self.start_room_id.as_str()]);
-            while let Some(room_id) = pending.pop_front() {
-                let Some(room) = self.rooms.iter().find(|room| room.id == room_id) else {
-                    continue;
-                };
-                for exit in &room.exits {
-                    let target = match &exit.target {
-                        ExitTarget::Room { room_id } => Some(room_id.as_str()),
-                        ExitTarget::LegacyVnum { vnum } => legacy_vnums.get(vnum).copied(),
-                    };
-                    if let Some(target) = target
-                        && room_ids.contains(target)
-                        && reachable.insert(target)
-                    {
-                        pending.push_back(target);
-                    }
-                }
-            }
-            for room in &self.rooms {
-                if !reachable.contains(room.id.as_str()) {
-                    errors.push(ValidationError::UnreachableRoom {
-                        room_id: room.id.clone(),
-                        start_room_id: self.start_room_id.clone(),
                     });
                 }
             }
@@ -366,12 +377,6 @@ impl WorldPack {
                 }
             }
         }
-        for item_id in item_ids {
-            if !placed_items.contains_key(item_id) {
-                errors.push(ValidationError::UnplacedItem(item_id.to_owned()));
-            }
-        }
-
         let declared_items = self
             .items
             .iter()
@@ -492,12 +497,85 @@ impl WorldPack {
             )));
         }
 
+        for item_id in item_ids {
+            match (
+                placed_items.get(item_id).copied(),
+                allocated_loot.contains(item_id),
+            ) {
+                (Some(room_id), true) => {
+                    errors.push(ValidationError::ItemPlacedAndAllocatedAsLoot {
+                        item_id: item_id.to_owned(),
+                        room_id: room_id.to_owned(),
+                    });
+                }
+                (None, false) => errors.push(ValidationError::UnplacedItem(item_id.to_owned())),
+                _ => {}
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
             Err(ValidationErrors(errors))
         }
     }
+
+    /// Conservative topology findings which do not make a pack invalid.
+    ///
+    /// Directed reachability cannot account for teleportation, scripted travel,
+    /// admin-only transitions, or content loaded by a larger composition. The
+    /// result is therefore review guidance, not a publication gate.
+    pub fn diagnostics(&self) -> Vec<WorldPackDiagnostic> {
+        let rooms_by_id = self
+            .rooms
+            .iter()
+            .map(|room| (room.id.as_str(), room))
+            .collect::<HashMap<_, _>>();
+        if !rooms_by_id.contains_key(self.start_room_id.as_str()) {
+            return Vec::new();
+        }
+        let legacy_vnums = self
+            .rooms
+            .iter()
+            .filter_map(|room| room.legacy_vnum.map(|vnum| (vnum, room.id.as_str())))
+            .collect::<HashMap<_, _>>();
+        let mut reachable = HashSet::from([self.start_room_id.as_str()]);
+        let mut pending = VecDeque::from([self.start_room_id.as_str()]);
+        while let Some(room_id) = pending.pop_front() {
+            let Some(room) = rooms_by_id.get(room_id) else {
+                continue;
+            };
+            for exit in &room.exits {
+                let target = match &exit.target {
+                    ExitTarget::Room { room_id } => Some(room_id.as_str()),
+                    ExitTarget::LegacyVnum { vnum } => legacy_vnums.get(vnum).copied(),
+                };
+                if let Some(target) = target
+                    && rooms_by_id.contains_key(target)
+                    && reachable.insert(target)
+                {
+                    pending.push_back(target);
+                }
+            }
+        }
+        self.rooms
+            .iter()
+            .filter(|room| !reachable.contains(room.id.as_str()))
+            .map(|room| WorldPackDiagnostic::DirectedUnreachableRoom {
+                room_id: room.id.clone(),
+                start_room_id: self.start_room_id.clone(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum WorldPackDiagnostic {
+    DirectedUnreachableRoom {
+        room_id: String,
+        start_room_id: String,
+    },
 }
 
 fn valid_relative_asset_path(path: &str) -> bool {
@@ -572,6 +650,8 @@ pub enum ValidationError {
     EmptyRoomTitle(String),
     #[error("room {room_id:?} has invalid relative asset manifest path {path:?}")]
     InvalidAssetManifestPath { room_id: String, path: String },
+    #[error("room {room_id:?} has invalid legacy alphabetic bitvector {value:?}")]
+    InvalidLegacyRoomBitvector { room_id: String, value: String },
     #[error("room {room_id:?} defines direction {direction:?} more than once")]
     DuplicateExitDirection {
         room_id: String,
@@ -579,11 +659,6 @@ pub enum ValidationError {
     },
     #[error("room {room_id:?} points to missing room {target:?}")]
     MissingRoomTarget { room_id: String, target: String },
-    #[error("room {room_id:?} is unreachable from start room {start_room_id:?}")]
-    UnreachableRoom {
-        room_id: String,
-        start_room_id: String,
-    },
     #[error("item id must not be empty")]
     EmptyItemId,
     #[error("item id {0:?} appears more than once")]
@@ -602,6 +677,8 @@ pub enum ValidationError {
         first_room: String,
         second_room: String,
     },
+    #[error("item {item_id:?} is both placed in room {room_id:?} and allocated as NPC loot")]
+    ItemPlacedAndAllocatedAsLoot { item_id: String, room_id: String },
     #[error("item {0:?} has no initial room")]
     UnplacedItem(String),
     #[error("invalid gameplay definition: {0}")]
@@ -701,6 +778,15 @@ pub enum ValidationError {
     DuplicateScriptId(String),
     #[error("script {script_id:?} references missing room {room_id:?}")]
     MissingScriptRoom { script_id: String, room_id: String },
+    #[error(
+        "room {room_id:?} declares {actual} script modules for hook {hook:?}; the maximum is {maximum}"
+    )]
+    TooManyScriptsForRoomHook {
+        room_id: String,
+        hook: ScriptHook,
+        actual: usize,
+        maximum: usize,
+    },
     #[error("script {0:?} must declare at least one hook")]
     EmptyScriptHooks(String),
     #[error("script {script_id:?} declares hook {hook:?} more than once")]
@@ -720,6 +806,8 @@ pub enum ValidationError {
     },
     #[error("script {0:?} has invalid or excessive runtime limits")]
     InvalidScriptLimits(String),
+    #[error("script {script_id:?} is not a valid sandboxed Lua module: {reason}")]
+    InvalidScriptModule { script_id: String, reason: String },
     #[error("content test name must not be empty")]
     EmptyContentTestName,
     #[error("content test {0:?} appears more than once")]
@@ -897,6 +985,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_room_bitvectors_preserve_rom_letters_without_guessing_a_mask() {
+        let numeric: LegacyBitvector = serde_json::from_str("321").unwrap();
+        let alphabetic: LegacyBitvector = serde_json::from_str(r#""ABcz""#).unwrap();
+        assert_eq!(numeric, LegacyBitvector::Numeric(321));
+        assert_eq!(alphabetic, LegacyBitvector::Alphabetic("ABcz".into()));
+
+        let mut value = pack();
+        value.rooms[0].legacy = Some(LegacyRoomData {
+            flags: alphabetic,
+            sector: 0,
+            prefix_values: Vec::new(),
+        });
+        value.validate().unwrap();
+
+        value.rooms[0].legacy.as_mut().unwrap().flags = LegacyBitvector::Alphabetic("A|B".into());
+        assert!(value.validate().unwrap_err().0.contains(
+            &ValidationError::InvalidLegacyRoomBitvector {
+                room_id: "test:1".into(),
+                value: "A|B".into(),
+            }
+        ));
+    }
+
+    #[test]
     fn start_room_is_explicit_and_must_reference_a_room() {
         let mut missing = pack();
         missing.start_room_id = "test:missing".into();
@@ -914,15 +1026,17 @@ mod tests {
     }
 
     #[test]
-    fn every_room_must_be_reachable_from_the_explicit_start() {
+    fn directed_unreachable_rooms_are_diagnostics_not_validation_errors() {
         let mut disconnected = pack();
         disconnected.rooms.push(room("test:isolated", 2));
-        assert!(disconnected.validate().unwrap_err().0.contains(
-            &ValidationError::UnreachableRoom {
+        disconnected.validate().unwrap();
+        assert_eq!(
+            disconnected.diagnostics(),
+            vec![WorldPackDiagnostic::DirectedUnreachableRoom {
                 room_id: "test:isolated".into(),
                 start_room_id: "test:1".into(),
-            }
-        ));
+            }]
+        );
     }
 
     #[test]
@@ -1030,6 +1144,63 @@ mod tests {
                 first_room: "test:1".into(),
                 second_room: "test:2".into(),
             }]
+        );
+    }
+
+    #[test]
+    fn an_item_must_start_in_exactly_one_room_or_one_loot_allocation() {
+        let item = Item {
+            id: "test:fang".into(),
+            name: "fang".into(),
+            description: "A sharp fang.".into(),
+            aliases: Vec::new(),
+        };
+        let prototype = NpcPrototype {
+            id: "test:wolf".into(),
+            name: "wolf".into(),
+            description: "A watchful wolf.".into(),
+            level: 1,
+            max_health: 10,
+            strength: 2,
+            defence: 0,
+            experience_reward: 10,
+            respawn_ticks: 2,
+            loot_item_ids: vec![item.id.clone()],
+        };
+        let spawn = NpcSpawn {
+            id: "test:wolf-1".into(),
+            prototype_id: prototype.id.clone(),
+            room_id: "test:1".into(),
+        };
+
+        let mut loot_only = pack();
+        loot_only.items.push(item.clone());
+        loot_only.gameplay.npc_prototypes.push(prototype.clone());
+        loot_only.gameplay.npc_spawns.push(spawn.clone());
+        loot_only.validate().unwrap();
+
+        let mut ambiguous = loot_only;
+        ambiguous.rooms[0].items.push(item.id.clone());
+        assert!(ambiguous.validate().unwrap_err().0.contains(
+            &ValidationError::ItemPlacedAndAllocatedAsLoot {
+                item_id: item.id.clone(),
+                room_id: "test:1".into(),
+            }
+        ));
+
+        let mut nowhere = pack();
+        nowhere.items.push(item);
+        nowhere.gameplay.npc_prototypes.push(prototype);
+        nowhere.gameplay.npc_spawns.push(NpcSpawn {
+            prototype_id: "missing:prototype".into(),
+            ..spawn
+        });
+        assert!(
+            nowhere
+                .validate()
+                .unwrap_err()
+                .0
+                .contains(&ValidationError::UnplacedItem("test:fang".into()))
         );
     }
 }

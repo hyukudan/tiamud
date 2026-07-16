@@ -25,6 +25,13 @@ enum Command {
         #[arg(long)]
         backup: PathBuf,
     },
+    /// Promote one registered account when the database has no administrator.
+    RecoverAdmin {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        account: String,
+    },
     /// Create, verify, or restore SQLite backups.
     Backup {
         #[command(subcommand)]
@@ -85,6 +92,13 @@ fn run(cli: Cli) -> Result<(), tiamud_admin::AdminError> {
             println!(
                 "database {:?} migrated from schema v{} to v{}; safety backup: {:?}",
                 report.database, report.migration.from, report.migration.to, report.backup
+            );
+        }
+        Command::RecoverAdmin { database, account } => {
+            let report = tiamud_admin::recover_admin(database, &account)?;
+            println!(
+                "recovered administrator {:?} (account id {}) in {:?}; audit entry recorded",
+                report.account_name, report.account_id, report.database
             );
         }
         Command::Backup { command } => match command {
@@ -197,6 +211,23 @@ mod tests {
             Command::Backup {
                 command: BackupCommand::Restore { .. }
             }
+        ));
+    }
+
+    #[test]
+    fn parses_explicit_admin_recovery() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "tiamud-admin",
+                "recover-admin",
+                "--database",
+                "state.sqlite3",
+                "--account",
+                "Keeper",
+            ])
+            .unwrap()
+            .command,
+            Command::RecoverAdmin { .. }
         ));
     }
 }

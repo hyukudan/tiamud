@@ -14,6 +14,10 @@ use thiserror::Error;
 
 const HOOK_GRANULARITY: u32 = 100;
 
+/// Shared authoring/runtime ceiling for modules attached to the same room and
+/// hook. WorldPack validation and the server both enforce this value.
+pub const MAX_MODULES_PER_ROOM_HOOK_BATCH: usize = 8;
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptHook {
@@ -273,11 +277,20 @@ fn install_capability_api(
     capabilities: &BTreeSet<ScriptCapability>,
     limits: ScriptLimits,
 ) -> Result<(), ScriptError> {
-    for forbidden in ["dofile", "load", "loadfile", "require"] {
+    for forbidden in [
+        "dofile",
+        "load",
+        "loadfile",
+        "require",
+        "print",
+        "warn",
+        "collectgarbage",
+    ] {
         lua.globals()
             .set(forbidden, mlua::Value::Nil)
             .map_err(map_lua_error)?;
     }
+    harden_standard_libraries(lua)?;
     let api = lua.create_table().map_err(map_lua_error)?;
     let allowed = capabilities
         .iter()
@@ -345,6 +358,29 @@ fn install_capability_api(
     lua.globals().set("tiamud", api).map_err(map_lua_error)
 }
 
+/// Remove standard-library entry points that bypass the sandbox's guarantees.
+///
+/// Lua's instruction hook cannot interrupt a long-running pattern operation
+/// while the VM is executing its C implementation. Packs do not need pattern
+/// matching for gameplay hooks, so fail closed instead of pretending that the
+/// wall-clock quota can preempt those calls. Likewise, all authored randomness
+/// must flow through the seeded `tiamud.random` capability.
+fn harden_standard_libraries(lua: &Lua) -> Result<(), ScriptError> {
+    let string: mlua::Table = lua.globals().get("string").map_err(map_lua_error)?;
+    for function in ["find", "gmatch", "gsub", "match"] {
+        string
+            .set(function, mlua::Value::Nil)
+            .map_err(map_lua_error)?;
+    }
+
+    let math: mlua::Table = lua.globals().get("math").map_err(map_lua_error)?;
+    for function in ["random", "randomseed"] {
+        math.set(function, mlua::Value::Nil)
+            .map_err(map_lua_error)?;
+    }
+    Ok(())
+}
+
 fn validate_limits(source: &str, limits: ScriptLimits) -> Result<(), ScriptError> {
     if source.len() > limits.max_source_bytes {
         return Err(ScriptError::SourceTooLarge {
@@ -407,6 +443,7 @@ mod tests {
             r#"
                 function on_enter(ctx)
                     assert(os == nil and io == nil and package == nil and require == nil)
+                    assert(print == nil and warn == nil and collectgarbage == nil)
                     tiamud.emit("narrate", ctx.character, "Welcome")
                 end
             "#,
@@ -515,6 +552,27 @@ mod tests {
             .events
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn removes_nondeterministic_randomness_and_uninterruptible_patterns() {
+        let outcome = execute_hook(
+            r#"
+                function on_look()
+                    assert(math.random == nil and math.randomseed == nil)
+                    assert(string.find == nil and string.gmatch == nil)
+                    assert(string.gsub == nil and string.match == nil)
+                    tiamud.emit("narrate", nil, string.upper("safe"))
+                end
+            "#,
+            ScriptHook::OnLook,
+            &ScriptContext::default(),
+            &capabilities(&[ScriptCapability::Narrate]),
+            ScriptLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.events[0].value.as_deref(), Some("SAFE"));
     }
 
     #[test]

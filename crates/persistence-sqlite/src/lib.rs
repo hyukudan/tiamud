@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MigrationReport {
@@ -104,6 +104,8 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
              snapshot_version INTEGER NOT NULL,
              snapshot_json TEXT NOT NULL CHECK(length(snapshot_json) <= 1048576),
+             last_event_sequence INTEGER
+                 CHECK(last_event_sequence IS NULL OR last_event_sequence >= 0),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
          CREATE TABLE IF NOT EXISTS social_ignores (
@@ -178,30 +180,41 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              state_json TEXT NOT NULL CHECK(length(state_json) <= 1048576),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         PRAGMA user_version = 7;",
+         PRAGMA user_version = 8;",
     )?;
-    let bootstrap_admin = transaction
-        .query_row(
-            "SELECT id FROM accounts
-             WHERE auth_state = 'registered'
-               AND NOT EXISTS(SELECT 1 FROM accounts WHERE role = 'admin')
-             ORDER BY id LIMIT 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    if let Some(account_id) = bootstrap_admin {
-        transaction.execute(
-            "UPDATE accounts SET role = 'admin' WHERE id = ?1",
-            [account_id],
+    // A legacy snapshot does not prove which event sequence it covers. Keep a
+    // NULL watermark until the next successful runtime commit establishes it;
+    // the migration itself must never discard event history.
+    if !column_exists(&transaction, "world_runtime", "last_event_sequence")? {
+        transaction.execute_batch(
+            "ALTER TABLE world_runtime ADD COLUMN last_event_sequence INTEGER
+                 CHECK(last_event_sequence IS NULL OR last_event_sequence >= 0);",
         )?;
-        transaction.execute(
-            "INSERT INTO moderation_audit
-                 (actor_account_id, target_account_id, action, details_json, created_at)
-             VALUES (?1, ?1, 'bootstrap_admin',
-                     '{\"source\":\"schema_v6_first_registered_account\"}', unixepoch())",
-            [account_id],
-        )?;
+    }
+    if from < 6 {
+        let bootstrap_admin = transaction
+            .query_row(
+                "SELECT id FROM accounts
+                 WHERE auth_state = 'registered'
+                   AND NOT EXISTS(SELECT 1 FROM accounts WHERE role = 'admin')
+                 ORDER BY id LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(account_id) = bootstrap_admin {
+            transaction.execute(
+                "UPDATE accounts SET role = 'admin' WHERE id = ?1",
+                [account_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO moderation_audit
+                     (actor_account_id, target_account_id, action, details_json, created_at)
+                 VALUES (?1, ?1, 'bootstrap_admin',
+                         '{\"source\":\"schema_v6_first_registered_account\"}', unixepoch())",
+                [account_id],
+            )?;
+        }
     }
     transaction.commit()?;
 
@@ -273,12 +286,12 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let report = migrate(&mut connection).unwrap();
 
-        assert_eq!(report, MigrationReport { from: 0, to: 7 });
+        assert_eq!(report, MigrationReport { from: 0, to: 8 });
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         assert!(
             connection
@@ -297,7 +310,7 @@ mod tests {
         );
         assert!(
             connection
-                .prepare("SELECT snapshot_json FROM world_runtime")
+                .prepare("SELECT snapshot_json, last_event_sequence FROM world_runtime")
                 .is_ok()
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
@@ -380,7 +393,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 3, to: 7 }
+            MigrationReport { from: 3, to: 8 }
         );
         assert_eq!(
             connection
@@ -424,7 +437,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 4, to: 7 }
+            MigrationReport { from: 4, to: 8 }
         );
         let gameplay: String = connection
             .query_row(
@@ -489,7 +502,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 5, to: 7 }
+            MigrationReport { from: 5, to: 8 }
         );
         assert_eq!(
             connection
@@ -546,7 +559,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 6, to: 7 }
+            MigrationReport { from: 6, to: 8 }
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
@@ -570,6 +583,139 @@ mod tests {
                 )
                 .unwrap(),
             "{\"level\":9}"
+        );
+    }
+
+    #[test]
+    fn upgrades_v7_without_compacting_events_when_snapshot_is_absent() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE domain_events (
+                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     event_json TEXT NOT NULL,
+                     created_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 CREATE TABLE world_runtime (
+                     singleton INTEGER PRIMARY KEY,
+                     snapshot_version INTEGER NOT NULL,
+                     snapshot_json TEXT NOT NULL,
+                     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 INSERT INTO domain_events (event_json)
+                     VALUES ('{\"type\":\"legacy-one\"}'),
+                            ('{\"type\":\"legacy-two\"}');
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 7, to: 8 }
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM domain_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM world_runtime", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert!(
+            connection
+                .prepare("SELECT last_event_sequence FROM world_runtime")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_watermark_stays_unknown_until_a_runtime_commit() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE domain_events (
+                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     event_json TEXT NOT NULL,
+                     created_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 CREATE TABLE world_runtime (
+                     singleton INTEGER PRIMARY KEY,
+                     snapshot_version INTEGER NOT NULL,
+                     snapshot_json TEXT NOT NULL,
+                     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 INSERT INTO domain_events (event_json)
+                     VALUES ('{\"type\":\"legacy\"}');
+                 INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json)
+                     VALUES (1, 1, '{}');
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM domain_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn current_schema_never_silently_recreates_an_admin() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO accounts (name, password_hash, auth_state, role)
+                 VALUES ('Oldest Player', 'hash', 'registered', 'player')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 8, to: 8 }
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT role FROM accounts WHERE name = 'Oldest Player'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "player"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM moderation_audit", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
         );
     }
 }

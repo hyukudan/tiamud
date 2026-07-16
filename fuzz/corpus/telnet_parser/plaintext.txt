@@ -1,0 +1,2 @@
+register fuzz-account fuzz-password
+look

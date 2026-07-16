@@ -35,6 +35,12 @@ configured by `TIAMUD_TELNET_TLS_CERT` and `TIAMUD_TELNET_TLS_KEY`; restrict the
 key to the `tiamud` service account and restart after atomic certificate
 renewal. Startup fails closed when TLS mode has an invalid identity.
 
+The reference unit writes only below `/var/lib/tiamud`, limits address families
+to local/IPv4/IPv6 sockets, removes ambient capabilities and isolates devices,
+namespaces, kernel controls and other users' process details. Validate it on
+the target distribution with `systemd-analyze security tiamud.service`; an
+older systemd may require explicitly removing an unsupported directive.
+
 `TIAMUD_TELNET_MODE` defaults to `tls`; there is no implicit downgrade. The
 only unencrypted setting is the exact value `plaintext`, which logs a prominent
 warning. It exists for development or an explicitly trusted private network:
@@ -147,6 +153,23 @@ copy them off-host, monitor free space before each backup, and periodically
 restore a selected off-host copy into a new path. A backup that has not passed
 `backup verify` and a restore exercise is not established recovery evidence.
 
+## Event retention and SQLite file size
+
+In schema v8, both SQLite and PostgreSQL record the last domain-event sequence
+covered by each committed world snapshot. The same transaction retains the
+covered 10,000-sequence suffix and removes only rows older than that watermark;
+sequence gaps can make the exact row count smaller. A database without a
+snapshot is never compacted. This keeps normal runtime storage bounded without
+weakening snapshot/event atomicity.
+
+SQLite normally places deleted rows on its internal free-page list and reuses
+those pages for later writes. The database file therefore may not become
+physically smaller after event compaction. Do not run `VACUUM` against the live
+server. If reclaiming filesystem space is operationally necessary, treat it as
+offline maintenance: stop Tiamud, create and verify a backup, perform the
+operator-reviewed rebuild on a separate copy or during the maintenance window,
+verify integrity and a restore, then restart the service.
+
 ## Schema migration
 
 Stop the server so no process holds the authoritative database, then run the
@@ -160,6 +183,69 @@ tiamud-admin migrate \
   --backup /var/lib/tiamud/backups/pre-migrate-2026-07-15.sqlite3
 sudo systemctl start tiamud
 ```
+
+## Emergency administrator recovery
+
+Schema migration only selected the first administrator during the historical
+v6 role transition. It never recreates an administrator during an ordinary
+restart. If an SQLite installation has no administrator, stop the server and
+use the explicit, audited break-glass command with an existing registered
+account:
+
+```sh
+sudo systemctl stop tiamud
+tiamud-admin backup create \
+  --database /var/lib/tiamud/data/tiamud.db \
+  --output /var/lib/tiamud/backups/pre-admin-recovery.sqlite3
+tiamud-admin recover-admin \
+  --database /var/lib/tiamud/data/tiamud.db \
+  --account Keeper
+sudo systemctl start tiamud
+```
+
+The command requires the current schema, refuses to run while any admin
+already exists, and commits the role change and `recover_admin` audit record in
+one transaction. `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the
+server, take and verify the installation's normal `pg_dump`/physical backup,
+then run `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply
+this equivalent transaction:
+
+```sql
+BEGIN;
+LOCK TABLE accounts IN EXCLUSIVE MODE;
+LOCK TABLE moderation_audit IN ROW EXCLUSIVE MODE;
+SELECT set_config('tiamud.recovery_account', :'target_account', true);
+DO $$
+DECLARE
+    target_id BIGINT;
+BEGIN
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 8 THEN
+        RAISE EXCEPTION 'administrator recovery requires Tiamud schema 8';
+    END IF;
+    IF EXISTS (SELECT 1 FROM accounts WHERE role = 'admin') THEN
+        RAISE EXCEPTION 'an administrator already exists';
+    END IF;
+    SELECT id INTO target_id
+    FROM accounts
+    WHERE lower(name) = lower(current_setting('tiamud.recovery_account'))
+      AND auth_state = 'registered';
+    IF target_id IS NULL THEN
+        RAISE EXCEPTION 'the target must be an existing registered account';
+    END IF;
+    UPDATE accounts SET role = 'admin' WHERE id = target_id;
+    INSERT INTO moderation_audit
+        (actor_account_id, target_account_id, action, details_json, created_at)
+    VALUES
+        (target_id, target_id, 'recover_admin',
+         '{"source":"postgres_break_glass"}',
+         floor(extract(epoch FROM now()))::BIGINT);
+END $$;
+COMMIT;
+```
+
+Check that the transaction reports `COMMIT`, verify the audit row and role,
+then restart Tiamud. Any raised exception aborts the transaction; use
+`ROLLBACK` before correcting the cause.
 
 ## Optional PostgreSQL profile
 

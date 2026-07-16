@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
-use world_pack::{Item, WorldPack};
+use world_pack::{Item, LegacyBitvector, WorldPack};
 
 use super::{
     Cursor, ImportError, TextEncoding, decode, line_number, parse_integer_line,
@@ -126,8 +126,8 @@ pub struct LegacyObject {
     pub room_description: String,
     pub action_description: String,
     pub item_type: i64,
-    pub extra_flags: i64,
-    pub wear_flags: i64,
+    pub extra_flags: LegacyBitvector,
+    pub wear_flags: LegacyBitvector,
     pub values: Vec<String>,
     /// Remaining data lines are dialect-specific and intentionally inert.
     pub attribute_lines: Vec<LegacyDataLine>,
@@ -454,8 +454,8 @@ fn parse_objects(bytes: &[u8], encoding: TextEncoding) -> Result<Vec<LegacyObjec
             });
         }
         let item_type = parse_data_number(&header.tokens[0], record_line)?;
-        let extra_flags = parse_data_number(&header.tokens[1], record_line)?;
-        let wear_flags = parse_data_number(&header.tokens[2], record_line)?;
+        let extra_flags = super::parse_legacy_bitvector(&header.tokens[1], record_line)?;
+        let wear_flags = super::parse_legacy_bitvector(&header.tokens[2], record_line)?;
         let values = attribute_lines.remove(0).tokens;
         records.push(LegacyObject {
             vnum,
@@ -920,32 +920,50 @@ fn append_descriptor_diagnostics(
                 "verify the source codebase's item type table before mapping this prototype",
             ));
         }
-        if object.extra_flags != 0 {
-            diagnostics.push(warning(
-                "object_extra_flag_mask_preserved",
-                "OBJECTS",
-                Some(object.line),
-                Some(object.vnum),
-                &format!(
-                    "object extra flag mask {} is preserved but not interpreted",
-                    object.extra_flags
-                ),
-                "review the source dialect's extra flag table and author equivalent behavior explicitly",
-            ));
-        }
-        if object.wear_flags != 0 {
-            diagnostics.push(warning(
-                "object_wear_flag_mask_preserved",
-                "OBJECTS",
-                Some(object.line),
-                Some(object.vnum),
-                &format!(
-                    "object wear flag mask {} is preserved but not interpreted",
-                    object.wear_flags
-                ),
-                "review the source dialect's wear flag table before adding equipment semantics",
-            ));
-        }
+        append_bitvector_diagnostic(
+            diagnostics,
+            object,
+            "extra",
+            &object.extra_flags,
+            "object_extra_flag_mask_preserved",
+        );
+        append_bitvector_diagnostic(
+            diagnostics,
+            object,
+            "wear",
+            &object.wear_flags,
+            "object_wear_flag_mask_preserved",
+        );
+    }
+}
+
+fn append_bitvector_diagnostic(
+    diagnostics: &mut Vec<ImportDiagnostic>,
+    object: &LegacyObject,
+    field: &str,
+    bitvector: &LegacyBitvector,
+    numeric_code: &'static str,
+) {
+    match bitvector {
+        LegacyBitvector::Numeric(0) => {}
+        LegacyBitvector::Numeric(value) => diagnostics.push(warning(
+            numeric_code,
+            "OBJECTS",
+            Some(object.line),
+            Some(object.vnum),
+            &format!("object {field} flag mask {value} is preserved but not interpreted"),
+            "review the source dialect's flag table and author equivalent behavior explicitly",
+        )),
+        LegacyBitvector::Alphabetic(value) => diagnostics.push(warning(
+            "rom_alphabetic_object_bitvector_preserved",
+            "OBJECTS",
+            Some(object.line),
+            Some(object.vnum),
+            &format!(
+                "ROM-style object {field} bitvector {value:?} is preserved verbatim and was not converted to a numeric mask"
+            ),
+            "review the exact source flag table before authoring equivalent item behavior",
+        )),
     }
 }
 

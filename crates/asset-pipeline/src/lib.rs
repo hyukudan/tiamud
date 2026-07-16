@@ -19,6 +19,7 @@ const SCHEMA_VERSION: u8 = 2;
 const JPEG_QUALITY: u8 = 84;
 const AVIF_QUALITY: f32 = 64.0;
 const AVIF_SPEED: u8 = 8;
+const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(feature = "webp-encoding")]
 const WEBP_QUALITY: f32 = 82.0;
 
@@ -247,6 +248,8 @@ pub enum PipelineError {
         actual: usize,
         maximum: usize,
     },
+    #[error("asset manifest is {actual} bytes, exceeding the {maximum}-byte client limit")]
+    ManifestTooLarge { actual: usize, maximum: usize },
     #[error("immutable output already exists with different contents: {0}")]
     ImmutableCollision(PathBuf),
     #[error("image decode failed: {0}")]
@@ -496,23 +499,21 @@ pub fn build_asset_with(
     );
     let asset_id = format!("sha256:{asset_hash}");
     let bundle_dir = request.output_dir.join(&asset_hash);
-    let mut variants = Vec::with_capacity(encoded_variants.len());
-
-    fs::create_dir_all(&bundle_dir).map_err(|error| PipelineError::io(&bundle_dir, error))?;
-    for variant in &encoded_variants {
-        let file_name = format!("scene-{}.{}", variant.width, variant.format.extension());
-        let file_path = bundle_dir.join(&file_name);
-        write_immutable(&file_path, &variant.bytes)?;
-        variants.push(PublishedVariant {
-            format: variant.format,
-            media_type: variant.format.media_type().to_owned(),
-            width: variant.width,
-            height: variant.height,
-            bytes: variant.bytes.len(),
-            sha256: variant.sha256.clone(),
-            path: format!("{asset_hash}/{file_name}"),
-        });
-    }
+    let variants = encoded_variants
+        .iter()
+        .map(|variant| {
+            let file_name = format!("scene-{}.{}", variant.width, variant.format.extension());
+            PublishedVariant {
+                format: variant.format,
+                media_type: variant.format.media_type().to_owned(),
+                width: variant.width,
+                height: variant.height,
+                bytes: variant.bytes.len(),
+                sha256: variant.sha256.clone(),
+                path: format!("{asset_hash}/{file_name}"),
+            }
+        })
+        .collect();
 
     let manifest = AssetManifest {
         schema: SCHEMA_VERSION,
@@ -537,7 +538,21 @@ pub fn build_asset_with(
     };
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     manifest_bytes.push(b'\n');
+    if manifest_bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(PipelineError::ManifestTooLarge {
+            actual: manifest_bytes.len(),
+            maximum: MAX_MANIFEST_BYTES,
+        });
+    }
     let manifest_sha256 = sha256_hex(&manifest_bytes);
+
+    // Validate the complete publish marker before writing any part of its
+    // bundle. A rejected manifest must not leave an orphaned asset directory.
+    fs::create_dir_all(&bundle_dir).map_err(|error| PipelineError::io(&bundle_dir, error))?;
+    for variant in &encoded_variants {
+        let file_name = format!("scene-{}.{}", variant.width, variant.format.extension());
+        write_immutable(&bundle_dir.join(file_name), &variant.bytes)?;
+    }
     let manifest_path = bundle_dir.join("manifest.json");
     write_immutable(&manifest_path, &manifest_bytes)?;
 
@@ -760,6 +775,7 @@ fn encode_avif(image: &RgbImage) -> Result<Vec<u8>, PipelineError> {
     let encoded = ravif::Encoder::new()
         .with_quality(AVIF_QUALITY)
         .with_speed(AVIF_SPEED)
+        .with_num_threads(Some(1))
         .encode_rgb(ravif::Img::new(
             &pixels,
             image.width() as usize,
@@ -916,14 +932,24 @@ fn write_immutable(path: &Path, bytes: &[u8]) -> Result<(), PipelineError> {
             .sync_all()
             .map_err(|error| PipelineError::io(&temporary, error))?;
 
-        if path.exists() {
-            let existing = fs::read(path).map_err(|error| PipelineError::io(path, error))?;
-            if existing != bytes {
-                return Err(PipelineError::ImmutableCollision(path.to_owned()));
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => {
+                // Persist the directory entry as well as the file contents.
+                fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| PipelineError::io(parent, error))?;
+                Ok(())
             }
-            return Ok(());
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = fs::read(path).map_err(|error| PipelineError::io(path, error))?;
+                if existing == bytes {
+                    Ok(())
+                } else {
+                    Err(PipelineError::ImmutableCollision(path.to_owned()))
+                }
+            }
+            Err(error) => Err(PipelineError::io(path, error)),
         }
-        fs::rename(&temporary, path).map_err(|error| PipelineError::io(path, error))
     })();
 
     if temporary.exists() {
@@ -1177,6 +1203,59 @@ mod tests {
     }
 
     #[test]
+    fn oversized_manifest_is_rejected_before_creating_a_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.png");
+        let output_dir = temp.path().join("published");
+        write_png(&source, 1280, 8, None);
+        let limits = BuildLimits {
+            max_alt_chars: 70_000,
+            ..BuildLimits::default()
+        };
+        let request = BuildRequest {
+            source,
+            alt: "a".repeat(70_000),
+            output_dir: output_dir.clone(),
+            limits,
+            metadata: reviewed_metadata(),
+            lossless: false,
+        };
+
+        assert!(matches!(
+            build_asset_with(&request, &FakeEncoders),
+            Err(PipelineError::ManifestTooLarge { .. })
+        ));
+        assert!(!output_dir.exists());
+    }
+
+    #[test]
+    fn concurrent_immutable_writers_never_replace_the_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("asset.bin");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles = [b"first".as_slice(), b"second".as_slice()].map(|payload| {
+            let path = path.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                write_immutable(&path, payload)
+            })
+        });
+        barrier.wait();
+        let outcomes = handles.map(|handle| handle.join().unwrap());
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Err(PipelineError::ImmutableCollision(_))))
+                .count(),
+            1
+        );
+        let published = fs::read(path).unwrap();
+        assert!(published == b"first" || published == b"second");
+    }
+
+    #[test]
     fn quarantine_requires_review_and_detects_tampering_before_publication() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("upload.png");
@@ -1236,6 +1315,11 @@ mod tests {
 
         let avif = encoders.encode(AssetFormat::Avif, &image).unwrap();
         assert!(avif.windows(4).any(|bytes| bytes == b"ftyp"));
+        assert_eq!(
+            avif,
+            encoders.encode(AssetFormat::Avif, &image).unwrap(),
+            "the pinned single-threaded AVIF encoder must be byte-deterministic"
+        );
 
         #[cfg(feature = "webp-encoding")]
         {

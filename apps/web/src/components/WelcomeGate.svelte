@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { imageAfterFailures, imageUrl } from '../lib/assets';
   import { PRODUCT_NAME } from '../lib/brand';
   import { ENTRY_IMAGE } from '../lib/entry';
 
@@ -18,31 +19,50 @@
     access?: Snippet<[enterWorld: EnterWorld]>;
     showArtwork?: boolean;
   } = $props();
+
+  let failedArtworkUrls = $state<string[]>([]);
+  const artwork = $derived(
+    showArtwork ? imageAfterFailures(ENTRY_IMAGE, failedArtworkUrls) : undefined,
+  );
+  const artworkRenderKey = $derived(failedArtworkUrls.join('|'));
 </script>
 
 <main class="welcome" aria-labelledby="welcome-title">
-  {#if showArtwork}
-    <picture class="welcome-art">
-      <source
-        srcset={ENTRY_IMAGE.avifSrcset}
-        sizes="100vw"
-        type="image/avif"
-      />
-      <source
-        srcset={ENTRY_IMAGE.webpSrcset}
-        sizes="100vw"
-        type="image/webp"
-      />
-      <img
-        src={ENTRY_IMAGE.jpeg}
-        srcset={ENTRY_IMAGE.jpegSrcset}
-        sizes="100vw"
-        alt={ENTRY_IMAGE.alt}
-        width={ENTRY_IMAGE.width}
-        height={ENTRY_IMAGE.height}
-        fetchpriority="high"
-      />
-    </picture>
+  {#if artwork}
+    {#key artworkRenderKey}
+      <picture class="welcome-art">
+        {#if artwork.avif}
+          <source
+            srcset={artwork.avifSrcset ?? artwork.avif}
+            sizes="100vw"
+            type="image/avif"
+          />
+        {/if}
+        {#if artwork.webp}
+          <source
+            srcset={artwork.webpSrcset ?? artwork.webp}
+            sizes="100vw"
+            type="image/webp"
+          />
+        {/if}
+        <img
+          src={imageUrl(artwork)}
+          srcset={artwork.jpegSrcset ?? artwork.pngSrcset}
+          sizes="100vw"
+          alt={artwork.alt}
+          width={artwork.width}
+          height={artwork.height}
+          fetchpriority="high"
+          onerror={(event) => {
+            const target = event.currentTarget as HTMLImageElement;
+            const failed = target.currentSrc || target.src;
+            if (failed && !failedArtworkUrls.includes(failed)) {
+              failedArtworkUrls = [...failedArtworkUrls, failed];
+            }
+          }}
+        />
+      </picture>
+    {/key}
   {/if}
 
   <div class="welcome-shade" aria-hidden="true"></div>

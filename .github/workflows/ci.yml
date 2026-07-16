@@ -9,12 +9,29 @@ permissions:
   contents: read
 
 jobs:
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check Rust advisories and dependency sources
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          rust-version: "1.93.1"
+          command: check advisories sources
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -64,13 +81,13 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test soak acceptance verifier
-        run: node --test scripts/verify-soak-report.test.mjs
+        run: node --test scripts/verify-soak-report.test.mjs scripts/telnet-bot.test.mjs
 
       - name: Run transport smoke test
         run: node scripts/smoke.mjs
 
       - name: Run bounded headless load profile
-        run: node scripts/load.mjs --users 16 --rounds 2 --concurrency 4 --pace-ms 150 --max-rss-growth-mb 96
+        run: node scripts/load.mjs --users 16 --telnet-users 1 --rounds 2 --concurrency 4 --pace-ms 150 --max-rss-growth-mb 96
 
       - name: Retain a short soak-evidence profile
         run: |
@@ -80,6 +97,7 @@ jobs:
             --warmup 5s \
             --sample-interval 5s \
             --users 2 \
+            --telnet-users 1 \
             --concurrency 2 \
             --pace-ms 100 \
             --max-rss-growth-mb 96 \

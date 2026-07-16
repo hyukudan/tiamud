@@ -1,0 +1,49 @@
+name: Bounded Telnet fuzzing
+
+on:
+  schedule:
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telnet-fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  telnet-parser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned nightly toolchain
+        run: rustup toolchain install nightly-2026-07-01 --profile minimal
+
+      - name: Install pinned cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Run the production Telnet parser with a bounded campaign
+        run: |
+          mkdir -p fuzz/artifacts/telnet_parser
+          cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
+            -dict=fuzz/dictionaries/telnet_parser.dict \
+            -max_len=262144 \
+            -timeout=5 \
+            -rss_limit_mb=1024 \
+            -max_total_time=120 \
+            -artifact_prefix=fuzz/artifacts/telnet_parser/
+
+      - name: Retain crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: telnet-fuzz-${{ github.run_id }}
+          path: fuzz/artifacts/telnet_parser/
+          if-no-files-found: ignore
+          retention-days: 14

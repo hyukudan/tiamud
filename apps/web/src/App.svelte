@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type {
     ActionResultData,
     ConnectionState,
@@ -24,9 +24,14 @@
   import {
     clearStoredAccess,
     logout as revokeAccess,
+    sessionHasExpired,
     type CharacterSelection,
   } from './lib/auth';
-  import { TiamudConnection, websocketUrl } from './lib/socket';
+  import {
+    TiamudConnection,
+    websocketUrl,
+    type BrowserCapabilities,
+  } from './lib/socket';
   import {
     loadPreferences,
     motionReduced,
@@ -36,6 +41,12 @@
   } from './lib/preferences';
   import { loadCommandHistory, rememberCommand } from './lib/history';
   import { AudioController } from './lib/audio';
+  import { createRequestId } from './lib/request-id';
+  import {
+    MAX_SCROLLBACK_ENTRIES,
+    boundedScrollback,
+    isScrollAnchored,
+  } from './lib/scrollback';
 
   interface HistoryEntry {
     id: string;
@@ -53,10 +64,15 @@
   let failedImageUrls = $state<string[]>([]);
   let notice = $state<ServerNoticeData>();
   let command = $state('');
+  let commandInput = $state<HTMLInputElement>();
   let history = $state<HistoryEntry[]>([]);
+  let historyScroller = $state<HTMLDivElement>();
+  let historyAnchored = $state(true);
+  let unseenHistory = $state(0);
   let eventCounter = 0;
   let connection: TiamudConnection | undefined;
   let selectedAccess = $state<CharacterSelection>();
+  let accessError = $state<string>();
   const browserSaveData = typeof navigator !== 'undefined' &&
     (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData === true;
   const initialPreferences = loadPreferences(
@@ -162,6 +178,71 @@
     if (next.audio && !preferences.audio) audioController?.unlockFromGesture();
     audioController?.updatePreferences(next);
     preferences = next;
+    connection?.updateCapabilities(capabilitiesFor(next));
+  }
+
+  function capabilitiesFor(value: ClientPreferences): BrowserCapabilities {
+    return {
+      images: multimediaAllowed(value),
+      reducedMotion: motionReduced(
+        value,
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      ),
+      audio: value.audio,
+    };
+  }
+
+  function replaceHistory(next: HistoryEntry[], activity = 1): void {
+    const scroller = historyScroller;
+    const wasAnchored = scroller ? isScrollAnchored(scroller) : true;
+    historyAnchored = wasAnchored;
+    history = boundedScrollback(next);
+    void tick().then(() => {
+      if (!historyScroller) return;
+      if (wasAnchored) {
+        historyScroller.scrollTop = historyScroller.scrollHeight;
+        historyAnchored = true;
+        unseenHistory = 0;
+      } else if (activity > 0) {
+        historyAnchored = false;
+        unseenHistory = Math.min(MAX_SCROLLBACK_ENTRIES, unseenHistory + activity);
+      }
+    });
+  }
+
+  function handleHistoryScroll(): void {
+    if (!historyScroller) return;
+    historyAnchored = isScrollAnchored(historyScroller);
+    if (historyAnchored) unseenHistory = 0;
+  }
+
+  function jumpToLatest(): void {
+    if (!historyScroller) return;
+    const top = historyScroller.scrollHeight;
+    if (typeof historyScroller.scrollTo === 'function') {
+      historyScroller.scrollTo({
+        top,
+        behavior: motionReduced(
+          preferences,
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        ) ? 'auto' : 'smooth',
+      });
+    } else {
+      historyScroller.scrollTop = top;
+    }
+    historyAnchored = true;
+    unseenHistory = 0;
+  }
+
+  function markPendingInterrupted(): void {
+    if (!history.some((entry) => entry.state === 'pending')) return;
+    replaceHistory(history.map((entry) => entry.state === 'pending'
+      ? {
+          ...entry,
+          state: 'failed' as const,
+          response: 'The connection closed before the server confirmed this action.',
+        }
+      : entry));
   }
 
   function handleActionResult(result: ActionResultData): void {
@@ -172,7 +253,7 @@
       return;
     }
 
-    history = history.map((entry) =>
+    replaceHistory(history.map((entry) =>
       entry.id === result.requestId
         ? {
             ...entry,
@@ -180,7 +261,7 @@
             response: result.message ?? (result.ok ? 'Done.' : 'The action failed.'),
           }
         : entry,
-    );
+    ));
   }
 
   function handleMessage(message: ServerMessage): void {
@@ -270,7 +351,7 @@
         break;
       case 'message.append':
         eventCounter += 1;
-        history = [
+        replaceHistory([
           ...history,
           {
             id: `event-${message.seq ?? eventCounter}-${eventCounter}`,
@@ -278,7 +359,7 @@
             state: 'complete' as const,
             response: message.data.text,
           },
-        ].slice(-50);
+        ]);
         break;
       case 'action.result':
         handleActionResult(message.data);
@@ -293,17 +374,17 @@
         audioController?.stop(message.data.channel);
         break;
       case 'chat.message':
-        history = [
-          ...history.slice(-49),
+        replaceHistory([
+          ...history,
           {
-            id: `chat-${message.seq ?? crypto.randomUUID()}`,
+            id: `chat-${message.seq ?? createRequestId()}`,
             command: message.data.channel === 'tell'
               ? `${message.data.sender} tells you`
               : `${message.data.sender} says`,
             state: 'complete',
             response: message.data.text,
           },
-        ];
+        ]);
         break;
     }
   }
@@ -314,28 +395,28 @@
       return;
     }
 
-    const id = crypto.randomUUID();
+    const id = createRequestId();
     const sent = connection?.submit(submitted, id) ?? false;
     recordSubmission(submitted, id, sent);
   }
 
   function submitAction(action: string, target: string | undefined, label: string): void {
-    const id = crypto.randomUUID();
+    const id = createRequestId();
     const sent = connection?.perform(action, target, id) ?? false;
     recordSubmission(label, id, sent);
   }
 
   function recordSubmission(submitted: string, id: string, sent: boolean): void {
 
-    history = [
-      ...history.slice(-49),
+    replaceHistory([
+      ...history,
       {
         id,
         command: submitted,
         state: sent ? 'pending' : 'failed',
         response: sent ? undefined : 'The command was not sent because the server is unavailable.',
       },
-    ];
+    ]);
     rememberedCommands = rememberCommand(
       rememberedCommands,
       submitted,
@@ -368,33 +449,57 @@
   }
 
   function enterWorld(selection: CharacterSelection): void {
+    if (sessionHasExpired(selection)) {
+      returnToLogin('Your session has expired. Sign in again.');
+      return;
+    }
+    accessError = undefined;
     selectedAccess = selection;
     if (!connection) {
       connection = new TiamudConnection(
         websocketUrl(window.location),
-        { token: selection.token, characterId: selection.characterId },
+        {
+          token: selection.token,
+          characterId: selection.characterId,
+          expiresAt: selection.expiresAt,
+        },
         {
           onMessage: handleMessage,
           onStateChange: (state) => {
             connectionState = state;
+            if (state === 'disconnected') markPendingInterrupted();
           },
           onProtocolError: () => {
             notice = { level: 'warning', message: 'The server sent a message this client could not read.' };
           },
-        },
-        {
-          images: showMultimedia,
-          reducedMotion: motionReduced(
-            preferences,
-            window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+          onAccessRejected: (message, clearCredentials) => returnToLogin(
+            message || 'Your session was rejected. Sign in again.',
+            clearCredentials,
           ),
-          audio: preferences.audio,
         },
+        capabilitiesFor(preferences),
       );
       connection.connect();
     }
 
     hasEntered = true;
+    void tick().then(() => commandInput?.focus());
+  }
+
+  function returnToLogin(message: string, clearCredentials = true): void {
+    audioController?.stop();
+    connection = undefined;
+    selectedAccess = undefined;
+    hasEntered = false;
+    connectionState = 'disconnected';
+    scene = undefined;
+    player = undefined;
+    notice = undefined;
+    history = [];
+    historyAnchored = true;
+    unseenHistory = 0;
+    accessError = message;
+    if (clearCredentials) clearStoredAccess(window.localStorage);
   }
 
   async function signOut(): Promise<void> {
@@ -409,6 +514,9 @@
     player = undefined;
     notice = undefined;
     history = [];
+    historyAnchored = true;
+    unseenHistory = 0;
+    accessError = undefined;
     clearStoredAccess(window.localStorage);
     if (token) {
       try {
@@ -435,6 +543,7 @@
 {#if !hasEntered}
   <WelcomeGate onenter={() => undefined} showArtwork={showMultimedia}>
     {#snippet access(_enterWorld)}
+      {#if accessError}<p class="access-error" role="alert">{accessError}</p>{/if}
       <AccountAccess onselect={enterWorld} />
       <PreferencesPanel value={preferences} onchange={updatePreferences} />
     {/snippet}
@@ -599,10 +708,18 @@
       <section class="console" aria-labelledby="console-title">
       <div class="console-heading">
         <h2 id="console-title">Command history</h2>
-        <div><button type="button" onclick={() => submitCommand('inventory')}>Inventory</button><span>{history.length} / 50</span></div>
+        <div><button type="button" onclick={() => submitCommand('inventory')}>Inventory</button><span>{history.length} / {MAX_SCROLLBACK_ENTRIES}</span></div>
       </div>
 
-      <div role="log" aria-label="Command and world event history" aria-live="polite" aria-relevant="additions text">
+      <div
+        class="history-scroll"
+        role="log"
+        aria-label="Command and world event history"
+        aria-live="polite"
+        aria-relevant="additions text"
+        bind:this={historyScroller}
+        onscroll={handleHistoryScroll}
+      >
         <ol class="history">
           {#if history.length === 0}
             <li class="history-empty">Try <kbd>look</kbd> to examine your surroundings.</li>
@@ -618,6 +735,14 @@
         </ol>
       </div>
 
+      {#if !historyAnchored && unseenHistory > 0}
+        <div class="jump-latest">
+          <button type="button" onclick={jumpToLatest}>
+            Jump to latest <span>({unseenHistory} new)</span>
+          </button>
+        </div>
+      {/if}
+
       <form
         class="command-form"
         onsubmit={(event) => {
@@ -630,6 +755,7 @@
           <span aria-hidden="true">›</span>
           <input
             id="command"
+            bind:this={commandInput}
             bind:value={command}
             autocomplete="off"
             autocapitalize="none"

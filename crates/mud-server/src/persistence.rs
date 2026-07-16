@@ -1,7 +1,7 @@
 use crate::{
     auth::{
         AuthenticatedSession, DEFAULT_SESSION_TTL, MAX_PASSWORD_BYTES, MIN_PASSWORD_BYTES,
-        SessionToken, digest_token, hash_password, validate_password, verify_password,
+        PasswordService, PasswordWorkError, SessionToken, digest_token, validate_password,
     },
     operations::RuntimeMetrics,
 };
@@ -26,11 +26,17 @@ use tokio::{
     time::{Duration, timeout},
 };
 
+#[cfg(test)]
+use crate::auth::{hash_password, verify_password};
+
 const MAX_IDENTITY_NAME_BYTES: usize = 64;
 const MAX_ACTIVE_SESSIONS: i64 = 16;
 const MAX_CHARACTER_JSON_BYTES: usize = 65_536;
 const MAX_EVENT_JSON_BYTES: usize = 65_536;
 const MAX_RUNTIME_JSON_BYTES: usize = 1_048_576;
+/// Number of snapshot-covered domain events retained for diagnostics and
+/// compatibility. Older covered events are compacted transactionally.
+pub(super) const DOMAIN_EVENT_RETENTION: i64 = 10_000;
 pub const MAX_SOCIAL_REASON_BYTES: usize = 1_024;
 pub const MAX_REPORT_REASON_BYTES: usize = 2_048;
 const MAX_AUDIT_DETAILS_BYTES: usize = 4_096;
@@ -213,7 +219,10 @@ pub trait CharacterStore: Send + Sync {
 
     async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError>;
 
-    /// Load the authoritative event ledger in durable sequence order.
+    /// Load the retained event suffix in durable sequence order. Before the
+    /// first runtime snapshot this is the complete recovery ledger; once a
+    /// snapshot exists, that snapshot is authoritative and covers the
+    /// persisted `last_event_sequence` watermark.
     async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError>;
 
     async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError>;
@@ -459,14 +468,17 @@ pub(super) enum Request {
     Health {
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
-    RegisterAccount {
+    FinishRegisterAccount {
         name: String,
-        password: String,
+        password_hash: String,
         reply: oneshot::Sender<Result<AuthenticatedSession, StoreError>>,
     },
-    LoginAccount {
+    PrepareLoginAccount {
         name: String,
-        password: String,
+        reply: oneshot::Sender<Result<Option<PreparedLogin>, StoreError>>,
+    },
+    FinishLoginAccount {
+        prepared: PreparedLogin,
         reply: oneshot::Sender<Result<AuthenticatedSession, StoreError>>,
     },
     ResolveSession {
@@ -555,6 +567,12 @@ pub(super) enum Request {
     },
 }
 
+#[derive(Clone)]
+pub(super) struct PreparedLogin {
+    pub(super) account_id: AccountId,
+    pub(super) encoded_hash: String,
+}
+
 /// SQLite adapter with one dedicated owner thread.
 ///
 /// `rusqlite::Connection` never crosses thread boundaries and gameplay tasks do
@@ -562,10 +580,18 @@ pub(super) enum Request {
 #[derive(Clone)]
 pub struct SqliteCharacterStore {
     tx: mpsc::Sender<Request>,
+    passwords: PasswordService,
 }
 
 impl SqliteCharacterStore {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_password_service(path, PasswordService::default()).await
+    }
+
+    async fn open_with_password_service(
+        path: impl AsRef<Path>,
+        passwords: PasswordService,
+    ) -> Result<Self, StoreError> {
         let path = path.as_ref().to_owned();
         // Backpressure here prevents an accidental caller from building an
         // unbounded heap queue while the database is busy.
@@ -604,27 +630,25 @@ impl SqliteCharacterStore {
                                 .map_err(StoreError::from);
                             let _ = reply.send(result);
                         }
-                        Request::RegisterAccount {
+                        Request::FinishRegisterAccount {
                             name,
-                            password,
+                            password_hash,
                             reply,
                         } => {
-                            let _ = reply.send(register_account(
+                            let _ = reply.send(finish_register_account(
                                 &mut connection,
                                 &name,
-                                &password,
+                                &password_hash,
                                 unix_timestamp(),
                             ));
                         }
-                        Request::LoginAccount {
-                            name,
-                            password,
-                            reply,
-                        } => {
-                            let _ = reply.send(login_account(
+                        Request::PrepareLoginAccount { name, reply } => {
+                            let _ = reply.send(prepare_login_account(&connection, &name));
+                        }
+                        Request::FinishLoginAccount { prepared, reply } => {
+                            let _ = reply.send(finish_login_account(
                                 &mut connection,
-                                &name,
-                                &password,
+                                &prepared,
                                 unix_timestamp(),
                             ));
                         }
@@ -767,7 +791,7 @@ impl SqliteCharacterStore {
             .map_err(StoreError::ThreadSpawn)?;
 
         ready_rx.await.map_err(|_| StoreError::WorkerStopped)??;
-        Ok(Self { tx })
+        Ok(Self { tx, passwords })
     }
 
     async fn request<T>(
@@ -786,6 +810,24 @@ impl SqliteCharacterStore {
             .await
             .map_err(|_| StoreError::RequestTimeout)?
             .map_err(|_| StoreError::WorkerStopped)?
+    }
+
+    /// Bound admission, but once a state-changing request is accepted, wait
+    /// for its definitive result. A response deadline here could report a
+    /// timeout while the owner thread subsequently commits the mutation.
+    async fn request_commit<T>(
+        &self,
+        request: Request,
+        receive: oneshot::Receiver<Result<T, StoreError>>,
+    ) -> Result<T, StoreError> {
+        self.tx
+            .send_timeout(request, PERSISTENCE_REQUEST_TIMEOUT)
+            .await
+            .map_err(|error| match error {
+                mpsc::error::SendTimeoutError::Timeout(_) => StoreError::RequestTimeout,
+                mpsc::error::SendTimeoutError::Closed(_) => StoreError::WorkerStopped,
+            })?;
+        receive.await.map_err(|_| StoreError::WorkerStopped)?
     }
 }
 
@@ -806,7 +848,8 @@ impl CharacterStore for SqliteCharacterStore {
 
     async fn shutdown(&self) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(Request::Shutdown { reply }, receive).await
+        self.request_commit(Request::Shutdown { reply }, receive)
+            .await
     }
 
     async fn register_account(
@@ -814,11 +857,20 @@ impl CharacterStore for SqliteCharacterStore {
         name: &str,
         password: &str,
     ) -> Result<AuthenticatedSession, StoreError> {
+        let name = normalise_name(name, "account")?;
+        if !validate_password(password) {
+            return Err(StoreError::InvalidPassword);
+        }
+        let password_hash = self
+            .passwords
+            .hash(password.to_owned())
+            .await
+            .map_err(map_password_work_error)?;
         let (reply, receive) = oneshot::channel();
-        self.request(
-            Request::RegisterAccount {
-                name: name.to_owned(),
-                password: password.to_owned(),
+        self.request_commit(
+            Request::FinishRegisterAccount {
+                name,
+                password_hash,
                 reply,
             },
             receive,
@@ -831,16 +883,32 @@ impl CharacterStore for SqliteCharacterStore {
         name: &str,
         password: &str,
     ) -> Result<AuthenticatedSession, StoreError> {
+        let name = normalise_name(name, "account")?;
+        if !validate_password(password) {
+            return Err(StoreError::InvalidPassword);
+        }
         let (reply, receive) = oneshot::channel();
-        self.request(
-            Request::LoginAccount {
-                name: name.to_owned(),
-                password: password.to_owned(),
-                reply,
-            },
-            receive,
-        )
-        .await
+        let prepared = self
+            .request(Request::PrepareLoginAccount { name, reply }, receive)
+            .await?;
+        let Some(prepared) = prepared else {
+            self.passwords
+                .dummy(password.to_owned())
+                .await
+                .map_err(map_password_work_error)?;
+            return Err(StoreError::InvalidCredentials);
+        };
+        let valid = self
+            .passwords
+            .verify(password.to_owned(), prepared.encoded_hash.clone())
+            .await
+            .map_err(map_password_work_error)?;
+        if !valid {
+            return Err(StoreError::InvalidCredentials);
+        }
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::FinishLoginAccount { prepared, reply }, receive)
+            .await
     }
 
     async fn resolve_session(&self, token: &str) -> Result<AccountSnapshot, StoreError> {
@@ -857,7 +925,7 @@ impl CharacterStore for SqliteCharacterStore {
 
     async fn revoke_session(&self, token: &str) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::RevokeSession {
                 token: token.to_owned(),
                 reply,
@@ -870,7 +938,7 @@ impl CharacterStore for SqliteCharacterStore {
     #[cfg(test)]
     async fn load_or_create_account(&self, name: &str) -> Result<AccountSnapshot, StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::LoadOrCreateAccount {
                 name: name.to_owned(),
                 reply,
@@ -896,7 +964,7 @@ impl CharacterStore for SqliteCharacterStore {
         start_room: &str,
     ) -> Result<CharacterSnapshot, StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::LoadOrCreateCharacter {
                 account_id,
                 name: name.to_owned(),
@@ -927,7 +995,7 @@ impl CharacterStore for SqliteCharacterStore {
 
     async fn save(&self, snapshot: CharacterSnapshot) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(Request::Save { snapshot, reply }, receive)
+        self.request_commit(Request::Save { snapshot, reply }, receive)
             .await
     }
 
@@ -1007,7 +1075,7 @@ impl CharacterStore for SqliteCharacterStore {
         enabled: bool,
     ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::SetSocialRelation {
                 actor,
                 target,
@@ -1027,7 +1095,7 @@ impl CharacterStore for SqliteCharacterStore {
         reason: &str,
     ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::ReportCharacter {
                 actor,
                 target,
@@ -1046,7 +1114,7 @@ impl CharacterStore for SqliteCharacterStore {
         action: ModerationAction,
     ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::ModerateCharacter {
                 actor,
                 target,
@@ -1071,7 +1139,7 @@ impl CharacterStore for SqliteCharacterStore {
         events: Vec<DomainEvent>,
     ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
-        self.request(
+        self.request_commit(
             Request::CommitAction {
                 characters,
                 runtime,
@@ -1110,6 +1178,13 @@ fn normalise_name(name: &str, kind: &'static str) -> Result<String, StoreError> 
     Ok(name.to_owned())
 }
 
+fn map_password_work_error(error: PasswordWorkError) -> StoreError {
+    match error {
+        PasswordWorkError::Overloaded | PasswordWorkError::Timeout => StoreError::RequestTimeout,
+        PasswordWorkError::Execution => StoreError::PasswordHashing,
+    }
+}
+
 fn unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1119,6 +1194,7 @@ fn unix_timestamp() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+#[cfg(test)]
 fn register_account(
     connection: &mut Connection,
     name: &str,
@@ -1129,16 +1205,48 @@ fn register_account(
     if !validate_password(password) {
         return Err(StoreError::InvalidPassword);
     }
-    if connection.query_row(
+    let password_hash = hash_password(password).map_err(|_| StoreError::PasswordHashing)?;
+    finish_register_account(connection, &name, &password_hash, now)
+}
+
+#[cfg(test)]
+fn login_account(
+    connection: &mut Connection,
+    name: &str,
+    password: &str,
+    now: i64,
+) -> Result<AuthenticatedSession, StoreError> {
+    let name = normalise_name(name, "account")?;
+    if !validate_password(password) {
+        return Err(StoreError::InvalidPassword);
+    }
+    let Some(prepared) = prepare_login_account(connection, &name)? else {
+        let _ = hash_password(password);
+        return Err(StoreError::InvalidCredentials);
+    };
+    if !verify_password(password, &prepared.encoded_hash)
+        .map_err(|_| StoreError::PasswordHashing)?
+    {
+        return Err(StoreError::InvalidCredentials);
+    }
+    finish_login_account(connection, &prepared, now)
+}
+
+fn finish_register_account(
+    connection: &mut Connection,
+    name: &str,
+    password_hash: &str,
+    now: i64,
+) -> Result<AuthenticatedSession, StoreError> {
+    let transaction = connection.transaction()?;
+    if transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM accounts WHERE name = ?1)",
-        [&name],
+        [name],
         |row| row.get::<_, bool>(0),
     )? {
         return Err(StoreError::AccountAlreadyExists);
     }
 
-    let password_hash = hash_password(password).map_err(|_| StoreError::PasswordHashing)?;
-    let transaction = connection.transaction()?;
     let role = if transaction.query_row(
         "SELECT COUNT(*) FROM accounts WHERE auth_state = 'registered'",
         [],
@@ -1156,7 +1264,7 @@ fn register_account(
     )?;
     let account = AccountSnapshot {
         id: AccountId(transaction.last_insert_rowid()),
-        name,
+        name: name.to_owned(),
     };
     if role == AccountRole::Admin {
         append_audit(
@@ -1173,48 +1281,58 @@ fn register_account(
     Ok(session)
 }
 
-fn login_account(
-    connection: &mut Connection,
+fn prepare_login_account(
+    connection: &Connection,
     name: &str,
-    password: &str,
-    now: i64,
-) -> Result<AuthenticatedSession, StoreError> {
-    let name = normalise_name(name, "account")?;
-    if !validate_password(password) {
-        return Err(StoreError::InvalidPassword);
-    }
-
-    let account_and_hash = connection
+) -> Result<Option<PreparedLogin>, StoreError> {
+    connection
         .query_row(
-            "SELECT id, name, password_hash FROM accounts
+            "SELECT id, password_hash FROM accounts
              WHERE name = ?1 AND auth_state = 'registered'",
-            [&name],
+            [name],
             |row| {
-                Ok((
-                    AccountSnapshot {
-                        id: AccountId(row.get(0)?),
-                        name: row.get(1)?,
-                    },
-                    row.get::<_, Option<String>>(2)?,
-                ))
+                let Some(encoded_hash) = row.get::<_, Option<String>>(1)? else {
+                    return Ok(None);
+                };
+                Ok(Some(PreparedLogin {
+                    account_id: AccountId(row.get(0)?),
+                    encoded_hash,
+                }))
             },
         )
-        .optional()?;
+        .optional()
+        .map(|prepared| prepared.flatten())
+        .map_err(StoreError::from)
+}
 
-    let Some((account, Some(encoded_hash))) = account_and_hash else {
-        // Spend the same dominant Argon2 work for unknown and guest accounts,
-        // making account-name probing less useful to a remote caller.
-        let _ = hash_password(password);
+fn finish_login_account(
+    connection: &mut Connection,
+    prepared: &PreparedLogin,
+    now: i64,
+) -> Result<AuthenticatedSession, StoreError> {
+    let transaction = connection.transaction()?;
+    let current = transaction
+        .query_row(
+            "SELECT name, password_hash FROM accounts
+             WHERE id = ?1 AND auth_state = 'registered'",
+            [prepared.account_id.0],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((name, Some(encoded_hash))) = current else {
         return Err(StoreError::InvalidCredentials);
     };
-    if !verify_password(password, &encoded_hash).map_err(|_| StoreError::PasswordHashing)? {
+    if encoded_hash != prepared.encoded_hash {
         return Err(StoreError::InvalidCredentials);
     }
-    if account_is_banned(connection, account.id, now)? {
+    let account = AccountSnapshot {
+        id: prepared.account_id,
+        name,
+    };
+    if account_is_banned(&transaction, account.id, now)? {
         return Err(StoreError::AccountBanned);
     }
 
-    let transaction = connection.transaction()?;
     let session = issue_session(&transaction, account, now)?;
     transaction.commit()?;
     Ok(session)
@@ -1928,6 +2046,23 @@ fn commit_action(
     runtime: &WorldRuntimeSnapshot,
     events: &[DomainEvent],
 ) -> Result<(), StoreError> {
+    commit_action_with_retention(
+        connection,
+        characters,
+        runtime,
+        events,
+        DOMAIN_EVENT_RETENTION,
+    )
+}
+
+fn commit_action_with_retention(
+    connection: &mut Connection,
+    characters: &[DurableCharacterSnapshot],
+    runtime: &WorldRuntimeSnapshot,
+    events: &[DomainEvent],
+    event_retention: i64,
+) -> Result<(), StoreError> {
+    debug_assert!(event_retention > 0);
     let gameplay_json = characters
         .iter()
         .map(|snapshot| {
@@ -1993,16 +2128,6 @@ fn commit_action(
         )?;
     }
     transaction.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json, updated_at)
-         VALUES (1, ?1, ?2, unixepoch())
-         ON CONFLICT(singleton) DO UPDATE SET
-             snapshot_version = excluded.snapshot_version,
-             snapshot_json = excluded.snapshot_json,
-             updated_at = excluded.updated_at",
-        params![runtime.snapshot_version, runtime_json],
-    )?;
-    transaction.execute(
         "INSERT INTO world_adventure (singleton, state_json, updated_at)
          VALUES (1, ?1, unixepoch())
          ON CONFLICT(singleton) DO UPDATE SET
@@ -2016,6 +2141,33 @@ fn commit_action(
             [event_json],
         )?;
     }
+    let last_event_sequence = transaction.query_row(
+        "SELECT max(
+             COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
+             COALESCE((SELECT last_event_sequence FROM world_runtime
+                       WHERE singleton = 1), 0)
+         )",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO world_runtime
+             (singleton, snapshot_version, snapshot_json,
+              last_event_sequence, updated_at)
+         VALUES (1, ?1, ?2, ?3, unixepoch())
+         ON CONFLICT(singleton) DO UPDATE SET
+             snapshot_version = excluded.snapshot_version,
+             snapshot_json = excluded.snapshot_json,
+             last_event_sequence = excluded.last_event_sequence,
+             updated_at = excluded.updated_at",
+        params![runtime.snapshot_version, runtime_json, last_event_sequence],
+    )?;
+    transaction.execute(
+        "DELETE FROM domain_events
+         WHERE sequence <= ?1 - ?2
+           AND sequence <= ?1",
+        params![last_event_sequence, event_retention],
+    )?;
     transaction.commit()?;
     Ok(())
 }
@@ -2035,7 +2187,14 @@ fn bounded_json<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::auth::PasswordBackend;
+    use std::{
+        sync::{
+            Condvar, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
     use tiamud_core::{
         ActiveEffect, Direction, EffectKind, EquipmentSlot, ItemLocationSnapshot,
         RuntimeItemLocation, World,
@@ -2043,6 +2202,44 @@ mod tests {
 
     async fn account(store: &SqliteCharacterStore, name: &str) -> AccountSnapshot {
         store.load_or_create_account(name).await.unwrap()
+    }
+
+    struct BlockingVerifyBackend {
+        verify_started: AtomicUsize,
+        released: AtomicBool,
+        lock: Mutex<()>,
+        wake: Condvar,
+    }
+
+    impl BlockingVerifyBackend {
+        fn new() -> Self {
+            Self {
+                verify_started: AtomicUsize::new(0),
+                released: AtomicBool::new(false),
+                lock: Mutex::new(()),
+                wake: Condvar::new(),
+            }
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+            self.wake.notify_all();
+        }
+    }
+
+    impl PasswordBackend for BlockingVerifyBackend {
+        fn hash(&self, password: &str) -> Result<String, ()> {
+            Ok(format!("test:{password}"))
+        }
+
+        fn verify(&self, password: &str, encoded_hash: &str) -> Result<bool, ()> {
+            self.verify_started.fetch_add(1, Ordering::SeqCst);
+            let mut guard = self.lock.lock().unwrap();
+            while !self.released.load(Ordering::SeqCst) {
+                guard = self.wake.wait(guard).unwrap();
+            }
+            Ok(encoded_hash == format!("test:{password}"))
+        }
     }
 
     #[tokio::test]
@@ -2080,6 +2277,75 @@ mod tests {
                 .unwrap(),
             registered.account
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_password_verification_does_not_block_database_health_or_commits() {
+        let backend = Arc::new(BlockingVerifyBackend::new());
+        let passwords = PasswordService::with_backend(1, backend.clone());
+        let store = SqliteCharacterStore::open_with_password_service(":memory:", passwords)
+            .await
+            .unwrap();
+        store
+            .register_account("Adventurer", "correct horse battery staple")
+            .await
+            .unwrap();
+
+        let login_store = store.clone();
+        let login = tokio::spawn(async move {
+            login_store
+                .login_account("adventurer", "correct horse battery staple")
+                .await
+        });
+        timeout(Duration::from_secs(1), async {
+            while backend.verify_started.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        timeout(Duration::from_secs(1), store.health_check())
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(
+            Duration::from_secs(1),
+            store.commit_action(Vec::new(), World::demo().runtime_snapshot(), Vec::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        backend.release();
+        login.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn login_finalization_revalidates_account_state_after_password_work() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        register_account(
+            &mut connection,
+            "Adventurer",
+            "correct horse battery staple",
+            1_000,
+        )
+        .unwrap();
+        let prepared = prepare_login_account(&connection, "adventurer")
+            .unwrap()
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE accounts SET auth_state = 'guest' WHERE id = ?1",
+                [prepared.account_id.0],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            finish_login_account(&mut connection, &prepared, 1_001),
+            Err(StoreError::InvalidCredentials)
+        ));
     }
 
     #[tokio::test]
@@ -2192,7 +2458,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v7_adventure_mirrors_are_written_in_the_same_transaction() {
+    fn schema_v8_adventure_mirrors_are_written_in_the_same_transaction() {
         let mut connection = Connection::open_in_memory().unwrap();
         initialise(&mut connection).unwrap();
         let owner = load_or_create_account(&connection, "Adventure Owner").unwrap();
@@ -2235,6 +2501,218 @@ mod tests {
         assert!(character_json.contains("\"coins\":28"));
         assert!(character_json.contains("\"tonic\":1"));
         assert!(world_json.contains("\"tonic\":19"));
+    }
+
+    fn test_domain_event() -> DomainEvent {
+        DomainEvent::CharacterMoved {
+            actor_id: CharacterId(1),
+            actor_name: "Aria".into(),
+            from_room_id: "room:a".into(),
+            to_room_id: "room:b".into(),
+            direction: Direction::North,
+        }
+    }
+
+    fn seed_domain_events(connection: &Connection, count: i64) {
+        connection
+            .execute(
+                "WITH RECURSIVE counter(value) AS (
+                     VALUES(1)
+                     UNION ALL
+                     SELECT value + 1 FROM counter WHERE value < ?1
+                 )
+                 INSERT INTO domain_events (event_json)
+                 SELECT '{\"type\":\"retained-test\"}' FROM counter",
+                [count],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn runtime_watermark_tracks_events_and_survives_an_empty_commit() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let mut runtime = World::demo().runtime_snapshot();
+
+        commit_action(&mut connection, &[], &runtime, &[test_domain_event()]).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        runtime.logical_tick = 1;
+        commit_action(&mut connection, &[], &runtime, &[]).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM domain_events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn domain_event_compaction_retains_the_explicit_bounded_suffix() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        seed_domain_events(&connection, DOMAIN_EVENT_RETENTION);
+
+        commit_action(
+            &mut connection,
+            &[],
+            &World::demo().runtime_snapshot(),
+            &[test_domain_event()],
+        )
+        .unwrap();
+
+        let bounds = connection
+            .query_row(
+                "SELECT COUNT(*), MIN(sequence), MAX(sequence) FROM domain_events",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            bounds,
+            (DOMAIN_EVENT_RETENTION, 2, DOMAIN_EVENT_RETENTION + 1)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            DOMAIN_EVENT_RETENTION + 1
+        );
+    }
+
+    #[test]
+    fn domain_event_compaction_stays_bounded_across_many_commits() {
+        const TEST_RETENTION: i64 = 10;
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let mut runtime = World::demo().runtime_snapshot();
+
+        for sequence in 1..=25 {
+            runtime.logical_tick = sequence;
+            commit_action_with_retention(
+                &mut connection,
+                &[],
+                &runtime,
+                &[test_domain_event()],
+                TEST_RETENTION,
+            )
+            .unwrap();
+        }
+
+        let state = connection
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM domain_events),
+                     (SELECT MIN(sequence) FROM domain_events),
+                     (SELECT MAX(sequence) FROM domain_events),
+                     last_event_sequence
+                 FROM world_runtime WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state, (TEST_RETENTION, 16, 25, 25));
+    }
+
+    #[test]
+    fn failed_compaction_rolls_back_event_snapshot_watermark_and_deletion() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        seed_domain_events(&connection, DOMAIN_EVENT_RETENTION);
+        let original_runtime = World::demo().runtime_snapshot();
+        let original_json = serde_json::to_string(&original_runtime).unwrap();
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json,
+                      last_event_sequence, updated_at)
+                 VALUES (1, ?1, ?2, ?3, unixepoch())",
+                params![
+                    original_runtime.snapshot_version,
+                    original_json,
+                    DOMAIN_EVENT_RETENTION
+                ],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_domain_event_compaction
+                 BEFORE DELETE ON domain_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected compaction failure');
+                 END;",
+            )
+            .unwrap();
+        let mut replacement = original_runtime;
+        replacement.logical_tick = 99;
+
+        assert!(commit_action(&mut connection, &[], &replacement, &[test_domain_event()]).is_err());
+        let state = connection
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM domain_events),
+                     (SELECT MAX(sequence) FROM domain_events),
+                     last_event_sequence,
+                     snapshot_json
+                 FROM world_runtime WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                DOMAIN_EVENT_RETENTION,
+                DOMAIN_EVENT_RETENTION,
+                DOMAIN_EVENT_RETENTION,
+                original_json
+            )
+        );
     }
 
     #[tokio::test]

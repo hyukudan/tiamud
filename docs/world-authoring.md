@@ -243,9 +243,9 @@ mismo serializado en orden canónico. La prueba de integración protege esa
 equivalencia semántica para que modularizar la autoría no cambie el mundo.
 
 El resultado entra en el mismo flujo `test`, `preview`, `diff` y `publish` que
-un WorldPack escrito directamente. `compose` valida el documento y sus assets,
-pero no ejecuta las pruebas de contenido ni compila Lua: esos límites siguen
-siendo pasos explícitos posteriores.
+un WorldPack escrito directamente. `compose` valida el documento, sus assets y
+compila Lua con el mismo sandbox que el runtime, pero no ejecuta las pruebas de
+contenido: `test` sigue siendo un paso explícito posterior.
 
 > **Frontera actual.** La composición modular sin conexión descrita arriba sí
 > está implementada. El catálogo residente, los bundles de área inmutables y
@@ -696,6 +696,25 @@ expone `tiamud.emit` y `tiamud.random`; la semilla se deriva de datos duraderos.
 El contexto visible contiene `actor_name`, `actor_level`, `actor_is_admin`,
 `world_hour` y `world_weather`.
 
+`math.random` y `math.randomseed` están desactivados para impedir resultados no
+reproducibles. También se retiran `string.find`, `string.match`, `string.gmatch`
+y `string.gsub`: las implementaciones C de patrones no se pueden interrumpir
+con el hook de instrucciones y, por tanto, no respetarían de forma fiable la
+cuota de tiempo. Las operaciones sencillas de cadena, como `upper`, siguen
+disponibles dentro del límite de memoria. `print`, `warn` y `collectgarbage`
+también están desactivados para impedir inyección de salida del host y otra
+operación C no interrumpible.
+
+Además de las cuotas por módulo, la validación de autoría rechaza más de ocho
+módulos para la misma pareja sala/hook y el runtime vuelve a imponer ese límite.
+El lote completo dispone de 50 ms y todo el scripting de un tick persistido de
+100 ms. El tiempo restante del lote reduce la
+cuota efectiva del siguiente módulo; cuando se agota no se inicia otro módulo.
+Un agotamiento del presupuesto global descarta todos los efectos y narraciones
+de scripts de ese tick, restaura el estado anterior y persiste de nuevo el tick
+base sin ejecutar hooks. El reloj y el juego siguen avanzando sin aceptar un
+lote parcial.
+
 Todos los scripts aplicables se ordenan por ID y primero producen eventos
 inertes. Solo después se valida y aplica el lote. Un error de script, una
 capacidad no concedida o un efecto inválido deja todo el lote inerte o restaura
@@ -878,10 +897,10 @@ registro altere silenciosamente un proceso ya activo.
 - `publish` valida y canonicaliza, pero **no ejecuta `contentTests`**. El paso
   `test` del flujo anterior es explícito y obligatorio para el equipo
   editorial.
-- La herramienta de línea de comandos de WorldPack valida límites declarativos
-  de scripts, pero no compila Lua. El cargador del servidor sí compila el módulo
-  y exige cada hook declarado antes de abrir la red; un script roto puede
-  publicarse y después impedir el arranque.
+- La herramienta de línea de comandos compila Lua y exige cada hook declarado
+  durante `compose`, `validate`, `build` y `publish`. No ejecuta los hooks como
+  prueba funcional; ese comportamiento debe cubrirse con `contentTests` y
+  pruebas del área.
 - `publish` no copia imágenes o audio, y `rollback` no vuelve a comprobar que
   sigan presentes.
 - El cargador del entorno de ejecución exige rutas de manifiesto direccionadas

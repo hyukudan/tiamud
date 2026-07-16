@@ -329,7 +329,8 @@ fn copy_world_runtime<C: GenericClient>(
 ) -> Result<u64, TransferError> {
     let row = source
         .query_row(
-            "SELECT singleton, snapshot_version, snapshot_json, updated_at
+            "SELECT singleton, snapshot_version, snapshot_json,
+                    last_event_sequence, updated_at
              FROM world_runtime WHERE singleton = 1",
             [],
             |row| {
@@ -337,19 +338,28 @@ fn copy_world_runtime<C: GenericClient>(
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((singleton, snapshot_version, snapshot_json, updated_at)) = row else {
+    let Some((singleton, snapshot_version, snapshot_json, last_event_sequence, updated_at)) = row
+    else {
         return Ok(0);
     };
     target.execute(
         "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json, updated_at)
-         VALUES ($1, $2, $3, $4)",
-        &[&singleton, &snapshot_version, &snapshot_json, &updated_at],
+             (singleton, snapshot_version, snapshot_json,
+              last_event_sequence, updated_at)
+         VALUES ($1, $2, $3, $4, $5)",
+        &[
+            &singleton,
+            &snapshot_version,
+            &snapshot_json,
+            &last_event_sequence,
+            &updated_at,
+        ],
     )?;
     Ok(1)
 }
@@ -607,7 +617,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 7
+                required: 8
             }
         ));
         assert_eq!(

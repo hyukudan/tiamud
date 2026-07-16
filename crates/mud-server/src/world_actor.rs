@@ -21,6 +21,7 @@ use tokio::time::MissedTickBehavior;
 
 const WORLD_COMMAND_QUEUE_CAPACITY: usize = 256;
 const WORLD_DELIVERY_CHANNEL_CAPACITY: usize = 256;
+const PERSIST_TICK_SCRIPT_WALL_BUDGET: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Error)]
 pub enum GameError {
@@ -843,6 +844,7 @@ fn broadcast_world_deliveries(
     domain_events: &[DomainEvent],
     delivery: &broadcast::Sender<WorldDelivery>,
 ) {
+    let refreshes_state = domain_events.iter().any(is_internal_tick_event);
     for observer in world
         .connected_sessions()
         .into_iter()
@@ -853,6 +855,9 @@ fn broadcast_world_deliveries(
             .map(|event| world.project_event(observer, event))
             .collect::<Result<Vec<_>, _>>()
             .map(|events| events.into_iter().flatten().collect::<Vec<_>>());
+        if !refreshes_state && matches!(&projected, Ok(events) if events.is_empty()) {
+            continue;
+        }
         let state = current_state(world, runtime_content, session_roles, observer);
         match (projected, state) {
             (Ok(events), Ok((scene, player))) => {
@@ -869,6 +874,37 @@ fn broadcast_world_deliveries(
             (_, Err(error)) => {
                 tracing::warn!(%error, ?observer, "could not build world delivery");
             }
+        }
+    }
+}
+
+fn send_targeted_narration_delivery(
+    world: &World,
+    runtime_content: &RuntimeContent,
+    session_roles: &HashMap<SessionId, AccountRole>,
+    session: SessionId,
+    narration: Vec<String>,
+    delivery: &broadcast::Sender<WorldDelivery>,
+) {
+    let events = narration
+        .iter()
+        .map(|line| world.project_private_narration(session, line))
+        .collect::<Result<Vec<_>, _>>();
+    let state = current_state(world, runtime_content, session_roles, session);
+    match (events, state) {
+        (Ok(events), Ok((scene, player))) => {
+            let _ = delivery.send(WorldDelivery {
+                session_id: session,
+                scene,
+                player,
+                events,
+            });
+        }
+        (Err(error), _) | (_, Err(GameError::World(error))) => {
+            tracing::warn!(%error, ?session, "could not project targeted script narration");
+        }
+        (_, Err(error)) => {
+            tracing::warn!(%error, ?session, "could not build targeted script narration");
         }
     }
 }
@@ -913,34 +949,136 @@ async fn persist_tick(
     store: &dyn CharacterStore,
     delivery: &broadcast::Sender<WorldDelivery>,
 ) -> bool {
+    persist_tick_with_script_budget(
+        world,
+        runtime_content,
+        session_roles,
+        store,
+        delivery,
+        PERSIST_TICK_SCRIPT_WALL_BUDGET,
+    )
+    .await
+}
+
+async fn persist_tick_with_script_budget(
+    world: &mut World,
+    runtime_content: &RuntimeContent,
+    session_roles: &HashMap<SessionId, AccountRole>,
+    store: &dyn CharacterStore,
+    delivery: &broadcast::Sender<WorldDelivery>,
+    script_wall_budget: Duration,
+) -> bool {
     let checkpoint = world.checkpoint();
+    let scripting_started = Instant::now();
+    let mut targeted_narration = Vec::new();
+    let mut scripting_budget_exhausted = false;
     let result = world.advance_tick().and_then(|mut events| {
         for session in world.connected_sessions() {
             let role = session_roles
                 .get(&session)
                 .copied()
                 .unwrap_or(AccountRole::Player);
-            let timer = runtime_content.run_hook(world, session, role, ScriptHook::OnTimer);
+            let mut narration = Vec::new();
+            let timer = runtime_content.run_hook_with_budget(
+                world,
+                session,
+                role,
+                ScriptHook::OnTimer,
+                script_wall_budget.saturating_sub(scripting_started.elapsed()),
+            );
+            if timer.budget_exhausted {
+                scripting_budget_exhausted = true;
+                break;
+            }
+            narration.extend(timer.narration);
             events.extend(timer.domain_events);
             let context = world.authorized_runtime_context(session)?;
             if event_defeats_character(&events, context.character_id) {
-                let hook = runtime_content.run_hook(world, session, role, ScriptHook::OnDefeat);
+                let hook = runtime_content.run_hook_with_budget(
+                    world,
+                    session,
+                    role,
+                    ScriptHook::OnDefeat,
+                    script_wall_budget.saturating_sub(scripting_started.elapsed()),
+                );
+                if hook.budget_exhausted {
+                    scripting_budget_exhausted = true;
+                    break;
+                }
+                narration.extend(hook.narration);
                 events.extend(hook.domain_events);
             }
             if event_changes_character_quest(&events, context.character_id) {
-                let hook = runtime_content.run_hook(world, session, role, ScriptHook::OnQuestEvent);
+                let hook = runtime_content.run_hook_with_budget(
+                    world,
+                    session,
+                    role,
+                    ScriptHook::OnQuestEvent,
+                    script_wall_budget.saturating_sub(scripting_started.elapsed()),
+                );
+                if hook.budget_exhausted {
+                    scripting_budget_exhausted = true;
+                    break;
+                }
+                narration.extend(hook.narration);
                 events.extend(hook.domain_events);
+            }
+            if !narration.is_empty() {
+                targeted_narration.push((session, narration));
             }
         }
         let characters = durable_connected_characters(world)?;
         Ok((characters, world.runtime_snapshot(), events))
     });
+    if scripting_budget_exhausted {
+        world.restore_checkpoint(checkpoint.clone());
+        tracing::warn!(
+            maximum_milliseconds = script_wall_budget.as_millis(),
+            "persist_tick scripting budget exhausted; retrying the base tick without scripts"
+        );
+        targeted_narration.clear();
+        let base_tick = world.advance_tick().and_then(|events| {
+            let characters = durable_connected_characters(world)?;
+            Ok((characters, world.runtime_snapshot(), events))
+        });
+        let Ok((characters, runtime, events)) = base_tick else {
+            world.restore_checkpoint(checkpoint);
+            return false;
+        };
+        let persisted_events = events
+            .iter()
+            .filter(|event| !is_internal_tick_event(event))
+            .cloned()
+            .collect();
+        if store
+            .commit_action(characters, runtime, persisted_events)
+            .await
+            .is_err()
+        {
+            world.restore_checkpoint(checkpoint);
+            return false;
+        }
+        broadcast_world_deliveries(
+            world,
+            runtime_content,
+            session_roles,
+            None,
+            &events,
+            delivery,
+        );
+        return true;
+    }
     let Ok((characters, runtime, events)) = result else {
         world.restore_checkpoint(checkpoint);
         return false;
     };
+    let persisted_events = events
+        .iter()
+        .filter(|event| !is_internal_tick_event(event))
+        .cloned()
+        .collect();
     if store
-        .commit_action(characters, runtime, events.clone())
+        .commit_action(characters, runtime, persisted_events)
         .await
         .is_err()
     {
@@ -955,7 +1093,26 @@ async fn persist_tick(
         &events,
         delivery,
     );
+    for (session, narration) in targeted_narration {
+        send_targeted_narration_delivery(
+            world,
+            runtime_content,
+            session_roles,
+            session,
+            narration,
+            delivery,
+        );
+    }
     true
+}
+
+fn is_internal_tick_event(event: &DomainEvent) -> bool {
+    matches!(
+        event,
+        DomainEvent::Gameplay {
+            event: GameplayEvent::TickAdvanced { .. }
+        }
+    )
 }
 
 fn event_defeats_character(events: &[DomainEvent], character_id: CharacterId) -> bool {
@@ -985,9 +1142,10 @@ fn event_changes_character_quest(events: &[DomainEvent], character_id: Character
 mod tests {
     use super::*;
     use crate::auth::SessionToken;
+    use crate::runtime_content::RuntimeScript;
     use async_trait::async_trait;
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeSet, HashMap, HashSet},
         sync::{
             Mutex,
             atomic::{AtomicBool, Ordering},
@@ -998,6 +1156,7 @@ mod tests {
         EquipmentSlot, ItemDefinition, ItemGameplayDefinition, NpcDefinition, PartyAction,
         QuestAction, RoomDefinition, SocialAction, WorldDefinition, WorldRuntimeSnapshot,
     };
+    use tiamud_scripting::{ScriptCapability, ScriptLimits};
 
     #[derive(Default)]
     struct MemoryState {
@@ -1025,42 +1184,41 @@ mod tests {
     }
 
     fn durable_gameplay_world() -> World {
-        let mut world = World::from_definition(WorldDefinition {
-            start_room_id: "test:arena".into(),
-            items: vec![
-                ItemDefinition {
-                    stable_id: "test:sword".into(),
-                    name: "bronze sword".into(),
-                    description: "A balanced old blade.".into(),
-                    aliases: vec!["sword".into()],
-                },
-                ItemDefinition {
-                    stable_id: "test:potion".into(),
-                    name: "ember potion".into(),
-                    description: "It glows warmly.".into(),
-                    aliases: vec!["potion".into()],
-                },
-                ItemDefinition {
-                    stable_id: "test:loot".into(),
-                    name: "silver fang".into(),
-                    description: "A trophy from the guardian.".into(),
-                    aliases: vec!["fang".into()],
-                },
-            ],
-            rooms: vec![RoomDefinition {
-                stable_id: "test:arena".into(),
-                title: "Arena".into(),
-                prose: vec!["Ancient banners stir overhead.".into()],
-                image: None,
-                audio: None,
-                exits: Vec::new(),
-                item_ids: vec![
-                    "test:sword".into(),
-                    "test:potion".into(),
-                    "test:loot".into(),
+        let mut world = World::from_definition_with_staged_items(
+            WorldDefinition {
+                start_room_id: "test:arena".into(),
+                items: vec![
+                    ItemDefinition {
+                        stable_id: "test:sword".into(),
+                        name: "bronze sword".into(),
+                        description: "A balanced old blade.".into(),
+                        aliases: vec!["sword".into()],
+                    },
+                    ItemDefinition {
+                        stable_id: "test:potion".into(),
+                        name: "ember potion".into(),
+                        description: "It glows warmly.".into(),
+                        aliases: vec!["potion".into()],
+                    },
+                    ItemDefinition {
+                        stable_id: "test:loot".into(),
+                        name: "silver fang".into(),
+                        description: "A trophy from the guardian.".into(),
+                        aliases: vec!["fang".into()],
+                    },
                 ],
-            }],
-        })
+                rooms: vec![RoomDefinition {
+                    stable_id: "test:arena".into(),
+                    title: "Arena".into(),
+                    prose: vec!["Ancient banners stir overhead.".into()],
+                    image: None,
+                    audio: None,
+                    exits: Vec::new(),
+                    item_ids: vec!["test:sword".into(), "test:potion".into()],
+                }],
+            },
+            vec!["test:loot".into()],
+        )
         .unwrap();
         world
             .configure_item_gameplay(ItemGameplayDefinition {
@@ -1875,6 +2033,176 @@ mod tests {
 
         assert_eq!(second_roster, first_roster);
         assert_eq!(second_roster.len(), 1);
+    }
+
+    fn connect_tick_character(
+        world: &mut World,
+        store: &MemoryStore,
+        session: SessionId,
+        character_id: CharacterId,
+        room_id: &str,
+        name: &str,
+    ) {
+        let character = CharacterSnapshot {
+            id: character_id,
+            account_id: AccountId(character_id.0),
+            name: name.into(),
+            room_id: room_id.into(),
+            item_locations: std::collections::BTreeMap::new(),
+        };
+        world.connect(session, character.clone()).unwrap();
+        let mut state = store.state.lock().unwrap();
+        state.characters.insert(character_id, character);
+        state
+            .gameplay
+            .insert(character_id, CharacterGameplaySnapshot::default());
+    }
+
+    fn timer_narration_content(
+        metrics: Option<Arc<crate::operations::RuntimeMetrics>>,
+    ) -> RuntimeContent {
+        let content = RuntimeContent::new(
+            Vec::new(),
+            vec![RuntimeScript {
+                id: "script:private-timer".into(),
+                room_id: "demo:lantern-square".into(),
+                hooks: BTreeSet::from([ScriptHook::OnTimer]),
+                capabilities: BTreeSet::from([
+                    ScriptCapability::Narrate,
+                    ScriptCapability::SetFlag,
+                ]),
+                limits: ScriptLimits::default(),
+                source: r#"
+                    function on_timer(ctx)
+                        tiamud.emit('narrate', 'self', ctx.actor_name .. ' alone hears the bell.')
+                        tiamud.emit('set_flag', 'self', 'timer-ran')
+                    end
+                "#
+                .into(),
+            }],
+            7,
+        );
+        match metrics {
+            Some(metrics) => content.with_operational_metrics(metrics),
+            None => content,
+        }
+    }
+
+    #[tokio::test]
+    async fn timer_script_narration_is_delivered_only_to_its_authorized_session() {
+        let store = MemoryStore::default();
+        let mut world = World::demo();
+        let target = SessionId(71);
+        let peer = SessionId(72);
+        connect_tick_character(
+            &mut world,
+            &store,
+            target,
+            CharacterId(71),
+            "demo:lantern-square",
+            "Target",
+        );
+        connect_tick_character(
+            &mut world,
+            &store,
+            peer,
+            CharacterId(72),
+            "demo:north-gate",
+            "Peer",
+        );
+        let content = timer_narration_content(None);
+        let roles = HashMap::from([(target, AccountRole::Player), (peer, AccountRole::Player)]);
+        let (delivery, mut receiver) = broadcast::channel(16);
+
+        assert!(persist_tick(&mut world, &content, &roles, &store, &delivery).await);
+
+        let mut deliveries = Vec::new();
+        while let Ok(delivery) = receiver.try_recv() {
+            deliveries.push(delivery);
+        }
+        let narration = deliveries
+            .iter()
+            .flat_map(|delivery| {
+                delivery
+                    .events
+                    .iter()
+                    .map(move |event| (delivery.session_id, event))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(narration.len(), 1);
+        assert_eq!(narration[0].0, target);
+        assert_eq!(narration[0].1.text, "Target alone hears the bell.");
+        assert_ne!(narration[0].1.actor_id, "71");
+        assert!(
+            deliveries
+                .iter()
+                .filter(|delivery| delivery.session_id == peer)
+                .all(|delivery| delivery.events.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_global_script_budget_commits_only_the_base_tick() {
+        let store = MemoryStore::default();
+        let mut world = World::demo();
+        let session = SessionId(81);
+        connect_tick_character(
+            &mut world,
+            &store,
+            session,
+            CharacterId(81),
+            "demo:lantern-square",
+            "Budget",
+        );
+        let before = world.runtime_snapshot();
+        let metrics = Arc::new(crate::operations::RuntimeMetrics::default());
+        let content = timer_narration_content(Some(metrics.clone()));
+        let roles = HashMap::from([(session, AccountRole::Player)]);
+        let (delivery, mut receiver) = broadcast::channel(16);
+
+        assert!(
+            persist_tick_with_script_budget(
+                &mut world,
+                &content,
+                &roles,
+                &store,
+                &delivery,
+                Duration::ZERO,
+            )
+            .await
+        );
+        assert_eq!(
+            world.runtime_snapshot().logical_tick,
+            before.logical_tick + 1
+        );
+        assert!(
+            !world
+                .character_gameplay_snapshot(session)
+                .unwrap()
+                .script_flags
+                .contains("timer-ran")
+        );
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.logical_tick),
+            Some(before.logical_tick + 1)
+        );
+        let mut received = Vec::new();
+        while let Ok(delivery) = receiver.try_recv() {
+            received.push(delivery);
+        }
+        assert!(!received.is_empty());
+        assert!(received.iter().all(|delivery| delivery.events.is_empty()));
+        assert!(
+            metrics
+                .prometheus(0)
+                .contains("tiamud_script_timeouts_total 1")
+        );
     }
 
     #[tokio::test]

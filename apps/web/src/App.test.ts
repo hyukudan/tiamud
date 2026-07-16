@@ -14,7 +14,14 @@ describe('Tiamud entry flow', () => {
   });
 
   it('exposes one named live log instead of mirroring world events into the notice region', () => {
-    expect(appSource).toContain('role="log" aria-label="Command and world event history"');
+    expect(appSource).toContain('role="log"');
+    expect(appSource).toContain('aria-label="Command and world event history"');
     expect(appSource).not.toContain("notice = { level: 'info', message: message.data.text }");
+  });
+
+  it('keeps a 500-entry anchored scrollback with an explicit latest affordance', () => {
+    expect(appSource).toContain('MAX_SCROLLBACK_ENTRIES');
+    expect(appSource).toContain('isScrollAnchored');
+    expect(appSource).toContain('Jump to latest');
   });
 });

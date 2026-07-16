@@ -58,6 +58,10 @@ export class TiamudBot {
     this.#recordLatency = recordLatency;
   }
 
+  get transport() {
+    return 'websocket';
+  }
+
   set paceMs(value) {
     this.#paceMs = value;
   }

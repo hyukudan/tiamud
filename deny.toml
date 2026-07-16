@@ -1,0 +1,17 @@
+# Supply-chain checks complement the repository's locked third-party notices
+# policy. License text and attribution are verified separately by
+# scripts/generate-third-party-notices.mjs.
+
+[graph]
+all-features = true
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "Unmaintained paste 1.0.15 is a transitive ravif/rav1e build dependency with no safe upgrade; keep tracking until the AVIF encoder removes it." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

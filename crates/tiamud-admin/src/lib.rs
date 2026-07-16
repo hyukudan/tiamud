@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use tempfile::Builder;
 use thiserror::Error;
 use tiamud_persistence_sqlite::{
@@ -46,6 +46,13 @@ pub struct MigrateReport {
     pub database: PathBuf,
     pub backup: PathBuf,
     pub migration: MigrationReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverAdminReport {
+    pub database: PathBuf,
+    pub account_id: i64,
+    pub account_name: String,
 }
 
 #[derive(Debug, Error)]
@@ -159,6 +166,20 @@ pub enum AdminError {
         #[source]
         source: SchemaError,
     },
+    #[error(
+        "database {path:?} uses schema v{found}; admin recovery requires current schema v{required}"
+    )]
+    AdminRecoverySchema {
+        path: PathBuf,
+        found: i64,
+        required: i64,
+    },
+    #[error("database {0:?} already has an administrator; use in-game moderation instead")]
+    AdminAlreadyExists(PathBuf),
+    #[error("account {account:?} does not exist in database {path:?}")]
+    AccountNotFound { path: PathBuf, account: String },
+    #[error("account {account:?} is not registered and cannot become an administrator")]
+    AccountNotRegistered { account: String },
 }
 
 /// Check a database without creating or migrating it, then validate its WorldPack.
@@ -356,6 +377,98 @@ pub fn migrate(
         database: database.to_owned(),
         backup: backup_output.to_owned(),
         migration,
+    })
+}
+
+/// Recover an installation that deliberately or accidentally has no admin.
+///
+/// This is an offline break-glass operation: it refuses to replace normal
+/// moderation while any administrator exists and records the promotion in the
+/// same transaction as the role change.
+pub fn recover_admin(
+    database: impl AsRef<Path>,
+    account_name: &str,
+) -> Result<RecoverAdminReport, AdminError> {
+    let database = database.as_ref();
+    let mut connection = Connection::open_with_flags(
+        database,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|source| AdminError::OpenDatabaseForMigration {
+        path: database.to_owned(),
+        source,
+    })?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
+        .map_err(|source| database_error(database, source))?;
+    let version = validate_database(&connection, database)?;
+    if version != SCHEMA_VERSION {
+        return Err(AdminError::AdminRecoverySchema {
+            path: database.to_owned(),
+            found: version,
+            required: SCHEMA_VERSION,
+        });
+    }
+
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|source| database_error(database, source))?;
+    let has_admin = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE role = 'admin')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|source| database_error(database, source))?;
+    if has_admin {
+        return Err(AdminError::AdminAlreadyExists(database.to_owned()));
+    }
+
+    let account = transaction
+        .query_row(
+            "SELECT id, name, auth_state FROM accounts WHERE name = ?1 COLLATE NOCASE",
+            [account_name],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|source| database_error(database, source))?
+        .ok_or_else(|| AdminError::AccountNotFound {
+            path: database.to_owned(),
+            account: account_name.to_owned(),
+        })?;
+    if account.2 != "registered" {
+        return Err(AdminError::AccountNotRegistered { account: account.1 });
+    }
+
+    transaction
+        .execute(
+            "UPDATE accounts SET role = 'admin' WHERE id = ?1",
+            [account.0],
+        )
+        .map_err(|source| database_error(database, source))?;
+    transaction
+        .execute(
+            "INSERT INTO moderation_audit
+                 (actor_account_id, target_account_id, action, details_json, created_at)
+             VALUES (?1, ?1, 'recover_admin',
+                     '{\"source\":\"tiamud-admin_offline_recovery\"}', unixepoch())",
+            [account.0],
+        )
+        .map_err(|source| database_error(database, source))?;
+    transaction
+        .commit()
+        .map_err(|source| database_error(database, source))?;
+
+    Ok(RecoverAdminReport {
+        database: database.to_owned(),
+        account_id: account.0,
+        account_name: account.1,
     })
 }
 
@@ -782,5 +895,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(auth_state, "guest");
+    }
+
+    #[test]
+    fn offline_admin_recovery_is_explicit_audited_and_single_use() {
+        let temporary = TempDir::new().unwrap();
+        let database = temporary.path().join("current.sqlite3");
+        let mut connection = Connection::open(&database).unwrap();
+        migrate_schema(&mut connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO accounts (name, password_hash, auth_state, role)
+                 VALUES ('Keeper', 'hash', 'registered', 'player')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = recover_admin(&database, "keeper").unwrap();
+        assert_eq!(report.account_name, "Keeper");
+        let connection = Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT role FROM accounts WHERE id = ?1",
+                    [report.account_id],
+                    |row| { row.get::<_, String>(0) }
+                )
+                .unwrap(),
+            "admin"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT action FROM moderation_audit WHERE target_account_id = ?1",
+                    [report.account_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "recover_admin"
+        );
+        drop(connection);
+
+        assert!(matches!(
+            recover_admin(&database, "Keeper"),
+            Err(AdminError::AdminAlreadyExists(_))
+        ));
     }
 }

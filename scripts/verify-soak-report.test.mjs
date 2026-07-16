@@ -38,6 +38,7 @@ test('rejects every independently required acceptance field', async (context) =>
     ['target configuration', (report) => (report.target.configuration.worldPack = 'host-env'), 'canonical temporary-server'],
     ['target configuration fields', (report) => (report.target.configuration.untracked = true), 'exactly the canonical'],
     ['harness evidence', (report) => delete report.evidence.harness.bot, 'harness bot'],
+    ['Telnet harness evidence', (report) => delete report.evidence.harness.telnetBot, 'harness telnetBot'],
     ['verdict', (report) => (report.verdict.loadPassed = false), 'verdict.loadPassed'],
     ['success', (report) => (report.success = false), 'report success'],
     ['readiness', (report) => (report.readiness.failures = 1), 'readiness.failures'],
@@ -86,6 +87,7 @@ test('rejects the demonstrated forged 20-second report bypass', () => {
 test('rejects standard-profile and load cross-field tampering', async (context) => {
   const cases = [
     ['users', (report) => (report.profile.users = 15), 'at least 16'],
+    ['Telnet users', (report) => (report.profile.telnetUsers = 0), 'between 1'],
     ['concurrency', (report) => (report.profile.concurrency = 3), 'at least 4'],
     ['concurrency/users', (report) => (report.profile.concurrency = 17), 'must not exceed'],
     ['pace', (report) => (report.profile.paceMs = 151), 'no more than 150'],
@@ -96,12 +98,14 @@ test('rejects standard-profile and load cross-field tampering', async (context) 
     ['sustained limit', (report) => (report.profile.limits.sustainedRssGrowthBytes += 1), 'sustainedRssGrowthBytes'],
     ['slope limit', (report) => (report.profile.limits.rssSlopeBytesPerHour += 1), 'rssSlopeBytesPerHour'],
     ['load users', (report) => (report.load.users = 15), 'load.users'],
+    ['load Telnet users', (report) => (report.load.telnetUsers = 3), 'load.telnetUsers'],
     ['load concurrency', (report) => (report.load.concurrency = 3), 'load.concurrency'],
     ['load pace', (report) => (report.load.paceMs = 149), 'load.paceMs'],
     ['load request', (report) => (report.load.requested.durationMs = 20_000), 'load.requested'],
     ['load elapsed', (report) => (report.load.elapsedMs = 20_000), 'load.elapsedMs'],
     ['bootstraps', (report) => (report.load.completed.bootstraps = 1), 'bootstraps'],
     ['rounds', (report) => (report.load.completed.rounds = 0), 'rounds'],
+    ['Telnet transport errors', (report) => report.load.transports.telnet.errors.push({ phase: 'round' }), 'telnet.errors'],
   ];
   for (const [name, mutate, expected] of cases) {
     await context.test(name, () => {
@@ -194,7 +198,13 @@ function validReport() {
           ...file(),
         },
       },
-      harness: { soak: file(), evidence: file(), load: file(), bot: file() },
+      harness: {
+        soak: file(),
+        evidence: file(),
+        load: file(),
+        bot: file(),
+        telnetBot: file(),
+      },
       runner: {
         platform: 'linux',
         release: '6.8.0-test',
@@ -221,6 +231,7 @@ function validReport() {
     profile: {
       durationMs: DAY_MS,
       users: 16,
+      telnetUsers: 4,
       concurrency: 4,
       paceMs: 150,
       sampleIntervalMs: 60_000,
@@ -244,10 +255,16 @@ function validReport() {
       success: true,
       mode: 'existing-server',
       users: 16,
+      telnetUsers: 4,
+      websocketUsers: 12,
       concurrency: 4,
       paceMs: 150,
       requested: { durationMs: DAY_MS },
       completed: { bootstraps: 16, rounds: 100 },
+      transports: {
+        websocket: { users: 12, bootstraps: 12, rounds: 75, errors: [], latenciesMs: {} },
+        telnet: { users: 4, bootstraps: 4, rounds: 25, errors: [], latenciesMs: {} },
+      },
       elapsedMs: DAY_MS,
       errors: [],
     },

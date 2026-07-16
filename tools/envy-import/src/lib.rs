@@ -13,8 +13,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use world_pack::{
-    CURRENT_SCHEMA_VERSION, Direction, Exit, ExitTarget, LegacyRoomData, Room, SourceMetadata,
-    WorldPack,
+    CURRENT_SCHEMA_VERSION, Direction, Exit, ExitTarget, LegacyBitvector, LegacyRoomData, Room,
+    SourceMetadata, WorldPack, WorldPackDiagnostic,
 };
 
 mod legacy;
@@ -221,6 +221,7 @@ pub fn parse_import(
     let mut room_diagnostics = Vec::new();
     let mut external_exit_references = Vec::new();
     let mut seen_room_vnums = HashSet::new();
+    let mut room_source_lines = HashMap::new();
     while !cursor.is_finished() {
         cursor.skip_ascii_whitespace();
         if cursor.is_finished() {
@@ -238,6 +239,7 @@ pub fn parse_import(
                 message: format!("duplicate room VNUM {vnum}"),
             });
         }
+        room_source_lines.insert(vnum, header_line);
         if rooms.len() >= MAX_ROOMS {
             return Err(ImportError::Limit {
                 line: header_line,
@@ -254,25 +256,32 @@ pub fn parse_import(
             .trim()
             .to_owned();
         let metadata_line_number = cursor.line();
-        let metadata = parse_integer_line(cursor.line_bytes()?, metadata_line_number)?;
-        if metadata.len() < 2 {
-            return Err(ImportError::Syntax {
-                line: metadata_line_number,
-                message: "room metadata requires at least flags and sector values".to_owned(),
-            });
-        }
-        let flags = metadata[metadata.len() - 2];
-        let sector = metadata[metadata.len() - 1];
-        let prefix_values = metadata[..metadata.len() - 2].to_vec();
-        if flags != 0 {
-            room_diagnostics.push(import_warning(
-                "room_flag_mask_preserved",
-                "ROOMS",
-                Some(metadata_line_number),
-                Some(vnum),
-                &format!("room flag mask {flags} is preserved but not interpreted"),
-                "review the source dialect's room flag table and author equivalent Tiamud behavior explicitly",
-            ));
+        let (prefix_values, flags, sector) =
+            parse_room_metadata(cursor.line_bytes()?, metadata_line_number)?;
+        match &flags {
+            LegacyBitvector::Numeric(value) if *value != 0 => {
+                room_diagnostics.push(import_warning(
+                    "room_flag_mask_preserved",
+                    "ROOMS",
+                    Some(metadata_line_number),
+                    Some(vnum),
+                    &format!("room flag mask {value} is preserved but not interpreted"),
+                    "review the source dialect's room flag table and author equivalent Tiamud behavior explicitly",
+                ));
+            }
+            LegacyBitvector::Alphabetic(value) => {
+                room_diagnostics.push(import_warning(
+                    "rom_alphabetic_room_bitvector_preserved",
+                    "ROOMS",
+                    Some(metadata_line_number),
+                    Some(vnum),
+                    &format!(
+                        "ROM-style room bitvector {value:?} is preserved verbatim and was not converted to a numeric mask"
+                    ),
+                    "review the exact source flag table and author equivalent Tiamud behavior explicitly",
+                ));
+            }
+            LegacyBitvector::Numeric(_) => {}
         }
         if !(0..=10).contains(&sector) {
             room_diagnostics.push(import_warning(
@@ -457,6 +466,29 @@ pub fn parse_import(
         "the importer cannot determine the copyright holder or license of historical content",
         "record authoritative provenance and obtain a human legal/license decision before distributing imported content",
     ));
+    diagnostics.extend(pack.diagnostics().into_iter().map(|diagnostic| match diagnostic {
+        WorldPackDiagnostic::DirectedUnreachableRoom {
+            room_id,
+            start_room_id,
+        } => {
+            let vnum = pack
+                .rooms
+                .iter()
+                .find(|room| room.id == room_id)
+                .and_then(|room| room.legacy_vnum);
+            let line = vnum.and_then(|vnum| room_source_lines.get(&vnum).copied());
+            import_warning(
+                "directed_unreachable_room_preserved",
+                "ROOMS",
+                line,
+                vnum,
+                &format!(
+                    "room {room_id:?} is not reachable through directed exits from {start_room_id:?}"
+                ),
+                "review one-way exits, teleportation, scripts, and cross-area travel before deciding whether this room is intentionally isolated",
+            )
+        }
+    }));
     pack.validate()
         .map_err(|error| ImportError::Validation(error.to_string()))?;
     Ok(ImportResult {
@@ -584,6 +616,41 @@ fn parse_integer_line(bytes: &[u8], line: usize) -> Result<Vec<i64>, ImportError
     text.split_ascii_whitespace()
         .map(|part| parse_legacy_number(part.as_bytes(), line))
         .collect()
+}
+
+fn parse_room_metadata(
+    bytes: &[u8],
+    line: usize,
+) -> Result<(Vec<i64>, LegacyBitvector, i64), ImportError> {
+    let text = std::str::from_utf8(trim_ascii(bytes)).map_err(|_| ImportError::Syntax {
+        line,
+        message: "room metadata contains non-ASCII bytes".to_owned(),
+    })?;
+    let tokens = text.split_ascii_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 2 {
+        return Err(ImportError::Syntax {
+            line,
+            message: "room metadata requires at least flags and sector values".to_owned(),
+        });
+    }
+    let flags = parse_legacy_bitvector(tokens[tokens.len() - 2], line)?;
+    let sector = parse_legacy_number(tokens[tokens.len() - 1].as_bytes(), line)?;
+    let prefix_values = tokens[..tokens.len() - 2]
+        .iter()
+        .map(|value| parse_legacy_number(value.as_bytes(), line))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((prefix_values, flags, sector))
+}
+
+pub(crate) fn parse_legacy_bitvector(
+    token: &str,
+    line: usize,
+) -> Result<LegacyBitvector, ImportError> {
+    if !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        Ok(LegacyBitvector::Alphabetic(token.to_owned()))
+    } else {
+        parse_legacy_number(token.as_bytes(), line).map(LegacyBitvector::Numeric)
+    }
 }
 
 fn parse_legacy_number(bytes: &[u8], line: usize) -> Result<i64, ImportError> {
@@ -992,7 +1059,10 @@ S
         assert_eq!(pack.rooms.len(), 2);
         assert_eq!(pack.rooms[0].legacy_vnum, Some(100));
         assert_eq!(pack.rooms[0].title, "The First Room");
-        assert_eq!(pack.rooms[0].legacy.as_ref().unwrap().flags, 0);
+        assert_eq!(
+            pack.rooms[0].legacy.as_ref().unwrap().flags,
+            LegacyBitvector::Numeric(0)
+        );
         assert_eq!(pack.rooms[0].legacy.as_ref().unwrap().sector, 4);
         assert_eq!(
             pack.rooms[0].exits[0].target,

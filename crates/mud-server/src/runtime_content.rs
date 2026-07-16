@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use tiamud_core::{
@@ -8,7 +9,8 @@ use tiamud_core::{
     SceneImage, SceneView, SessionId, WeatherKind, World,
 };
 use tiamud_scripting::{
-    ScriptCapability, ScriptContext, ScriptError, ScriptHook, ScriptLimits, execute_hook,
+    MAX_MODULES_PER_ROOM_HOOK_BATCH, ScriptCapability, ScriptContext, ScriptError, ScriptHook,
+    ScriptLimits, execute_hook,
 };
 use world_pack::{
     ConditionContext, RoomSceneVariants, ScriptCapability as PackScriptCapability,
@@ -16,6 +18,8 @@ use world_pack::{
 };
 
 use crate::operations::{RuntimeMetrics, ScriptMetricOutcome};
+
+pub(crate) const SCRIPT_BATCH_WALL_BUDGET: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub(crate) struct RuntimeContent {
@@ -141,6 +145,17 @@ impl RuntimeContent {
         role: AccountRole,
         hook: ScriptHook,
     ) -> ScriptBatchOutcome {
+        self.run_hook_with_budget(world, session, role, hook, SCRIPT_BATCH_WALL_BUDGET)
+    }
+
+    pub(crate) fn run_hook_with_budget(
+        &self,
+        world: &mut World,
+        session: SessionId,
+        role: AccountRole,
+        hook: ScriptHook,
+        maximum_wall_time: Duration,
+    ) -> ScriptBatchOutcome {
         let Ok(runtime) = world.authorized_runtime_context(session) else {
             return ScriptBatchOutcome::default();
         };
@@ -148,14 +163,39 @@ impl RuntimeContent {
             .scripts
             .iter()
             .filter(|script| script.room_id == runtime.room_id && script.hooks.contains(&hook))
+            .take(MAX_MODULES_PER_ROOM_HOOK_BATCH + 1)
             .collect::<Vec<_>>();
         if scripts.is_empty() {
             return ScriptBatchOutcome::default();
+        }
+        if scripts.len() > MAX_MODULES_PER_ROOM_HOOK_BATCH {
+            if let Some(metrics) = &self.operational_metrics {
+                metrics.script_finished(Duration::ZERO, ScriptMetricOutcome::Error);
+            }
+            tracing::warn!(
+                hook = hook.function_name(),
+                category = "batch_module_limit",
+                maximum = MAX_MODULES_PER_ROOM_HOOK_BATCH,
+                "WorldPack script batch rejected before execution"
+            );
+            return ScriptBatchOutcome::default();
+        }
+
+        let batch_budget = maximum_wall_time.min(SCRIPT_BATCH_WALL_BUDGET);
+        let batch_started = Instant::now();
+        if batch_budget.is_zero() {
+            return reject_script_budget(self, hook, batch_started, "aggregate_budget");
         }
 
         let context = script_context(&runtime, role);
         let mut pending = Vec::new();
         for script in scripts {
+            let Some(remaining) = batch_budget.checked_sub(batch_started.elapsed()) else {
+                return reject_script_budget(self, hook, batch_started, "aggregate_budget");
+            };
+            if remaining.is_zero() {
+                return reject_script_budget(self, hook, batch_started, "aggregate_budget");
+            }
             let mut context = context.clone();
             context.seed = deterministic_hook_seed(
                 self.seed,
@@ -164,20 +204,30 @@ impl RuntimeContent {
                 runtime.logical_tick,
                 hook,
             );
+            let mut module_limits = script.limits;
+            module_limits.max_wall_time = module_limits.max_wall_time.min(remaining);
             match execute_hook(
                 &script.source,
                 hook,
                 &context,
                 &script.capabilities,
-                script.limits,
+                module_limits,
             ) {
                 Ok(outcome) => {
                     if let Some(metrics) = &self.operational_metrics {
                         metrics.script_finished(outcome.elapsed, ScriptMetricOutcome::Success);
                     }
                     pending.extend(outcome.events);
+                    if batch_started.elapsed() > batch_budget {
+                        return reject_script_budget(self, hook, batch_started, "aggregate_budget");
+                    }
                 }
                 Err(error) => {
+                    if matches!(error, ScriptError::ExecutionQuota)
+                        && batch_started.elapsed() >= batch_budget
+                    {
+                        return reject_script_budget(self, hook, batch_started, "aggregate_budget");
+                    }
                     if let Some(metrics) = &self.operational_metrics {
                         metrics.script_finished(
                             std::time::Duration::ZERO,
@@ -196,6 +246,10 @@ impl RuntimeContent {
                     return ScriptBatchOutcome::default();
                 }
             }
+        }
+
+        if batch_started.elapsed() > batch_budget {
+            return reject_script_budget(self, hook, batch_started, "aggregate_budget");
         }
 
         let Some(validated) = validate_events(&pending) else {
@@ -283,6 +337,10 @@ impl RuntimeContent {
                 }
             }
         }
+        if batch_started.elapsed() > batch_budget {
+            world.restore_checkpoint(checkpoint);
+            return reject_script_budget(self, hook, batch_started, "aggregate_budget");
+        }
         result
     }
 }
@@ -328,6 +386,7 @@ pub(crate) struct ScriptBatchOutcome {
     pub(crate) narration: Vec<String>,
     pub(crate) changed: bool,
     pub(crate) domain_events: Vec<DomainEvent>,
+    pub(crate) budget_exhausted: bool,
 }
 
 enum ValidatedEvent {
@@ -450,6 +509,26 @@ fn rollback_script_batch(
         "isolated WorldPack script failure"
     );
     ScriptBatchOutcome::default()
+}
+
+fn reject_script_budget(
+    content: &RuntimeContent,
+    hook: ScriptHook,
+    started: Instant,
+    category: &'static str,
+) -> ScriptBatchOutcome {
+    if let Some(metrics) = &content.operational_metrics {
+        metrics.script_finished(started.elapsed(), ScriptMetricOutcome::Timeout);
+    }
+    tracing::warn!(
+        hook = hook.function_name(),
+        category,
+        "WorldPack script aggregate budget exhausted"
+    );
+    ScriptBatchOutcome {
+        budget_exhausted: true,
+        ..ScriptBatchOutcome::default()
+    }
 }
 
 fn condition_context(runtime: &AuthorizedRuntimeContext, role: AccountRole) -> ConditionContext {
@@ -696,6 +775,91 @@ mod tests {
                 value: Some("0".into()),
             }])
             .is_none()
+        );
+    }
+
+    fn script_test_world() -> (World, SessionId) {
+        let session = SessionId(41);
+        let mut world = World::demo();
+        world
+            .connect(
+                session,
+                tiamud_core::CharacterSnapshot {
+                    id: tiamud_core::CharacterId(41),
+                    account_id: tiamud_core::AccountId(4),
+                    name: "Budget Test".into(),
+                    room_id: "demo:lantern-square".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        (world, session)
+    }
+
+    fn flag_script(index: usize, hook: ScriptHook) -> RuntimeScript {
+        RuntimeScript {
+            id: format!("script:bounded-{index:02}"),
+            room_id: "demo:lantern-square".into(),
+            hooks: BTreeSet::from([hook]),
+            capabilities: BTreeSet::from([ScriptCapability::SetFlag]),
+            limits: ScriptLimits::default(),
+            source: format!(
+                "function {}() tiamud.emit('set_flag', 'self', 'ran-{index}') end",
+                hook.function_name()
+            ),
+        }
+    }
+
+    #[test]
+    fn room_hook_batch_rejects_more_than_eight_modules_before_starting_any() {
+        let (mut world, session) = script_test_world();
+        let scripts = (0..=MAX_MODULES_PER_ROOM_HOOK_BATCH)
+            .map(|index| flag_script(index, ScriptHook::OnLook))
+            .collect();
+        let content = RuntimeContent::new(Vec::new(), scripts, 7);
+
+        let outcome =
+            content.run_hook(&mut world, session, AccountRole::Player, ScriptHook::OnLook);
+
+        assert!(!outcome.changed);
+        assert!(outcome.narration.is_empty());
+        assert!(
+            world
+                .character_gameplay_snapshot(session)
+                .unwrap()
+                .script_flags
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn exhausted_aggregate_budget_is_inert_and_reported() {
+        let (mut world, session) = script_test_world();
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let content = RuntimeContent::new(Vec::new(), vec![flag_script(1, ScriptHook::OnTimer)], 7)
+            .with_operational_metrics(metrics.clone());
+
+        let outcome = content.run_hook_with_budget(
+            &mut world,
+            session,
+            AccountRole::Player,
+            ScriptHook::OnTimer,
+            Duration::ZERO,
+        );
+
+        assert!(outcome.budget_exhausted);
+        assert!(!outcome.changed);
+        assert!(
+            world
+                .character_gameplay_snapshot(session)
+                .unwrap()
+                .script_flags
+                .is_empty()
+        );
+        assert!(
+            metrics
+                .prometheus(0)
+                .contains("tiamud_script_timeouts_total 1")
         );
     }
 

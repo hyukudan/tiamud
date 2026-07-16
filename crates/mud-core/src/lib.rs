@@ -982,6 +982,9 @@ const MAX_ACTIVE_EFFECTS: usize = 32;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RuntimeItemLocation {
+    /// Reserved during world construction for a content-defined initial owner.
+    /// Staged items are never projected into a room scene.
+    Staged,
     Carried {
         character_id: CharacterId,
     },
@@ -1172,6 +1175,12 @@ pub enum WorldBuildError {
     },
     #[error("Item {0:?} has no initial room.")]
     UnplacedItem(String),
+    #[error("Staged item {0:?} is not declared by the world.")]
+    UnknownStagedItem(String),
+    #[error("Staged item {0:?} appears more than once.")]
+    DuplicateStagedItem(String),
+    #[error("Item {item_id:?} is both placed in room {room_id:?} and staged for an initial owner.")]
+    ItemPlacedAndStaged { item_id: String, room_id: String },
 }
 
 #[derive(Clone, Debug)]
@@ -1202,6 +1211,7 @@ struct Character {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SharedItemLocation {
+    Staged,
     Carried(CharacterId),
     Room(String),
     Equipped(CharacterId, EquipmentSlot),
@@ -1594,6 +1604,16 @@ pub struct WorldCheckpoint {
 
 impl World {
     pub fn from_definition(definition: WorldDefinition) -> Result<Self, WorldBuildError> {
+        Self::from_definition_with_staged_items(definition, Vec::new())
+    }
+
+    /// Builds a world while reserving explicitly named items for initial
+    /// ownership assignment (for example, NPC loot). A staged item is not
+    /// visible in any room and can only be claimed by an NPC spawn.
+    pub fn from_definition_with_staged_items(
+        definition: WorldDefinition,
+        staged_item_ids: Vec<String>,
+    ) -> Result<Self, WorldBuildError> {
         if definition.rooms.is_empty() {
             return Err(WorldBuildError::EmptyWorld);
         }
@@ -1702,6 +1722,22 @@ impl World {
                     });
                 }
             }
+        }
+        let mut staged = std::collections::HashSet::new();
+        for item_id in staged_item_ids {
+            if !staged.insert(item_id.clone()) {
+                return Err(WorldBuildError::DuplicateStagedItem(item_id));
+            }
+            if !stable_items.contains_key(&item_id) {
+                return Err(WorldBuildError::UnknownStagedItem(item_id));
+            }
+            if let Some(SharedItemLocation::Room(room_id)) = item_locations.get(&item_id) {
+                return Err(WorldBuildError::ItemPlacedAndStaged {
+                    item_id,
+                    room_id: room_id.clone(),
+                });
+            }
+            item_locations.insert(item_id, SharedItemLocation::Staged);
         }
         for item_id in stable_items.keys() {
             if !item_locations.contains_key(item_id) {
@@ -1853,6 +1889,7 @@ impl World {
                 .iter()
                 .map(|(item_id, location)| {
                     let location = match location {
+                        SharedItemLocation::Staged => RuntimeItemLocation::Staged,
                         SharedItemLocation::Carried(character_id) => RuntimeItemLocation::Carried {
                             character_id: *character_id,
                         },
@@ -2008,6 +2045,7 @@ impl World {
             .iter()
             .map(|(item_id, location)| {
                 let location = match location {
+                    RuntimeItemLocation::Staged => SharedItemLocation::Staged,
                     RuntimeItemLocation::Carried { character_id } => {
                         SharedItemLocation::Carried(*character_id)
                     }
@@ -2518,7 +2556,7 @@ impl World {
                 self.stable_items.contains_key(item_id)
                     && matches!(
                         self.item_locations.get(item_id),
-                        Some(SharedItemLocation::Room(_))
+                        Some(SharedItemLocation::Staged)
                     )
             });
         if !valid {
@@ -2643,9 +2681,7 @@ impl World {
             });
         }
         self.revision = self.revision.wrapping_add(1).max(1);
-        if let Some(event) = events.first() {
-            self.bump_view_revisions(event)?;
-        }
+        self.bump_view_revisions_for_events(&events)?;
         Ok(events)
     }
 
@@ -3343,7 +3379,8 @@ impl World {
                 SharedItemLocation::Room(room_id) if room_id == &current_room.stable_id => {
                     Some(item_id)
                 }
-                SharedItemLocation::Carried(_)
+                SharedItemLocation::Staged
+                | SharedItemLocation::Carried(_)
                 | SharedItemLocation::Room(_)
                 | SharedItemLocation::Equipped(_, _)
                 | SharedItemLocation::HeldByNpc(_)
@@ -4260,7 +4297,8 @@ impl World {
                     SharedItemLocation::Room(item_room) => self
                         .item_visible_to(session, item_id, item_room)?,
                     SharedItemLocation::Carried(owner) => *owner == character.id,
-                    SharedItemLocation::Equipped(_, _)
+                    SharedItemLocation::Staged
+                    | SharedItemLocation::Equipped(_, _)
                     | SharedItemLocation::HeldByNpc(_)
                     | SharedItemLocation::Consumed => false,
                 };
@@ -4796,6 +4834,16 @@ impl World {
         session: SessionId,
         event: &DomainEvent,
     ) -> Result<Option<ViewEvent>, WorldError> {
+        // The clock changes observer-visible state (weather countdowns, effects,
+        // recovery timers), but is not itself player-facing narration.
+        if matches!(
+            event,
+            DomainEvent::Gameplay {
+                event: GameplayEvent::TickAdvanced { .. }
+            }
+        ) {
+            return Ok(None);
+        }
         if !self.perceives_event(session, event)? {
             return Ok(None);
         }
@@ -4929,11 +4977,69 @@ impl World {
         }))
     }
 
+    /// Build a perception-safe narration event addressed to exactly one
+    /// authorized session. The caller must keep the resulting event on that
+    /// session's targeted delivery; it is not a domain event and must never be
+    /// broadcast or persisted.
+    pub fn project_private_narration(
+        &self,
+        session: SessionId,
+        text: &str,
+    ) -> Result<ViewEvent, WorldError> {
+        let text = text.trim();
+        if text.is_empty()
+            || text.len() > 1_024
+            || text
+                .chars()
+                .any(|character| character.is_control() && character != '\n')
+        {
+            return Err(WorldError::InvalidScriptEffect);
+        }
+        let observer = self.observer(session)?;
+        let viewer = self.character(session)?;
+        Ok(ViewEvent {
+            revision: observer.revision,
+            kind: ViewEventKind::Gameplay,
+            text: text.to_owned(),
+            actor_id: opaque_id(observer.salt, "character", &viewer.id.0.to_string()),
+            target_id: None,
+            item_id: None,
+        })
+    }
+
     fn bump_view_revisions(&mut self, event: &DomainEvent) -> Result<(), WorldError> {
         let affected = self
             .connected_sessions()
             .into_iter()
             .map(|session| Ok((session, self.perceives_event(session, event)?)))
+            .collect::<Result<Vec<_>, WorldError>>()?;
+        let mut previous = Vec::new();
+        for (session, perceived) in affected {
+            if perceived {
+                let view = self
+                    .observer_views
+                    .get_mut(&session)
+                    .ok_or(WorldError::InvalidEntity)?;
+                previous.push((session, view.revision));
+                view.revision = view.revision.wrapping_add(1).max(1);
+            }
+        }
+        self.last_view_bump = Some((self.revision, previous));
+        Ok(())
+    }
+
+    fn bump_view_revisions_for_events(&mut self, events: &[DomainEvent]) -> Result<(), WorldError> {
+        let affected = self
+            .connected_sessions()
+            .into_iter()
+            .map(|session| {
+                for event in events {
+                    if self.perceives_event(session, event)? {
+                        return Ok((session, true));
+                    }
+                }
+                Ok((session, false))
+            })
             .collect::<Result<Vec<_>, WorldError>>()?;
         let mut previous = Vec::new();
         for (session, perceived) in affected {
@@ -5024,8 +5130,8 @@ impl World {
             }
             DomainEvent::Gameplay { event } => {
                 let base = matches!(event, GameplayEvent::TickAdvanced { .. })
-                    || gameplay_event_character(event).is_some_and(|id| id == viewer.id)
-                    || gameplay_event_room(event).is_some_and(|room| room == viewer_room);
+                    || (gameplay_event_character(event).is_some_and(|id| id == viewer.id)
+                        || gameplay_event_room(event).is_some_and(|room| room == viewer_room));
                 let npc_visible = match (gameplay_event_npc(event), gameplay_event_room(event)) {
                     (Some(npc_id), Some(room_id))
                         if gameplay_event_character(event) != Some(viewer.id) =>
@@ -5586,55 +5692,58 @@ mod tests {
     }
 
     fn phase_two_world(seed: u64, npc_strength: i32, npc_health: i32) -> (World, SessionId) {
-        let mut world = World::from_definition(WorldDefinition {
-            start_room_id: "game:start".into(),
-            items: vec![
-                ItemDefinition {
-                    stable_id: "game:sword".into(),
-                    name: "iron sword".into(),
-                    description: "A balanced beginner's blade.".into(),
-                    aliases: vec!["sword".into(), "blade".into()],
-                },
-                ItemDefinition {
-                    stable_id: "game:potion".into(),
-                    name: "red potion".into(),
-                    description: "A restorative draught.".into(),
-                    aliases: vec!["potion".into()],
-                },
-                ItemDefinition {
-                    stable_id: "game:fang".into(),
-                    name: "silver fang".into(),
-                    description: "Proof of victory over the guardian.".into(),
-                    aliases: vec!["fang".into()],
-                },
-            ],
-            rooms: vec![
-                RoomDefinition {
-                    stable_id: "game:start".into(),
-                    title: "Sanctuary".into(),
-                    prose: vec!["A quiet place to prepare.".into()],
-                    image: None,
-                    audio: None,
-                    exits: vec![ExitDefinition {
-                        direction: Direction::North,
-                        target_room_id: "game:arena".into(),
-                    }],
-                    item_ids: vec!["game:sword".into(), "game:potion".into()],
-                },
-                RoomDefinition {
-                    stable_id: "game:arena".into(),
-                    title: "Old Arena".into(),
-                    prose: vec!["Claw marks cross the sand.".into()],
-                    image: None,
-                    audio: None,
-                    exits: vec![ExitDefinition {
-                        direction: Direction::South,
-                        target_room_id: "game:start".into(),
-                    }],
-                    item_ids: vec!["game:fang".into()],
-                },
-            ],
-        })
+        let mut world = World::from_definition_with_staged_items(
+            WorldDefinition {
+                start_room_id: "game:start".into(),
+                items: vec![
+                    ItemDefinition {
+                        stable_id: "game:sword".into(),
+                        name: "iron sword".into(),
+                        description: "A balanced beginner's blade.".into(),
+                        aliases: vec!["sword".into(), "blade".into()],
+                    },
+                    ItemDefinition {
+                        stable_id: "game:potion".into(),
+                        name: "red potion".into(),
+                        description: "A restorative draught.".into(),
+                        aliases: vec!["potion".into()],
+                    },
+                    ItemDefinition {
+                        stable_id: "game:fang".into(),
+                        name: "silver fang".into(),
+                        description: "Proof of victory over the guardian.".into(),
+                        aliases: vec!["fang".into()],
+                    },
+                ],
+                rooms: vec![
+                    RoomDefinition {
+                        stable_id: "game:start".into(),
+                        title: "Sanctuary".into(),
+                        prose: vec!["A quiet place to prepare.".into()],
+                        image: None,
+                        audio: None,
+                        exits: vec![ExitDefinition {
+                            direction: Direction::North,
+                            target_room_id: "game:arena".into(),
+                        }],
+                        item_ids: vec!["game:sword".into(), "game:potion".into()],
+                    },
+                    RoomDefinition {
+                        stable_id: "game:arena".into(),
+                        title: "Old Arena".into(),
+                        prose: vec!["Claw marks cross the sand.".into()],
+                        image: None,
+                        audio: None,
+                        exits: vec![ExitDefinition {
+                            direction: Direction::South,
+                            target_room_id: "game:start".into(),
+                        }],
+                        item_ids: Vec::new(),
+                    },
+                ],
+            },
+            vec!["game:fang".into()],
+        )
         .unwrap();
         world.set_rng_seed(seed);
         world
@@ -6902,9 +7011,49 @@ mod tests {
             })
             .unwrap();
         let view = world.project_event(session, damage).unwrap().unwrap();
-        assert!(!view.actor_id.contains("900"));
+        assert_ne!(view.actor_id, "900");
         assert!(!view.target_id.as_deref().unwrap().contains("game:"));
         assert!(!view.text.contains("game:"));
+    }
+
+    #[test]
+    fn private_narration_uses_only_the_authorized_observers_opaque_identity() {
+        let (world, session) = phase_two_world(13, 2, 20);
+        let view = world
+            .project_private_narration(session, "Only you hear the archive whisper.")
+            .unwrap();
+
+        assert_eq!(view.kind, ViewEventKind::Gameplay);
+        assert_eq!(view.text, "Only you hear the archive whisper.");
+        assert!(!view.actor_id.contains("900"));
+        assert!(view.target_id.is_none());
+        assert!(view.item_id.is_none());
+        assert!(matches!(
+            world.project_private_narration(session, "\u{1b}[31munsafe"),
+            Err(WorldError::InvalidScriptEffect)
+        ));
+    }
+
+    #[test]
+    fn internal_clock_ticks_refresh_but_do_not_narrate_observer_views() {
+        let (mut world, session) = phase_two_world(13, 2, 20);
+        let before = world.scene_for(session).unwrap().revision;
+
+        let events = world.advance_tick().unwrap();
+        let tick = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    DomainEvent::Gameplay {
+                        event: GameplayEvent::TickAdvanced { .. }
+                    }
+                )
+            })
+            .unwrap();
+
+        assert_eq!(world.project_event(session, tick).unwrap(), None);
+        assert!(world.scene_for(session).unwrap().revision > before);
     }
 
     #[test]
@@ -7108,6 +7257,91 @@ mod tests {
             }),
             Err(WorldBuildError::DuplicateRoomItem { .. })
         ));
+
+        let item = ItemDefinition {
+            stable_id: "test:item".into(),
+            name: "item".into(),
+            description: "An item.".into(),
+            aliases: Vec::new(),
+        };
+        assert!(matches!(
+            World::from_definition_with_staged_items(
+                WorldDefinition {
+                    start_room_id: "test:start".into(),
+                    items: vec![item],
+                    rooms: vec![room(vec!["test:item".into()])],
+                },
+                vec!["test:item".into()],
+            ),
+            Err(WorldBuildError::ItemPlacedAndStaged { item_id, .. })
+                if item_id == "test:item"
+        ));
+    }
+
+    #[test]
+    fn staged_npc_loot_is_neither_visible_nor_interactable_before_spawn() {
+        let mut world = World::from_definition_with_staged_items(
+            WorldDefinition {
+                start_room_id: "test:start".into(),
+                items: vec![ItemDefinition {
+                    stable_id: "test:loot".into(),
+                    name: "silver fang".into(),
+                    description: "A trophy carried by a guardian.".into(),
+                    aliases: vec!["fang".into()],
+                }],
+                rooms: vec![RoomDefinition {
+                    stable_id: "test:start".into(),
+                    title: "Start".into(),
+                    prose: Vec::new(),
+                    image: None,
+                    audio: None,
+                    exits: Vec::new(),
+                    item_ids: Vec::new(),
+                }],
+            },
+            vec!["test:loot".into()],
+        )
+        .unwrap();
+        let session = SessionId(91);
+        world
+            .connect(
+                session,
+                CharacterSnapshot {
+                    id: CharacterId(92),
+                    account_id: AccountId(93),
+                    name: "Observer".into(),
+                    room_id: "test:start".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+
+        assert!(world.scene_for(session).unwrap().items.is_empty());
+        assert!(matches!(
+            world.apply(session, PlayerAction::Take("fang".into())),
+            Err(WorldError::ItemNotFound(query)) if query == "fang"
+        ));
+        world
+            .spawn_npc(NpcDefinition {
+                stable_id: "test:guardian".into(),
+                name: "guardian".into(),
+                description: "A silent guardian.".into(),
+                room_id: "test:start".into(),
+                level: 1,
+                max_health: 1,
+                strength: 1,
+                defence: 0,
+                experience_reward: 1,
+                loot_item_ids: vec!["test:loot".into()],
+                respawn_ticks: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            world.runtime_snapshot().item_locations["test:loot"],
+            RuntimeItemLocation::HeldByNpc {
+                npc_id: "test:guardian".into(),
+            }
+        );
     }
 
     #[test]

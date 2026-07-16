@@ -9,12 +9,17 @@ rust-version = "1.88"
 [package.metadata]
 cargo-fuzz = true
 
+[features]
+default = ["libfuzzer"]
+libfuzzer = ["libfuzzer-sys/link_libfuzzer"]
+
 [dependencies]
 envy-import = { path = "../tools/envy-import" }
-libfuzzer-sys = "=0.4.13"
+libfuzzer-sys = { version = "=0.4.13", default-features = false }
 serde_json = "=1.0.150"
 tiamud-asset-pipeline = { path = "../crates/asset-pipeline", default-features = false }
 tiamud-core = { path = "../crates/mud-core" }
+tiamud-telnet-codec = { path = "../crates/telnet-codec" }
 world-pack = { path = "../crates/world-pack" }
 
 [[bin]]
@@ -41,6 +46,13 @@ bench = false
 [[bin]]
 name = "action_parser"
 path = "fuzz_targets/action_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "telnet_parser"
+path = "fuzz_targets/telnet_parser.rs"
 test = false
 doc = false
 bench = false

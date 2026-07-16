@@ -47,7 +47,7 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
 pub(crate) const APPLICATION_TABLES: [&str; 13] = [
@@ -126,6 +126,8 @@ CREATE TABLE world_runtime (
     singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
     snapshot_version BIGINT NOT NULL,
     snapshot_json TEXT NOT NULL CHECK (octet_length(snapshot_json) <= 1048576),
+    last_event_sequence BIGINT
+        CHECK (last_event_sequence IS NULL OR last_event_sequence >= 0),
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
@@ -209,7 +211,7 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 7);
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 8);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -226,6 +228,14 @@ CREATE TABLE world_adventure (
 UPDATE tiamud_schema
 SET version = 7, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 6;
+"#;
+
+const UPGRADE_V7_TO_V8_SQL: &str = r#"
+ALTER TABLE world_runtime ADD COLUMN last_event_sequence BIGINT
+    CHECK (last_event_sequence IS NULL OR last_event_sequence >= 0);
+UPDATE tiamud_schema
+SET version = 8, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 7;
 "#;
 
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
@@ -266,17 +276,17 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v7 schema or migration from v6"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v8 schema or migration from v6/v7"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v7 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v8 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6 is upgraded to v7, and v7 is verified.
+/// at the current version, v6/v7 are upgraded to v8, and v8 is verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
     let report = migrate_in_transaction(&mut transaction)?;
@@ -309,10 +319,14 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
         return Err(SchemaError::InvalidMetadata);
     }
     let found: i32 = rows[0].get(0);
-    if found == 6 {
-        client.batch_execute(UPGRADE_V6_TO_V7_SQL)?;
-    } else if found != SCHEMA_VERSION {
-        return Err(SchemaError::UnsupportedVersion { found });
+    match found {
+        6 => {
+            client.batch_execute(UPGRADE_V6_TO_V7_SQL)?;
+            client.batch_execute(UPGRADE_V7_TO_V8_SQL)?;
+        }
+        7 => client.batch_execute(UPGRADE_V7_TO_V8_SQL)?,
+        SCHEMA_VERSION => {}
+        _ => return Err(SchemaError::UnsupportedVersion { found }),
     }
     for &table in &APPLICATION_TABLES {
         let exists: bool = client
@@ -322,7 +336,12 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
             return Err(SchemaError::MissingTable { table });
         }
     }
-    client.batch_execute(ENSURE_BOOTSTRAP_ADMIN_SQL)?;
+    // The automatic first-admin promotion belongs to the v6 role migration.
+    // Re-running it for an already-current schema would silently undo an
+    // operator's deliberate no-admin state after a restart.
+    if found == 6 {
+        client.batch_execute(ENSURE_BOOTSTRAP_ADMIN_SQL)?;
+    }
 
     Ok(MigrationReport {
         from: found,
@@ -369,7 +388,8 @@ mod tests {
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 7)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 8)"));
+        assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
     #[test]
@@ -380,6 +400,13 @@ mod tests {
         assert!(SCHEMA_SQL.contains("octet_length(details_json) <= 4096"));
         assert!(SCHEMA_SQL.contains("accounts (lower(name))"));
         assert!(SCHEMA_SQL.contains("characters (account_id, lower(name))"));
+    }
+
+    #[test]
+    fn v8_upgrade_adds_an_unknown_watermark_without_compacting_history() {
+        assert!(UPGRADE_V7_TO_V8_SQL.contains("ADD COLUMN last_event_sequence"));
+        assert!(!UPGRADE_V7_TO_V8_SQL.contains("DELETE FROM domain_events"));
+        assert!(!UPGRADE_V7_TO_V8_SQL.contains("NOT NULL"));
     }
 
     #[test]

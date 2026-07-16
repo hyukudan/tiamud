@@ -17,6 +17,11 @@ on:
         required: true
         default: "16"
         type: string
+      telnet_users:
+        description: Total users that use real plaintext Telnet
+        required: true
+        default: "4"
+        type: string
       concurrency:
         description: Maximum simultaneous bots
         required: true
@@ -105,6 +110,7 @@ jobs:
           SOAK_MAX_RSS_GROWTH_MB: ${{ inputs.max_rss_growth_mb }}
           SOAK_MAX_RSS_SLOPE_MB_PER_HOUR: ${{ inputs.max_rss_slope_mb_per_hour }}
           SOAK_MAX_SUSTAINED_GROWTH_MB: ${{ inputs.max_sustained_growth_mb }}
+          SOAK_TELNET_USERS: ${{ inputs.telnet_users }}
           SOAK_USERS: ${{ inputs.users }}
         shell: bash
         run: |
@@ -114,6 +120,7 @@ jobs:
             --warmup 30m \
             --sample-interval 1m \
             --users "$SOAK_USERS" \
+            --telnet-users "$SOAK_TELNET_USERS" \
             --concurrency "$SOAK_CONCURRENCY" \
             --pace-ms 150 \
             --max-rss-growth-mb "$SOAK_MAX_RSS_GROWTH_MB" \

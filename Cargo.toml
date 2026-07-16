@@ -8,6 +8,7 @@ members = [
     "crates/persistence-postgres",
     "crates/persistence-sqlite",
     "crates/scripting",
+    "crates/telnet-codec",
     "crates/tiamud-admin",
     "crates/world-pack",
     "tools/envy-import",

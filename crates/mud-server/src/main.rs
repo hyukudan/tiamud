@@ -20,7 +20,6 @@ use persistence::{CharacterStore, MeasuredCharacterStore, SqliteCharacterStore};
 use persistence_postgres::PostgresCharacterStore;
 use std::{env, error::Error, net::SocketAddr, path::Path, sync::Arc};
 use thiserror::Error;
-use tiamud_core::World;
 use tokio::{
     net::TcpListener,
     signal,
@@ -32,7 +31,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use web::AppState;
 use world_actor::{WorldHandle, WorldSchedulerConfig};
-use world_loader::{default_loaded_world, load_loaded_world};
+use world_loader::{build_loaded_world, default_loaded_world, load_loaded_world};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -64,32 +63,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(path) => (load_loaded_world(&path)?, path),
         None => (default_loaded_world()?, "embedded default".to_owned()),
     };
+    let world = build_loaded_world(&loaded_world)?;
     let metrics = Arc::new(RuntimeMetrics::default());
     let runtime_content = loaded_world
         .runtime_content
         .with_operational_metrics(metrics.clone());
-    let mut world = World::from_definition(loaded_world.definition)?;
-    if let Some(seed) = loaded_world.rng_seed {
-        world.set_rng_seed(seed);
-    }
-    for rule in loaded_world.item_rules {
-        world.configure_item_gameplay(rule)?;
-    }
-    for (room_id, light) in loaded_world.room_light {
-        world.configure_room_light(&room_id, light)?;
-    }
-    for (item_id, difficulty) in loaded_world.hidden_items {
-        world.configure_hidden_item(&item_id, difficulty)?;
-    }
-    for (room_id, direction, difficulty) in loaded_world.secret_exits {
-        world.configure_secret_exit(&room_id, direction, difficulty)?;
-    }
-    for npc in loaded_world.npcs {
-        world.spawn_npc(npc)?;
-    }
-    for (npc_id, difficulty) in loaded_world.hidden_npcs {
-        world.configure_hidden_npc(&npc_id, difficulty)?;
-    }
     // Exactly one branch is opened. Runtime startup never copies between or
     // writes to both persistence backends.
     let store: Arc<dyn CharacterStore> = match &database {

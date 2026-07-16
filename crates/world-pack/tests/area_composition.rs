@@ -276,7 +276,7 @@ fn nested_area_typo_is_rejected_without_changing_runtime_reader_compatibility() 
 }
 
 #[test]
-fn global_missing_references_unreachable_rooms_and_undeclared_edges_fail() {
+fn missing_references_and_undeclared_edges_fail_but_unreachable_rooms_are_diagnostic() {
     let missing = tempfile::tempdir().unwrap();
     write_json(
         &missing.path().join("a.json"),
@@ -300,10 +300,8 @@ fn global_missing_references_unreachable_rooms_and_undeclared_edges_fail() {
     );
     let manifest = unreachable.path().join("world.project.json");
     write_json(&manifest, &project(vec![("a", "a.json")]));
-    assert!(matches!(
-        compose_world_project(manifest),
-        Err(CompositionError::InvalidWorld(_))
-    ));
+    let composed = compose_world_project(manifest).unwrap();
+    assert_eq!(composed.document.world.diagnostics().len(), 1);
 
     let undeclared = tempfile::tempdir().unwrap();
     write_json(

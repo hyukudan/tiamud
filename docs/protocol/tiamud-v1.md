@@ -39,6 +39,12 @@ Authenticated endpoints require `Authorization: Bearer <token>`.
 token contains 256 random bits, only its SHA-256 digest is stored, it expires
 after 30 days and logout revokes it. Public use requires HTTPS/WSS.
 
+Argon2 work is isolated from the async request path. The default service runs
+at most two password jobs concurrently, admits no more than 256 outstanding
+jobs without creating an unbounded waiter queue, and applies a five-second work
+timeout. Saturation and timeout fail as temporary service unavailability; they
+do not fall back to weaker password handling.
+
 HTTP numeric account/character IDs are durable identity references used for
 ownership and selection. They are not world entity IDs and never authorize an
 action by themselves.
@@ -98,6 +104,24 @@ notice and closes the connection.
 Disconnect releases the live lease. Reconnect repeats the handshake and gets a
 fresh observer salt and authoritative snapshots. It does not replay commands or
 general event history.
+
+A rejected pre-welcome handshake is a sequenced error `server.notice` with one
+of these stable codes:
+
+- `access.protocol_rejected`: the first frame was not a valid authenticated
+  `client.hello`;
+- `access.session_expired` or `access.session_invalid`: discard the saved
+  credential and require sign-in;
+- `access.character_invalid`: the selected character is unavailable;
+- `access.character_connected`: another live connection owns its lease;
+- `access.session_limit`: an account/IP connection cap rejected entry;
+- `access.temporarily_unavailable`: a bounded dependency could not admit or
+  finish the request.
+
+The official browser stops automatic reconnect after any of these entry
+rejections. It clears saved credentials only for expired or invalid sessions;
+the other codes preserve an otherwise reusable login and return the player to
+character entry with a safe explanation.
 
 ## Client messages
 
@@ -161,7 +185,8 @@ ledger.
 The server responds with a coalescible, critical `sync.snapshot` containing the
 current authorized scene/player state and echoes `afterSeq`. v1 intentionally
 does not retain/replay missing events. The client discards duplicate/backwards
-sequences and suppresses stale snapshots while a sync is pending.
+sequences and suppresses stale snapshots while a sync is pending. The official
+client closes and reconnects if no sync response arrives within ten seconds.
 
 ### Heartbeat acknowledgement
 
@@ -180,7 +205,7 @@ traffic.
 | --- | --- |
 | `server.welcome` | Server name, optional MOTD and transport-session ID. |
 | `action.result` | Critical correlated accepted/rejected action result. |
-| `server.notice` | `info`, `warning` or `error` operational/protocol notice. |
+| `server.notice` | `info`, `warning` or `error` operational/protocol notice. Pre-welcome access rejections include a stable `access.*` code. |
 | `scene.snapshot` | Complete authorized scene. |
 | `player.snapshot` | Complete private player state. |
 | `scene.patch` | Typed changed scene scalars/weather/image/exits. |
@@ -198,6 +223,11 @@ State messages are coalescible; narrative is lower priority than critical
 results. When a connection cannot drain critical output within the bounded
 queue/write timeout, the server closes it explicitly. An actor/broadcast lag is
 recovered with a notice and authoritative snapshots.
+
+Before `server.welcome`, a rejected connection is reported as the typed error
+notice documented under the authenticated handshake. Codes after welcome are
+ordinary operational notices and do not retroactively reject authenticated
+entry.
 
 ## Scene state
 

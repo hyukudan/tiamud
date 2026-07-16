@@ -8,9 +8,9 @@ release dependency graphs and includes the license and notice texts shipped by
 their packages. It does not replace the terms of those licenses.
 
 - Release target: `x86_64-unknown-linux-gnu`
-- Cargo lockfile SHA-256: `1e691df6ffb35806acbbef9fe2e9aefc72780b0af1e910e3a78386e5d3aae6c7`
+- Cargo lockfile SHA-256: `9a290a50799df11815e06f573dca7f516189018d61a270d4d72984f3614416c4`
 - pnpm lockfile SHA-256: `9275125a07de8f672f32191dc79a57304d2746cfe2164afe06c200cb09df65ba`
-- Rust release dependencies: 308
+- Rust release dependencies: 307
 - Web build/runtime dependencies: 76
 
 Regenerate this file with `node scripts/generate-third-party-notices.mjs` and
@@ -231,7 +231,6 @@ file fails generation pending human review.
 | `rustix 1.1.4` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/rustix> |
 | `rustls 0.23.42` | `Apache-2.0 OR ISC OR MIT` | <https://github.com/rustls/rustls> |
 | `rustls-native-certs 0.8.4` | `Apache-2.0 OR ISC OR MIT` | <https://github.com/rustls/rustls-native-certs> |
-| `rustls-pemfile 2.2.0` | `Apache-2.0 OR ISC OR MIT` | <https://github.com/rustls/pemfile> |
 | `rustls-pki-types 1.15.0` | `MIT OR Apache-2.0` | <https://github.com/rustls/pki-types> |
 | `rustls-platform-verifier 0.7.0` | `MIT OR Apache-2.0` | <https://github.com/rustls/rustls-platform-verifier> |
 | `rustls-webpki 0.103.13` | `ISC` | <https://github.com/rustls/webpki> |
@@ -7507,7 +7506,6 @@ Applies to:
 
 - Rust `hyper-rustls@0.27.9`
 - Rust `rustls-native-certs@0.8.4`
-- Rust `rustls-pemfile@2.2.0`
 - Rust `rustls@0.23.42`
 
 Source filename(s): `LICENSE-MIT`
@@ -8489,7 +8487,6 @@ Applies to:
 
 - Rust `hyper-rustls@0.27.9`
 - Rust `rustls-native-certs@0.8.4`
-- Rust `rustls-pemfile@2.2.0`
 - Rust `rustls@0.23.42`
 
 Source filename(s): `LICENSE-ISC`
@@ -8816,7 +8813,6 @@ Applies to:
 - Rust `ring@0.17.14`
 - Rust `rustix@1.1.4`
 - Rust `rustls-native-certs@0.8.4`
-- Rust `rustls-pemfile@2.2.0`
 - Rust `rustls@0.23.42`
 - Rust `scopeguard@1.2.0`
 - Rust `signal-hook-registry@1.4.8`
@@ -18001,24 +17997,6 @@ Source filename(s): `LICENSE`
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
-
-### `sha256:e1da6bc3092fe4be62352c00a7692cbc30bab30d9a89e8d6349b945b06904009`
-
-Applies to:
-
-- Rust `rustls-pemfile@2.2.0`
-
-Source filename(s): `LICENSE`
-
-    rustls-pemfile is distributed under the following three licenses:
-
-    - Apache License version 2.0.
-    - MIT license.
-    - ISC license.
-
-    These are included as LICENSE-APACHE, LICENSE-MIT and LICENSE-ISC
-    respectively.  You may use this software under the terms of any
-    of these licenses, at your option.
 
 ### `sha256:e20fa2b8e0a2565f24a792b94b4bf4b6c2b9d36f781d8a9516e218a036e6677a`
 

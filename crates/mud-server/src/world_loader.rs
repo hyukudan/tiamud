@@ -10,8 +10,8 @@ use thiserror::Error;
 use tiamud_core::{
     ActiveEffect, Direction as CoreDirection, EffectKind as CoreEffectKind,
     EquipmentSlot as CoreEquipmentSlot, ExitDefinition, ItemDefinition, ItemGameplayDefinition,
-    LightLevel as CoreLightLevel, NpcDefinition, RoomDefinition, SceneAudio, SceneImage,
-    WorldDefinition,
+    LightLevel as CoreLightLevel, NpcDefinition, RoomDefinition, SceneAudio, SceneImage, World,
+    WorldBuildError, WorldDefinition, WorldError,
 };
 use world_pack::{
     AudioCue, Direction as PackDirection, EffectKind as PackEffectKind,
@@ -38,6 +38,51 @@ pub struct LoadedWorldDefinition {
     pub hidden_npcs: Vec<(String, u16)>,
     pub secret_exits: Vec<(String, CoreDirection, u16)>,
     pub runtime_content: RuntimeContent,
+}
+
+#[derive(Debug, Error)]
+pub enum WorldInitializationError {
+    #[error(transparent)]
+    Build(#[from] WorldBuildError),
+    #[error(transparent)]
+    Configure(#[from] WorldError),
+}
+
+/// Applies the complete authored startup contract to the runtime world. NPC
+/// loot is explicitly staged outside all rooms, then transferred to its spawn
+/// owner; it is never briefly visible as duplicate room content.
+pub fn build_loaded_world(
+    loaded: &LoadedWorldDefinition,
+) -> Result<World, WorldInitializationError> {
+    let staged_loot = loaded
+        .npcs
+        .iter()
+        .flat_map(|npc| npc.loot_item_ids.iter().cloned())
+        .collect();
+    let mut world =
+        World::from_definition_with_staged_items(loaded.definition.clone(), staged_loot)?;
+    if let Some(seed) = loaded.rng_seed {
+        world.set_rng_seed(seed);
+    }
+    for rule in &loaded.item_rules {
+        world.configure_item_gameplay(rule.clone())?;
+    }
+    for (room_id, light) in &loaded.room_light {
+        world.configure_room_light(room_id, *light)?;
+    }
+    for (item_id, difficulty) in &loaded.hidden_items {
+        world.configure_hidden_item(item_id, *difficulty)?;
+    }
+    for (room_id, direction, difficulty) in &loaded.secret_exits {
+        world.configure_secret_exit(room_id, *direction, *difficulty)?;
+    }
+    for npc in &loaded.npcs {
+        world.spawn_npc(npc.clone())?;
+    }
+    for (npc_id, difficulty) in &loaded.hidden_npcs {
+        world.configure_hidden_npc(npc_id, *difficulty)?;
+    }
+    Ok(world)
 }
 
 pub fn default_loaded_world() -> Result<LoadedWorldDefinition, WorldLoadError> {
@@ -477,6 +522,30 @@ mod tests {
         assert_eq!(
             loaded.secret_exits,
             [("demo:lantern-square".into(), CoreDirection::Down, 8)]
+        );
+    }
+
+    #[test]
+    fn reviewed_pack_builds_and_assigns_loot_to_its_npc_without_room_placement() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worlds/lantern-square.world.json");
+        let loaded = load_loaded_world(path).unwrap();
+        assert!(
+            loaded
+                .definition
+                .rooms
+                .iter()
+                .all(|room| !room.item_ids.iter().any(|item| item == "tiamud:wolf-clasp"))
+        );
+
+        let world = build_loaded_world(&loaded).unwrap();
+        let snapshot = world.runtime_snapshot();
+        assert!(snapshot.npcs.contains_key("tiamud:gate-stalker-1"));
+        assert_eq!(
+            snapshot.item_locations.get("tiamud:wolf-clasp"),
+            Some(&tiamud_core::RuntimeItemLocation::HeldByNpc {
+                npc_id: "tiamud:gate-stalker-1".into(),
+            })
         );
     }
 

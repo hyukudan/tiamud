@@ -72,7 +72,7 @@
       "id": "demo:north-gate",
       "title": "The North Gate",
       "description": "An iron-bound gate stands open between squat stone towers. The road continues into fields silvered by rain.",
-      "items": ["tiamud:road-token", "tiamud:wolf-clasp"],
+      "items": ["tiamud:road-token"],
       "exits": [
         {
           "direction": "south",

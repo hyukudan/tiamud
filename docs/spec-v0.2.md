@@ -458,6 +458,8 @@ Reglas:
 - Latido de conexión y tiempo de espera.
 - Validación mediante esquema y tipos del servidor.
 - Autorización de cada acción.
+- Los rechazos previos a `server.welcome` llevan un código `access.*`; solo
+  `access.session_expired` y `access.session_invalid` invalidan la credencial.
 
 Los botones envían acciones estructuradas:
 

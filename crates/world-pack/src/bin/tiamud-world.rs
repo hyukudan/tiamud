@@ -23,7 +23,7 @@ use tiamud_editorial_ai::{
 };
 use world_pack::{
     CompositionError, ConditionContext, DocumentToolError, PreviewFormat, TimePeriod, Weather,
-    WorldPackDocument, compose_world_project,
+    WorldPack, WorldPackDiagnostic, WorldPackDocument, compose_world_project,
 };
 
 const MAX_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
@@ -406,6 +406,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                     path: project.clone(),
                     source: Box::new(source),
                 })?;
+            report_world_diagnostics(&composed.document.world);
             write_artifact_atomically(&output, &composed.artifact)?;
             println!(
                 "composed {} area(s) into canonical WorldPack {:?} at {:?} ({} bytes, sha256:{}, {} cross-area reference(s))",
@@ -421,6 +422,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             let document = load_document(&input)?;
             validate_document(&input, &document)?;
             validate_document_assets(&input, &document)?;
+            report_world_diagnostics(&document.world);
             println!(
                 "valid WorldPack {:?}: {} rooms, {} items, {} scene variant set(s), {} content test(s)",
                 document.world.id,
@@ -437,6 +439,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         } => {
             let document = load_document(&input)?;
             validate_document_assets(&input, &document)?;
+            report_world_diagnostics(&document.world);
             let artifact =
                 document
                     .deterministic_artifact()
@@ -518,6 +521,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Publish { input, registry } => {
             let document = load_document(&input)?;
             validate_document_assets(&input, &document)?;
+            report_world_diagnostics(&document.world);
             let artifact =
                 document
                     .deterministic_artifact()
@@ -566,6 +570,19 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::AiReview(arguments) => run_ai_review(arguments)?,
     }
     Ok(())
+}
+
+fn report_world_diagnostics(world: &WorldPack) {
+    for diagnostic in world.diagnostics() {
+        match diagnostic {
+            WorldPackDiagnostic::DirectedUnreachableRoom {
+                room_id,
+                start_room_id,
+            } => eprintln!(
+                "warning: room {room_id:?} is not reachable through directed exits from start room {start_room_id:?}; review scripted, portal, admin, or cross-area access"
+            ),
+        }
+    }
 }
 
 #[cfg(feature = "editorial-ai")]
@@ -1076,6 +1093,7 @@ fn write_artifact_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> 
                 }
             }
         })?;
+        sync_directory(parent)?;
         Ok(())
     })();
     let _ = fs::remove_file(&temporary_path);
@@ -1100,23 +1118,23 @@ fn active_pointer_path(registry: &Path, world_id: &str) -> PathBuf {
 }
 
 fn write_immutable_artifact(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    if path.exists() {
-        let existing = fs::read(path).map_err(|source| CliError::Read {
-            path: path.to_owned(),
-            source,
-        })?;
-        return if existing == bytes {
-            Ok(())
-        } else {
-            Err(CliError::PublishedDigestMismatch)
-        };
-    }
     let parent = path.parent().expect("publication path has a parent");
-    fs::create_dir_all(parent).map_err(|source| CliError::Write {
-        path: parent.to_owned(),
-        source,
-    })?;
-    write_artifact(path, bytes, false)
+    create_dir_all_durable(parent)?;
+    match write_artifact_atomically(path, bytes) {
+        Ok(()) => Ok(()),
+        Err(CliError::OutputExists(_)) => {
+            let existing = fs::read(path).map_err(|source| CliError::Read {
+                path: path.to_owned(),
+                source,
+            })?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err(CliError::PublishedDigestMismatch)
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn activate_publication(
@@ -1128,10 +1146,7 @@ fn activate_publication(
     validate_digest(digest)?;
     let pointer_path = active_pointer_path(registry, world_id);
     let parent = pointer_path.parent().expect("active pointer has a parent");
-    fs::create_dir_all(parent).map_err(|source| CliError::Write {
-        path: parent.to_owned(),
-        source,
-    })?;
+    create_dir_all_durable(parent)?;
     let relative = artifact_path
         .strip_prefix(registry)
         .map_err(|_| CliError::WrongPublishedWorld(world_id.to_owned()))?;
@@ -1146,17 +1161,91 @@ fn activate_publication(
         source: DocumentToolError::Json(source),
     })?;
     bytes.push(b'\n');
-    let temporary = parent.join(format!(
-        ".{}.{}.part",
-        pointer_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("active"),
-        std::process::id()
-    ));
-    write_artifact(&temporary, &bytes, false)?;
-    fs::rename(&temporary, &pointer_path).map_err(|source| CliError::Write {
-        path: pointer_path,
+    let file_name = pointer_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("active");
+    let (temporary, mut file) = reserve_temporary(parent, file_name)?;
+    let result = (|| {
+        file.write_all(&bytes).map_err(|source| CliError::Write {
+            path: temporary.clone(),
+            source,
+        })?;
+        file.sync_all().map_err(|source| CliError::Write {
+            path: temporary.clone(),
+            source,
+        })?;
+        drop(file);
+        fs::rename(&temporary, &pointer_path).map_err(|source| CliError::Write {
+            path: pointer_path.clone(),
+            source,
+        })?;
+        sync_directory(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn reserve_temporary(parent: &Path, file_name: &str) -> Result<(PathBuf, fs::File), CliError> {
+    for nonce in 0..128_u16 {
+        let candidate = parent.join(format!(
+            ".{file_name}.{}.{}.part",
+            std::process::id(),
+            nonce
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        match options.open(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(CliError::Write {
+                    path: candidate,
+                    source,
+                });
+            }
+        }
+    }
+    Err(CliError::Write {
+        path: parent.join(file_name),
+        source: std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not reserve a unique temporary path",
+        ),
+    })
+}
+
+fn create_dir_all_durable(path: &Path) -> Result<(), CliError> {
+    let missing = path
+        .ancestors()
+        .take_while(|candidate| !candidate.exists())
+        .map(Path::to_owned)
+        .collect::<Vec<_>>();
+    fs::create_dir_all(path).map_err(|source| CliError::Write {
+        path: path.to_owned(),
+        source,
+    })?;
+    for directory in missing.iter().rev() {
+        if let Some(parent) = directory.parent() {
+            sync_directory(parent)?;
+        }
+        sync_directory(directory)?;
+    }
+    if missing.is_empty() {
+        sync_directory(path)?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), CliError> {
+    let directory = fs::File::open(path).map_err(|source| CliError::Write {
+        path: path.to_owned(),
+        source,
+    })?;
+    directory.sync_all().map_err(|source| CliError::Write {
+        path: path.to_owned(),
         source,
     })
 }
@@ -1348,6 +1437,14 @@ mod tests {
             .unwrap();
         let first_digest = sha256_hex(&first_artifact);
 
+        let pointer_path = active_pointer_path(&registry, "demo");
+        let pointer_name = pointer_path.file_name().unwrap().to_string_lossy();
+        let stale_pointer = pointer_path
+            .parent()
+            .unwrap()
+            .join(format!(".{pointer_name}.{}.0.part", std::process::id()));
+        fs::write(&stale_pointer, b"orphaned previous attempt").unwrap();
+
         fs::write(&input, document("Second")).unwrap();
         run(Cli {
             command: Command::Publish {
@@ -1356,6 +1453,7 @@ mod tests {
             },
         })
         .unwrap();
+        assert!(stale_pointer.exists());
         let first_path = publication_path(&registry, "demo", &first_digest);
         assert_eq!(fs::read(&first_path).unwrap(), first_artifact);
 
@@ -1377,6 +1475,31 @@ mod tests {
                 .strip_prefix(&registry)
                 .unwrap()
                 .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn immutable_publication_never_overwrites_divergent_existing_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("packs/example");
+        create_dir_all_durable(&parent).unwrap();
+        let retry_path = parent.join("retry.world.json");
+        let stale = parent.join(format!(".retry.world.json.{}.0.part", std::process::id()));
+        fs::write(&stale, b"orphaned partial bytes").unwrap();
+        write_immutable_artifact(&retry_path, b"complete reviewed bytes").unwrap();
+        assert_eq!(fs::read(&retry_path).unwrap(), b"complete reviewed bytes");
+        assert!(stale.exists());
+
+        let divergent_path = parent.join("digest.world.json");
+        fs::write(&divergent_path, b"existing divergent bytes").unwrap();
+
+        assert!(matches!(
+            write_immutable_artifact(&divergent_path, b"new reviewed bytes"),
+            Err(CliError::PublishedDigestMismatch)
+        ));
+        assert_eq!(
+            fs::read(divergent_path).unwrap(),
+            b"existing divergent bytes"
         );
     }
 

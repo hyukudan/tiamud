@@ -93,7 +93,7 @@ export function verifySoakAcceptance(report) {
   requireValue(errors, report?.target?.mode === 'temporary-server', 'target must be a temporary server');
   requireValue(errors, validFileEvidence(report?.target?.binary), 'target binary evidence is missing');
   verifyTargetConfiguration(errors, report?.target?.configuration, report?.profile?.users);
-  for (const name of ['soak', 'evidence', 'load', 'bot']) {
+  for (const name of ['soak', 'evidence', 'load', 'bot', 'telnetBot']) {
     requireValue(
       errors,
       validFileEvidence(report?.evidence?.harness?.[name]),
@@ -144,6 +144,13 @@ function verifyProfile(errors, profile) {
     errors,
     Number.isSafeInteger(profile?.users) && profile.users >= 16,
     'profile.users must be at least 16',
+  );
+  requireValue(
+    errors,
+    Number.isSafeInteger(profile?.telnetUsers) &&
+      profile.telnetUsers >= 1 &&
+      profile.telnetUsers <= profile?.users,
+    'profile.telnetUsers must be between 1 and profile.users',
   );
   requireValue(
     errors,
@@ -232,6 +239,16 @@ function verifyLoad(errors, load, profile, evidenceElapsedMs) {
   }
   requireValue(
     errors,
+    load?.telnetUsers === profile?.telnetUsers,
+    'load.telnetUsers must match profile.telnetUsers',
+  );
+  requireValue(
+    errors,
+    load?.websocketUsers === profile?.users - profile?.telnetUsers,
+    'load.websocketUsers must equal profile.users minus profile.telnetUsers',
+  );
+  requireValue(
+    errors,
     isRecord(load?.requested) && load.requested.durationMs === profile?.durationMs,
     'load.requested.durationMs must match profile.durationMs',
   );
@@ -252,10 +269,42 @@ function verifyLoad(errors, load, profile, evidenceElapsedMs) {
     Number.isSafeInteger(load?.completed?.rounds) && load.completed.rounds > 0,
     'load.completed.rounds must be a positive integer',
   );
+  verifyTransportLoad(errors, load?.transports?.telnet, profile?.telnetUsers, 'telnet');
+  verifyTransportLoad(
+    errors,
+    load?.transports?.websocket,
+    profile?.users - profile?.telnetUsers,
+    'websocket',
+  );
   requireValue(
     errors,
     Array.isArray(load?.errors) && load.errors.length === 0,
     'load harness errors must be empty',
+  );
+}
+
+function verifyTransportLoad(errors, transport, users, name) {
+  requireValue(errors, isRecord(transport), `load.transports.${name} must be present`);
+  requireValue(
+    errors,
+    transport?.users === users,
+    `load.transports.${name}.users must match the configured transport mix`,
+  );
+  requireValue(
+    errors,
+    transport?.bootstraps === users,
+    `load.transports.${name}.bootstraps must equal its user count`,
+  );
+  requireValue(
+    errors,
+    Number.isSafeInteger(transport?.rounds) &&
+      (users === 0 ? transport.rounds === 0 : transport.rounds > 0),
+    `load.transports.${name}.rounds must match whether the transport has users`,
+  );
+  requireValue(
+    errors,
+    Array.isArray(transport?.errors) && transport.errors.length === 0,
+    `load.transports.${name}.errors must be empty`,
   );
 }
 
@@ -461,7 +510,7 @@ export function verifySoakEvidenceAgainstCheckout(report, checkout) {
     sameCandidateEvidence(report?.evidence?.candidate, checkout?.candidate),
     'recorded candidate evidence must match the current checkout',
   );
-  for (const name of ['soak', 'evidence', 'load', 'bot']) {
+  for (const name of ['soak', 'evidence', 'load', 'bot', 'telnetBot']) {
     requireValue(
       errors,
       sameFileEvidence(report?.evidence?.harness?.[name], checkout?.harness?.[name]),
@@ -532,6 +581,7 @@ async function main() {
         evidence: await fileEvidence(path.join(root, 'scripts', 'soak-evidence.mjs')),
         load: await fileEvidence(path.join(root, 'scripts', 'load.mjs')),
         bot: await fileEvidence(path.join(root, 'scripts', 'bot.mjs')),
+        telnetBot: await fileEvidence(path.join(root, 'scripts', 'telnet-bot.mjs')),
       },
       binary: await fileEvidence(binaryPath),
     };

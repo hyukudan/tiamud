@@ -29,20 +29,23 @@ requirements.
   same transport-neutral actions. Observer-specific perception is applied
   before either protocol receives a scene or event.
 - **A modern browser experience.** Responsive Svelte UI, typed reconnect and
-  snapshot recovery, command history, map, accessible panels, persistent
-  media/motion/contrast preferences and a bounded Service Worker.
+  snapshot recovery, typed access rejection, a 500-entry anchored scrollback,
+  command history, map, accessible panels, persistent media/motion/contrast
+  preferences and a bounded Service Worker.
 - **A capable terminal experience.** Fragment-safe Telnet negotiation, ANSI,
   GMCP, MSSP, MCCP2, optional safe links, direct TLS, and opt-in graphical
-  capabilities; official TinTin++ and Mudlet integrations are included.
+  capabilities; official TinTin++ and Mudlet integrations are included. The
+  production byte parser is shared with its bounded fuzz target.
 - **Authored worlds with guardrails.** Versioned WorldPacks, deterministic
-  build/diff/preview/test/publish/rollback tools, bounded Lua hooks, immutable
-  assets and explicit provenance. Editorial AI is optional, authoring-only and
-  never part of the game loop; explicitly configured remote compatible
-  providers may use HTTPS.
+  build/diff/preview/test/publish/rollback tools, compile-validated and
+  aggregate-bounded Lua hooks, immutable assets and explicit provenance.
+  Editorial AI is optional, authoring-only and never part of the game loop;
+  explicitly configured remote compatible providers may use HTTPS.
 - **Operator-facing safety.** Argon2id credentials, revocable sessions,
-  authorization and rate limits, bounded queues, health and Prometheus
-  endpoints, graceful shutdown, verified SQLite backup/restore, an explicit
-  PostgreSQL mover and reproducible release tooling.
+  a bounded password-work service, authorization and rate limits, bounded
+  queues, health and Prometheus endpoints, graceful shutdown, schema-v8 event
+  watermarks/compaction, verified SQLite backup/restore, an explicit PostgreSQL
+  mover and reproducible release tooling.
 
 ### One authoritative action path
 
@@ -208,6 +211,11 @@ cargo run -p world-pack --bin tiamud-world -- preview \
 cargo run -p envy-import -- audit path/to/area.are
 ```
 
+The importer preserves ROM-style alphabetic flag bitvectors verbatim rather
+than guessing their numeric meaning. Directed-unreachable rooms are retained
+with review diagnostics because one-way travel, portals and scripts cannot be
+inferred safely from static exits alone.
+
 Detailed workflows:
 
 - [World authoring and runtime decisions](docs/decisions/0002-runtime-world-and-durable-identity.md)
@@ -255,7 +263,10 @@ Composition is deterministic, atomic and implemented today. Its report records
 the ownership of every structured record, declared dependencies, cross-area
 references, exact source SHA-256 values, and canonical manifest and artifact
 digests. Each area file, all area sources together and the composed artifact
-are independently capped at 16 MiB.
+are independently capped at 16 MiB. Validation compiles every Lua module,
+checks each declared hook and rejects room/hook batches above eight modules.
+NPC loot is allocated exactly once and staged outside room projection until its
+initial NPC spawn takes ownership.
 
 The current server still loads exactly one complete WorldPack at startup; it
 does not compose, hot-load or evict areas while running. A resident catalog,
@@ -283,9 +294,10 @@ node --test scripts/verify-soak-report.test.mjs
 cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p tiamud-telnet-codec --locked
 
 node scripts/smoke.mjs
-node scripts/load.mjs --users 2 --rounds 2 --concurrency 2 --pace-ms 100
+node scripts/load.mjs --users 2 --telnet-users 1 --rounds 2 --concurrency 2 --pace-ms 100
 ```
 
 The Playwright install step fetches Chromium, Firefox and WebKit plus the native
@@ -293,7 +305,10 @@ dependencies required before `e2e`. PostgreSQL integration tests are
 intentionally opt-in and require a disposable external database. See the
 [completion matrix](docs/project/COMPLETION_MATRIX.md) for requirement-by-
 requirement evidence and [soak-testing.md](docs/operations/soak-testing.md)
-before interpreting short load tests as long-duration acceptance.
+before interpreting short load tests as long-duration acceptance. The
+weekly/manual Telnet fuzz workflow is configured to run a bounded campaign
+against the same parser used by the server; the existence of that workflow is
+not evidence that a particular campaign completed.
 
 ## Project status and limits
 
@@ -302,7 +317,7 @@ Tiamud is the definitive product name. The current packages are versioned
 historical [v0.2 specification](docs/spec-v0.2.md).
 
 The engine, default world, browser and Telnet paths, SQLite and PostgreSQL
-adapters, tooling and automated browser matrix are implemented with focused
+adapters, tooling and automated browser harnesses are implemented with focused
 coverage. Acceptance criterion 19 remains open until a successful 24-hour
 candidate report is retained and passes the deterministic verifier. A running
 soak, a shorter profile or an unverified JSON file is not acceptance.

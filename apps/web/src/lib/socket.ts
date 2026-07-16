@@ -14,11 +14,13 @@ export interface ConnectionCallbacks {
   onMessage(message: ServerMessage): void;
   onStateChange(state: ConnectionState): void;
   onProtocolError?(): void;
+  onAccessRejected?(message: string, clearCredentials: boolean): void;
 }
 
 export interface ConnectionAuth {
   token: string;
   characterId: number;
+  expiresAt?: number;
 }
 
 export interface BrowserCapabilities {
@@ -30,7 +32,9 @@ export interface BrowserCapabilities {
 type LocationLike = Pick<Location, 'protocol' | 'host'>;
 
 export const SERVER_SILENCE_TIMEOUT_MS = 45_000;
+export const SYNC_RESPONSE_TIMEOUT_MS = 10_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
+const MAX_TIMER_DELAY_MS = 2_147_000_000;
 
 export function websocketUrl(location: LocationLike): string {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -41,15 +45,20 @@ export class TiamudConnection {
   readonly #callbacks: ConnectionCallbacks;
   readonly #url: string;
   readonly #auth: ConnectionAuth;
-  readonly #capabilities?: BrowserCapabilities;
+  #capabilities?: BrowserCapabilities;
   #socket?: WebSocket;
   #reconnectTimer?: ReturnType<typeof setTimeout>;
   #reconnectAttempts = 0;
   #closedByClient = false;
   #lastSequence?: number;
   #syncPending = false;
+  #syncTimer?: ReturnType<typeof setTimeout>;
   #lastServerActivity = 0;
   #watchdogTimer?: ReturnType<typeof setInterval>;
+  #authExpiryTimer?: ReturnType<typeof setTimeout>;
+  #welcomed = false;
+  #accessRejected = false;
+  #reconnectImmediately = false;
 
   constructor(
     url: string,
@@ -64,6 +73,9 @@ export class TiamudConnection {
   }
 
   connect(): void {
+    if (this.#accessRejected) {
+      return;
+    }
     if (this.#socket?.readyState === WebSocket.OPEN || this.#socket?.readyState === WebSocket.CONNECTING) {
       return;
     }
@@ -75,10 +87,17 @@ export class TiamudConnection {
     this.#socket = socket;
 
     socket.addEventListener('open', () => {
+      if (this.#socket !== socket) return;
       this.#reconnectAttempts = 0;
       this.#lastSequence = undefined;
-      this.#syncPending = false;
+      this.#clearSyncWait();
+      this.#welcomed = false;
       this.#lastServerActivity = Date.now();
+      if (this.#authHasExpired()) {
+        this.#rejectAccess('Your session has expired. Sign in again.', socket, true);
+        return;
+      }
+      this.#scheduleAuthExpiry(socket);
       this.#startWatchdog(socket);
       this.#callbacks.onStateChange('connected');
       const reducedMotion = this.#capabilities?.reducedMotion ??
@@ -92,6 +111,7 @@ export class TiamudConnection {
     });
 
     socket.addEventListener('message', (event: MessageEvent<unknown>) => {
+      if (this.#socket !== socket) return;
       if (typeof event.data !== 'string') {
         this.#callbacks.onProtocolError?.();
         return;
@@ -106,6 +126,23 @@ export class TiamudConnection {
           }
           return;
         }
+        if (message.type === 'server.welcome') {
+          this.#welcomed = true;
+        } else if (
+          !this.#welcomed &&
+          message.type === 'server.notice' &&
+          message.seq === 1 &&
+          message.data.level === 'error' &&
+          message.data.code?.startsWith('access.')
+        ) {
+          this.#rejectAccess(
+            message.data.message,
+            socket,
+            message.data.code === 'access.session_expired' ||
+              message.data.code === 'access.session_invalid',
+          );
+          return;
+        }
         this.#handleSequenced(message, socket);
       } else {
         this.#callbacks.onProtocolError?.();
@@ -113,15 +150,42 @@ export class TiamudConnection {
     });
 
     socket.addEventListener('close', () => {
-      this.#stopWatchdog();
-      if (this.#socket === socket) {
-        this.#socket = undefined;
-      }
+      if (this.#socket !== socket) return;
+      this.#stopConnectionTimers();
+      this.#socket = undefined;
       this.#callbacks.onStateChange('disconnected');
-      if (!this.#closedByClient) {
+      if (this.#closedByClient || this.#accessRejected) return;
+      if (this.#reconnectImmediately) {
+        this.#reconnectImmediately = false;
+        this.connect();
+      } else {
         this.#scheduleReconnect();
       }
     });
+  }
+
+  updateCapabilities(capabilities: BrowserCapabilities): boolean {
+    if (sameCapabilities(this.#capabilities, capabilities)) {
+      return false;
+    }
+    this.#capabilities = { ...capabilities };
+    if (this.#closedByClient || this.#accessRejected) {
+      return true;
+    }
+
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+    }
+    this.#reconnectImmediately = true;
+    const socket = this.#socket;
+    if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
+      socket.close(4001, 'Client capabilities changed');
+    } else if (!socket) {
+      this.#reconnectImmediately = false;
+      this.connect();
+    }
+    return true;
   }
 
   submit(command: string, requestId: string): boolean {
@@ -144,11 +208,12 @@ export class TiamudConnection {
 
   close(): void {
     this.#closedByClient = true;
+    this.#reconnectImmediately = false;
     if (this.#reconnectTimer) {
       clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = undefined;
     }
-    this.#stopWatchdog();
+    this.#stopConnectionTimers();
     this.#socket?.close(1000, 'Client closed');
     this.#socket = undefined;
   }
@@ -171,7 +236,7 @@ export class TiamudConnection {
         return;
       }
       this.#lastSequence = sequence;
-      this.#syncPending = false;
+      this.#clearSyncWait();
       this.#callbacks.onMessage(message);
       return;
     }
@@ -210,6 +275,11 @@ export class TiamudConnection {
     }
     this.#syncPending = true;
     socket.send(JSON.stringify(createSyncRequest(afterSeq)));
+    this.#syncTimer = setTimeout(() => {
+      if (this.#socket === socket && this.#syncPending && socket.readyState === WebSocket.OPEN) {
+        socket.close(4002, 'State synchronization timeout');
+      }
+    }, SYNC_RESPONSE_TIMEOUT_MS);
   }
 
   #startWatchdog(socket: WebSocket): void {
@@ -231,4 +301,77 @@ export class TiamudConnection {
       this.#watchdogTimer = undefined;
     }
   }
+
+  #clearSyncWait(): void {
+    this.#syncPending = false;
+    if (this.#syncTimer) {
+      clearTimeout(this.#syncTimer);
+      this.#syncTimer = undefined;
+    }
+  }
+
+  #stopConnectionTimers(): void {
+    this.#stopWatchdog();
+    this.#clearSyncWait();
+    if (this.#authExpiryTimer) {
+      clearTimeout(this.#authExpiryTimer);
+      this.#authExpiryTimer = undefined;
+    }
+  }
+
+  #authExpiryMs(): number | undefined {
+    const expiresAt = this.#auth.expiresAt;
+    if (expiresAt === undefined || !Number.isFinite(expiresAt)) return undefined;
+    return expiresAt > 10_000_000_000 ? expiresAt : expiresAt * 1000;
+  }
+
+  #authHasExpired(): boolean {
+    const expiry = this.#authExpiryMs();
+    return expiry !== undefined && Date.now() >= expiry;
+  }
+
+  #scheduleAuthExpiry(socket: WebSocket): void {
+    if (this.#authExpiryTimer) clearTimeout(this.#authExpiryTimer);
+    const expiry = this.#authExpiryMs();
+    if (expiry === undefined) return;
+    const remaining = expiry - Date.now();
+    if (remaining <= 0) {
+      this.#rejectAccess('Your session has expired. Sign in again.', socket, true);
+      return;
+    }
+    this.#authExpiryTimer = setTimeout(() => {
+      this.#authExpiryTimer = undefined;
+      if (this.#socket !== socket) return;
+      if (this.#authHasExpired()) {
+        this.#rejectAccess('Your session has expired. Sign in again.', socket, true);
+      } else {
+        this.#scheduleAuthExpiry(socket);
+      }
+    }, Math.min(remaining, MAX_TIMER_DELAY_MS));
+  }
+
+  #rejectAccess(message: string, socket: WebSocket, clearCredentials: boolean): void {
+    if (this.#accessRejected) return;
+    this.#accessRejected = true;
+    this.#closedByClient = true;
+    this.#reconnectImmediately = false;
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+    }
+    this.#stopConnectionTimers();
+    this.#callbacks.onAccessRejected?.(message, clearCredentials);
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+      socket.close(4003, 'Access rejected');
+    }
+  }
+}
+
+function sameCapabilities(
+  left: BrowserCapabilities | undefined,
+  right: BrowserCapabilities,
+): boolean {
+  return left?.images === right.images &&
+    left.reducedMotion === right.reducedMotion &&
+    left.audio === right.audio;
 }
