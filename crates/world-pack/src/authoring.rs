@@ -1434,6 +1434,15 @@ fn normalize_v4_items(value: &mut serde_json::Value) -> Result<(), String> {
         {
             return Err("WorldPack v4 item prototypes must use stackPolicy unique".to_owned());
         }
+        if prototype
+            .get("transferPolicy")
+            .and_then(serde_json::Value::as_str)
+            != Some("transferable")
+        {
+            return Err(
+                "WorldPack v4 item prototypes must use transferPolicy transferable".to_owned(),
+            );
+        }
         prototype.insert("maxStackUnits".to_owned(), serde_json::json!(1));
     }
     let instances = root
@@ -3215,6 +3224,14 @@ mod tests {
                 Err(DocumentToolError::LegacyItems(_))
             ));
 
+            let mut smuggled_policy = legacy.clone();
+            smuggled_policy["schemaVersion"] = serde_json::json!(schema_version);
+            smuggled_policy["items"][0]["transferPolicy"] = serde_json::json!("character_bound");
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&smuggled_policy).unwrap()),
+                Err(DocumentToolError::LegacyItems(_))
+            ));
+
             let mut smuggled_rule = legacy.clone();
             smuggled_rule["schemaVersion"] = serde_json::json!(schema_version);
             smuggled_rule["gameplay"]["itemRules"][0]["container"] =
@@ -3361,6 +3378,16 @@ mod tests {
             assert!(matches!(
                 WorldPackDocument::from_json(&serde_json::to_vec(&smuggled).unwrap()),
                 Err(DocumentToolError::LegacyItems(_))
+            ));
+        }
+
+        for transfer_policy in ["character_bound", "non_transferable"] {
+            let mut smuggled = legacy.clone();
+            smuggled["itemPrototypes"][0]["transferPolicy"] = serde_json::json!(transfer_policy);
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&smuggled).unwrap()),
+                Err(DocumentToolError::LegacyItems(error))
+                    if error.contains("must use transferPolicy transferable")
             ));
         }
 

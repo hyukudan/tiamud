@@ -200,6 +200,8 @@ struct ActionPerformData {
     #[serde(default)]
     target: Option<String>,
     #[serde(default)]
+    recipient: Option<String>,
+    #[serde(default)]
     container: Option<String>,
     #[serde(default)]
     quantity: Option<u16>,
@@ -2025,6 +2027,11 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         || target.len() > MAX_ACTION_TARGET_BYTES
                         || target.chars().any(char::is_control)
                 })
+                || data.recipient.as_deref().is_some_and(|recipient| {
+                    recipient.is_empty()
+                        || recipient.len() > MAX_SOCIAL_TARGET_BYTES
+                        || recipient.chars().any(char::is_control)
+                })
                 || data.container.as_deref().is_some_and(|container| {
                     container.is_empty()
                         || container.len() > MAX_ACTION_TARGET_BYTES
@@ -2064,6 +2071,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         &data.graph_id,
                         &data.node_id,
                         &data.target,
+                        &data.recipient,
                         &data.container,
                         data.quantity,
                         data.page,
@@ -2163,11 +2171,14 @@ fn valid_definition_id(value: &str, maximum: usize) -> bool {
 
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
+    if action != "item.give" && data.recipient.is_some() {
+        return Err(format!("Action {action:?} has unexpected fields."));
+    }
     let has_item_fields =
         data.container.is_some() || data.quantity.is_some() || data.page.is_some();
     if !matches!(
         action,
-        "item.take" | "item.drop" | "item.put" | "item.get" | "item.contents"
+        "item.take" | "item.drop" | "item.put" | "item.get" | "item.contents" | "item.give"
     ) && has_item_fields
     {
         return Err(format!("Action {action:?} has unexpected fields."));
@@ -2201,6 +2212,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             && data.graph_id.is_none()
             && data.node_id.is_none()
             && data.container.is_none()
+            && data.recipient.is_none()
             && data.quantity.is_none()
             && data.page.is_none()
             && data.message.is_none()
@@ -2233,6 +2245,26 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         required_target()
     };
     let no_item_extras = || {
+        (data.ability_id.is_none()
+            && data.class_id.is_none()
+            && data.graph_id.is_none()
+            && data.node_id.is_none()
+            && data.recipient.is_none()
+            && data.message.is_none()
+            && data.channel.is_none()
+            && data.duration_seconds.is_none()
+            && data.reason.is_none()
+            && data.role.is_none()
+            && data.report_id.is_none()
+            && data.resolution.is_none()
+            && matches!(data.profile, NullableField::Missing)
+            && matches!(data.lore_title, NullableField::Missing)
+            && data.capability.is_none()
+            && data.enabled.is_none())
+        .then_some(())
+        .ok_or_else(|| format!("Action {action:?} has unexpected fields."))
+    };
+    let no_give_extras = || {
         (data.ability_id.is_none()
             && data.class_id.is_none()
             && data.graph_id.is_none()
@@ -2322,6 +2354,27 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 return Err(format!("Action {action:?} has unexpected fields."));
             }
             item_selection().map(PlayerAction::Drop)
+        }
+        "item.give" => {
+            if data.container.is_some() || data.page.is_some() {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            no_give_extras()?;
+            let recipient = data
+                .recipient
+                .clone()
+                .ok_or_else(|| format!("Action {action:?} requires recipient."))?;
+            if recipient.len() > MAX_SOCIAL_TARGET_BYTES {
+                return Err("Give recipient is too long.".to_owned());
+            }
+            let selection = ItemSelection {
+                query: required_target()?,
+                quantity: data.quantity.unwrap_or(1),
+            };
+            Ok(PlayerAction::Give {
+                selection,
+                recipient,
+            })
         }
         "item.put" => {
             if data.page.is_some() {
@@ -2840,6 +2893,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
 
 fn public_game_error(error: &GameError) -> String {
     match error {
+        GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
         GameError::World(WorldError::NoExit) => error.to_string(),
         GameError::World(WorldError::ItemNotFound(_))
         | GameError::World(WorldError::AmbiguousItem { .. })
@@ -2852,7 +2906,12 @@ fn public_game_error(error: &GameError) -> String {
         | GameError::World(WorldError::ClassNotFound)
         | GameError::World(WorldError::PromotionUnavailable)
         | GameError::World(WorldError::TalentUnavailable)
-        | GameError::World(WorldError::InsufficientProgressionPoints) => error.to_string(),
+        | GameError::World(WorldError::InsufficientProgressionPoints)
+        | GameError::World(WorldError::InventoryCapacityExceeded)
+        | GameError::World(WorldError::ItemTransferForbidden) => error.to_string(),
+        GameError::World(WorldError::GiveTargetUnavailable) => {
+            "That item transfer is not available.".to_owned()
+        }
         GameError::World(
             WorldError::PartyUnavailable
             | WorldError::PartyForbidden
@@ -3278,6 +3337,18 @@ mod tests {
             public_game_error(&GameError::World(WorldError::InsufficientResource)),
             "There are not enough resources to use that ability."
         );
+        assert_eq!(
+            public_game_error(&GameError::World(WorldError::InventoryCapacityExceeded)),
+            "That item would exceed inventory slot or weight capacity."
+        );
+        assert_eq!(
+            public_game_error(&GameError::World(WorldError::ItemTransferForbidden)),
+            "That item cannot change ownership."
+        );
+        assert_eq!(
+            public_game_error(&GameError::GiveUnavailable),
+            "That item transfer is not available."
+        );
     }
 
     #[test]
@@ -3387,6 +3458,23 @@ mod tests {
                 page: 2,
             })
         );
+        let ClientMessage::Action(give) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-give","action":"item.give","target":"o1111111111111111","recipient":"o3333333333333333","quantity":2}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("structured item.give must parse as an action");
+        };
+        assert_eq!(
+            give.action,
+            Ok(PlayerAction::Give {
+                selection: ItemSelection {
+                    query: "o1111111111111111".into(),
+                    quantity: 2,
+                },
+                recipient: "o3333333333333333".into(),
+            })
+        );
         assert_ne!(action.signature, put.signature);
         let signatures = [
             r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.put","target":"o1111111111111111","container":"o2222222222222222","quantity":12}}"#,
@@ -3394,6 +3482,9 @@ mod tests {
             r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.put","target":"o1111111111111111","container":"o3333333333333333","quantity":12}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.contents","container":"o2222222222222222","page":1}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.contents","container":"o2222222222222222","page":2}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.give","target":"o1111111111111111","recipient":"o3333333333333333","quantity":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.give","target":"o1111111111111111","recipient":"o4444444444444444","quantity":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.give","target":"o1111111111111111","recipient":"o3333333333333333","quantity":2}}"#,
         ]
         .map(|raw| match parse_client_message(raw).unwrap() {
             ClientMessage::Action(action) => action.signature,
@@ -3411,11 +3502,24 @@ mod tests {
             r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-1","action":"item.take","target":"tonic","quantity":0}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-2","action":"item.drop","target":"tonic","quantity":257}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-3","action":"item.contents","container":"bag","page":0}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-give-1","action":"item.give","target":"tonic","recipient":"Bram","quantity":0}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-give-2","action":"item.give","target":"tonic","recipient":"Bram","quantity":257}}"#,
         ] {
             assert_eq!(
                 parse_client_message(invalid).unwrap_err(),
                 ClientMessageError::InvalidEnvelope
             );
+        }
+        for invalid_fields in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"give-missing-recipient","action":"item.give","target":"tonic"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"give-extra","action":"item.give","target":"tonic","recipient":"Bram","message":"smuggled"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"drop-recipient","action":"item.drop","target":"tonic","recipient":"Bram"}}"#,
+        ] {
+            let ClientMessage::Action(action) = parse_client_message(invalid_fields).unwrap()
+            else {
+                panic!("well-formed action must return a structured action error");
+            };
+            assert!(action.action.is_err());
         }
         let ClientMessage::Action(extra_item_field) = parse_client_message(
             r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-extra","action":"look","quantity":1}}"#,
@@ -4158,6 +4262,29 @@ mod tests {
         assert_eq!(frame.value["data"]["targetId"], "opaque-target");
         assert!(frame.value["data"].get("roomId").is_none());
         assert!(frame.value["data"].get("cue").is_none());
+
+        assert!(queue_view_event(
+            &outbound,
+            &mut sequence,
+            ProjectedViewEvent {
+                event: tiamud_core::ViewEvent {
+                    revision: 9,
+                    kind: tiamud_core::ViewEventKind::ItemGiven,
+                    text: "Aria gives a lantern to Bram.".to_owned(),
+                    actor_id: "opaque-giver".to_owned(),
+                    target_id: Some("opaque-recipient".to_owned()),
+                    item_id: Some("opaque-item".to_owned()),
+                },
+                combat_cue: None,
+            },
+            &crate::runtime_content::ScenePresentation::default(),
+            &crate::runtime_content::ScenePresentation::default(),
+        ));
+        let given = outbound.pop().expect("projected give must be queued");
+        assert_eq!(given.value["data"]["kind"], "itemGiven");
+        assert_eq!(given.value["data"]["targetId"], "opaque-recipient");
+        assert_eq!(given.value["data"]["itemId"], "opaque-item");
+        assert!(!given.value.to_string().contains("characterId"));
     }
 
     #[test]
@@ -4438,6 +4565,9 @@ mod tests {
                 quantity: 1,
                 stack_slots: 1,
                 total_weight_grams: 1,
+                transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+                bound_to_you: false,
+                can_give: true,
                 container_capacity: None,
                 actions: Vec::new(),
             })
@@ -4610,6 +4740,9 @@ mod tests {
                 quantity: 1,
                 stack_slots: 1,
                 total_weight_grams: 1,
+                transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+                bound_to_you: false,
+                can_give: true,
                 container_capacity: None,
                 actions: Vec::new(),
             })
@@ -4657,6 +4790,9 @@ mod tests {
                     quantity: 1,
                     stack_slots: 1,
                     total_weight_grams: 1,
+                    transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+                    bound_to_you: false,
+                    can_give: false,
                     container_capacity: None,
                     actions: vec![tiamud_core::SceneAction {
                         label: "Get".into(),

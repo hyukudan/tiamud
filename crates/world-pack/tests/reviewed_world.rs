@@ -1,6 +1,6 @@
 use world_pack::{
-    AbilityCategory, AbilityStatusEffect, CURRENT_SCHEMA_VERSION, ExitTarget, GrantDefinition,
-    InitialItemLocation, ItemStackPolicy, WorldPackDocument,
+    AbilityCategory, AbilityStatusEffect, CURRENT_SCHEMA_VERSION, EquipmentSlot, ExitTarget,
+    GrantDefinition, InitialItemLocation, ItemStackPolicy, ItemTransferPolicy, WorldPackDocument,
 };
 
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
@@ -14,8 +14,8 @@ fn reviewed_runtime_fixture_matches_world_pack_v5() {
     assert_eq!(pack.schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(pack.start_room_id, "demo:lantern-square");
     assert!(pack.rooms.iter().any(|room| room.id == pack.start_room_id));
-    assert_eq!(pack.item_prototypes.len(), 7);
-    assert_eq!(pack.initial_item_instances.len(), 8);
+    assert_eq!(pack.item_prototypes.len(), 9);
+    assert_eq!(pack.initial_item_instances.len(), 10);
     assert!(
         pack.item_prototypes
             .iter()
@@ -44,8 +44,54 @@ fn reviewed_runtime_fixture_matches_world_pack_v5() {
             .iter()
             .filter(|item| item.equipment_slot.is_some() || item.consumable)
             .count(),
-        3
+        5
     );
+    for stable_id in ["tiamud:road-token", "tiamud:wolf-clasp"] {
+        assert_eq!(
+            pack.item_prototypes
+                .iter()
+                .find(|prototype| prototype.id == stable_id)
+                .unwrap()
+                .transfer_policy,
+            ItemTransferPolicy::Transferable
+        );
+    }
+    let rain_writ = pack
+        .item_prototypes
+        .iter()
+        .find(|prototype| prototype.id == "tiamud:rain-writ")
+        .unwrap();
+    assert!(rain_writ.consumable);
+    assert_eq!(rain_writ.heal_amount, 1);
+    assert_eq!(
+        rain_writ.transfer_policy,
+        ItemTransferPolicy::NonTransferable
+    );
+    assert!(pack.initial_item_instances.iter().any(|instance| {
+        instance.id == rain_writ.id
+            && matches!(
+                &instance.location,
+                InitialItemLocation::Room { room_id } if room_id == "demo:north-gate"
+            )
+    }));
+    let stormglass = pack
+        .item_prototypes
+        .iter()
+        .find(|prototype| prototype.id == "tiamud:stormglass-talon")
+        .unwrap();
+    assert_eq!(stormglass.equipment_slot, Some(EquipmentSlot::Trinket));
+    assert_eq!(
+        stormglass.transfer_policy,
+        ItemTransferPolicy::CharacterBound
+    );
+    assert!(pack.initial_item_instances.iter().any(|instance| {
+        instance.id == stormglass.id
+            && matches!(
+                &instance.location,
+                InitialItemLocation::NpcSpawn { npc_spawn_id }
+                    if npc_spawn_id == "tiamud:gate-stalker-1"
+            )
+    }));
     let tonic = pack
         .item_prototypes
         .iter()

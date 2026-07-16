@@ -34,12 +34,15 @@ const validPlayerState = () => ({
     id: 'o1111111111111111', label: 'blue lantern', description: 'Cold light.',
     rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
     quantity: 1, stackSlots: 1, totalWeightGrams: 800,
+    transferPolicy: 'transferable', boundToYou: false,
+    canGive: true,
     actions: [{ label: 'Drop', command: 'drop o1111111111111111' }],
   }],
   equipment: [{
     id: 'o2222222222222222', slot: 'weapon', label: 'bronze sword',
     rarity: 'common', itemLevel: 2, weightGrams: 2200,
     quantity: 1, stackSlots: 1, totalWeightGrams: 2200,
+    transferPolicy: 'transferable', boundToYou: false,
     actions: [{ label: 'Unequip', command: 'unequip weapon' }],
   }],
   inventoryCapacity: {
@@ -65,7 +68,7 @@ const validPlayerState = () => ({
     }],
   },
   social: {
-    online: [{ id: 'o4444444444444444', name: 'Aria', selfCharacter: true }],
+    online: [{ id: 'o4444444444444444', name: 'Aria', selfCharacter: true, nearby: true }],
   },
 });
 
@@ -113,6 +116,16 @@ describe('protocol messages', () => {
       'request-contents',
     )).toMatchObject({
       data: { action: 'item.contents', container: 'o2222222222222222', page: 2 },
+    });
+    expect(createActionPerform(
+      'item.give',
+      { target: 'o1111111111111111', recipient: 'o3333333333333333', quantity: 2 },
+      'request-give',
+    )).toMatchObject({
+      data: {
+        action: 'item.give', target: 'o1111111111111111',
+        recipient: 'o3333333333333333', quantity: 2,
+      },
     });
     expect(createActionPerform('party.say', { message: 'Hold the bridge.' }, 'request-party')).toMatchObject({
       data: { requestId: 'request-party', action: 'party.say', message: 'Hold the bridge.' },
@@ -162,6 +175,10 @@ describe('protocol messages', () => {
     expect(() => createActionPerform('item.drop', { target: 'tonic', quantity: 257 }, 'bad')).toThrow(RangeError);
     expect(() => createActionPerform('item.contents', { container: 'bag', page: 0 }, 'bad')).toThrow(RangeError);
     expect(() => createActionPerform('item.contents', { container: '', page: 1 }, 'bad')).toThrow(RangeError);
+    expect(() => createActionPerform('item.give', { target: 'tonic', recipient: '' }, 'bad')).toThrow(RangeError);
+    expect(() => createActionPerform(
+      'item.give', { target: 'tonic', recipient: 'x'.repeat(65) }, 'bad',
+    )).toThrow(RangeError);
   });
 
   it('creates the exact structured staff phase-2 payloads', () => {
@@ -396,6 +413,8 @@ describe('protocol messages', () => {
           quantity: 2,
           stackSlots: 1,
           totalWeightGrams: 1600,
+          transferPolicy: 'transferable',
+          boundToYou: false,
           actions: [
             { label: 'Examine', command: 'examine tiamud:blue-lantern' },
             { label: 'Take', command: 'take tiamud:blue-lantern' },
@@ -518,7 +537,8 @@ describe('protocol messages', () => {
           id: `o${String(index + 1).padStart(16, '0')}`,
           label: `item ${index}`, description: 'Still usable.',
           rarity: 'common', itemLevel: 1, weightGrams: 100,
-          quantity: 1, stackSlots: 1, totalWeightGrams: 100, actions: [],
+          quantity: 1, stackSlots: 1, totalWeightGrams: 100,
+          transferPolicy: 'transferable', boundToYou: false, actions: [],
         })),
         npcs: [],
         presentation: {
@@ -651,6 +671,7 @@ describe('protocol messages', () => {
           id: 'o8888888888888888', label: 'lantern', description: 'Still usable.', actions: [],
           rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
           quantity: 1, stackSlots: 1, totalWeightGrams: 800,
+          transferPolicy: 'transferable', boundToYou: false,
           visual,
           presentation: { entities: [{ id: 'o8888888888888888', ...visual }] },
         },
@@ -682,6 +703,7 @@ describe('protocol messages', () => {
           id: itemId, label: 'blue lantern', description: 'Cold light.',
           rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
           quantity: 1, stackSlots: 1, totalWeightGrams: 800,
+          transferPolicy: 'transferable', boundToYou: false,
           actions: [{ label: 'Take', command: `take ${itemId}` }],
         },
       },
@@ -711,6 +733,8 @@ describe('protocol messages', () => {
     const item = {
       id: 'o1111111111111111', label: 'healing tonic', rarity: 'uncommon', itemLevel: 2,
       weightGrams: 250, quantity: 12, stackSlots: 1, totalWeightGrams: 3000,
+      transferPolicy: 'transferable', boundToYou: false,
+      canGive: false,
       actions: [{ label: 'Get', command: 'get 12 o1111111111111111 from o2222222222222222' }],
     };
     const envelope = (overrides: Record<string, unknown> = {}) => ({
@@ -727,6 +751,9 @@ describe('protocol messages', () => {
     });
     expect(parseServerMessage(JSON.stringify(envelope({ page: 3 })))).toBeUndefined();
     expect(parseServerMessage(JSON.stringify(envelope({ items: Array.from({ length: 21 }, () => item) })))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify(envelope({
+      items: [{ ...item, canGive: true }],
+    })))).toBeUndefined();
     expect(parseServerMessage(JSON.stringify(envelope({
       items: [{ ...item, totalWeightGrams: 2999 }],
     })))).toBeUndefined();
@@ -831,8 +858,8 @@ describe('protocol messages', () => {
         revision: 3,
         kind: 'itemTaken',
         text: 'You take the lantern.',
-        actorId: 'opaque-character',
-        itemId: 'opaque-item',
+        actorId: 'o1111111111111111',
+        itemId: 'o2222222222222222',
       },
     }))).toMatchObject({ type: 'message.append', seq: 10, data: { kind: 'itemTaken' } });
     expect(parseServerMessage(JSON.stringify({
@@ -841,9 +868,39 @@ describe('protocol messages', () => {
       seq: 11,
       data: {
         revision: 4,
+        kind: 'itemGiven',
+        text: 'Aria gives the lantern to Bram.',
+        actorId: 'o1111111111111111',
+        targetId: 'o3333333333333333',
+        itemId: 'o2222222222222222',
+      },
+    }))).toMatchObject({ type: 'message.append', data: { kind: 'itemGiven' } });
+    const validGive = {
+      revision: 4,
+      kind: 'itemGiven',
+      text: 'Aria gives the lantern to Bram.',
+      actorId: 'o1111111111111111',
+      targetId: 'o3333333333333333',
+      itemId: 'o2222222222222222',
+    };
+    for (const invalidData of [
+      { ...validGive, actorId: '12' },
+      { ...validGive, targetId: '12' },
+      { ...validGive, itemId: 'demo:blue-lantern' },
+    ]) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1, type: 'message.append', seq: 12, data: invalidData,
+      }))).toBeUndefined();
+    }
+    expect(parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'message.append',
+      seq: 13,
+      data: {
+        revision: 4,
         kind: 'adventure',
         text: 'The weather turns foggy.',
-        actorId: 'opaque-world',
+        actorId: 'o4444444444444444',
       },
     }))).toMatchObject({ type: 'message.append', data: { kind: 'adventure' } });
 
@@ -943,6 +1000,10 @@ describe('protocol messages', () => {
       { ...validPlayerState().inventory[0], rarity: 'mythic' },
       { ...validPlayerState().inventory[0], itemLevel: 1_001 },
       { ...validPlayerState().inventory[0], weightGrams: 1_000_001 },
+      { ...validPlayerState().inventory[0], transferPolicy: 'account_bound' },
+      { ...validPlayerState().inventory[0], transferPolicy: 'transferable', boundToYou: true },
+      { ...validPlayerState().inventory[0], canGive: undefined },
+      { ...validPlayerState().inventory[0], transferPolicy: 'non_transferable', canGive: true },
     ]) {
       expect(parseServerMessage(JSON.stringify({
         v: 1,

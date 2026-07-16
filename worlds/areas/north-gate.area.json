@@ -6,6 +6,25 @@
   ],
   "itemPrototypes": [
     {
+      "id": "tiamud:rain-writ",
+      "name": "rain-sealed passage writ",
+      "description": "A palm-sized paper writ sealed with blue wax and wintermint; presenting it breaks the seal, offers a breath of bracing relief, and leaves the paper unreadable.",
+      "aliases": [
+        "writ",
+        "passage writ",
+        "gate writ"
+      ],
+      "healAmount": 1,
+      "consumable": true,
+      "weightGrams": 10,
+      "slotCost": 1,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "maxStackUnits": 1,
+      "transferPolicy": "non_transferable"
+    },
+    {
       "id": "tiamud:road-token",
       "name": "iron road token",
       "description": "A thumb-sized iron token stamped with a gate above a winding road.",
@@ -20,6 +39,24 @@
       "stackPolicy": "unique",
       "maxStackUnits": 1,
       "transferPolicy": "transferable"
+    },
+    {
+      "id": "tiamud:stormglass-talon",
+      "name": "stormglass talon charm",
+      "description": "A talon-shaped sliver of storm-dark glass taken from the gate-stalker, cold even beneath dry cloth.",
+      "aliases": [
+        "charm",
+        "talon charm",
+        "stormglass charm"
+      ],
+      "equipmentSlot": "trinket",
+      "weightGrams": 80,
+      "slotCost": 1,
+      "rarity": "uncommon",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "maxStackUnits": 1,
+      "transferPolicy": "character_bound"
     },
     {
       "id": "tiamud:wolf-clasp",
@@ -41,11 +78,27 @@
   ],
   "initialItemInstances": [
     {
+      "id": "tiamud:rain-writ",
+      "prototypeId": "tiamud:rain-writ",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:north-gate"
+      }
+    },
+    {
       "id": "tiamud:road-token",
       "prototypeId": "tiamud:road-token",
       "location": {
         "kind": "room",
         "roomId": "demo:north-gate"
+      }
+    },
+    {
+      "id": "tiamud:stormglass-talon",
+      "prototypeId": "tiamud:stormglass-talon",
+      "location": {
+        "kind": "npc_spawn",
+        "npcSpawnId": "tiamud:gate-stalker-1"
       }
     },
     {

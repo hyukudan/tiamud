@@ -2,9 +2,10 @@ use std::collections::HashSet;
 
 use tiamud_core::{
     AccountId, ActiveEffect, CharacterId, CharacterSnapshot, Direction, EconomyAction, EffectKind,
-    EquipmentSlot, InitialItemInstanceDefinition, InitialItemLocation, ItemGameplayDefinition,
-    ItemInstanceId, ItemPrototypeDefinition, ItemRarity, ItemStackPolicy, ItemTransferPolicy,
-    PlayerAction, RoomDefinition, RuntimeItemLocation, SessionId, World, WorldDefinition,
+    EquipmentSlot, InitialItemInstanceDefinition, InitialItemLocation, ItemBinding,
+    ItemGameplayDefinition, ItemInstanceId, ItemPrototypeDefinition, ItemRarity, ItemStackPolicy,
+    ItemTransferPolicy, PlayerAction, RoomDefinition, RuntimeItemLocation, SessionId, World,
+    WorldDefinition,
 };
 
 const ITEM_COUNT: usize = 3;
@@ -209,6 +210,80 @@ fn generated_inventory_economy_and_effect_sequences_preserve_invariants() {
                 world.advance_tick().unwrap();
             }
             assert_domain_invariants(&world, session);
+        }
+    }
+}
+
+#[test]
+fn generated_give_sequences_preserve_single_ownership_and_unbound_transferables() {
+    for case in 1..=64_u64 {
+        let (mut world, first) = property_world();
+        let second = SessionId(2);
+        world
+            .connect(
+                second,
+                CharacterSnapshot {
+                    id: CharacterId(2),
+                    account_id: AccountId(2),
+                    name: "Receiver".into(),
+                    room_id: "property:market".into(),
+                    item_locations: Default::default(),
+                },
+            )
+            .unwrap();
+        let mut seed = case.wrapping_mul(0xd6e8_feb8_6659_fd93);
+        for _step in 0..128 {
+            let (session, action) = match next_random(&mut seed) % 10 {
+                0 => (first, PlayerAction::Take("sword".into())),
+                1 => (second, PlayerAction::Take("sword".into())),
+                2 => (first, PlayerAction::Drop("sword".into())),
+                3 => (second, PlayerAction::Drop("sword".into())),
+                4 => (
+                    first,
+                    PlayerAction::Give {
+                        selection: "sword".into(),
+                        recipient: "Receiver".into(),
+                    },
+                ),
+                5 => (
+                    second,
+                    PlayerAction::Give {
+                        selection: "sword".into(),
+                        recipient: "Invariant".into(),
+                    },
+                ),
+                6 => (first, PlayerAction::Take("charm".into())),
+                7 => (second, PlayerAction::Take("charm".into())),
+                8 => (
+                    first,
+                    PlayerAction::Give {
+                        selection: "charm".into(),
+                        recipient: "Receiver".into(),
+                    },
+                ),
+                _ => (
+                    second,
+                    PlayerAction::Give {
+                        selection: "charm".into(),
+                        recipient: "Invariant".into(),
+                    },
+                ),
+            };
+            let _ = world.apply(session, action);
+            assert_domain_invariants(&world, first);
+            let runtime = world.runtime_snapshot();
+            assert!(
+                runtime
+                    .item_instances
+                    .values()
+                    .all(|instance| instance.binding == ItemBinding::Unbound)
+            );
+            assert!(
+                world
+                    .runtime_item_owner_ids()
+                    .iter()
+                    .all(|owner| matches!(owner, CharacterId(1) | CharacterId(2)))
+            );
         }
     }
 }

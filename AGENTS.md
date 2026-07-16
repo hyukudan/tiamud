@@ -71,14 +71,16 @@ matriz, memoria y documentación pública a la vez.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
-- `WorldRuntimeSnapshot` v3 es la única autoridad durable de las instancias de
+- `WorldRuntimeSnapshot` v4 es la única autoridad durable de las instancias de
   objeto. SQLite y PostgreSQL la confirman con personajes/eventos en su
-  transacción existente; no hay esquema v11 ni tabla espejo. Las lecturas v1
-  y v2 usan DTO y migraciones explícitos dirigidos por `snapshotVersion`, y
-  fallan cerradas ante campos de otra versión, referencias, grafo o contador
-  inválidos. Al restaurar un snapshot anterior se conservan las nuevas
-  instancias iniciales del WorldPack y se superponen las ubicaciones durables;
-  una instancia creada en runtime que no esté en el snapshot no reaparece.
+  transacción existente; ambos adaptadores continúan en esquema v10 y no hay
+  esquema v11 ni tabla espejo. DTO exactos v1, v2, v3 y v4 se seleccionan por
+  `snapshotVersion`; v1-v3 se convierten a vínculo `unbound` y un campo
+  `binding` inyectado en v3 se rechaza. La lectura falla cerrada ante campos de
+  otra versión, referencias, grafo, vínculo, política o contador inválidos. Al
+  restaurar un snapshot anterior se conservan las nuevas instancias iniciales
+  del WorldPack y se superponen las ubicaciones durables; una instancia creada
+  en runtime que no esté en el snapshot no reaparece.
 - Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
   sufijo diagnóstico cubierto de 10.000 secuencias.
 - Autenticación registrada compartida entre web y Telnet. Trabajo Argon2id,
@@ -119,19 +121,32 @@ matriz, memoria y documentación pública a la vez.
   sal criptográficamente aleatoria nueva por sesión. Telnet muestra la
   referencia opaca y permite usarla en comandos. En autoría,
   `entityMedia(kind=item)` referencia el prototipo reusable, mientras
-  `roomPerception.hiddenItems` referencia la instancia concreta. En 3B las
-  pilas fungibles son vistas derivadas por ubicación/prototipo: no persisten
+  `roomPerception.hiddenItems` referencia la instancia concreta. Las pilas
+  fungibles son vistas derivadas por ubicación/prototipo/vínculo: no persisten
   cantidad ni identidad de pila. Los contenedores son instancias únicas con
   slots/peso propios, peso recursivo, profundidad máxima cuatro y grafo
-  validado. `take`/`drop`/`put`/`get` aceptan 1..=256 unidades y `contents`
-  pagina 20 grupos; Web, Telnet y GMCP reciben cantidad, slots, peso total y
-  capacidad con referencias opacas. Solo se acepta `transferable`. No amplíes
-  la afirmación: no hay telepatía definida por el mundo, give/trade, reparto
-  de grupo ni tablas de botín aleatorias.
-- El arranque enumera de forma acotada los personajes que poseen instancias,
-  carga temporalmente sus agregados y valida existencia, equipo y capacidad,
-  incluidos los desconectados. Esos agregados no quedan retenidos como
-  personajes conectados. Una incoherencia bloquea listeners.
+  validado. `take`/`drop`/`put`/`get` y `give` aceptan 1..=256 unidades y
+  `contents` pagina 20 grupos; Web, Telnet y GMCP reciben cantidad, slots, peso
+  total, capacidad, política de transferencia y estado de vínculo mediante
+  referencias opacas.
+- WorldPack v5 y AreaPack v4 aceptan el vocabulario cerrado `transferable`,
+  `character_bound` y `non_transferable`; WorldPack v4/AreaPack v3 y formatos
+  anteriores solo normalizan `transferable`. La primera adquisición liga
+  recursivamente un `character_bound`. Mover dentro del grafo del mismo dueño
+  está permitido, pero `drop` o un cambio de dueño exige que toda la raíz y sus
+  descendientes sean `transferable`; `non_transferable` no guarda dueño ligado
+  pero tampoco puede abandonar al adquirente.
+- `give [cantidad] <objeto> to <personaje>` mueve solo raíces portadas a otro
+  personaje conectado de la misma sala. Acepta selector opaco o nombre exacto,
+  rechaza al propio emisor, prevalida capacidad de ambos agregados, respeta
+  ignore del receptor y block bilateral y confirma un único `ItemsGiven` antes
+  de proyectar. No hay trade/escrow, entrega offline/remota, reparto de grupo ni
+  tablas de botín aleatorias.
+- El arranque enumera de forma acotada la unión de personajes que poseen raíces
+  y todos los `CharacterId` ligados, incluso en instancias consumidas. Carga
+  temporalmente sus agregados y valida existencia, vínculo, equipo, grafo y
+  capacidad, incluidos los desconectados. Esos agregados no quedan retenidos
+  como personajes conectados. Una incoherencia bloquea listeners.
 - Los grupos admiten hasta seis miembros y soportan
   create/invite/accept/revoke/kick/transfer/disband/leave/status y `party say`
   (`gsay`/`gtell`). No hay follow/assist/rescue, selección general de aliados,
@@ -220,9 +235,9 @@ matriz, memoria y documentación pública a la vez.
   proveedor predeterminado; endpoints locales usan loopback y remotos HTTPS.
   Ningún borrador se publica sin validación y revisión humana.
 
-### Evidencia retenida de fase 3A y estado de fase 3B
+### Evidencia retenida de inventario 3A–3C
 
-El árbol integrado de inventario 3A supera formato, pruebas bloqueadas del
+La evidencia histórica de inventario 3A supera formato, pruebas bloqueadas del
 workspace y clippy estricto. Las suites enfocadas pasan 77 pruebas de core, 80
 de WorldPack, 28 del importador y 195 de `tiamud-server`; la web pasa
 `svelte-check` con 0 errores/avisos, 100/100 unitarias, build y 30/30 escenarios
@@ -235,7 +250,7 @@ veredictos en `pass`. No se ejecutaron PostgreSQL real v10, WebKit local ni soak
 de 24 horas. La evidencia operacional procede de un árbol dirty precommit: es
 diagnóstico local, no evidencia publicable ni de CI.
 
-La fase 3B está implementada en el árbol de trabajo mediante WorldPack v5,
+La entrega histórica de fase 3B implementó WorldPack v5,
 AreaPack v4, snapshot v3, pilas derivadas, contenedores acotados y paridad de
 acciones/proyecciones. El árbol integrado pasa formato/check/clippy, 499/499
 pruebas Rust (88 core, 93 WorldPack, 28 importador, 202 servidor y 88
@@ -244,6 +259,19 @@ carga CI 16 usuarios y soak corto de 66 rondas/10 readiness. También pasan
 `cargo-deny`, licencias y avisos 307 Rust/76 web. No hubo PostgreSQL real v10,
 WebKit local ni soak de 24 horas; no conviertas este pase local precommit en
 evidencia de CI o producción.
+
+La fase 3C está implementada en el árbol actual mediante snapshot v4, vínculo
+durable, tres políticas de transferencia y `give` atómico en Web, Telnet y
+GMCP. Lantern Square contiene 9 prototipos y 10 instancias iniciales; su
+WorldPack canónico ocupa 49.603 bytes y tiene SHA-256
+`f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
+En este árbol pasan 513/513 pruebas Rust: 93 core, 95 WorldPack, 28 importador,
+207 servidor y 90 restantes. También pasan `svelte-check` con 0 errores y 0
+avisos, 103/103 pruebas web, 81/81 Node y 32/32 escenarios Playwright
+soportados, 16 Chromium y 16 Firefox. WebKit no arranca en este host por
+bibliotecas GTK/GStreamer ausentes. No se ejecutaron PostgreSQL real v10 ni
+soak de 24 horas; esta comprobación local sobre un árbol dirty no es evidencia
+de CI, release o producción.
 
 ### Evidencia histórica retenida
 
@@ -287,10 +315,10 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 9. Autoridad de staff separada de XP, nivel, clase y talentos. Usa la capacidad
    concreta y auditoría append-only; perfiles y títulos son asignación/presentación,
    no autorización implícita.
-10. La fase 3B ya separa prototipo/instancia, deriva pilas y aplica capacidad
-    recursiva de contenedores. Antes de botín repetible/aleatorio, implementa
-    transferencias/políticas y trade confirmado, y después define propiedad,
-    procedencia y reparto atómicos.
+10. La fase 3C ya separa prototipo/instancia, deriva pilas, aplica capacidad
+    recursiva de contenedores y ejecuta `give` con políticas de transferencia.
+    Antes de botín repetible/aleatorio, implementa trade confirmado y después
+    define propiedad, procedencia y reparto atómicos.
     Cajas, llaves y tiradas pagadas quedan fuera.
 11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
     conservando snapshot atómico.
@@ -437,10 +465,10 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - fase social 1 implementada, pero sin correo/historial, shout/yell o telepatía;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
-- fase 3B de inventario implementada: prototipos/instancias, creación durable,
+- fase 3C de inventario implementada: prototipos/instancias, creación durable,
   pilas derivadas, contenedores con capacidad/profundidad acotadas, cantidades,
-  paginación, rareza e `itemLevel`; sin give/trade, políticas de vinculación,
-  derechos/reparto ni botín aleatorio;
+  paginación, rareza, `itemLevel`, vínculo, políticas y `give`; sin trade
+  confirmado, derechos/reparto, procedencia ni botín aleatorio;
 - backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;
 - marca/dominios y derechos de terceros siguen siendo trabajo legal externo.
 

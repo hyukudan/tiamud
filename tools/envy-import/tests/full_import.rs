@@ -80,6 +80,10 @@ fn only_unconditional_room_object_resets_become_world_pack_items() {
     assert_eq!(prototype.max_stack_units, 1);
     assert!(prototype.container.is_none());
     assert_eq!(
+        prototype.transfer_policy,
+        world_pack::ItemTransferPolicy::Transferable
+    );
+    assert_eq!(
         result.world_pack.initial_item_instances[0].id,
         "synthetic-full:object:2000:1"
     );

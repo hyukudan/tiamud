@@ -98,6 +98,8 @@ export interface SceneItem {
   quantity: number;
   stackSlots: number;
   totalWeightGrams: number;
+  transferPolicy: ItemTransferPolicy;
+  boundToYou: boolean;
   containerCapacity?: InventoryCapacitySnapshot;
   actions: SceneAction[];
 }
@@ -145,7 +147,7 @@ export interface ServerNoticeData {
 
 export interface MessageAppendData {
   revision: number;
-  kind: 'characterMoved' | 'itemTaken' | 'itemDropped' | 'gameplay' | 'adventure';
+  kind: 'characterMoved' | 'itemTaken' | 'itemDropped' | 'itemGiven' | 'gameplay' | 'adventure';
   text: string;
   actorId: string;
   targetId?: string;
@@ -396,6 +398,9 @@ export interface PlayerItemSnapshot {
   quantity: number;
   stackSlots: number;
   totalWeightGrams: number;
+  transferPolicy: ItemTransferPolicy;
+  boundToYou: boolean;
+  canGive: boolean;
   containerCapacity?: InventoryCapacitySnapshot;
   actions: SceneAction[];
 }
@@ -410,11 +415,14 @@ export interface EquippedItemSnapshot {
   quantity: number;
   stackSlots: number;
   totalWeightGrams: number;
+  transferPolicy: ItemTransferPolicy;
+  boundToYou: boolean;
   containerCapacity?: InventoryCapacitySnapshot;
   actions: SceneAction[];
 }
 
 export type ItemRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
+export type ItemTransferPolicy = 'transferable' | 'character_bound' | 'non_transferable';
 
 export interface InventoryCapacitySnapshot {
   usedSlots: number;
@@ -478,7 +486,7 @@ export interface PlayerStateSnapshot {
     }>;
   };
   social: {
-    online: Array<{ id: string; name: string; selfCharacter: boolean }>;
+    online: Array<{ id: string; name: string; selfCharacter: boolean; nearby: boolean }>;
   };
 }
 
@@ -534,6 +542,7 @@ export type CommandSubmit = Envelope<
 
 export interface ActionPerformFields {
   target?: string;
+  recipient?: string;
   container?: string;
   quantity?: number;
   page?: number;
@@ -584,6 +593,20 @@ const itemRarityOrUndefined = (value: unknown): ItemRarity | undefined =>
     value === 'legendary'
     ? value
     : undefined;
+
+const itemTransferPolicyOrUndefined = (value: unknown): ItemTransferPolicy | undefined =>
+  value === 'transferable' || value === 'character_bound' || value === 'non_transferable'
+    ? value
+    : undefined;
+
+const parseItemTransfer = (
+  value: Record<string, unknown>,
+): Pick<PlayerItemSnapshot, 'transferPolicy' | 'boundToYou'> | undefined => {
+  const transferPolicy = itemTransferPolicyOrUndefined(value.transferPolicy);
+  if (!transferPolicy || typeof value.boundToYou !== 'boolean' ||
+    (transferPolicy !== 'character_bound' && value.boundToYou)) return undefined;
+  return { transferPolicy, boundToYou: value.boundToYou };
+};
 
 const parseInventoryCapacity = (value: unknown): InventoryCapacitySnapshot | undefined => {
   if (!isRecord(value)) return undefined;
@@ -689,7 +712,7 @@ const parseContainerContents = (value: unknown): ContainerContentsData | undefin
   for (const entry of value.items) {
     if (!isRecord(entry) || !hasOnlyKeys(entry, [
       'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
-      'totalWeightGrams', 'containerCapacity', 'actions',
+      'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou', 'canGive', 'actions',
     ]) || (entry.containerCapacity !== undefined &&
       (!isRecord(entry.containerCapacity) || !hasOnlyKeys(entry.containerCapacity, [
         'usedSlots', 'maxSlots', 'usedWeightGrams', 'maxWeightGrams',
@@ -701,15 +724,18 @@ const parseContainerContents = (value: unknown): ContainerContentsData | undefin
     const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
+    const transfer = parseItemTransfer(entry);
+    const canGive = typeof entry.canGive === 'boolean' ? entry.canGive : undefined;
     const actions = parseActions(entry.actions);
     if (!id || ids.has(id) || !label || !rarity || itemLevel === undefined || itemLevel > 1_000 ||
-      weightGrams === undefined || weightGrams > 1_000_000 || !stack ||
+      weightGrams === undefined || weightGrams > 1_000_000 || !stack || !transfer ||
+      canGive !== false ||
       (stack.containerCapacity
         ? stack.quantity !== 1 || stack.totalWeightGrams !==
           weightGrams + stack.containerCapacity.usedWeightGrams
         : stack.totalWeightGrams !== weightGrams * stack.quantity) || !actions) return undefined;
     ids.add(id);
-    items.push({ id, label, rarity, itemLevel, weightGrams, ...stack, actions });
+    items.push({ id, label, rarity, itemLevel, weightGrams, ...stack, ...transfer, canGive, actions });
   }
   return { container, items, page, totalPages, capacity };
 };
@@ -1043,16 +1069,22 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
+    const transfer = parseItemTransfer(entry);
+    const canGive = typeof entry.canGive === 'boolean' ? entry.canGive : undefined;
     const actions = parseActions(entry.actions);
     if (!id || !label || description === undefined || !rarity || itemLevel === undefined ||
       itemLevel > 1_000 || weightGrams === undefined || weightGrams > 1_000_000 || !stack ||
+      (!transfer || (transfer.transferPolicy === 'character_bound' && !transfer.boundToYou)) ||
+      canGive === undefined || (canGive && transfer.transferPolicy !== 'transferable') ||
       (stack.containerCapacity
         ? stack.quantity !== 1 || stack.totalWeightGrams !==
           weightGrams + stack.containerCapacity.usedWeightGrams
         : stack.totalWeightGrams !== weightGrams * stack.quantity) || !actions) {
       return undefined;
     }
-    inventory.push({ id, label, description, rarity, itemLevel, weightGrams, ...stack, actions });
+    inventory.push({
+      id, label, description, rarity, itemLevel, weightGrams, ...stack, ...transfer, canGive, actions,
+    });
   }
 
   if (!Array.isArray(value.equipment) || value.equipment.length > 3) return undefined;
@@ -1066,16 +1098,18 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
+    const transfer = parseItemTransfer(entry);
     const actions = parseActions(entry.actions);
     if (!id || (slot !== 'weapon' && slot !== 'body' && slot !== 'trinket') || !label ||
       !rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
-      weightGrams > 1_000_000 || !stack || stack.quantity !== 1 ||
+      weightGrams > 1_000_000 || !stack || !transfer ||
+      (transfer.transferPolicy === 'character_bound' && !transfer.boundToYou) || stack.quantity !== 1 ||
       (stack.containerCapacity
         ? stack.totalWeightGrams !== weightGrams + stack.containerCapacity.usedWeightGrams
         : stack.totalWeightGrams !== weightGrams) || !actions) {
       return undefined;
     }
-    equipment.push({ id, slot, label, rarity, itemLevel, weightGrams, ...stack, actions });
+    equipment.push({ id, slot, label, rarity, itemLevel, weightGrams, ...stack, ...transfer, actions });
   }
 
   const inventoryCapacity = parseInventoryCapacity(value.inventoryCapacity);
@@ -1207,8 +1241,11 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     if (!isRecord(entry)) return undefined;
     const id = opaqueId(entry.id);
     const onlineName = boundedString(entry.name, 64);
-    if (!id || !onlineName || typeof entry.selfCharacter !== 'boolean') return undefined;
-    online.push({ id, name: onlineName, selfCharacter: entry.selfCharacter });
+    if (!id || !onlineName || typeof entry.selfCharacter !== 'boolean' ||
+      typeof entry.nearby !== 'boolean') return undefined;
+    online.push({
+      id, name: onlineName, selfCharacter: entry.selfCharacter, nearby: entry.nearby,
+    });
   }
 
   return {
@@ -1548,8 +1585,9 @@ const toItems = (value: unknown): SceneItem[] => {
     const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
+    const transfer = parseItemTransfer(entry);
     if (!rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
-      weightGrams > 1_000_000 || !stack || (stack.containerCapacity
+      weightGrams > 1_000_000 || !stack || !transfer || (stack.containerCapacity
         ? stack.quantity !== 1 || stack.totalWeightGrams !==
           weightGrams + stack.containerCapacity.usedWeightGrams
         : stack.totalWeightGrams !== weightGrams * stack.quantity)) return [];
@@ -1562,6 +1600,7 @@ const toItems = (value: unknown): SceneItem[] => {
       itemLevel,
       weightGrams,
       ...stack,
+      ...transfer,
       actions: suppliedActions.length > 0
         ? suppliedActions
         : [
@@ -1837,24 +1876,26 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       const kind = candidate.data.kind;
       const text = stringOrUndefined(candidate.data.text);
-      const actorId = stringOrUndefined(candidate.data.actorId);
+      const actorId = opaqueId(candidate.data.actorId);
       const targetId = candidate.data.targetId;
       const itemId = candidate.data.itemId;
+      const normalizedTargetId = targetId === undefined ? undefined : opaqueId(targetId);
+      const normalizedItemId = itemId === undefined ? undefined : opaqueId(itemId);
       if (
         revision === undefined ||
         (kind !== 'characterMoved' &&
           kind !== 'itemTaken' &&
           kind !== 'itemDropped' &&
+          kind !== 'itemGiven' &&
           kind !== 'gameplay' &&
           kind !== 'adventure') ||
         !text ||
         !actorId ||
-        (targetId !== undefined && typeof targetId !== 'string') ||
-        (itemId !== undefined && typeof itemId !== 'string')
+        (targetId !== undefined && !normalizedTargetId) ||
+        (itemId !== undefined && !normalizedItemId)
       ) {
         return undefined;
       }
-      const normalizedTargetId = stringOrUndefined(targetId);
       const cue = parseMessagePresentationCue(candidate.data.cue, actorId, normalizedTargetId);
       return {
         ...base,
@@ -1865,7 +1906,7 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
           text,
           actorId,
           targetId: normalizedTargetId,
-          itemId: stringOrUndefined(itemId),
+          itemId: normalizedItemId,
           ...(cue ? { cue } : {}),
         },
       };
@@ -2024,6 +2065,11 @@ export function createActionPerform(
   }
   if (fields?.container !== undefined && fields.container.length === 0) {
     throw new RangeError('container must not be empty');
+  }
+  if (fields?.recipient !== undefined &&
+    (fields.recipient.length === 0 || fields.recipient.length > 64 ||
+      /[\u0000-\u001f\u007f]/.test(fields.recipient))) {
+    throw new RangeError('recipient must be a bounded visible selector');
   }
   return {
     v: PROTOCOL_VERSION,

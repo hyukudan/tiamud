@@ -38,7 +38,8 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   combate, misiones, grupos, economía, tiempo lógico y clima. Los objetos
   separan prototipos reutilizables e instancias durables, con capacidad por
   slots/peso, pilas fungibles derivadas, contenedores acotados y botín fijo;
-  `give`, intercambio confirmado y tablas aleatorias aún no.
+  `give` atómico y las políticas de transferencia ya funcionan. El intercambio
+  confirmado y las tablas aleatorias aún no.
 - **Personajes definidos por datos:** el modelo de personaje v3 modela linajes, trasfondo
   opcional, clases base y avanzadas, una curva global de XP, talentos con rango
   y promociones atómicas. Atributos, habilidades, recursos, resistencias,
@@ -130,6 +131,7 @@ Comandos representativos:
 ```text
 look                       north / east / south / west
 inventory                  take / drop [cantidad] <objeto>
+give [cantidad] <objeto> to <personaje>
 contents <contenedor> [página]
 put [cantidad] <objeto> in <contenedor>
 get [cantidad] <objeto> from <contenedor>
@@ -274,9 +276,9 @@ implementado de la hoja de ruta.
 | Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`. | Correo e historial durable, shout/yell espacial, emotes, tablones y telepatía definida por el mundo. `tell` no es telepatía. |
 | Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos, elegibilidad y reparto de botín. |
 | Canales | Suscripción persistente en SQLite/PostgreSQL v10; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
-| Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Transferencias/trade 3C–3D y botín 4. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
-| Inventario | WorldPack v5 separa `itemPrototypes` reutilizables de `initialItemInstances`; cada unidad conserva identidad durable. Las pilas fungibles son vistas derivadas por ubicación/prototipo: no se persisten cantidades ni IDs de pila. Los contenedores únicos aplican slots, peso recursivo, profundidad máxima cuatro y rechazo atómico de ciclos/sobrecapacidad. `take`/`drop`/`put`/`get` aceptan cantidades 1..=256 y `contents` pagina 20 grupos. Web, Telnet y GMCP proyectan cantidad, slots, peso unitario/total, capacidad e IDs opacos. | `give`, políticas `character_bound`/`non_transferable`, intercambio confirmado, durabilidad y afijos. |
-| Botín | El botín fijo es una instancia inicial cuya ubicación es `npc_spawn`; se transfiere al derrotar al NPC y conserva identidad. Varias unidades fungibles se agrupan solo al proyectarlas. El RNG y el snapshot son seguros ante reinicio. | Derechos y reparto de grupo, tablas ponderadas, tiradas/cantidades aleatorias, procedencia de drops repetibles y contenedores aleatorios. |
+| Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
+| Inventario | WorldPack v5 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo y vínculo; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` solo mueve raíces portadas y subárboles completamente transferibles a otro personaje conectado en la misma sala, con capacidad bilateral e ignore/block. Web, Telnet y GMCP proyectan política, estado ligado, disponibilidad de entrega e IDs opacos, nunca el dueño durable. | Intercambio bilateral confirmado, durabilidad, afijos, procedencia y derechos/reparto de botín. |
+| Botín | El botín fijo es una instancia inicial cuya ubicación es `npc_spawn`; se transfiere al derrotar al NPC y conserva identidad. Varias unidades fungibles se agrupan solo al proyectarlas. El RNG general y el snapshot del mundo son seguros ante reinicio; todavía no existe RNG específico de tablas de botín. | Derechos y reparto de grupo, tablas ponderadas, tiradas/cantidades aleatorias, procedencia de drops repetibles y contenedores aleatorios. |
 
 `reply` no persiste el destinatario: conserva en memoria el ID interno del
 último remitente cuyo `tell` se entregó. Al desconectar o reiniciar no se
@@ -362,13 +364,19 @@ un `npc_spawn`, `staged` o dentro de otra instancia contenedor; los IDs durables
 y de prototipo permanecen en el servidor y cada sesión recibe solo IDs opacos.
 WorldPack v4/v3/v2 y AreaPack v3/v2/v1 se aceptan únicamente para
 normalización determinista. Las entradas antiguas no pueden introducir campos
-de 3B: deben publicar la versión nueva.
+de fases posteriores: en particular, WorldPack v4 y AreaPack v3 exigen
+`transferable` y rechazan políticas o campos 3C. Para publicar
+`character_bound` o `non_transferable` se requiere WorldPack v5/AreaPack v4.
 
 Las instancias fungibles comparten `stackPolicy: fungible` y
 `maxStackUnits: 2..=1000`; el runtime deriva grupos ordenados sin persistir una
 segunda autoridad de cantidad. Un prototipo contenedor declara `maxSlots` y
 `maxWeightGrams`, debe ser `unique` y puede anidarse hasta cuatro aristas. Sus
 hijos directos consumen slots agrupados; todos los descendientes consumen peso.
+La clave de pila incluye el vínculo de la instancia. La primera adquisición de
+un subárbol liga recursivamente sus objetos `character_bound`; una bolsa
+transferible no permite sacar un descendiente ligado o no transferible de su
+propietario efectivo.
 
 Los sprites `entityMedia` de objeto pertenecen al **prototipo**, de modo que
 pueden decorar todas sus unidades visibles. La percepción `hiddenItems`
@@ -378,10 +386,20 @@ del mismo prototipo.
 Al arrancar con un snapshot anterior, Tiamud conserva las nuevas instancias
 iniciales del WorldPack y superpone las ubicaciones durables, sin resucitar
 instancias runtime ausentes. Antes de abrir listeners valida también
-propietarios desconectados, equipo y capacidad mediante lecturas acotadas que
-descarta después; no convierte esas fichas en personajes activos. El snapshot
-vigente es v3 y el decoder separa explícitamente las formas v1, v2 y v3 antes
-de normalizar; SQLite y PostgreSQL continúan en esquema v10.
+propietarios desconectados, equipo, capacidad y todos los IDs ligados, incluso
+si el objeto ya fue consumido, mediante lecturas acotadas que descarta después;
+no convierte esas fichas en personajes activos. El snapshot vigente es v4 y
+exige un vínculo cerrado por instancia. El decoder separa explícitamente las
+formas v1, v2, v3 y v4; v1-v3 migran a `unbound` y un payload antiguo que
+inyecta `binding` se rechaza. SQLite y PostgreSQL continúan en esquema v10.
+
+El mundo revisado compone tres áreas en 9 prototipos y 10 instancias iniciales:
+49.603 bytes con SHA-256
+`f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
+`rain-writ` demuestra `non_transferable`; `stormglass-talon`, botín del
+gate-stalker, demuestra adquisición `character_bound`. Los IDs publicados
+anteriores conservan su política para que un snapshot v3 legítimo siga
+restaurando sin reinterpretación.
 
 | Herramienta | Finalidad |
 | --- | --- |
@@ -503,6 +521,19 @@ rondas, 10/10 readiness y 146 acciones sin errores ni crecimiento continuo
 sospechoso. Consulta el
 [registro de fase 3B](docs/project/log/2026-07-16-derived-stacks-and-containers-phase-3b.md).
 
+La fase 3C añade entrega atómica y políticas ejecutables sin crear otra
+autoridad SQL: WorldPack v5/AreaPack v4, `WorldRuntimeSnapshot` v4 y los
+esquemas SQLite/PostgreSQL v10 permanecen alineados. Sobre el árbol integrado
+pasan formato/check/clippy y 513/513 pruebas Rust (93 core, 95 WorldPack, 28
+importador, 207 servidor y 90 restantes), `svelte-check` 0/0, 103/103 pruebas
+web, build, 32/32 Playwright soportados (16 Chromium + 16 Firefox) y 81/81
+pruebas Node. También pasan humo, licencias, avisos de 307 dependencias Rust/76
+web y `cargo deny check advisories sources`. La carga exacta de CI completa 16
+bootstraps/32 rondas sin errores; el soak corto completa 60 rondas, 8/8
+readiness y 131 acciones, sin errores ni crecimiento continuo sospechoso. No
+se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24 horas. Consulta el
+[registro de fase 3C](docs/project/log/2026-07-16-atomic-give-and-transfer-policies-phase-3c.md).
+
 Una prueba corta de carga no sustituye al soak de 24 horas. WebKit no arranca
 en el host local actual por bibliotecas GTK/GStreamer/medios ausentes; eso no
 es un pase ni un fallo de aplicación.
@@ -526,8 +557,8 @@ Siguientes líneas técnicas y de producto:
 - añadir correo/historial/emotes solo con retención y moderación explícitas;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
-- ampliar las pilas y contenedores ya implementados con `give`, políticas de
-  transferencia ejecutables e intercambio confirmado;
+- añadir intercambio bilateral confirmado y escrow sobre las transferencias y
+  políticas ya implementadas;
 - definir después derechos/reparto de grupo, procedencia y tablas de botín
   enteras restart-safe;
 - mantener fuera del baseline las cajas de botín pagadas;
@@ -585,7 +616,9 @@ deploy/                      ejemplos Caddy, systemd y entorno
   [personajes v3](docs/decisions/0007-worldpack-v3-character-model.md) ·
   [compositor](docs/decisions/0008-optional-scene-compositor.md) ·
   [prototipos, instancias y capacidad](docs/decisions/0009-item-prototypes-instances-and-capacity.md) ·
-  [pilas derivadas y contenedores](docs/decisions/0010-derived-stacks-and-bounded-containers.md).
+  [pilas derivadas y contenedores](docs/decisions/0010-derived-stacks-and-bounded-containers.md) ·
+  [entrega atómica y políticas](docs/decisions/0011-atomic-give-and-item-transfer-policies.md) ·
+  [propuesta de trade confirmado](docs/decisions/0012-confirmed-trade-reservations.md).
 - **Estado:** [matriz](docs/project/COMPLETION_MATRIX.md) ·
   [especificación v0.3](docs/spec-v0.3.md) ·
   [memoria](docs/project/PROJECT_MEMORY.md) ·

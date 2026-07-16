@@ -793,11 +793,38 @@ mod tests {
 
     #[test]
     fn runtime_copy_validates_the_original_version_before_normalizing() {
-        let runtime = tiamud_core::World::demo().runtime_snapshot();
+        let mut runtime = tiamud_core::World::demo().runtime_snapshot();
+        let first_item = runtime.item_instances.keys().next().unwrap().clone();
+        let item = runtime.item_instances.get_mut(&first_item).unwrap();
+        item.binding = tiamud_core::ItemBinding::Character {
+            character_id: tiamud_core::CharacterId(41),
+        };
+        item.location = tiamud_core::RuntimeItemLocation::Carried {
+            character_id: tiamud_core::CharacterId(41),
+        };
         let json = serde_json::to_string(&runtime).unwrap();
         validate_runtime_snapshot(i64::from(runtime.snapshot_version), &json).unwrap();
         assert!(matches!(
             validate_runtime_snapshot(2, &json),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+
+        let mut v3 = serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
+        v3["snapshotVersion"] = serde_json::json!(3);
+        for item in v3["itemInstances"].as_object_mut().unwrap().values_mut() {
+            item.as_object_mut().unwrap().remove("binding");
+        }
+        let v3_json = v3.to_string();
+        validate_runtime_snapshot(3, &v3_json).unwrap();
+        assert!(matches!(
+            validate_runtime_snapshot(4, &v3_json),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+
+        v3["itemInstances"][first_item.0.as_str()]["binding"] =
+            serde_json::json!({"kind":"unbound"});
+        assert!(matches!(
+            validate_runtime_snapshot(3, &v3.to_string()),
             Err(TransferError::InvalidRuntimeSnapshot)
         ));
     }

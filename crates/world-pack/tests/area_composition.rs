@@ -534,7 +534,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
 }
 
 #[test]
-fn area_v3_normalizes_to_v4_but_rejects_container_schema_smuggling() {
+fn area_v3_normalizes_to_v4_but_rejects_v4_schema_smuggling() {
     let legacy = json!({
         "schemaVersion": 3,
         "id": "a",
@@ -567,12 +567,79 @@ fn area_v3_normalizes_to_v4_but_rejects_container_schema_smuggling() {
     smuggled["itemPrototypes"][0]["maxStackUnits"] = json!(20);
     assert!(serde_json::from_value::<AreaPack>(smuggled).is_err());
 
+    for transfer_policy in ["character_bound", "non_transferable"] {
+        let mut smuggled = legacy.clone();
+        smuggled["itemPrototypes"][0]["transferPolicy"] = json!(transfer_policy);
+        assert!(serde_json::from_value::<AreaPack>(smuggled).is_err());
+    }
+
     let mut smuggled = legacy;
     smuggled["initialItemInstances"][0]["location"] = json!({
         "kind": "container",
         "containerInstanceId": "a:item-1"
     });
     assert!(serde_json::from_value::<AreaPack>(smuggled).is_err());
+}
+
+#[test]
+fn area_v1_and_v2_only_normalize_transferable_items() {
+    for schema_version in [1, 2] {
+        let legacy = json!({
+            "schemaVersion": schema_version,
+            "id": "a",
+            "items": [{
+                "id": "a:item",
+                "name": "Item",
+                "description": "A legacy item."
+            }],
+            "rooms": [{
+                "id": "a:start",
+                "title": "Start",
+                "description": "Start.",
+                "items": ["a:item"]
+            }]
+        });
+        let normalized: AreaPack = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            normalized.item_prototypes[0].transfer_policy,
+            world_pack::ItemTransferPolicy::Transferable
+        );
+
+        let mut smuggled = legacy;
+        smuggled["items"][0]["transferPolicy"] = json!("character_bound");
+        assert!(serde_json::from_value::<AreaPack>(smuggled).is_err());
+    }
+}
+
+#[test]
+fn area_v4_accepts_all_native_transfer_policies() {
+    for transfer_policy in ["transferable", "character_bound", "non_transferable"] {
+        let area: AreaPack = serde_json::from_value(json!({
+            "schemaVersion": 4,
+            "id": "a",
+            "itemPrototypes": [{
+                "id": "a:item",
+                "name": "Item",
+                "description": "A native item.",
+                "weightGrams": 0,
+                "slotCost": 1,
+                "rarity": "common",
+                "itemLevel": 1,
+                "stackPolicy": "unique",
+                "maxStackUnits": 1,
+                "transferPolicy": transfer_policy
+            }],
+            "initialItemInstances": [{
+                "id": "a:item-1",
+                "prototypeId": "a:item",
+                "location": {"kind": "staged"}
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(area.schema_version, world_pack::AREA_PACK_SCHEMA_VERSION);
+        assert_eq!(area.item_prototypes.len(), 1);
+    }
 }
 
 #[test]

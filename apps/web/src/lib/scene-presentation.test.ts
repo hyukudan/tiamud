@@ -34,7 +34,8 @@ const scene = (entities: SceneEntityPresentation[]): SceneSnapshot => ({
   items: [{
     id: 'o1111111111111111', label: 'lantern', description: 'Cold light.',
     rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
-    quantity: 1, stackSlots: 1, totalWeightGrams: 800, actions: [],
+    quantity: 1, stackSlots: 1, totalWeightGrams: 800,
+    transferPolicy: 'transferable', boundToYou: false, actions: [],
   }],
   npcs: [{
     id: 'o2222222222222222', label: 'rain wolf', description: 'It watches.',

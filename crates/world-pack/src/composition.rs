@@ -374,6 +374,15 @@ fn normalize_v3_area_items(value: &mut serde_json::Value) -> Result<(), String> 
         {
             return Err("AreaPack v3 item prototypes must use stackPolicy unique".to_owned());
         }
+        if prototype
+            .get("transferPolicy")
+            .and_then(serde_json::Value::as_str)
+            != Some("transferable")
+        {
+            return Err(
+                "AreaPack v3 item prototypes must use transferPolicy transferable".to_owned(),
+            );
+        }
         prototype.insert("maxStackUnits".to_owned(), serde_json::json!(1));
     }
     let instances = root

@@ -560,7 +560,7 @@
     const id = createRequestId();
     const sent = connection?.perform(action, fields, id) ?? false;
     if (sent && [
-      'item.take', 'item.drop', 'item.put', 'item.get', 'item.contents',
+      'item.take', 'item.drop', 'item.put', 'item.get', 'item.give', 'item.contents',
       'item.use', 'item.equip', 'item.unequip',
     ].includes(action)) {
       containerContents = undefined;

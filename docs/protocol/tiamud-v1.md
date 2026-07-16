@@ -138,14 +138,23 @@ cannot displace an accepted command result.
 
 ### Additive v1 rollout policy
 
-Client-to-server action schemas remain strict: a client cannot probe new
-actions by sending unknown fields. Capability names are the explicit extension
-point, but advertising an unknown capability has no effect until the server
-supports it. Server-to-client evolution is additive only inside a recognized
-message shape. The official client discards unknown server envelope and
-payload fields while validating and retaining every known field; this allows
-an optional presentation or informational field to roll out without changing
-the meaning of the v1 message.
+`tiamud.v1` aún no ha alcanzado su primer hito de compatibilidad ni se ha usado
+en producción pública. Durante este intervalo de prelanzamiento, la fase 3C
+sustituye deliberadamente el contrato fuente de forma incompatible: el servidor
+y el cliente oficial deben proceder del mismo checkout. No existe una capacidad
+negociada que haga compatible un cliente anterior con los campos o enums de 3C,
+y no debe afirmarse esa compatibilidad.
+
+La política aditiva siguiente será vinculante a partir del primer hito explícito
+de compatibilidad. Desde ese hito, los esquemas cliente-servidor permanecerán
+estrictos: un cliente no podrá sondear acciones nuevas mediante campos
+desconocidos. Los nombres de capacidad serán el punto de extensión explícito,
+pero anunciar una capacidad desconocida no tendrá efecto hasta que el servidor
+la implemente. La evolución servidor-cliente será aditiva solo dentro de una
+forma reconocida. El cliente oficial descartará campos desconocidos dentro de
+un envelope/payload reconocido mientras valida y conserva todos los conocidos;
+esto permitirá añadir presentación o información opcional sin cambiar el
+significado del mensaje v1.
 
 A new required field, enum value, independently sequenced message type or
 behavior that an older client must understand is not a safe field addition. It
@@ -224,6 +233,18 @@ character entry with a safe explanation.
 El comando ocupa como máximo 1024 bytes y no contiene caracteres de control.
 Llega al mismo analizador de `PlayerAction` que Telnet.
 
+La entrega textual de objetos usa exactamente:
+
+```text
+give [cantidad] <objeto> to <personaje>
+```
+
+La cantidad predeterminada es uno y debe estar en `1..=256`. Objeto y receptor
+pueden ser selectores opacos de la sesión; el receptor también puede ser un
+nombre exacto no ambiguo. El servidor exige que sea otro personaje conectado y
+en la misma sala y vuelve a validar política, subárbol, capacidad e
+ignore/block.
+
 ### Acción estructurada
 
 ```json
@@ -238,7 +259,7 @@ Nombres de acción implementados:
 
 ```text
 look, inventory, move
-item.take, item.drop, item.contents, item.put, item.get,
+item.take, item.drop, item.contents, item.put, item.get, item.give,
 item.examine, item.use, item.equip, item.unequip
 combat.attack, combat.ability
 progression.promote, progression.talent
@@ -284,10 +305,13 @@ está limitado a 64 bytes, el motivo a 1.024 y el título narrativo a 128. Los
 campos que no pertenecen a la acción se rechazan.
 
 Las acciones de objeto usan combinaciones cerradas de `target`, `container`,
-`quantity` y `page`. `quantity` es opcional, vale uno por defecto y debe estar
-en 1..=256. `item.put`/`item.get` exigen ambos selectores opacos;
+`recipient`, `quantity` y `page`. `quantity` es opcional, vale uno por defecto y
+debe estar en `1..=256`. `item.put`/`item.get` exigen ambos selectores opacos;
 `item.contents` exige `container`, admite una página positiva y prohíbe
-cantidad. Todos esos campos forman parte de la firma de deduplicación:
+cantidad. `item.give` exige `target` y `recipient`, admite cantidad y prohíbe
+contenedor/página. `recipient` ocupa como máximo 64 bytes, no contiene controles
+y se rechaza para cualquier otra acción. Todos los campos admitidos forman
+parte de la firma de deduplicación:
 
 ```json
 {"v":1,"type":"action.perform","data":{
@@ -298,6 +322,23 @@ cantidad. Todos esos campos forman parte de la firma de deduplicación:
   "quantity":12
 }}
 ```
+
+```json
+{"v":1,"type":"action.perform","data":{
+  "requestId":"give-1",
+  "action":"item.give",
+  "target":"o51a4c0311f262a90",
+  "recipient":"o7f72cd623eb86c31",
+  "quantity":2
+}}
+```
+
+Para `item.give`, `target`, `recipient` y `quantity` participan en la firma.
+Repetir `requestId` con la misma firma devuelve el resultado cacheado sin
+reejecutar; cambiar cualquiera de esos valores con el mismo ID es un error de
+protocolo. Los selectores opacos pertenecen a la sesión que los creó; la caché
+continúa indexada por personaje/`requestId` y solo puede reproducir la misma
+firma exacta según las reglas generales descritas más abajo.
 
 Los equivalentes de texto usan `party say` (`gsay`/`gtell`), `party revoke`,
 `party kick`, `party transfer`, `party disband`, `reply`, `channel(s)`,
@@ -453,6 +494,14 @@ Representative `scene.snapshot`:
       "id":"of75b645d851f21cf",
       "label":"blue-glass lantern",
       "description":"Cold blue light pools inside the glass.",
+      "rarity":"common",
+      "itemLevel":1,
+      "weightGrams":1200,
+      "quantity":1,
+      "stackSlots":2,
+      "totalWeightGrams":1200,
+      "transferPolicy":"transferable",
+      "boundToYou":false,
       "actions":[
         {"label":"Examine","command":"examine of75b645d851f21cf"},
         {"label":"Take","command":"take of75b645d851f21cf"}
@@ -717,7 +766,9 @@ The rest of the snapshot contains:
 - `quests`: stable public content slug, description, status/progress/actions;
 - optional `party` and `partyInvites`, with opaque character IDs;
 - `economy`: coin, commodity slugs/quantities and available shop stock/actions;
-- `social.online`: opaque IDs, display name and self marker.
+- `social.online`: ID opaco, nombre visible y booleanos `selfCharacter` y
+  `nearby`. `nearby` solo ayuda a construir selectores de receptor; el servidor
+  vuelve a comprobar conexión y sala al ejecutar.
 
 Quest/commodity slugs are stable public content identifiers rather than hidden
 world entity IDs. Persistence-only moderation/account state and private script
@@ -749,6 +800,21 @@ ubicación o miembros. `container.contents` contiene `container`, `page`,
 `totalPages`, `capacity` e `items`; cada página incluye como máximo veinte
 grupos y debe caber en el límite normal de 16 KiB.
 
+Cada objeto incluye obligatoriamente `transferPolicy`, con valor
+`transferable`, `character_bound` o `non_transferable`, y el booleano
+`boundToYou`. Este último solo puede ser verdadero para `character_bound` y
+nunca revela el `CharacterId` durable del propietario. Los objetos de inventario
+añaden el booleano obligatorio `canGive`, calculado sobre todo el subárbol; un
+contenido de contenedor siempre lleva `canGive: false` porque no es una raíz
+portada directamente, y el equipo no publica ese campo. Las acciones
+autorizadas siguen indicando `Drop`; `canGive`, no una acción textual
+incompleta, decide si el cliente ofrece `Give`.
+
+En GMCP, `Char.Items.List` proyecta `transferPolicy` y `boundToYou` para
+`location: "inv"`, `"worn"` y `"container"`. Inventario y contenedor incluyen
+también `canGive`; en contenedor siempre es falso. Cada regeneración usa la sal
+de la sesión Telnet y no transporta vínculo o propietario durable.
+
 `vitals.update`, `inventory.patch` and `map.snapshot` replace their complete
 corresponding fragment at the stated revision. Other player changes use a new
 `player.snapshot`. A full scene/player snapshot may follow semantic updates to
@@ -756,10 +822,34 @@ keep recovery deterministic under output coalescing.
 
 ## Narrativa, conversación y medios
 
-`message.append.data` contains `revision`, `kind` (`characterMoved`,
-`itemTaken`, `itemDropped`, `gameplay` or `adventure`), safe text, opaque
-`actorId`, and optional opaque `targetId`/`itemId`. It is projected separately
-for every observer; inability to perceive a domain event means no message.
+`message.append.data` contiene `revision`, `kind` (`characterMoved`,
+`itemTaken`, `itemDropped`, `itemGiven`, `gameplay` o `adventure`), texto seguro,
+`actorId` opaco y `targetId`/`itemId` opacos opcionales. Se proyecta por separado
+para cada observador; no percibir un evento de dominio significa no recibir
+mensaje.
+
+Para `itemGiven`, `actorId` identifica al emisor y `targetId` al receptor con la
+sal propia del observador. Emisor y receptor reciben además `itemId`, derivado
+con su sesión de la primera raíz transferida; no se promete que sea una
+identidad durable de pila. Otro observador de la misma sala recibe la narración
+y los personajes opacos, pero no `itemId`; un observador remoto no recibe el
+evento. El evento durable `ItemsGiven` conserva como máximo 256 IDs de raíces
+internos, nunca expuestos por este mensaje.
+
+```json
+{"v":1,"type":"message.append","seq":52,"data":{
+  "revision":19,
+  "kind":"itemGiven",
+  "text":"Aria gives 2 × ember tonic to Bram.",
+  "actorId":"o51a4c0311f262a90",
+  "targetId":"o7f72cd623eb86c31",
+  "itemId":"o9c07330f19a0e04d"
+}}
+```
+
+Telnet conserva la narración textual completa. Si negoció `Char.Items`, emisor
+y receptor reciben listas de inventario regeneradas independientemente con su
+propia sal; el observador de sala no recibe una lista ajena.
 
 `chat.message.data` contiene `channel` (`announcement`, `say`, `tell`, `party`,
 `general`, `newbie` o `staff`), `sender` y texto plano acotado. Ignore y block
@@ -821,7 +911,7 @@ rendering remains authoritative and is never removed by this fallback.
   `tiamud_outbound_budget_exceeded_total{transport="websocket",message="frame"}`
   increment rather than emitting an invalid frame.
 - JSON nesting: 16.
-- command: 1024 bytes; request ID: 128; action target: 256.
+- command: 1024 bytes; request ID: 128; action target: 256; `recipient`: 64.
 - chat: 512 bytes; reason fields and all projected arrays/strings are bounded.
 - initial hello timeout: 10 seconds; WebSocket write timeout: 5 seconds.
 - three consecutive protocol/rate violations close the game session.

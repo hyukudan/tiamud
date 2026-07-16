@@ -29,14 +29,15 @@ sobre la aceptación de la especificación histórica.
 - Sí existen inventario, equipo, consumibles, botín fijo de NPC, prototipos
   reutilizables, instancias durables, capacidad por slots/peso y
   rareza/`itemLevel` textual. También existen pilas fungibles derivadas,
-  contenedores acotados, cantidades y consulta paginada.
-- No existen `give`/trade, políticas ligadas ejecutables, derechos o reparto de
-  botín, afijos ni tablas de botín aleatorias.
+  contenedores acotados, cantidades, consulta paginada, `give` atómico y las
+  políticas `transferable`, `character_bound` y `non_transferable`.
+- No existen intercambio bilateral confirmado, derechos o reparto de botín,
+  afijos ni tablas de botín aleatorias.
 
 Las fases 1, comunicación/grupo, 2, staff por capacidades, 3A, fundamento de
-objetos, y 3B, pilas/contenedores, están implementadas. La secuencia pendiente
-es: transferencias y trade confirmado; propiedad y reparto del botín; y después, drops
-repetibles, afijos y tablas aleatorias.
+objetos, 3B, pilas/contenedores, y 3C, entrega/políticas, están implementadas.
+La secuencia pendiente es: trade confirmado; propiedad y reparto del botín; y
+después, drops repetibles, afijos y tablas aleatorias.
 
 ## Estado verificado en el código
 
@@ -194,26 +195,39 @@ directos agrupados y peso de todos sus descendientes. El grafo rechaza ciclos y
 una quinta arista. Equipar, desequipar, reemplazar, tomar, soltar, introducir y
 extraer prevalidan el estado prospectivo completo antes de mutar.
 
-Las pilas `fungible` se derivan por ubicación/prototipo, ordenan unidades por
-ID y se dividen por `maxStackUnits`; no se persiste `quantity` ni un ID de pila.
-`take`/`drop`/`put`/`get` mueven 1..=256 unidades y `contents` pagina 20 grupos.
+Las pilas `fungible` se derivan por ubicación/prototipo/vínculo, ordenan
+unidades por ID y se dividen por `maxStackUnits`; no se persiste `quantity` ni
+un ID de pila. `take`/`drop`/`put`/`get`/`give` mueven 1..=256 unidades y
+`contents` pagina 20 grupos.
 La rareza cerrada, `itemLevel`, peso unitario/total, cantidad, slots y capacidad
 se muestran como texto; Web usa `container.contents`, Telnet texto equivalente
-y GMCP `Char.Items.List` con ubicación `container`.
+y GMCP `Char.Items.List` con ubicación `container`. Las vistas añaden política,
+estado ligado y `canGive`, sin exponer el dueño durable.
+
+El propietario efectivo se obtiene en la raíz del grafo. Al adquirir desde
+sala/NPC/staging se liga recursivamente cada descendiente `character_bound` al
+personaje; `non_transferable` restringe el cambio sin persistir un dueño. Un
+subárbol solo puede cambiar de personaje o volver al mundo si todas sus
+instancias son `transferable`, cerrando el bypass mediante contenedores.
+`give [cantidad] <objeto> to <personaje>` solo acepta raíces portadas, otro
+personaje conectado en la misma sala y capacidad bilateral. Ignore del
+receptor y block bilateral lo impiden con un error genérico. El cambio,
+snapshot y `ItemsGiven` se confirman o revierten juntos.
 
 El botín fijo actual es una instancia inicial ubicada en `npc_spawn`. El
 validador exige prototipo, instancia, spawn y ubicación coherentes. La unidad
 se entrega al NPC al cargar y se transfiere al derrotarlo. Esto sigue siendo
 botín fijo y determinista, no una tabla aleatoria repetible.
 
-`WorldRuntimeSnapshot` v3 persiste instancias, contención y contador; las
-lecturas v1/v2 usan DTO y conversiones explícitos dirigidos por versión. SQLite
+`WorldRuntimeSnapshot` v4 persiste instancias, contención, contador y vínculo
+obligatorio; las lecturas v1/v2/v3 usan DTO exactos, migran a `unbound` y
+rechazan inyección de campos v4. SQLite
 y PostgreSQL confirman ese snapshot único en la
 transacción existente de esquema v10. Al restaurar se conservan nuevas
 instancias iniciales del WorldPack y se superpone el estado durable, sin
 recuperar instancias runtime ausentes del snapshot. La barrera de arranque
-valida propietarios siguiendo contenedores hasta su raíz, equipo, grafo y
-capacidad de personajes conectados o
+valida propietarios siguiendo contenedores hasta su raíz, IDs ligados incluso
+en objetos consumidos, equipo, grafo y capacidad de personajes conectados o
 desconectados mediante agregados acotados que descarta después. No hay tabla
 espejo ni esquema v11.
 
@@ -357,13 +371,16 @@ Son sistemas distintos y deben modelarse por separado.
 ```mermaid
 flowchart LR
     accTitle: Inventario implementado y ampliaciones de transferencia y botín
-    accDescr: Cada unidad conserva identidad durable; pilas y contenedores ya forman una vista y un grafo acotados. Transferencias, derechos y tablas siguen como fases posteriores.
+    accDescr: Cada unidad conserva identidad durable; pilas, contenedores, políticas y entrega directa ya son autoritativos. Intercambio bilateral, derechos y tablas siguen como fases posteriores.
 
     Prototype[ItemPrototype implementado<br/>nombre · reglas · rareza · peso] --> Instance[ItemInstance implementada<br/>ID durable · prototypeId · ubicación]
     Sequence[(Secuencia persistida)] --> Instance
     Instance --> Current[Inventario / equipo / NPC / sala / contenedor]
     Current --> Stack[Pila derivada<br/>sin identidad durable]
     Current --> Container[Contenedor acotado<br/>slots + peso recursivo]
+    Current --> Give[Give atómico<br/>solo subárbol transferible]
+    Policy[Política + vínculo durable] --> Give
+    Give -. fase 3D .-> Trade[Intercambio confirmado]
 
     Prototype -. fase 4 .-> Table[LootTable validada]
     RNG[(RNG persistido)] --> Roll[Tirada entera determinista]
@@ -371,7 +388,6 @@ flowchart LR
     Roll --> Generated[Instancia nueva + procedencia]
     Generated --> Rights[Elegibilidad y propietario]
     Rights --> Future[Reparto]
-    Current -. fase 3C/3D .-> Trade[Dar / intercambio confirmado]
 ```
 
 ### Fundamento y secuencia
@@ -382,12 +398,12 @@ flowchart LR
 3. Implementado: inventario acotado por slots/peso, contenedores con capacidad
    y profundidad máximas, y pilas derivadas que agrupan unidades fungibles por
    ubicación/prototipo sin persistir cantidad.
-4. Pendiente: transferencia atómica, con `give` para casos simples e intercambio confirmado
-   por ambas partes para objetos valiosos. Objetos de quest, ligados o no
-   transferibles deben declararlo. En 3B solo se acepta `transferable`;
-   `character_bound` y `non_transferable` se rechazan como valores reservados
-   hasta que 3C ejecute su semántica.
-5. Pendiente: derechos de botín con ventana exclusiva y política inicial determinista, por
+4. Implementado: `give` atómico para casos simples y políticas declaradas
+   `transferable`, `character_bound` y `non_transferable`, aplicadas al
+   propietario efectivo y al subárbol completo.
+5. Pendiente: intercambio confirmado por ambas partes para ofertas de objetos
+   y moneda, con escrow acotado e invalidación ante cualquier cambio.
+6. Pendiente: derechos de botín con ventana exclusiva y política inicial determinista, por
    ejemplo round-robin, antes de dejarlo libre en la sala.
 
 ### Rareza y nivel de objeto
@@ -427,7 +443,8 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 | Mail y tablones | Ausente. | Después de definir retención, cuotas, moderación y privacidad. |
 | Guilds/clanes | Ausente. | Tras estabilizar parties, canales y autoridad comunitaria. |
 | Puertas y llaves | Ausentes como sistema general; los contenedores de inventario sí existen. | Cuando el estado abierto/cerrado, acceso y llaves tenga autoría/persistencia explícita. |
-| Give/trade/auction | Ausente. | Tras propiedad durable, operación atómica y antifraude básico. |
+| Give | Implementado para raíces portadas, misma sala, capacidad bilateral y subárbol enteramente transferible. | Ampliarlo solo si se diseña entrega remota/offline con política explícita. |
+| Trade/auction | Ausente. | Tras escrow, doble aceptación, expiración e invalidación atómicas. |
 | Crafting | Ausente. | Cuando haya prototipos repetibles y sinks económicos. |
 | Housing | Ausente. | Cuando el contenido necesite instancias persistentes privadas. |
 | Pets/mounts | Ausente. | Después de followers y reglas de party/NPC. |
@@ -473,10 +490,20 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 - cantidades máximas 256, `contents` paginado a 20 grupos y selectores opacos;
 - paridad de datos/acciones en Web, Telnet y `Char.Items.List` GMCP.
 
-### Fase 3C/3D — transferencias — pendiente
+### Fase 3C — entrega y políticas — implementada
 
-- `give` atómico y políticas de transferencia ejecutables;
+- `give` atómico, propietario efectivo y políticas de transferencia
+  ejecutables;
+- binding durable en snapshot v4, migración cerrada desde v1-v3 y paridad
+  Web/Telnet/GMCP;
+- ignore/block, capacidad bilateral, replay/rollback y proyección opaca.
+
+### Fase 3D — intercambio confirmado — pendiente
+
 - intercambio con escrow, doble aceptación e invalidación ante cambios.
+
+El contrato propuesto, todavía no aceptado ni implementado, está en
+[ADR 0012](../decisions/0012-confirmed-trade-reservations.md).
 
 ### Fase 4 — propiedad y botín aleatorio — pendiente
 

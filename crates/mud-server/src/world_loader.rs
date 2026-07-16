@@ -1047,8 +1047,8 @@ mod tests {
     #[test]
     fn reviewed_pack_loads_item_prototypes_instances_and_an_npc_spawn() {
         let loaded = default_loaded_world().unwrap();
-        assert_eq!(loaded.definition.item_prototypes.len(), 7);
-        assert_eq!(loaded.definition.initial_item_instances.len(), 8);
+        assert_eq!(loaded.definition.item_prototypes.len(), 9);
+        assert_eq!(loaded.definition.initial_item_instances.len(), 10);
         let tonic = loaded
             .definition
             .item_prototypes
@@ -1074,6 +1074,26 @@ mod tests {
             .find(|prototype| prototype.prototype_id == "tiamud:archive-satchel")
             .unwrap();
         assert_eq!(satchel.container.as_ref().unwrap().max_slots, 8);
+        let rain_writ = loaded
+            .definition
+            .item_prototypes
+            .iter()
+            .find(|prototype| prototype.prototype_id == "tiamud:rain-writ")
+            .unwrap();
+        assert_eq!(
+            rain_writ.transfer_policy,
+            CoreItemTransferPolicy::NonTransferable
+        );
+        let stormglass_talon = loaded
+            .definition
+            .item_prototypes
+            .iter()
+            .find(|prototype| prototype.prototype_id == "tiamud:stormglass-talon")
+            .unwrap();
+        assert_eq!(
+            stormglass_talon.transfer_policy,
+            CoreItemTransferPolicy::CharacterBound
+        );
         assert!(
             loaded
                 .definition
@@ -1112,7 +1132,10 @@ mod tests {
         assert_eq!(loaded.npcs[0].stable_id, "tiamud:gate-stalker-1");
         assert_eq!(
             loaded.npcs[0].loot_item_ids,
-            [ItemInstanceId("tiamud:wolf-clasp".into())]
+            [
+                ItemInstanceId("tiamud:stormglass-talon".into()),
+                ItemInstanceId("tiamud:wolf-clasp".into()),
+            ]
         );
         assert_eq!(loaded.rng_seed, Some(6_073_466_303_471_576_068));
         assert!(

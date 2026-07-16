@@ -16,7 +16,7 @@ honesto de `AGENTS.md`.
 Ante conflictos de estado, la matriz prevalece sobre registros antiguos y
 texto obsoleto de un ADR. Los ADR siguen gobernando decisiones aceptadas.
 `docs/spec-v0.2.md` es contexto histórico en castellano; `docs/spec-v0.3.md`
-describe el baseline vigente de personajes y medios.
+describe el baseline vigente de personajes, inventario y medios.
 
 ## Estado actual resumido
 
@@ -38,22 +38,29 @@ describe el baseline vigente de personajes y medios.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
-- La fase de inventario 3B separa `itemPrototypes` de instancias durables,
-  persiste `WorldRuntimeSnapshot` v3 con conversiones explícitas desde v1/v2 y
-  aplica capacidad por slots/peso. Las pilas fungibles se derivan por
-  ubicación/prototipo y no persisten cantidad ni ID de pila. Los contenedores
-  únicos tienen capacidad propia, peso recursivo, profundidad máxima cuatro y
-  rechazo atómico de ciclos/sobrecapacidad. Rareza cerrada, `itemLevel`, peso
-  unitario/total, cantidad, slots y capacidad se proyectan
-  como texto con IDs opacos derivados de una sal aleatoria por sesión; Telnet
-  muestra y acepta esas referencias para desambiguar. Los medios de objeto
-  referencian el prototipo y `hiddenItems` la instancia. El arranque valida de
-  forma acotada propietarios, equipo y capacidad también para desconectados,
-  sin retener sus agregados en el mundo activo. SQLite/PostgreSQL conservan el
-  snapshot único en esquema v10; restore conserva nuevas instancias iniciales
-  del WorldPack y superpone el snapshot sin resucitar instancias runtime
-  ausentes. No existe tabla espejo ni esquema v11. En 3B solo se acepta
-  `transferable`; `give`, trade, políticas ligadas, derechos y tablas aleatorias
+- La fase de inventario 3C separa `itemPrototypes` de instancias durables y
+  persiste `WorldRuntimeSnapshot` v4 con DTO exactos v1/v2/v3/v4. v1-v3 se
+  convierten a vínculo `unbound`; schema-smuggling, vínculos y políticas
+  incoherentes fallan cerrados. SQLite/PostgreSQL conservan el snapshot único en
+  esquema v10, sin tabla espejo ni esquema v11. Restore conserva nuevas
+  instancias iniciales del WorldPack y superpone el snapshot sin resucitar
+  instancias runtime ausentes.
+- Las pilas fungibles se derivan por ubicación/prototipo/vínculo y no persisten
+  cantidad ni ID de pila. Los contenedores únicos tienen capacidad propia, peso
+  recursivo, profundidad máxima cuatro y rechazo atómico de
+  ciclos/sobrecapacidad. Rareza cerrada, `itemLevel`, peso unitario/total,
+  cantidad, slots, capacidad, política y vínculo se proyectan como texto con IDs
+  opacos derivados de una sal aleatoria por sesión; Telnet muestra y acepta esas
+  referencias. Los medios de objeto referencian el prototipo y `hiddenItems` la
+  instancia.
+- WorldPack v5/AreaPack v4 aceptan `transferable`, `character_bound` y
+  `non_transferable`; formatos anteriores solo `transferable`. La adquisición
+  liga recursivamente, y ninguna raíz puede soltar o cambiar de dueño un
+  descendiente restringido. `give [cantidad] <objeto> to <personaje>` mueve
+  1..=256 raíces portadas a un receptor distinto, conectado y en la misma sala,
+  con capacidad bilateral, ignore/block, commit y proyección atómicos. El
+  arranque valida propietarios raíz y ligados, incluidos consumidos y
+  desconectados. Trade/escrow, derechos/reparto, procedencia y tablas aleatorias
   siguen pendientes.
 - La fase social 1 está implementada: `say`, `tell`, `reply` online, grupos de
   seis miembros con chat y liderazgo, y suscripciones durables a `general`,
@@ -82,7 +89,7 @@ describe el baseline vigente de personajes y medios.
   obligatorio.
 - Software: `MIT OR Apache-2.0`; contenido original: `CC-BY-4.0`.
 
-El árbol integrado de inventario 3A supera formato, pruebas bloqueadas del
+La evidencia histórica de inventario 3A supera formato, pruebas bloqueadas del
 workspace y clippy estricto; 77 pruebas de core, 80 de WorldPack, 28 del
 importador, 195 de servidor, `svelte-check` 0/0, 100 pruebas web, build y 30/30
 escenarios Playwright soportados. Licencias y avisos de 307 dependencias Rust y
@@ -93,12 +100,22 @@ veredictos en `pass`. No se ejecutaron PostgreSQL real v10, WebKit local ni soak
 de 24 horas. Esa evidencia operacional procede de un árbol dirty precommit: es
 diagnóstico local, no evidencia publicable ni de CI.
 
-La integración 3B pasa formato/check/clippy y 499/499 pruebas Rust: 88 core, 93
+La evidencia histórica de integración 3B pasa formato/check/clippy y 499/499
+pruebas Rust: 88 core, 93
 WorldPack, 28 importador, 202 servidor y 88 restantes. También pasan
 `svelte-check` 0/0, 103/103 web, build, 30/30 Playwright Chromium/Firefox,
 80/80 Node, humo, carga CI con 16 usuarios, soak corto de 66 rondas/10
 readiness, `cargo-deny`, licencias y avisos 307 Rust/76 web. PostgreSQL real
 v10, WebKit local y soak de 24 horas no se ejecutaron.
+
+La integración actual 3C usa un WorldPack canónico con 9 prototipos, 10
+instancias iniciales, 49.603 bytes y SHA-256
+`f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
+Pasan 513/513 pruebas Rust: 93 core, 95 WorldPack, 28 importador, 207 servidor y
+90 restantes; `svelte-check` 0/0, 103/103 web, 81/81 Node y 32/32 Playwright
+soportados, 16 Chromium y 16 Firefox. WebKit no arranca en este host por
+bibliotecas GTK/GStreamer. No se ejecutaron PostgreSQL real v10 ni soak de 24
+horas; es evidencia local de un árbol dirty, no de CI, release o producción.
 
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
@@ -127,10 +144,10 @@ por facturación antes de ejecutar.
   paridad Telnet/GMCP.
 - Medios pasan por pipeline y manifiesto revisado; perderlos no cambia juego.
 - La identidad durable prototype/instance, las pilas derivadas y los
-  contenedores acotados ya existen. Antes de botín repetible/aleatorio,
-  implementa transferencias/políticas, trade confirmado y después propiedad,
-  procedencia y derechos de reparto atómicos. No añadas cajas de botín pagadas
-  al baseline.
+  contenedores acotados, `give` y las políticas de transferencia ya existen.
+  Antes de botín repetible/aleatorio, implementa trade confirmado y después
+  propiedad, procedencia y derechos de reparto atómicos. No añadas cajas de
+  botín pagadas al baseline.
 - Las acciones staff que tocan el mundo resuelven un personaje conectado y
   comprueban una capacidad concreta. Conserva la sintaxis textual con `|` para
   separar cuerpo y motivo en inspect/where/goto/transfer/restore, announce,

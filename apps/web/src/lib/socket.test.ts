@@ -93,7 +93,9 @@ const validPlayerState = () => ({
   }],
   partyInvites: [],
   economy: { coins: 40, commodities: [], shopAvailable: false, shop: [] },
-  social: { online: [{ id: 'o2222222222222222', name: 'Aria', selfCharacter: true }] },
+  social: {
+    online: [{ id: 'o2222222222222222', name: 'Aria', selfCharacter: true, nearby: true }],
+  },
 });
 
 beforeEach(() => {
@@ -146,6 +148,17 @@ describe('TiamudConnection', () => {
     expect(connection.perform('item.take', { target: 'o8888888888888888' }, 'legacy-1')).toBe(true);
     expect(lastSent(socket)).toMatchObject({
       data: { requestId: 'legacy-1', action: 'item.take', target: 'o8888888888888888' },
+    });
+    expect(connection.perform(
+      'item.give',
+      { target: 'o8888888888888888', recipient: 'o7777777777777777', quantity: 2 },
+      'give-1',
+    )).toBe(true);
+    expect(lastSent(socket)).toMatchObject({
+      data: {
+        requestId: 'give-1', action: 'item.give', target: 'o8888888888888888',
+        recipient: 'o7777777777777777', quantity: 2,
+      },
     });
     expect(connection.perform(
       'social.channel.say',

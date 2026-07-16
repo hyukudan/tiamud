@@ -982,6 +982,7 @@ async fn write_auth_error(connection: &mut TelnetConnection, error: &GameError) 
 
 fn public_error(error: &GameError) -> String {
     match error {
+        GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
         GameError::World(
             error @ (tiamud_core::WorldError::NoExit
             | tiamud_core::WorldError::ItemNotFound(_)
@@ -993,8 +994,13 @@ fn public_error(error: &GameError) -> String {
             | tiamud_core::WorldError::ClassNotFound
             | tiamud_core::WorldError::PromotionUnavailable
             | tiamud_core::WorldError::TalentUnavailable
-            | tiamud_core::WorldError::InsufficientProgressionPoints),
+            | tiamud_core::WorldError::InsufficientProgressionPoints
+            | tiamud_core::WorldError::InventoryCapacityExceeded
+            | tiamud_core::WorldError::ItemTransferForbidden),
         ) => error.to_string(),
+        GameError::World(tiamud_core::WorldError::GiveTargetUnavailable) => {
+            "That item transfer is not available.".to_owned()
+        }
         GameError::World(
             error @ (tiamud_core::WorldError::PartyUnavailable
             | tiamud_core::WorldError::PartyForbidden
@@ -2131,6 +2137,9 @@ impl TelnetSession {
                         "quantity": item.quantity,
                         "stackSlots": item.stack_slots,
                         "totalWeightGrams": item.total_weight_grams,
+                        "transferPolicy": item.transfer_policy,
+                        "boundToYou": item.bound_to_you,
+                        "canGive": item.can_give,
                     });
                     if let Some(capacity) = &item.container_capacity {
                         value["containerCapacity"] = json!(capacity);
@@ -2162,6 +2171,8 @@ impl TelnetSession {
                         "quantity": item.quantity,
                         "stackSlots": item.stack_slots,
                         "totalWeightGrams": item.total_weight_grams,
+                        "transferPolicy": item.transfer_policy,
+                        "boundToYou": item.bound_to_you,
                     });
                     if let Some(capacity) = &item.container_capacity {
                         value["containerCapacity"] = json!(capacity);
@@ -2220,6 +2231,9 @@ impl TelnetSession {
                     "quantity": item.quantity,
                     "stackSlots": item.stack_slots,
                     "totalWeightGrams": item.total_weight_grams,
+                    "transferPolicy": item.transfer_policy,
+                    "boundToYou": item.bound_to_you,
+                    "canGive": item.can_give,
                 });
                 if let Some(capacity) = &item.container_capacity {
                     value["containerCapacity"] = json!(capacity);
@@ -2260,6 +2274,9 @@ impl TelnetSession {
                     "quantity": item.quantity,
                     "stackSlots": item.stack_slots,
                     "totalWeightGrams": item.total_weight_grams,
+                    "transferPolicy": item.transfer_policy,
+                    "boundToYou": item.bound_to_you,
+                    "canGive": item.can_give,
                 });
                 if let Some(capacity) = &item.container_capacity {
                     value["containerCapacity"] = json!(capacity);
@@ -2828,12 +2845,15 @@ fn render_scene(scene: &SceneView, session: &TelnetSession) -> String {
                                     capacity.max_weight_grams,
                                 )
                             });
+                    let transfer_policy =
+                        item_transfer_policy_label(item.transfer_policy, item.bound_to_you);
                     format!(
-                        "{} × {} [{} · level {} · {} g each · {} {} · {} g total{} · ref {}]",
+                        "{} × {} [{} · level {} · {} · {} g each · {} {} · {} g total{} · ref {}]",
                         item.quantity,
                         item.label,
                         item.rarity,
                         item.item_level,
+                        transfer_policy,
                         item.weight_grams,
                         item.stack_slots,
                         stack_slots,
@@ -2875,6 +2895,20 @@ fn render_scene(scene: &SceneView, session: &TelnetSession) -> String {
     }
     output.push_str("\r\n");
     output
+}
+
+fn item_transfer_policy_label(
+    policy: tiamud_core::ItemTransferPolicy,
+    bound_to_you: bool,
+) -> &'static str {
+    match policy {
+        tiamud_core::ItemTransferPolicy::Transferable => "transferable",
+        tiamud_core::ItemTransferPolicy::CharacterBound if bound_to_you => {
+            "bound to this character"
+        }
+        tiamud_core::ItemTransferPolicy::CharacterBound => "binds on first acquisition",
+        tiamud_core::ItemTransferPolicy::NonTransferable => "non-transferable",
+    }
 }
 
 fn render_link(label: &str, command: &str, mode: LinkMode) -> String {
@@ -3113,6 +3147,22 @@ mod tests {
         assert_eq!(
             public_error(&GameError::World(tiamud_core::WorldError::InvalidEntity)),
             "The world is temporarily unavailable."
+        );
+        assert_eq!(
+            public_error(&GameError::World(
+                tiamud_core::WorldError::InventoryCapacityExceeded
+            )),
+            "That item would exceed inventory slot or weight capacity."
+        );
+        assert_eq!(
+            public_error(&GameError::World(
+                tiamud_core::WorldError::ItemTransferForbidden
+            )),
+            "That item cannot change ownership."
+        );
+        assert_eq!(
+            public_error(&GameError::GiveUnavailable),
+            "That item transfer is not available."
         );
     }
 
@@ -3797,13 +3847,24 @@ mod tests {
         assert!(wire.contains("\"quantity\":1"));
         assert!(wire.contains("\"stackSlots\":1"));
         assert!(wire.contains("\"totalWeightGrams\":1000"));
+        assert!(wire.contains("\"transferPolicy\":\"transferable\""));
+        assert!(wire.contains("\"boundToYou\":false"));
+        assert!(wire.contains("\"canGive\":true"));
         assert!(!wire.contains("demo:lantern-square"));
         assert!(!wire.contains("prototypeId"));
         assert!(!wire.contains("characterId"));
 
         let contents = tiamud_core::ContainerContentsView {
             selector: "o9999999999999999".into(),
-            items: player.inventory.clone(),
+            items: player
+                .inventory
+                .iter()
+                .cloned()
+                .map(|mut item| {
+                    item.can_give = false;
+                    item
+                })
+                .collect(),
             page: 1,
             total_pages: 2,
             capacity: tiamud_core::InventoryCapacityView {
@@ -3826,6 +3887,9 @@ mod tests {
         assert_eq!(json["page"], 1);
         assert_eq!(json["totalPages"], 2);
         assert_eq!(json["capacity"]["maxSlots"], 8);
+        assert_eq!(json["items"][0]["transferPolicy"], "transferable");
+        assert_eq!(json["items"][0]["boundToYou"], false);
+        assert_eq!(json["items"][0]["canGive"], false);
         assert!(container_payloads[0].len() <= MAX_GMCP_BYTES);
     }
 
@@ -3854,6 +3918,9 @@ mod tests {
                     quantity: 1,
                     stack_slots: 100,
                     total_weight_grams: 1_000_000,
+                    transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+                    bound_to_you: false,
+                    can_give: false,
                     container_capacity: Some(tiamud_core::InventoryCapacityView {
                         used_slots: 0,
                         max_slots: 1_000,
@@ -3894,6 +3961,9 @@ mod tests {
             assert_eq!(item["quantity"], 1);
             assert_eq!(item["stackSlots"], 100);
             assert_eq!(item["totalWeightGrams"], 1_000_000);
+            assert_eq!(item["transferPolicy"], "transferable");
+            assert_eq!(item["boundToYou"], false);
+            assert_eq!(item["canGive"], false);
             assert_eq!(item["containerCapacity"]["maxSlots"], 1_000);
         }
     }
@@ -4548,6 +4618,7 @@ mod tests {
                 location: tiamud_core::RuntimeItemLocation::Room {
                     room_id: "demo:lantern-square".into(),
                 },
+                binding: tiamud_core::ItemBinding::Unbound,
             },
         );
         runtime.next_item_instance_sequence = 2;
@@ -4607,6 +4678,8 @@ mod tests {
             quantity: 1,
             stack_slots: 1,
             total_weight_grams: 700,
+            transfer_policy: tiamud_core::ItemTransferPolicy::CharacterBound,
+            bound_to_you: false,
             container_capacity: Some(tiamud_core::InventoryCapacityView {
                 used_slots: 1,
                 max_slots: 8,
@@ -4622,6 +4695,7 @@ mod tests {
         assert!(rendered.contains("1 stack slot"));
         assert!(rendered.contains("700 g total"));
         assert!(rendered.contains("container 1/8 slots · 200/5000 g"));
+        assert!(rendered.contains("binds on first acquisition"));
         assert!(rendered.contains("ref o1111111111111111"));
         assert!(!rendered.contains("prototypeId"));
     }

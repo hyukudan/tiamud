@@ -697,12 +697,6 @@ impl WorldPack {
                     prototype.id
                 )));
             }
-            if prototype.transfer_policy != ItemTransferPolicy::Transferable {
-                errors.push(ValidationError::InvalidGameplay(format!(
-                    "item prototype {:?} uses a transfer policy reserved for phase 3C",
-                    prototype.id
-                )));
-            }
             match prototype.stack_policy {
                 ItemStackPolicy::Unique if prototype.max_stack_units != 1 => {
                     errors.push(ValidationError::InvalidGameplay(format!(
@@ -2658,18 +2652,21 @@ mod tests {
         too_many_aliases.item_prototypes.push(prototype);
         assert!(too_many_aliases.validate().is_err());
 
-        let mut reserved_transfer = pack();
-        let mut prototype = item_prototype("test:bound");
-        prototype.transfer_policy = ItemTransferPolicy::CharacterBound;
-        reserved_transfer.item_prototypes.push(prototype);
-        assert!(
-            reserved_transfer
-                .validate()
-                .unwrap_err()
-                .0
-                .iter()
-                .any(|error| error.to_string().contains("reserved for phase 3C"))
-        );
+        for (suffix, transfer_policy) in [
+            ("transferable", ItemTransferPolicy::Transferable),
+            ("bound", ItemTransferPolicy::CharacterBound),
+            ("non-transferable", ItemTransferPolicy::NonTransferable),
+        ] {
+            let mut candidate = pack();
+            let mut prototype = item_prototype(&format!("test:{suffix}"));
+            prototype.transfer_policy = transfer_policy;
+            candidate.item_prototypes.push(prototype);
+            candidate.validate().unwrap();
+
+            let encoded = serde_json::to_vec(&candidate).unwrap();
+            let decoded: WorldPack = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded.item_prototypes[0].transfer_policy, transfer_policy);
+        }
 
         let mut too_many_prototypes = pack();
         too_many_prototypes.item_prototypes = (0..=MAX_ITEM_PROTOTYPES)

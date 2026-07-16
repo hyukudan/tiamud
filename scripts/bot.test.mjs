@@ -29,6 +29,8 @@ function sceneItem(overrides = {}) {
     quantity: 1,
     stackSlots: 1,
     totalWeightGrams: 800,
+    transferPolicy: 'transferable',
+    boundToYou: false,
     actions: [{ label: 'Take', command: `take ${OPAQUE_ITEM}` }],
     ...overrides,
   };
@@ -79,7 +81,10 @@ function inventoryPatch(overrides = {}) {
     seq: 2,
     data: {
       revision: 2,
-      inventory: [sceneItem({ actions: [{ label: 'Drop', command: `drop ${OPAQUE_ITEM}` }] })],
+      inventory: [sceneItem({
+        canGive: true,
+        actions: [{ label: 'Drop', command: `drop ${OPAQUE_ITEM}` }],
+      })],
       equipment: [{
         id: OPAQUE_EQUIPMENT,
         slot: 'weapon',
@@ -90,6 +95,8 @@ function inventoryPatch(overrides = {}) {
         quantity: 1,
         stackSlots: 1,
         totalWeightGrams: 2_200,
+        transferPolicy: 'transferable',
+        boundToYou: false,
         actions: [{ label: 'Unequip', command: 'unequip weapon' }],
       }],
       inventoryCapacity: {
@@ -163,6 +170,8 @@ test('strict bot accepts the complete bounded phase-3B scene item contract', () 
 
   for (const invalid of [
     sceneItem({ rarity: 'mythic' }),
+    sceneItem({ transferPolicy: 'account_bound' }),
+    sceneItem({ transferPolicy: 'transferable', boundToYou: true }),
     sceneItem({ itemLevel: 0 }),
     sceneItem({ itemLevel: 1_001 }),
     sceneItem({ weightGrams: -1 }),
@@ -181,6 +190,22 @@ test('strict bot accepts the complete bounded phase-3B scene item contract', () 
     () => parseServerMessage(JSON.stringify(sceneEnvelope({ ...sceneItem(), prototypeId: 'secret' }))),
     /unknown keys: prototypeId/,
   );
+});
+
+test('strict bot accepts opaque itemGiven projections without durable ownership', () => {
+  const event = {
+    revision: 8,
+    kind: 'itemGiven',
+    text: 'Aria gives a blue lantern to Bram.',
+    actorId: OPAQUE_ACTOR,
+    targetId: OPAQUE_TARGET,
+    itemId: OPAQUE_ITEM,
+  };
+  assert.equal(parseEnvelope('message.append', event).data.kind, 'itemGiven');
+  assert.throws(() => parseEnvelope('message.append', {
+    ...event,
+    ownerCharacterId: 42,
+  }));
 });
 
 test('strict bot accepts bounded entity presentation and scene audio without weakening secrecy', () => {
@@ -368,6 +393,8 @@ test('strict bot validates inventory, equipment, and capacity as one coherent pr
         quantity: 1,
         stackSlots: 1,
         totalWeightGrams: 2_200,
+        transferPolicy: 'transferable',
+        boundToYou: false,
         actions: [],
       }],
     }),
@@ -375,6 +402,12 @@ test('strict bot validates inventory, equipment, and capacity as one coherent pr
   for (const invalid of invalidPatches) {
     assert.throws(() => parseServerMessage(JSON.stringify(invalid)));
   }
+  assert.throws(() => parseServerMessage(JSON.stringify(inventoryPatch({
+    inventory: [sceneItem({ canGive: undefined })],
+  }))));
+  assert.throws(() => parseServerMessage(JSON.stringify(inventoryPatch({
+    inventory: [sceneItem({ transferPolicy: 'non_transferable', canGive: true })],
+  }))));
 });
 
 test('strict bot validates paginated container summaries without durable ids or prose trees', () => {
@@ -382,6 +415,7 @@ test('strict bot validates paginated container summaries without durable ids or 
     container: OPAQUE_EQUIPMENT,
     items: [sceneItem({
       description: undefined,
+      canGive: false,
       quantity: 3,
       totalWeightGrams: 2_400,
       actions: [{
@@ -398,6 +432,10 @@ test('strict bot validates paginated container summaries without durable ids or 
   assert.throws(() => parseEnvelope('container.contents', {
     ...data,
     items: Array.from({ length: 21 }, () => data.items[0]),
+  }));
+  assert.throws(() => parseEnvelope('container.contents', {
+    ...data,
+    items: [{ ...data.items[0], canGive: true }],
   }));
   assert.throws(() => parseEnvelope('container.contents', {
     ...data,

@@ -1,7 +1,8 @@
 # ADR 0009: prototipos, instancias y capacidad de inventario
 
 - Estado: aceptado; fase 3A implementada. Fase 3B implementada por
-  [ADR 0010](0010-derived-stacks-and-bounded-containers.md); fases 3C–4 pendientes.
+  [ADR 0010](0010-derived-stacks-and-bounded-containers.md) y fase 3C por
+  [ADR 0011](0011-atomic-give-and-item-transfer-policies.md); fases 3D–4 pendientes.
 - Fecha: 2026-07-16.
 - Alcance: identidad de objetos, autoría, snapshot, capacidad y presentación.
 
@@ -114,6 +115,12 @@ independientes, una
 migración futura podrá mover la autoridad a tablas relacionales en una barrera
 versionada, nunca mediante doble escritura indefinida.
 
+Esta es la decisión histórica de 3A. ADR 0010 llevó el snapshot a v3 para el
+grafo de contenedores y ADR 0011 a v4 para el `binding` obligatorio por
+instancia. SQLite y PostgreSQL continúan en esquema v10 y el snapshot sigue
+siendo la única autoridad de objetos; no se introdujo tabla espejo ni doble
+escritura.
+
 ### Capacidad y rareza
 
 Cada personaje tiene `max_slots` y `max_weight_grams`. Cada prototipo declara
@@ -130,11 +137,15 @@ La rareza canónica es cerrada: `common`, `uncommon`, `rare`, `epic`,
 puede acompañar, nunca sustituir la etiqueta. `item_level` es otro eje y no
 salta requisitos, límites o reglas económicas.
 
-En 3A toda instancia es individual y transferible: solo se aceptan
+En 3A toda instancia era individual y transferible: solo se aceptaban
 `stackPolicy: unique` y `transferPolicy: transferable`. Los valores
 `character_bound` y `non_transferable` se conservan en el vocabulario cerrado,
-pero el validador los rechaza como reservados hasta que la fase 3C ejecute su
-semántica. Una futura pila solo podrá agrupar unidades
+pero el validador de aquella fase los rechazaba como reservados. ADR 0011
+activa las tres políticas solo en WorldPack v5/AreaPack v4 y conserva
+WorldPack v4/AreaPack v3 y entradas anteriores como `transferable`; no
+reinterpreta el contrato histórico. Una entrada legacy que intente declarar
+otra política se rechaza en vez de ignorarla o normalizarla silenciosamente.
+Una pila solo puede agrupar unidades
 fungibles con prototipo y metadatos idénticos; no se introduce una cantidad que
 oculte instancias heterogéneas.
 
@@ -158,7 +169,8 @@ oculte instancias heterogéneas.
 1. Fase 3A: split prototipo/instancia, snapshot v2, capacidad y rareza textual.
 2. Fase 3B, implementada por ADR 0010: pilas fungibles derivadas y contenedores
    con profundidad, peso y capacidad máximos.
-3. Fase 3C: `give` atómico y políticas bound/quest/no-transfer.
+3. Fase 3C, implementada por ADR 0011: `give` atómico, propietario efectivo,
+   vinculación durable y políticas `character_bound`/`non_transferable`.
 4. Fase 3D: intercambio con escrow, doble aceptación e invalidación ante
    cualquier cambio.
 5. Fase 4: elegibilidad/reparto de grupo, procedencia, tablas enteras y RNG
@@ -179,6 +191,7 @@ La migración transversal de fase 3A está integrada en WorldPack, core,
 compositor, snapshot, Web y Telnet/GMCP. Tiamud obtiene así una base única para
 objetos repetibles sin introducir todavía tablas de botín, comercio o una
 segunda autoridad persistente prematura. ADR 0010 añade pilas derivadas y
-contenedores acotados sobre esa base sin reinterpretar esta decisión. Las
-transferencias, derechos/reparto y botín aleatorio permanecen en las fases
-posteriores.
+contenedores acotados sobre esa base sin reinterpretar esta decisión. ADR 0011
+añade la entrega simple y las políticas ejecutables sobre el subárbol completo.
+El intercambio confirmado, derechos/reparto y botín aleatorio permanecen en
+las fases posteriores.

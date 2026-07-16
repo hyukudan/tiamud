@@ -36,6 +36,8 @@ pub enum GameError {
     ActorStopped,
     #[error("the character references content that requires an operator migration")]
     CharacterContentIncompatible,
+    #[error("that item transfer is not available")]
+    GiveUnavailable,
     #[error("world actor startup failed during {stage}: {reason}")]
     Startup { stage: &'static str, reason: String },
 }
@@ -938,6 +940,19 @@ async fn apply(
         session_staff_accesses,
         delivery,
     } = resources;
+    if let PlayerAction::Give { recipient, .. } = &action {
+        let giver = world.character_snapshot(session)?;
+        let recipient = world.resolve_give_recipient(session, recipient)?;
+        if !store
+            .social_delivery_allowed(giver.id, recipient.character_id)
+            .await?
+        {
+            // Recipient-side ignore and bilateral block deliberately collapse
+            // to one inventory error. The action is rejected before any world
+            // mutation, revision bump, script hook or durable commit.
+            return Err(GameError::GiveUnavailable);
+        }
+    }
     let checkpoint = world.checkpoint();
     let action = match action {
         PlayerAction::Staff(action) => {
@@ -3015,6 +3030,214 @@ mod tests {
         assert!(!delivery.events[0].event.actor_id.contains("demo:"));
     }
 
+    #[tokio::test]
+    async fn committed_give_refreshes_both_owners_and_only_room_observers() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let mut remote = world.enter("Give Remote".into()).await.unwrap();
+        world
+            .apply(remote.session_id, PlayerAction::Move(Direction::North))
+            .await
+            .unwrap();
+        let sender = world.enter("Give Sender".into()).await.unwrap();
+        let mut recipient = world.enter("Give Recipient".into()).await.unwrap();
+        let mut observer = world.enter("Give Observer".into()).await.unwrap();
+
+        let taken = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Take(tiamud_core::ItemSelection::one("blue-glass lantern")),
+            )
+            .await
+            .unwrap();
+        // Drain the pickup broadcast so the next messages must be caused by
+        // the committed give.
+        recipient.deliveries.recv().await.unwrap();
+        observer.deliveries.recv().await.unwrap();
+        let item = taken.player.inventory[0].id.clone();
+        let recipient_selector = taken
+            .player
+            .social
+            .online
+            .iter()
+            .find(|character| character.name == "Give Recipient")
+            .unwrap()
+            .id
+            .clone();
+
+        let given = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Give {
+                    selection: tiamud_core::ItemSelection::one(item),
+                    recipient: recipient_selector,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(given.player.inventory.is_empty());
+        assert_eq!(
+            given.events[0].event.kind,
+            tiamud_core::ViewEventKind::ItemGiven
+        );
+
+        let recipient_delivery = recipient.deliveries.recv().await.unwrap();
+        let crate::delivery::SessionDelivery::World(recipient_delivery) = recipient_delivery else {
+            panic!("recipient world delivery expected");
+        };
+        assert_eq!(recipient_delivery.player.inventory.len(), 1);
+        assert_eq!(
+            recipient_delivery.events[0].event.kind,
+            tiamud_core::ViewEventKind::ItemGiven
+        );
+        assert!(recipient_delivery.events[0].event.item_id.is_some());
+        assert!(
+            !recipient_delivery.player.inventory[0]
+                .id
+                .contains("demo:blue-lantern")
+        );
+
+        let observer_delivery = observer.deliveries.recv().await.unwrap();
+        let crate::delivery::SessionDelivery::World(observer_delivery) = observer_delivery else {
+            panic!("observer world delivery expected");
+        };
+        assert!(observer_delivery.player.inventory.is_empty());
+        assert_eq!(
+            observer_delivery.events[0].event.kind,
+            tiamud_core::ViewEventKind::ItemGiven
+        );
+        assert!(observer_delivery.events[0].event.item_id.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), remote.deliveries.recv())
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            store.load_domain_events().await.unwrap().last(),
+            Some(DomainEvent::ItemsGiven { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn give_policy_and_failed_commit_publish_nothing_and_restore_both_owners() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let sender = world.enter("Guarded Sender".into()).await.unwrap();
+        let mut recipient = world.enter("Guarded Recipient".into()).await.unwrap();
+        let taken = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Take(tiamud_core::ItemSelection::one("blue-glass lantern")),
+            )
+            .await
+            .unwrap();
+        recipient.deliveries.recv().await.unwrap();
+        let item = taken.player.inventory[0].id.clone();
+        let recipient_selector = taken
+            .player
+            .social
+            .online
+            .iter()
+            .find(|character| character.name == "Guarded Recipient")
+            .unwrap()
+            .id
+            .clone();
+        let action = || PlayerAction::Give {
+            selection: tiamud_core::ItemSelection::one(item.clone()),
+            recipient: recipient_selector.clone(),
+        };
+
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Social(SocialAction::Ignore("Guarded Sender".into())),
+            )
+            .await
+            .unwrap();
+        let revision_before = world
+            .current_state(sender.session_id)
+            .await
+            .unwrap()
+            .0
+            .revision;
+        assert!(matches!(
+            world.apply(sender.session_id, action()).await,
+            Err(GameError::GiveUnavailable)
+        ));
+        assert_eq!(
+            world
+                .current_state(sender.session_id)
+                .await
+                .unwrap()
+                .0
+                .revision,
+            revision_before
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                .await
+                .is_err()
+        );
+
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Social(SocialAction::Unignore("Guarded Sender".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Social(SocialAction::Block("Guarded Sender".into())),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            world.apply(sender.session_id, action()).await,
+            Err(GameError::GiveUnavailable)
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                .await
+                .is_err()
+        );
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Social(SocialAction::Unblock("Guarded Sender".into())),
+            )
+            .await
+            .unwrap();
+        store.fail_saves.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            world.apply(sender.session_id, action()).await,
+            Err(GameError::Persistence(_))
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                .await
+                .is_err()
+        );
+        store.fail_saves.store(false, Ordering::SeqCst);
+        let sender_state = world.current_state(sender.session_id).await.unwrap().2;
+        let recipient_state = world.current_state(recipient.session_id).await.unwrap().2;
+        assert_eq!(sender_state.inventory.len(), 1);
+        assert!(recipient_state.inventory.is_empty());
+        assert!(
+            store
+                .load_domain_events()
+                .await
+                .unwrap()
+                .iter()
+                .all(|event| !matches!(event, DomainEvent::ItemsGiven { .. }))
+        );
+    }
+
     #[test]
     fn authoritative_combat_cues_are_batch_aware_and_use_only_projected_ids() {
         let mut world = World::demo();
@@ -3326,7 +3549,7 @@ mod tests {
         assert!(output.starts_with(
             "Capacity: 1/24 slots; 1000/50000 g.\r\n\
                  You are carrying:\r\n\
-                 - 1 × blue-glass lantern [common; level 1; 1000 g each; 1 stack slot; 1000 g total; ref o"
+                 - 1 × blue-glass lantern [common; level 1; 1000 g each; 1 stack slot; 1000 g total; policy transferable; ref o"
         ));
         assert!(output.ends_with("]\r\n"));
         assert!(!output.contains("demo:blue-lantern"));
@@ -3882,7 +4105,7 @@ mod tests {
             .await
             .unwrap();
         assert!(inventory.output.unwrap().contains(
-            "weapon: 1 × bronze sword [common; level 1; 2000 g each; 1 stack slot; 2000 g total; ref o"
+            "weapon: 1 × bronze sword [common; level 1; 2000 g each; 1 stack slot; 2000 g total; policy transferable; ref o"
         ));
         assert_eq!(entered.player.inventory_capacity.used_slots, 0);
         assert_eq!(entered.player.inventory_capacity.used_weight_grams, 2_000);

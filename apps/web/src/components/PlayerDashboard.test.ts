@@ -70,6 +70,9 @@ const player: PlayerStateSnapshot = {
     quantity: 2,
     stackSlots: 1,
     totalWeightGrams: 1600,
+    transferPolicy: 'transferable',
+    boundToYou: false,
+    canGive: true,
     actions: [{ label: 'Drop', command: 'drop o1111111111111111' }],
   }, {
     id: 'o6666666666666666',
@@ -81,6 +84,9 @@ const player: PlayerStateSnapshot = {
     quantity: 1,
     stackSlots: 1,
     totalWeightGrams: 650,
+    transferPolicy: 'character_bound',
+    boundToYou: true,
+    canGive: false,
     containerCapacity: {
       usedSlots: 1, maxSlots: 8, usedWeightGrams: 250, maxWeightGrams: 5000,
     },
@@ -96,6 +102,8 @@ const player: PlayerStateSnapshot = {
     quantity: 1,
     stackSlots: 1,
     totalWeightGrams: 2300,
+    transferPolicy: 'non_transferable',
+    boundToYou: false,
     containerCapacity: {
       usedSlots: 2, maxSlots: 5, usedWeightGrams: 100, maxWeightGrams: 1000,
     },
@@ -138,8 +146,8 @@ const player: PlayerStateSnapshot = {
   },
   social: {
     online: [
-      { id: 'o4444444444444444', name: 'Aria', selfCharacter: true },
-      { id: 'o5555555555555555', name: 'Bram', selfCharacter: false },
+      { id: 'o4444444444444444', name: 'Aria', selfCharacter: true, nearby: true },
+      { id: 'o5555555555555555', name: 'Bram', selfCharacter: false, nearby: true },
     ],
   },
 };
@@ -154,7 +162,8 @@ describe('PlayerDashboard', () => {
           items: [{
             id: 'o7777777777777777', label: 'healing tonic', rarity: 'uncommon',
             itemLevel: 2, weightGrams: 250, quantity: 3, stackSlots: 1,
-            totalWeightGrams: 750, actions: [],
+            totalWeightGrams: 750, transferPolicy: 'transferable', boundToYou: false,
+            canGive: false, actions: [],
           }],
           page: 1,
           totalPages: 2,
@@ -176,7 +185,8 @@ describe('PlayerDashboard', () => {
       'Invite or manage an adventurer', 'Revoke invitation', 'Remove from party',
       'Transfer leadership', 'Disband party', 'Message to party',
       'Reply to your latest direct message', 'World channels', 'Channel',
-      'General', 'Newbie', 'Staff',
+      'General', 'Newbie', 'Staff', 'Nearby recipient', 'Transferable',
+      'Bound to this character', 'Non-transferable',
     ]) {
       expect(body).toContain(label);
     }
@@ -224,6 +234,8 @@ describe('PlayerDashboard', () => {
     expect(dashboardSource).toContain("'item.contents'");
     expect(dashboardSource).toContain("'item.put'");
     expect(dashboardSource).toContain("'item.get'");
+    expect(dashboardSource).toContain("'item.give'");
+    expect(dashboardSource).toContain('recipient: recipient.id');
     expect(dashboardSource).toContain('<option value="staff">');
     expect(dashboardSource).not.toContain('<option value="announcement">');
   });

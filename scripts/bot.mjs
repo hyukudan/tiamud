@@ -700,7 +700,8 @@ function validateContainerContents(data) {
       item,
       [
         'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
-        'totalWeightGrams', 'containerCapacity', 'actions',
+        'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou', 'canGive',
+        'actions',
       ],
       'container contents item',
     );
@@ -709,6 +710,8 @@ function validateContainerContents(data) {
     ids.add(item.id);
     assertBoundedString(item.label, 256, 'container contents item label');
     validateItemMetadata(item, 'container contents item');
+    assertBoolean(item.canGive, 'container contents item give availability');
+    if (item.canGive) throw new Error('Container contents item cannot be given directly.');
     validateActions(item.actions, 'container contents item actions');
   }
   validateCapacityShape(data.capacity, 'container contents capacity');
@@ -989,7 +992,7 @@ function validateSceneEntity(entity, kind, extraKeys = []) {
   const itemKeys = kind === 'item'
     ? [
         'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
-        'totalWeightGrams', 'containerCapacity',
+        'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou',
       ]
     : [];
   assertOnlyKeys(
@@ -1160,10 +1163,11 @@ function validatePlayerState(player) {
   assertArrayMax(social.online, 256, 'player online characters');
   for (const online of social.online) {
     assertRecord(online, 'player online character');
-    assertOnlyKeys(online, ['id', 'name', 'selfCharacter'], 'player online character');
+    assertOnlyKeys(online, ['id', 'name', 'selfCharacter', 'nearby'], 'player online character');
     assertOpaqueId(online.id, 'player online character id');
     assertBoundedString(online.name, 64, 'player online character name');
     assertBoolean(online.selfCharacter, 'player online character self marker');
+    assertBoolean(online.nearby, 'player online character proximity marker');
   }
 
 }
@@ -1470,7 +1474,8 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
       item,
       [
         'id', 'label', 'description', 'rarity', 'itemLevel', 'weightGrams', 'quantity',
-        'stackSlots', 'totalWeightGrams', 'containerCapacity', 'actions',
+        'stackSlots', 'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou',
+        'canGive', 'actions',
       ],
       itemLabel,
     );
@@ -1478,6 +1483,13 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
     assertBoundedString(item.label, 256, `${itemLabel} label`);
     assertStringMax(item.description, 4096, `${itemLabel} description`);
     validateItemMetadata(item, itemLabel);
+    if (item.transferPolicy === 'character_bound' && !item.boundToYou) {
+      throw new Error(`${itemLabel} is character-bound but not bound to this character.`);
+    }
+    assertBoolean(item.canGive, `${itemLabel} give availability`);
+    if (item.canGive && item.transferPolicy !== 'transferable') {
+      throw new Error(`${itemLabel} cannot be given under its transfer policy.`);
+    }
     validateActions(item.actions, `${itemLabel} actions`);
     if (instanceIds.has(item.id)) throw new Error(`${label} inventory contains a duplicate item id.`);
     instanceIds.add(item.id);
@@ -1491,7 +1503,8 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
       item,
       [
         'id', 'slot', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity',
-        'stackSlots', 'totalWeightGrams', 'containerCapacity', 'actions',
+        'stackSlots', 'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou',
+        'actions',
       ],
       itemLabel,
     );
@@ -1499,6 +1512,9 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
     if (!EQUIPMENT_SLOTS.has(item.slot)) throw new Error(`${itemLabel} slot is invalid.`);
     assertBoundedString(item.label, 256, `${itemLabel} label`);
     validateItemMetadata(item, itemLabel);
+    if (item.transferPolicy === 'character_bound' && !item.boundToYou) {
+      throw new Error(`${itemLabel} is character-bound but not bound to this character.`);
+    }
     validateActions(item.actions, `${itemLabel} actions`);
     if (instanceIds.has(item.id)) throw new Error(`${label} contains a duplicate item id.`);
     if (occupiedSlots.has(item.slot)) throw new Error(`${label} equipment contains a duplicate slot.`);
@@ -1511,6 +1527,13 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
 
 function validateItemMetadata(item, label) {
   if (!ITEM_RARITIES.has(item.rarity)) throw new Error(`${label} rarity is invalid.`);
+  if (!['transferable', 'character_bound', 'non_transferable'].includes(item.transferPolicy)) {
+    throw new Error(`${label} transferPolicy is invalid.`);
+  }
+  assertBoolean(item.boundToYou, `${label} binding marker`);
+  if (item.transferPolicy !== 'character_bound' && item.boundToYou) {
+    throw new Error(`${label} has an invalid binding marker.`);
+  }
   assertPositiveInteger(item.itemLevel, `${label} itemLevel`);
   if (item.itemLevel > MAX_ITEM_LEVEL) {
     throw new Error(`${label} itemLevel exceeds ${MAX_ITEM_LEVEL}.`);
@@ -1595,7 +1618,7 @@ function validateViewEvent(event) {
     'message.append.data',
   );
   assertPositiveInteger(event.revision, 'message revision');
-  if (!['characterMoved', 'itemTaken', 'itemDropped', 'gameplay', 'adventure'].includes(event.kind)) {
+  if (!['characterMoved', 'itemTaken', 'itemDropped', 'itemGiven', 'gameplay', 'adventure'].includes(event.kind)) {
     throw new Error(`Unknown message.append kind ${event.kind}.`);
   }
   requiredString(event.text, 'message text');

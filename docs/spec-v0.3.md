@@ -65,7 +65,7 @@ Propiedades obligatorias:
 Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
 
-### Objetos e inventario 3A–3B
+### Objetos e inventario 3A–3C
 
 WorldPack v5 separa `itemPrototypes`, que contienen contenido y reglas
 reutilizables, de `initialItemInstances`, que asignan cada unidad durable a una
@@ -84,9 +84,10 @@ cantidad visible.
 Cada prototipo declara peso, coste de slot, rareza cerrada
 `common|uncommon|rare|epic|legendary`, `itemLevel`, política de pila y política
 de transferencia. `unique` exige `maxStackUnits: 1`; `fungible` admite
-`2..=1000`. Las pilas son vistas deterministas por ubicación/prototipo,
-ordenadas por ID de instancia y partidas por ese máximo. No se persisten
-`quantity`, identidad de pila ni una lista duplicada de miembros:
+`2..=1000`. Las pilas son vistas deterministas por
+ubicación/prototipo/vínculo, ordenadas por ID de instancia y partidas por ese
+máximo. No se persisten `quantity`, identidad de pila ni una lista duplicada de
+miembros:
 
 ```text
 stackSlots = ceil(quantity / maxStackUnits) × slotCost
@@ -118,28 +119,62 @@ cantidad opcional, `put <objeto> in <contenedor>` mueve raíces portadas y
 1..=256 unidades. `contents` pagina veinte grupos y evita incrustar árboles
 recursivos en las fichas o escenas.
 
+WorldPack v5 y AreaPack v4 aceptan el vocabulario cerrado `transferable`,
+`character_bound` y `non_transferable`; WorldPack v4, AreaPack v3 y formatos
+anteriores solo normalizan `transferable`. El propietario efectivo de una
+instancia se obtiene siguiendo como máximo cuatro aristas de contención hasta
+una raíz portada o equipada. La primera adquisición por un personaje liga
+atómicamente la raíz y cada descendiente `character_bound`. Un objeto ligado
+no se desliga ni se reasigna; `non_transferable` no guarda dueño ligado, pero
+no puede abandonar al personaje que lo posee. `drop` y todo cambio de dueño
+exigen que el subárbol completo sea `transferable`; introducir, extraer,
+equipar, desequipar o consumir dentro del grafo del mismo dueño conserva el
+vínculo.
+
+```text
+give [cantidad] <objeto> to <personaje>
+```
+
+`give` mueve únicamente raíces portadas a un receptor distinto, conectado y en
+la misma sala. Acepta un selector opaco o un nombre exacto no ambiguo, valida
+capacidad de emisor y receptor, y respeta ignore del receptor y block bilateral.
+La ubicación de todas las raíces y el evento `ItemsGiven` se confirman como una
+sola mutación antes de proyectar salida. No es un intercambio: escrow, oferta y
+doble aceptación pertenecen a la fase 3D.
+
 Rareza, nivel, peso unitario/total, cantidad, slots y capacidad aparecen como
 texto en escena, inventario, equipo y contenidos. El color nunca es la única
 señal. Web usa `container.contents`; Telnet ofrece texto equivalente y GMCP
 proyecta `Char.Items.List` con ubicación `container`.
 
-`WorldRuntimeSnapshot` v3 conserva `itemInstances`, su grafo de ubicaciones y
-el siguiente contador. El decoder lee primero `snapshotVersion` y usa DTO
-explícitos v1, v2 y v3; campos de una versión nueva inyectados en una antigua,
-referencias huérfanas, ciclos, profundidad o contadores inválidos bloquean el
-arranque. La restauración conserva instancias iniciales nuevas del WorldPack y
-superpone el estado durable, sin resucitar instancias runtime ausentes. Antes
-de abrir listeners se validan por lotes propietarios conectados o
-desconectados, equipo, grafo y capacidad, descartando después esos agregados.
-SQLite y PostgreSQL confirman el snapshot como única autoridad en su
-transacción de esquema v10; no hay tabla espejo ni esquema v11.
+`WorldRuntimeSnapshot` v4 conserva `itemInstances`, su grafo de ubicaciones,
+el vínculo obligatorio por instancia y el siguiente contador. El vínculo tiene
+exactamente una de estas formas:
+
+```json
+{"kind":"unbound"}
+{"kind":"character","characterId":42}
+```
+
+El decoder lee primero `snapshotVersion` y usa DTO explícitos v1, v2, v3 y v4;
+v1-v3 se convierten a `unbound`. Campos `binding` inyectados en v3, referencias
+huérfanas, ciclos, profundidad, política/vínculo o contadores inválidos bloquean
+el arranque. La restauración conserva instancias iniciales nuevas del WorldPack
+y superpone el estado durable, sin resucitar instancias runtime ausentes. Antes
+de abrir listeners se valida por lotes la unión de propietarios raíz y todos los
+`CharacterId` ligados, incluso si la instancia está consumida, junto con
+equipo, grafo y capacidad; después se descartan esos agregados. SQLite y
+PostgreSQL confirman el snapshot como única autoridad en su transacción de
+esquema v10; no hay tabla espejo ni esquema v11.
 
 Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
 WorldPack, 65.536 instancias runtime, 1 MiB para el snapshot y 1 MiB agregado
 para las fichas de propietarios inspeccionadas al arrancar; cada ficha tiene un
-máximo de 64 KiB. En 3B solo se acepta `transferable`; `give`, trade,
-`character_bound`, `non_transferable`, derechos/reparto y tablas de botín
-aleatorias pertenecen a fases posteriores.
+máximo de 64 KiB. Lantern Square contiene 9 prototipos y 10 instancias
+iniciales; el WorldPack canónico ocupa 49.603 bytes y tiene SHA-256
+`f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
+Trade confirmado, derechos/reparto, procedencia y tablas de botín aleatorias
+pertenecen a fases posteriores.
 
 ## Modelo de personaje
 
@@ -278,14 +313,14 @@ Web expone acciones estructuradas estrictas equivalentes. Telnet usa el mismo
 analizador; los anuncios llegan como `announcement` en texto, Web
 `chat.message` y GMCP `Comm.Channel.Text`.
 
-Los objetos separan prototipo reutilizable e instancia durable con ubicación
-autoritaria. Los NPC poseen instancias de botín fijo validadas y las
-transfieren al morir. Capacidad por slots/peso, rareza textual y `itemLevel`
-están implementados junto con pilas fungibles derivadas, contenedores acotados,
-cantidades y consulta paginada. Faltan `give`/trade, políticas ligadas, afijos,
-propiedad y reparto de grupo, procedencia de drops repetibles y tablas
-ponderadas. Cajas de botín pagadas o tiradas con moneda prémium quedan fuera
-del baseline.
+Los objetos separan prototipo reutilizable e instancia durable con ubicación y
+vínculo autoritarios. Los NPC poseen instancias de botín fijo validadas y las
+transfieren al morir. Capacidad por slots/peso, rareza textual, `itemLevel`,
+pilas fungibles derivadas, contenedores acotados, cantidades, consulta paginada,
+tres políticas de transferencia y `give` atómico están implementados. Faltan
+trade confirmado, afijos, propiedad y reparto de grupo, procedencia de drops
+repetibles y tablas ponderadas. Cajas de botín pagadas o tiradas con moneda
+prémium quedan fuera del baseline.
 
 Consulta la [hoja de ruta social/staff/botín](design/social-staff-and-loot-roadmap.md).
 
@@ -376,9 +411,10 @@ secuencia ni se infieren de prosa. Referencia:
 | Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v10 aún no retenida |
 | Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
+| Inventario fase 3C | Snapshot v4 con vínculo durable y migración v1-v3, tres políticas, `give` atómico, opacidad y paridad Web/Telnet/GMCP implementados; puertas locales soportadas superadas |
 | Protocolo atómico de delta denso | Pendiente |
 
-En el árbol integrado de fase 3A pasan formato, pruebas bloqueadas del workspace
+En la evidencia histórica integrada de fase 3A pasan formato, pruebas bloqueadas del workspace
 y clippy estricto; 77 pruebas de core, 80 de WorldPack, 28 del importador y 195
 del servidor; `svelte-check` sin errores ni avisos, 100/100 pruebas web y build;
 30/30 escenarios Playwright soportados; y las comprobaciones de licencias y
@@ -386,11 +422,19 @@ avisos generados para 307 dependencias Rust y 76 web. No se ejecutaron
 PostgreSQL real v10, WebKit local ni soak de 24 horas. Estas puertas locales no
 demuestran por sí solas publicación o CI.
 
-La integración 3B pasa formato/check/clippy, 499/499 pruebas Rust, 103/103 web,
-30/30 Playwright Chromium/Firefox, 80/80 Node, humo, carga CI y soak corto.
-También pasan `cargo-deny`, licencias y avisos 307 Rust/76 web. No se ejecutaron
-PostgreSQL real v10, WebKit local ni soak de 24 horas; las puertas locales no
-demuestran por sí solas publicación o CI.
+La evidencia histórica integrada de 3B pasa formato/check/clippy, 499/499
+pruebas Rust, 103/103 web, 30/30 Playwright Chromium/Firefox, 80/80 Node, humo,
+carga CI y soak corto. También pasan `cargo-deny`, licencias y avisos 307
+Rust/76 web. No se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24
+horas; las puertas locales no demuestran por sí solas publicación o CI.
+
+En el árbol actual de fase 3C pasan 513/513 pruebas Rust: 93 core, 95
+WorldPack, 28 importador, 207 servidor y 90 restantes. También pasan
+`svelte-check` con 0 errores y 0 avisos, 103/103 pruebas web, 81/81 Node y
+32/32 escenarios Playwright soportados, 16 Chromium y 16 Firefox. WebKit no
+arranca en este host por bibliotecas GTK/GStreamer ausentes. No se ejecutaron
+PostgreSQL real v10 ni soak de 24 horas; estas comprobaciones locales sobre un
+árbol dirty no demuestran CI, publicación o producción.
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
 cuando las puertas de integración cambien.
@@ -429,6 +473,22 @@ Inventario 3B:
 6. Cantidad máxima 256 y `contents` máximo 20 grupos por página.
 7. Snapshot v1/v2/v3 falla cerrado y conserva propietarios offline válidos.
 8. Web, texto Telnet y GMCP expresan los mismos hechos autorizados.
+
+Inventario 3C:
+
+1. Snapshot v4 exige un vínculo cerrado por instancia; v1-v3 migran a
+   `unbound` y rechazan campos de otra versión.
+2. Adquirir liga recursivamente y una política restringida no puede eludirse
+   mediante un contenedor, drop, give, replay o rollback.
+3. `give` mueve 1..=256 raíces portadas entre personajes distintos, conectados
+   y próximos, con capacidad bilateral y una sola revisión/evento.
+4. Ignore y block impiden la entrega sin revelar cuál de esas políticas existe.
+5. Un fallo de commit, capacidad, política, desconexión previa o selector no
+   válido no publica estado, evento ni salida parcial.
+6. Ningún propietario durable se proyecta; emisor y receptor reciben selectores
+   opacos propios, el observador local solo narración y el remoto nada.
+7. Web, texto Telnet, GMCP, SQLite, PostgreSQL, admin y mover comparten decoder,
+   autorización y semántica.
 
 ## Trabajo aplazado o rechazado
 

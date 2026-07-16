@@ -1,7 +1,7 @@
 use std::{env, fs, process, time::SystemTime};
 
 use postgres::{Client, NoTls};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 /// Opt-in because the normal test suite must not require a PostgreSQL service.
@@ -49,9 +49,6 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
              VALUES (10, 'general', 900);
              INSERT INTO domain_events (sequence, event_json)
              VALUES (7, '{\"type\":\"test\"}');
-             INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, last_event_sequence)
-             VALUES (1, 4, '{\"tick\":4}', 7);
              INSERT INTO character_adventure (character_id, state_json)
              VALUES (10, '{\"coins\":40}');
              INSERT INTO world_adventure (singleton, state_json)
@@ -77,6 +74,16 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
                   reason, details_json, created_at)
              VALUES (5, 1, 2, 'reports.resolve', 'report.resolve',
                      'Reviewed report', '{\"reportId\":20}', 960);",
+        )
+        .unwrap();
+    let runtime = tiamud_core::World::demo().runtime_snapshot();
+    let runtime_json = serde_json::to_string(&runtime).unwrap();
+    sqlite
+        .execute(
+            "INSERT INTO world_runtime
+                 (singleton, snapshot_version, snapshot_json, last_event_sequence)
+             VALUES (1, ?1, ?2, 7)",
+            params![runtime.snapshot_version, runtime_json],
         )
         .unwrap();
     let gameplay_json = r#"{"lineageId":"tiamud:mortal","backgroundId":"tiamud:city-guard","baseClassId":"tiamud:vanguard","activeClassId":"tiamud:bastion","classHistory":["tiamud:vanguard","tiamud:bastion"],"progressionPoints":{"talent":0},"talentNodeRanks":{"tiamud:martial-talents":{"tiamud:guarded-stance":1}},"tags":["tiamud:founder"],"receivedSignals":["tiamud:heard-call"]}"#;
@@ -179,6 +186,27 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .unwrap()
             .get::<_, Option<i64>>(0),
         Some(7)
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        i64::from(runtime.snapshot_version)
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, String>(1),
+        runtime_json,
+        "offline transfer must preserve the validated runtime snapshot byte-for-byte"
     );
     assert!(matches!(
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres),

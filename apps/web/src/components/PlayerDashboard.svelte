@@ -33,7 +33,14 @@
   let abilityTargetById = $state<Record<string, string>>({});
   let itemQuantity = $state(1);
   let destinationContainer = $state('');
+  let giveRecipient = $state('');
   const carriedContainers = $derived(value?.inventory.filter((item) => item.containerCapacity) ?? []);
+  const nearbyRecipients = $derived(
+    value?.social.online.filter((character) => character.nearby && !character.selfCharacter) ?? [],
+  );
+  const giveRecipientIsNearby = $derived(
+    nearbyRecipients.some((character) => character.id === giveRecipient),
+  );
   const additionalAttributes = $derived(
     value?.character.attributes.filter((attribute) => attribute.id !== 'strength' && attribute.id !== 'defence') ?? [],
   );
@@ -112,6 +119,26 @@
       `get ${quantity} ${item.label}`,
     );
   }
+
+  function giveItem(item: PlayerItemSnapshot): void {
+    if (!giveRecipient) return;
+    const recipient = nearbyRecipients.find((character) => character.id === giveRecipient);
+    if (!recipient) return;
+    const quantity = boundedItemQuantity(item.quantity);
+    onaction(
+      'item.give',
+      { target: item.id, recipient: recipient.id, quantity },
+      `give ${quantity} ${item.label} to ${recipient.name}`,
+    );
+  }
+
+  const transferPolicyLabel = (
+    item: Pick<PlayerItemSnapshot, 'transferPolicy' | 'boundToYou'>,
+  ): string => {
+    if (item.transferPolicy === 'transferable') return 'Transferable';
+    if (item.transferPolicy === 'non_transferable') return 'Non-transferable';
+    return item.boundToYou ? 'Bound to this character' : 'Binds on first acquisition';
+  };
 
   function openContainer(container: string, page = 1): void {
     onaction('item.contents', { container, page }, `contents page ${page}`);
@@ -482,6 +509,17 @@
               </select>
             </label>
           {/if}
+          {#if nearbyRecipients.length > 0}
+            <label>
+              Nearby recipient
+              <select bind:value={giveRecipient}>
+                <option value="">Choose a character</option>
+                {#each nearbyRecipients as character (character.id)}
+                  <option value={character.id}>{character.name}</option>
+                {/each}
+              </select>
+            </label>
+          {/if}
         </div>
         {#if value.inventory.length === 0 && value.equipment.length === 0}
           <p class="empty-copy">You are carrying nothing.</p>
@@ -495,6 +533,7 @@
                   <strong>{item.label} ×{item.quantity}</strong>
                   <p>
                     {item.rarity} · level {item.itemLevel} ·
+                    {transferPolicyLabel(item)} ·
                     {(item.weightGrams / 1000).toFixed(1)} kg each ·
                     {(item.totalWeightGrams / 1000).toFixed(1)} kg total ·
                     {item.stackSlots} {item.stackSlots === 1 ? 'stack slot' : 'stack slots'}
@@ -512,6 +551,13 @@
                   {#each item.actions as action (action.command)}
                     <button type="button" onclick={() => perform(action)}>{action.label}</button>
                   {/each}
+                  {#if item.canGive}
+                    <button
+                      type="button"
+                      disabled={!giveRecipientIsNearby}
+                      onclick={() => giveItem(item)}
+                    >Give</button>
+                  {/if}
                   {#if item.containerCapacity && !item.actions.some((action) => action.command.startsWith('contents '))}
                     <button type="button" onclick={() => openContainer(item.id)}>Contents</button>
                   {/if}
@@ -535,6 +581,7 @@
                 <span>
                   <small>{item.slot}</small> <strong>{item.label} ×{item.quantity}</strong>
                   · {item.rarity} · level {item.itemLevel} ·
+                  {transferPolicyLabel(item)} ·
                   {(item.weightGrams / 1000).toFixed(1)} kg each ·
                   {(item.totalWeightGrams / 1000).toFixed(1)} kg total ·
                   {item.stackSlots} {item.stackSlots === 1 ? 'stack slot' : 'stack slots'}
@@ -575,7 +622,7 @@
                   <li>
                     <span>
                       <strong>{item.label} ×{item.quantity}</strong>
-                      · {item.rarity} · level {item.itemLevel} ·
+                      · {item.rarity} · level {item.itemLevel} · {transferPolicyLabel(item)} ·
                       {(item.weightGrams / 1000).toFixed(1)} kg each ·
                       {(item.totalWeightGrams / 1000).toFixed(1)} kg total ·
                       {item.stackSlots} {item.stackSlots === 1 ? 'stack slot' : 'stack slots'}

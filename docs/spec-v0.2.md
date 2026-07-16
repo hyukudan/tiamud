@@ -833,7 +833,7 @@ on_quest_event
 > incrustada en el ejecutable; el registro de WorldPacks no copia multimedia.
 > Las rutas fragmentadas y libvips descritos a continuación pertenecen a la
 > propuesta histórica. Consulte la [guía actual de autoría y
-> multimedia](world-authoring.md#multimedia-percepcion-y-localizacion).
+> multimedia](world-authoring.md).
 
 ### 18.1 Almacenamiento v1
 

@@ -121,6 +121,8 @@ async function installMockWorld(
                 id: 'o2222222222222222', label: 'blue lantern', description: 'Cold blue light.',
                 rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
                 quantity: 1, stackSlots: 1, totalWeightGrams: 800,
+                transferPolicy: 'transferable', boundToYou: false,
+                canGive: true,
                 actions: [{ label: 'Drop', command: 'drop o2222222222222222' }],
               }],
               equipment: [],
@@ -149,8 +151,9 @@ async function installMockWorld(
               economy: { coins: 40, commodities: [], shopAvailable: false, shop: [] },
               social: {
                 online: [
-                  { id: 'o3333333333333333', name: 'Aria', selfCharacter: true },
-                  { id: 'o4444444444444444', name: 'Bram', selfCharacter: false },
+                  { id: 'o3333333333333333', name: 'Aria', selfCharacter: true, nearby: true },
+                  { id: 'o4444444444444444', name: 'Bram', selfCharacter: false, nearby: true },
+                  { id: 'o5555555555555555', name: 'Cato', selfCharacter: false, nearby: false },
                 ],
               },
             },
@@ -538,6 +541,30 @@ test('ability panel chooses a visible target and sends a structured ability acti
     action: 'combat.ability',
     abilityId: 'ember-bolt',
     target: 'opaque-wolf',
+  });
+});
+
+test('inventory gives only to a selected nearby opaque recipient', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+
+  const give = page.getByRole('button', { name: 'Give', exact: true });
+  await expect(give).toBeDisabled();
+  const recipients = page.getByLabel('Nearby recipient');
+  await expect(recipients.getByRole('option', { name: 'Cato' })).toHaveCount(0);
+  await recipients.selectOption({ label: 'Bram' });
+  await expect(give).toBeEnabled();
+  await give.click();
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toMatchObject({
+    action: 'item.give',
+    target: 'o2222222222222222',
+    recipient: 'o4444444444444444',
+    quantity: 1,
   });
 });
 

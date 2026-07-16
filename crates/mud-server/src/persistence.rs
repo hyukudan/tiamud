@@ -3699,10 +3699,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use tiamud_core::{
-        ActiveEffect, BackgroundSelection, Direction, EffectKind, EquipmentSlot, ItemInstanceId,
-        ItemLocationSnapshot, PlayerAction, RuntimeItemInstanceSnapshotV2, RuntimeItemLocation,
-        RuntimeItemLocationV2, SessionId, World, WorldError, WorldRuntimeSnapshotV1,
-        WorldRuntimeSnapshotV2,
+        ActiveEffect, BackgroundSelection, Direction, EffectKind, EquipmentSlot, ItemBinding,
+        ItemInstanceId, ItemLocationSnapshot, PlayerAction, RuntimeItemInstanceSnapshotV2,
+        RuntimeItemInstanceSnapshotV3, RuntimeItemLocation, RuntimeItemLocationV2, SessionId,
+        World, WorldError, WorldRuntimeSnapshotV1, WorldRuntimeSnapshotV2, WorldRuntimeSnapshotV3,
     };
 
     async fn account(store: &SqliteCharacterStore, name: &str) -> AccountSnapshot {
@@ -4442,6 +4442,7 @@ mod tests {
                 room_id: "demo:lantern-square".into()
             }
         );
+        assert_eq!(item.binding, ItemBinding::Unbound);
     }
 
     #[test]
@@ -4487,6 +4488,66 @@ mod tests {
                 room_id: "demo:lantern-square".into(),
             }
         );
+        assert_eq!(
+            upgraded.item_instances[&ItemInstanceId("runtime:1".into())].binding,
+            ItemBinding::Unbound
+        );
+    }
+
+    #[test]
+    fn sqlite_runtime_loader_upgrades_v3_binding_as_unbound_and_rejects_smuggling() {
+        let legacy = WorldRuntimeSnapshotV3 {
+            snapshot_version: 3,
+            revision: 8,
+            logical_tick: 4,
+            rng_state: 43,
+            next_item_instance_sequence: 3,
+            item_instances: BTreeMap::from([(
+                ItemInstanceId("runtime:contained".into()),
+                RuntimeItemInstanceSnapshotV3 {
+                    prototype_id: "legacy:map".into(),
+                    location: RuntimeItemLocation::Contained {
+                        container_id: ItemInstanceId("runtime:satchel".into()),
+                    },
+                },
+            )]),
+            npcs: BTreeMap::new(),
+            adventure: tiamud_core::AdventureRuntimeSnapshot::default(),
+            progression_flags: Default::default(),
+        };
+
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 3, ?1, unixepoch())",
+                [serde_json::to_string(&legacy).unwrap()],
+            )
+            .unwrap();
+
+        let upgraded = load_runtime_snapshot(&connection).unwrap().unwrap();
+        let item = &upgraded.item_instances[&ItemInstanceId("runtime:contained".into())];
+        assert_eq!(item.binding, ItemBinding::Unbound);
+        assert!(matches!(
+            item.location,
+            RuntimeItemLocation::Contained { .. }
+        ));
+
+        let mut smuggled = serde_json::to_value(&legacy).unwrap();
+        smuggled["itemInstances"]["runtime:contained"]["binding"] =
+            serde_json::json!({"kind":"character", "characterId":7});
+        connection
+            .execute(
+                "UPDATE world_runtime SET snapshot_json = ?1 WHERE singleton = 1",
+                [smuggled.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            load_runtime_snapshot(&connection),
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
     }
 
     #[test]
@@ -4594,7 +4655,7 @@ mod tests {
             },
             equipment: std::collections::BTreeMap::from([(
                 EquipmentSlot::Weapon,
-                ItemInstanceId("demo:blue-lantern".to_owned()),
+                ItemInstanceId("tiamud:bronze-sword".to_owned()),
             )]),
             effects: vec![ActiveEffect {
                 kind: EffectKind::Strength,
@@ -4619,18 +4680,24 @@ mod tests {
             }],
             ..defaults
         };
-        let mut runtime = World::demo().runtime_snapshot();
+        let loaded = crate::world_loader::default_loaded_world().unwrap();
+        let mut runtime = crate::world_loader::build_loaded_world(&loaded)
+            .unwrap()
+            .runtime_snapshot();
         runtime.logical_tick = 17;
         runtime.adventure.next_weather_tick = 20;
         runtime.adventure.shop_stock.insert("tonic".into(), 18);
-        runtime
+        let sword = runtime
             .item_instances
-            .get_mut(&ItemInstanceId("demo:blue-lantern".into()))
-            .unwrap()
-            .location = RuntimeItemLocation::Equipped {
+            .get_mut(&ItemInstanceId("tiamud:bronze-sword".into()))
+            .unwrap();
+        sword.location = RuntimeItemLocation::Equipped {
             character_id: character.id,
             slot: EquipmentSlot::Weapon,
         };
+        sword.binding = ItemBinding::Unbound;
+        let mut restored = crate::world_loader::build_loaded_world(&loaded).unwrap();
+        restored.restore_runtime_snapshot(runtime.clone()).unwrap();
 
         store
             .commit_action(
@@ -4659,6 +4726,31 @@ mod tests {
             }]
         );
         assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
+    }
+
+    #[tokio::test]
+    async fn items_given_event_round_trips_through_sqlite() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let event = DomainEvent::ItemsGiven {
+            giver_id: CharacterId(11),
+            giver_name: "Aria".into(),
+            recipient_id: CharacterId(12),
+            recipient_name: "Bryn".into(),
+            item_ids: vec![ItemInstanceId("runtime:gift-1".into())],
+            item_name: "gift".into(),
+            room_id: "demo:lantern-square".into(),
+        };
+
+        store
+            .commit_action(
+                Vec::new(),
+                World::demo().runtime_snapshot(),
+                vec![event.clone()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.load_domain_events().await.unwrap(), vec![event]);
     }
 
     #[tokio::test]

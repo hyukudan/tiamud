@@ -2655,9 +2655,71 @@ mod tests {
     use super::*;
     use std::{collections::BTreeMap, env, process, time::Duration};
     use tiamud_core::{
-        AdventureRuntimeSnapshot, Direction, ItemInstanceId, ItemLocationSnapshot,
-        RuntimeItemInstanceSnapshot, RuntimeItemLocation, WORLD_RUNTIME_SNAPSHOT_VERSION,
+        AdventureRuntimeSnapshot, Direction, ItemBinding, ItemInstanceId, ItemLocationSnapshot,
+        RuntimeItemInstanceSnapshot, RuntimeItemInstanceSnapshotV3, RuntimeItemLocation,
+        WORLD_RUNTIME_SNAPSHOT_VERSION, World, WorldRuntimeSnapshotV3,
     };
+
+    #[test]
+    fn postgres_runtime_decoder_accepts_v4_binding_and_upgrades_strict_v3() {
+        let mut current = World::demo().runtime_snapshot();
+        let item_id = current.item_instances.keys().next().unwrap().clone();
+        let item = current.item_instances.get_mut(&item_id).unwrap();
+        item.location = RuntimeItemLocation::Carried {
+            character_id: CharacterId(77),
+        };
+        item.binding = ItemBinding::Character {
+            character_id: CharacterId(77),
+        };
+        let current_json = serde_json::to_value(&current).unwrap();
+        assert_eq!(
+            current_json["itemInstances"][item_id.0.as_str()]["binding"],
+            serde_json::json!({"kind":"character", "characterId":77})
+        );
+        let decoded = decode_runtime_snapshot(
+            i64::from(WORLD_RUNTIME_SNAPSHOT_VERSION),
+            &current_json.to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.item_instances[&item_id].binding,
+            ItemBinding::Character {
+                character_id: CharacterId(77)
+            }
+        );
+
+        let legacy = WorldRuntimeSnapshotV3 {
+            snapshot_version: 3,
+            revision: 5,
+            logical_tick: 6,
+            rng_state: 7,
+            next_item_instance_sequence: 8,
+            item_instances: BTreeMap::from([(
+                ItemInstanceId("legacy:item".into()),
+                RuntimeItemInstanceSnapshotV3 {
+                    prototype_id: "legacy:item".into(),
+                    location: RuntimeItemLocation::Room {
+                        room_id: "legacy:room".into(),
+                    },
+                },
+            )]),
+            npcs: BTreeMap::new(),
+            adventure: AdventureRuntimeSnapshot::default(),
+            progression_flags: Default::default(),
+        };
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        let upgraded = decode_runtime_snapshot(3, &legacy_json).unwrap();
+        assert_eq!(
+            upgraded.item_instances[&ItemInstanceId("legacy:item".into())].binding,
+            ItemBinding::Unbound
+        );
+        assert!(decode_runtime_snapshot(4, &legacy_json).is_err());
+
+        let mut smuggled = serde_json::to_value(legacy).unwrap();
+        smuggled["itemInstances"]["legacy:item"]["binding"] =
+            serde_json::json!({"kind":"character", "characterId":77});
+        assert!(decode_runtime_snapshot(3, &smuggled.to_string()).is_err());
+    }
 
     fn scoped_url(base: &str, schema: &str) -> String {
         let separator = if base.contains('?') { '&' } else { '?' };
@@ -2811,6 +2873,9 @@ mod tests {
                 RuntimeItemInstanceSnapshot {
                     prototype_id: "item:lamp".into(),
                     location: RuntimeItemLocation::Carried {
+                        character_id: keeper_character.id,
+                    },
+                    binding: ItemBinding::Character {
                         character_id: keeper_character.id,
                     },
                 },

@@ -56,9 +56,14 @@ documento nativo. WorldPack v5 y AreaPack v4 rechazan `items`, `room.items`,
 `itemRules` y `lootItemIds`: usan `itemPrototypes` e
 `initialItemInstances`.
 
-WorldPack v4 y AreaPack v3 reciben por normalización `maxStackUnits: 1` y sin
-contenedor. Si una entrada antigua intenta declarar campos de 3B, se rechaza en
-vez de ignorarlos: debe declarar la versión nueva.
+WorldPack v4 y AreaPack v3 reciben por normalización `maxStackUnits: 1`, sin
+contenedor y con `transferPolicy: transferable`. En esas versiones la política
+debe ser exactamente `transferable`; `character_bound` y `non_transferable`
+no se reinterpretan como si el formato antiguo ya conociera la vinculación de
+3C. Si una entrada antigua intenta declarar campos de 3B/3C, se rechaza en vez
+de ignorarlos: debe declarar la versión nativa correspondiente. WorldPack
+v3/v2, AreaPack v2/v1 y Envy/Merc también normalizan siempre a objetos
+transferibles y nunca infieren un vínculo desde flags históricos.
 
 Los objetos v3/v2 antiguos se convierten uno a uno, sin deduplicar por nombre o
 contenido. El prototipo y la instancia pueden conservar la misma cadena
@@ -342,7 +347,7 @@ ItemPrototype
 ├── container?
 │   ├── maxSlots!        1..=1.000
 │   └── maxWeightGrams!  0..=1.000.000
-└── transferPolicy!      transferable en fase 3B
+└── transferPolicy!      transferable | character_bound | non_transferable
 
 InitialItemInstance
 ├── id!                  ID durable interno
@@ -380,9 +385,10 @@ Invariantes:
   textual ambigua falla en vez de escoger una unidad arbitraria.
 
 La capacidad de personaje no se autoriza en el WorldPack ni se calcula en el
-cliente. Los slots del personaje cuentan raíces portadas, agrupadas por
-prototipo; el peso incluye raíces portadas/equipadas y todos sus descendientes.
-Los slots de un contenedor cuentan hijos directos agrupados y su peso usado
+cliente. Los slots del personaje cuentan raíces portadas, agrupadas por la
+pila derivada de prototipo y vínculo; el peso incluye raíces portadas/equipadas
+y todos sus descendientes. Los slots de un contenedor cuentan hijos directos
+agrupados por esa misma clave y su peso usado
 cuenta todo el subárbol, sin incluir la carcasa del propio contenedor. Equipar,
 desequipar, reemplazar, tomar, soltar, introducir y extraer prevalidan el
 resultado completo.
@@ -398,7 +404,8 @@ flowchart TD
     Character -. peso: carcasa y descendientes .-> Map
 ```
 
-Las pilas nunca son entidades durables. Se derivan por ubicación/prototipo,
+Las pilas nunca son entidades durables. Se derivan por
+ubicación/prototipo/vínculo,
 ordenan sus instancias por ID y se dividen por `maxStackUnits`:
 
 ```text
@@ -411,11 +418,43 @@ unidades. `put` opera sobre raíces portadas; `get` solo sobre hijos directos;
 `contents` pagina veinte grupos. Mover una instancia contenedor conserva las
 ubicaciones relativas de todo su subárbol.
 
-Fase 3B acepta únicamente `transferPolicy: transferable`. Los valores
-`character_bound` y `non_transferable` existen en el vocabulario cerrado pero
-el validador los rechaza como reservados hasta que 3C ejecute su semántica. 3B
-no implementa `give`, intercambio, afijos, elegibilidad/reparto, procedencia de
-drops ni tablas aleatorias.
+### Propiedad efectiva y transferencia
+
+WorldPack v5 y AreaPack v4 aceptan las tres políticas. La vinculación no se
+escribe en autoría: pertenece a cada instancia runtime y se crea, valida y
+persiste cuando el personaje adquiere el objeto.
+
+- `transferable` puede cambiar de propietario o volver al mundo si todas las
+  instancias de su subárbol también son transferibles;
+- `character_bound` se vincula al `CharacterId` de la primera adquisición, no
+  se desliga ni se reasigna y conserva el vínculo al consumirse; y
+- `non_transferable` no guarda vínculo, pero una vez dentro del grafo de un
+  personaje no puede soltarse ni pasar a otro; su consumo autorizado sí puede
+  llevarlo al estado terminal `Consumed`.
+
+El propietario efectivo se obtiene siguiendo hasta cuatro padres `Contained`
+hasta una raíz `Carried` o `Equipped`. Por eso una bolsa `transferable` que
+contenga un objeto ligado o no transferible puede reorganizarse dentro del
+inventario de su dueño, pero no soltarse ni entregarse. `take`, `drop`,
+`put`, `get`, equipo, consumo y la concesión autorizada de Lua prevalidan
+ubicación, vínculo, grafo y capacidad sobre una copia prospectiva completa.
+
+La entrega directa usa la misma acción en Web y Telnet:
+
+```text
+give [cantidad] <objeto> to <personaje>
+```
+
+Solo mueve raíces `Carried` y conserva cada subárbol. El receptor debe ser
+distinto, estar conectado y en la misma sala; se resuelve por selector opaco o
+nombre exacto no ambiguo. La entrega exige un subárbol completamente
+`transferable`, capacidad válida en ambos personajes y ausencia de ignore del
+receptor o block bilateral. Todo el lote de 1..=256 raíces se confirma con una
+sola mutación y commit; `canGive` y las acciones proyectadas solo ayudan a la
+interfaz, nunca sustituyen esta autorización del servidor.
+
+La fase 3C no implementa intercambio confirmado, entrega offline/remota,
+afijos, elegibilidad o reparto, procedencia de drops ni tablas aleatorias.
 
 ## Composición, validación y digest
 
@@ -441,13 +480,20 @@ La composición:
 - produce bytes y reportes deterministas; y
 - escribe el destino completo de forma atómica sin sobreescribirlo.
 
-Lantern Square se compone desde tres áreas y produce siete prototipos y ocho
-instancias iniciales. El artefacto es byte a byte idéntico al WorldPack
-canónico y su SHA-256 es:
+Lantern Square se compone desde tres áreas y produce nueve prototipos y diez
+instancias iniciales. El artefacto de 49.603 bytes es byte a byte idéntico al
+WorldPack canónico y su SHA-256 es:
 
 ```text
-080dbc59fccde2327754d9e2834b8b98040905c15753062731d7b968e8cc0855
+f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8
 ```
+
+La demostración conserva `tiamud:road-token` y `tiamud:wolf-clasp` como
+`transferable`: sus IDs publicados no cambian de semántica sin migración. Los
+casos 3C son nuevas identidades: `tiamud:rain-writ`, consumible con
+`healAmount: 1` y `non_transferable`, comienza en `demo:north-gate`; y
+`tiamud:stormglass-talon`, `character_bound`, es botín fijo de
+`tiamud:gate-stalker-1`.
 
 Límites principales:
 
@@ -506,16 +552,20 @@ validación y revisión humana.
 
 ## Persistencia y evolución del formato
 
-WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v3 define dónde están
-las instancias después de jugar y conserva el siguiente contador de identidad.
-El decoder elige primero por `snapshotVersion`; las conversiones desde v1 y v2
-usan DTO explícitos y fallan cerradas ante campos cruzados, referencias, ciclos,
-profundidad, capacidad o contador inválidos. Al restaurar un
+WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v4 define dónde están
+las instancias después de jugar, su `binding` obligatorio y el siguiente
+contador de identidad. El decoder elige primero por `snapshotVersion` y
+compara esa versión original con la columna SQL; las conversiones desde v1, v2
+y v3 usan DTO explícitos, producen `binding: { kind: "unbound" }` y fallan
+cerradas ante campos cruzados. En particular, inyectar `binding` en un payload
+v3 no lo convierte en v4. También se rechazan referencias, ciclos, profundidad,
+capacidad, contador, propietario o vínculo inválidos. Al restaurar un
 snapshot anterior, las instancias iniciales nuevas del WorldPack se conservan y
 el estado durable se superpone; una instancia creada en runtime que no figure
 en el snapshot no reaparece. Antes de abrir listeners se validan por lotes los
-propietarios de objetos siguiendo padres `Contained` hasta la raíz, sus equipos,
-el grafo y su capacidad, incluidos personajes
+propietarios de objetos siguiendo padres `Contained` hasta la raíz y todos los
+`CharacterId` ligados, incluidos los de objetos consumidos. Se comprueban sus
+fichas, equipos, el grafo, los vínculos y la capacidad, incluidos personajes
 desconectados, y esos agregados temporales no quedan en el mundo activo.
 El runtime admite hasta 65.536 instancias; tanto el snapshot como la suma de
 fichas inspeccionadas en esa barrera están limitados a 1 MiB, y cada ficha a
