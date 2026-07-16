@@ -215,6 +215,8 @@ pub struct RuntimeMetrics {
     telnet_output_queue_depth: AtomicUsize,
     websocket_slow_disconnects_total: AtomicU64,
     telnet_slow_disconnects_total: AtomicU64,
+    websocket_outbound_budget_exceeded_total: AtomicU64,
+    gmcp_scene_overflow_total: AtomicU64,
     database_transactions_total: AtomicU64,
     database_errors_total: AtomicU64,
     database_latency_microseconds: AtomicU64,
@@ -335,6 +337,20 @@ impl RuntimeMetrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records output which was rejected before transport because its encoded
+    /// representation exceeded the protocol's per-message byte budget.
+    pub fn websocket_outbound_budget_exceeded(&self) {
+        self.websocket_outbound_budget_exceeded_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a full `Tiamud.Scene` projection which had to degrade to the
+    /// bounded GMCP fallback.
+    pub fn gmcp_scene_overflow(&self) {
+        self.gmcp_scene_overflow_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn database_transaction_finished(&self, elapsed: Duration, succeeded: bool) {
         self.database_transactions_total
             .fetch_add(1, Ordering::Relaxed);
@@ -429,6 +445,9 @@ impl RuntimeMetrics {
                 "# TYPE tiamud_slow_client_disconnects_total counter\n",
                 "tiamud_slow_client_disconnects_total{{transport=\"websocket\"}} {}\n",
                 "tiamud_slow_client_disconnects_total{{transport=\"telnet\"}} {}\n",
+                "# TYPE tiamud_outbound_budget_exceeded_total counter\n",
+                "tiamud_outbound_budget_exceeded_total{{transport=\"websocket\",message=\"frame\"}} {}\n",
+                "tiamud_outbound_budget_exceeded_total{{transport=\"gmcp\",message=\"scene\"}} {}\n",
                 "# TYPE tiamud_database_transactions_total counter\n",
                 "tiamud_database_transactions_total {}\n",
                 "# TYPE tiamud_database_errors_total counter\n",
@@ -480,6 +499,9 @@ impl RuntimeMetrics {
             self.websocket_slow_disconnects_total
                 .load(Ordering::Relaxed),
             self.telnet_slow_disconnects_total.load(Ordering::Relaxed),
+            self.websocket_outbound_budget_exceeded_total
+                .load(Ordering::Relaxed),
+            self.gmcp_scene_overflow_total.load(Ordering::Relaxed),
             self.database_transactions_total.load(Ordering::Relaxed),
             self.database_errors_total.load(Ordering::Relaxed),
             self.database_latency_microseconds.load(Ordering::Relaxed) as f64 / 1_000_000.0,
@@ -603,6 +625,8 @@ mod tests {
         metrics.output_frame_enqueued(OutputTransport::Telnet);
         metrics.output_frame_removed(OutputTransport::Telnet);
         metrics.slow_client_disconnected(OutputTransport::Telnet);
+        metrics.websocket_outbound_budget_exceeded();
+        metrics.gmcp_scene_overflow();
         metrics.database_transaction_finished(Duration::from_millis(10), false);
         metrics.set_database_queue_depth(3);
         metrics.tick_finished(Duration::from_millis(5), true);
@@ -619,6 +643,12 @@ mod tests {
         assert!(output.contains("tiamud_output_queue_depth{transport=\"websocket\"} 1"));
         assert!(output.contains("tiamud_output_queue_depth{transport=\"telnet\"} 0"));
         assert!(output.contains("tiamud_slow_client_disconnects_total{transport=\"telnet\"} 1"));
+        assert!(output.contains(
+            "tiamud_outbound_budget_exceeded_total{transport=\"websocket\",message=\"frame\"} 1"
+        ));
+        assert!(output.contains(
+            "tiamud_outbound_budget_exceeded_total{transport=\"gmcp\",message=\"scene\"} 1"
+        ));
         assert!(output.contains("tiamud_database_transactions_total 1"));
         assert!(output.contains("tiamud_database_errors_total 1"));
         assert!(output.contains("tiamud_database_latency_seconds_sum 0.010000"));

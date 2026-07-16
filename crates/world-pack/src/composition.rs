@@ -1,8 +1,8 @@
 //! Strict, bounded, offline composition of modular authoring areas.
 //!
-//! AreaPack v1 is deliberately an authoring format, not a runtime hot-load
+//! AreaPack v2 is deliberately an authoring format, not a runtime hot-load
 //! protocol. Composition resolves and validates the complete graph, then emits
-//! the same single [`WorldPackDocument`] v2 consumed by the current runtime.
+//! one validated [`WorldPackDocument`] v3 consumed by the runtime.
 //! Area identities, source digests, ownership and cross-area edges are exposed
 //! in [`CompositionReport`] so a later catalog/activation design can build on
 //! stable facts without weakening today's all-or-nothing runtime validation.
@@ -19,14 +19,17 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    AbilityDefinition, ArchetypeDefinition, ContentTest, ExitTarget, GameplayDefinition, Item,
-    ItemRule, NpcAbilitySet, NpcPrototype, NpcSpawn, Room, RoomMediaDefinition,
+    AbilityDefinition, AdvancedClassDefinition, ArchetypeDefinition, BackgroundDefinition,
+    BaseClassDefinition, CharacterDefaultsDefinition, CharacterProgressionDefinition, ContentTest,
+    EntityMediaDefinition, EntityMediaKind, ExitTarget, GameplayDefinition, GrantDefinition, Item,
+    ItemRule, LevelThresholdDefinition, LineageDefinition, NpcAbilitySet, NpcPrototype, NpcSpawn,
+    RequirementDefinition, RequirementPredicate, Room, RoomMediaDefinition,
     RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition, SourceMetadata,
-    ValidationErrors, WorldPack, WorldPackDocument,
+    TalentGraphDefinition, ValidationErrors, WorldPack, WorldPackDocument,
 };
 
-pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 1;
-pub const AREA_PACK_SCHEMA_VERSION: u32 = 1;
+pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 2;
+pub const AREA_PACK_SCHEMA_VERSION: u32 = 2;
 pub const MAX_PROJECT_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_AREA_COUNT: usize = 256;
 pub const MAX_AREA_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -34,8 +37,8 @@ pub const MAX_TOTAL_AREA_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_COMPOSED_WORLD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Project-level identity and the complete set of offline authoring modules.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorldProjectManifest {
     pub schema_version: u32,
     pub id: String,
@@ -44,8 +47,60 @@ pub struct WorldProjectManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rng_seed: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_archetype_id: Option<String>,
+    pub default_lineage_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_background_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_base_class_id: Option<String>,
     pub areas: Vec<ProjectArea>,
+}
+
+impl<'de> Deserialize<'de> for WorldProjectManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Raw {
+            schema_version: u32,
+            id: String,
+            name: String,
+            start_room_id: String,
+            #[serde(default)]
+            rng_seed: Option<u64>,
+            #[serde(default)]
+            default_archetype_id: Option<String>,
+            #[serde(default)]
+            default_lineage_id: Option<String>,
+            #[serde(default)]
+            default_background_id: Option<String>,
+            #[serde(default)]
+            default_base_class_id: Option<String>,
+            areas: Vec<ProjectArea>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.schema_version != 1 && raw.schema_version != WORLD_PROJECT_SCHEMA_VERSION {
+            return Err(D::Error::custom(format!(
+                "unsupported project schema {}",
+                raw.schema_version
+            )));
+        }
+        let legacy = raw.schema_version == 1;
+        Ok(Self {
+            schema_version: WORLD_PROJECT_SCHEMA_VERSION,
+            id: raw.id,
+            name: raw.name,
+            start_room_id: raw.start_room_id,
+            rng_seed: raw.rng_seed,
+            default_lineage_id: raw
+                .default_lineage_id
+                .or_else(|| legacy.then(|| "legacy:mortal".to_owned())),
+            default_background_id: raw.default_background_id,
+            default_base_class_id: raw.default_base_class_id.or(raw.default_archetype_id),
+            areas: raw.areas,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,11 +135,25 @@ pub struct AreaPack {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archetypes: Vec<ArchetypeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub level_thresholds: Vec<LevelThresholdDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineages: Vec<LineageDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backgrounds: Vec<BackgroundDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_classes: Vec<BaseClassDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advanced_classes: Vec<AdvancedClassDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub talent_graphs: Vec<TalentGraphDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abilities: Vec<AbilityDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_ability_sets: Vec<NpcAbilitySet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub room_media: Vec<RoomMediaDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_media: Vec<EntityMediaDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub room_perception: Vec<RoomPerceptionDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -120,11 +189,25 @@ impl<'de> Deserialize<'de> for AreaPack {
             #[serde(default)]
             archetypes: Vec<ArchetypeDefinition>,
             #[serde(default)]
+            level_thresholds: Vec<LevelThresholdDefinition>,
+            #[serde(default)]
+            lineages: Vec<LineageDefinition>,
+            #[serde(default)]
+            backgrounds: Vec<BackgroundDefinition>,
+            #[serde(default)]
+            base_classes: Vec<BaseClassDefinition>,
+            #[serde(default)]
+            advanced_classes: Vec<AdvancedClassDefinition>,
+            #[serde(default)]
+            talent_graphs: Vec<TalentGraphDefinition>,
+            #[serde(default)]
             abilities: Vec<AbilityDefinition>,
             #[serde(default)]
             npc_ability_sets: Vec<NpcAbilitySet>,
             #[serde(default)]
             room_media: Vec<RoomMediaDefinition>,
+            #[serde(default)]
+            entity_media: Vec<EntityMediaDefinition>,
             #[serde(default)]
             room_perception: Vec<RoomPerceptionDefinition>,
             #[serde(default)]
@@ -138,8 +221,33 @@ impl<'de> Deserialize<'de> for AreaPack {
         let value = serde_json::Value::deserialize(deserializer)?;
         audit_area_pack_keys(&value).map_err(D::Error::custom)?;
         let raw: RawAreaPack = serde_json::from_value(value).map_err(D::Error::custom)?;
+        if raw.schema_version != 1 && raw.schema_version != AREA_PACK_SCHEMA_VERSION {
+            return Err(D::Error::custom(format!(
+                "unsupported area schema {}",
+                raw.schema_version
+            )));
+        }
+        let mut level_thresholds = raw.level_thresholds;
+        let mut lineages = raw.lineages;
+        let mut base_classes = raw.base_classes;
+        if raw.schema_version == 1 && !raw.archetypes.is_empty() {
+            let imported = crate::progression::normalize_v2_character_progression(
+                raw.archetypes.clone(),
+                None,
+            )
+            .map_err(D::Error::custom)?
+            .expect("non-empty archetypes produce progression");
+            level_thresholds.extend(imported.level_thresholds);
+            lineages.extend(imported.lineages);
+            base_classes.extend(imported.base_classes);
+        }
+        let archetypes = if raw.schema_version == 1 {
+            Vec::new()
+        } else {
+            raw.archetypes
+        };
         Ok(Self {
-            schema_version: raw.schema_version,
+            schema_version: AREA_PACK_SCHEMA_VERSION,
             id: raw.id,
             depends_on: raw.depends_on,
             items: raw.items,
@@ -147,10 +255,17 @@ impl<'de> Deserialize<'de> for AreaPack {
             item_rules: raw.item_rules,
             npc_prototypes: raw.npc_prototypes,
             npc_spawns: raw.npc_spawns,
-            archetypes: raw.archetypes,
+            archetypes,
+            level_thresholds,
+            lineages,
+            backgrounds: raw.backgrounds,
+            base_classes,
+            advanced_classes: raw.advanced_classes,
+            talent_graphs: raw.talent_graphs,
             abilities: raw.abilities,
             npc_ability_sets: raw.npc_ability_sets,
             room_media: raw.room_media,
+            entity_media: raw.entity_media,
             room_perception: raw.room_perception,
             scene_variants: raw.scene_variants,
             scripts: raw.scripts,
@@ -168,9 +283,16 @@ pub struct AreaOwnership {
     pub npc_prototypes: Vec<String>,
     pub npc_spawns: Vec<String>,
     pub archetypes: Vec<String>,
+    pub lineages: Vec<String>,
+    pub backgrounds: Vec<String>,
+    pub base_classes: Vec<String>,
+    pub advanced_classes: Vec<String>,
+    pub talent_graphs: Vec<String>,
+    pub talent_nodes: Vec<String>,
     pub abilities: Vec<String>,
     pub npc_ability_sets: Vec<String>,
     pub room_media: Vec<String>,
+    pub entity_media: Vec<String>,
     pub room_perception: Vec<String>,
     pub scene_variant_sets: Vec<String>,
     pub scene_variants: Vec<String>,
@@ -198,9 +320,11 @@ pub enum AreaCrossReferenceKind {
     NpcSpawnPrototype,
     NpcSpawnRoom,
     ArchetypeAbility,
+    ProgressionReference,
     NpcAbilitySetPrototype,
     NpcAbility,
     RoomMedia,
+    EntityMedia,
     RoomPerception,
     HiddenItem,
     HiddenNpc,
@@ -240,6 +364,8 @@ pub struct ComposedWorld {
 
 #[derive(Debug, Error)]
 pub enum CompositionError {
+    #[error("invalid character progression project default: {0}")]
+    InvalidCharacterProgressionDefault(String),
     #[error("could not inspect {path:?}: {source}")]
     Inspect {
         path: PathBuf,
@@ -548,11 +674,12 @@ fn compose_loaded(
             rooms: Vec::new(),
             gameplay: GameplayDefinition {
                 rng_seed: manifest.rng_seed,
-                default_archetype_id: manifest.default_archetype_id.clone(),
+                character_progression: None,
                 ..GameplayDefinition::default()
             },
         },
         room_media: Vec::new(),
+        entity_media: Vec::new(),
         room_perception: Vec::new(),
         scene_variants: Vec::new(),
         scripts: Vec::new(),
@@ -592,6 +719,44 @@ fn compose_loaded(
             "archetype",
             &pack.id,
             pack.archetypes.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "lineage",
+            &pack.id,
+            pack.lineages.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "background",
+            &pack.id,
+            pack.backgrounds.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "base class",
+            &pack.id,
+            pack.base_classes.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "advanced class",
+            &pack.id,
+            pack.advanced_classes.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "talent graph",
+            &pack.id,
+            pack.talent_graphs.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "talent node",
+            &pack.id,
+            pack.talent_graphs
+                .iter()
+                .flat_map(|graph| graph.nodes.iter().map(|node| &node.id)),
         )?;
         register_entities(
             &mut global_ids,
@@ -645,6 +810,37 @@ fn compose_loaded(
                         .map(|value| value.id.clone())
                         .collect(),
                 ),
+                lineages: sorted(pack.lineages.iter().map(|value| value.id.clone()).collect()),
+                backgrounds: sorted(
+                    pack.backgrounds
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                base_classes: sorted(
+                    pack.base_classes
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                advanced_classes: sorted(
+                    pack.advanced_classes
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                talent_graphs: sorted(
+                    pack.talent_graphs
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                talent_nodes: sorted(
+                    pack.talent_graphs
+                        .iter()
+                        .flat_map(|graph| graph.nodes.iter().map(|node| node.id.clone()))
+                        .collect(),
+                ),
                 abilities: sorted(
                     pack.abilities
                         .iter()
@@ -661,6 +857,12 @@ fn compose_loaded(
                     pack.room_media
                         .iter()
                         .map(|value| value.room_id.clone())
+                        .collect(),
+                ),
+                entity_media: sorted(
+                    pack.entity_media
+                        .iter()
+                        .map(EntityMediaDefinition::key)
                         .collect(),
                 ),
                 room_perception: sorted(
@@ -724,12 +926,64 @@ fn compose_loaded(
             .npc_ability_sets
             .extend(pack.npc_ability_sets.clone());
         document.room_media.extend(pack.room_media.clone());
+        document.entity_media.extend(pack.entity_media.clone());
         document
             .room_perception
             .extend(pack.room_perception.clone());
         document.scene_variants.extend(pack.scene_variants.clone());
         document.scripts.extend(pack.scripts.clone());
         document.content_tests.extend(pack.content_tests.clone());
+    }
+
+    let has_progression = areas.iter().any(|area| {
+        let pack = &area.pack;
+        !pack.level_thresholds.is_empty()
+            || !pack.lineages.is_empty()
+            || !pack.backgrounds.is_empty()
+            || !pack.base_classes.is_empty()
+            || !pack.advanced_classes.is_empty()
+            || !pack.talent_graphs.is_empty()
+    });
+    if has_progression {
+        document.world.gameplay.character_progression = Some(CharacterProgressionDefinition {
+            defaults: CharacterDefaultsDefinition {
+                lineage_id: manifest.default_lineage_id.clone().ok_or_else(|| {
+                    CompositionError::InvalidCharacterProgressionDefault(
+                        "defaultLineageId is required".to_owned(),
+                    )
+                })?,
+                background_id: manifest.default_background_id.clone(),
+                base_class_id: manifest.default_base_class_id.clone().ok_or_else(|| {
+                    CompositionError::InvalidCharacterProgressionDefault(
+                        "defaultBaseClassId is required".to_owned(),
+                    )
+                })?,
+            },
+            level_thresholds: areas
+                .iter()
+                .flat_map(|area| area.pack.level_thresholds.clone())
+                .collect(),
+            lineages: areas
+                .iter()
+                .flat_map(|area| area.pack.lineages.clone())
+                .collect(),
+            backgrounds: areas
+                .iter()
+                .flat_map(|area| area.pack.backgrounds.clone())
+                .collect(),
+            base_classes: areas
+                .iter()
+                .flat_map(|area| area.pack.base_classes.clone())
+                .collect(),
+            advanced_classes: areas
+                .iter()
+                .flat_map(|area| area.pack.advanced_classes.clone())
+                .collect(),
+            talent_graphs: areas
+                .iter()
+                .flat_map(|area| area.pack.talent_graphs.clone())
+                .collect(),
+        });
     }
 
     document.validate()?;
@@ -773,6 +1027,9 @@ fn compose_loaded(
             crate::DocumentToolError::Json(error) => CompositionError::Artifact(error),
             crate::DocumentToolError::InvalidScene(error) => {
                 unreachable!("artifact generation does not resolve scenes: {error}")
+            }
+            crate::DocumentToolError::LegacyProgression(error) => {
+                unreachable!("composed artifacts are already WorldPack v3: {error}")
             }
         })?;
     if artifact.len() > MAX_COMPOSED_WORLD_BYTES {
@@ -840,6 +1097,42 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
     let ability_owner = owner_map(areas, |area| {
         area.abilities.iter().map(|value| value.id.as_str())
     });
+    let progression_owner = areas
+        .iter()
+        .flat_map(|area| {
+            let owner = area.pack.id.as_str();
+            area.pack
+                .lineages
+                .iter()
+                .map(move |value| (value.id.as_str(), owner))
+                .chain(
+                    area.pack
+                        .backgrounds
+                        .iter()
+                        .map(move |value| (value.id.as_str(), owner)),
+                )
+                .chain(
+                    area.pack
+                        .base_classes
+                        .iter()
+                        .map(move |value| (value.id.as_str(), owner)),
+                )
+                .chain(
+                    area.pack
+                        .advanced_classes
+                        .iter()
+                        .map(move |value| (value.id.as_str(), owner)),
+                )
+                .chain(area.pack.talent_graphs.iter().flat_map(move |graph| {
+                    std::iter::once((graph.id.as_str(), owner)).chain(
+                        graph
+                            .nodes
+                            .iter()
+                            .map(move |node| (node.id.as_str(), owner)),
+                    )
+                }))
+        })
+        .collect::<HashMap<_, _>>();
     let spawn_owner = owner_map(areas, |area| {
         area.npc_spawns.iter().map(|value| value.id.as_str())
     });
@@ -960,6 +1253,115 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                 }
             }
         }
+        for lineage in &area.pack.lineages {
+            add_progression_references(
+                &mut edges,
+                from,
+                &lineage.id,
+                lineage.talent_graph_ids.iter().map(String::as_str),
+                &progression_owner,
+            );
+            add_grant_references(
+                &mut edges,
+                from,
+                &lineage.id,
+                &lineage.creation_grants,
+                &ability_owner,
+            );
+        }
+        for background in &area.pack.backgrounds {
+            add_progression_references(
+                &mut edges,
+                from,
+                &background.id,
+                background.talent_graph_ids.iter().map(String::as_str),
+                &progression_owner,
+            );
+            add_grant_references(
+                &mut edges,
+                from,
+                &background.id,
+                &background.creation_grants,
+                &ability_owner,
+            );
+        }
+        for class in &area.pack.base_classes {
+            add_progression_references(
+                &mut edges,
+                from,
+                &class.id,
+                class.talent_graph_ids.iter().map(String::as_str),
+                &progression_owner,
+            );
+            add_grant_references(
+                &mut edges,
+                from,
+                &class.id,
+                &class.creation_grants,
+                &ability_owner,
+            );
+            for milestone in &class.level_grants {
+                add_grant_references(
+                    &mut edges,
+                    from,
+                    &class.id,
+                    &milestone.grants,
+                    &ability_owner,
+                );
+            }
+        }
+        for class in &area.pack.advanced_classes {
+            add_progression_references(
+                &mut edges,
+                from,
+                &class.id,
+                class
+                    .from_class_ids
+                    .iter()
+                    .chain(&class.talent_graph_ids)
+                    .map(String::as_str),
+                &progression_owner,
+            );
+            add_requirement_references(
+                &mut edges,
+                from,
+                &class.id,
+                &class.requirements,
+                &progression_owner,
+                &ability_owner,
+            );
+            add_grant_references(
+                &mut edges,
+                from,
+                &class.id,
+                &class.promotion_grants,
+                &ability_owner,
+            );
+            for milestone in &class.level_grants {
+                add_grant_references(
+                    &mut edges,
+                    from,
+                    &class.id,
+                    &milestone.grants,
+                    &ability_owner,
+                );
+            }
+        }
+        for graph in &area.pack.talent_graphs {
+            for node in &graph.nodes {
+                for rank in &node.ranks {
+                    add_requirement_references(
+                        &mut edges,
+                        from,
+                        &node.id,
+                        &rank.requirements,
+                        &progression_owner,
+                        &ability_owner,
+                    );
+                    add_grant_references(&mut edges, from, &node.id, &rank.grants, &ability_owner);
+                }
+            }
+        }
         for set in &area.pack.npc_ability_sets {
             if let Some(owner) = prototype_owner.get(set.npc_prototype_id.as_str()) {
                 add_edge(
@@ -993,6 +1395,22 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                     AreaCrossReferenceKind::RoomMedia,
                     &media.room_id,
                     &media.room_id,
+                );
+            }
+        }
+        for media in &area.pack.entity_media {
+            let owner = match media.kind {
+                EntityMediaKind::Item => item_owner.get(media.subject_id.as_str()),
+                EntityMediaKind::Npc => spawn_owner.get(media.subject_id.as_str()),
+            };
+            if let Some(owner) = owner {
+                add_edge(
+                    &mut edges,
+                    from,
+                    owner,
+                    AreaCrossReferenceKind::EntityMedia,
+                    &media.key(),
+                    &media.subject_id,
                 );
             }
         }
@@ -1085,6 +1503,124 @@ where
         .collect()
 }
 
+fn add_progression_references<'a>(
+    edges: &mut Vec<AreaCrossReference>,
+    from: &str,
+    source_id: &str,
+    targets: impl Iterator<Item = &'a str>,
+    owners: &HashMap<&str, &str>,
+) {
+    for target in targets {
+        if let Some(owner) = owners.get(target) {
+            add_edge(
+                edges,
+                from,
+                owner,
+                AreaCrossReferenceKind::ProgressionReference,
+                source_id,
+                target,
+            );
+        }
+    }
+}
+
+fn add_grant_references(
+    edges: &mut Vec<AreaCrossReference>,
+    from: &str,
+    source_id: &str,
+    grants: &[GrantDefinition],
+    ability_owners: &HashMap<&str, &str>,
+) {
+    for grant in grants {
+        if let GrantDefinition::Ability { ability_id } = grant
+            && let Some(owner) = ability_owners.get(ability_id.as_str())
+        {
+            add_edge(
+                edges,
+                from,
+                owner,
+                AreaCrossReferenceKind::ProgressionReference,
+                source_id,
+                ability_id,
+            );
+        }
+    }
+}
+
+fn add_requirement_references(
+    edges: &mut Vec<AreaCrossReference>,
+    from: &str,
+    source_id: &str,
+    requirements: &[RequirementDefinition],
+    progression_owners: &HashMap<&str, &str>,
+    ability_owners: &HashMap<&str, &str>,
+) {
+    for requirement in requirements {
+        match &requirement.predicate {
+            RequirementPredicate::Lineage { lineage_id } => add_progression_references(
+                edges,
+                from,
+                source_id,
+                std::iter::once(lineage_id.as_str()),
+                progression_owners,
+            ),
+            RequirementPredicate::CurrentClass { class_id }
+            | RequirementPredicate::HistoricalClass { class_id } => add_progression_references(
+                edges,
+                from,
+                source_id,
+                std::iter::once(class_id.as_str()),
+                progression_owners,
+            ),
+            RequirementPredicate::NodeRank {
+                graph_id, node_id, ..
+            } => add_progression_references(
+                edges,
+                from,
+                source_id,
+                [graph_id.as_str(), node_id.as_str()].into_iter(),
+                progression_owners,
+            ),
+            RequirementPredicate::Ability { ability_id } => {
+                if let Some(owner) = ability_owners.get(ability_id.as_str()) {
+                    add_edge(
+                        edges,
+                        from,
+                        owner,
+                        AreaCrossReferenceKind::ProgressionReference,
+                        source_id,
+                        ability_id,
+                    );
+                }
+            }
+            RequirementPredicate::All { requirements }
+            | RequirementPredicate::Any { requirements } => add_requirement_references(
+                edges,
+                from,
+                source_id,
+                requirements,
+                progression_owners,
+                ability_owners,
+            ),
+            RequirementPredicate::Not { requirement } => add_requirement_references(
+                edges,
+                from,
+                source_id,
+                std::slice::from_ref(requirement),
+                progression_owners,
+                ability_owners,
+            ),
+            RequirementPredicate::Level { .. }
+            | RequirementPredicate::PermanentAttribute { .. }
+            | RequirementPredicate::Skill { .. }
+            | RequirementPredicate::CompletedQuest { .. }
+            | RequirementPredicate::ReceivedSignal { .. }
+            | RequirementPredicate::CharacterFlag { .. }
+            | RequirementPredicate::WorldFlag { .. } => {}
+        }
+    }
+}
+
 fn add_edge(
     edges: &mut Vec<AreaCrossReference>,
     from: &str,
@@ -1141,6 +1677,20 @@ fn validate_project_assets(
             }
             if let Some(audio) = &variant.audio {
                 locate_asset(&roots, &audio.path)?;
+            }
+        }
+    }
+    for media in &document.entity_media {
+        let sources = std::iter::once(&media.poses.idle)
+            .chain(media.poses.attack.iter())
+            .chain(media.poses.hit.iter())
+            .chain(media.poses.defeated.iter());
+        for source in sources {
+            for path in [source.webp.as_deref(), source.png.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                locate_asset(&roots, path)?;
             }
         }
     }
@@ -1289,7 +1839,7 @@ fn safe_identifier(value: &str) -> bool {
 }
 
 /// Existing runtime WorldPack readers intentionally tolerate future fields.
-/// AreaPack v1 does not: this format-specific key audit makes every structured
+/// AreaPack v2 does not: this format-specific key audit makes every structured
 /// authoring record fail closed without changing runtime deserialization.
 fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionError> {
     let Some(area) = audit_object(
@@ -1304,9 +1854,16 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
             "npcPrototypes",
             "npcSpawns",
             "archetypes",
+            "levelThresholds",
+            "lineages",
+            "backgrounds",
+            "baseClasses",
+            "advancedClasses",
+            "talentGraphs",
             "abilities",
             "npcAbilitySets",
             "roomMedia",
+            "entityMedia",
             "roomPerception",
             "sceneVariants",
             "scripts",
@@ -1334,6 +1891,7 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
         audit_npc_ability_set,
     )?;
     audit_array(area.get("roomMedia"), "$.roomMedia", audit_room_media)?;
+    audit_array(area.get("entityMedia"), "$.entityMedia", audit_entity_media)?;
     audit_array(
         area.get("roomPerception"),
         "$.roomPerception",
@@ -1591,6 +2149,57 @@ fn audit_room_media(value: &serde_json::Value, path: &str) -> Result<(), Composi
     };
     if let Some(audio) = media.get("audio") {
         audit_audio(audio, &format!("{path}.audio"))?;
+    }
+    Ok(())
+}
+
+fn audit_entity_media(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    let Some(media) = audit_object(
+        value,
+        &[
+            "kind",
+            "subjectId",
+            "alt",
+            "decorative",
+            "footprint",
+            "preferredAnchor",
+            "priority",
+            "layer",
+            "poses",
+        ],
+        path,
+    )?
+    else {
+        return Ok(());
+    };
+    if let Some(footprint) = media.get("footprint") {
+        audit_object(
+            footprint,
+            &["widthMilli", "heightMilli"],
+            &format!("{path}.footprint"),
+        )?;
+    }
+    if let Some(anchor) = media.get("preferredAnchor") {
+        audit_object(
+            anchor,
+            &["xMilli", "yMilli"],
+            &format!("{path}.preferredAnchor"),
+        )?;
+    }
+    if let Some(poses) = media.get("poses") {
+        let Some(poses) = audit_object(
+            poses,
+            &["idle", "attack", "hit", "defeated"],
+            &format!("{path}.poses"),
+        )?
+        else {
+            return Ok(());
+        };
+        for pose in ["idle", "attack", "hit", "defeated"] {
+            if let Some(source) = poses.get(pose) {
+                audit_object(source, &["webp", "png"], &format!("{path}.poses.{pose}"))?;
+            }
+        }
     }
     Ok(())
 }

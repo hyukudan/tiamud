@@ -5,7 +5,9 @@ import {
   createClientHello,
   createCommandSubmit,
   createHeartbeatAck,
+  createPromotionPerform,
   createSyncRequest,
+  createTalentPerform,
   localizedImageAlt,
   parseServerMessage,
 } from './protocol';
@@ -18,6 +20,14 @@ const validPlayerState = () => ({
     name: 'Aria', level: 2, experience: 120, nextLevelExperience: 200,
     health: 21, maxHealth: 25, strength: 7, defence: 3, effects: [], recoveryInTicks: null,
     skills: [{ id: 'combat', label: 'Combat', rank: 14 }],
+    lineage: { id: 'mortal', label: 'Mortal', description: 'Adaptable and ambitious.' },
+    background: null,
+    baseClass: { id: 'wanderer', label: 'Wanderer', description: 'A versatile explorer.' },
+    activeClass: { id: 'wanderer', label: 'Wanderer', description: 'A versatile explorer.' },
+    classHistory: [{ id: 'wanderer', label: 'Wanderer', description: 'A versatile explorer.' }],
+    progressionPoints: { talent: 1 },
+    talents: [],
+    promotions: [],
   },
   inventory: [{
     id: 'o1111111111111111', label: 'blue lantern', description: 'Cold light.',
@@ -97,6 +107,14 @@ describe('protocol messages', () => {
         action: 'combat.ability',
         abilityId: 'ember-bolt',
         target: 'o9999999999999999',
+      },
+    });
+    expect(createPromotionPerform('pathfinder', 'request-4')).toMatchObject({
+      data: { requestId: 'request-4', action: 'progression.promote', classId: 'pathfinder' },
+    });
+    expect(createTalentPerform('wayfarer', 'sure-step', 'request-5')).toMatchObject({
+      data: {
+        requestId: 'request-5', action: 'progression.talent', graphId: 'wayfarer', nodeId: 'sure-step',
       },
     });
   });
@@ -229,6 +247,252 @@ describe('protocol messages', () => {
     });
   });
 
+  it('accepts bounded entity annotations only in the scene presentation sidecar', () => {
+    const hash = 'b'.repeat(64);
+    const message = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'scene.snapshot',
+      seq: 5,
+      data: {
+        viewId: 'o9999999999999999',
+        title: 'Lantern Square',
+        prose: [],
+        exits: [],
+        items: [],
+        npcs: [{
+          id: 'o8888888888888888',
+          label: 'rain wolf',
+          description: 'It watches from the archway.',
+          health: 12,
+          maxHealth: 12,
+          actions: [{ label: 'Attack', command: 'attack o8888888888888888' }],
+        }],
+        presentation: {
+          entities: [{
+            id: 'o8888888888888888',
+            alt: '',
+            decorative: true,
+            footprint: { width: 0.18, height: 0.42 },
+            preferredAnchor: { x: 0.7, y: 0.96 },
+            priority: 20,
+            layer: 'foreground',
+            poses: {
+              idle: {
+                avif: `/assets/${hash}/sprite-idle-640.avif`,
+                png: `/assets/${hash}/sprite-idle-640.png`,
+              },
+              attack: { webp: `/assets/${hash}/sprite-attack-640.webp` },
+              hit: { manifest: `/assets/${hash}/manifest.json` },
+            },
+          }],
+        },
+      },
+    }));
+
+    expect(message).toMatchObject({
+      type: 'scene.snapshot',
+      data: {
+        npcs: [{
+          id: 'o8888888888888888',
+        }],
+        presentation: {
+          entities: [{
+            id: 'o8888888888888888',
+            decorative: true,
+            footprint: { width: 0.18, height: 0.42 },
+            priority: 20,
+            layer: 'foreground',
+            poses: {
+              idle: { avif: `/assets/${hash}/sprite-idle-640.avif` },
+              attack: { webp: `/assets/${hash}/sprite-attack-640.webp` },
+              hit: { manifest: `/assets/${hash}/manifest.json` },
+            },
+          }],
+        },
+      },
+    });
+  });
+
+  it('strips unsafe sidecar annotations without dropping semantic entities', () => {
+    const unsafeVisuals = [
+      {
+        alt: '', decorative: true, footprint: { width: 0.2, height: 0.4 }, priority: 1,
+        layer: 'foreground', poses: { idle: { png: 'https://tracker.invalid/wolf.png' } },
+      },
+      {
+        alt: '', decorative: true, footprint: { width: 0.2, height: 0.4 }, priority: 1,
+        layer: 'foreground', poses: { idle: { png: 'data:image/png;base64,AAAA' } },
+      },
+      {
+        alt: '', decorative: true, footprint: { width: 0.2, height: 0.4 }, priority: 1,
+        layer: 'foreground', poses: { idle: { png: `/assets/${'c'.repeat(64)}/sprite-idle.svg` } },
+      },
+      {
+        alt: 'x'.repeat(257), decorative: false, footprint: { width: 0.2, height: 0.4 }, priority: 1,
+        layer: 'foreground', poses: { idle: { png: `/assets/${'d'.repeat(64)}/sprite-idle.png` } },
+      },
+      {
+        alt: '', decorative: true, footprint: { width: 2, height: 0.4 }, priority: 1,
+        layer: 'foreground', poses: { idle: { png: `/assets/${'e'.repeat(64)}/sprite-idle.png` } },
+      },
+      {
+        alt: '', decorative: true, footprint: { width: 0.2, height: 0.4 }, priority: 1,
+        layer: 'foreground',
+        poses: { idle: { manifest: { url: `/assets/${'f'.repeat(64)}/manifest.json` } } },
+      },
+    ];
+    const message = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'scene.snapshot',
+      seq: 6,
+      data: {
+        title: 'Lantern Square', prose: [], exits: [],
+        items: unsafeVisuals.map((_visual, index) => ({
+          id: `o${String(index + 1).padStart(16, '0')}`,
+          label: `item ${index}`, description: 'Still usable.', actions: [],
+        })),
+        npcs: [],
+        presentation: {
+          entities: unsafeVisuals.map((visual, index) => ({
+            id: `o${String(index + 1).padStart(16, '0')}`,
+            ...visual,
+          })),
+        },
+      },
+    }));
+
+    expect(message?.type).toBe('scene.snapshot');
+    if (message?.type !== 'scene.snapshot') throw new Error('expected scene snapshot');
+    expect(message.data.items).toHaveLength(6);
+    expect(message.data.items.every((item) => item.description === 'Still usable.')).toBe(true);
+    expect(message.data.presentation).toBeUndefined();
+  });
+
+  it('decorates message.append with only bounded semantic cues', () => {
+    const cue = {
+      kind: 'hit',
+      entityId: 'o8888888888888888',
+      pose: 'hit',
+      intensity: 2,
+      durationMs: 480,
+    };
+    expect(parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'message.append',
+      seq: 12,
+      data: {
+        revision: 7,
+        kind: 'gameplay',
+        text: 'The rain wolf recoils from the blow.',
+        actorId: 'o7777777777777777',
+        targetId: 'o8888888888888888',
+        cue,
+      },
+    }))).toMatchObject({ type: 'message.append', data: { cue, text: 'The rain wolf recoils from the blow.' } });
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'visual.cue', seq: 12, data: cue,
+    }))).toBeUndefined();
+
+    for (const invalid of [
+      { ...cue, kind: 'status' },
+      { ...cue, pose: 'javascript:alert(1)' },
+      { ...cue, intensity: 4 },
+      { ...cue, durationMs: 801 },
+      { ...cue, entityId: 'o6666666666666666' },
+    ]) {
+      const message = parseServerMessage(JSON.stringify({
+        v: 1,
+        type: 'message.append',
+        seq: 13,
+        data: {
+          revision: 8,
+          kind: 'gameplay',
+          text: 'Combat text remains authoritative.',
+          actorId: 'o7777777777777777',
+          targetId: 'o8888888888888888',
+          cue: invalid,
+        },
+      }));
+      expect(message).toMatchObject({
+        type: 'message.append',
+        data: { text: 'Combat text remains authoritative.' },
+      });
+      if (message?.type !== 'message.append') throw new Error('expected semantic message');
+      expect(message.data.cue).toBeUndefined();
+    }
+  });
+
+  it('bounds the sidecar annotation count and keeps it out of incremental entity messages', () => {
+    const visual = {
+      alt: '', decorative: true, footprint: { width: 0.2, height: 0.4 }, priority: 1,
+      layer: 'foreground', poses: { idle: { png: `/assets/${'a'.repeat(64)}/sprite-idle.png` } },
+    };
+    const oversized = Array.from({ length: 13 }, (_, index) => ({
+      id: `o${String(index).padStart(16, '0')}`,
+      ...visual,
+    }));
+    const snapshot = parseServerMessage(JSON.stringify({
+      v: 1, type: 'scene.snapshot', seq: 14,
+      data: {
+        title: 'Lantern Square', prose: [], items: [], npcs: [], exits: [],
+        presentation: { entities: oversized },
+      },
+    }));
+    expect(snapshot).toMatchObject({ type: 'scene.snapshot', data: { presentation: undefined } });
+
+    const fourPoses = {
+      ...visual,
+      poses: Object.fromEntries((['idle', 'attack', 'hit', 'defeated'] as const).map((pose) => [
+        pose,
+        { png: `/assets/${'b'.repeat(64)}/sprite-${pose}.png` },
+      ])),
+    };
+    const tooManyPoses = parseServerMessage(JSON.stringify({
+      v: 1, type: 'scene.snapshot', seq: 14,
+      data: {
+        title: 'Lantern Square', prose: [], items: [], npcs: [], exits: [],
+        presentation: {
+          entities: Array.from({ length: 9 }, (_, index) => ({
+            id: `o${String(index).padStart(16, '0')}`,
+            ...fourPoses,
+          })),
+        },
+      },
+    }));
+    expect(tooManyPoses).toMatchObject({
+      type: 'scene.snapshot', data: { presentation: undefined },
+    });
+
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'scene.patch', seq: 15,
+      data: {
+        viewId: 'o9999999999999999', revision: 8, title: 'Night falls',
+        presentation: { entities: [{ id: 'o8888888888888888', ...visual }] },
+      },
+    }))).toMatchObject({
+      type: 'scene.patch',
+      data: { viewId: 'o9999999999999999', revision: 8, title: 'Night falls' },
+    });
+
+    const upsert = parseServerMessage(JSON.stringify({
+      v: 1, type: 'entity.upsert', seq: 16,
+      data: {
+        viewId: 'o9999999999999999', revision: 8, kind: 'item', id: 'o8888888888888888',
+        entity: {
+          id: 'o8888888888888888', label: 'lantern', description: 'Still usable.', actions: [],
+          visual,
+          presentation: { entities: [{ id: 'o8888888888888888', ...visual }] },
+        },
+      },
+    }));
+    expect(upsert).toMatchObject({
+      type: 'entity.upsert', data: { entity: { id: 'o8888888888888888' } },
+    });
+    if (upsert?.type !== 'entity.upsert') throw new Error('expected entity upsert');
+    expect('presentation' in upsert.data.entity).toBe(false);
+    expect('visual' in upsert.data.entity).toBe(false);
+  });
+
   it('validates typed scene, entity, vitals, inventory, and map updates', () => {
     const viewId = 'o9999999999999999';
     const itemId = 'o8888888888888888';
@@ -339,7 +603,7 @@ describe('protocol messages', () => {
     expect(parseServerMessage('{"type":"world.destroyed","data":{}}')).toBeUndefined();
   });
 
-  it('parses projected events, sync snapshots, and unsequenced heartbeats', () => {
+  it('parses projected events, correlated sync halves, and unsequenced heartbeats', () => {
     expect(parseServerMessage(JSON.stringify({
       v: 1,
       type: 'message.append',
@@ -366,18 +630,49 @@ describe('protocol messages', () => {
 
     expect(parseServerMessage(JSON.stringify({
       v: 1,
-      type: 'sync.snapshot',
-      seq: 11,
+      type: 'sync.scene',
+      seq: 50,
       data: {
-        afterSeq: 8,
+        syncId: 'sync-50',
+        afterSeq: 41,
         scene: { title: 'Lantern Square', prose: [], exits: [], items: [] },
-        player: validPlayerState(),
       },
     }))).toMatchObject({
-      type: 'sync.snapshot',
-      seq: 11,
-      data: { afterSeq: 8, scene: { title: 'Lantern Square' } },
+      type: 'sync.scene',
+      seq: 50,
+      data: { syncId: 'sync-50', afterSeq: 41, scene: { title: 'Lantern Square' } },
     });
+    expect(parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'sync.player',
+      seq: 51,
+      data: {
+        syncId: 'sync-50',
+        afterSeq: 41,
+        player: validPlayerState(),
+        complete: true,
+      },
+    }))).toMatchObject({
+      type: 'sync.player',
+      seq: 51,
+      data: { syncId: 'sync-50', afterSeq: 41, complete: true, player: { revision: 3 } },
+    });
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'sync.snapshot', seq: 52,
+      data: { afterSeq: 41, scene: {}, player: {} },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'sync.player', seq: 52,
+      data: {
+        syncId: 'unsafe', afterSeq: 41, player: validPlayerState(), complete: true,
+      },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'sync.player', seq: 52,
+      data: {
+        syncId: 'sync-50', afterSeq: 41, player: validPlayerState(), complete: false,
+      },
+    }))).toBeUndefined();
 
     expect(parseServerMessage(JSON.stringify({
       v: 1,
@@ -391,7 +686,7 @@ describe('protocol messages', () => {
     });
   });
 
-  it('accepts bounded player projections and rejects durable or policy state', () => {
+  it('accepts bounded player projections and ignores fields it does not project', () => {
     expect(parseServerMessage(JSON.stringify({
       v: 1,
       type: 'player.snapshot',
@@ -407,12 +702,15 @@ describe('protocol messages', () => {
       },
     });
 
-    expect(parseServerMessage(JSON.stringify({
+    const additive = parseServerMessage(JSON.stringify({
       v: 1,
       type: 'player.snapshot',
       seq: 17,
       data: { ...validPlayerState(), characterId: 42 },
-    }))).toBeUndefined();
+    }));
+    expect(additive).toMatchObject({ type: 'player.snapshot', data: { revision: 3 } });
+    if (additive?.type !== 'player.snapshot') throw new Error('expected player snapshot');
+    expect('characterId' in additive.data).toBe(false);
     expect(parseServerMessage(JSON.stringify({
       v: 1,
       type: 'player.snapshot',
@@ -424,32 +722,54 @@ describe('protocol messages', () => {
     }))).toBeUndefined();
   });
 
-  it('parses an additive archetype, character sheet, resources, and known abilities', () => {
-    const legacyState = validPlayerState();
+  it('parses clean v3 origins, class evolution, talents, promotions, and abilities', () => {
+    const baseState = validPlayerState();
     const state = {
-      ...legacyState,
+      ...baseState,
       character: {
-      ...legacyState.character,
-      archetype: { id: 'spellblade', label: 'Spellblade', description: 'Steel guided by ember lore.' },
-      attributes: [
-        { id: 'agility', label: 'Agility', value: 8 },
-        { id: 'intellect', label: 'Intellect', value: 11 },
-      ],
-      resistances: [{ damageType: 'fire', percent: 15 }],
-      statuses: [{
-        id: 'focused', label: 'Focused', kind: 'attribute_modifier', magnitude: 2, remainingTicks: 2,
-      }],
-      resources: [{ id: 'mana', label: 'Mana', current: 12, max: 20 }],
-      abilities: [{
-        id: 'ember-bolt',
-        name: 'Ember Bolt',
-        description: 'Hurls a compact flame at a visible foe.',
-        kind: 'spell',
-        resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 4 }],
-        cooldownRemaining: 0,
-        usable: true,
-        targeting: 'explicitTarget',
-      }],
+        ...baseState.character,
+        lineage: { id: 'embermarked', label: 'Embermarked', description: 'Fire answers their blood.' },
+        background: { id: 'archive', label: 'Archive Apprentice', description: 'Trained among old records.' },
+        baseClass: { id: 'arcanist', label: 'Arcanist', description: 'Shapes disciplined magic.' },
+        activeClass: { id: 'spellblade', label: 'Spellblade', description: 'Steel guided by ember lore.' },
+        classHistory: [
+          { id: 'arcanist', label: 'Arcanist', description: 'Shapes disciplined magic.' },
+          { id: 'spellblade', label: 'Spellblade', description: 'Steel guided by ember lore.' },
+        ],
+        progressionPoints: { talent: 2 },
+        talents: [{
+          id: 'ember-path', label: 'Ember Path', description: 'Control fire without being consumed.',
+          pointPoolId: 'talent', availablePoints: 2,
+          nodes: [{
+            id: 'steady-flame', label: 'Steady Flame', description: 'Keep a spell stable under pressure.',
+            rank: 1, maxRank: 3, nextCost: 2, available: true,
+            requirements: [{ met: true, text: 'Level 2' }], command: 'talent learn ember-path steady-flame',
+          }],
+        }],
+        promotions: [{
+          class: { id: 'stormcaller', label: 'Stormcaller', description: 'Calls lightning from rain.' },
+          available: false, requirements: [{ met: false, text: 'Reach level 5' }],
+          command: 'promote stormcaller',
+        }],
+        attributes: [
+          { id: 'agility', label: 'Agility', value: 8 },
+          { id: 'intellect', label: 'Intellect', value: 11 },
+        ],
+        resistances: [{ damageType: 'fire', percent: 15 }],
+        statuses: [{
+          id: 'focused', label: 'Focused', kind: 'attribute_modifier', magnitude: 2, remainingTicks: 2,
+        }],
+        resources: [{ id: 'mana', label: 'Mana', current: 12, max: 20 }],
+        abilities: [{
+          id: 'ember-bolt',
+          name: 'Ember Bolt',
+          description: 'Hurls a compact flame at a visible foe.',
+          kind: 'spell',
+          resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 4 }],
+          cooldownRemaining: 0,
+          usable: true,
+          targeting: 'explicitTarget',
+        }],
       },
     };
 
@@ -457,7 +777,14 @@ describe('protocol messages', () => {
       v: 1, type: 'player.snapshot', seq: 19, data: state,
     }))).toMatchObject({
       data: { character: {
-        archetype: { id: 'spellblade', label: 'Spellblade' },
+        lineage: { id: 'embermarked' },
+        background: { id: 'archive' },
+        baseClass: { id: 'arcanist' },
+        activeClass: { id: 'spellblade' },
+        classHistory: [{ id: 'arcanist' }, { id: 'spellblade' }],
+        progressionPoints: { talent: 2 },
+        talents: [{ id: 'ember-path', nodes: [{ id: 'steady-flame', rank: 1, nextCost: 2 }] }],
+        promotions: [{ class: { id: 'stormcaller' }, available: false }],
         attributes: [{ id: 'agility', value: 8 }, { id: 'intellect', value: 11 }],
         resistances: [{ damageType: 'fire', percent: 15 }],
         statuses: [{ id: 'focused', kind: 'attribute_modifier', remainingTicks: 2 }],
@@ -476,14 +803,17 @@ describe('protocol messages', () => {
   });
 
   it('matches the authored character-sheet boundary limits', () => {
-    const legacyState = validPlayerState();
+    const baseState = validPlayerState();
     const maximumId = 'a'.repeat(128);
     const maximumStatId = 's'.repeat(64);
     const state = {
-      ...legacyState,
+      ...baseState,
       character: {
-        ...legacyState.character,
-        archetype: { id: maximumId, label: 'Boundary', description: '' },
+        ...baseState.character,
+        lineage: { id: maximumId, label: 'Boundary', description: '' },
+        baseClass: { id: maximumId, label: 'Boundary', description: '' },
+        activeClass: { id: maximumId, label: 'Boundary', description: '' },
+        classHistory: [{ id: maximumId, label: 'Boundary', description: '' }],
         attributes: Array.from({ length: 64 }, (_, index) => ({
           id: `stat-${index}`,
           label: `Stat ${index}`,
@@ -517,7 +847,7 @@ describe('protocol messages', () => {
     }));
     expect(message).toMatchObject({
       type: 'player.snapshot',
-      data: { character: { archetype: { id: maximumId, description: '' } } },
+      data: { character: { lineage: { id: maximumId, description: '' } } },
     });
     if (message?.type !== 'player.snapshot') throw new Error('expected bounded player snapshot');
     expect(message.data.character.attributes).toHaveLength(64);
@@ -553,7 +883,7 @@ describe('protocol messages', () => {
     }))).toMatchObject({ type: 'media.stop', data: {} });
   });
 
-  it('parses bounded public chat projections without accepting policy fields', () => {
+  it('parses bounded public chat projections and ignores additive policy fields', () => {
     expect(parseServerMessage(JSON.stringify({
       v: 1,
       type: 'chat.message',
@@ -563,15 +893,137 @@ describe('protocol messages', () => {
       type: 'chat.message',
       data: { channel: 'tell', sender: 'Aria', text: 'Meet at the gate.' },
     });
-    expect(parseServerMessage(JSON.stringify({
+    const additive = parseServerMessage(JSON.stringify({
       v: 1,
       type: 'chat.message',
       seq: 15,
       data: { channel: 'tell', sender: 'Aria', text: 'x', blocked: true },
+    }));
+    expect(additive).toMatchObject({
+      type: 'chat.message',
+      data: { channel: 'tell', sender: 'Aria', text: 'x' },
+    });
+    if (additive?.type !== 'chat.message') throw new Error('expected chat message');
+    expect('blocked' in additive.data).toBe(false);
+  });
+
+  it('ignores additive server fields in scene, player, message, and split sync envelopes', () => {
+    const scene = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'scene.snapshot',
+      seq: 30,
+      rollout: 'next',
+      data: {
+        title: 'Lantern Square',
+        prose: [],
+        exits: [],
+        items: [],
+        futureLightingModel: { exposure: 0.8 },
+      },
+    }));
+    expect(scene).toMatchObject({ type: 'scene.snapshot', seq: 30, data: { title: 'Lantern Square' } });
+    if (scene?.type !== 'scene.snapshot') throw new Error('expected scene snapshot');
+    expect('rollout' in scene).toBe(false);
+    expect('futureLightingModel' in scene.data).toBe(false);
+
+    const player = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'player.snapshot',
+      seq: 31,
+      data: {
+        ...validPlayerState(),
+        futureProgression: { renown: 4 },
+        character: { ...validPlayerState().character, futureAffinity: 'storm' },
+      },
+    }));
+    expect(player).toMatchObject({ type: 'player.snapshot', data: { character: { name: 'Aria' } } });
+    if (player?.type !== 'player.snapshot') throw new Error('expected player snapshot');
+    expect('futureProgression' in player.data).toBe(false);
+    expect('futureAffinity' in player.data.character).toBe(false);
+
+    const message = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'message.append',
+      seq: 32,
+      traceContext: 'ignored',
+      data: {
+        revision: 4,
+        kind: 'gameplay',
+        text: 'The rain wolf circles.',
+        actorId: 'o7777777777777777',
+        futurePresentation: { emphasis: 'ominous' },
+      },
+    }));
+    expect(message).toMatchObject({ type: 'message.append', data: { text: 'The rain wolf circles.' } });
+    if (message?.type !== 'message.append') throw new Error('expected appended message');
+    expect('traceContext' in message).toBe(false);
+    expect('futurePresentation' in message.data).toBe(false);
+
+    const syncScene = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'sync.scene',
+      seq: 33,
+      data: {
+        syncId: 'sync-33',
+        afterSeq: 29,
+        scene: { title: 'Lantern Square', futureLightingModel: 'v2' },
+        futureSyncWindow: 2,
+      },
+    }));
+    const syncPlayer = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'sync.player',
+      seq: 34,
+      data: {
+        syncId: 'sync-33',
+        afterSeq: 29,
+        player: { ...validPlayerState(), futureProgression: true },
+        complete: true,
+        futureSyncWindow: 2,
+      },
+    }));
+    expect(syncScene).toMatchObject({
+      type: 'sync.scene', data: { syncId: 'sync-33', afterSeq: 29, scene: { title: 'Lantern Square' } },
+    });
+    expect(syncPlayer).toMatchObject({
+      type: 'sync.player', data: { syncId: 'sync-33', afterSeq: 29, complete: true },
+    });
+    if (syncScene?.type !== 'sync.scene' || syncPlayer?.type !== 'sync.player') {
+      throw new Error('expected split sync messages');
+    }
+    expect('futureSyncWindow' in syncScene.data).toBe(false);
+    expect('futureLightingModel' in syncScene.data.scene).toBe(false);
+    expect('futureSyncWindow' in syncPlayer.data).toBe(false);
+    expect('futureProgression' in syncPlayer.data.player).toBe(false);
+  });
+
+  it('still rejects malformed required known fields after ignoring additions', () => {
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'scene.snapshot', seq: 40, data: { title: 42, futureField: true },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'player.snapshot', seq: 41,
+      data: { ...validPlayerState(), revision: '3', futureField: true },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'message.append', seq: 42,
+      data: {
+        revision: 4, kind: 'futureKind', text: 'Still malformed.', actorId: 'opaque', futureField: true,
+      },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'sync.player', seq: 43,
+      data: {
+        syncId: 'sync-43', afterSeq: 39, player: validPlayerState(), complete: false, futureField: true,
+      },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'scene.patch', seq: 44,
+      data: { viewId: 'o9999999999999999', revision: 9, futureField: true },
     }))).toBeUndefined();
   });
 
-  it('rejects invalid versions, missing sequences, and unknown envelope fields', () => {
+  it('rejects invalid versions and missing sequences while ignoring additive envelope fields', () => {
     const data = { title: 'Lantern Square', prose: [], exits: [], items: [] };
     expect(parseServerMessage(JSON.stringify({ v: 2, type: 'scene.snapshot', seq: 1, data }))).toBeUndefined();
     expect(parseServerMessage(JSON.stringify({ v: 1, type: 'scene.snapshot', data }))).toBeUndefined();
@@ -581,7 +1033,7 @@ describe('protocol messages', () => {
       seq: 1,
       data,
       unexpected: true,
-    }))).toBeUndefined();
+    }))).toMatchObject({ type: 'scene.snapshot', seq: 1, data: { title: 'Lantern Square' } });
     expect(parseServerMessage(JSON.stringify({
       v: 1,
       type: 'action.result',

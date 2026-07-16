@@ -22,7 +22,7 @@ fn cli_checks_and_backs_up_a_restorable_database() {
     fs::write(
         &world,
         r#"{
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "id": "cli-test",
             "name": "CLI Test",
             "startRoomId": "room:start",

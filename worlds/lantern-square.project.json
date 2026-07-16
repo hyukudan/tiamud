@@ -1,10 +1,12 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "lantern-square",
   "name": "Tiamud: Lantern Square",
   "startRoomId": "demo:lantern-square",
   "rngSeed": 6073466303471576068,
-  "defaultArchetypeId": "tiamud:wanderer",
+  "defaultLineageId": "tiamud:mortal",
+  "defaultBackgroundId": "tiamud:caravan-scout",
+  "defaultBaseClassId": "tiamud:wanderer",
   "areas": [
     {
       "id": "archive",

@@ -4,14 +4,15 @@
     authenticate,
     clearStoredAccess,
     createCharacter,
-    loadArchetypes,
+    loadCharacterOptions,
     loadCharacters,
     logout,
     readStoredAccess,
     writeStoredAccess,
     type AuthenticatedSession,
-    type ArchetypeChoice,
     type Character,
+    type CharacterCreationCatalog,
+    type CharacterCreationSelection,
     type CharacterSelection,
   } from '../lib/auth';
 
@@ -21,8 +22,10 @@
   let accountName = $state('');
   let password = $state('');
   let characterName = $state('');
-  let archetypes = $state<ArchetypeChoice[]>([]);
-  let archetypeId = $state('');
+  let characterOptions = $state<CharacterCreationCatalog>();
+  let lineageId = $state('');
+  let backgroundChoice = $state<'@default' | '@none' | string>('@default');
+  let baseClassId = $state('');
   let session = $state<AuthenticatedSession>();
   let characters = $state<Character[]>([]);
   let lastCharacterId = $state<number>();
@@ -31,29 +34,61 @@
   let error = $state<string>();
 
   const submitLabel = $derived(mode === 'login' ? 'Sign in' : 'Create account');
-  const selectedArchetype = $derived(archetypes.find((archetype) => archetype.id === archetypeId));
+  const defaultLineage = $derived(
+    characterOptions?.lineages.find((option) => option.id === characterOptions?.defaultLineageId),
+  );
+  const selectedLineage = $derived(
+    lineageId ? characterOptions?.lineages.find((option) => option.id === lineageId) : defaultLineage,
+  );
+  const defaultBackground = $derived(
+    characterOptions?.backgrounds.find((option) => option.id === characterOptions?.defaultBackgroundId),
+  );
+  const selectedBackground = $derived(
+    backgroundChoice === '@default'
+      ? defaultBackground
+      : characterOptions?.backgrounds.find((option) => option.id === backgroundChoice),
+  );
+  const defaultBaseClass = $derived(
+    characterOptions?.baseClasses.find((option) => option.id === characterOptions?.defaultBaseClassId),
+  );
+  const selectedBaseClass = $derived(
+    baseClassId
+      ? characterOptions?.baseClasses.find((option) => option.id === baseClassId)
+      : defaultBaseClass,
+  );
 
   async function refreshRoster(current: AuthenticatedSession): Promise<void> {
-    const [nextCharacters, archetypeResult] = await Promise.all([
+    const [nextCharacters, optionsResult] = await Promise.all([
       loadCharacters(current.token),
-      loadArchetypes()
+      loadCharacterOptions()
         .then((value) => ({ value }))
         .catch((cause: unknown) => ({ cause })),
     ]);
     characters = nextCharacters;
-    if ('cause' in archetypeResult) {
-      archetypes = [];
-      archetypeId = '';
-      error = archetypeResult.cause instanceof Error
-        ? archetypeResult.cause.message
-        : 'The archetype catalog is unavailable.';
+    if ('cause' in optionsResult) {
+      characterOptions = undefined;
+      resetCreationChoices();
+      error = optionsResult.cause instanceof Error
+        ? optionsResult.cause.message
+        : 'Character options are unavailable.';
       return;
     }
-    const nextArchetypes = archetypeResult.value;
-    archetypes = nextArchetypes;
-    archetypeId = archetypeId && nextArchetypes.some((archetype) => archetype.id === archetypeId)
-      ? archetypeId
+    const nextOptions = optionsResult.value;
+    characterOptions = nextOptions;
+    lineageId = lineageId && nextOptions.lineages.some((option) => option.id === lineageId) ? lineageId : '';
+    baseClassId = baseClassId && nextOptions.baseClasses.some((option) => option.id === baseClassId)
+      ? baseClassId
       : '';
+    backgroundChoice = backgroundChoice === '@none' ||
+      (backgroundChoice !== '@default' && nextOptions.backgrounds.some((option) => option.id === backgroundChoice))
+      ? backgroundChoice
+      : '@default';
+  }
+
+  function resetCreationChoices(): void {
+    lineageId = '';
+    backgroundChoice = '@default';
+    baseClassId = '';
   }
 
   async function restore(): Promise<void> {
@@ -98,11 +133,14 @@
     busy = true;
     error = undefined;
     try {
-      const character = await createCharacter(
-        session.token,
-        characterName.trim(),
-        archetypeId || undefined,
-      );
+      const selection: CharacterCreationSelection = {
+        ...(lineageId ? { lineageId } : {}),
+        ...(baseClassId ? { baseClassId } : {}),
+        ...(backgroundChoice === '@none'
+          ? { backgroundId: null }
+          : backgroundChoice === '@default' ? {} : { backgroundId: backgroundChoice }),
+      };
+      const character = await createCharacter(session.token, characterName.trim(), selection);
       characters = [...characters, character];
       characterName = '';
     } catch (cause) {
@@ -126,8 +164,8 @@
     clearStoredAccess(window.localStorage);
     session = undefined;
     characters = [];
-    archetypes = [];
-    archetypeId = '';
+    characterOptions = undefined;
+    resetCreationChoices();
     lastCharacterId = undefined;
     try {
       if (token) await logout(token);
@@ -159,7 +197,7 @@
       <ul class="character-list">
         {#each characters as character (character.id)}
           <li>
-            <span>{character.name}{#if character.archetype}<small>{character.archetype.label}</small>{/if}</span>
+            <span>{character.name}</span>
             <button type="button" disabled={busy} onclick={() => selectCharacter(character)}>
               {lastCharacterId === character.id ? 'Continue' : 'Enter'}
               <span class="sr-only"> as {character.name}</span>
@@ -190,24 +228,58 @@
           placeholder="Character name"
         />
       </div>
-      {#if archetypes.length > 0}
-        <label for="character-archetype">Archetype</label>
+      {#if characterOptions}
+        <fieldset class="character-origin-fields">
+          <legend>Origins and starting path</legend>
+        <label for="character-lineage">Lineage</label>
         <select
-          id="character-archetype"
-          bind:value={archetypeId}
+          id="character-lineage"
+          bind:value={lineageId}
           disabled={busy}
-          aria-describedby="archetype-description"
+          aria-describedby="lineage-description"
         >
-          <option value="">World default</option>
-          {#each archetypes as archetype (archetype.id)}
-            <option value={archetype.id}>{archetype.label}</option>
+          <option value="">World default ({defaultLineage?.label ?? characterOptions.defaultLineageId})</option>
+          {#each characterOptions.lineages as option (option.id)}
+            <option value={option.id}>{option.label}</option>
           {/each}
         </select>
-        {#if selectedArchetype}
-          <p id="archetype-description">{selectedArchetype.description}</p>
+        <p id="lineage-description">{selectedLineage?.description ?? 'Use the world author’s suggested lineage.'}</p>
+
+        <label for="character-background">Background</label>
+        <select
+          id="character-background"
+          bind:value={backgroundChoice}
+          disabled={busy}
+          aria-describedby="background-description"
+        >
+          <option value="@default">World default{defaultBackground ? ` (${defaultBackground.label})` : ' (none)'}</option>
+          <option value="@none">No background</option>
+          {#each characterOptions.backgrounds as option (option.id)}
+            <option value={option.id}>{option.label}</option>
+          {/each}
+        </select>
+        {#if backgroundChoice === '@none'}
+          <p id="background-description">Begin without a background package. This differs from the world default.</p>
+        {:else if selectedBackground}
+          <p id="background-description">{selectedBackground.description}</p>
         {:else}
-          <p id="archetype-description">Use the world author's suggested starting path.</p>
+          <p id="background-description">The world author has chosen no default background.</p>
         {/if}
+
+        <label for="character-base-class">Base class</label>
+        <select
+          id="character-base-class"
+          bind:value={baseClassId}
+          disabled={busy}
+          aria-describedby="base-class-description"
+        >
+          <option value="">World default ({defaultBaseClass?.label ?? characterOptions.defaultBaseClassId})</option>
+          {#each characterOptions.baseClasses as option (option.id)}
+            <option value={option.id}>{option.label}</option>
+          {/each}
+        </select>
+        <p id="base-class-description">{selectedBaseClass?.description ?? 'Use the world author’s suggested base class.'}</p>
+        </fieldset>
       {/if}
       <button
         class="character-create"

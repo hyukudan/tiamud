@@ -1,16 +1,20 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tiamud_core::{
-    AbilityCategory, AbilityDamageDefinition, AbilityEffectTarget, AbilityHealDefinition,
-    AbilityStatusEffectDefinition, AbilityTargeting, AccountId, ActiveStatusEffect,
-    ActiveStatusKind, ArchetypeDefinition, CharacterId, CharacterSnapshot, DamageType, DomainEvent,
-    GameplayEvent, LevelProgressionDefinition, NpcAbilitySetDefinition, NpcDefinition,
-    PlayerAction, ResourcePool, RoomDefinition, SessionId, World, WorldDefinition, WorldError,
-    parse_action,
+    AbilityCategory, AbilityDamageDefinition, AbilityDefinition, AbilityEffectTarget,
+    AbilityTargeting, AccountId, ActiveEffect, ActiveStatusEffect, ActiveStatusKind,
+    AdvancedClassDefinition, BackgroundDefinition, BackgroundSelection, BaseClassDefinition,
+    CharacterDefaultsDefinition, CharacterGameplaySnapshot, CharacterId,
+    CharacterProgressionDefinition, CharacterSnapshot, DamageType, DomainEvent, EffectKind,
+    GameplayEvent, GrantDefinition, LevelGrantDefinition, LevelThresholdDefinition,
+    LineageDefinition, NpcDefinition, PlayerAction, RequirementDefinition, RequirementDisclosure,
+    RequirementPredicate, ResourcePool, RoomDefinition, SessionId, TalentGraphDefinition,
+    TalentNodeDefinition, TalentRankDefinition, World, WorldDefinition, WorldError, parse_action,
 };
 
 const ROOM_ID: &str = "test:arena";
-const ARCHETYPE_ID: &str = "test:hero";
+const LINEAGE_ID: &str = "test:human";
+const CLASS_ID: &str = "test:warden";
 const NPC_ID: &str = "test:sentinel";
 
 fn empty_world() -> World {
@@ -20,7 +24,7 @@ fn empty_world() -> World {
         rooms: vec![RoomDefinition {
             stable_id: ROOM_ID.into(),
             title: "Test Arena".into(),
-            prose: vec!["A bounded room for deterministic combat tests.".into()],
+            prose: vec!["A bounded room for deterministic progression tests.".into()],
             image: None,
             audio: None,
             exits: Vec::new(),
@@ -30,91 +34,101 @@ fn empty_world() -> World {
     .unwrap()
 }
 
-fn base_archetype(ability_ids: &[&str]) -> ArchetypeDefinition {
-    ArchetypeDefinition {
-        id: ARCHETYPE_ID.into(),
-        name: "Test Hero".into(),
-        description: "A deterministic test archetype.".into(),
-        initial_attributes: BTreeMap::from([
-            ("agility".into(), 4),
-            ("defence".into(), 3),
-            ("max_health".into(), 30),
-            ("strength".into(), 6),
-        ]),
-        initial_skills: BTreeMap::from([("combat".into(), 1)]),
-        initial_resources: BTreeMap::new(),
-        resource_regeneration: BTreeMap::new(),
-        initial_resistances: BTreeMap::new(),
-        initial_ability_ids: ability_ids.iter().map(|id| (*id).to_owned()).collect(),
-        level_progression: Vec::new(),
-    }
-}
-
-fn target_damage_ability(
-    id: &str,
-    base_amount: u32,
-    damage_type: DamageType,
-) -> tiamud_core::AbilityDefinition {
-    tiamud_core::AbilityDefinition {
+fn origin_lineage(id: &str, grants: Vec<GrantDefinition>) -> LineageDefinition {
+    LineageDefinition {
         id: id.into(),
-        name: id.rsplit(':').next().unwrap_or(id).replace('-', " "),
-        description: "A deterministic test attack.".into(),
-        category: AbilityCategory::Martial,
-        resource_costs: BTreeMap::new(),
-        cooldown_ticks: 0,
-        targeting: AbilityTargeting::SingleEnemy,
-        damage: Some(AbilityDamageDefinition {
-            target: AbilityEffectTarget::Target,
-            damage_type,
-            base_amount,
-            scaling_attribute: None,
-            scaling_percent: 0,
-        }),
-        heal: None,
-        status_effects: Vec::new(),
+        name: id.rsplit(':').next().unwrap().into(),
+        description: "A deterministic test lineage.".into(),
+        ui_order: 0,
+        creation_grants: grants,
+        talent_graph_ids: Vec::new(),
     }
 }
 
-fn configure_catalog(
-    world: &mut World,
-    archetype: ArchetypeDefinition,
-    abilities: Vec<tiamud_core::AbilityDefinition>,
-) {
-    world
-        .configure_abilities(archetype.id.clone(), vec![archetype], abilities)
-        .unwrap();
+fn background(id: &str, grants: Vec<GrantDefinition>) -> BackgroundDefinition {
+    BackgroundDefinition {
+        id: id.into(),
+        name: id.rsplit(':').next().unwrap().into(),
+        description: "A deterministic test background.".into(),
+        ui_order: 0,
+        creation_grants: grants,
+        talent_graph_ids: Vec::new(),
+    }
 }
 
-fn spawn_npc(
-    world: &mut World,
+fn base_class(
     id: &str,
-    name: &str,
-    max_health: i32,
-    strength: i32,
-    defence: i32,
-    experience_reward: u64,
-) {
-    world
-        .spawn_npc(NpcDefinition {
-            stable_id: id.into(),
-            name: name.into(),
-            description: "A deterministic test opponent.".into(),
-            room_id: ROOM_ID.into(),
-            level: 1,
-            max_health,
-            strength,
-            defence,
-            experience_reward,
-            loot_item_ids: Vec::new(),
-            respawn_ticks: 5,
-        })
-        .unwrap();
+    creation_grants: Vec<GrantDefinition>,
+    level_grants: Vec<LevelGrantDefinition>,
+) -> BaseClassDefinition {
+    BaseClassDefinition {
+        id: id.into(),
+        name: id.rsplit(':').next().unwrap().into(),
+        description: "A deterministic test class.".into(),
+        ui_order: 0,
+        creation_grants,
+        level_grants,
+        talent_graph_ids: Vec::new(),
+    }
 }
 
-fn enter_character(world: &mut World, archetype_id: &str) -> (SessionId, CharacterId) {
+fn basic_definition() -> CharacterProgressionDefinition {
+    CharacterProgressionDefinition {
+        defaults: CharacterDefaultsDefinition {
+            lineage_id: LINEAGE_ID.into(),
+            background_id: None,
+            base_class_id: CLASS_ID.into(),
+        },
+        level_thresholds: vec![
+            LevelThresholdDefinition {
+                level: 2,
+                total_experience_required: 10,
+                point_awards: BTreeMap::new(),
+            },
+            LevelThresholdDefinition {
+                level: 3,
+                total_experience_required: 30,
+                point_awards: BTreeMap::new(),
+            },
+        ],
+        lineages: vec![origin_lineage(LINEAGE_ID, Vec::new())],
+        backgrounds: Vec::new(),
+        base_classes: vec![base_class(
+            CLASS_ID,
+            vec![
+                grant_attribute("max_health", 20),
+                grant_attribute("strength", 5),
+                grant_attribute("defence", 2),
+                GrantDefinition::Skill {
+                    skill_id: "combat".into(),
+                    amount: 10,
+                },
+                GrantDefinition::Skill {
+                    skill_id: "exploration".into(),
+                    amount: 5,
+                },
+            ],
+            Vec::new(),
+        )],
+        advanced_classes: Vec::new(),
+        talent_graphs: Vec::new(),
+    }
+}
+
+fn configure(
+    world: &mut World,
+    definition: CharacterProgressionDefinition,
+    abilities: Vec<AbilityDefinition>,
+) {
+    world.configure_progression(definition, abilities).unwrap();
+}
+
+fn enter(world: &mut World) -> (SessionId, CharacterId) {
     let session = SessionId(1);
     let character_id = CharacterId(1);
-    let gameplay = world.initial_gameplay(Some(archetype_id)).unwrap();
+    let gameplay = world
+        .initial_gameplay(None, BackgroundSelection::Default, None)
+        .unwrap();
     world
         .restore_character_gameplay(character_id, gameplay)
         .unwrap();
@@ -133,360 +147,213 @@ fn enter_character(world: &mut World, archetype_id: &str) -> (SessionId, Charact
     (session, character_id)
 }
 
-fn use_ability(world: &mut World, session: SessionId, id: &str, target: Option<&str>) {
+fn spawn_reward(world: &mut World, reward: u64) {
     world
-        .apply(
-            session,
-            PlayerAction::Ability {
-                ability_id: id.into(),
-                target: target.map(str::to_owned),
-            },
-        )
+        .spawn_npc(NpcDefinition {
+            stable_id: NPC_ID.into(),
+            name: "Sentinel".into(),
+            description: "A deterministic opponent.".into(),
+            room_id: ROOM_ID.into(),
+            level: 1,
+            max_health: 1,
+            strength: 1,
+            defence: 0,
+            experience_reward: reward,
+            loot_item_ids: Vec::new(),
+            respawn_ticks: 5,
+        })
         .unwrap();
 }
 
-fn npc_health(world: &World, npc_id: &str) -> i32 {
-    world.runtime_snapshot().npcs[npc_id].health
+fn grant_attribute(id: &str, amount: u32) -> GrantDefinition {
+    GrantDefinition::Attribute {
+        attribute_id: id.into(),
+        amount,
+    }
 }
 
-#[test]
-fn authored_catalog_builds_the_complete_initial_character_sheet() {
-    let strike = target_damage_ability("test:strike", 3, DamageType::Physical);
-    let mut wanderer = base_archetype(&["test:strike"]);
-    wanderer.id = "test:wanderer".into();
-    wanderer.name = "Wanderer".into();
-    wanderer.initial_resources = BTreeMap::from([("stamina".into(), 8)]);
-    wanderer.resource_regeneration = BTreeMap::from([("stamina".into(), 2)]);
-    wanderer.initial_resistances = BTreeMap::from([(DamageType::Physical, 10)]);
-
-    let mut vanguard = base_archetype(&["test:strike"]);
-    vanguard.id = "test:vanguard".into();
-    vanguard.name = "Vanguard".into();
-
-    let mut world = empty_world();
-    world
-        .configure_abilities(
-            wanderer.id.clone(),
-            vec![vanguard, wanderer.clone()],
-            vec![strike],
-        )
-        .unwrap();
-
-    assert_eq!(world.default_archetype_id(), "test:wanderer");
-    assert_eq!(world.archetype_catalog().len(), 2);
-    assert!(
-        world
-            .archetype_catalog()
-            .iter()
-            .any(|choice| choice.id == "test:vanguard")
-    );
-
-    let sheet = world.initial_gameplay(None).unwrap();
-    assert_eq!(sheet.archetype_id, "test:wanderer");
-    assert_eq!(sheet.vitals.health, 30);
-    assert_eq!(sheet.vitals.max_health, 30);
-    assert_eq!(sheet.attributes.strength, 6);
-    assert_eq!(sheet.attributes.defence, 3);
-    assert_eq!(sheet.attributes.additional["agility"], 4);
-    assert_eq!(sheet.skills["combat"], 1);
-    assert_eq!(
-        sheet.resources["stamina"],
-        ResourcePool { current: 8, max: 8 }
-    );
-    assert_eq!(sheet.resistances[&DamageType::Physical], 10);
-    assert_eq!(sheet.ability_ids, ["test:strike"]);
-
-    let (session, _) = enter_character(&mut world, "test:wanderer");
-    let player = world.player_state_view(session).unwrap();
-    assert_eq!(player.character.archetype.id, "test:wanderer");
-    assert_eq!(player.character.attributes.len(), 3);
-    assert_eq!(player.character.resources[0].id, "stamina");
-    assert_eq!(player.character.abilities[0].id, "test:strike");
-}
-
-#[test]
-fn parser_accepts_ability_skill_and_cast_aliases() {
-    let expected = PlayerAction::Ability {
-        ability_id: "test:arcane-bolt".into(),
-        target: Some("gate sentinel".into()),
-    };
-
-    for alias in ["ability", "skill", "cast"] {
-        assert_eq!(
-            parse_action(&format!("{alias} test:arcane-bolt gate sentinel")).unwrap(),
-            expected
-        );
+fn public(predicate: RequirementPredicate) -> RequirementDefinition {
+    RequirementDefinition {
+        disclosure: RequirementDisclosure::Public,
+        hint: None,
+        predicate,
     }
 }
 
 #[test]
-fn authoritative_ability_lookup_rejects_oversized_transport_queries() {
-    let strike = target_damage_ability("test:strike", 3, DamageType::Physical);
+fn character_creation_composes_independent_choices_without_a_matrix() {
+    let mut definition = basic_definition();
+    definition.lineages = vec![
+        origin_lineage("test:human", vec![grant_attribute("agility", 1)]),
+        origin_lineage("test:elf", vec![grant_attribute("agility", 2)]),
+    ];
+    definition.backgrounds = vec![
+        background(
+            "test:scholar",
+            vec![GrantDefinition::Skill {
+                skill_id: "lore".into(),
+                amount: 3,
+            }],
+        ),
+        background(
+            "test:scout",
+            vec![GrantDefinition::Skill {
+                skill_id: "survival".into(),
+                amount: 4,
+            }],
+        ),
+    ];
+    definition.defaults.background_id = Some("test:scholar".into());
+    definition.base_classes = vec![
+        base_class(
+            "test:warden",
+            vec![
+                grant_attribute("max_health", 20),
+                grant_attribute("strength", 2),
+            ],
+            Vec::new(),
+        ),
+        base_class(
+            "test:mystic",
+            vec![
+                grant_attribute("max_health", 20),
+                grant_attribute("defence", 3),
+            ],
+            Vec::new(),
+        ),
+    ];
     let mut world = empty_world();
-    configure_catalog(&mut world, base_archetype(&["test:strike"]), vec![strike]);
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-    let before_runtime = world.runtime_snapshot();
-    let before_gameplay = world.character_gameplay_snapshot(session).unwrap();
+    configure(&mut world, definition, Vec::new());
 
-    let result = world.apply(
-        session,
-        PlayerAction::Ability {
-            ability_id: "x".repeat(129),
-            target: None,
-        },
-    );
-    assert!(matches!(result, Err(WorldError::AbilityNotKnown)));
-    assert_eq!(world.runtime_snapshot(), before_runtime);
-    assert_eq!(
-        world.character_gameplay_snapshot(session).unwrap(),
-        before_gameplay
-    );
-}
+    for lineage in ["test:human", "test:elf"] {
+        for background in ["test:scholar", "test:scout"] {
+            for class in ["test:warden", "test:mystic"] {
+                let first = world
+                    .initial_gameplay(
+                        Some(lineage),
+                        BackgroundSelection::Id(background),
+                        Some(class),
+                    )
+                    .unwrap();
+                let second = world
+                    .initial_gameplay(
+                        Some(lineage),
+                        BackgroundSelection::Id(background),
+                        Some(class),
+                    )
+                    .unwrap();
+                assert_eq!(first, second);
+                assert_eq!(first.lineage_id, lineage);
+                assert_eq!(first.background_id.as_deref(), Some(background));
+                assert_eq!(first.active_class_id, class);
+                assert_eq!(first.class_history, [class]);
+            }
+        }
+    }
 
-#[test]
-fn global_cooldown_blocks_same_tick_spam_and_the_ability_replaces_autoattack() {
-    let strike = target_damage_ability("test:strike", 5, DamageType::Physical);
-    let mut world = empty_world();
-    configure_catalog(&mut world, base_archetype(&["test:strike"]), vec![strike]);
-    spawn_npc(&mut world, NPC_ID, "Training Sentinel", 100, 1, 100, 0);
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-
-    use_ability(
-        &mut world,
-        session,
-        "test:strike",
-        Some("Training Sentinel"),
-    );
-    assert_eq!(npc_health(&world, NPC_ID), 95);
-
-    let repeated = world.apply(
-        session,
-        PlayerAction::Ability {
-            ability_id: "test:strike".into(),
-            target: Some("Training Sentinel".into()),
-        },
-    );
-    assert!(matches!(repeated, Err(WorldError::AbilityUnavailable)));
-    assert_eq!(npc_health(&world, NPC_ID), 95);
-
-    world.advance_tick().unwrap();
-    assert_eq!(
-        npc_health(&world, NPC_ID),
-        95,
-        "the normal player attack must not stack with the preceding ability"
-    );
-
-    world.advance_tick().unwrap();
-    assert_eq!(npc_health(&world, NPC_ID), 94);
-}
-
-#[test]
-fn resource_cost_cooldown_and_authored_regeneration_share_world_ticks() {
-    let focus = tiamud_core::AbilityDefinition {
-        id: "test:focus".into(),
-        name: "Focus".into(),
-        description: "Spend mana and recover a little health.".into(),
-        category: AbilityCategory::Spell,
-        resource_costs: BTreeMap::from([("mana".into(), 3)]),
-        cooldown_ticks: 2,
-        targeting: AbilityTargeting::SelfOnly,
-        damage: None,
-        heal: Some(AbilityHealDefinition {
-            target: AbilityEffectTarget::Caster,
-            base_amount: 1,
-            scaling_attribute: None,
-            scaling_percent: 0,
-        }),
-        status_effects: Vec::new(),
-    };
-    let mut archetype = base_archetype(&["test:focus"]);
-    archetype.initial_resources = BTreeMap::from([("mana".into(), 10)]);
-    archetype.resource_regeneration = BTreeMap::from([("mana".into(), 2)]);
-    let mut world = empty_world();
-    configure_catalog(&mut world, archetype, vec![focus]);
-    let (session, character_id) = enter_character(&mut world, ARCHETYPE_ID);
-
-    use_ability(&mut world, session, "test:focus", None);
-    let spent = world.character_gameplay_snapshot(session).unwrap();
-    assert_eq!(spent.resources["mana"].current, 7);
-    assert_eq!(spent.ability_cooldowns["test:focus"], 2);
-
-    world.advance_tick().unwrap();
+    let catalog = world.progression_catalog();
+    assert_eq!(catalog.lineages.len(), 2);
+    assert_eq!(catalog.backgrounds.len(), 2);
+    assert_eq!(catalog.base_classes.len(), 2);
     assert_eq!(
         world
-            .character_gameplay_snapshot(session)
+            .initial_gameplay(None, BackgroundSelection::Default, None)
             .unwrap()
-            .resources["mana"]
-            .current,
-        9
+            .background_id
+            .as_deref(),
+        Some("test:scholar")
     );
-    let cooling_down = world.apply(
-        session,
-        PlayerAction::Ability {
-            ability_id: "test:focus".into(),
-            target: None,
+    assert_eq!(
+        world
+            .initial_gameplay(None, BackgroundSelection::None, None)
+            .unwrap()
+            .background_id,
+        None
+    );
+}
+
+#[test]
+fn character_creation_sheet_is_composed_from_authored_zero() {
+    let mut definition = basic_definition();
+    definition.lineages[0].creation_grants = vec![
+        grant_attribute("max_health", 2),
+        grant_attribute("strength", 1),
+        GrantDefinition::Skill {
+            skill_id: "combat".into(),
+            amount: 2,
         },
-    );
-    assert!(matches!(cooling_down, Err(WorldError::AbilityUnavailable)));
-
-    world.advance_tick().unwrap();
-    assert_eq!(
-        world
-            .character_gameplay_snapshot(session)
-            .unwrap()
-            .resources["mana"]
-            .current,
-        10
-    );
-    use_ability(&mut world, session, "test:focus", None);
-    assert_eq!(
-        world
-            .character_gameplay_snapshot(session)
-            .unwrap()
-            .resources["mana"]
-            .current,
-        7
-    );
-
-    // Keep the durable ID exercised by this integration test rather than only
-    // checking the session-scoped projection.
-    assert_eq!(character_id, CharacterId(1));
-}
-
-#[test]
-fn npc_resistance_reduces_ability_damage_by_the_authored_percentage() {
-    let fire = target_damage_ability("test:fire", 10, DamageType::Fire);
-    let mut world = empty_world();
-    configure_catalog(&mut world, base_archetype(&["test:fire"]), vec![fire]);
-    spawn_npc(&mut world, NPC_ID, "Fire Sentinel", 50, 1, 0, 0);
-    world
-        .configure_npc_abilities(NpcAbilitySetDefinition {
-            npc_id: NPC_ID.into(),
-            resource_pools: BTreeMap::new(),
-            resource_regeneration: BTreeMap::new(),
-            resistances: BTreeMap::from([(DamageType::Fire, 50)]),
-            ability_ids: Vec::new(),
-        })
-        .unwrap();
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-
-    use_ability(&mut world, session, "test:fire", Some("Fire Sentinel"));
-    assert_eq!(npc_health(&world, NPC_ID), 45);
-}
-
-#[test]
-fn defeating_an_npc_applies_authored_level_progression_and_unlocks() {
-    let tap = target_damage_ability("test:tap", 5, DamageType::Physical);
-    let mut power = target_damage_ability("test:power", 10, DamageType::Physical);
-    power.resource_costs = BTreeMap::from([("stamina".into(), 5)]);
-
-    let mut archetype = base_archetype(&["test:tap"]);
-    archetype.initial_attributes = BTreeMap::from([
-        ("agility".into(), 2),
-        ("defence".into(), 0),
-        ("max_health".into(), 20),
-        ("strength".into(), 1),
-    ]);
-    archetype.initial_resources = BTreeMap::from([("stamina".into(), 2)]);
-    archetype.level_progression = vec![LevelProgressionDefinition {
-        level: 2,
-        total_experience_required: 10,
-        attribute_gains: BTreeMap::from([
-            ("agility".into(), 1),
-            ("max_health".into(), 4),
-            ("strength".into(), 2),
-        ]),
-        skill_gains: BTreeMap::from([("combat".into(), 2)]),
-        resource_gains: BTreeMap::from([("stamina".into(), 3)]),
-        ability_unlock_ids: vec!["test:power".into()],
-    }];
-
-    let mut world = empty_world();
-    configure_catalog(&mut world, archetype, vec![tap, power]);
-    spawn_npc(&mut world, NPC_ID, "Frail Sentinel", 1, 1, 0, 10);
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-
-    let outcome = world
-        .apply(
-            session,
-            PlayerAction::Ability {
-                ability_id: "test:tap".into(),
-                target: Some("Frail Sentinel".into()),
+    ];
+    definition.backgrounds = vec![background(
+        "test:guard",
+        vec![
+            grant_attribute("max_health", 3),
+            grant_attribute("defence", 4),
+            GrantDefinition::Skill {
+                skill_id: "combat".into(),
+                amount: 3,
             },
-        )
-        .unwrap();
-    assert!(outcome.domain_events.iter().any(|event| matches!(
-        event,
-        DomainEvent::Gameplay {
-            event: GameplayEvent::CharacterLeveled { level: 2, .. }
-        }
-    )));
-
-    let sheet = world.character_gameplay_snapshot(session).unwrap();
-    assert_eq!(sheet.level, 2);
-    assert_eq!(sheet.experience, 10);
-    assert_eq!(
-        sheet.vitals,
-        tiamud_core::Vitals {
-            health: 24,
-            max_health: 24
-        }
-    );
-    assert_eq!(sheet.attributes.strength, 3);
-    assert_eq!(sheet.attributes.additional["agility"], 3);
-    assert_eq!(sheet.skills["combat"], 3);
-    assert_eq!(
-        sheet.resources["stamina"],
-        ResourcePool { current: 5, max: 5 }
-    );
-    assert_eq!(sheet.ability_ids, ["test:tap", "test:power"]);
-}
-
-#[test]
-fn one_experience_reward_advances_through_every_reached_milestone() {
-    let tap = target_damage_ability("test:tap", 5, DamageType::Physical);
-    let first_unlock = target_damage_ability("test:first", 1, DamageType::Physical);
-    let second_unlock = target_damage_ability("test:second", 1, DamageType::Physical);
-    let mut archetype = base_archetype(&["test:tap"]);
-    archetype.level_progression = vec![
-        LevelProgressionDefinition {
-            level: 2,
-            total_experience_required: 10,
-            attribute_gains: BTreeMap::from([("strength".into(), 1)]),
-            skill_gains: BTreeMap::new(),
-            resource_gains: BTreeMap::new(),
-            ability_unlock_ids: vec!["test:first".into()],
-        },
-        LevelProgressionDefinition {
-            level: 3,
-            total_experience_required: 20,
-            attribute_gains: BTreeMap::from([("strength".into(), 2)]),
-            skill_gains: BTreeMap::new(),
-            resource_gains: BTreeMap::new(),
-            ability_unlock_ids: vec!["test:second".into()],
+        ],
+    )];
+    definition.base_classes[0].creation_grants = vec![
+        grant_attribute("max_health", 10),
+        grant_attribute("strength", 2),
+        GrantDefinition::Skill {
+            skill_id: "exploration".into(),
+            amount: 1,
         },
     ];
     let mut world = empty_world();
-    configure_catalog(
-        &mut world,
-        archetype,
-        vec![tap, first_unlock, second_unlock],
-    );
-    spawn_npc(&mut world, NPC_ID, "Reward Sentinel", 1, 1, 0, 30);
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
+    configure(&mut world, definition, Vec::new());
 
-    let outcome = world
-        .apply(
-            session,
-            PlayerAction::Ability {
-                ability_id: "test:tap".into(),
-                target: Some("Reward Sentinel".into()),
-            },
+    let sheet = world
+        .initial_gameplay(
+            Some(LINEAGE_ID),
+            BackgroundSelection::Id("test:guard"),
+            Some(CLASS_ID),
         )
         .unwrap();
+
+    assert_eq!(sheet.vitals.max_health, 15);
+    assert_eq!(sheet.vitals.health, 15);
+    assert_eq!(sheet.attributes.strength, 3);
+    assert_eq!(sheet.attributes.defence, 4);
+    assert_eq!(sheet.skills.get("combat"), Some(&5));
+    assert_eq!(sheet.skills.get("exploration"), Some(&1));
+}
+
+#[test]
+fn base_class_must_author_positive_creation_health() {
+    let mut definition = basic_definition();
+    definition.base_classes[0].creation_grants.retain(|grant| {
+        !matches!(grant, GrantDefinition::Attribute { attribute_id, .. }
+                if attribute_id == "max_health")
+    });
+    let mut world = empty_world();
+
+    assert!(matches!(
+        world.configure_progression(definition, Vec::new()),
+        Err(WorldError::InvalidProgressionDefinition)
+    ));
+}
+
+#[test]
+fn global_xp_advances_without_requiring_a_class_grant_at_every_level() {
+    let mut definition = basic_definition();
+    definition.base_classes[0].level_grants = vec![LevelGrantDefinition {
+        level: 2,
+        grants: vec![grant_attribute("strength", 2)],
+    }];
+    let mut world = empty_world();
+    configure(&mut world, definition, Vec::new());
+    spawn_reward(&mut world, 30);
+    let (session, _) = enter(&mut world);
+
+    world
+        .apply(session, PlayerAction::Attack("Sentinel".into()))
+        .unwrap();
+    let events = world.advance_tick().unwrap();
     assert_eq!(
-        outcome
-            .domain_events
+        events
             .iter()
             .filter(|event| matches!(
                 event,
@@ -500,639 +367,555 @@ fn one_experience_reward_advances_through_every_reached_milestone() {
     let sheet = world.character_gameplay_snapshot(session).unwrap();
     assert_eq!(sheet.level, 3);
     assert_eq!(sheet.experience, 30);
-    assert_eq!(sheet.attributes.strength, 9);
-    assert_eq!(sheet.ability_ids, ["test:tap", "test:first", "test:second"]);
+    assert_eq!(sheet.attributes.strength, 7);
 }
 
 #[test]
-fn npc_ai_prefers_the_stronger_eligible_technique_and_spends_its_resource() {
-    let basic = target_damage_ability("test:basic", 1, DamageType::Physical);
-    let mut technique = target_damage_ability("test:technique", 7, DamageType::Physical);
-    technique.resource_costs = BTreeMap::from([("stamina".into(), 2)]);
-    technique.cooldown_ticks = 2;
-
+fn capacity_grants_never_refill_health_or_resources() {
+    let mut definition = basic_definition();
+    definition.base_classes[0].creation_grants = vec![
+        grant_attribute("max_health", 20),
+        GrantDefinition::ResourceMax {
+            resource_id: "mana".into(),
+            amount: 10,
+        },
+    ];
+    definition.base_classes[0].level_grants = vec![LevelGrantDefinition {
+        level: 2,
+        grants: vec![
+            grant_attribute("max_health", 5),
+            GrantDefinition::ResourceMax {
+                resource_id: "mana".into(),
+                amount: 5,
+            },
+        ],
+    }];
     let mut world = empty_world();
-    configure_catalog(&mut world, base_archetype(&[]), vec![basic, technique]);
-    spawn_npc(&mut world, NPC_ID, "Battle Sentinel", 100, 1, 100, 0);
+    configure(&mut world, definition, Vec::new());
+    spawn_reward(&mut world, 10);
+    let (session, character_id) = enter(&mut world);
+    let mut wounded = world.character_gameplay_snapshot(session).unwrap();
+    wounded.vitals.health = 7;
+    wounded.resources.get_mut("mana").unwrap().current = 3;
     world
-        .configure_npc_abilities(NpcAbilitySetDefinition {
-            npc_id: NPC_ID.into(),
-            resource_pools: BTreeMap::from([("stamina".into(), 4)]),
-            resource_regeneration: BTreeMap::new(),
-            resistances: BTreeMap::new(),
-            ability_ids: vec!["test:basic".into(), "test:technique".into()],
-        })
-        .unwrap();
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-    world
-        .apply(session, PlayerAction::Attack("Battle Sentinel".into()))
+        .restore_character_gameplay(character_id, wounded)
         .unwrap();
 
-    let events = world.advance_tick().unwrap();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        DomainEvent::Gameplay {
-            event: GameplayEvent::NpcAbilityUsed { ability_id, .. }
-        } if ability_id == "test:technique"
-    )));
-    let snapshot = world.runtime_snapshot();
-    assert_eq!(snapshot.npcs[NPC_ID].resources["stamina"].current, 2);
+    world
+        .apply(session, PlayerAction::Attack("Sentinel".into()))
+        .unwrap();
+    world.advance_tick().unwrap();
+    let sheet = world.character_gameplay_snapshot(session).unwrap();
+    assert_eq!(sheet.vitals.health, 7);
+    assert_eq!(sheet.vitals.max_health, 25);
     assert_eq!(
-        world
-            .character_gameplay_snapshot(session)
-            .unwrap()
-            .vitals
-            .health,
-        23
+        sheet.resources["mana"],
+        ResourcePool {
+            current: 3,
+            max: 15
+        }
+    );
+}
+
+fn progression_with_talents() -> CharacterProgressionDefinition {
+    let mut definition = basic_definition();
+    definition.level_thresholds[0].point_awards = BTreeMap::from([("class".into(), 3)]);
+    definition.base_classes[0].talent_graph_ids = vec!["test:warden-talents".into()];
+    definition.talent_graphs = vec![TalentGraphDefinition {
+        id: "test:warden-talents".into(),
+        name: "Warden talents".into(),
+        description: "A bounded talent graph.".into(),
+        ui_order: 0,
+        point_pool_id: "class".into(),
+        nodes: vec![
+            TalentNodeDefinition {
+                id: "test:bulwark".into(),
+                name: "Bulwark".into(),
+                description: "Defensive training.".into(),
+                ui_order: 0,
+                exclusion_group: Some("stance".into()),
+                ranks: vec![
+                    TalentRankDefinition {
+                        rank: 1,
+                        cost: 1,
+                        requirements: Vec::new(),
+                        grants: vec![grant_attribute("defence", 1)],
+                    },
+                    TalentRankDefinition {
+                        rank: 2,
+                        cost: 2,
+                        requirements: vec![public(RequirementPredicate::NodeRank {
+                            graph_id: "test:warden-talents".into(),
+                            node_id: "test:bulwark".into(),
+                            minimum_rank: 1,
+                        })],
+                        grants: vec![grant_attribute("defence", 2)],
+                    },
+                ],
+            },
+            TalentNodeDefinition {
+                id: "test:assault".into(),
+                name: "Assault".into(),
+                description: "Aggressive training.".into(),
+                ui_order: 1,
+                exclusion_group: Some("stance".into()),
+                ranks: vec![TalentRankDefinition {
+                    rank: 1,
+                    cost: 1,
+                    requirements: Vec::new(),
+                    grants: vec![grant_attribute("strength", 1)],
+                }],
+            },
+        ],
+    }];
+    definition
+}
+
+#[test]
+fn talent_ranks_deduct_points_exactly_once_and_enforce_exclusion() {
+    let definition = progression_with_talents();
+    let mut world = empty_world();
+    configure(&mut world, definition, Vec::new());
+    spawn_reward(&mut world, 10);
+    let (session, _) = enter(&mut world);
+    world
+        .apply(session, PlayerAction::Attack("Sentinel".into()))
+        .unwrap();
+    world.advance_tick().unwrap();
+
+    world
+        .apply(
+            session,
+            PlayerAction::AcquireTalent {
+                graph_id: "test:warden-talents".into(),
+                node_id: "test:bulwark".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        world.apply(
+            session,
+            PlayerAction::AcquireTalent {
+                graph_id: "test:warden-talents".into(),
+                node_id: "test:assault".into(),
+            }
+        ),
+        Err(WorldError::TalentUnavailable)
+    ));
+    world
+        .apply(
+            session,
+            PlayerAction::AcquireTalent {
+                graph_id: "test:warden-talents".into(),
+                node_id: "test:bulwark".into(),
+            },
+        )
+        .unwrap();
+    let sheet = world.character_gameplay_snapshot(session).unwrap();
+    assert_eq!(sheet.progression_points["class"], 0);
+    assert_eq!(
+        sheet.talent_node_ranks["test:warden-talents"]["test:bulwark"],
+        2
+    );
+    assert_eq!(sheet.attributes.defence, 5);
+    assert!(matches!(
+        world.apply(
+            session,
+            PlayerAction::AcquireTalent {
+                graph_id: "test:warden-talents".into(),
+                node_id: "test:bulwark".into(),
+            }
+        ),
+        Err(WorldError::TalentUnavailable)
+    ));
+}
+
+fn advanced_class(
+    id: &str,
+    from: &[&str],
+    requirements: Vec<RequirementDefinition>,
+) -> AdvancedClassDefinition {
+    AdvancedClassDefinition {
+        id: id.into(),
+        name: id.rsplit(':').next().unwrap().into(),
+        description: "An advanced deterministic class.".into(),
+        ui_order: 0,
+        from_class_ids: from.iter().map(|value| (*value).into()).collect(),
+        exclusive_group: None,
+        requirements,
+        promotion_grants: vec![grant_attribute("strength", 2)],
+        level_grants: Vec::new(),
+        talent_graph_ids: Vec::new(),
+    }
+}
+
+#[test]
+fn promotion_is_atomic_and_supports_cross_entry_advanced_classes() {
+    let mut definition = basic_definition();
+    definition.base_classes.push(base_class(
+        "test:mage",
+        vec![grant_attribute("max_health", 16)],
+        Vec::new(),
+    ));
+    definition.advanced_classes = vec![advanced_class(
+        "test:spellblade",
+        &[CLASS_ID, "test:mage"],
+        vec![
+            public(RequirementPredicate::Level { minimum: 2 }),
+            public(RequirementPredicate::Skill {
+                skill_id: "arcana".into(),
+                minimum: 3,
+            }),
+            public(RequirementPredicate::ReceivedSignal {
+                signal_id: "test:blade-oath".into(),
+            }),
+        ],
+    )];
+    let mut world = empty_world();
+    configure(&mut world, definition, Vec::new());
+    let (session, character_id) = enter(&mut world);
+    let before = world.character_gameplay_snapshot(session).unwrap();
+    assert!(matches!(
+        world.apply(
+            session,
+            PlayerAction::Promote {
+                class_id: "test:spellblade".into(),
+            }
+        ),
+        Err(WorldError::PromotionUnavailable)
+    ));
+    assert_eq!(world.character_gameplay_snapshot(session).unwrap(), before);
+
+    let mut eligible = before;
+    eligible.level = 2;
+    eligible.experience = 10;
+    eligible.skills.insert("arcana".into(), 3);
+    world
+        .restore_character_gameplay(character_id, eligible)
+        .unwrap();
+    world
+        .receive_progression_signal(character_id, "test:blade-oath")
+        .unwrap();
+    let outcome = world
+        .apply(
+            session,
+            PlayerAction::Promote {
+                class_id: "test:spellblade".into(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome.domain_events.as_slice(),
+        [DomainEvent::Gameplay {
+            event: GameplayEvent::CharacterPromoted { to_class_id, .. }
+        }] if to_class_id == "test:spellblade"
+    ));
+    let promoted = world.character_gameplay_snapshot(session).unwrap();
+    assert_eq!(promoted.active_class_id, "test:spellblade");
+    assert_eq!(promoted.class_history, [CLASS_ID, "test:spellblade"]);
+    assert_eq!(promoted.level, 2);
+    assert_eq!(promoted.experience, 10);
+    assert_eq!(promoted.attributes.strength, 7);
+    let view = world.player_state_view(session).unwrap();
+    assert_eq!(view.character.base_class.id, CLASS_ID);
+    assert_eq!(view.character.active_class.id, "test:spellblade");
+}
+
+#[test]
+fn delayed_promotion_applies_reached_class_milestones_exactly_once() {
+    let mut definition = basic_definition();
+    definition
+        .level_thresholds
+        .extend((4..=8).map(|level| LevelThresholdDefinition {
+            level,
+            total_experience_required: u64::from(level) * 10,
+            point_awards: BTreeMap::new(),
+        }));
+    let mut advanced = advanced_class(
+        "test:bastion",
+        &[CLASS_ID],
+        vec![public(RequirementPredicate::Level { minimum: 8 })],
+    );
+    advanced.level_grants = vec![LevelGrantDefinition {
+        level: 7,
+        grants: vec![grant_attribute("strength", 3)],
+    }];
+    definition.advanced_classes = vec![advanced];
+    let mut world = empty_world();
+    configure(&mut world, definition, Vec::new());
+    let (session, character_id) = enter(&mut world);
+    let mut eligible = world.character_gameplay_snapshot(session).unwrap();
+    eligible.level = 8;
+    eligible.experience = 80;
+    world
+        .restore_character_gameplay(character_id, eligible)
+        .unwrap();
+
+    world
+        .apply(
+            session,
+            PlayerAction::Promote {
+                class_id: "test:bastion".into(),
+            },
+        )
+        .unwrap();
+    let promoted = world.character_gameplay_snapshot(session).unwrap();
+    assert_eq!(promoted.attributes.strength, 10);
+    assert_eq!(promoted.class_history, [CLASS_ID, "test:bastion"]);
+
+    assert!(matches!(
+        world.apply(
+            session,
+            PlayerAction::Promote {
+                class_id: "test:bastion".into(),
+            }
+        ),
+        Err(WorldError::PromotionUnavailable)
+    ));
+    assert_eq!(
+        world.character_gameplay_snapshot(session).unwrap(),
+        promoted
     );
 }
 
 #[test]
-fn npc_damage_over_time_can_defeat_and_attribute_the_character() {
-    let affliction = tiamud_core::AbilityDefinition {
-        id: "test:npc-affliction".into(),
-        name: "Withering mark".into(),
-        description: "A deterministic hostile periodic effect.".into(),
-        category: AbilityCategory::Innate,
-        resource_costs: BTreeMap::new(),
-        cooldown_ticks: 3,
-        targeting: AbilityTargeting::SingleEnemy,
-        damage: None,
-        heal: None,
-        status_effects: vec![AbilityStatusEffectDefinition::DamageOverTime {
-            target: AbilityEffectTarget::Target,
-            damage_type: DamageType::Arcane,
-            magnitude: 30,
-            duration_ticks: 1,
+fn hidden_requirement_projects_only_its_safe_hint() {
+    let secret = "test:never-leak-this-flag";
+    let mut definition = basic_definition();
+    definition.advanced_classes = vec![advanced_class(
+        "test:hidden-path",
+        &[CLASS_ID],
+        vec![RequirementDefinition {
+            disclosure: RequirementDisclosure::Hidden,
+            hint: Some("Earn the trust of the silent order.".into()),
+            predicate: RequirementPredicate::CharacterFlag {
+                flag_id: secret.into(),
+                equals: true,
+            },
         }],
-    };
+    )];
     let mut world = empty_world();
-    configure_catalog(&mut world, base_archetype(&[]), vec![affliction]);
-    spawn_npc(&mut world, NPC_ID, "Withering Sentinel", 100, 1, 100, 0);
-    world
-        .configure_npc_abilities(NpcAbilitySetDefinition {
-            npc_id: NPC_ID.into(),
-            resource_pools: BTreeMap::new(),
-            resource_regeneration: BTreeMap::new(),
-            resistances: BTreeMap::new(),
-            ability_ids: vec!["test:npc-affliction".into()],
-        })
-        .unwrap();
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-    world
-        .apply(session, PlayerAction::Attack("Withering Sentinel".into()))
-        .unwrap();
-
-    world.advance_tick().unwrap();
-    let events = world.advance_tick().unwrap();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        DomainEvent::Gameplay {
-            event: GameplayEvent::CharacterDefeated { npc_id, .. }
-        } if npc_id == NPC_ID
-    )));
-    let sheet = world.character_gameplay_snapshot(session).unwrap();
-    assert_eq!(sheet.vitals.health, 0);
-    assert!(sheet.recovery_at_tick.is_some());
+    configure(&mut world, definition, Vec::new());
+    let (session, _) = enter(&mut world);
+    let json = serde_json::to_string(&world.player_state_view(session).unwrap()).unwrap();
+    assert!(json.contains("Earn the trust of the silent order."));
+    assert!(!json.contains(secret));
 }
 
 #[test]
-fn stun_suppresses_the_npc_turn_while_damage_over_time_keeps_attribution() {
-    let affliction = tiamud_core::AbilityDefinition {
-        id: "test:affliction".into(),
-        name: "Affliction".into(),
-        description: "Stun an enemy while deterministic damage resolves.".into(),
-        category: AbilityCategory::Spell,
+fn nested_requirement_text_exposes_safe_branch_details_only() {
+    let secret = "test:spellblade-secret-flag";
+    let mut definition = basic_definition();
+    definition.advanced_classes = vec![advanced_class(
+        "test:spellblade",
+        &[CLASS_ID],
+        vec![public(RequirementPredicate::Any {
+            requirements: vec![
+                public(RequirementPredicate::Level { minimum: 8 }),
+                RequirementDefinition {
+                    disclosure: RequirementDisclosure::Hidden,
+                    hint: Some("Hear the veiled call.".into()),
+                    predicate: RequirementPredicate::CharacterFlag {
+                        flag_id: secret.into(),
+                        equals: true,
+                    },
+                },
+            ],
+        })],
+    )];
+    let mut world = empty_world();
+    configure(&mut world, definition, Vec::new());
+    let (session, _) = enter(&mut world);
+
+    let text = &world
+        .player_state_view(session)
+        .unwrap()
+        .character
+        .promotions[0]
+        .requirements[0]
+        .text;
+    assert!(text.contains("One of:"));
+    assert!(text.contains("Reach level 8."));
+    assert!(text.contains("Hear the veiled call."));
+    assert!(!text.contains(secret));
+    assert!(text.len() <= 1_024);
+}
+
+#[test]
+fn restore_rejects_unknown_progression_references() {
+    let mut world = empty_world();
+    configure(&mut world, basic_definition(), Vec::new());
+    for invalid in [
+        {
+            let mut value = world
+                .initial_gameplay(None, BackgroundSelection::Default, None)
+                .unwrap();
+            value.lineage_id = "test:missing".into();
+            value
+        },
+        {
+            let mut value = world
+                .initial_gameplay(None, BackgroundSelection::Default, None)
+                .unwrap();
+            value.active_class_id = "test:missing".into();
+            value.class_history.push("test:missing".into());
+            value
+        },
+        {
+            let mut value = world
+                .initial_gameplay(None, BackgroundSelection::Default, None)
+                .unwrap();
+            value.talent_node_ranks.insert(
+                "test:missing".into(),
+                BTreeMap::from([("test:nope".into(), 1)]),
+            );
+            value
+        },
+    ] {
+        assert!(matches!(
+            world.restore_character_gameplay(CharacterId(1), invalid),
+            Err(WorldError::InvalidGameplayDefinition)
+        ));
+    }
+}
+
+#[test]
+fn snapshot_roundtrip_is_bounded_and_lossless() {
+    let mut snapshot = CharacterGameplaySnapshot::default();
+    snapshot.class_history = (0..8).map(|index| format!("test:class-{index}")).collect();
+    snapshot.base_class_id = snapshot.class_history[0].clone();
+    snapshot.active_class_id = snapshot.class_history[7].clone();
+    snapshot.attributes.additional = (0..62)
+        .map(|index| (format!("attribute-{index}"), 999_999))
+        .collect();
+    snapshot.skills = (0..64)
+        .map(|index| (format!("skill-{index}"), 1_000))
+        .collect();
+    snapshot.resources = (0..16)
+        .map(|index| {
+            (
+                format!("resource-{index}"),
+                ResourcePool {
+                    current: 999_999,
+                    max: 1_000_000,
+                },
+            )
+        })
+        .collect();
+    snapshot.resource_regeneration = (0..16)
+        .map(|index| (format!("resource-{index}"), 1_000_000))
+        .collect();
+    snapshot.ability_ids = (0..64)
+        .map(|index| format!("test:ability-{index}"))
+        .collect();
+    snapshot.ability_cooldowns = snapshot
+        .ability_ids
+        .iter()
+        .cloned()
+        .map(|id| (id, 10_000))
+        .collect();
+    snapshot.statuses = (0..32)
+        .map(|index| ActiveStatusEffect {
+            source_ability_id: format!("test:ability-{index}"),
+            source_character_id: Some(CharacterId(9_999)),
+            source_npc_id: Some(format!("test:npc-{index}")),
+            kind: ActiveStatusKind::Stun,
+            magnitude: 0,
+            remaining_ticks: 10_000,
+            attribute: None,
+            damage_type: None,
+        })
+        .collect();
+    snapshot.effects = (0..16)
+        .map(|_| ActiveEffect {
+            kind: EffectKind::Strength,
+            magnitude: 100_000,
+            remaining_ticks: 10_000,
+        })
+        .collect();
+    snapshot.progression_points = (0..4).map(|index| (format!("pool-{index}"), 100)).collect();
+    snapshot.talent_node_ranks = (0..16)
+        .map(|graph| {
+            (
+                format!("test:graph-{graph}"),
+                (0..2)
+                    .map(|node| (format!("test:node-{graph}-{node}"), 5))
+                    .collect(),
+            )
+        })
+        .collect();
+    snapshot.tags = (0..64)
+        .map(|index| format!("test:tag-{index}-{}", "x".repeat(64)))
+        .collect();
+    snapshot.received_signals = (0..64)
+        .map(|index| format!("test:signal-{index}-{}", "x".repeat(60)))
+        .collect::<BTreeSet<_>>();
+    snapshot.script_flags = (0..64)
+        .map(|index| format!("test:flag-{index}-{}", "x".repeat(64)))
+        .collect();
+    let bytes = serde_json::to_vec(&snapshot).unwrap();
+    assert!(bytes.len() < 65_536, "snapshot used {} bytes", bytes.len());
+    assert_eq!(
+        serde_json::from_slice::<CharacterGameplaySnapshot>(&bytes).unwrap(),
+        snapshot
+    );
+}
+
+#[test]
+fn parser_exposes_explicit_promotion_and_talent_actions() {
+    assert_eq!(
+        parse_action("promote test:spellblade").unwrap(),
+        PlayerAction::Promote {
+            class_id: "test:spellblade".into()
+        }
+    );
+    assert_eq!(
+        parse_action("talent learn test:warden-talents test:bulwark").unwrap(),
+        PlayerAction::AcquireTalent {
+            graph_id: "test:warden-talents".into(),
+            node_id: "test:bulwark".into(),
+        }
+    );
+}
+
+#[test]
+fn authored_ability_grants_remain_usable() {
+    let strike = AbilityDefinition {
+        id: "test:strike".into(),
+        name: "Strike".into(),
+        description: "A deterministic attack.".into(),
+        category: AbilityCategory::Martial,
         resource_costs: BTreeMap::new(),
         cooldown_ticks: 0,
         targeting: AbilityTargeting::SingleEnemy,
-        damage: None,
-        heal: None,
-        status_effects: vec![
-            AbilityStatusEffectDefinition::Stun {
-                target: AbilityEffectTarget::Target,
-                duration_ticks: 1,
-            },
-            AbilityStatusEffectDefinition::DamageOverTime {
-                target: AbilityEffectTarget::Target,
-                damage_type: DamageType::Arcane,
-                magnitude: 4,
-                duration_ticks: 2,
-            },
-        ],
-    };
-    let mut world = empty_world();
-    configure_catalog(
-        &mut world,
-        base_archetype(&["test:affliction"]),
-        vec![affliction],
-    );
-    spawn_npc(&mut world, NPC_ID, "Cursed Sentinel", 8, 10, 100, 5);
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-
-    use_ability(
-        &mut world,
-        session,
-        "test:affliction",
-        Some("Cursed Sentinel"),
-    );
-    world.advance_tick().unwrap();
-    assert_eq!(npc_health(&world, NPC_ID), 4);
-    assert_eq!(
-        world
-            .character_gameplay_snapshot(session)
-            .unwrap()
-            .vitals
-            .health,
-        30,
-        "stun must suppress the NPC response on the first status tick"
-    );
-
-    let events = world.advance_tick().unwrap();
-    assert_eq!(npc_health(&world, NPC_ID), 0);
-    assert!(events.iter().any(|event| matches!(
-        event,
-        DomainEvent::Gameplay {
-            event: GameplayEvent::NpcDefeated { character_id, .. }
-        } if *character_id == CharacterId(1)
-    )));
-    assert_eq!(
-        world
-            .character_gameplay_snapshot(session)
-            .unwrap()
-            .experience,
-        5
-    );
-}
-
-#[test]
-fn stun_suppresses_the_players_automatic_combat_turn() {
-    let stun = tiamud_core::AbilityDefinition {
-        id: "test:stun".into(),
-        name: "Stun".into(),
-        description: "Prevent an enemy from taking its next automatic turns.".into(),
-        category: AbilityCategory::Martial,
-        resource_costs: BTreeMap::new(),
-        cooldown_ticks: 3,
-        targeting: AbilityTargeting::SingleEnemy,
-        damage: None,
-        heal: None,
-        status_effects: vec![AbilityStatusEffectDefinition::Stun {
+        damage: Some(AbilityDamageDefinition {
             target: AbilityEffectTarget::Target,
-            duration_ticks: 2,
-        }],
+            damage_type: DamageType::Physical,
+            base_amount: 2,
+            scaling_attribute: None,
+            scaling_percent: 0,
+        }),
+        heal: None,
+        status_effects: Vec::new(),
     };
-    let mut world = empty_world();
-    configure_catalog(&mut world, base_archetype(&[]), vec![stun]);
-    spawn_npc(&mut world, NPC_ID, "Stunning Sentinel", 100, 1, 100, 0);
-    world
-        .configure_npc_abilities(NpcAbilitySetDefinition {
-            npc_id: NPC_ID.into(),
-            resource_pools: BTreeMap::new(),
-            resource_regeneration: BTreeMap::new(),
-            resistances: BTreeMap::new(),
-            ability_ids: vec!["test:stun".into()],
-        })
-        .unwrap();
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-    world
-        .apply(session, PlayerAction::Attack("Stunning Sentinel".into()))
-        .unwrap();
-
-    let first_turn = world.advance_tick().unwrap();
-    assert!(first_turn.iter().any(|event| matches!(
-        event,
-        DomainEvent::Gameplay {
-            event: GameplayEvent::NpcAbilityUsed { ability_id, .. }
-        } if ability_id == "test:stun"
-    )));
-    let health_after_first_turn = npc_health(&world, NPC_ID);
-
-    let stunned_turn = world.advance_tick().unwrap();
-    assert_eq!(
-        npc_health(&world, NPC_ID),
-        health_after_first_turn,
-        "a stunned character must not perform its automatic attack"
-    );
-    assert!(!stunned_turn.iter().any(|event| matches!(
-        event,
-        DomainEvent::Gameplay {
-            event: GameplayEvent::NpcDamaged { character_id, .. }
-        } if *character_id == CharacterId(1)
-    )));
-}
-
-#[test]
-fn legacy_level_three_migration_replays_all_reached_authored_milestones_once() {
-    let tap = target_damage_ability("test:tap", 2, DamageType::Physical);
-    let power = target_damage_ability("test:power", 4, DamageType::Physical);
-    let finisher = target_damage_ability("test:finisher", 6, DamageType::Physical);
-    let mut archetype = base_archetype(&["test:tap"]);
-    archetype.initial_attributes.insert("agility".into(), 2);
-    archetype.initial_resources = BTreeMap::from([("stamina".into(), 2)]);
-    archetype.level_progression = vec![
-        LevelProgressionDefinition {
-            level: 2,
-            total_experience_required: 10,
-            attribute_gains: BTreeMap::from([
-                ("agility".into(), 1),
-                ("max_health".into(), 4),
-                ("strength".into(), 2),
-            ]),
-            skill_gains: BTreeMap::from([("combat".into(), 2)]),
-            resource_gains: BTreeMap::from([("stamina".into(), 3)]),
-            ability_unlock_ids: vec!["test:power".into()],
-        },
-        LevelProgressionDefinition {
-            level: 3,
-            total_experience_required: 30,
-            attribute_gains: BTreeMap::from([
-                ("agility".into(), 2),
-                ("defence".into(), 3),
-                ("max_health".into(), 5),
-            ]),
-            skill_gains: BTreeMap::from([("combat".into(), 1), ("lore".into(), 4)]),
-            resource_gains: BTreeMap::from([("stamina".into(), 2)]),
-            ability_unlock_ids: vec!["test:finisher".into()],
+    let mut definition = basic_definition();
+    definition.base_classes[0].creation_grants = vec![
+        grant_attribute("max_health", 20),
+        GrantDefinition::Ability {
+            ability_id: strike.id.clone(),
         },
     ];
     let mut world = empty_world();
-    configure_catalog(&mut world, archetype, vec![tap, power, finisher]);
-
-    let mut legacy = tiamud_core::CharacterGameplaySnapshot {
-        level: 3,
-        experience: 30,
-        ..tiamud_core::CharacterGameplaySnapshot::default()
-    };
-    // The pre-archetype snapshot shape has the old default ID and none of the
-    // additive collections. Preserve a non-full health value across migration.
-    legacy.vitals.health = 17;
+    configure(&mut world, definition, vec![strike]);
+    spawn_reward(&mut world, 0);
+    let (session, _) = enter(&mut world);
     world
-        .restore_character_gameplay(CharacterId(1), legacy)
-        .unwrap();
-    world
-        .connect(
-            SessionId(1),
-            CharacterSnapshot {
-                id: CharacterId(1),
-                account_id: AccountId(1),
-                name: "Aria".into(),
-                room_id: ROOM_ID.into(),
-                item_locations: BTreeMap::new(),
+        .apply(
+            session,
+            PlayerAction::Ability {
+                ability_id: "test:strike".into(),
+                target: Some("Sentinel".into()),
             },
         )
         .unwrap();
-
-    let migrated = world.character_gameplay_snapshot(SessionId(1)).unwrap();
-    assert_eq!(migrated.archetype_id, ARCHETYPE_ID);
-    assert_eq!(migrated.vitals.health, 17);
-    assert_eq!(migrated.vitals.max_health, 29);
-    assert_eq!(migrated.attributes.strength, 7);
-    assert_eq!(migrated.attributes.defence, 5);
-    assert_eq!(migrated.attributes.additional["agility"], 5);
-    assert_eq!(migrated.skills["combat"], 13);
-    assert_eq!(migrated.skills["lore"], 4);
-    assert_eq!(
-        migrated.resources["stamina"],
-        ResourcePool { current: 7, max: 7 }
-    );
-    assert_eq!(
-        migrated.ability_ids,
-        ["test:tap", "test:power", "test:finisher"]
-    );
-
-    // A current-shape snapshot carries additive fields, so restoring it must
-    // not replay the migration milestones a second time.
-    world
-        .restore_character_gameplay(CharacterId(1), migrated.clone())
-        .unwrap();
-    assert_eq!(
-        world.character_gameplay_snapshot(SessionId(1)).unwrap(),
-        migrated
-    );
-}
-
-#[test]
-fn current_snapshot_with_empty_optional_collections_does_not_replay_milestones() {
-    let mut archetype = base_archetype(&[]);
-    archetype.level_progression = vec![LevelProgressionDefinition {
-        level: 2,
-        total_experience_required: 10,
-        attribute_gains: BTreeMap::from([("strength".into(), 2)]),
-        skill_gains: BTreeMap::from([("combat".into(), 3)]),
-        resource_gains: BTreeMap::new(),
-        ability_unlock_ids: Vec::new(),
-    }];
-    let mut world = empty_world();
-    configure_catalog(&mut world, archetype, Vec::new());
-
-    let mut current = world.initial_gameplay(Some(ARCHETYPE_ID)).unwrap();
-    current.level = 2;
-    current.experience = 10;
-    current.attributes.strength += 2;
-    *current.skills.get_mut("combat").unwrap() += 3;
-    assert!(current.resources.is_empty());
-    assert!(current.ability_ids.is_empty());
-    let expected = current.clone();
-
-    world
-        .restore_character_gameplay(CharacterId(1), current)
-        .unwrap();
-    world
-        .connect(
-            SessionId(1),
-            CharacterSnapshot {
-                id: CharacterId(1),
-                account_id: AccountId(1),
-                name: "Aria".into(),
-                room_id: ROOM_ID.into(),
-                item_locations: BTreeMap::new(),
-            },
-        )
-        .unwrap();
-
-    assert_eq!(
-        world.character_gameplay_snapshot(SessionId(1)).unwrap(),
-        expected
-    );
-}
-
-#[test]
-fn one_tick_attribute_modifier_affects_combat_before_expiring() {
-    let weaken = tiamud_core::AbilityDefinition {
-        id: "test:weaken".into(),
-        name: "Weaken".into(),
-        description: "Reduce an enemy's strength for one deterministic turn.".into(),
-        category: AbilityCategory::Spell,
-        resource_costs: BTreeMap::new(),
-        cooldown_ticks: 0,
-        targeting: AbilityTargeting::SingleEnemy,
-        damage: None,
-        heal: None,
-        status_effects: vec![AbilityStatusEffectDefinition::AttributeModifier {
-            target: AbilityEffectTarget::Target,
-            attribute: "strength".into(),
-            magnitude: -100,
-            duration_ticks: 1,
-        }],
-    };
-    let mut world = empty_world();
-    configure_catalog(&mut world, base_archetype(&["test:weaken"]), vec![weaken]);
-    spawn_npc(&mut world, NPC_ID, "Weakened Sentinel", 100, 10, 100, 5);
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-
-    use_ability(
-        &mut world,
-        session,
-        "test:weaken",
-        Some("Weakened Sentinel"),
-    );
-    world.advance_tick().unwrap();
-
-    assert_eq!(
-        world
-            .character_gameplay_snapshot(session)
-            .unwrap()
-            .vitals
-            .health,
-        29,
-        "the duration-one strength penalty must affect the NPC's next attack"
-    );
-    assert!(
-        world.runtime_snapshot().npcs[NPC_ID].statuses.is_empty(),
-        "the modifier must expire after affecting exactly one combat turn"
-    );
-}
-
-#[test]
-fn corrupt_runtime_snapshots_are_rejected_without_partial_mutation() {
-    let technique = target_damage_ability("test:technique", 5, DamageType::Physical);
-    let mut world = empty_world();
-    configure_catalog(&mut world, base_archetype(&[]), vec![technique]);
-    spawn_npc(&mut world, NPC_ID, "Snapshot Sentinel", 20, 2, 1, 0);
-    world
-        .configure_npc_abilities(NpcAbilitySetDefinition {
-            npc_id: NPC_ID.into(),
-            resource_pools: BTreeMap::from([("stamina".into(), 6)]),
-            resource_regeneration: BTreeMap::from([("stamina".into(), 1)]),
-            resistances: BTreeMap::new(),
-            ability_ids: vec!["test:technique".into()],
-        })
-        .unwrap();
-    let baseline = world.runtime_snapshot();
-
-    let mut overfilled = baseline.clone();
-    overfilled
-        .npcs
-        .get_mut(NPC_ID)
-        .unwrap()
-        .resources
-        .insert("stamina".into(), ResourcePool { current: 7, max: 6 });
-    assert!(matches!(
-        world.restore_runtime_snapshot(overfilled),
-        Err(WorldError::InvalidRuntimeSnapshot)
-    ));
-    assert_eq!(world.runtime_snapshot(), baseline);
-
-    let mut forged_status = baseline.clone();
-    forged_status
-        .npcs
-        .get_mut(NPC_ID)
-        .unwrap()
-        .statuses
-        .push(ActiveStatusEffect {
-            source_ability_id: "test:technique".into(),
-            source_character_id: Some(CharacterId(1)),
-            source_npc_id: None,
-            kind: ActiveStatusKind::DamageOverTime,
-            magnitude: 100_000,
-            remaining_ticks: 1,
-            attribute: None,
-            damage_type: Some(DamageType::Physical),
-        });
-    world.restore_runtime_snapshot(forged_status).unwrap();
-    assert!(world.runtime_snapshot().npcs[NPC_ID].statuses.is_empty());
-    assert_eq!(world.runtime_snapshot(), baseline);
-
-    let mut forged_npc = baseline.clone();
-    let mut ghost = forged_npc.npcs[NPC_ID].clone();
-    ghost.stable_id = "test:ghost".into();
-    forged_npc.npcs.insert("test:ghost".into(), ghost);
-    assert!(matches!(
-        world.restore_runtime_snapshot(forged_npc),
-        Err(WorldError::InvalidRuntimeSnapshot)
-    ));
-    assert_eq!(world.runtime_snapshot(), baseline);
-}
-
-#[test]
-fn disconnect_cancels_character_sourced_npc_statuses_before_offline_ticks() {
-    let affliction = tiamud_core::AbilityDefinition {
-        id: "test:affliction".into(),
-        name: "Affliction".into(),
-        description: "A pending effect that must not outlive its combat session.".into(),
-        category: AbilityCategory::Spell,
-        resource_costs: BTreeMap::new(),
-        cooldown_ticks: 0,
-        targeting: AbilityTargeting::SingleEnemy,
-        damage: None,
-        heal: None,
-        status_effects: vec![AbilityStatusEffectDefinition::DamageOverTime {
-            target: AbilityEffectTarget::Target,
-            damage_type: DamageType::Arcane,
-            magnitude: 5,
-            duration_ticks: 2,
-        }],
-    };
-    let mut world = empty_world();
-    configure_catalog(
-        &mut world,
-        base_archetype(&["test:affliction"]),
-        vec![affliction],
-    );
-    spawn_npc(&mut world, NPC_ID, "Lingering Sentinel", 5, 1, 100, 10);
-    let (session, _) = enter_character(&mut world, ARCHETYPE_ID);
-
-    use_ability(
-        &mut world,
-        session,
-        "test:affliction",
-        Some("Lingering Sentinel"),
-    );
-    assert_eq!(world.runtime_snapshot().npcs[NPC_ID].statuses.len(), 1);
-
-    world.disconnect(session);
-    let after_disconnect = world.runtime_snapshot();
-    assert!(after_disconnect.npcs[NPC_ID].statuses.is_empty());
-    assert_eq!(after_disconnect.npcs[NPC_ID].engaged_character, None);
-
-    let events = world.advance_tick().unwrap();
-    assert_eq!(npc_health(&world, NPC_ID), 5);
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        DomainEvent::Gameplay {
-            event: GameplayEvent::NpcDefeated { .. }
-        }
-    )));
-}
-
-#[test]
-fn retired_abilities_do_not_block_character_or_runtime_restore() {
-    let retired = tiamud_core::AbilityDefinition {
-        id: "test:retired".into(),
-        name: "Retired art".into(),
-        description: "A content definition removed by the next reviewed pack.".into(),
-        category: AbilityCategory::Innate,
-        resource_costs: BTreeMap::new(),
-        cooldown_ticks: 5,
-        targeting: AbilityTargeting::SelfOnly,
-        damage: None,
-        heal: None,
-        status_effects: vec![AbilityStatusEffectDefinition::Regeneration {
-            target: AbilityEffectTarget::Caster,
-            magnitude: 1,
-            duration_ticks: 3,
-        }],
-    };
-    let mut old_world = empty_world();
-    configure_catalog(
-        &mut old_world,
-        base_archetype(&["test:retired"]),
-        vec![retired],
-    );
-    spawn_npc(&mut old_world, NPC_ID, "Old Sentinel", 20, 1, 1, 0);
-    let (session, character_id) = enter_character(&mut old_world, ARCHETYPE_ID);
-    use_ability(&mut old_world, session, "test:retired", None);
-    let saved_character = old_world.character_gameplay_snapshot(session).unwrap();
-    let mut saved_runtime = old_world.runtime_snapshot();
-    saved_runtime
-        .npcs
-        .get_mut(NPC_ID)
-        .unwrap()
-        .ability_ids
-        .push("test:retired".into());
-    saved_runtime
-        .npcs
-        .get_mut(NPC_ID)
-        .unwrap()
-        .ability_cooldowns
-        .insert("test:retired".into(), 3);
-
-    let mut current_world = empty_world();
-    configure_catalog(&mut current_world, base_archetype(&[]), Vec::new());
-    spawn_npc(&mut current_world, NPC_ID, "Current Sentinel", 20, 1, 1, 0);
-    current_world
-        .restore_character_gameplay(character_id, saved_character)
-        .unwrap();
-    current_world
-        .restore_runtime_snapshot(saved_runtime)
-        .unwrap();
-    current_world
-        .connect(
-            SessionId(2),
-            CharacterSnapshot {
-                id: character_id,
-                account_id: AccountId(1),
-                name: "Aria".into(),
-                room_id: ROOM_ID.into(),
-                item_locations: BTreeMap::new(),
-            },
-        )
-        .unwrap();
-
-    let restored = current_world
-        .character_gameplay_snapshot(SessionId(2))
-        .unwrap();
-    assert!(restored.ability_ids.is_empty());
-    assert!(restored.ability_cooldowns.is_empty());
-    assert!(restored.statuses.is_empty());
-    assert!(
-        current_world.runtime_snapshot().npcs[NPC_ID]
-            .ability_cooldowns
-            .is_empty()
-    );
-}
-
-#[test]
-fn runtime_restore_overlays_dynamic_state_onto_new_authored_npc_configuration() {
-    let technique = target_damage_ability("test:technique", 5, DamageType::Physical);
-
-    let mut old_world = empty_world();
-    configure_catalog(&mut old_world, base_archetype(&[]), vec![technique.clone()]);
-    spawn_npc(&mut old_world, NPC_ID, "Old Sentinel", 30, 1, 0, 0);
-    let old_snapshot = old_world.runtime_snapshot();
-    assert!(old_snapshot.npcs[NPC_ID].ability_ids.is_empty());
-
-    let mut current_world = empty_world();
-    configure_catalog(&mut current_world, base_archetype(&[]), vec![technique]);
-    spawn_npc(&mut current_world, NPC_ID, "Current Sentinel", 50, 4, 2, 0);
-    current_world
-        .configure_npc_abilities(NpcAbilitySetDefinition {
-            npc_id: NPC_ID.into(),
-            resource_pools: BTreeMap::from([("stamina".into(), 6)]),
-            resource_regeneration: BTreeMap::from([("stamina".into(), 1)]),
-            resistances: BTreeMap::from([(DamageType::Fire, 25)]),
-            ability_ids: vec!["test:technique".into()],
-        })
-        .unwrap();
-    spawn_npc(&mut current_world, "test:newcomer", "Newcomer", 15, 2, 1, 0);
-
-    current_world
-        .restore_runtime_snapshot(old_snapshot)
-        .unwrap();
-    let restored = current_world.runtime_snapshot();
-    let sentinel = &restored.npcs[NPC_ID];
-    assert_eq!(sentinel.name, "Current Sentinel");
-    assert_eq!(sentinel.max_health, 50);
-    assert_eq!(sentinel.health, 30);
-    assert_eq!(sentinel.strength, 4);
-    assert_eq!(sentinel.defence, 2);
-    assert_eq!(sentinel.ability_ids, ["test:technique"]);
-    assert_eq!(
-        sentinel.resources["stamina"],
-        ResourcePool { current: 6, max: 6 }
-    );
-    assert_eq!(sentinel.resource_regeneration["stamina"], 1);
-    assert_eq!(sentinel.resistances[&DamageType::Fire], 25);
-    assert!(restored.npcs.contains_key("test:newcomer"));
 }

@@ -13,12 +13,24 @@ use tiamud_core::{
     AbilityHealDefinition as CoreAbilityHealDefinition,
     AbilityStatusEffectDefinition as CoreAbilityStatusEffectDefinition,
     AbilityTargeting as CoreAbilityTargeting, ActiveEffect,
-    ArchetypeDefinition as CoreArchetypeDefinition, DamageType as CoreDamageType,
-    Direction as CoreDirection, EffectKind as CoreEffectKind, EquipmentSlot as CoreEquipmentSlot,
-    ExitDefinition, ItemDefinition, ItemGameplayDefinition,
-    LevelProgressionDefinition as CoreLevelProgressionDefinition, LightLevel as CoreLightLevel,
-    NpcAbilitySetDefinition as CoreNpcAbilitySetDefinition, NpcDefinition, RoomDefinition,
-    SceneAudio, SceneImage, World, WorldBuildError, WorldDefinition, WorldError,
+    AdvancedClassDefinition as CoreAdvancedClassDefinition,
+    BackgroundDefinition as CoreBackgroundDefinition,
+    BaseClassDefinition as CoreBaseClassDefinition,
+    CharacterDefaultsDefinition as CoreCharacterDefaultsDefinition,
+    CharacterProgressionDefinition as CoreCharacterProgressionDefinition,
+    DamageType as CoreDamageType, Direction as CoreDirection, EffectKind as CoreEffectKind,
+    EquipmentSlot as CoreEquipmentSlot, ExitDefinition, GrantDefinition as CoreGrantDefinition,
+    ItemDefinition, ItemGameplayDefinition, LevelGrantDefinition as CoreLevelGrantDefinition,
+    LevelThresholdDefinition as CoreLevelThresholdDefinition, LightLevel as CoreLightLevel,
+    LineageDefinition as CoreLineageDefinition,
+    NpcAbilitySetDefinition as CoreNpcAbilitySetDefinition, NpcDefinition,
+    RequirementDefinition as CoreRequirementDefinition,
+    RequirementDisclosure as CoreRequirementDisclosure,
+    RequirementPredicate as CoreRequirementPredicate, RoomDefinition, SceneAudio, SceneImage,
+    TalentGraphDefinition as CoreTalentGraphDefinition,
+    TalentNodeDefinition as CoreTalentNodeDefinition,
+    TalentRankDefinition as CoreTalentRankDefinition, World, WorldBuildError, WorldDefinition,
+    WorldError,
 };
 use world_pack::{
     AudioCue, Direction as PackDirection, EffectKind as PackEffectKind,
@@ -39,8 +51,7 @@ pub struct LoadedWorldDefinition {
     pub definition: WorldDefinition,
     pub rng_seed: Option<u64>,
     pub item_rules: Vec<ItemGameplayDefinition>,
-    pub default_archetype_id: Option<String>,
-    pub archetypes: Vec<CoreArchetypeDefinition>,
+    pub character_progression: CoreCharacterProgressionDefinition,
     pub abilities: Vec<CoreAbilityDefinition>,
     pub npcs: Vec<NpcDefinition>,
     pub npc_ability_sets: Vec<CoreNpcAbilitySetDefinition>,
@@ -87,13 +98,10 @@ pub fn build_loaded_world(
     for (room_id, direction, difficulty) in &loaded.secret_exits {
         world.configure_secret_exit(room_id, *direction, *difficulty)?;
     }
-    if let Some(default_archetype_id) = &loaded.default_archetype_id {
-        world.configure_abilities(
-            default_archetype_id.clone(),
-            loaded.archetypes.clone(),
-            loaded.abilities.clone(),
-        )?;
-    }
+    world.configure_progression(
+        loaded.character_progression.clone(),
+        loaded.abilities.clone(),
+    )?;
     for npc in &loaded.npcs {
         world.spawn_npc(npc.clone())?;
     }
@@ -183,7 +191,8 @@ fn convert_document(
         scripts.push(script);
     }
     let runtime_content =
-        RuntimeContent::new(std::mem::take(&mut document.scene_variants), scripts, seed);
+        RuntimeContent::new(std::mem::take(&mut document.scene_variants), scripts, seed)
+            .with_entity_media(std::mem::take(&mut document.entity_media));
     let mut loaded = convert_pack(
         document.world,
         std::mem::take(&mut document.room_media),
@@ -203,10 +212,10 @@ fn convert_pack(
         item_rules: pack_item_rules,
         npc_prototypes,
         npc_spawns,
-        default_archetype_id,
-        archetypes: pack_archetypes,
+        character_progression,
         abilities: pack_abilities,
         npc_ability_sets: pack_npc_ability_sets,
+        ..
     } = std::mem::take(&mut pack.gameplay);
     let start_room_id = pack.start_room_id.clone();
     let items = pack
@@ -313,7 +322,9 @@ fn convert_pack(
             }),
         })
         .collect();
-    let archetypes = pack_archetypes.into_iter().map(map_archetype).collect();
+    let character_progression = character_progression
+        .map(map_character_progression)
+        .ok_or(WorldLoadError::MissingCharacterProgression)?;
     let abilities = pack_abilities.into_iter().map(map_ability).collect();
     let prototypes = npc_prototypes
         .into_iter()
@@ -377,8 +388,7 @@ fn convert_pack(
         definition,
         rng_seed,
         item_rules,
-        default_archetype_id,
-        archetypes,
+        character_progression,
         abilities,
         npcs,
         npc_ability_sets,
@@ -390,35 +400,252 @@ fn convert_pack(
     })
 }
 
-fn map_archetype(definition: world_pack::ArchetypeDefinition) -> CoreArchetypeDefinition {
-    CoreArchetypeDefinition {
-        id: definition.id,
-        name: definition.name,
-        description: definition.description,
-        initial_attributes: definition.initial_attributes,
-        initial_skills: definition.initial_skills,
-        initial_resources: definition.initial_resources,
-        resource_regeneration: definition.resource_regeneration,
-        initial_resistances: map_resistances(definition.initial_resistances),
-        initial_ability_ids: definition.initial_ability_ids,
-        level_progression: definition
-            .level_progression
+fn map_character_progression(
+    definition: world_pack::CharacterProgressionDefinition,
+) -> CoreCharacterProgressionDefinition {
+    CoreCharacterProgressionDefinition {
+        defaults: CoreCharacterDefaultsDefinition {
+            lineage_id: definition.defaults.lineage_id,
+            background_id: definition.defaults.background_id,
+            base_class_id: definition.defaults.base_class_id,
+        },
+        level_thresholds: definition
+            .level_thresholds
             .into_iter()
-            .map(map_level_progression)
+            .map(|entry| CoreLevelThresholdDefinition {
+                level: entry.level,
+                total_experience_required: entry.total_experience_required,
+                point_awards: entry.point_awards,
+            })
+            .collect(),
+        lineages: definition
+            .lineages
+            .into_iter()
+            .map(|entry| CoreLineageDefinition {
+                id: entry.id,
+                name: entry.name,
+                description: entry.description,
+                ui_order: entry.ui_order,
+                creation_grants: map_grants(entry.creation_grants),
+                talent_graph_ids: entry.talent_graph_ids,
+            })
+            .collect(),
+        backgrounds: definition
+            .backgrounds
+            .into_iter()
+            .map(|entry| CoreBackgroundDefinition {
+                id: entry.id,
+                name: entry.name,
+                description: entry.description,
+                ui_order: entry.ui_order,
+                creation_grants: map_grants(entry.creation_grants),
+                talent_graph_ids: entry.talent_graph_ids,
+            })
+            .collect(),
+        base_classes: definition
+            .base_classes
+            .into_iter()
+            .map(|entry| CoreBaseClassDefinition {
+                id: entry.id,
+                name: entry.name,
+                description: entry.description,
+                ui_order: entry.ui_order,
+                creation_grants: map_grants(entry.creation_grants),
+                level_grants: entry
+                    .level_grants
+                    .into_iter()
+                    .map(map_level_grant)
+                    .collect(),
+                talent_graph_ids: entry.talent_graph_ids,
+            })
+            .collect(),
+        advanced_classes: definition
+            .advanced_classes
+            .into_iter()
+            .map(|entry| CoreAdvancedClassDefinition {
+                id: entry.id,
+                name: entry.name,
+                description: entry.description,
+                ui_order: entry.ui_order,
+                from_class_ids: entry.from_class_ids,
+                exclusive_group: entry.exclusive_group,
+                requirements: entry
+                    .requirements
+                    .into_iter()
+                    .map(map_requirement)
+                    .collect(),
+                promotion_grants: map_grants(entry.promotion_grants),
+                level_grants: entry
+                    .level_grants
+                    .into_iter()
+                    .map(map_level_grant)
+                    .collect(),
+                talent_graph_ids: entry.talent_graph_ids,
+            })
+            .collect(),
+        talent_graphs: definition
+            .talent_graphs
+            .into_iter()
+            .map(|graph| CoreTalentGraphDefinition {
+                id: graph.id,
+                name: graph.name,
+                description: graph.description,
+                ui_order: graph.ui_order,
+                point_pool_id: graph.point_pool_id,
+                nodes: graph
+                    .nodes
+                    .into_iter()
+                    .map(|node| CoreTalentNodeDefinition {
+                        id: node.id,
+                        name: node.name,
+                        description: node.description,
+                        ui_order: node.ui_order,
+                        exclusion_group: node.exclusion_group,
+                        ranks: node
+                            .ranks
+                            .into_iter()
+                            .map(|rank| CoreTalentRankDefinition {
+                                rank: rank.rank,
+                                cost: rank.cost,
+                                requirements: rank
+                                    .requirements
+                                    .into_iter()
+                                    .map(map_requirement)
+                                    .collect(),
+                                grants: map_grants(rank.grants),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
             .collect(),
     }
 }
 
-fn map_level_progression(
-    definition: world_pack::LevelProgressionDefinition,
-) -> CoreLevelProgressionDefinition {
-    CoreLevelProgressionDefinition {
+fn map_level_grant(definition: world_pack::LevelGrantDefinition) -> CoreLevelGrantDefinition {
+    CoreLevelGrantDefinition {
         level: definition.level,
-        total_experience_required: definition.total_experience_required,
-        attribute_gains: definition.attribute_gains,
-        skill_gains: definition.skill_gains,
-        resource_gains: definition.resource_gains,
-        ability_unlock_ids: definition.ability_unlock_ids,
+        grants: map_grants(definition.grants),
+    }
+}
+
+fn map_grants(definitions: Vec<world_pack::GrantDefinition>) -> Vec<CoreGrantDefinition> {
+    definitions.into_iter().map(map_grant).collect()
+}
+
+fn map_grant(definition: world_pack::GrantDefinition) -> CoreGrantDefinition {
+    match definition {
+        world_pack::GrantDefinition::Attribute {
+            attribute_id,
+            amount,
+        } => CoreGrantDefinition::Attribute {
+            attribute_id,
+            amount,
+        },
+        world_pack::GrantDefinition::Skill { skill_id, amount } => {
+            CoreGrantDefinition::Skill { skill_id, amount }
+        }
+        world_pack::GrantDefinition::ResourceMax {
+            resource_id,
+            amount,
+        } => CoreGrantDefinition::ResourceMax {
+            resource_id,
+            amount,
+        },
+        world_pack::GrantDefinition::ResourceRegeneration {
+            resource_id,
+            amount,
+        } => CoreGrantDefinition::ResourceRegeneration {
+            resource_id,
+            amount,
+        },
+        world_pack::GrantDefinition::Ability { ability_id } => {
+            CoreGrantDefinition::Ability { ability_id }
+        }
+        world_pack::GrantDefinition::Resistance {
+            damage_type,
+            percent,
+        } => CoreGrantDefinition::Resistance {
+            damage_type: map_damage_type(damage_type),
+            percent,
+        },
+        world_pack::GrantDefinition::Points { pool_id, amount } => {
+            CoreGrantDefinition::Points { pool_id, amount }
+        }
+        world_pack::GrantDefinition::Tag { tag_id } => CoreGrantDefinition::Tag { tag_id },
+    }
+}
+
+fn map_requirement(definition: world_pack::RequirementDefinition) -> CoreRequirementDefinition {
+    CoreRequirementDefinition {
+        disclosure: match definition.disclosure {
+            world_pack::RequirementDisclosure::Public => CoreRequirementDisclosure::Public,
+            world_pack::RequirementDisclosure::Hidden => CoreRequirementDisclosure::Hidden,
+        },
+        hint: definition.hint,
+        predicate: map_requirement_predicate(definition.predicate),
+    }
+}
+
+fn map_requirement_predicate(
+    predicate: world_pack::RequirementPredicate,
+) -> CoreRequirementPredicate {
+    match predicate {
+        world_pack::RequirementPredicate::Level { minimum } => {
+            CoreRequirementPredicate::Level { minimum }
+        }
+        world_pack::RequirementPredicate::PermanentAttribute {
+            attribute_id,
+            minimum,
+        } => CoreRequirementPredicate::PermanentAttribute {
+            attribute_id,
+            minimum,
+        },
+        world_pack::RequirementPredicate::Skill { skill_id, minimum } => {
+            CoreRequirementPredicate::Skill { skill_id, minimum }
+        }
+        world_pack::RequirementPredicate::CompletedQuest { quest_id } => {
+            CoreRequirementPredicate::CompletedQuest { quest_id }
+        }
+        world_pack::RequirementPredicate::ReceivedSignal { signal_id } => {
+            CoreRequirementPredicate::ReceivedSignal { signal_id }
+        }
+        world_pack::RequirementPredicate::CharacterFlag { flag_id, equals } => {
+            CoreRequirementPredicate::CharacterFlag { flag_id, equals }
+        }
+        world_pack::RequirementPredicate::WorldFlag { flag_id, equals } => {
+            CoreRequirementPredicate::WorldFlag { flag_id, equals }
+        }
+        world_pack::RequirementPredicate::Lineage { lineage_id } => {
+            CoreRequirementPredicate::Lineage { lineage_id }
+        }
+        world_pack::RequirementPredicate::CurrentClass { class_id } => {
+            CoreRequirementPredicate::CurrentClass { class_id }
+        }
+        world_pack::RequirementPredicate::HistoricalClass { class_id } => {
+            CoreRequirementPredicate::HistoricalClass { class_id }
+        }
+        world_pack::RequirementPredicate::NodeRank {
+            graph_id,
+            node_id,
+            minimum_rank,
+        } => CoreRequirementPredicate::NodeRank {
+            graph_id,
+            node_id,
+            minimum_rank,
+        },
+        world_pack::RequirementPredicate::Ability { ability_id } => {
+            CoreRequirementPredicate::Ability { ability_id }
+        }
+        world_pack::RequirementPredicate::All { requirements } => CoreRequirementPredicate::All {
+            requirements: requirements.into_iter().map(map_requirement).collect(),
+        },
+        world_pack::RequirementPredicate::Any { requirements } => CoreRequirementPredicate::Any {
+            requirements: requirements.into_iter().map(map_requirement).collect(),
+        },
+        world_pack::RequirementPredicate::Not { requirement } => CoreRequirementPredicate::Not {
+            requirement: Box::new(map_requirement(*requirement)),
+        },
     }
 }
 
@@ -456,7 +683,7 @@ fn map_ability_category(category: world_pack::AbilityCategory) -> CoreAbilityCat
     match category {
         world_pack::AbilityCategory::Martial => CoreAbilityCategory::Martial,
         world_pack::AbilityCategory::Spell => CoreAbilityCategory::Spell,
-        world_pack::AbilityCategory::Innate => CoreAbilityCategory::Innate,
+        world_pack::AbilityCategory::Utility => CoreAbilityCategory::Utility,
     }
 }
 
@@ -624,6 +851,8 @@ pub enum WorldLoadError {
     },
     #[error("WorldPack contains {size} bytes; the runtime limit is {max} bytes")]
     TooLarge { size: usize, max: usize },
+    #[error("WorldPack v3 requires a character progression definition")]
+    MissingCharacterProgression,
     #[error("WorldPack is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -651,6 +880,60 @@ pub enum WorldLoadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn v3_fixture(bytes: &[u8]) -> Vec<u8> {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        value["schemaVersion"] = serde_json::json!(3);
+        value["gameplay"]["characterProgression"] = serde_json::json!({
+            "defaults": {
+                "lineageId": "test:mortal",
+                "baseClassId": "test:wanderer"
+            },
+            "levelThresholds": [{
+                "level": 2,
+                "totalExperienceRequired": 100
+            }],
+            "lineages": [{
+                "id": "test:mortal",
+                "name": "Mortal",
+                "description": "A test lineage.",
+                "uiOrder": 0
+            }],
+            "baseClasses": [{
+                "id": "test:wanderer",
+                "name": "Wanderer",
+                "description": "A test class.",
+                "uiOrder": 0,
+                "creationGrants": [{
+                    "kind": "attribute",
+                    "attributeId": "max_health",
+                    "amount": 20
+                }]
+            }]
+        });
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    #[test]
+    fn progression_authoring_and_runtime_caps_match() {
+        macro_rules! same_cap {
+            ($name:ident) => {
+                assert_eq!(world_pack::$name, tiamud_core::$name, stringify!($name));
+            };
+        }
+        same_cap!(MAX_LINEAGES);
+        same_cap!(MAX_BACKGROUNDS);
+        same_cap!(MAX_BASE_CLASSES);
+        same_cap!(MAX_ADVANCED_CLASSES);
+        same_cap!(MAX_TALENT_GRAPHS);
+        same_cap!(MAX_NODES_PER_GRAPH);
+        same_cap!(MAX_RANKS_PER_NODE);
+        same_cap!(MAX_GRANTS_PER_ENTRY);
+        same_cap!(MAX_REQUIREMENT_DEPTH);
+        same_cap!(MAX_REQUIREMENT_NODES);
+        same_cap!(MAX_PROGRESSION_POINTS);
+        same_cap!(MAX_PROGRESSION_POINT_POOLS);
+    }
 
     #[test]
     fn reviewed_pack_loads_as_a_runtime_definition() {
@@ -707,10 +990,24 @@ mod tests {
         let loaded = default_loaded_world().unwrap();
         assert_eq!(loaded.item_rules.len(), 3);
         assert_eq!(
-            loaded.default_archetype_id.as_deref(),
-            Some("tiamud:wanderer")
+            loaded.character_progression.defaults.lineage_id,
+            "tiamud:mortal"
         );
-        assert_eq!(loaded.archetypes.len(), 3);
+        assert_eq!(
+            loaded
+                .character_progression
+                .defaults
+                .background_id
+                .as_deref(),
+            Some("tiamud:caravan-scout")
+        );
+        assert_eq!(
+            loaded.character_progression.defaults.base_class_id,
+            "tiamud:wanderer"
+        );
+        assert_eq!(loaded.character_progression.lineages.len(), 3);
+        assert_eq!(loaded.character_progression.base_classes.len(), 3);
+        assert_eq!(loaded.character_progression.advanced_classes.len(), 4);
         assert_eq!(loaded.abilities.len(), 3);
         assert_eq!(loaded.npcs.len(), 1);
         assert_eq!(loaded.npc_ability_sets.len(), 1);
@@ -731,18 +1028,41 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_pack_builds_the_archetype_catalog_and_initial_gameplay() {
+    fn reviewed_pack_builds_the_creation_catalog_and_composed_initial_gameplay() {
         let loaded = default_loaded_world().unwrap();
         let world = build_loaded_world(&loaded).unwrap();
 
-        assert_eq!(world.default_archetype_id(), "tiamud:wanderer");
-        assert_eq!(world.archetype_catalog().len(), 3);
-        assert!(world.archetype_catalog().iter().any(|archetype| {
-            archetype.id == "tiamud:arcanist" && archetype.label == "Arcanist"
-        }));
+        let catalog = world.progression_catalog();
+        assert_eq!(catalog.default_lineage_id, "tiamud:mortal");
+        assert_eq!(
+            catalog.default_background_id.as_deref(),
+            Some("tiamud:caravan-scout")
+        );
+        assert_eq!(catalog.default_base_class_id, "tiamud:wanderer");
+        assert_eq!(catalog.lineages.len(), 3);
+        assert_eq!(catalog.backgrounds.len(), 3);
+        assert_eq!(catalog.base_classes.len(), 3);
+        assert!(
+            catalog
+                .base_classes
+                .iter()
+                .any(|class| { class.id == "tiamud:arcanist" && class.label == "Arcanist" })
+        );
 
-        let initial = world.initial_gameplay(Some("tiamud:arcanist")).unwrap();
-        assert_eq!(initial.archetype_id, "tiamud:arcanist");
+        let initial = world
+            .initial_gameplay(
+                Some("tiamud:mortal"),
+                tiamud_core::BackgroundSelection::Id("tiamud:caravan-scout"),
+                Some("tiamud:arcanist"),
+            )
+            .unwrap();
+        assert_eq!(initial.lineage_id, "tiamud:mortal");
+        assert_eq!(
+            initial.background_id.as_deref(),
+            Some("tiamud:caravan-scout")
+        );
+        assert_eq!(initial.base_class_id, "tiamud:arcanist");
+        assert_eq!(initial.active_class_id, "tiamud:arcanist");
         assert_eq!(initial.vitals.health, 16);
         assert_eq!(initial.attributes.additional.get("intellect"), Some(&8));
         assert_eq!(initial.skills.get("perception"), Some(&12));
@@ -754,7 +1074,7 @@ mod tests {
             })
         );
         assert_eq!(initial.ability_ids, ["tiamud:basic-strike"]);
-        assert_eq!(initial.resistances.get(&CoreDamageType::Arcane), Some(&10));
+        assert_eq!(initial.resistances.get(&CoreDamageType::Arcane), Some(&5));
     }
 
     #[test]
@@ -777,7 +1097,13 @@ mod tests {
 
         let session = tiamud_core::SessionId(91);
         let character_id = tiamud_core::CharacterId(42);
-        let gameplay = world.initial_gameplay(Some("tiamud:arcanist")).unwrap();
+        let gameplay = world
+            .initial_gameplay(
+                None,
+                tiamud_core::BackgroundSelection::Default,
+                Some("tiamud:arcanist"),
+            )
+            .unwrap();
         world
             .restore_character_gameplay(character_id, gameplay)
             .unwrap();
@@ -839,9 +1165,9 @@ mod tests {
 
     #[test]
     fn empty_world_is_rejected_for_runtime() {
-        let error = parse_world_definition(
+        let error = parse_world_definition(&v3_fixture(
             br#"{"schemaVersion":2,"id":"empty","name":"Empty","startRoomId":"missing","rooms":[]}"#,
-        )
+        ))
         .err()
         .unwrap();
 
@@ -850,7 +1176,7 @@ mod tests {
 
     #[test]
     fn unresolved_external_legacy_vnum_is_rejected_for_runtime() {
-        let error = parse_world_definition(
+        let error = parse_world_definition(&v3_fixture(
             br#"{
                 "schemaVersion": 2,
                 "id": "legacy",
@@ -867,7 +1193,7 @@ mod tests {
                     }]
                 }]
             }"#,
-        )
+        ))
         .err()
         .unwrap();
 
@@ -879,7 +1205,7 @@ mod tests {
 
     #[test]
     fn internal_legacy_vnum_is_resolved_to_a_stable_room_id() {
-        let definition = parse_world_definition(
+        let definition = parse_world_definition(&v3_fixture(
             br#"{
                 "schemaVersion": 2,
                 "id": "legacy",
@@ -904,7 +1230,7 @@ mod tests {
                     }
                 ]
             }"#,
-        )
+        ))
         .unwrap();
 
         assert_eq!(definition.rooms[0].exits[0].target_room_id, "legacy:2");
@@ -912,7 +1238,7 @@ mod tests {
 
     #[test]
     fn structural_validation_errors_are_preserved() {
-        let error = parse_world_definition(
+        let error = parse_world_definition(&v3_fixture(
             br#"{
                 "schemaVersion": 2,
                 "id": "broken",
@@ -928,7 +1254,7 @@ mod tests {
                     }]
                 }]
             }"#,
-        )
+        ))
         .err()
         .unwrap();
 
@@ -945,7 +1271,7 @@ mod tests {
 
     #[test]
     fn runtime_requires_a_content_addressed_asset_manifest() {
-        let error = parse_world_definition(
+        let error = parse_world_definition(&v3_fixture(
             br#"{
                 "schemaVersion": 2,
                 "id": "unsafe-media",
@@ -962,7 +1288,7 @@ mod tests {
                     "imageAlt": {"en": "A safe description."}
                 }]
             }"#,
-        )
+        ))
         .unwrap_err();
 
         assert!(matches!(
@@ -1000,7 +1326,7 @@ mod tests {
                 }}]
             }}"#
         );
-        let definition = parse_world_definition(json.as_bytes()).unwrap();
+        let definition = parse_world_definition(&v3_fixture(json.as_bytes())).unwrap();
         let room = &definition.rooms[0];
         assert_eq!(
             room.image.as_ref().map(|image| image.alt.as_str()),

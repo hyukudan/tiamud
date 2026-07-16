@@ -24,4 +24,43 @@ describe('Tiamud entry flow', () => {
     expect(appSource).toContain('isScrollAnchored');
     expect(appSource).toContain('Jump to latest');
   });
+
+  it('keeps optional scene sprites decorative, bounded and non-interactive', () => {
+    expect(appSource).toContain('layoutSceneEntities');
+    expect(appSource).toContain('maxVisible: 10');
+    expect(appSource).toContain('class="entity-visual-layer" aria-hidden="true"');
+    expect(appSource).toContain('alt=""');
+    expect(appSource).toContain('visualLayout.overflow.slice(0, 5)');
+    expect(appSource).toContain('mapVisibleScenePresentation(scene)');
+    expect(appSource).toContain('const visualLayout = $derived.by');
+  });
+
+  it('uses only bounded semantic cue classes and honours reduced motion', () => {
+    for (const cue of ['attack', 'hit', 'heal', 'defeat']) {
+      expect(appSource).toContain(`class:cue-${cue}`);
+    }
+    expect(appSource).not.toContain('class:cue-status');
+    expect(appSource).not.toContain('class:cue-spawn');
+    expect(appSource).toContain("case 'message.append'");
+    expect(appSource).toContain('class:motion-reduced={reduceVisualMotion}');
+    expect(appSource).toContain('visualSourceForCue(entity.visual, cue)');
+    expect(appSource).not.toContain('innerHTML');
+  });
+
+  it('keeps same-view cues through the immediate snapshot but clears recovery state', () => {
+    expect(appSource).toContain('reconcileScenePresentationCues(scene, message.data, activeVisualCues)');
+    expect(appSource).not.toContain("case 'scene.snapshot':\n        resetVisualPresentation();");
+    expect(appSource).toContain('function handleSyncRecovery(recovery: SyncRecoveryData)');
+    expect(appSource).toMatch(/function handleSyncRecovery[\s\S]*?resetVisualPresentation\(\);/);
+  });
+
+  it('applies correlated recovery through one atomic sync callback', () => {
+    expect(appSource).toContain('function handleSyncRecovery(recovery: SyncRecoveryData)');
+    expect(appSource).toContain('scene = recovery.scene;');
+    expect(appSource).toContain('player = recovery.player;');
+    expect(appSource).toContain('onSync: handleSyncRecovery');
+    expect(appSource).not.toContain("case 'sync.scene'");
+    expect(appSource).not.toContain("case 'sync.player'");
+    expect(appSource).not.toContain("case 'sync.snapshot'");
+  });
 });

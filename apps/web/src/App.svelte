@@ -3,10 +3,14 @@
   import type {
     ActionResultData,
     ConnectionState,
+    LiveServerMessage,
+    MessageAppendData,
+    MessagePresentationCue,
     PlayerStateSnapshot,
+    SceneEntityVisualSource,
     SceneSnapshot,
-    ServerMessage,
     ServerNoticeData,
+    SyncRecoveryData,
   } from './lib/protocol';
   import { localizedImageAlt } from './lib/protocol';
   import {
@@ -47,12 +51,33 @@
     boundedScrollback,
     isScrollAnchored,
   } from './lib/scrollback';
+  import {
+    layoutSceneEntities,
+    type VisualPlacement,
+  } from './lib/scene-layout';
+  import {
+    mapVisibleScenePresentation,
+    presentationCueEntityId,
+    presentationCuePose,
+    reconcileScenePresentationCues,
+    visualSourceForCue,
+    type ActiveScenePresentationCue,
+  } from './lib/scene-presentation';
 
   interface HistoryEntry {
     id: string;
     command: string;
     state: 'pending' | 'complete' | 'failed';
     response?: string;
+  }
+
+  type VisualSceneEntity = ReturnType<typeof mapVisibleScenePresentation>[number];
+
+  interface RenderedVisualEntity {
+    entity: VisualSceneEntity;
+    placement: VisualPlacement;
+    source: SceneEntityVisualSource;
+    cue?: ActiveScenePresentationCue;
   }
 
   let connectionState = $state<ConnectionState>('connecting');
@@ -70,6 +95,9 @@
   let historyAnchored = $state(true);
   let unseenHistory = $state(0);
   let eventCounter = 0;
+  let activeVisualCues = $state<Record<string, ActiveScenePresentationCue>>({});
+  const visualCueTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const seenMessageCueKeys: string[] = [];
   let connection: TiamudConnection | undefined;
   let selectedAccess = $state<CharacterSelection>();
   let accessError = $state<string>();
@@ -88,6 +116,9 @@
     ? undefined
     : new AudioController((url) => new Audio(url), initialPreferences);
   const showMultimedia = $derived(multimediaAllowed(preferences));
+  const systemReducedMotion = typeof window !== 'undefined' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reduceVisualMotion = $derived(motionReduced(preferences, systemReducedMotion));
 
   const connectionLabel = $derived(
     connectionState === 'connected'
@@ -111,6 +142,34 @@
       : undefined,
   );
   const imageRenderKey = $derived(`${sceneAssetKey ?? 'none'}:${failedImageUrls.join('|')}`);
+  const visualEntities = $derived.by((): VisualSceneEntity[] => {
+    return mapVisibleScenePresentation(scene).filter((entity) =>
+      Boolean(directVisualSource(entity.visual.poses.idle)),
+    );
+  });
+  const visualLayout = $derived.by(() =>
+    showMultimedia && Boolean(atmosphereImage)
+      ? layoutSceneEntities(visualEntities.map((entity) => ({
+          id: entity.id,
+          priority: entity.visual.priority,
+          footprint: entity.visual.footprint,
+          preferredAnchor: entity.visual.preferredAnchor,
+        })), { maxVisible: 10 })
+      : { placements: [] as VisualPlacement[], overflow: [] as string[] },
+  );
+  const renderedVisualEntities = $derived.by((): RenderedVisualEntity[] =>
+    visualLayout.placements.flatMap((placement) => {
+      const entity = visualEntities.find((candidate) => candidate.id === placement.id);
+      if (!entity) return [];
+      const cue = activeVisualCues[entity.id];
+      const requested = visualSourceForCue(entity.visual, cue);
+      const source = directVisualSource(requested) ?? directVisualSource(entity.visual.poses.idle);
+      return source ? [{ entity, placement, source, cue }] : [];
+    }),
+  );
+  const overflowVisualEntities = $derived(visualLayout.overflow.slice(0, 5).flatMap((id) =>
+    visualEntities.find((entity) => entity.id === id) ?? [],
+  ));
   const commandSuggestions = $derived.by(() => {
     const commands = [
       'look',
@@ -264,7 +323,63 @@
     ));
   }
 
-  function handleMessage(message: ServerMessage): void {
+  function directVisualSource(
+    source: SceneEntityVisualSource | undefined,
+  ): SceneEntityVisualSource | undefined {
+    return source && (source.avif || source.webp || source.png) ? source : undefined;
+  }
+
+  function visualSourceUrl(source: SceneEntityVisualSource): string {
+    return source.png ?? source.webp ?? source.avif ?? '';
+  }
+
+  function clearEntityVisualCue(entityId: string): void {
+    const timer = visualCueTimers.get(entityId);
+    if (timer !== undefined) clearTimeout(timer);
+    visualCueTimers.delete(entityId);
+    if (activeVisualCues[entityId]) {
+      const { [entityId]: _removed, ...remaining } = activeVisualCues;
+      activeVisualCues = remaining;
+    }
+  }
+
+  function cancelVisualCues(): void {
+    for (const timer of visualCueTimers.values()) clearTimeout(timer);
+    visualCueTimers.clear();
+    seenMessageCueKeys.length = 0;
+    activeVisualCues = {};
+  }
+
+  function resetVisualPresentation(): void {
+    cancelVisualCues();
+  }
+
+  function applyVisualCue(
+    cue: MessagePresentationCue,
+    message: MessageAppendData,
+    eventKey: string,
+  ): void {
+    if (seenMessageCueKeys.includes(eventKey)) return;
+    seenMessageCueKeys.push(eventKey);
+    if (seenMessageCueKeys.length > 128) {
+      seenMessageCueKeys.splice(0, seenMessageCueKeys.length - 128);
+    }
+    const entityId = presentationCueEntityId(cue, message);
+    if (!visualEntities.some((entity) => entity.id === entityId)) return;
+
+    clearEntityVisualCue(entityId);
+    activeVisualCues = {
+      ...activeVisualCues,
+      [entityId]: { ...cue, pose: presentationCuePose(cue), eventKey },
+    };
+    visualCueTimers.set(entityId, setTimeout(() => {
+      visualCueTimers.delete(entityId);
+      const { [entityId]: _expired, ...remaining } = activeVisualCues;
+      activeVisualCues = remaining;
+    }, cue.durationMs));
+  }
+
+  function handleMessage(message: LiveServerMessage): void {
     switch (message.type) {
       case 'server.welcome':
         if (message.data.motd) {
@@ -272,6 +387,13 @@
         }
         break;
       case 'scene.snapshot':
+        {
+          const retained = reconcileScenePresentationCues(scene, message.data, activeVisualCues);
+          for (const entityId of Object.keys(activeVisualCues)) {
+            if (!retained[entityId]) clearEntityVisualCue(entityId);
+          }
+          activeVisualCues = retained;
+        }
         scene = message.data;
         break;
       case 'scene.patch':
@@ -309,6 +431,7 @@
         break;
       case 'entity.remove':
         if (scene?.viewId === message.data.viewId && (scene.revision ?? 0) <= message.data.revision) {
+          clearEntityVisualCue(message.data.id);
           scene = message.data.kind === 'item'
             ? {
                 ...scene,
@@ -345,10 +468,6 @@
           player = { ...player, revision: message.data.revision, map: message.data.map };
         }
         break;
-      case 'sync.snapshot':
-        scene = message.data.scene;
-        player = message.data.player;
-        break;
       case 'message.append':
         eventCounter += 1;
         replaceHistory([
@@ -360,6 +479,13 @@
             response: message.data.text,
           },
         ]);
+        if (message.data.cue) {
+          applyVisualCue(
+            message.data.cue,
+            message.data,
+            `${message.seq ?? 0}:${message.id ?? ''}:${message.data.revision}`,
+          );
+        }
         break;
       case 'action.result':
         handleActionResult(message.data);
@@ -389,6 +515,12 @@
     }
   }
 
+  function handleSyncRecovery(recovery: SyncRecoveryData): void {
+    resetVisualPresentation();
+    scene = recovery.scene;
+    player = recovery.player;
+  }
+
   function submitCommand(value = command): void {
     const submitted = value.trim();
     if (!submitted) {
@@ -409,6 +541,18 @@
   function submitAbility(abilityId: string, target: string | undefined, label: string): void {
     const id = createRequestId();
     const sent = connection?.performAbility(abilityId, target, id) ?? false;
+    recordSubmission(label, id, sent);
+  }
+
+  function submitPromotion(classId: string, label: string): void {
+    const id = createRequestId();
+    const sent = connection?.promote(classId, id) ?? false;
+    recordSubmission(label, id, sent);
+  }
+
+  function submitTalent(graphId: string, nodeId: string, label: string): void {
+    const id = createRequestId();
+    const sent = connection?.acquireTalent(graphId, nodeId, id) ?? false;
     recordSubmission(label, id, sent);
   }
 
@@ -471,9 +615,13 @@
         },
         {
           onMessage: handleMessage,
+          onSync: handleSyncRecovery,
           onStateChange: (state) => {
             connectionState = state;
-            if (state === 'disconnected') markPendingInterrupted();
+            if (state === 'disconnected') {
+              markPendingInterrupted();
+              cancelVisualCues();
+            }
           },
           onProtocolError: () => {
             notice = { level: 'warning', message: 'The server sent a message this client could not read.' };
@@ -499,6 +647,7 @@
     hasEntered = false;
     connectionState = 'disconnected';
     scene = undefined;
+    resetVisualPresentation();
     player = undefined;
     notice = undefined;
     history = [];
@@ -517,6 +666,7 @@
     hasEntered = false;
     connectionState = 'connecting';
     scene = undefined;
+    resetVisualPresentation();
     player = undefined;
     notice = undefined;
     history = [];
@@ -538,6 +688,7 @@
     return () => {
       connection?.close();
       audioController?.stop();
+      resetVisualPresentation();
     };
   });
 </script>
@@ -579,40 +730,86 @@
     <section class="scene" aria-labelledby="scene-title">
       {#if scene}
         {#if atmosphereImage}
-          {#key imageRenderKey}
-            <picture class="atmosphere">
-              {#if atmosphereImage.avif}
-                <source
-                  srcset={atmosphereImage.avifSrcset ?? atmosphereImage.avif}
+          <div class="visual-stage">
+            {#key imageRenderKey}
+              <picture class="atmosphere">
+                {#if atmosphereImage.avif}
+                  <source
+                    srcset={atmosphereImage.avifSrcset ?? atmosphereImage.avif}
+                    sizes="(min-width: 58rem) 65vw, 100vw"
+                    type="image/avif"
+                  />
+                {/if}
+                {#if atmosphereImage.webp}
+                  <source
+                    srcset={atmosphereImage.webpSrcset ?? atmosphereImage.webp}
+                    sizes="(min-width: 58rem) 65vw, 100vw"
+                    type="image/webp"
+                  />
+                {/if}
+                <img
+                  src={imageUrl(atmosphereImage)}
+                  srcset={atmosphereImage.jpegSrcset ?? atmosphereImage.pngSrcset}
                   sizes="(min-width: 58rem) 65vw, 100vw"
-                  type="image/avif"
+                  alt={atmosphereImage.alt}
+                  width={atmosphereImage.width}
+                  height={atmosphereImage.height}
+                  fetchpriority="high"
+                  onerror={(event) => {
+                    const target = event.currentTarget as HTMLImageElement;
+                    const failed = target.currentSrc || target.src;
+                    if (failed && !failedImageUrls.includes(failed)) {
+                      failedImageUrls = [...failedImageUrls, failed];
+                    }
+                  }}
                 />
-              {/if}
-              {#if atmosphereImage.webp}
-                <source
-                  srcset={atmosphereImage.webpSrcset ?? atmosphereImage.webp}
-                  sizes="(min-width: 58rem) 65vw, 100vw"
-                  type="image/webp"
-                />
-              {/if}
-              <img
-                src={imageUrl(atmosphereImage)}
-                srcset={atmosphereImage.jpegSrcset ?? atmosphereImage.pngSrcset}
-                sizes="(min-width: 58rem) 65vw, 100vw"
-                alt={atmosphereImage.alt}
-                width={atmosphereImage.width}
-                height={atmosphereImage.height}
-                fetchpriority="high"
-                onerror={(event) => {
-                  const target = event.currentTarget as HTMLImageElement;
-                  const failed = target.currentSrc || target.src;
-                  if (failed && !failedImageUrls.includes(failed)) {
-                    failedImageUrls = [...failedImageUrls, failed];
-                  }
-                }}
-              />
-            </picture>
-          {/key}
+              </picture>
+            {/key}
+
+            {#if renderedVisualEntities.length > 0}
+              <div class="entity-visual-layer" aria-hidden="true">
+                {#each renderedVisualEntities as visual (visual.entity.id)}
+                  <div
+                    class="entity-visual entity-layer-{visual.entity.visual.layer}"
+                    class:cue-attack={visual.cue?.kind === 'attack'}
+                    class:cue-hit={visual.cue?.kind === 'hit'}
+                    class:cue-heal={visual.cue?.kind === 'heal'}
+                    class:cue-defeat={visual.cue?.kind === 'defeat'}
+                    class:intensity-1={visual.cue?.intensity === 1}
+                    class:intensity-2={visual.cue?.intensity === 2}
+                    class:intensity-3={visual.cue?.intensity === 3}
+                    class:motion-reduced={reduceVisualMotion}
+                    style={`left:${visual.placement.rect.x * 100}%;top:${visual.placement.rect.y * 100}%;width:${visual.placement.rect.width * 100}%;height:${visual.placement.rect.height * 100}%;--cue-duration:${visual.cue?.durationMs ?? 1}ms`}
+                  >
+                    {#key visual.cue?.eventKey ?? 'idle'}
+                      <picture class="entity-sprite">
+                        {#if visual.source.avif}<source srcset={visual.source.avif} type="image/avif" />{/if}
+                        {#if visual.source.webp}<source srcset={visual.source.webp} type="image/webp" />{/if}
+                        <img
+                          src={visualSourceUrl(visual.source)}
+                          alt=""
+                          aria-hidden="true"
+                          decoding="async"
+                        />
+                      </picture>
+                    {/key}
+                  </div>
+                {/each}
+
+                {#if visualLayout.overflow.length > 0}
+                  <div
+                    class="entity-visual-overflow"
+                    title={overflowVisualEntities.map((entity) => entity.label).join(', ')}
+                  >
+                    <span>+{visualLayout.overflow.length}</span>
+                    <ul>
+                      {#each overflowVisualEntities as entity (entity.id)}<li>{entity.label}</li>{/each}
+                    </ul>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
         {/if}
 
         <div class="narrative">
@@ -715,6 +912,8 @@
         oncommand={submitCommand}
         onaction={submitAction}
         onability={submitAbility}
+        onpromote={submitPromotion}
+        ontalent={submitTalent}
       />
 
       <section class="console" aria-labelledby="console-title">

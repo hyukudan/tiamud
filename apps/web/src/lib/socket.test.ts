@@ -5,7 +5,7 @@ import {
   SYNC_RESPONSE_TIMEOUT_MS,
   TiamudConnection,
 } from './socket';
-import type { ConnectionState, ServerMessage } from './protocol';
+import type { ConnectionState, ServerMessage, SyncRecoveryData } from './protocol';
 
 type SocketListener = (event: unknown) => void;
 
@@ -69,6 +69,12 @@ const validPlayerState = () => ({
   character: {
     name: 'Aria', level: 1, experience: 0, nextLevelExperience: 100,
     health: 20, maxHealth: 20, strength: 5, defence: 2, effects: [], recoveryInTicks: null,
+    lineage: { id: 'mortal', label: 'Mortal', description: 'Adaptable people.' },
+    background: null,
+    baseClass: { id: 'wanderer', label: 'Wanderer', description: 'A flexible explorer.' },
+    activeClass: { id: 'wanderer', label: 'Wanderer', description: 'A flexible explorer.' },
+    classHistory: [{ id: 'wanderer', label: 'Wanderer', description: 'A flexible explorer.' }],
+    progressionPoints: {}, talents: [], promotions: [],
   },
   inventory: [],
   equipment: [],
@@ -112,7 +118,7 @@ describe('TiamudConnection', () => {
     connection.close();
   });
 
-  it('sends ability use as a structured action without changing legacy perform', () => {
+  it('sends ability and progression choices as native structured actions', () => {
     const connection = new TiamudConnection(
       'wss://tiamud.test/ws',
       { token: 'token', characterId: 7 },
@@ -137,6 +143,17 @@ describe('TiamudConnection', () => {
     expect(connection.perform('item.take', 'o8888888888888888', 'legacy-1')).toBe(true);
     expect(lastSent(socket)).toMatchObject({
       data: { requestId: 'legacy-1', action: 'item.take', target: 'o8888888888888888' },
+    });
+    expect(connection.promote('stormcaller', 'promote-1')).toBe(true);
+    expect(lastSent(socket)).toMatchObject({
+      data: { requestId: 'promote-1', action: 'progression.promote', classId: 'stormcaller' },
+    });
+    expect(connection.acquireTalent('ember-path', 'steady-flame', 'talent-1')).toBe(true);
+    expect(lastSent(socket)).toMatchObject({
+      data: {
+        requestId: 'talent-1', action: 'progression.talent',
+        graphId: 'ember-path', nodeId: 'steady-flame',
+      },
     });
     connection.close();
   });
@@ -227,12 +244,17 @@ describe('TiamudConnection', () => {
     connection.close();
   });
 
-  it('requests a sync on a sequence gap and suppresses stale scene snapshots', () => {
+  it('requests a sync on a sequence gap and atomically publishes only a matching pair', () => {
     const received: ServerMessage[] = [];
+    const recoveries: SyncRecoveryData[] = [];
     const connection = new TiamudConnection(
       'wss://tiamud.test/ws',
       { token: 'secret', characterId: 42 },
-      { onMessage: (message) => received.push(message), onStateChange: () => undefined },
+      {
+        onMessage: (message) => received.push(message),
+        onSync: (recovery) => recoveries.push(recovery),
+        onStateChange: () => undefined,
+      },
     );
     connection.connect();
     const socket = TestWebSocket.instances[0]!;
@@ -270,21 +292,47 @@ describe('TiamudConnection', () => {
     }));
     socket.receive(JSON.stringify({
       v: 1,
-      type: 'sync.snapshot',
+      type: 'sync.scene',
       seq: 6,
       data: {
+        syncId: 'sync-6',
         afterSeq: 1,
         scene: { title: 'Lantern Square', prose: [], exits: [], items: [] },
+      },
+    }));
+    expect(recoveries).toEqual([]);
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'sync.player',
+      seq: 7,
+      data: {
+        syncId: 'sync-6',
+        afterSeq: 1,
         player: validPlayerState(),
+        complete: true,
       },
     }));
 
     expect(received.map((message) => message.type)).toEqual([
       'server.welcome',
       'action.result',
-      'sync.snapshot',
     ]);
-    expect(received.at(-1)).toMatchObject({ data: { scene: { title: 'Lantern Square' } } });
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0]).toMatchObject({
+      syncId: 'sync-6',
+      afterSeq: 1,
+      scene: { title: 'Lantern Square' },
+      player: { revision: 1 },
+    });
+    socket.receive(JSON.stringify({
+      v: 1, type: 'server.notice', seq: 8,
+      data: { level: 'info', message: 'Recovery complete.' },
+    }));
+    expect(received.map((message) => message.type)).toEqual([
+      'server.welcome',
+      'action.result',
+      'server.notice',
+    ]);
     connection.close();
   });
 
@@ -315,12 +363,17 @@ describe('TiamudConnection', () => {
     connection.close();
   });
 
-  it('cancels the sync timeout after an authoritative sync snapshot', () => {
+  it('keeps the timeout until both correlated halves arrive, then clears it', () => {
     vi.useFakeTimers();
+    const recoveries: SyncRecoveryData[] = [];
     const connection = new TiamudConnection(
       'wss://tiamud.test/ws',
       { token: 'secret', characterId: 42 },
-      { onMessage: () => undefined, onStateChange: () => undefined },
+      {
+        onMessage: () => undefined,
+        onSync: (recovery) => recoveries.push(recovery),
+        onStateChange: () => undefined,
+      },
     );
     connection.connect();
     const socket = TestWebSocket.instances[0]!;
@@ -334,21 +387,98 @@ describe('TiamudConnection', () => {
     }));
     socket.receive(JSON.stringify({
       v: 1,
-      type: 'sync.snapshot',
+      type: 'sync.scene',
       seq: 4,
       data: {
+        syncId: 'sync-4',
         afterSeq: 1,
         scene: { title: 'Lantern Square', prose: [], exits: [], items: [] },
+      },
+    }));
+    vi.advanceTimersByTime(SYNC_RESPONSE_TIMEOUT_MS - 1);
+    expect(recoveries).toEqual([]);
+    expect(socket.closeCalls).not.toContainEqual({
+      code: 4002,
+      reason: 'State synchronization timeout',
+    });
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'sync.player',
+      seq: 5,
+      data: {
+        syncId: 'sync-4',
+        afterSeq: 1,
         player: validPlayerState(),
+        complete: true,
       },
     }));
 
     vi.advanceTimersByTime(SYNC_RESPONSE_TIMEOUT_MS);
 
+    expect(recoveries).toHaveLength(1);
     expect(socket.closeCalls).not.toContainEqual({
       code: 4002,
       reason: 'State synchronization timeout',
     });
+    connection.close();
+  });
+
+  it('ignores duplicate, stale and mismatched recovery halves', () => {
+    const recoveries: SyncRecoveryData[] = [];
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'secret', characterId: 42 },
+      {
+        onMessage: () => undefined,
+        onSync: (recovery) => recoveries.push(recovery),
+        onStateChange: () => undefined,
+      },
+    );
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+    socket.receive(JSON.stringify({ v: 1, type: 'server.welcome', seq: 1, data: {} }));
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'action.result',
+      seq: 3,
+      data: { requestId: 'request-1', ok: true, message: null },
+    }));
+
+    const scene = { title: 'Lantern Square', prose: [], exits: [], items: [] };
+    socket.receive(JSON.stringify({
+      v: 1, type: 'sync.scene', seq: 4,
+      data: { syncId: 'sync-4', afterSeq: 1, scene },
+    }));
+    socket.receive(JSON.stringify({
+      v: 1, type: 'sync.scene', seq: 5,
+      data: { syncId: 'sync-4', afterSeq: 1, scene: { ...scene, title: 'Duplicate' } },
+    }));
+    socket.receive(JSON.stringify({
+      v: 1, type: 'sync.player', seq: 6,
+      data: { syncId: 'sync-6', afterSeq: 1, player: validPlayerState(), complete: true },
+    }));
+    socket.receive(JSON.stringify({
+      v: 1, type: 'sync.player', seq: 7,
+      data: { syncId: 'sync-4', afterSeq: 0, player: validPlayerState(), complete: true },
+    }));
+    expect(recoveries).toEqual([]);
+    socket.receive(JSON.stringify({
+      v: 1, type: 'sync.player', seq: 8,
+      data: { syncId: 'sync-4', afterSeq: 1, player: validPlayerState(), complete: true },
+    }));
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0]?.scene.title).toBe('Lantern Square');
+
+    socket.receive(JSON.stringify({
+      v: 1, type: 'sync.player', seq: 8,
+      data: { syncId: 'sync-4', afterSeq: 1, player: validPlayerState(), complete: true },
+    }));
+    socket.receive(JSON.stringify({
+      v: 1, type: 'sync.scene', seq: 9,
+      data: { syncId: 'sync-9', afterSeq: 1, scene },
+    }));
+    expect(recoveries).toHaveLength(1);
     connection.close();
   });
 

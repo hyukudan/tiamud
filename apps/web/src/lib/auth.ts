@@ -8,13 +8,28 @@ export interface Character {
   accountId?: number;
   name: string;
   roomId?: string;
-  archetype?: Pick<ArchetypeChoice, 'id' | 'label'>;
 }
 
-export interface ArchetypeChoice {
+export interface CharacterOption {
   id: string;
   label: string;
   description: string;
+}
+
+export interface CharacterCreationCatalog {
+  defaultLineageId: string;
+  defaultBackgroundId?: string;
+  defaultBaseClassId: string;
+  lineages: CharacterOption[];
+  backgrounds: CharacterOption[];
+  baseClasses: CharacterOption[];
+}
+
+export interface CharacterCreationSelection {
+  lineageId?: string;
+  /** Omitted means world default; null explicitly selects no background. */
+  backgroundId?: string | null;
+  baseClassId?: string;
 }
 
 export interface AuthenticatedSession {
@@ -40,11 +55,6 @@ type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const hasOnlyKeys = (value: Record<string, unknown>, allowed: readonly string[]): boolean => {
-  const keys = new Set(allowed);
-  return Object.keys(value).every((key) => keys.has(key));
-};
-
 function parseAccount(value: unknown): Account {
   if (!isRecord(value) || typeof value.id !== 'number' || typeof value.name !== 'string') {
     throw new Error('The server returned an invalid account.');
@@ -69,19 +79,11 @@ function parseCharacter(value: unknown): Character {
   }
   const accountId = value.accountId ?? value.account_id;
   const roomId = value.roomId ?? value.room_id;
-  let archetype: Character['archetype'];
-  if (isRecord(value.archetype)) {
-    const id = boundedContentId(value.archetype.id);
-    const label = boundedText(value.archetype.label, 128);
-    if (!id || !label) throw new Error('The server returned an invalid character.');
-    archetype = { id, label };
-  }
   return {
     id: value.id,
     accountId: typeof accountId === 'number' ? accountId : undefined,
     name: value.name,
     roomId: typeof roomId === 'string' ? roomId : undefined,
-    ...(archetype ? { archetype } : {}),
   };
 }
 
@@ -93,19 +95,28 @@ const boundedContentId = (value: unknown): string | undefined => {
   return id && /^[a-z0-9](?:[a-z0-9_.:-]{0,126}[a-z0-9])?$/.test(id) ? id : undefined;
 };
 
-function parseArchetype(value: unknown): ArchetypeChoice {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['id', 'label', 'description'])) {
-    throw new Error('The server returned an invalid archetype catalog.');
-  }
+function parseCharacterOption(value: unknown): CharacterOption {
+  if (!isRecord(value)) throw new Error('The server returned invalid character options.');
   const id = boundedContentId(value.id);
   const label = boundedText(value.label, 128);
   const description = typeof value.description === 'string' && value.description.length <= 2048
     ? value.description
     : undefined;
   if (!id || !label || description === undefined) {
-    throw new Error('The server returned an invalid archetype catalog.');
+    throw new Error('The server returned invalid character options.');
   }
   return { id, label, description };
+}
+
+function parseOptionList(value: unknown, maximum: number): CharacterOption[] {
+  if (!Array.isArray(value) || value.length > maximum) {
+    throw new Error('The server returned invalid character options.');
+  }
+  const options = value.map(parseCharacterOption);
+  if (new Set(options.map((option) => option.id)).size !== options.length) {
+    throw new Error('The server returned invalid character options.');
+  }
+  return options;
 }
 
 async function requestJson(
@@ -165,42 +176,44 @@ export async function loadCharacters(
   return body.characters.map(parseCharacter);
 }
 
-export async function loadArchetypes(
+export async function loadCharacterOptions(
   fetcher: FetchLike = fetch,
-): Promise<ArchetypeChoice[]> {
-  const response = await fetcher('/api/archetypes', {});
-  // Pre-archetype servers do not expose this additive catalog.
-  if (response.status === 404 || response.status === 405) return [];
-  if (!response.ok) {
-    let message = `The request failed (${response.status}).`;
-    try {
-      const body: unknown = await response.json();
-      if (isRecord(body) && typeof body.error === 'string') message = body.error;
-    } catch {
-      // Preserve the useful status if an intermediary returned non-JSON.
-    }
-    throw new Error(message);
+): Promise<CharacterCreationCatalog> {
+  const body = await requestJson('/api/character-options', {}, fetcher);
+  if (!isRecord(body)) throw new Error('The server returned invalid character options.');
+
+  const defaultLineageId = boundedContentId(body.defaultLineageId);
+  const defaultBackgroundId = body.defaultBackgroundId === null || body.defaultBackgroundId === undefined
+    ? undefined
+    : boundedContentId(body.defaultBackgroundId);
+  const defaultBaseClassId = boundedContentId(body.defaultBaseClassId);
+  const lineages = parseOptionList(body.lineages, 16);
+  const backgrounds = parseOptionList(body.backgrounds, 16);
+  const baseClasses = parseOptionList(body.baseClasses, 32);
+  if (
+    !defaultLineageId || !lineages.some((option) => option.id === defaultLineageId) ||
+    !defaultBaseClassId || !baseClasses.some((option) => option.id === defaultBaseClassId) ||
+    (body.defaultBackgroundId !== null && body.defaultBackgroundId !== undefined &&
+      (!defaultBackgroundId || !backgrounds.some((option) => option.id === defaultBackgroundId)))
+  ) {
+    throw new Error('The server returned invalid character options.');
   }
-  const body: unknown = await response.json();
-  if (!isRecord(body) || !hasOnlyKeys(body, ['archetypes']) ||
-    !Array.isArray(body.archetypes) || body.archetypes.length > 32) {
-    throw new Error('The server returned an invalid archetype catalog.');
-  }
-  const archetypes = body.archetypes.map(parseArchetype);
-  if (new Set(archetypes.map((archetype) => archetype.id)).size !== archetypes.length) {
-    throw new Error('The server returned an invalid archetype catalog.');
-  }
-  return archetypes;
+  return {
+    defaultLineageId,
+    ...(defaultBackgroundId ? { defaultBackgroundId } : {}),
+    defaultBaseClassId,
+    lineages,
+    backgrounds,
+    baseClasses,
+  };
 }
 
 export async function createCharacter(
   token: string,
   name: string,
-  archetypeIdOrFetcher?: string | FetchLike,
+  selection: CharacterCreationSelection = {},
   fetcher: FetchLike = fetch,
 ): Promise<Character> {
-  const archetypeId = typeof archetypeIdOrFetcher === 'string' ? archetypeIdOrFetcher : undefined;
-  const requestFetcher = typeof archetypeIdOrFetcher === 'function' ? archetypeIdOrFetcher : fetcher;
   const body = await requestJson(
     '/api/characters',
     {
@@ -209,9 +222,9 @@ export async function createCharacter(
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ name, ...(archetypeId ? { archetypeId } : {}) }),
+      body: JSON.stringify({ name, ...selection }),
     },
-    requestFetcher,
+    fetcher,
   );
   if (!isRecord(body)) {
     throw new Error('The server returned an invalid character.');

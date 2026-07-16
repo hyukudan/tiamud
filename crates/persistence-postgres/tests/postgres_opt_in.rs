@@ -59,6 +59,13 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
              VALUES (3, 1, 2, 'role.set', '{}', 1000);",
         )
         .unwrap();
+    let gameplay_json = r#"{"lineageId":"tiamud:mortal","backgroundId":"tiamud:city-guard","baseClassId":"tiamud:vanguard","activeClassId":"tiamud:bastion","classHistory":["tiamud:vanguard","tiamud:bastion"],"progressionPoints":{"talent":0},"talentNodeRanks":{"tiamud:martial-talents":{"tiamud:guarded-stance":1}},"tags":["tiamud:founder"],"receivedSignals":["tiamud:heard-call"]}"#;
+    sqlite
+        .execute(
+            "UPDATE characters SET gameplay_json = ?1 WHERE id = 10",
+            [gameplay_json],
+        )
+        .unwrap();
     drop(sqlite);
 
     let report =
@@ -70,6 +77,14 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .unwrap()
             .get::<_, i64>(0),
         2
+    );
+    assert_eq!(
+        postgres
+            .query_one("SELECT gameplay_json FROM characters WHERE id = 10", &[])
+            .unwrap()
+            .get::<_, String>(0),
+        gameplay_json,
+        "offline transfer must preserve the native v3 snapshot byte-for-byte"
     );
     assert_eq!(
         postgres

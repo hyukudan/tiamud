@@ -1717,8 +1717,30 @@ mod tests {
             .load_or_create_character(keeper.account.id, "Aster", "room:start")
             .await
             .unwrap();
-        let mut selected_gameplay = CharacterGameplaySnapshot::default();
-        selected_gameplay.attributes.defence = 9;
+        let defaults = CharacterGameplaySnapshot::default();
+        let mut selected_gameplay = CharacterGameplaySnapshot {
+            lineage_id: "tiamud:mortal".into(),
+            background_id: Some("tiamud:city-guard".into()),
+            base_class_id: "tiamud:vanguard".into(),
+            active_class_id: "tiamud:bastion".into(),
+            class_history: vec!["tiamud:vanguard".into(), "tiamud:bastion".into()],
+            attributes: tiamud_core::Attributes {
+                defence: 9,
+                ..defaults.attributes
+            },
+            ..defaults
+        };
+        selected_gameplay
+            .progression_points
+            .insert("talent".into(), 0);
+        selected_gameplay.talent_node_ranks.insert(
+            "tiamud:martial-talents".into(),
+            BTreeMap::from([("tiamud:guarded-stance".into(), 1)]),
+        );
+        selected_gameplay.tags.insert("tiamud:founder".into());
+        selected_gameplay
+            .received_signals
+            .insert("tiamud:heard-call".into());
         let player_character = store
             .load_or_create_character_with_gameplay(
                 player.account.id,
@@ -1752,7 +1774,7 @@ mod tests {
         updated_character
             .item_locations
             .insert("item:lamp".into(), ItemLocationSnapshot::Carried);
-        let gameplay = CharacterGameplaySnapshot::default();
+        let gameplay = selected_gameplay;
         let runtime = WorldRuntimeSnapshot {
             snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
             revision: 9,
@@ -1766,6 +1788,7 @@ mod tests {
             )]),
             npcs: BTreeMap::new(),
             adventure: AdventureRuntimeSnapshot::default(),
+            progression_flags: Default::default(),
         };
         let event = DomainEvent::CharacterMoved {
             actor_id: keeper_character.id,

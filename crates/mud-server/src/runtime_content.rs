@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::Serialize;
 use tiamud_core::{
     AccountRole, AuthorizedRuntimeContext, DomainEvent, PlayerAction, QuestAction, SceneAudio,
     SceneImage, SceneView, SessionId, WeatherKind, World,
@@ -13,8 +14,10 @@ use tiamud_scripting::{
     ScriptLimits, execute_hook,
 };
 use world_pack::{
-    ConditionContext, RoomSceneVariants, ScriptCapability as PackScriptCapability,
-    ScriptDefinition, ScriptHook as PackScriptHook, TimePeriod, Weather,
+    ConditionContext, EntityMediaDefinition, EntityMediaKind, EntitySpriteSource,
+    MAX_PROJECTED_ENTITY_MEDIA, MAX_PROJECTED_ENTITY_POSES, RoomSceneVariants,
+    ScriptCapability as PackScriptCapability, ScriptDefinition, ScriptHook as PackScriptHook,
+    TimePeriod, Weather,
 };
 
 use crate::operations::{RuntimeMetrics, ScriptMetricOutcome};
@@ -24,6 +27,7 @@ pub(crate) const SCRIPT_BATCH_WALL_BUDGET: Duration = Duration::from_millis(50);
 #[derive(Debug)]
 pub(crate) struct RuntimeContent {
     variants: HashMap<String, RoomSceneVariants>,
+    entity_media: HashMap<(EntityMediaKind, String), EntityMediaDefinition>,
     scripts: Vec<RuntimeScript>,
     seed: u64,
     operational_metrics: Option<Arc<RuntimeMetrics>>,
@@ -48,10 +52,64 @@ impl RuntimeContent {
                 .into_iter()
                 .map(|variants| (variants.room_id.clone(), variants))
                 .collect(),
+            entity_media: HashMap::new(),
             scripts,
             seed,
             operational_metrics: None,
         }
+    }
+
+    pub(crate) fn with_entity_media(mut self, media: Vec<EntityMediaDefinition>) -> Self {
+        self.entity_media = media
+            .into_iter()
+            .map(|media| ((media.kind, media.subject_id.clone()), media))
+            .collect();
+        self
+    }
+
+    pub(crate) fn resolve_entity_presentation(
+        &self,
+        world: &World,
+        session: SessionId,
+    ) -> ScenePresentation {
+        let Ok(visible) = world.visible_scene_entity_ids(session) else {
+            return ScenePresentation::default();
+        };
+        let mut candidates = visible
+            .items
+            .into_iter()
+            .filter_map(|entity| {
+                self.entity_media
+                    .get(&(EntityMediaKind::Item, entity.stable_id))
+                    .map(|media| ProjectedEntityMedia::from_definition(entity.opaque_id, media))
+            })
+            .chain(visible.npcs.into_iter().filter_map(|entity| {
+                self.entity_media
+                    .get(&(EntityMediaKind::Npc, entity.stable_id))
+                    .map(|media| ProjectedEntityMedia::from_definition(entity.opaque_id, media))
+            }))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut poses = 0;
+        let entities = candidates
+            .into_iter()
+            .filter(|candidate| {
+                let next = poses + candidate.poses.count();
+                if next > MAX_PROJECTED_ENTITY_POSES {
+                    false
+                } else {
+                    poses = next;
+                    true
+                }
+            })
+            .take(MAX_PROJECTED_ENTITY_MEDIA)
+            .collect();
+        ScenePresentation { entities }
     }
 
     pub(crate) fn with_operational_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
@@ -342,6 +400,122 @@ impl RuntimeContent {
             return reject_script_budget(self, hook, batch_started, "aggregate_budget");
         }
         result
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ScenePresentation {
+    pub(crate) entities: Vec<ProjectedEntityMedia>,
+}
+
+impl ScenePresentation {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+
+    pub(crate) fn contains_entity(&self, entity_id: &str) -> bool {
+        self.entities.iter().any(|entity| entity.id == entity_id)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectedEntityMedia {
+    id: String,
+    alt: String,
+    decorative: bool,
+    footprint: ProjectedFootprint,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preferred_anchor: Option<ProjectedAnchor>,
+    priority: i16,
+    layer: &'static str,
+    poses: ProjectedPoses,
+}
+
+impl ProjectedEntityMedia {
+    fn from_definition(id: String, media: &EntityMediaDefinition) -> Self {
+        Self {
+            id,
+            alt: if media.decorative {
+                String::new()
+            } else {
+                media.alt.resolve("en").unwrap_or_default().to_owned()
+            },
+            decorative: media.decorative,
+            footprint: ProjectedFootprint {
+                width: f32::from(media.footprint.width_milli) / 1_000.0,
+                height: f32::from(media.footprint.height_milli) / 1_000.0,
+            },
+            preferred_anchor: media.preferred_anchor.map(|anchor| ProjectedAnchor {
+                x: f32::from(anchor.x_milli) / 1_000.0,
+                y: f32::from(anchor.y_milli) / 1_000.0,
+            }),
+            priority: media.priority,
+            layer: media.layer.as_str(),
+            poses: ProjectedPoses::from_definition(&media.poses),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+struct ProjectedFootprint {
+    width: f32,
+    height: f32,
+}
+
+impl Eq for ProjectedFootprint {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+struct ProjectedAnchor {
+    x: f32,
+    y: f32,
+}
+
+impl Eq for ProjectedAnchor {}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ProjectedSource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    png: Option<String>,
+}
+
+impl From<&EntitySpriteSource> for ProjectedSource {
+    fn from(source: &EntitySpriteSource) -> Self {
+        Self {
+            webp: source.webp.as_ref().map(|path| format!("/{path}")),
+            png: source.png.as_ref().map(|path| format!("/{path}")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ProjectedPoses {
+    idle: ProjectedSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attack: Option<ProjectedSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hit: Option<ProjectedSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    defeated: Option<ProjectedSource>,
+}
+
+impl ProjectedPoses {
+    fn from_definition(poses: &world_pack::EntitySpritePoses) -> Self {
+        Self {
+            idle: (&poses.idle).into(),
+            attack: poses.attack.as_ref().map(Into::into),
+            hit: poses.hit.as_ref().map(Into::into),
+            defeated: poses.defeated.as_ref().map(Into::into),
+        }
+    }
+
+    fn count(&self) -> usize {
+        1 + usize::from(self.attack.is_some())
+            + usize::from(self.hit.is_some())
+            + usize::from(self.defeated.is_some())
     }
 }
 
@@ -653,6 +827,75 @@ fn script_error_category(error: &ScriptError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_entity_media(subject_id: &str) -> EntityMediaDefinition {
+        let hash = "a".repeat(64);
+        EntityMediaDefinition {
+            kind: EntityMediaKind::Item,
+            subject_id: subject_id.into(),
+            alt: world_pack::LocalizedText(BTreeMap::from([(
+                "en".into(),
+                "A reviewed lantern sprite".into(),
+            )])),
+            decorative: false,
+            footprint: world_pack::NormalizedFootprint {
+                width_milli: 180,
+                height_milli: 420,
+            },
+            preferred_anchor: None,
+            priority: 10,
+            layer: world_pack::EntityMediaLayer::Foreground,
+            poses: world_pack::EntitySpritePoses {
+                idle: EntitySpriteSource {
+                    webp: Some(format!("assets/{hash}/sprite-idle-640.webp")),
+                    png: None,
+                },
+                attack: None,
+                hit: None,
+                defeated: None,
+            },
+        }
+    }
+
+    #[test]
+    fn entity_media_joins_only_visible_opaque_scene_entities() {
+        let session = SessionId(88);
+        let mut world = World::demo();
+        world
+            .connect(
+                session,
+                tiamud_core::CharacterSnapshot {
+                    id: tiamud_core::CharacterId(91),
+                    account_id: tiamud_core::AccountId(92),
+                    name: "Media Observer".into(),
+                    room_id: "demo:lantern-square".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let content = RuntimeContent::default()
+            .with_entity_media(vec![test_entity_media("demo:blue-lantern")]);
+        let scene = world.current_scene(session).unwrap();
+        let visible_id = scene.items[0].id.clone();
+        let projected = content.resolve_entity_presentation(&world, session);
+        let json = serde_json::to_string(&projected).unwrap();
+        assert_eq!(projected.entities.len(), 1);
+        assert!(json.contains(&visible_id));
+        assert!(!json.contains("demo:blue-lantern"));
+
+        world
+            .configure_hidden_item("demo:blue-lantern", 100)
+            .unwrap();
+        let hidden_scene = world.current_scene(session).unwrap();
+        assert!(hidden_scene.items.is_empty());
+        let hidden = content.resolve_entity_presentation(&world, session);
+        assert!(hidden.entities.is_empty());
+        assert!(
+            !serde_json::to_string(&hidden)
+                .unwrap()
+                .contains("blue-lantern")
+        );
+    }
 
     #[test]
     fn selected_variant_projects_reviewed_alt_and_audio_without_author_metadata() {

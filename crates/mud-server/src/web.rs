@@ -6,7 +6,9 @@ use crate::{
     },
     persistence::{CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, StoreError},
     social::{MAX_CHAT_MESSAGE_BYTES, MAX_SOCIAL_TARGET_BYTES},
-    world_actor::{GameError, WorldHandle},
+    world_actor::{
+        CharacterBackgroundSelection, CombatCueKind, GameError, ProjectedViewEvent, WorldHandle,
+    },
 };
 use axum::{
     Json,
@@ -19,7 +21,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rust_embed::RustEmbed;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -29,8 +31,7 @@ use std::{
 };
 use tiamud_core::{
     AccountRole, CharacterId, CharacterSnapshot, EconomyAction, PartyAction, PlayerAction,
-    PlayerStateView, QuestAction, SceneView, SessionId, SocialAction, ViewEvent, WorldError,
-    parse_action,
+    PlayerStateView, QuestAction, SceneView, SessionId, SocialAction, WorldError, parse_action,
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
@@ -45,7 +46,7 @@ const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_PROTOCOL_ERRORS: u8 = 3;
 const MAX_ACTION_TARGET_BYTES: usize = 256;
 const MAX_ABILITY_ID_BYTES: usize = 128;
-const MAX_ARCHETYPE_ID_BYTES: usize = 128;
+const MAX_PROGRESSION_ID_BYTES: usize = 128;
 const MAX_JSON_DEPTH: usize = 16;
 const GLOBAL_REQUEST_CACHE_CAPACITY: usize = 4_096;
 const WS_INBOUND_CAPACITY: usize = 32;
@@ -83,7 +84,27 @@ pub struct CredentialsRequest {
 pub struct CreateCharacterRequest {
     name: String,
     #[serde(default)]
-    archetype_id: Option<String>,
+    lineage_id: Option<String>,
+    #[serde(
+        default,
+        rename = "backgroundId",
+        deserialize_with = "deserialize_background_selection"
+    )]
+    background: CharacterBackgroundSelection,
+    #[serde(default)]
+    base_class_id: Option<String>,
+}
+
+fn deserialize_background_selection<'de, D>(
+    deserializer: D,
+) -> Result<CharacterBackgroundSelection, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match Option::<String>::deserialize(deserializer)? {
+        Some(id) => CharacterBackgroundSelection::Id(id),
+        None => CharacterBackgroundSelection::None,
+    })
 }
 
 #[derive(Serialize)]
@@ -107,7 +128,7 @@ struct ClientAuth {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct ClientCapabilities {
     images: Vec<String>,
     #[serde(rename = "reducedMotion")]
@@ -166,6 +187,12 @@ struct ActionPerformData {
     #[serde(default)]
     ability_id: Option<String>,
     #[serde(default)]
+    class_id: Option<String>,
+    #[serde(default)]
+    graph_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
     target: Option<String>,
     #[serde(default)]
     message: Option<String>,
@@ -206,7 +233,8 @@ enum CoalesceKey {
     Vitals,
     Inventory,
     Map,
-    Sync,
+    SyncScene,
+    SyncPlayer,
     Heartbeat,
 }
 
@@ -341,6 +369,22 @@ impl OutboundHandle {
     }
 
     fn enqueue(&self, frame: OutboundEnvelope) -> EnqueueResult {
+        let encoded_bytes =
+            serde_json::to_vec(&frame.value).map_or(usize::MAX, |encoded| encoded.len());
+        if encoded_bytes > MAX_WS_MESSAGE_BYTES {
+            self.queue
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .disconnect("Server output exceeded the WebSocket message byte budget.");
+            self.metrics.websocket_outbound_budget_exceeded();
+            self.changed.notify_one();
+            warn!(
+                encoded_bytes,
+                maximum_bytes = MAX_WS_MESSAGE_BYTES,
+                "rejected oversized outbound WebSocket frame"
+            );
+            return EnqueueResult::Disconnect;
+        }
         let (result, before, after) = {
             let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
             let before = queue.frames.len();
@@ -660,8 +704,8 @@ pub async fn characters(State(state): State<AppState>, headers: HeaderMap) -> Re
     }
 }
 
-pub async fn archetypes(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({"archetypes": state.world.archetype_catalog()}))
+pub async fn character_options(State(state): State<AppState>) -> Json<Value> {
+    Json(json!(state.world.creation_catalog()))
 }
 
 pub async fn create_character(
@@ -673,23 +717,39 @@ pub async fn create_character(
         Ok(token) => token,
         Err(status) => return bearer_error(status),
     };
-    if request.archetype_id.as_deref().is_some_and(|id| {
-        !valid_definition_id(id, MAX_ARCHETYPE_ID_BYTES)
-            || !state
-                .world
-                .archetype_catalog()
-                .iter()
-                .any(|archetype| archetype.id == id)
-    }) {
+    let catalog = state.world.creation_catalog();
+    let known = |id: &str, options: &[tiamud_core::ProgressionOptionView]| {
+        valid_definition_id(id, MAX_PROGRESSION_ID_BYTES)
+            && options.iter().any(|option| option.id == id)
+    };
+    if request
+        .lineage_id
+        .as_deref()
+        .is_some_and(|id| !known(id, &catalog.lineages))
+        || matches!(
+            &request.background,
+            CharacterBackgroundSelection::Id(id) if !known(id, &catalog.backgrounds)
+        )
+        || request
+            .base_class_id
+            .as_deref()
+            .is_some_and(|id| !known(id, &catalog.base_classes))
+    {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Unknown character archetype."})),
+            Json(json!({"error": "Unknown character creation option."})),
         )
             .into_response();
     }
     match state
         .world
-        .create_authenticated_character_with_archetype(token, request.name, request.archetype_id)
+        .create_authenticated_character_with_progression(
+            token,
+            request.name,
+            request.lineage_id,
+            request.background,
+            request.base_class_id,
+        )
         .await
     {
         Ok(character) => {
@@ -802,6 +862,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
 
     let mut sequence = 1_u64;
     let mut last_scene = entered.scene;
+    let mut last_presentation = entered.presentation;
     let mut last_player = entered.player;
     let mut ignore_world_through_revision = None;
     if !queue_sequenced(
@@ -815,8 +876,13 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
             "motd": "Welcome to Tiamud, a text-complete world of adventures.",
             "sessionId": entered.session_id.0.to_string()
         }),
-    ) || !queue_scene(&outbound, &mut sequence, "scene.snapshot", &last_scene)
-        || !queue_player(&outbound, &mut sequence, &last_player)
+    ) || !queue_scene(
+        &outbound,
+        &mut sequence,
+        "scene.snapshot",
+        &last_scene,
+        &last_presentation,
+    ) || !queue_player(&outbound, &mut sequence, &last_player)
         || !queue_media_transition(
             &outbound,
             &mut sequence,
@@ -872,7 +938,13 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         }
                         ignore_world_through_revision = None;
                         for event in delivery.events {
-                            if !queue_view_event(&outbound, &mut sequence, event) {
+                            if !queue_view_event(
+                                &outbound,
+                                &mut sequence,
+                                event,
+                                &last_presentation,
+                                &delivery.presentation,
+                            ) {
                                 break 'session;
                             }
                         }
@@ -882,6 +954,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         let previous_scene = last_scene.clone();
                         let previous_player = last_player.clone();
                         last_scene = delivery.scene;
+                        last_presentation = delivery.presentation;
                         last_player = delivery.player;
                         if !queue_semantic_updates(
                             &outbound,
@@ -901,16 +974,18 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             &mut sequence,
                             "scene.snapshot",
                             &last_scene,
+                            &last_presentation,
                         ) || !queue_player(&outbound, &mut sequence, &last_player) {
                             break;
                         }
                     }
                     Some(SessionDelivery::WorldLagged) => {
                         match state.world.current_state(entered.session_id).await {
-                            Ok((scene, player)) => {
+                            Ok((scene, presentation, player)) => {
                                 let previous_audio = last_scene.audio.clone();
                                 ignore_world_through_revision = Some(scene.revision);
                                 last_scene = scene;
+                                last_presentation = presentation;
                                 last_player = player;
                                 if !queue_notice(
                                     &outbound,
@@ -927,6 +1002,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                     &mut sequence,
                                     "scene.snapshot",
                                     &last_scene,
+                                    &last_presentation,
                                 ) || !queue_player(&outbound, &mut sequence, &last_player)
                                 {
                                     break;
@@ -992,17 +1068,13 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         }
                     }
                     ClientMessage::Sync { after_seq } => {
-                        if !queue_sequenced(
+                        if !queue_sync_recovery(
                             &outbound,
                             &mut sequence,
-                            OutboundPriority::Critical,
-                            Some(CoalesceKey::Sync),
-                            "sync.snapshot",
-                            json!({
-                                "afterSeq": after_seq,
-                                "scene": &last_scene,
-                                "player": &last_player
-                            }),
+                            after_seq,
+                            &last_scene,
+                            &last_presentation,
+                            &last_player,
                         ) {
                             break;
                         }
@@ -1039,6 +1111,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 &mut sequence,
                                 "scene.snapshot",
                                 &last_scene,
+                                &last_presentation,
                             ) || !queue_player(
                                 &outbound,
                                 &mut sequence,
@@ -1063,12 +1136,14 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
 
                         let action_started = Instant::now();
                         let previous_scene = last_scene.clone();
+                        let previous_presentation = last_presentation.clone();
                         let previous_player = last_player.clone();
                         let (ok, message, events) = match requested.action {
                             Ok(action) => match state.world.apply(entered.session_id, action).await {
                                 Ok(outcome) => {
                                     state.metrics.action_finished(action_started.elapsed(), true);
                                     last_scene = outcome.scene;
+                                    last_presentation = outcome.presentation;
                                     last_player = outcome.player;
                                     (true, outcome.output, outcome.events)
                                 }
@@ -1105,7 +1180,13 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             break;
                         }
                         for event in events {
-                            if !queue_view_event(&outbound, &mut sequence, event) {
+                            if !queue_view_event(
+                                &outbound,
+                                &mut sequence,
+                                event,
+                                &previous_presentation,
+                                &last_presentation,
+                            ) {
                                 break 'session;
                             }
                         }
@@ -1133,6 +1214,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             &mut sequence,
                             "scene.snapshot",
                             &last_scene,
+                            &last_presentation,
                         ) || !queue_player(&outbound, &mut sequence, &last_player)) {
                             break;
                         }
@@ -1273,15 +1355,36 @@ fn queue_scene(
     sequence: &mut u64,
     message_type: &'static str,
     scene: &SceneView,
+    presentation: &crate::runtime_content::ScenePresentation,
 ) -> bool {
-    queue_sequenced(
-        outbound,
-        sequence,
-        OutboundPriority::State,
-        Some(CoalesceKey::Scene),
-        message_type,
-        json!(scene),
-    )
+    let mut presentation = presentation.clone();
+    loop {
+        let mut data = json!(scene);
+        if !presentation.is_empty() {
+            data["presentation"] = json!(presentation);
+        }
+        let candidate = json!({
+            "v": 1,
+            "type": message_type,
+            "seq": *sequence,
+            "data": data,
+        });
+        if serde_json::to_vec(&candidate).is_ok_and(|bytes| bytes.len() <= MAX_WS_MESSAGE_BYTES)
+            || presentation.entities.is_empty()
+        {
+            return queue_sequenced(
+                outbound,
+                sequence,
+                OutboundPriority::State,
+                Some(CoalesceKey::Scene),
+                message_type,
+                data,
+            );
+        }
+        // Definitions are priority-descending; shed the least important
+        // optional annotation before risking the semantic scene frame.
+        presentation.entities.pop();
+    }
 }
 
 fn queue_player(outbound: &OutboundHandle, sequence: &mut u64, player: &PlayerStateView) -> bool {
@@ -1293,6 +1396,70 @@ fn queue_player(outbound: &OutboundHandle, sequence: &mut u64, player: &PlayerSt
         "player.snapshot",
         json!(player),
     )
+}
+
+/// Emits gap recovery as two independently budgeted, correlated frames.
+///
+/// A single combined scene/player snapshot can exceed the WebSocket protocol's
+/// 16 KiB frame budget even when both projections are independently valid. The
+/// stable sync ID lets clients discard incomplete/coalesced older pairs without
+/// treating either recovery frame's sequence jump as another gap.
+fn queue_sync_recovery(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    after_seq: u64,
+    scene: &SceneView,
+    presentation: &crate::runtime_content::ScenePresentation,
+    player: &PlayerStateView,
+) -> bool {
+    let sync_id = format!("sync-{}", *sequence);
+    let mut presentation = presentation.clone();
+    let scene_queued = loop {
+        let data = json!({
+            "syncId": sync_id,
+            "afterSeq": after_seq,
+            "scene": scene_with_presentation(scene, &presentation),
+        });
+        let candidate = json!({"v": 1, "type": "sync.scene", "seq": *sequence, "data": data});
+        if serde_json::to_vec(&candidate).is_ok_and(|bytes| bytes.len() <= MAX_WS_MESSAGE_BYTES)
+            || presentation.entities.is_empty()
+        {
+            break queue_sequenced(
+                outbound,
+                sequence,
+                OutboundPriority::Critical,
+                Some(CoalesceKey::SyncScene),
+                "sync.scene",
+                data,
+            );
+        }
+        presentation.entities.pop();
+    };
+    scene_queued
+        && queue_sequenced(
+            outbound,
+            sequence,
+            OutboundPriority::Critical,
+            Some(CoalesceKey::SyncPlayer),
+            "sync.player",
+            json!({
+                "syncId": sync_id,
+                "afterSeq": after_seq,
+                "player": player,
+                "complete": true,
+            }),
+        )
+}
+
+fn scene_with_presentation(
+    scene: &SceneView,
+    presentation: &crate::runtime_content::ScenePresentation,
+) -> Value {
+    let mut value = json!(scene);
+    if !presentation.is_empty() {
+        value["presentation"] = json!(presentation);
+    }
+    value
 }
 
 fn queue_media_transition(
@@ -1543,14 +1710,49 @@ fn queue_notice(outbound: &OutboundHandle, sequence: &mut u64, message: &str) ->
     )
 }
 
-fn queue_view_event(outbound: &OutboundHandle, sequence: &mut u64, event: ViewEvent) -> bool {
+fn queue_view_event(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    event: ProjectedViewEvent,
+    previous_presentation: &crate::runtime_content::ScenePresentation,
+    current_presentation: &crate::runtime_content::ScenePresentation,
+) -> bool {
+    let mut data = json!(event.event);
+    if let Some(cue) = event.combat_cue.filter(|cue| {
+        previous_presentation.contains_entity(&cue.entity_id)
+            || current_presentation.contains_entity(&cue.entity_id)
+    }) {
+        data["cue"] = match cue.kind {
+            CombatCueKind::Attack => json!({
+                "kind": "attack",
+                "entityId": cue.entity_id,
+                "pose": "attack",
+                "intensity": 2,
+                "durationMs": 420,
+            }),
+            CombatCueKind::Hit => json!({
+                "kind": "hit",
+                "entityId": cue.entity_id,
+                "pose": "hit",
+                "intensity": 2,
+                "durationMs": 320,
+            }),
+            CombatCueKind::Defeat => json!({
+                "kind": "defeat",
+                "entityId": cue.entity_id,
+                "pose": "defeated",
+                "intensity": 3,
+                "durationMs": 700,
+            }),
+        };
+    }
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::Narrative,
         None,
         "message.append",
-        json!(event),
+        data,
     )
 }
 
@@ -1691,6 +1893,16 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 || data.ability_id.as_deref().is_some_and(|ability_id| {
                     !valid_definition_id(ability_id, MAX_ABILITY_ID_BYTES)
                 })
+                || data.class_id.as_deref().is_some_and(|class_id| {
+                    !valid_definition_id(class_id, MAX_PROGRESSION_ID_BYTES)
+                })
+                || data.graph_id.as_deref().is_some_and(|graph_id| {
+                    !valid_definition_id(graph_id, MAX_PROGRESSION_ID_BYTES)
+                })
+                || data
+                    .node_id
+                    .as_deref()
+                    .is_some_and(|node_id| !valid_definition_id(node_id, MAX_PROGRESSION_ID_BYTES))
                 || data.target.as_deref().is_some_and(|target| {
                     target.is_empty()
                         || target.len() > MAX_ACTION_TARGET_BYTES
@@ -1710,9 +1922,12 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 return Err(ClientMessageError::InvalidEnvelope);
             }
             let signature = format!(
-                "action:{}\0{}\0{}\0{}\0{:?}\0{}\0{:?}",
+                "action:{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{}\0{:?}",
                 data.action,
                 data.ability_id.as_deref().unwrap_or_default(),
+                data.class_id.as_deref().unwrap_or_default(),
+                data.graph_id.as_deref().unwrap_or_default(),
+                data.node_id.as_deref().unwrap_or_default(),
                 data.target.as_deref().unwrap_or_default(),
                 data.message.as_deref().unwrap_or_default(),
                 data.duration_seconds,
@@ -1800,6 +2015,8 @@ fn valid_definition_id(value: &str, maximum: usize) -> bool {
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
     let target = data.target.as_deref();
+    let has_progression_fields =
+        || data.class_id.is_some() || data.graph_id.is_some() || data.node_id.is_some();
     let no_target = || {
         target
             .is_none()
@@ -1813,6 +2030,9 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     };
     let no_social_extras = || {
         (data.ability_id.is_none()
+            && data.class_id.is_none()
+            && data.graph_id.is_none()
+            && data.node_id.is_none()
             && data.message.is_none()
             && data.duration_seconds.is_none()
             && data.reason.is_none()
@@ -1850,7 +2070,10 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "item.examine" => gameplay_target().map(PlayerAction::Examine),
         "combat.attack" => gameplay_target().map(PlayerAction::Attack),
         "combat.ability" => {
-            if data.message.is_some()
+            if data.class_id.is_some()
+                || data.graph_id.is_some()
+                || data.node_id.is_some()
+                || data.message.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -1865,6 +2088,44 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 ability_id,
                 target: data.target.clone(),
             })
+        }
+        "progression.promote" => {
+            if data.target.is_some()
+                || data.ability_id.is_some()
+                || data.graph_id.is_some()
+                || data.node_id.is_some()
+                || data.message.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
+                return Err("Class promotion has unexpected fields.".to_owned());
+            }
+            data.class_id
+                .clone()
+                .map(|class_id| PlayerAction::Promote { class_id })
+                .ok_or_else(|| "Class promotion requires classId.".to_owned())
+        }
+        "progression.talent" => {
+            if data.target.is_some()
+                || data.ability_id.is_some()
+                || data.class_id.is_some()
+                || data.message.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
+                return Err("Talent acquisition has unexpected fields.".to_owned());
+            }
+            let graph_id = data
+                .graph_id
+                .clone()
+                .ok_or_else(|| "Talent acquisition requires graphId.".to_owned())?;
+            let node_id = data
+                .node_id
+                .clone()
+                .ok_or_else(|| "Talent acquisition requires nodeId.".to_owned())?;
+            Ok(PlayerAction::AcquireTalent { graph_id, node_id })
         }
         "item.use" => gameplay_target().map(PlayerAction::Use),
         "item.equip" => gameplay_target().map(PlayerAction::Equip),
@@ -1900,7 +2161,8 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "world.time" => exact_no_fields().map(|()| PlayerAction::Time),
         "social.say" => {
             no_target()?;
-            if data.ability_id.is_some()
+            if has_progression_fields()
+                || data.ability_id.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -1915,7 +2177,8 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "social.tell" => {
             let target = social_target()?;
-            if data.ability_id.is_some()
+            if has_progression_fields()
+                || data.ability_id.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -1930,7 +2193,8 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "social.who" => exact_no_fields().map(|()| PlayerAction::Social(SocialAction::Who)),
         "social.help" => {
-            if data.ability_id.is_some()
+            if has_progression_fields()
+                || data.ability_id.is_some()
                 || data.message.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
@@ -1955,7 +2219,8 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "social.report" => {
             let target = social_target()?;
-            if data.ability_id.is_some()
+            if has_progression_fields()
+                || data.ability_id.is_some()
                 || data.message.is_some()
                 || data.duration_seconds.is_some()
                 || data.role.is_some()
@@ -1973,7 +2238,11 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "moderation.mute" | "moderation.ban" => {
             let target = social_target()?;
-            if data.ability_id.is_some() || data.message.is_some() || data.role.is_some() {
+            if has_progression_fields()
+                || data.ability_id.is_some()
+                || data.message.is_some()
+                || data.role.is_some()
+            {
                 return Err("Moderation action has unexpected fields.".to_owned());
             }
             let reason = data
@@ -2009,7 +2278,8 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "moderation.role" => {
             let target = social_target()?;
-            if data.ability_id.is_some()
+            if has_progression_fields()
+                || data.ability_id.is_some()
                 || data.message.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
@@ -2035,7 +2305,11 @@ fn public_game_error(error: &GameError) -> String {
         | GameError::World(WorldError::AbilityNotKnown)
         | GameError::World(WorldError::AbilityUnavailable)
         | GameError::World(WorldError::InsufficientResource)
-        | GameError::World(WorldError::InvalidAbilityTarget) => error.to_string(),
+        | GameError::World(WorldError::InvalidAbilityTarget)
+        | GameError::World(WorldError::ClassNotFound)
+        | GameError::World(WorldError::PromotionUnavailable)
+        | GameError::World(WorldError::TalentUnavailable)
+        | GameError::World(WorldError::InsufficientProgressionPoints) => error.to_string(),
         GameError::World(
             WorldError::PartyUnavailable
             | WorldError::PartyForbidden
@@ -2217,18 +2491,119 @@ fn websocket_request_allowed(headers: &HeaderMap) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn character_creation_keeps_the_legacy_shape_and_accepts_only_camel_case_archetype_ids() {
-        let legacy: CreateCharacterRequest = serde_json::from_str(r#"{"name":"Aria"}"#).unwrap();
-        assert_eq!(legacy.name, "Aria");
-        assert_eq!(legacy.archetype_id, None);
+    fn test_entity_presentation() -> crate::runtime_content::ScenePresentation {
+        let session = SessionId(8_800);
+        let mut world = tiamud_core::World::demo();
+        world
+            .connect(
+                session,
+                tiamud_core::CharacterSnapshot {
+                    id: CharacterId(8_801),
+                    account_id: tiamud_core::AccountId(8_802),
+                    name: "Presentation Test".into(),
+                    room_id: "demo:lantern-square".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let hash = "a".repeat(64);
+        let media = world_pack::EntityMediaDefinition {
+            kind: world_pack::EntityMediaKind::Item,
+            subject_id: "demo:blue-lantern".into(),
+            alt: world_pack::LocalizedText(BTreeMap::from([(
+                "en".into(),
+                "A blue lantern".into(),
+            )])),
+            decorative: false,
+            footprint: world_pack::NormalizedFootprint {
+                width_milli: 180,
+                height_milli: 420,
+            },
+            preferred_anchor: None,
+            priority: 10,
+            layer: world_pack::EntityMediaLayer::Foreground,
+            poses: world_pack::EntitySpritePoses {
+                idle: world_pack::EntitySpriteSource {
+                    webp: Some(format!("assets/{hash}/sprite-idle-640.webp")),
+                    png: Some(format!("assets/{hash}/sprite-idle-640.png")),
+                },
+                attack: None,
+                hit: None,
+                defeated: None,
+            },
+        };
+        crate::runtime_content::RuntimeContent::default()
+            .with_entity_media(vec![media])
+            .resolve_entity_presentation(&world, session)
+    }
 
-        let selected: CreateCharacterRequest =
-            serde_json::from_str(r#"{"name":"Aria","archetypeId":"vanguard"}"#).unwrap();
-        assert_eq!(selected.archetype_id.as_deref(), Some("vanguard"));
+    fn test_player_state() -> PlayerStateView {
+        let session = SessionId(8_810);
+        let mut world = tiamud_core::World::demo();
+        world
+            .connect(
+                session,
+                tiamud_core::CharacterSnapshot {
+                    id: CharacterId(8_811),
+                    account_id: tiamud_core::AccountId(8_812),
+                    name: "Player State Test".into(),
+                    room_id: "demo:lantern-square".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        world.player_state_view(session).unwrap()
+    }
+
+    fn test_scene() -> SceneView {
+        let session = SessionId(8_820);
+        let mut world = tiamud_core::World::demo();
+        world
+            .connect(
+                session,
+                tiamud_core::CharacterSnapshot {
+                    id: CharacterId(8_821),
+                    account_id: tiamud_core::AccountId(8_822),
+                    name: "Scene Test".into(),
+                    room_id: "demo:lantern-square".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        world.current_scene(session).unwrap()
+    }
+
+    #[test]
+    fn character_creation_uses_clean_v3_fields_and_preserves_background_intent() {
+        let defaults: CreateCharacterRequest = serde_json::from_str(r#"{"name":"Aria"}"#).unwrap();
+        assert_eq!(defaults.name, "Aria");
+        assert_eq!(defaults.lineage_id, None);
+        assert_eq!(defaults.background, CharacterBackgroundSelection::Default);
+        assert_eq!(defaults.base_class_id, None);
+
+        let none: CreateCharacterRequest =
+            serde_json::from_str(r#"{"name":"Aria","backgroundId":null}"#).unwrap();
+        assert_eq!(none.background, CharacterBackgroundSelection::None);
+
+        let selected: CreateCharacterRequest = serde_json::from_str(
+            r#"{"name":"Aria","lineageId":"stonekin","backgroundId":"guard","baseClassId":"vanguard"}"#,
+        )
+        .unwrap();
+        assert_eq!(selected.lineage_id.as_deref(), Some("stonekin"));
+        assert_eq!(
+            selected.background,
+            CharacterBackgroundSelection::Id("guard".into())
+        );
+        assert_eq!(selected.base_class_id.as_deref(), Some("vanguard"));
         assert!(
             serde_json::from_str::<CreateCharacterRequest>(
-                r#"{"name":"Aria","archetype_id":"vanguard"}"#
+                r#"{"name":"Aria","base_class_id":"vanguard"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<CreateCharacterRequest>(
+                r#"{"name":"Aria","archetypeId":"vanguard"}"#
             )
             .is_err()
         );
@@ -2272,6 +2647,28 @@ mod tests {
             "ab".repeat(32)
         );
         assert!(parse_client_hello(&no_images).is_some());
+
+        let additive_capability = format!(
+            r#"{{"v":1,"type":"client.hello","data":{{"client":"web","capabilities":{{"images":[],"reducedMotion":true,"audio":false,"sceneSprites":true}} ,"auth":{{"token":"{}","characterId":7}}}}}}"#,
+            "ab".repeat(32)
+        );
+        assert!(parse_client_hello(&additive_capability).is_some());
+
+        for malformed_capabilities in [
+            r#"{"images":"avif","reducedMotion":false,"audio":false}"#,
+            r#"{"images":[],"reducedMotion":"no","audio":false}"#,
+        ] {
+            let hello = format!(
+                r#"{{"v":1,"type":"client.hello","data":{{"client":"web","capabilities":{malformed_capabilities},"auth":{{"token":"{}","characterId":7}}}}}}"#,
+                "ab".repeat(32)
+            );
+            assert!(parse_client_hello(&hello).is_none());
+        }
+        let malformed_auth = format!(
+            r#"{{"v":1,"type":"client.hello","data":{{"client":"web","capabilities":{{"images":[],"reducedMotion":false,"audio":false}},"auth":{{"token":"{}","characterId":"7"}}}}}}"#,
+            "ab".repeat(32)
+        );
+        assert!(parse_client_hello(&malformed_auth).is_none());
     }
 
     #[test]
@@ -2414,6 +2811,44 @@ mod tests {
                 target: Some("guardian".into()),
             })
         );
+
+        let ClientMessage::Action(promotion) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-promote","action":"progression.promote","classId":"tiamud:bastion"}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("structured class promotion must parse");
+        };
+        assert_eq!(
+            promotion.action,
+            Ok(PlayerAction::Promote {
+                class_id: "tiamud:bastion".into(),
+            })
+        );
+
+        let ClientMessage::Action(talent) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-talent","action":"progression.talent","graphId":"tiamud:martial-talents","nodeId":"tiamud:bulwark"}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("structured talent acquisition must parse");
+        };
+        assert_eq!(
+            talent.action,
+            Ok(PlayerAction::AcquireTalent {
+                graph_id: "tiamud:martial-talents".into(),
+                node_id: "tiamud:bulwark".into(),
+            })
+        );
+
+        let ClientMessage::Action(incomplete_talent) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-talent-missing","action":"progression.talent","graphId":"tiamud:martial-talents"}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("invalid structured talent must remain an action result");
+        };
+        assert!(incomplete_talent.action.is_err());
 
         let ClientMessage::Action(missing_ability) = parse_client_message(
             r#"{"v":1,"type":"action.perform","data":{"requestId":"request-ability-missing","action":"combat.ability","target":"guardian"}}"#,
@@ -2727,14 +3162,19 @@ mod tests {
         assert!(queue_view_event(
             &outbound,
             &mut sequence,
-            ViewEvent {
-                revision: 8,
-                kind: tiamud_core::ViewEventKind::Gameplay,
-                text: "The brigand strikes you.".to_owned(),
-                actor_id: "opaque-actor".to_owned(),
-                target_id: Some("opaque-target".to_owned()),
-                item_id: None,
-            }
+            ProjectedViewEvent {
+                event: tiamud_core::ViewEvent {
+                    revision: 8,
+                    kind: tiamud_core::ViewEventKind::Gameplay,
+                    text: "The brigand strikes you.".to_owned(),
+                    actor_id: "opaque-actor".to_owned(),
+                    target_id: Some("opaque-target".to_owned()),
+                    item_id: None,
+                },
+                combat_cue: None,
+            },
+            &crate::runtime_content::ScenePresentation::default(),
+            &crate::runtime_content::ScenePresentation::default(),
         ));
 
         let frame = outbound.pop().expect("projected event must be queued");
@@ -2742,6 +3182,85 @@ mod tests {
         assert_eq!(frame.value["data"]["actorId"], "opaque-actor");
         assert_eq!(frame.value["data"]["targetId"], "opaque-target");
         assert!(frame.value["data"].get("roomId").is_none());
+        assert!(frame.value["data"].get("cue").is_none());
+    }
+
+    #[test]
+    fn combat_cues_decorate_messages_only_for_presented_opaque_entities() {
+        let presentation = test_entity_presentation();
+        let presented_id = serde_json::to_value(&presentation).unwrap()["entities"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let empty = crate::runtime_content::ScenePresentation::default();
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+
+        let projected = |kind, actor_id: String, target_id: Option<String>, entity_id: String| {
+            ProjectedViewEvent {
+                event: tiamud_core::ViewEvent {
+                    revision: 8,
+                    kind: tiamud_core::ViewEventKind::Gameplay,
+                    text: "Authoritative combat narration.".into(),
+                    actor_id,
+                    target_id,
+                    item_id: None,
+                },
+                combat_cue: Some(crate::world_actor::AuthoritativeCombatCue { kind, entity_id }),
+            }
+        };
+        assert!(queue_view_event(
+            &outbound,
+            &mut sequence,
+            projected(
+                CombatCueKind::Attack,
+                presented_id.clone(),
+                Some("o0000000000000001".into()),
+                presented_id.clone(),
+            ),
+            &presentation,
+            &empty,
+        ));
+        assert!(queue_view_event(
+            &outbound,
+            &mut sequence,
+            projected(
+                CombatCueKind::Hit,
+                "o0000000000000001".into(),
+                Some(presented_id.clone()),
+                presented_id.clone(),
+            ),
+            &empty,
+            &presentation,
+        ));
+        assert!(queue_view_event(
+            &outbound,
+            &mut sequence,
+            projected(
+                CombatCueKind::Defeat,
+                "o0000000000000001".into(),
+                Some("o0000000000000002".into()),
+                "o0000000000000002".into(),
+            ),
+            &empty,
+            &empty,
+        ));
+
+        let attack = outbound.pop().unwrap().value;
+        assert_eq!(attack["data"]["cue"]["kind"], "attack");
+        assert_eq!(attack["data"]["cue"]["entityId"], presented_id);
+        assert_eq!(attack["data"]["cue"]["pose"], "attack");
+        let hit = outbound.pop().unwrap().value;
+        assert_eq!(hit["data"]["cue"]["kind"], "hit");
+        assert_eq!(hit["data"]["cue"]["entityId"], presented_id);
+        assert_eq!(hit["data"]["cue"]["pose"], "hit");
+        let suppressed = outbound.pop().unwrap().value;
+        assert!(suppressed["data"].get("cue").is_none());
+        assert_eq!(
+            suppressed["data"]["text"],
+            "Authoritative combat narration."
+        );
+        assert!(!attack.to_string().contains("demo:blue-lantern"));
     }
 
     #[test]
@@ -2822,13 +3341,13 @@ mod tests {
         let player = world.player_state_view(session).unwrap();
         let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
         let mut sequence = 1;
-        assert!(queue_sequenced(
+        assert!(queue_sync_recovery(
             &outbound,
             &mut sequence,
-            OutboundPriority::Critical,
-            Some(CoalesceKey::Sync),
-            "sync.snapshot",
-            json!({"afterSeq": 0, "scene": &scene, "player": &player}),
+            0,
+            &scene,
+            &crate::runtime_content::ScenePresentation::default(),
+            &player,
         ));
         assert!(queue_player(&outbound, &mut sequence, &player));
 
@@ -2837,7 +3356,9 @@ mod tests {
             wire.push_str(&frame.value.to_string());
         }
         assert!(wire.contains("\"type\":\"player.snapshot\""));
-        assert!(wire.contains("\"type\":\"sync.snapshot\""));
+        assert!(wire.contains("\"type\":\"sync.scene\""));
+        assert!(wire.contains("\"type\":\"sync.player\""));
+        assert!(wire.contains("\"syncId\":\"sync-1\""));
         for forbidden in [
             "demo:lantern-square",
             "demo:blue-lantern",
@@ -2854,6 +3375,282 @@ mod tests {
         ] {
             assert!(!wire.contains(forbidden), "wire leaked {forbidden}: {wire}");
         }
+    }
+
+    #[test]
+    fn sync_recovery_is_two_bounded_correlated_and_coalescible_frames() {
+        let mut world = tiamud_core::World::demo();
+        let session = SessionId(78);
+        world
+            .connect(
+                session,
+                CharacterSnapshot {
+                    id: CharacterId(1),
+                    account_id: tiamud_core::AccountId(2),
+                    name: "Sync Tester".into(),
+                    room_id: world.start_room_id().to_owned(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let scene = world.current_scene(session).unwrap();
+        let player = world.player_state_view(session).unwrap();
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 10;
+
+        assert!(queue_sync_recovery(
+            &outbound,
+            &mut sequence,
+            4,
+            &scene,
+            &crate::runtime_content::ScenePresentation::default(),
+            &player
+        ));
+        assert!(queue_sync_recovery(
+            &outbound,
+            &mut sequence,
+            9,
+            &scene,
+            &crate::runtime_content::ScenePresentation::default(),
+            &player
+        ));
+
+        let frames = std::iter::from_fn(|| outbound.pop()).collect::<Vec<_>>();
+        assert_eq!(
+            frames.len(),
+            2,
+            "the newer recovery pair coalesces the old pair"
+        );
+        assert_eq!(frames[0].value["type"], "sync.scene");
+        assert_eq!(frames[1].value["type"], "sync.player");
+        assert_eq!(frames[0].value["data"]["syncId"], "sync-12");
+        assert_eq!(frames[1].value["data"]["syncId"], "sync-12");
+        assert_eq!(frames[0].value["data"]["afterSeq"], 9);
+        assert_eq!(frames[1].value["data"]["afterSeq"], 9);
+        assert_eq!(frames[1].value["data"]["complete"], true);
+        assert!(frames.iter().all(|frame| {
+            serde_json::to_vec(&frame.value).unwrap().len() <= MAX_WS_MESSAGE_BYTES
+        }));
+    }
+
+    #[test]
+    fn split_sync_accepts_individually_bounded_states_that_do_not_fit_together() {
+        let mut world = tiamud_core::World::demo();
+        let session = SessionId(80);
+        world
+            .connect(
+                session,
+                CharacterSnapshot {
+                    id: CharacterId(5),
+                    account_id: tiamud_core::AccountId(6),
+                    name: "Split Budget".into(),
+                    room_id: world.start_room_id().to_owned(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let mut scene = world.current_scene(session).unwrap();
+        scene.prose = vec!["s".repeat(5_000), "t".repeat(5_000)];
+        let mut player = world.player_state_view(session).unwrap();
+        player.inventory = (0..2)
+            .map(|index| tiamud_core::PlayerItemView {
+                id: format!("o{index:016x}"),
+                label: format!("Budget item {index}"),
+                description: "p".repeat(2_500),
+                actions: Vec::new(),
+            })
+            .collect();
+        let old_combined = json!({
+            "v": 1,
+            "type": "sync.snapshot",
+            "seq": 1,
+            "data": {"afterSeq": 0, "scene": &scene, "player": &player},
+        });
+        assert!(serde_json::to_vec(&old_combined).unwrap().len() > MAX_WS_MESSAGE_BYTES);
+
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_sync_recovery(
+            &outbound,
+            &mut sequence,
+            0,
+            &scene,
+            &crate::runtime_content::ScenePresentation::default(),
+            &player
+        ));
+        let frames = std::iter::from_fn(|| outbound.pop()).collect::<Vec<_>>();
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|frame| {
+            serde_json::to_vec(&frame.value).unwrap().len() <= MAX_WS_MESSAGE_BYTES
+        }));
+    }
+
+    #[test]
+    fn optional_entity_presentation_is_shed_before_semantic_scene_exceeds_budget() {
+        let presentation = test_entity_presentation();
+        assert_eq!(presentation.entities.len(), 1);
+        let mut scene = test_scene();
+        let mut chosen = None;
+        for prose_bytes in (1_000..MAX_WS_MESSAGE_BYTES).rev() {
+            scene.prose = vec!["x".repeat(prose_bytes)];
+            let semantic = json!({"v":1,"type":"scene.snapshot","seq":1,"data":&scene});
+            let decorated = json!({
+                "v":1,
+                "type":"scene.snapshot",
+                "seq":1,
+                "data":scene_with_presentation(&scene, &presentation),
+            });
+            if serde_json::to_vec(&semantic).unwrap().len() <= MAX_WS_MESSAGE_BYTES
+                && serde_json::to_vec(&decorated).unwrap().len() > MAX_WS_MESSAGE_BYTES
+            {
+                chosen = Some(scene.clone());
+                break;
+            }
+        }
+        let scene = chosen.expect("a presentation-only overflow boundary must exist");
+
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_scene(
+            &outbound,
+            &mut sequence,
+            "scene.snapshot",
+            &scene,
+            &presentation,
+        ));
+        let frame = outbound.pop().unwrap();
+        assert_eq!(frame.value["data"]["title"], scene.title);
+        assert!(frame.value["data"].get("presentation").is_none());
+        assert!(serde_json::to_vec(&frame.value).unwrap().len() <= MAX_WS_MESSAGE_BYTES);
+
+        let player = test_player_state();
+        let mut sync_scene_model = test_scene();
+        let mut sync_chosen = None;
+        for prose_bytes in (1_000..MAX_WS_MESSAGE_BYTES).rev() {
+            sync_scene_model.prose = vec!["x".repeat(prose_bytes)];
+            let semantic = json!({
+                "v":1,
+                "type":"sync.scene",
+                "seq":1,
+                "data":{"syncId":"sync-1","afterSeq":0,"scene":&sync_scene_model},
+            });
+            let decorated = json!({
+                "v":1,
+                "type":"sync.scene",
+                "seq":1,
+                "data":{
+                    "syncId":"sync-1",
+                    "afterSeq":0,
+                    "scene":scene_with_presentation(&sync_scene_model, &presentation),
+                },
+            });
+            if serde_json::to_vec(&semantic).unwrap().len() <= MAX_WS_MESSAGE_BYTES
+                && serde_json::to_vec(&decorated).unwrap().len() > MAX_WS_MESSAGE_BYTES
+            {
+                sync_chosen = Some(sync_scene_model.clone());
+                break;
+            }
+        }
+        let sync_scene_model =
+            sync_chosen.expect("a sync presentation-only overflow boundary must exist");
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_sync_recovery(
+            &outbound,
+            &mut sequence,
+            0,
+            &sync_scene_model,
+            &presentation,
+            &player,
+        ));
+        let sync_scene = outbound.pop().unwrap();
+        assert_eq!(sync_scene.value["type"], "sync.scene");
+        assert!(
+            sync_scene.value["data"]["scene"]
+                .get("presentation")
+                .is_none()
+        );
+        assert!(serde_json::to_vec(&sync_scene.value).unwrap().len() <= MAX_WS_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn scene_snapshot_projects_entity_media_with_only_observer_opaque_ids() {
+        let scene = test_scene();
+        let presentation = test_entity_presentation();
+        let opaque_id = serde_json::to_value(&presentation).unwrap()["entities"][0]["id"].clone();
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_scene(
+            &outbound,
+            &mut sequence,
+            "scene.snapshot",
+            &scene,
+            &presentation,
+        ));
+        let frame = outbound.pop().unwrap();
+        let wire = frame.value.to_string();
+        assert_eq!(
+            frame.value["data"]["presentation"]["entities"][0]["id"],
+            opaque_id
+        );
+        assert!(wire.contains("sprite-idle-640.webp"));
+        assert!(!wire.contains("demo:blue-lantern"));
+        assert!(!scene.as_plain_text().contains("sprite-idle"));
+    }
+
+    #[test]
+    fn oversized_scene_and_player_snapshots_fail_closed_before_queueing() {
+        let mut world = tiamud_core::World::demo();
+        let session = SessionId(79);
+        world
+            .connect(
+                session,
+                CharacterSnapshot {
+                    id: CharacterId(3),
+                    account_id: tiamud_core::AccountId(4),
+                    name: "Budget Tester".into(),
+                    room_id: world.start_room_id().to_owned(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let mut scene = world.current_scene(session).unwrap();
+        scene.prose = (0..32).map(|_| "s".repeat(4_096)).collect();
+        let mut player = world.player_state_view(session).unwrap();
+        player.inventory = (0..256)
+            .map(|index| tiamud_core::PlayerItemView {
+                id: format!("o{index:016x}"),
+                label: format!("Oversized budget item {index}"),
+                description: "p".repeat(4_096),
+                actions: Vec::new(),
+            })
+            .collect();
+
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let outbound = OutboundHandle::new(4, metrics.clone());
+        let mut sequence = 1;
+        assert!(!queue_scene(
+            &outbound,
+            &mut sequence,
+            "scene.snapshot",
+            &scene,
+            &crate::runtime_content::ScenePresentation::default()
+        ));
+        assert!(outbound.pop().is_none());
+        assert!(outbound.take_disconnect_reason().is_some());
+        assert!(metrics.prometheus(0).contains(
+            "tiamud_outbound_budget_exceeded_total{transport=\"websocket\",message=\"frame\"} 1"
+        ));
+
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let outbound = OutboundHandle::new(4, metrics.clone());
+        let mut sequence = 1;
+        assert!(!queue_player(&outbound, &mut sequence, &player));
+        assert!(outbound.pop().is_none());
+        assert!(outbound.take_disconnect_reason().is_some());
+        assert!(metrics.prometheus(0).contains(
+            "tiamud_outbound_budget_exceeded_total{transport=\"websocket\",message=\"frame\"} 1"
+        ));
     }
 
     #[test]

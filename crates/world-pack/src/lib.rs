@@ -7,14 +7,18 @@ use thiserror::Error;
 
 mod authoring;
 mod composition;
+mod progression;
 
 pub use authoring::{
     AudioChannel, AudioCue, Condition, ConditionContext, ConditionField, ConditionValidationError,
     ConditionValidationErrors, ConditionValue, ContentTest, ContentTestExpectation,
-    ContentTestFailure, ContentTestReport, DocumentToolError, EntityDiff, LightLevel,
-    LocalizedText, PreviewFormat, ResolvedScene, RoomMediaDefinition, RoomPerceptionDefinition,
-    RoomSceneVariants, SceneResolutionError, SceneVariant, ScriptCapability, ScriptDefinition,
-    ScriptHook, ScriptLimitsDefinition, TimePeriod, Weather, WorldPackDiff, WorldPackDocument,
+    ContentTestFailure, ContentTestReport, DocumentToolError, EntityDiff, EntityMediaDefinition,
+    EntityMediaKind, EntityMediaLayer, EntitySpritePoses, EntitySpriteSource, LightLevel,
+    LocalizedText, MAX_ENTITY_MEDIA_DEFINITIONS, MAX_PROJECTED_ENTITY_MEDIA,
+    MAX_PROJECTED_ENTITY_POSES, NormalizedAnchor, NormalizedFootprint, PreviewFormat,
+    ResolvedScene, RoomMediaDefinition, RoomPerceptionDefinition, RoomSceneVariants,
+    SceneResolutionError, SceneVariant, ScriptCapability, ScriptDefinition, ScriptHook,
+    ScriptLimitsDefinition, TimePeriod, Weather, WorldPackDiff, WorldPackDocument,
 };
 pub use composition::{
     AREA_PACK_SCHEMA_VERSION, AreaComposition, AreaCrossReference, AreaCrossReferenceKind,
@@ -23,8 +27,17 @@ pub use composition::{
     MAX_TOTAL_AREA_BYTES, ProjectArea, WORLD_PROJECT_SCHEMA_VERSION, WorldProjectManifest,
     compose_world_project,
 };
+pub use progression::{
+    AdvancedClassDefinition, BackgroundDefinition, BaseClassDefinition,
+    CharacterDefaultsDefinition, CharacterProgressionDefinition, GrantDefinition,
+    LevelGrantDefinition, LevelThresholdDefinition, LineageDefinition, MAX_ADVANCED_CLASSES,
+    MAX_BACKGROUNDS, MAX_BASE_CLASSES, MAX_GRANTS_PER_ENTRY, MAX_LINEAGES, MAX_NODES_PER_GRAPH,
+    MAX_PROGRESSION_POINT_POOLS, MAX_PROGRESSION_POINTS, MAX_RANKS_PER_NODE, MAX_REQUIREMENT_DEPTH,
+    MAX_REQUIREMENT_NODES, MAX_TALENT_GRAPHS, RequirementDefinition, RequirementDisclosure,
+    RequirementPredicate, TalentGraphDefinition, TalentNodeDefinition, TalentRankDefinition,
+};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 pub const MAX_ARCHETYPES: usize = 32;
 pub const MAX_ABILITIES: usize = 512;
 pub const MAX_NPC_ABILITY_SETS: usize = 512;
@@ -111,6 +124,9 @@ pub struct GameplayDefinition {
     pub npc_prototypes: Vec<NpcPrototype>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_spawns: Vec<NpcSpawn>,
+    /// Canonical WorldPack v3 character creation and advancement rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_progression: Option<CharacterProgressionDefinition>,
     /// Archetype selected when character creation does not name one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_archetype_id: Option<String>,
@@ -130,6 +146,7 @@ impl GameplayDefinition {
             && self.item_rules.is_empty()
             && self.npc_prototypes.is_empty()
             && self.npc_spawns.is_empty()
+            && self.character_progression.is_none()
             && self.default_archetype_id.is_none()
             && self.archetypes.is_empty()
             && self.abilities.is_empty()
@@ -171,10 +188,16 @@ pub struct LevelProgressionDefinition {
     pub level: u32,
     /// Cumulative experience required to enter this level.
     pub total_experience_required: u64,
+    /// Base-stat increases only: `max_health` raises the ceiling without
+    /// healing. The authored cumulative value must remain within engine caps.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attribute_gains: BTreeMap<String, u32>,
+    /// Authored cumulative ranks must remain within the skill cap; runtime
+    /// saturation is only a defensive safeguard for restored state.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub skill_gains: BTreeMap<String, u16>,
+    /// Capacity increases only: current pools are preserved, and a resource
+    /// first introduced by a milestone starts empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resource_gains: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -208,7 +231,7 @@ pub struct AbilityDefinition {
 pub enum AbilityCategory {
     Martial,
     Spell,
-    Innate,
+    Utility,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -582,6 +605,8 @@ impl WorldPack {
             .map(|item| item.id.as_str())
             .collect::<HashSet<_>>();
         let mut ruled_items = HashSet::new();
+        let max_gameplay_value =
+            i32::try_from(MAX_GAMEPLAY_VALUE).expect("MAX_GAMEPLAY_VALUE fits in i32");
         for rule in &self.gameplay.item_rules {
             if !ruled_items.insert(rule.item_id.as_str()) {
                 errors.push(ValidationError::InvalidGameplay(format!(
@@ -595,11 +620,13 @@ impl WorldPack {
                     rule.item_id
                 )));
             }
-            if rule.attack_bonus < 0
-                || rule.heal_amount < 0
-                || rule
-                    .effect
-                    .is_some_and(|effect| effect.magnitude <= 0 || effect.remaining_ticks == 0)
+            if !(0..=max_gameplay_value).contains(&rule.attack_bonus)
+                || !(0..=max_gameplay_value).contains(&rule.heal_amount)
+                || rule.effect.is_some_and(|effect| {
+                    !(1..=MAX_ABILITY_EFFECT_MAGNITUDE).contains(&effect.magnitude)
+                        || !(1..=MAX_ABILITY_EFFECT_DURATION_TICKS)
+                            .contains(&effect.remaining_ticks)
+                })
             {
                 errors.push(ValidationError::InvalidGameplay(format!(
                     "item {:?} has invalid bonuses or effect bounds",
@@ -613,10 +640,10 @@ impl WorldPack {
             if prototype.id.trim().is_empty()
                 || prototype.name.trim().is_empty()
                 || prototype.description.trim().is_empty()
-                || prototype.level == 0
-                || prototype.max_health <= 0
-                || prototype.strength <= 0
-                || prototype.defence < 0
+                || !(1..=MAX_PROGRESSION_LEVEL).contains(&prototype.level)
+                || !(1..=max_gameplay_value).contains(&prototype.max_health)
+                || !(1..=max_gameplay_value).contains(&prototype.strength)
+                || !(0..=max_gameplay_value).contains(&prototype.defence)
                 || prototype.respawn_ticks == 0
             {
                 errors.push(ValidationError::InvalidGameplay(format!(
@@ -651,6 +678,13 @@ impl WorldPack {
         }
 
         validate_character_and_abilities(&self.gameplay, &prototypes, &mut errors);
+        if let Some(progression) = &self.gameplay.character_progression {
+            progression::validate_character_progression(
+                progression,
+                &self.gameplay.abilities,
+                &mut errors,
+            );
+        }
 
         let mut spawn_ids = HashSet::new();
         let mut used_prototypes = HashSet::new();
@@ -974,6 +1008,8 @@ fn validate_archetype(
         .keys()
         .map(String::as_str)
         .collect::<HashSet<_>>();
+    let mut projected_attribute_values = archetype.initial_attributes.clone();
+    let mut projected_skill_values = archetype.initial_skills.clone();
     validate_u32_map(
         &archetype.initial_attributes,
         MAX_STATS_PER_ARCHETYPE,
@@ -1103,6 +1139,31 @@ fn validate_archetype(
             &format!("archetype {:?} level {level} attribute gains", archetype.id),
             errors,
         );
+        for (attribute_id, gain) in &progression.attribute_gains {
+            let value = projected_attribute_values
+                .entry(attribute_id.clone())
+                .or_default();
+            let Some(total) = value.checked_add(*gain) else {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "archetype {:?} attribute {:?} overflows during progression",
+                        archetype.id, attribute_id
+                    ),
+                );
+                continue;
+            };
+            if total > MAX_GAMEPLAY_VALUE {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "archetype {:?} attribute {:?} exceeds {MAX_GAMEPLAY_VALUE} during progression",
+                        archetype.id, attribute_id
+                    ),
+                );
+            }
+            *value = total.min(MAX_GAMEPLAY_VALUE);
+        }
         projected_attribute_ids.extend(
             progression
                 .attribute_gains
@@ -1126,6 +1187,29 @@ fn validate_archetype(
             &format!("archetype {:?} level {level} skill gains", archetype.id),
             errors,
         );
+        for (skill_id, gain) in &progression.skill_gains {
+            let value = projected_skill_values.entry(skill_id.clone()).or_default();
+            let Some(total) = value.checked_add(*gain) else {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "archetype {:?} skill {:?} overflows during progression",
+                        archetype.id, skill_id
+                    ),
+                );
+                continue;
+            };
+            if total > MAX_SKILL_VALUE {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "archetype {:?} skill {:?} exceeds {MAX_SKILL_VALUE} during progression",
+                        archetype.id, skill_id
+                    ),
+                );
+            }
+            *value = total.min(MAX_SKILL_VALUE);
+        }
         skill_ids.extend(progression.skill_gains.keys().map(String::as_str));
         if skill_ids.len() > MAX_STATS_PER_ARCHETYPE {
             invalid_gameplay(
@@ -1690,6 +1774,16 @@ pub enum ValidationError {
     InvalidRoomImageAlt { room_id: String, reason: String },
     #[error("room {room_id:?} has an invalid audio cue: {reason}")]
     InvalidRoomAudio { room_id: String, reason: String },
+    #[error("WorldPack declares more than the bounded number of entity media definitions")]
+    TooManyEntityMedia,
+    #[error("entity media subject {kind}:{subject_id} appears more than once")]
+    DuplicateEntityMedia { kind: String, subject_id: String },
+    #[error("entity media subject {kind}:{subject_id} is invalid: {reason}")]
+    InvalidEntityMedia {
+        kind: String,
+        subject_id: String,
+        reason: String,
+    },
     #[error("perception policy references missing room {room_id:?}")]
     MissingRoomPerceptionRoom { room_id: String },
     #[error("room {room_id:?} defines perception policy more than once")]
@@ -1858,6 +1952,109 @@ mod tests {
     }
 
     #[test]
+    fn item_gameplay_values_cannot_exceed_authored_caps() {
+        let max_gameplay_value =
+            i32::try_from(MAX_GAMEPLAY_VALUE).expect("MAX_GAMEPLAY_VALUE fits in i32");
+        let base_rule = ItemRule {
+            item_id: "test:blade".into(),
+            equipment_slot: Some(EquipmentSlot::Weapon),
+            attack_bonus: 1,
+            heal_amount: 0,
+            consumable: false,
+            effect: None,
+        };
+        let invalid_rules = [
+            ItemRule {
+                attack_bonus: max_gameplay_value + 1,
+                ..base_rule.clone()
+            },
+            ItemRule {
+                heal_amount: max_gameplay_value + 1,
+                ..base_rule.clone()
+            },
+            ItemRule {
+                effect: Some(EffectRule {
+                    kind: EffectKind::Strength,
+                    magnitude: MAX_ABILITY_EFFECT_MAGNITUDE + 1,
+                    remaining_ticks: 1,
+                }),
+                ..base_rule.clone()
+            },
+            ItemRule {
+                effect: Some(EffectRule {
+                    kind: EffectKind::Strength,
+                    magnitude: 1,
+                    remaining_ticks: MAX_ABILITY_EFFECT_DURATION_TICKS + 1,
+                }),
+                ..base_rule
+            },
+        ];
+
+        for rule in invalid_rules {
+            let mut candidate = pack();
+            candidate.items.push(Item {
+                id: "test:blade".into(),
+                name: "test blade".into(),
+                description: "A blade used to verify authoring bounds.".into(),
+                aliases: Vec::new(),
+            });
+            candidate.rooms[0].items.push("test:blade".into());
+            candidate.gameplay.item_rules.push(rule);
+
+            assert!(candidate.validate().unwrap_err().0.iter().any(|error| {
+                matches!(error, ValidationError::InvalidGameplay(message)
+                    if message.contains("invalid bonuses or effect bounds"))
+            }));
+        }
+    }
+
+    #[test]
+    fn npc_gameplay_values_cannot_exceed_authored_caps() {
+        let max_gameplay_value =
+            i32::try_from(MAX_GAMEPLAY_VALUE).expect("MAX_GAMEPLAY_VALUE fits in i32");
+        let base_prototype = NpcPrototype {
+            id: "test:sentinel".into(),
+            name: "sentinel".into(),
+            description: "A sentinel used to verify authoring bounds.".into(),
+            level: 1,
+            max_health: 10,
+            strength: 2,
+            defence: 1,
+            experience_reward: 1,
+            respawn_ticks: 1,
+            loot_item_ids: Vec::new(),
+        };
+        let mut invalid_prototypes = Vec::new();
+        let mut invalid = base_prototype.clone();
+        invalid.level = MAX_PROGRESSION_LEVEL + 1;
+        invalid_prototypes.push(invalid);
+        let mut invalid = base_prototype.clone();
+        invalid.max_health = max_gameplay_value + 1;
+        invalid_prototypes.push(invalid);
+        let mut invalid = base_prototype.clone();
+        invalid.strength = max_gameplay_value + 1;
+        invalid_prototypes.push(invalid);
+        let mut invalid = base_prototype;
+        invalid.defence = max_gameplay_value + 1;
+        invalid_prototypes.push(invalid);
+
+        for prototype in invalid_prototypes {
+            let mut candidate = pack();
+            candidate.gameplay.npc_spawns.push(NpcSpawn {
+                id: "test:sentinel-1".into(),
+                prototype_id: prototype.id.clone(),
+                room_id: "test:1".into(),
+            });
+            candidate.gameplay.npc_prototypes.push(prototype);
+
+            assert!(candidate.validate().unwrap_err().0.iter().any(|error| {
+                matches!(error, ValidationError::InvalidGameplay(message)
+                    if message.contains("invalid required fields"))
+            }));
+        }
+    }
+
+    #[test]
     fn duplicate_room_ids_and_vnums_are_rejected() {
         let mut pack = pack();
         pack.rooms.push(room("test:1", 1));
@@ -2011,7 +2208,7 @@ mod tests {
         let errors = legacy.validate().unwrap_err().0;
         assert!(errors.contains(&ValidationError::UnsupportedSchemaVersion {
             found: 1,
-            supported: 2,
+            supported: CURRENT_SCHEMA_VERSION,
         }));
         assert!(errors.contains(&ValidationError::EmptyStartRoomId));
     }

@@ -47,7 +47,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Compose strict AreaPack v1 modules offline into one canonical runtime WorldPack v2.
+    /// Compose strict AreaPack v2 modules offline into one canonical runtime WorldPack v3.
     Compose {
         project: PathBuf,
         #[arg(short, long)]
@@ -931,6 +931,20 @@ fn validate_document_assets(path: &Path, document: &WorldPackDocument) -> Result
             }
             if let Some(audio) = &variant.audio {
                 validate_asset_exists(path, &audio.path)?;
+            }
+        }
+    }
+    for media in &document.entity_media {
+        let sources = std::iter::once(&media.poses.idle)
+            .chain(media.poses.attack.iter())
+            .chain(media.poses.hit.iter())
+            .chain(media.poses.defeated.iter());
+        for source in sources {
+            for relative in [source.webp.as_deref(), source.png.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                validate_asset_exists(path, relative)?;
             }
         }
     }

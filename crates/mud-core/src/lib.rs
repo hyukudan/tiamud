@@ -1,8 +1,10 @@
 //! Transport-independent world model for Tiamud.
 
 mod ability;
+mod progression;
 
 pub use ability::*;
+pub use progression::*;
 
 use serde::{Deserialize, Serialize};
 use slotmap::{SlotMap, new_key_type};
@@ -86,6 +88,13 @@ pub enum PlayerAction {
     Ability {
         ability_id: String,
         target: Option<String>,
+    },
+    Promote {
+        class_id: String,
+    },
+    AcquireTalent {
+        graph_id: String,
+        node_id: String,
     },
     Use(String),
     Equip(String),
@@ -199,6 +208,29 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if normalised == "time" {
         return Ok(PlayerAction::Time);
+    }
+    if let Some(class_id) = normalised.strip_prefix("promote ").map(str::trim) {
+        if class_id.is_empty() {
+            return Err(ParseActionError::MissingTarget { command: "promote" });
+        }
+        return Ok(PlayerAction::Promote {
+            class_id: class_id.to_owned(),
+        });
+    }
+    if normalised == "promote" {
+        return Err(ParseActionError::MissingTarget { command: "promote" });
+    }
+    if let Some(rest) = normalised.strip_prefix("talent learn ").map(str::trim) {
+        let mut parts = rest.split_whitespace();
+        let graph_id = parts.next();
+        let node_id = parts.next();
+        if graph_id.is_none() || node_id.is_none() || parts.next().is_some() {
+            return Err(ParseActionError::MissingTarget { command: "talent" });
+        }
+        return Ok(PlayerAction::AcquireTalent {
+            graph_id: graph_id.expect("checked").to_owned(),
+            node_id: node_id.expect("checked").to_owned(),
+        });
     }
     if normalised == "balance" {
         return Ok(PlayerAction::Economy(EconomyAction::Balance));
@@ -609,7 +641,12 @@ pub struct PlayerStateView {
 #[serde(rename_all = "camelCase")]
 pub struct PlayerCharacterView {
     pub name: String,
-    pub archetype: ArchetypeView,
+    pub lineage: LineageView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<BackgroundView>,
+    pub base_class: ClassView,
+    pub active_class: ClassView,
+    pub class_history: Vec<ClassView>,
     pub level: u32,
     pub experience: u64,
     pub next_level_experience: u64,
@@ -623,6 +660,9 @@ pub struct PlayerCharacterView {
     pub abilities: Vec<AbilityView>,
     pub resistances: Vec<ResistanceView>,
     pub statuses: Vec<StatusView>,
+    pub progression_points: BTreeMap<String, u16>,
+    pub talents: Vec<TalentGraphView>,
+    pub promotions: Vec<PromotionView>,
     pub effects: Vec<ActiveEffect>,
     pub recovery_in_ticks: Option<u64>,
 }
@@ -879,14 +919,20 @@ pub struct Attributes {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CharacterGameplaySnapshot {
-    #[serde(default = "default_archetype_id")]
-    pub archetype_id: String,
+    pub lineage_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_id: Option<String>,
+    pub base_class_id: String,
+    pub active_class_id: String,
+    pub class_history: Vec<String>,
     pub level: u32,
     pub experience: u64,
     pub vitals: Vitals,
     pub attributes: Attributes,
     #[serde(default)]
     pub resources: BTreeMap<String, ResourcePool>,
+    #[serde(default)]
+    pub resource_regeneration: BTreeMap<String, u32>,
     #[serde(default)]
     pub ability_ids: Vec<String>,
     /// Absolute logical tick at which an ability becomes available again.
@@ -906,6 +952,14 @@ pub struct CharacterGameplaySnapshot {
     pub statuses: Vec<ActiveStatusEffect>,
     #[serde(default = "default_skills")]
     pub skills: BTreeMap<String, u16>,
+    #[serde(default)]
+    pub progression_points: BTreeMap<String, u16>,
+    #[serde(default)]
+    pub talent_node_ranks: BTreeMap<String, BTreeMap<String, u8>>,
+    #[serde(default)]
+    pub tags: BTreeSet<String>,
+    #[serde(default)]
+    pub received_signals: BTreeSet<String>,
     pub equipment: BTreeMap<EquipmentSlot, String>,
     pub effects: Vec<ActiveEffect>,
     pub recovery_at_tick: Option<u64>,
@@ -934,10 +988,6 @@ fn default_coin_balance() -> u64 {
     40
 }
 
-fn default_archetype_id() -> String {
-    "wanderer".to_owned()
-}
-
 fn default_skills() -> BTreeMap<String, u16> {
     BTreeMap::from([
         ("combat".to_owned(), 10),
@@ -946,12 +996,84 @@ fn default_skills() -> BTreeMap<String, u16> {
     ])
 }
 
+fn builtin_progression_definition() -> CharacterProgressionDefinition {
+    CharacterProgressionDefinition {
+        defaults: CharacterDefaultsDefinition {
+            lineage_id: "core:human".into(),
+            background_id: None,
+            base_class_id: "core:wanderer".into(),
+        },
+        level_thresholds: (2..=MAX_PROGRESSION_LEVEL)
+            .map(|level| LevelThresholdDefinition {
+                level,
+                total_experience_required: u64::from(level - 1) * 100,
+                point_awards: BTreeMap::new(),
+            })
+            .collect(),
+        lineages: vec![LineageDefinition {
+            id: "core:human".into(),
+            name: "Human".into(),
+            description: "A versatile mortal lineage.".into(),
+            ui_order: 0,
+            creation_grants: Vec::new(),
+            talent_graph_ids: Vec::new(),
+        }],
+        backgrounds: Vec::new(),
+        base_classes: vec![BaseClassDefinition {
+            id: "core:wanderer".into(),
+            name: "Wanderer".into(),
+            description: "A flexible adventurer with a balanced foundation.".into(),
+            ui_order: 0,
+            creation_grants: vec![
+                GrantDefinition::Attribute {
+                    attribute_id: "max_health".into(),
+                    amount: 20,
+                },
+                GrantDefinition::Attribute {
+                    attribute_id: "strength".into(),
+                    amount: 5,
+                },
+                GrantDefinition::Attribute {
+                    attribute_id: "defence".into(),
+                    amount: 2,
+                },
+                GrantDefinition::Skill {
+                    skill_id: "combat".into(),
+                    amount: 10,
+                },
+                GrantDefinition::Skill {
+                    skill_id: "exploration".into(),
+                    amount: 5,
+                },
+            ],
+            level_grants: (2..=MAX_PROGRESSION_LEVEL)
+                .map(|level| LevelGrantDefinition {
+                    level,
+                    grants: vec![
+                        GrantDefinition::Attribute {
+                            attribute_id: "max_health".into(),
+                            amount: 5,
+                        },
+                        GrantDefinition::Attribute {
+                            attribute_id: "strength".into(),
+                            amount: 2,
+                        },
+                        GrantDefinition::Attribute {
+                            attribute_id: "defence".into(),
+                            amount: 1,
+                        },
+                    ],
+                })
+                .collect(),
+            talent_graph_ids: Vec::new(),
+        }],
+        advanced_classes: Vec::new(),
+        talent_graphs: Vec::new(),
+    }
+}
+
 fn valid_script_flag(flag: &str) -> bool {
-    !flag.is_empty()
-        && flag.len() <= 64
-        && flag.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
+    valid_definition_id(flag)
 }
 
 fn perception_senses(gameplay: &CharacterGameplaySnapshot) -> BTreeSet<Sense> {
@@ -1107,12 +1229,18 @@ pub struct WorldRuntimeSnapshot {
     pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
     #[serde(default)]
     pub adventure: AdventureRuntimeSnapshot,
+    #[serde(default)]
+    pub progression_flags: BTreeSet<String>,
 }
 
 impl Default for CharacterGameplaySnapshot {
     fn default() -> Self {
         Self {
-            archetype_id: default_archetype_id(),
+            lineage_id: "core:human".into(),
+            background_id: None,
+            base_class_id: "core:wanderer".into(),
+            active_class_id: "core:wanderer".into(),
+            class_history: vec!["core:wanderer".into()],
             level: 1,
             experience: 0,
             vitals: Vitals {
@@ -1125,6 +1253,7 @@ impl Default for CharacterGameplaySnapshot {
                 additional: BTreeMap::new(),
             },
             resources: BTreeMap::new(),
+            resource_regeneration: BTreeMap::new(),
             ability_ids: Vec::new(),
             ability_cooldowns: BTreeMap::new(),
             ability_global_ready_tick: 0,
@@ -1132,6 +1261,10 @@ impl Default for CharacterGameplaySnapshot {
             resistances: BTreeMap::new(),
             statuses: Vec::new(),
             skills: default_skills(),
+            progression_points: BTreeMap::new(),
+            talent_node_ranks: BTreeMap::new(),
+            tags: BTreeSet::new(),
+            received_signals: BTreeSet::new(),
             equipment: BTreeMap::new(),
             effects: Vec::new(),
             recovery_at_tick: None,
@@ -1159,6 +1292,23 @@ pub struct AuthorizedRuntimeContext {
     pub actor_senses: BTreeSet<String>,
     pub logical_tick: u64,
     pub weather: WeatherKind,
+}
+
+/// Server-internal join key for presentation annotations. This type is
+/// intentionally not serializable: stable IDs must never cross a transport
+/// boundary, while `opaque_id` is safe only for this observer session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct VisibleSceneEntityId {
+    pub stable_id: String,
+    pub opaque_id: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct VisibleSceneEntityIds {
+    pub items: Vec<VisibleSceneEntityId>,
+    pub npcs: Vec<VisibleSceneEntityId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1405,9 +1555,25 @@ pub enum WorldError {
     EquipmentSlotEmpty,
     #[error("Combat cannot be started right now.")]
     CombatUnavailable,
-    #[error("No character archetype matches that identifier.")]
-    ArchetypeNotFound,
-    #[error("The authored archetype or ability configuration is invalid.")]
+    #[error("No lineage matches that identifier.")]
+    LineageNotFound,
+    #[error("No background matches that identifier.")]
+    BackgroundNotFound,
+    #[error("No class matches that identifier.")]
+    ClassNotFound,
+    #[error("That class promotion is not available.")]
+    PromotionUnavailable,
+    #[error("That talent rank is not available.")]
+    TalentUnavailable,
+    #[error("There are not enough progression points.")]
+    InsufficientProgressionPoints,
+    #[error("A progression grant would exceed an engine cap.")]
+    ProgressionCapExceeded,
+    #[error("The authored progression configuration is invalid.")]
+    InvalidProgressionDefinition,
+    #[error("The progression transition is invalid.")]
+    InvalidProgressionTransition,
+    #[error("The authored ability configuration is invalid.")]
     InvalidAbilityDefinition,
     #[error("That ability is unknown or has not been learned.")]
     AbilityNotKnown,
@@ -1582,6 +1748,21 @@ pub enum GameplayEvent {
         level: u32,
         room_id: String,
     },
+    CharacterPromoted {
+        character_id: CharacterId,
+        character_name: String,
+        from_class_id: String,
+        to_class_id: String,
+        room_id: String,
+    },
+    TalentRankAcquired {
+        character_id: CharacterId,
+        character_name: String,
+        graph_id: String,
+        node_id: String,
+        rank: u8,
+        room_id: String,
+    },
     CharacterDefeated {
         character_id: CharacterId,
         character_name: String,
@@ -1698,9 +1879,9 @@ pub struct World {
     secret_exits: HashMap<(String, Direction), u16>,
     npcs: BTreeMap<String, Npc>,
     abilities: BTreeMap<String, AbilityDefinition>,
-    archetypes: BTreeMap<String, ArchetypeDefinition>,
-    archetype_catalog: Vec<ArchetypeView>,
-    default_archetype_id: String,
+    progression: ProgressionCatalog,
+    progression_catalog: CharacterCreationCatalogView,
+    world_progression_flags: BTreeSet<String>,
     character_gameplay: HashMap<CharacterId, CharacterGameplaySnapshot>,
     sessions: HashMap<SessionId, EntityId>,
     observer_views: HashMap<SessionId, ObserverView>,
@@ -1729,6 +1910,7 @@ pub struct WorldCheckpoint {
     logical_tick: u64,
     rng: DeterministicRng,
     adventure: AdventureRuntimeSnapshot,
+    world_progression_flags: BTreeSet<String>,
 }
 
 impl World {
@@ -1874,6 +2056,11 @@ impl World {
             }
         }
 
+        let progression =
+            ProgressionCatalog::compile(builtin_progression_definition(), &BTreeMap::new())
+                .expect("the built-in progression is valid");
+        let progression_catalog = progression.creation_view();
+
         Ok(Self {
             entities,
             stable_rooms,
@@ -1886,13 +2073,9 @@ impl World {
             secret_exits: HashMap::new(),
             npcs: BTreeMap::new(),
             abilities: BTreeMap::new(),
-            archetypes: BTreeMap::new(),
-            archetype_catalog: vec![ArchetypeView {
-                id: "wanderer".into(),
-                label: "Wanderer".into(),
-                description: "A flexible adventurer using the legacy balanced profile.".into(),
-            }],
-            default_archetype_id: "wanderer".into(),
+            progression,
+            progression_catalog,
+            world_progression_flags: BTreeSet::new(),
             character_gameplay: HashMap::new(),
             sessions: HashMap::new(),
             observer_views: HashMap::new(),
@@ -1971,23 +2154,15 @@ impl World {
         .expect("the built-in demo world is valid")
     }
 
-    /// Installs reviewed, transport-independent character and ability data.
-    /// Existing worlds may omit this call and retain the legacy Wanderer
-    /// defaults, which keeps old tests, saves and imported areas playable.
-    pub fn configure_abilities(
+    /// Atomically installs one reviewed character progression and ability catalog.
+    pub fn configure_progression(
         &mut self,
-        default_archetype_id: String,
-        archetypes: Vec<ArchetypeDefinition>,
+        definition: CharacterProgressionDefinition,
         abilities: Vec<AbilityDefinition>,
     ) -> Result<(), WorldError> {
-        if archetypes.is_empty()
-            || archetypes.len() > MAX_ARCHETYPES
-            || abilities.len() > MAX_ABILITIES
-            || !valid_definition_id(&default_archetype_id)
-        {
+        if abilities.len() > MAX_ABILITIES {
             return Err(WorldError::InvalidAbilityDefinition);
         }
-
         let ability_count = abilities.len();
         let unique_ability_names = abilities
             .iter()
@@ -2007,98 +2182,25 @@ impl World {
             return Err(WorldError::InvalidAbilityDefinition);
         }
 
-        let archetype_count = archetypes.len();
-        let archetype_map = archetypes
-            .into_iter()
-            .map(|archetype| {
-                validate_archetype_definition(&archetype, &ability_map)?;
-                Ok((archetype.id.clone(), archetype))
-            })
-            .collect::<Result<BTreeMap<_, _>, WorldError>>()?;
-        if archetype_map.len() != archetype_count
-            || archetype_map.len() > MAX_ARCHETYPES
-            || !archetype_map.contains_key(&default_archetype_id)
-        {
-            return Err(WorldError::InvalidAbilityDefinition);
-        }
-
-        self.archetype_catalog = archetype_map
-            .values()
-            .map(|archetype| ArchetypeView {
-                id: archetype.id.clone(),
-                label: archetype.name.clone(),
-                description: archetype.description.clone(),
-            })
-            .collect();
-        self.default_archetype_id = default_archetype_id;
-        self.archetypes = archetype_map;
+        let progression = ProgressionCatalog::compile(definition, &ability_map)?;
+        self.progression_catalog = progression.creation_view();
+        self.progression = progression;
         self.abilities = ability_map;
         Ok(())
     }
 
-    pub fn archetype_catalog(&self) -> &[ArchetypeView] {
-        &self.archetype_catalog
-    }
-
-    pub fn default_archetype_id(&self) -> &str {
-        &self.default_archetype_id
+    pub fn progression_catalog(&self) -> &CharacterCreationCatalogView {
+        &self.progression_catalog
     }
 
     pub fn initial_gameplay(
         &self,
-        archetype_id: Option<&str>,
+        lineage_id: Option<&str>,
+        background: BackgroundSelection<'_>,
+        base_class_id: Option<&str>,
     ) -> Result<CharacterGameplaySnapshot, WorldError> {
-        let requested = archetype_id.unwrap_or(&self.default_archetype_id);
-        let Some(archetype) = self.archetypes.get(requested) else {
-            if requested == "wanderer" && self.archetypes.is_empty() {
-                return Ok(CharacterGameplaySnapshot::default());
-            }
-            return Err(WorldError::ArchetypeNotFound);
-        };
-
-        let mut snapshot = CharacterGameplaySnapshot {
-            archetype_id: archetype.id.clone(),
-            skills: archetype.initial_skills.clone(),
-            ability_ids: archetype.initial_ability_ids.clone(),
-            resistances: archetype.initial_resistances.clone(),
-            ..CharacterGameplaySnapshot::default()
-        };
-        snapshot.attributes.strength = archetype
-            .initial_attributes
-            .get("strength")
-            .copied()
-            .unwrap_or(5) as i32;
-        snapshot.attributes.defence = archetype
-            .initial_attributes
-            .get("defence")
-            .copied()
-            .unwrap_or(2) as i32;
-        snapshot.vitals.max_health = archetype
-            .initial_attributes
-            .get("max_health")
-            .copied()
-            .unwrap_or(20) as i32;
-        snapshot.vitals.health = snapshot.vitals.max_health;
-        snapshot.attributes.additional = archetype
-            .initial_attributes
-            .iter()
-            .filter(|(id, _)| !matches!(id.as_str(), "strength" | "defence" | "max_health"))
-            .map(|(id, value)| (id.clone(), *value as i32))
-            .collect();
-        snapshot.resources = archetype
-            .initial_resources
-            .iter()
-            .map(|(id, maximum)| {
-                (
-                    id.clone(),
-                    ResourcePool {
-                        current: *maximum,
-                        max: *maximum,
-                    },
-                )
-            })
-            .collect();
-        Ok(snapshot)
+        self.progression
+            .initial_gameplay(lineage_id, background, base_class_id, &self.abilities)
     }
 
     pub fn configure_npc_abilities(
@@ -2193,6 +2295,7 @@ impl World {
             logical_tick: self.logical_tick,
             rng: self.rng.clone(),
             adventure: self.adventure.clone(),
+            world_progression_flags: self.world_progression_flags.clone(),
         }
     }
 
@@ -2207,6 +2310,7 @@ impl World {
         self.logical_tick = checkpoint.logical_tick;
         self.rng = checkpoint.rng;
         self.adventure = checkpoint.adventure;
+        self.world_progression_flags = checkpoint.world_progression_flags;
     }
 
     pub fn runtime_snapshot(&self) -> WorldRuntimeSnapshot {
@@ -2273,6 +2377,7 @@ impl World {
                 })
                 .collect(),
             adventure: self.adventure.clone(),
+            progression_flags: self.world_progression_flags.clone(),
         }
     }
 
@@ -2323,6 +2428,11 @@ impl World {
             || !item_ids_match
             || !npc_ids_match
             || !adventure_valid
+            || snapshot.progression_flags.len() > 64
+            || !snapshot
+                .progression_flags
+                .iter()
+                .all(|flag| valid_definition_id(flag))
         {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
@@ -2337,9 +2447,13 @@ impl World {
                 .get(npc_id)
                 .cloned()
                 .ok_or(WorldError::InvalidRuntimeSnapshot)?;
-            let valid = saved.max_health > 0
+            let max_stat_value = i32::try_from(MAX_STAT_VALUE).expect("MAX_STAT_VALUE fits in i32");
+            let valid = (1..=MAX_PROGRESSION_LEVEL).contains(&saved.level)
+                && (1..=max_stat_value).contains(&saved.max_health)
+                && (1..=max_stat_value).contains(&saved.strength)
+                && (0..=max_stat_value).contains(&saved.defence)
                 && saved.health >= 0
-                && saved.health <= i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)
+                && saved.health <= max_stat_value
                 && saved.engaged_character.is_none_or(|id| id.0 > 0)
                 && ((saved.health == 0) == saved.respawn_at_tick.is_some())
                 && (saved.health > 0 || saved.engaged_character.is_none())
@@ -2481,6 +2595,7 @@ impl World {
             .next_weather_tick
             .max(snapshot.logical_tick.saturating_add(1));
         self.adventure = snapshot.adventure;
+        self.world_progression_flags = snapshot.progression_flags;
         self.last_view_bump = None;
         Ok(())
     }
@@ -2758,97 +2873,10 @@ impl World {
     pub fn restore_character_gameplay(
         &mut self,
         character_id: CharacterId,
-        mut snapshot: CharacterGameplaySnapshot,
+        snapshot: CharacterGameplaySnapshot,
     ) -> Result<(), WorldError> {
-        let legacy_archetype_missing = !self.archetypes.is_empty()
-            && snapshot.archetype_id == "wanderer"
-            && !self.archetypes.contains_key(&snapshot.archetype_id);
-        if !self.archetypes.is_empty() && !self.archetypes.contains_key(&snapshot.archetype_id) {
-            if legacy_archetype_missing {
-                snapshot.archetype_id = self.default_archetype_id.clone();
-            } else {
-                return Err(WorldError::InvalidGameplayDefinition);
-            }
-        }
-        let additive_fields_missing = legacy_archetype_missing
-            && snapshot.resources.is_empty()
-            && snapshot.ability_ids.is_empty()
-            && snapshot.ability_cooldowns.is_empty()
-            && snapshot.resistances.is_empty()
-            && snapshot.statuses.is_empty();
-        if additive_fields_missing
-            && let Some(archetype) = self.archetypes.get(&snapshot.archetype_id)
-        {
-            for (id, value) in &archetype.initial_attributes {
-                if !matches!(id.as_str(), "strength" | "defence" | "max_health") {
-                    snapshot
-                        .attributes
-                        .additional
-                        .entry(id.clone())
-                        .or_insert(i32::try_from(*value).unwrap_or(i32::MAX));
-                }
-            }
-            for (id, rank) in &archetype.initial_skills {
-                snapshot.skills.entry(id.clone()).or_insert(*rank);
-            }
-            let mut resource_maxima = archetype.initial_resources.clone();
-            let mut abilities = archetype.initial_ability_ids.clone();
-            for milestone in archetype
-                .level_progression
-                .iter()
-                .filter(|milestone| milestone.level <= snapshot.level)
-            {
-                // Legacy snapshots already contain their historical base
-                // attributes and skills, but none of the additive authored
-                // progression. Replay every milestone reached by the saved
-                // level exactly once while migrating that legacy shape.
-                for (id, gain) in &milestone.attribute_gains {
-                    let gain = i32::try_from(*gain).unwrap_or(i32::MAX);
-                    match id.as_str() {
-                        "max_health" => {
-                            snapshot.vitals.max_health =
-                                snapshot.vitals.max_health.saturating_add(gain);
-                        }
-                        "strength" => {
-                            snapshot.attributes.strength =
-                                snapshot.attributes.strength.saturating_add(gain);
-                        }
-                        "defence" => {
-                            snapshot.attributes.defence =
-                                snapshot.attributes.defence.saturating_add(gain);
-                        }
-                        _ => {
-                            let value = snapshot
-                                .attributes
-                                .additional
-                                .entry(id.clone())
-                                .or_default();
-                            *value = value.saturating_add(gain);
-                        }
-                    }
-                }
-                for (id, gain) in &milestone.skill_gains {
-                    let rank = snapshot.skills.entry(id.clone()).or_default();
-                    *rank = rank.saturating_add(*gain).min(MAX_SKILL_VALUE);
-                }
-                for (id, gain) in &milestone.resource_gains {
-                    let maximum = resource_maxima.entry(id.clone()).or_default();
-                    *maximum = maximum.saturating_add(*gain).min(MAX_RESOURCE_VALUE);
-                }
-                abilities.extend(milestone.ability_unlock_ids.iter().cloned());
-            }
-            snapshot.resources = resource_maxima
-                .into_iter()
-                .map(|(id, max)| (id, ResourcePool { current: max, max }))
-                .collect();
-            snapshot.ability_ids = abilities;
-            snapshot.resistances = archetype.initial_resistances.clone();
-        }
-        // Authored ability IDs are content references, while cooldowns and
-        // statuses are ephemeral runtime state. A reviewed pack may retire an
-        // ability between restarts; discard only those now-unknown references
-        // so one obsolete effect cannot block character login. Malformed IDs
-        // and malformed status payloads still fail closed.
+        // Saves are native v3 snapshots. Unknown content references fail
+        // closed instead of being guessed or replayed additively.
         if !snapshot
             .ability_ids
             .iter()
@@ -2861,20 +2889,6 @@ impl World {
         {
             return Err(WorldError::InvalidGameplayDefinition);
         }
-        snapshot
-            .ability_ids
-            .retain(|id| self.abilities.contains_key(id));
-        snapshot
-            .ability_cooldowns
-            .retain(|id, _| self.abilities.contains_key(id) && snapshot.ability_ids.contains(id));
-        snapshot.statuses.retain(|status| {
-            self.abilities.contains_key(&status.source_ability_id)
-                && status
-                    .source_npc_id
-                    .as_ref()
-                    .is_none_or(|npc_id| self.npcs.contains_key(npc_id))
-                && validate_active_status(status, &self.abilities)
-        });
         let unique_equipment = snapshot
             .equipment
             .values()
@@ -2887,18 +2901,18 @@ impl World {
             .collect::<std::collections::HashSet<_>>()
             .len()
             == snapshot.ability_ids.len();
-        let valid_archetype = if self.archetypes.is_empty() {
-            snapshot.archetype_id == "wanderer"
-        } else {
-            self.archetypes.contains_key(&snapshot.archetype_id)
-        };
-        let valid = valid_archetype
+        let valid = self
+            .progression
+            .validate_snapshot(&snapshot, &self.abilities)
             && snapshot.level > 0
             && snapshot.level <= MAX_PROGRESSION_LEVEL
             && snapshot.vitals.max_health > 0
+            && snapshot.vitals.max_health <= i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)
             && (0..=snapshot.vitals.max_health).contains(&snapshot.vitals.health)
             && snapshot.attributes.strength >= 0
+            && snapshot.attributes.strength <= i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)
             && snapshot.attributes.defence >= 0
+            && snapshot.attributes.defence <= i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)
             && snapshot.attributes.additional.len() + 2 <= MAX_STATS
             && snapshot.attributes.additional.iter().all(|(id, value)| {
                 valid_stat_id(id)
@@ -2911,6 +2925,10 @@ impl World {
                     && pool.max > 0
                     && pool.max <= MAX_RESOURCE_VALUE
                     && pool.current <= pool.max
+            })
+            && snapshot.resource_regeneration.len() <= snapshot.resources.len()
+            && snapshot.resource_regeneration.iter().all(|(id, amount)| {
+                snapshot.resources.contains_key(id) && *amount <= MAX_RESOURCE_VALUE
             })
             && snapshot.ability_ids.len() <= MAX_KNOWN_ABILITIES
             && unique_abilities
@@ -2965,10 +2983,10 @@ impl World {
                             if *owner == character_id && *equipped_slot == *slot
                     ))
             })
-            && snapshot
-                .effects
-                .iter()
-                .all(|effect| effect.remaining_ticks > 0 && effect.magnitude > 0)
+            && snapshot.effects.iter().all(|effect| {
+                (1..=MAX_STATUS_TICKS).contains(&effect.remaining_ticks)
+                    && (1..=MAX_STATUS_MAGNITUDE).contains(&effect.magnitude)
+            })
             && snapshot.effects.len() <= MAX_ACTIVE_EFFECTS;
         let adventure_valid = snapshot.commodities.len() <= commodity_specs().len()
             && snapshot.commodities.iter().all(|(id, amount)| {
@@ -3032,13 +3050,14 @@ impl World {
         &mut self,
         definition: ItemGameplayDefinition,
     ) -> Result<(), WorldError> {
+        let max_stat_value = i32::try_from(MAX_STAT_VALUE).expect("MAX_STAT_VALUE fits in i32");
         let valid = self.stable_items.contains_key(&definition.item_id)
-            && definition.attack_bonus >= 0
-            && definition.heal_amount >= 0
-            && definition
-                .effect
-                .as_ref()
-                .is_none_or(|effect| effect.magnitude > 0 && effect.remaining_ticks > 0);
+            && (0..=max_stat_value).contains(&definition.attack_bonus)
+            && (0..=max_stat_value).contains(&definition.heal_amount)
+            && definition.effect.as_ref().is_none_or(|effect| {
+                (1..=MAX_STATUS_MAGNITUDE).contains(&effect.magnitude)
+                    && (1..=MAX_STATUS_TICKS).contains(&effect.remaining_ticks)
+            });
         if !valid {
             return Err(WorldError::InvalidGameplayDefinition);
         }
@@ -3113,14 +3132,15 @@ impl World {
             .collect::<std::collections::HashSet<_>>()
             .len()
             == definition.loot_item_ids.len();
+        let max_stat_value = i32::try_from(MAX_STAT_VALUE).expect("MAX_STAT_VALUE fits in i32");
         let valid = !definition.stable_id.trim().is_empty()
             && !definition.name.trim().is_empty()
             && !self.npcs.contains_key(&definition.stable_id)
             && self.stable_rooms.contains_key(&definition.room_id)
-            && definition.level > 0
-            && definition.max_health > 0
-            && definition.strength > 0
-            && definition.defence >= 0
+            && (1..=MAX_PROGRESSION_LEVEL).contains(&definition.level)
+            && (1..=max_stat_value).contains(&definition.max_health)
+            && (1..=max_stat_value).contains(&definition.strength)
+            && (0..=max_stat_value).contains(&definition.defence)
             && definition.respawn_ticks > 0
             && loot_unique
             && definition.loot_item_ids.iter().all(|item_id| {
@@ -3222,6 +3242,10 @@ impl World {
             })
             .collect::<Vec<_>>();
         for character_id in defeated {
+            // TODO(progression-signals): replace this legacy kill-side skill
+            // increment once WorldPack can author event-triggered GrantSets.
+            // Removing it before that hook exists would silently change the
+            // existing combat/quest loop rather than make it data-driven.
             if let Some(rank) = self
                 .character_gameplay
                 .get_mut(&character_id)
@@ -3295,8 +3319,7 @@ impl World {
             let resource_regeneration = self
                 .character_gameplay
                 .get(&character_id)
-                .and_then(|state| self.archetypes.get(&state.archetype_id))
-                .map(|archetype| archetype.resource_regeneration.clone())
+                .map(|state| state.resource_regeneration.clone())
                 .unwrap_or_default();
             let state = self
                 .character_gameplay
@@ -3357,9 +3380,12 @@ impl World {
             for mut effect in std::mem::take(&mut state.effects) {
                 if effect.kind == EffectKind::Regeneration && state.vitals.health > 0 {
                     let previous = state.vitals.health;
-                    state.vitals.health =
-                        (state.vitals.health + effect.magnitude).min(state.vitals.max_health);
-                    let amount = state.vitals.health - previous;
+                    state.vitals.health = state
+                        .vitals
+                        .health
+                        .saturating_add(effect.magnitude.max(0))
+                        .min(state.vitals.max_health);
+                    let amount = state.vitals.health.saturating_sub(previous);
                     if amount > 0 {
                         events.push(DomainEvent::Gameplay {
                             event: GameplayEvent::CharacterHealed {
@@ -3401,7 +3427,7 @@ impl World {
                                 .health
                                 .saturating_add(status.magnitude.max(0))
                                 .min(state.vitals.max_health);
-                            let amount = state.vitals.health - previous;
+                            let amount = state.vitals.health.saturating_sub(previous);
                             if amount > 0 {
                                 events.push(DomainEvent::Gameplay {
                                     event: GameplayEvent::CharacterHealed {
@@ -3420,7 +3446,7 @@ impl World {
                                 .and_then(|kind| state.resistances.get(&kind).copied())
                                 .unwrap_or(0);
                             let amount = resisted_amount(status.magnitude.max(0), resistance);
-                            state.vitals.health = (state.vitals.health - amount).max(0);
+                            state.vitals.health = state.vitals.health.saturating_sub(amount).max(0);
                             if state.vitals.health == 0 {
                                 defeating_npc_id = status.source_npc_id.clone();
                             }
@@ -3532,7 +3558,7 @@ impl World {
                             .and_then(|kind| npc.resistances.get(&kind).copied())
                             .unwrap_or(0);
                         let amount = resisted_amount(status.magnitude.max(0), resistance);
-                        npc.health = (npc.health - amount).max(0);
+                        npc.health = npc.health.saturating_sub(amount).max(0);
                         if npc.health == 0 {
                             defeating_source = status.source_character_id;
                         }
@@ -3676,21 +3702,22 @@ impl World {
                 .values()
                 .filter_map(|item_id| self.item_gameplay.get(item_id))
                 .map(|item| item.attack_bonus)
-                .sum::<i32>();
+                .fold(0_i32, i32::saturating_add);
             let effect_bonus = state
                 .effects
                 .iter()
                 .filter(|effect| effect.kind == EffectKind::Strength)
                 .map(|effect| effect.magnitude)
-                .sum::<i32>();
+                .fold(0_i32, i32::saturating_add);
             let player_attack = effective_gameplay_attribute(&state, "strength")
-                + state.level as i32
-                + equipment_bonus
-                + effect_bonus;
+                .saturating_add(i32::try_from(state.level).unwrap_or(i32::MAX))
+                .saturating_add(equipment_bonus)
+                .saturating_add(effect_bonus);
             let player_damage = resisted_amount(
-                (player_attack - effective_npc_attribute(&npc_snapshot, "defence")
-                    + self.rng.range_inclusive(0, 2))
-                .max(1),
+                player_attack
+                    .saturating_sub(effective_npc_attribute(&npc_snapshot, "defence"))
+                    .saturating_add(self.rng.range_inclusive(0, 2))
+                    .max(1),
                 npc_snapshot
                     .resistances
                     .get(&DamageType::Physical)
@@ -3699,7 +3726,7 @@ impl World {
             );
             let remaining_npc_health = {
                 let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
-                npc.health = (npc.health - player_damage).max(0);
+                npc.health = npc.health.saturating_sub(player_damage).max(0);
                 npc.health
             };
             events.push(DomainEvent::Gameplay {
@@ -3808,7 +3835,7 @@ impl World {
                         .unwrap_or(0);
                     let amount = resisted_amount(amount, resistance);
                     let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
-                    npc.health = (npc.health - amount).max(0);
+                    npc.health = npc.health.saturating_sub(amount).max(0);
                 }
             }
             if let Some(heal) = &ability.heal
@@ -3847,10 +3874,11 @@ impl World {
             }
         } else {
             player_damage = Some((
-                (effective_npc_attribute(&npc_snapshot, "strength") + npc_snapshot.level as i32
-                    - effective_gameplay_attribute(&state, "defence")
-                    + self.rng.range_inclusive(0, 2))
-                .max(1),
+                effective_npc_attribute(&npc_snapshot, "strength")
+                    .saturating_add(i32::try_from(npc_snapshot.level).unwrap_or(i32::MAX))
+                    .saturating_sub(effective_gameplay_attribute(&state, "defence"))
+                    .saturating_add(self.rng.range_inclusive(0, 2))
+                    .max(1),
                 DamageType::Physical,
             ));
         }
@@ -3865,7 +3893,8 @@ impl World {
             .get_mut(&character_id)
             .ok_or(WorldError::InvalidEntity)?;
         if let Some(npc_damage) = npc_damage {
-            player_state.vitals.health = (player_state.vitals.health - npc_damage).max(0);
+            player_state.vitals.health =
+                player_state.vitals.health.saturating_sub(npc_damage).max(0);
         }
         if player_state.vitals.health > 0
             && let Some(ability) = &npc_ability
@@ -4002,83 +4031,22 @@ impl World {
         room_id: &str,
         events: &mut Vec<DomainEvent>,
     ) -> Result<(), WorldError> {
-        let archetype = self
+        let mut state = self
             .character_gameplay
             .get(&character_id)
-            .and_then(|state| self.archetypes.get(&state.archetype_id))
-            .cloned();
-        let state = self
-            .character_gameplay
-            .get_mut(&character_id)
+            .cloned()
             .ok_or(WorldError::InvalidEntity)?;
         loop {
-            let milestone = archetype.as_ref().and_then(|archetype| {
-                archetype
-                    .level_progression
-                    .iter()
-                    .find(|milestone| milestone.level == state.level + 1)
-            });
-            let legacy_ready = archetype.is_none()
-                && state.level < MAX_PROGRESSION_LEVEL
-                && state.experience >= u64::from(state.level).saturating_mul(100);
-            if milestone.is_none() && !legacy_ready {
+            let Some(threshold) = self
+                .progression
+                .next_level(state.level, state.experience)
+                .cloned()
+            else {
                 break;
-            }
-            if let Some(milestone) = milestone {
-                if state.experience < milestone.total_experience_required {
-                    break;
-                }
-                state.level = milestone.level;
-                for (attribute, gain) in &milestone.attribute_gains {
-                    let gain = i32::try_from(*gain).unwrap_or(i32::MAX);
-                    match attribute.as_str() {
-                        "max_health" => {
-                            state.vitals.max_health = state.vitals.max_health.saturating_add(gain);
-                        }
-                        "strength" => {
-                            state.attributes.strength =
-                                state.attributes.strength.saturating_add(gain);
-                        }
-                        "defence" => {
-                            state.attributes.defence =
-                                state.attributes.defence.saturating_add(gain);
-                        }
-                        _ => {
-                            let value = state
-                                .attributes
-                                .additional
-                                .entry(attribute.clone())
-                                .or_default();
-                            *value = value.saturating_add(gain);
-                        }
-                    }
-                }
-                for (skill, gain) in &milestone.skill_gains {
-                    let rank = state.skills.entry(skill.clone()).or_default();
-                    *rank = rank.saturating_add(*gain).min(MAX_SKILL_VALUE);
-                }
-                for (resource, gain) in &milestone.resource_gains {
-                    let pool = state
-                        .resources
-                        .entry(resource.clone())
-                        .or_insert(ResourcePool { current: 0, max: 0 });
-                    pool.max = pool.max.saturating_add(*gain).min(MAX_RESOURCE_VALUE);
-                    pool.current = pool.max;
-                }
-                for ability_id in &milestone.ability_unlock_ids {
-                    if state.ability_ids.len() < MAX_KNOWN_ABILITIES
-                        && !state.ability_ids.contains(ability_id)
-                    {
-                        state.ability_ids.push(ability_id.clone());
-                    }
-                }
-            } else {
-                state.level += 1;
-                state.vitals.max_health += 5;
-                state.attributes.strength += 2;
-                state.attributes.defence += 1;
-            }
-            state.vitals.health = state.vitals.max_health;
+            };
+            state = self
+                .progression
+                .apply_level(&state, &threshold, &self.abilities)?;
             events.push(DomainEvent::Gameplay {
                 event: GameplayEvent::CharacterLeveled {
                     character_id,
@@ -4088,6 +4056,7 @@ impl World {
                 },
             });
         }
+        self.character_gameplay.insert(character_id, state);
         Ok(())
     }
 
@@ -4400,6 +4369,10 @@ impl World {
             PlayerAction::Ability { ability_id, target } => {
                 self.use_ability(session, &ability_id, target.as_deref())
             }
+            PlayerAction::Promote { class_id } => self.promote_character(session, &class_id),
+            PlayerAction::AcquireTalent { graph_id, node_id } => {
+                self.acquire_talent(session, &graph_id, &node_id)
+            }
             PlayerAction::Use(query) => self.use_item(session, &query),
             PlayerAction::Equip(query) => self.equip_item(session, &query),
             PlayerAction::Unequip(query) => self.unequip_item(session, &query),
@@ -4594,6 +4567,58 @@ impl World {
                     .saturating_sub(self.logical_tick),
             },
         })
+    }
+
+    /// Return presentation-only joins for entities already visible in the
+    /// observer's current semantic scene. It cannot discover hidden, dead,
+    /// carried, equipped or out-of-room entities.
+    #[doc(hidden)]
+    pub fn visible_scene_entity_ids(
+        &self,
+        session: SessionId,
+    ) -> Result<VisibleSceneEntityIds, WorldError> {
+        let current_room = room_checked(&self.entities, self.character(session)?.location)?;
+        let observer = self.observer(session)?;
+        let mut items = self
+            .item_locations
+            .iter()
+            .filter_map(|(stable_id, location)| {
+                matches!(location, SharedItemLocation::Room(room_id) if room_id == &current_room.stable_id)
+                    .then_some(stable_id)
+            })
+            .map(|stable_id| {
+                self.item_visible_to(session, stable_id, &current_room.stable_id)
+                    .map(|visible| {
+                        visible.then(|| VisibleSceneEntityId {
+                            stable_id: stable_id.clone(),
+                            opaque_id: opaque_id(observer.salt, "item", stable_id),
+                        })
+                    })
+            })
+            .collect::<Result<Vec<_>, WorldError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut npcs = self
+            .npcs
+            .values()
+            .filter(|npc| npc.alive() && npc.spawn_room_id == current_room.stable_id)
+            .map(|npc| {
+                self.npc_visible_to(session, &npc.stable_id, &current_room.stable_id)
+                    .map(|visible| {
+                        visible.then(|| VisibleSceneEntityId {
+                            stable_id: npc.stable_id.clone(),
+                            opaque_id: opaque_id(observer.salt, "npc", &npc.stable_id),
+                        })
+                    })
+            })
+            .collect::<Result<Vec<_>, WorldError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| left.stable_id.cmp(&right.stable_id));
+        npcs.sort_by(|left, right| left.stable_id.cmp(&right.stable_id));
+        Ok(VisibleSceneEntityIds { items, npcs })
     }
 
     pub fn inventory_as_plain_text(&self, session: SessionId) -> Result<String, WorldError> {
@@ -5351,7 +5376,7 @@ impl World {
                         .unwrap_or(0);
                     let amount = resisted_amount(amount, resistance);
                     let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
-                    npc.health = (npc.health - amount).max(0);
+                    npc.health = npc.health.saturating_sub(amount).max(0);
                     let remaining_health = npc.health;
                     let npc_name = npc.name.clone();
                     events.push(DomainEvent::Gameplay {
@@ -5387,7 +5412,7 @@ impl World {
                         .character_gameplay
                         .get_mut(&character_id)
                         .ok_or(WorldError::InvalidEntity)?;
-                    state.vitals.health = (state.vitals.health - amount).max(0);
+                    state.vitals.health = state.vitals.health.saturating_sub(amount).max(0);
                 }
             }
         }
@@ -5409,8 +5434,12 @@ impl World {
                 .get_mut(&character_id)
                 .ok_or(WorldError::InvalidEntity)?;
             let previous = state.vitals.health;
-            state.vitals.health = (state.vitals.health + amount).min(state.vitals.max_health);
-            let healed = state.vitals.health - previous;
+            state.vitals.health = state
+                .vitals
+                .health
+                .saturating_add(amount.max(0))
+                .min(state.vitals.max_health);
+            let healed = state.vitals.health.saturating_sub(previous);
             if healed > 0 {
                 events.push(DomainEvent::Gameplay {
                     event: GameplayEvent::CharacterHealed {
@@ -5513,9 +5542,12 @@ impl World {
             },
         }];
         let previous_health = state.vitals.health;
-        state.vitals.health =
-            (state.vitals.health + definition.heal_amount).min(state.vitals.max_health);
-        let healed = state.vitals.health - previous_health;
+        state.vitals.health = state
+            .vitals
+            .health
+            .saturating_add(definition.heal_amount.max(0))
+            .min(state.vitals.max_health);
+        let healed = state.vitals.health.saturating_sub(previous_health);
         if healed > 0 {
             events.push(DomainEvent::Gameplay {
                 event: GameplayEvent::CharacterHealed {
@@ -5672,6 +5704,176 @@ impl World {
             changed_character: None,
             domain_events: events,
         })
+    }
+
+    fn promote_character(
+        &mut self,
+        session: SessionId,
+        class_id: &str,
+    ) -> Result<ActionOutcome, WorldError> {
+        let checkpoint = self.checkpoint();
+        match self.promote_character_inner(session, class_id) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.restore_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn promote_character_inner(
+        &mut self,
+        session: SessionId,
+        class_id: &str,
+    ) -> Result<ActionOutcome, WorldError> {
+        let character = self.character(session)?;
+        let character_id = character.id;
+        let character_name = character.name.clone();
+        let room_id = room_checked(&self.entities, character.location)?
+            .stable_id
+            .clone();
+        let previous = self
+            .character_gameplay
+            .get(&character_id)
+            .cloned()
+            .ok_or(WorldError::InvalidEntity)?;
+        let from_class_id = previous.active_class_id.clone();
+        let next = self.progression.promote(
+            &previous,
+            class_id,
+            &self.world_progression_flags,
+            &self.abilities,
+        )?;
+        let class_name = self.progression.class_view(class_id).label;
+        self.character_gameplay.insert(character_id, next);
+        let event = DomainEvent::Gameplay {
+            event: GameplayEvent::CharacterPromoted {
+                character_id,
+                character_name,
+                from_class_id,
+                to_class_id: class_id.to_owned(),
+                room_id,
+            },
+        };
+        self.finish_gameplay_action(
+            session,
+            format!("You advance to the {class_name} class.\r\n"),
+            vec![event],
+        )
+    }
+
+    fn acquire_talent(
+        &mut self,
+        session: SessionId,
+        graph_id: &str,
+        node_id: &str,
+    ) -> Result<ActionOutcome, WorldError> {
+        let checkpoint = self.checkpoint();
+        match self.acquire_talent_inner(session, graph_id, node_id) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.restore_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn acquire_talent_inner(
+        &mut self,
+        session: SessionId,
+        graph_id: &str,
+        node_id: &str,
+    ) -> Result<ActionOutcome, WorldError> {
+        let character = self.character(session)?;
+        let character_id = character.id;
+        let character_name = character.name.clone();
+        let room_id = room_checked(&self.entities, character.location)?
+            .stable_id
+            .clone();
+        let previous = self
+            .character_gameplay
+            .get(&character_id)
+            .cloned()
+            .ok_or(WorldError::InvalidEntity)?;
+        let next = self.progression.acquire_talent(
+            &previous,
+            graph_id,
+            node_id,
+            &self.world_progression_flags,
+            &self.abilities,
+        )?;
+        let rank = next
+            .talent_node_ranks
+            .get(graph_id)
+            .and_then(|nodes| nodes.get(node_id))
+            .copied()
+            .ok_or(WorldError::InvalidProgressionTransition)?;
+        let node_name = self
+            .progression
+            .talent_views(&next, &self.world_progression_flags)
+            .into_iter()
+            .find(|graph| graph.id == graph_id)
+            .and_then(|graph| graph.nodes.into_iter().find(|node| node.id == node_id))
+            .map_or_else(|| humanize_id(node_id), |node| node.label);
+        self.character_gameplay.insert(character_id, next);
+        let event = DomainEvent::Gameplay {
+            event: GameplayEvent::TalentRankAcquired {
+                character_id,
+                character_name,
+                graph_id: graph_id.to_owned(),
+                node_id: node_id.to_owned(),
+                rank,
+                room_id,
+            },
+        };
+        self.finish_gameplay_action(
+            session,
+            format!("You acquire rank {rank} of {node_name}.\r\n"),
+            vec![event],
+        )
+    }
+
+    pub fn receive_progression_signal(
+        &mut self,
+        character_id: CharacterId,
+        signal_id: &str,
+    ) -> Result<bool, WorldError> {
+        if !valid_definition_id(signal_id) {
+            return Err(WorldError::InvalidProgressionTransition);
+        }
+        let state = self
+            .character_gameplay
+            .get_mut(&character_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        if state.received_signals.contains(signal_id) {
+            return Ok(false);
+        }
+        if state.received_signals.len() >= MAX_RECEIVED_SIGNALS {
+            return Err(WorldError::ProgressionCapExceeded);
+        }
+        state.received_signals.insert(signal_id.to_owned());
+        Ok(true)
+    }
+
+    pub fn set_world_progression_flag(
+        &mut self,
+        flag_id: &str,
+        enabled: bool,
+    ) -> Result<bool, WorldError> {
+        if !valid_definition_id(flag_id) {
+            return Err(WorldError::InvalidProgressionTransition);
+        }
+        let changed = if enabled {
+            if self.world_progression_flags.len() >= 64
+                && !self.world_progression_flags.contains(flag_id)
+            {
+                return Err(WorldError::ProgressionCapExceeded);
+            }
+            self.world_progression_flags.insert(flag_id.to_owned())
+        } else {
+            self.world_progression_flags.remove(flag_id)
+        };
+        Ok(changed)
     }
 
     fn move_item(
@@ -6254,39 +6456,21 @@ impl World {
             revision: observer.revision,
             character: PlayerCharacterView {
                 name: character.name.clone(),
-                archetype: self
-                    .archetypes
-                    .get(&gameplay.archetype_id)
-                    .map(|archetype| ArchetypeView {
-                        id: archetype.id.clone(),
-                        label: archetype.name.clone(),
-                        description: archetype.description.clone(),
-                    })
-                    .unwrap_or_else(|| ArchetypeView {
-                        id: gameplay.archetype_id.clone(),
-                        label: humanize_id(&gameplay.archetype_id),
-                        description: "A character created before authored archetypes were enabled."
-                            .into(),
-                    }),
+                lineage: self.progression.lineage_view(&gameplay.lineage_id),
+                background: gameplay
+                    .background_id
+                    .as_ref()
+                    .map(|id| self.progression.background_view(id)),
+                base_class: self.progression.class_view(&gameplay.base_class_id),
+                active_class: self.progression.class_view(&gameplay.active_class_id),
+                class_history: gameplay
+                    .class_history
+                    .iter()
+                    .map(|id| self.progression.class_view(id))
+                    .collect(),
                 level: gameplay.level,
                 experience: gameplay.experience,
-                next_level_experience: self.archetypes.get(&gameplay.archetype_id).map_or_else(
-                    || {
-                        if gameplay.level < MAX_PROGRESSION_LEVEL {
-                            u64::from(gameplay.level) * 100
-                        } else {
-                            gameplay.experience
-                        }
-                    },
-                    |archetype| {
-                        archetype
-                            .level_progression
-                            .iter()
-                            .find(|milestone| milestone.level == gameplay.level + 1)
-                            .map(|milestone| milestone.total_experience_required)
-                            .unwrap_or(gameplay.experience)
-                    },
-                ),
+                next_level_experience: self.progression.next_level_experience(gameplay.level),
                 health: gameplay.vitals.health,
                 max_health: gameplay.vitals.max_health,
                 strength: gameplay.attributes.strength,
@@ -6403,6 +6587,13 @@ impl World {
                         remaining_ticks: status.remaining_ticks,
                     })
                     .collect(),
+                progression_points: gameplay.progression_points.clone(),
+                talents: self
+                    .progression
+                    .talent_views(gameplay, &self.world_progression_flags),
+                promotions: self
+                    .progression
+                    .promotions(gameplay, &self.world_progression_flags),
                 effects: gameplay.effects.clone(),
                 recovery_in_ticks: gameplay
                     .recovery_at_tick
@@ -7080,9 +7271,9 @@ fn npc_ability_score(ability: &AbilityDefinition, npc: &Npc) -> i64 {
             heal.scaling_percent,
             npc,
         );
-        score = score
-            .saturating_add(500_000)
-            .saturating_add(i64::from(amount.min(npc.max_health - npc.health)));
+        score = score.saturating_add(500_000).saturating_add(i64::from(
+            amount.min(npc.max_health.saturating_sub(npc.health)),
+        ));
     }
     for status in &ability.status_effects {
         if npc_effect_targets_enemy(ability, status_target(status)) {
@@ -7184,6 +7375,13 @@ fn attribute_value(attributes: &Attributes, id: &str) -> i32 {
     }
 }
 
+pub(crate) fn permanent_gameplay_attribute(gameplay: &CharacterGameplaySnapshot, id: &str) -> i32 {
+    match id {
+        "max_health" => gameplay.vitals.max_health,
+        _ => attribute_value(&gameplay.attributes, id),
+    }
+}
+
 fn ability_scaled_amount(
     base: u32,
     scaling_attribute: Option<&str>,
@@ -7267,127 +7465,6 @@ fn resisted_amount(amount: i32, resistance: u16) -> i32 {
     (i64::from(amount).saturating_mul(retained) / 100).clamp(1, i64::from(i32::MAX)) as i32
 }
 
-fn validate_archetype_definition(
-    archetype: &ArchetypeDefinition,
-    abilities: &BTreeMap<String, AbilityDefinition>,
-) -> Result<(), WorldError> {
-    let mut previous_level = 1;
-    let mut previous_experience = 0;
-    let mut attribute_ids = std::collections::HashSet::from(["strength", "defence"]);
-    attribute_ids.extend(
-        archetype
-            .initial_attributes
-            .keys()
-            .map(String::as_str)
-            .filter(|id| *id != "max_health"),
-    );
-    let mut skill_ids = archetype
-        .initial_skills
-        .keys()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let mut resource_values = archetype
-        .initial_resources
-        .iter()
-        .map(|(id, value)| (id.as_str(), *value))
-        .collect::<HashMap<_, _>>();
-    let mut unlocked_abilities = std::collections::HashSet::new();
-    let initial_abilities_valid = archetype.initial_ability_ids.iter().all(|id| {
-        unlocked_abilities.insert(id.as_str())
-            && abilities.get(id).is_some_and(|ability| {
-                ability
-                    .resource_costs
-                    .keys()
-                    .all(|resource| resource_values.contains_key(resource.as_str()))
-            })
-    });
-    let valid = valid_definition_id(&archetype.id)
-        && safe_definition_text(&archetype.name, 128)
-        && safe_definition_text(&archetype.description, 2_048)
-        && archetype.initial_attributes.len() <= MAX_STATS
-        && attribute_ids.len() <= MAX_STATS
-        && archetype.initial_attributes.contains_key("max_health")
-        && archetype.initial_attributes.contains_key("strength")
-        && archetype.initial_attributes.contains_key("defence")
-        && archetype.initial_attributes.iter().all(|(id, value)| {
-            valid_stat_id(id) && *value <= MAX_STAT_VALUE && (id != "max_health" || *value > 0)
-        })
-        && archetype.initial_skills.len() <= MAX_STATS
-        && archetype
-            .initial_skills
-            .iter()
-            .all(|(id, value)| valid_stat_id(id) && *value <= MAX_SKILL_VALUE)
-        && archetype.initial_resources.len() <= MAX_RESOURCE_POOLS
-        && archetype
-            .initial_resources
-            .iter()
-            .all(|(id, value)| valid_stat_id(id) && (1..=MAX_RESOURCE_VALUE).contains(value))
-        && archetype.resource_regeneration.iter().all(|(id, value)| {
-            valid_stat_id(id)
-                && archetype.initial_resources.contains_key(id)
-                && *value <= MAX_RESOURCE_VALUE
-        })
-        && archetype.initial_resistances.len() <= MAX_RESISTANCES
-        && archetype
-            .initial_resistances
-            .values()
-            .all(|value| *value <= MAX_RESISTANCE_PERCENT)
-        && archetype.initial_ability_ids.len() <= MAX_KNOWN_ABILITIES
-        && initial_abilities_valid
-        && archetype.level_progression.len() <= MAX_LEVEL_MILESTONES
-        && archetype.level_progression.iter().all(|milestone| {
-            let ordered = milestone.level == previous_level + 1
-                && milestone.total_experience_required > previous_experience;
-            previous_level = milestone.level;
-            previous_experience = milestone.total_experience_required;
-            let attributes_valid = milestone.attribute_gains.iter().all(|(id, value)| {
-                if id != "max_health" {
-                    attribute_ids.insert(id.as_str());
-                }
-                valid_stat_id(id) && *value > 0 && *value <= MAX_STAT_VALUE
-            }) && attribute_ids.len() <= MAX_STATS;
-            let skills_valid = milestone.skill_gains.iter().all(|(id, value)| {
-                skill_ids.insert(id.as_str());
-                valid_stat_id(id) && *value > 0 && *value <= MAX_SKILL_VALUE
-            }) && skill_ids.len() <= MAX_STATS;
-            let resources_valid = milestone.resource_gains.iter().all(|(id, value)| {
-                let total = resource_values
-                    .get(id.as_str())
-                    .copied()
-                    .unwrap_or(0)
-                    .checked_add(*value);
-                if let Some(total) = total {
-                    resource_values.insert(id.as_str(), total);
-                }
-                valid_stat_id(id)
-                    && *value > 0
-                    && total.is_some_and(|total| total <= MAX_RESOURCE_VALUE)
-            }) && resource_values.len() <= MAX_RESOURCE_POOLS;
-            let unlocks_valid = milestone.ability_unlock_ids.iter().all(|id| {
-                unlocked_abilities.insert(id.as_str())
-                    && abilities.get(id).is_some_and(|ability| {
-                        ability
-                            .resource_costs
-                            .keys()
-                            .all(|resource| resource_values.contains_key(resource.as_str()))
-                    })
-            }) && unlocked_abilities.len() <= MAX_KNOWN_ABILITIES;
-            ordered
-                && milestone.level <= MAX_PROGRESSION_LEVEL
-                && milestone.attribute_gains.len() <= MAX_STATS
-                && attributes_valid
-                && milestone.skill_gains.len() <= MAX_STATS
-                && skills_valid
-                && milestone.resource_gains.len() <= MAX_RESOURCE_POOLS
-                && resources_valid
-                && milestone.ability_unlock_ids.len() <= MAX_KNOWN_ABILITIES
-                && unlocks_valid
-        });
-    valid
-        .then_some(())
-        .ok_or(WorldError::InvalidAbilityDefinition)
-}
-
 fn resolve_item_query<'a>(
     items: &HashMap<String, Item>,
     candidates: impl Iterator<Item = &'a str>,
@@ -7467,6 +7544,8 @@ fn gameplay_event_room(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::LootDropped { room_id, .. }
         | GameplayEvent::ExperienceGained { room_id, .. }
         | GameplayEvent::CharacterLeveled { room_id, .. }
+        | GameplayEvent::CharacterPromoted { room_id, .. }
+        | GameplayEvent::TalentRankAcquired { room_id, .. }
         | GameplayEvent::CharacterDefeated { room_id, .. }
         | GameplayEvent::CharacterCollapsed { room_id, .. }
         | GameplayEvent::CharacterRecovered { room_id, .. }
@@ -7490,6 +7569,8 @@ fn gameplay_event_character(event: &GameplayEvent) -> Option<CharacterId> {
         | GameplayEvent::NpcDefeated { character_id, .. }
         | GameplayEvent::ExperienceGained { character_id, .. }
         | GameplayEvent::CharacterLeveled { character_id, .. }
+        | GameplayEvent::CharacterPromoted { character_id, .. }
+        | GameplayEvent::TalentRankAcquired { character_id, .. }
         | GameplayEvent::CharacterDefeated { character_id, .. }
         | GameplayEvent::CharacterCollapsed { character_id, .. }
         | GameplayEvent::CharacterRecovered { character_id, .. }
@@ -7521,6 +7602,8 @@ fn gameplay_event_npc(event: &GameplayEvent) -> Option<&str> {
         GameplayEvent::TickAdvanced { .. }
         | GameplayEvent::ExperienceGained { .. }
         | GameplayEvent::CharacterLeveled { .. }
+        | GameplayEvent::CharacterPromoted { .. }
+        | GameplayEvent::TalentRankAcquired { .. }
         | GameplayEvent::CharacterCollapsed { .. }
         | GameplayEvent::CharacterRecovered { .. }
         | GameplayEvent::ItemEquipped { .. }
@@ -7548,6 +7631,8 @@ fn gameplay_event_item(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::NpcDefeated { .. }
         | GameplayEvent::ExperienceGained { .. }
         | GameplayEvent::CharacterLeveled { .. }
+        | GameplayEvent::CharacterPromoted { .. }
+        | GameplayEvent::TalentRankAcquired { .. }
         | GameplayEvent::CharacterDefeated { .. }
         | GameplayEvent::CharacterCollapsed { .. }
         | GameplayEvent::CharacterRecovered { .. }
@@ -7727,6 +7812,37 @@ fn project_gameplay_event(
                 format!("You reach level {level}.")
             } else {
                 format!("{character_name} grows in power.")
+            },
+            None,
+        ),
+        GameplayEvent::CharacterPromoted {
+            character_id: character,
+            character_name,
+            to_class_id,
+            ..
+        } => (
+            character_id(*character),
+            None,
+            if viewer_id == *character {
+                format!("You advance to {}.", humanize_id(to_class_id))
+            } else {
+                format!("{character_name} advances to a new class.")
+            },
+            None,
+        ),
+        GameplayEvent::TalentRankAcquired {
+            character_id: character,
+            character_name,
+            node_id,
+            rank,
+            ..
+        } => (
+            character_id(*character),
+            None,
+            if viewer_id == *character {
+                format!("You acquire rank {rank} of {}.", humanize_id(node_id))
+            } else {
+                format!("{character_name} develops a new talent.")
             },
             None,
         ),
@@ -8009,6 +8125,160 @@ mod tests {
             )
             .unwrap();
         (world, session)
+    }
+
+    #[test]
+    fn runtime_gameplay_definitions_enforce_numeric_caps() {
+        let (mut world, _) = phase_two_world(1, 2, 10);
+        let max_stat_value = i32::try_from(MAX_STAT_VALUE).expect("MAX_STAT_VALUE fits in i32");
+        let base_item = ItemGameplayDefinition {
+            item_id: "game:sword".into(),
+            equipment_slot: Some(EquipmentSlot::Weapon),
+            attack_bonus: 1,
+            heal_amount: 0,
+            consumable: false,
+            effect: None,
+        };
+        for invalid_item in [
+            ItemGameplayDefinition {
+                attack_bonus: max_stat_value + 1,
+                ..base_item.clone()
+            },
+            ItemGameplayDefinition {
+                heal_amount: max_stat_value + 1,
+                ..base_item.clone()
+            },
+            ItemGameplayDefinition {
+                effect: Some(ActiveEffect {
+                    kind: EffectKind::Strength,
+                    magnitude: MAX_STATUS_MAGNITUDE + 1,
+                    remaining_ticks: 1,
+                }),
+                ..base_item
+            },
+        ] {
+            assert!(matches!(
+                world.configure_item_gameplay(invalid_item),
+                Err(WorldError::InvalidGameplayDefinition)
+            ));
+        }
+
+        let base_npc = NpcDefinition {
+            stable_id: "game:bounded-sentinel".into(),
+            name: "bounded sentinel".into(),
+            description: "A sentinel used to verify runtime bounds.".into(),
+            room_id: "game:start".into(),
+            level: 1,
+            max_health: 10,
+            strength: 2,
+            defence: 1,
+            experience_reward: 1,
+            loot_item_ids: Vec::new(),
+            respawn_ticks: 1,
+        };
+        let mut invalid_npcs = Vec::new();
+        let mut invalid = base_npc.clone();
+        invalid.level = MAX_PROGRESSION_LEVEL + 1;
+        invalid_npcs.push(invalid);
+        let mut invalid = base_npc.clone();
+        invalid.max_health = max_stat_value + 1;
+        invalid_npcs.push(invalid);
+        let mut invalid = base_npc.clone();
+        invalid.strength = max_stat_value + 1;
+        invalid_npcs.push(invalid);
+        let mut invalid = base_npc;
+        invalid.defence = max_stat_value + 1;
+        invalid_npcs.push(invalid);
+        for invalid_npc in invalid_npcs {
+            assert!(matches!(
+                world.spawn_npc(invalid_npc),
+                Err(WorldError::InvalidGameplayDefinition)
+            ));
+        }
+    }
+
+    #[test]
+    fn restored_item_effects_enforce_numeric_caps() {
+        let (mut world, session) = phase_two_world(1, 2, 10);
+        let mut snapshot = world.character_gameplay_snapshot(session).unwrap();
+        snapshot.effects.push(ActiveEffect {
+            kind: EffectKind::Strength,
+            magnitude: MAX_STATUS_MAGNITUDE + 1,
+            remaining_ticks: 1,
+        });
+
+        assert!(matches!(
+            world.restore_character_gameplay(CharacterId(900), snapshot),
+            Err(WorldError::InvalidGameplayDefinition)
+        ));
+    }
+
+    #[test]
+    fn combat_saturates_equipment_and_strength_effect_bonuses() {
+        let (mut world, session) = phase_two_world(7, 2, 10);
+        world
+            .apply(session, PlayerAction::Move(Direction::North))
+            .unwrap();
+
+        for (item_id, slot) in [
+            ("game:sword", EquipmentSlot::Weapon),
+            ("game:potion", EquipmentSlot::Body),
+            ("game:fang", EquipmentSlot::Trinket),
+        ] {
+            world.item_gameplay.insert(
+                item_id.into(),
+                ItemGameplayDefinition {
+                    item_id: item_id.into(),
+                    equipment_slot: Some(slot),
+                    attack_bonus: i32::MAX,
+                    heal_amount: 0,
+                    consumable: false,
+                    effect: None,
+                },
+            );
+            world
+                .character_gameplay
+                .get_mut(&CharacterId(900))
+                .unwrap()
+                .equipment
+                .insert(slot, item_id.into());
+        }
+        world
+            .character_gameplay
+            .get_mut(&CharacterId(900))
+            .unwrap()
+            .effects = vec![
+            ActiveEffect {
+                kind: EffectKind::Strength,
+                magnitude: i32::MAX,
+                remaining_ticks: 2,
+            },
+            ActiveEffect {
+                kind: EffectKind::Strength,
+                magnitude: i32::MAX,
+                remaining_ticks: 2,
+            },
+        ];
+        world.npcs.get_mut("game:guardian").unwrap().defence = 0;
+
+        world
+            .apply(session, PlayerAction::Attack("guardian".into()))
+            .unwrap();
+        let events = world.advance_tick().unwrap();
+        let damage = events.iter().find_map(|event| match event {
+            DomainEvent::Gameplay {
+                event:
+                    GameplayEvent::NpcDamaged {
+                        amount,
+                        remaining_health,
+                        ..
+                    },
+            } => Some((*amount, *remaining_health)),
+            _ => None,
+        });
+
+        assert_eq!(damage, Some((i32::MAX, 0)));
+        assert_eq!(world.npcs["game:guardian"].health, 0);
     }
 
     #[test]

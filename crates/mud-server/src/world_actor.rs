@@ -2,20 +2,20 @@ use crate::{
     auth::AuthenticatedSession,
     delivery::{DeliveryInbox, DeliveryRouter},
     persistence::{CharacterStore, StoreError},
-    runtime_content::RuntimeContent,
+    runtime_content::{RuntimeContent, ScenePresentation},
     social::{SocialRuntime, apply_social},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
 use thiserror::Error;
 use tiamud_core::{
-    AccountId, AccountRole, AccountSnapshot, AdventureEvent, ArchetypeView,
-    CharacterGameplaySnapshot, CharacterId, CharacterSnapshot, DomainEvent, GameplayEvent,
-    PlayerAction, PlayerStateView, SceneView, SessionId, ViewEvent, World,
-    WorldError as CoreWorldError,
+    AccountId, AccountRole, AccountSnapshot, AdventureEvent, BackgroundSelection,
+    CharacterCreationCatalogView, CharacterGameplaySnapshot, CharacterId, CharacterSnapshot,
+    DomainEvent, GameplayEvent, PlayerAction, PlayerStateView, SceneView, SessionId, ViewEvent,
+    World, WorldError as CoreWorldError,
 };
 use tiamud_scripting::ScriptHook;
 use tokio::sync::{mpsc, oneshot};
@@ -44,6 +44,7 @@ pub struct EnteredWorld {
     pub session_id: SessionId,
     pub account_id: AccountId,
     pub scene: SceneView,
+    pub(crate) presentation: ScenePresentation,
     pub player: PlayerStateView,
     pub deliveries: DeliveryInbox,
 }
@@ -59,9 +60,41 @@ struct PreparedWorldEntry {
 #[derive(Debug)]
 pub struct AppliedAction {
     pub scene: SceneView,
+    pub(crate) presentation: ScenePresentation,
     pub player: PlayerStateView,
     pub output: Option<String>,
-    pub events: Vec<ViewEvent>,
+    pub events: Vec<ProjectedViewEvent>,
+}
+
+/// Server-only transport metadata paired with the exact perception-safe event
+/// from which it was derived. The core event schema remains the authoritative
+/// narrative contract and is serialized unchanged by non-web transports.
+#[derive(Debug)]
+pub struct ProjectedViewEvent {
+    pub event: ViewEvent,
+    pub(crate) combat_cue: Option<AuthoritativeCombatCue>,
+}
+
+impl ProjectedViewEvent {
+    fn narrative(event: ViewEvent) -> Self {
+        Self {
+            event,
+            combat_cue: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CombatCueKind {
+    Attack,
+    Hit,
+    Defeat,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuthoritativeCombatCue {
+    pub(crate) kind: CombatCueKind,
+    pub(crate) entity_id: String,
 }
 
 /// A fresh perception-safe projection caused by another actor or by a world
@@ -70,8 +103,29 @@ pub struct AppliedAction {
 #[derive(Debug)]
 pub struct WorldDelivery {
     pub scene: SceneView,
+    pub(crate) presentation: ScenePresentation,
     pub player: PlayerStateView,
-    pub events: Vec<ViewEvent>,
+    pub events: Vec<ProjectedViewEvent>,
+}
+
+/// Owned transport representation of the core's borrowed tri-state background
+/// selection. `Default` and `None` are intentionally different choices.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum CharacterBackgroundSelection {
+    #[default]
+    Default,
+    None,
+    Id(String),
+}
+
+impl CharacterBackgroundSelection {
+    fn as_core(&self) -> BackgroundSelection<'_> {
+        match self {
+            Self::Default => BackgroundSelection::Default,
+            Self::None => BackgroundSelection::None,
+            Self::Id(id) => BackgroundSelection::Id(id),
+        }
+    }
 }
 
 enum Command {
@@ -80,7 +134,13 @@ enum Command {
     },
     CurrentState {
         session: SessionId,
-        reply: oneshot::Sender<Result<(SceneView, PlayerStateView), GameError>>,
+        reply: oneshot::Sender<Result<(SceneView, ScenePresentation, PlayerStateView), GameError>>,
+    },
+    InitialGameplay {
+        lineage_id: Option<String>,
+        background: CharacterBackgroundSelection,
+        base_class_id: Option<String>,
+        reply: oneshot::Sender<Result<CharacterGameplaySnapshot, GameError>>,
     },
     EnterPreparedCharacter {
         snapshot: CharacterSnapshot,
@@ -106,9 +166,7 @@ pub struct WorldHandle {
     tx: mpsc::Sender<Command>,
     store: Arc<dyn CharacterStore>,
     start_room_id: Arc<str>,
-    archetype_catalog: Arc<[ArchetypeView]>,
-    default_archetype_id: Arc<str>,
-    initial_gameplay: Arc<HashMap<String, CharacterGameplaySnapshot>>,
+    creation_catalog: Arc<CharacterCreationCatalogView>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -152,19 +210,7 @@ impl WorldHandle {
         let operational_metrics = runtime_content.operational_metrics();
         let mut actor_delivery = DeliveryRouter::new(operational_metrics.clone());
         let start_room_id: Arc<str> = Arc::from(world.start_room_id());
-        let archetype_catalog: Arc<[ArchetypeView]> = Arc::from(world.archetype_catalog().to_vec());
-        let default_archetype_id: Arc<str> = Arc::from(world.default_archetype_id());
-        let initial_gameplay = Arc::new(
-            archetype_catalog
-                .iter()
-                .map(|archetype| {
-                    let gameplay = world
-                        .initial_gameplay(Some(&archetype.id))
-                        .map_err(GameError::from)?;
-                    Ok((archetype.id.clone(), gameplay))
-                })
-                .collect::<Result<HashMap<_, _>, GameError>>()?,
-        );
+        let creation_catalog = Arc::new(world.progression_catalog().clone());
         let actor_store = Arc::clone(&store);
         tokio::spawn(async move {
             let mut world = world;
@@ -256,6 +302,21 @@ impl WorldHandle {
                             current_state(&world, &runtime_content, &session_roles, session);
                         let _ = reply.send(result);
                     }
+                    Command::InitialGameplay {
+                        lineage_id,
+                        background,
+                        base_class_id,
+                        reply,
+                    } => {
+                        let result = world
+                            .initial_gameplay(
+                                lineage_id.as_deref(),
+                                background.as_core(),
+                                base_class_id.as_deref(),
+                            )
+                            .map_err(GameError::from);
+                        let _ = reply.send(result);
+                    }
                     Command::EnterPreparedCharacter {
                         snapshot,
                         gameplay,
@@ -285,6 +346,8 @@ impl WorldHandle {
                             session_id: entered.session_id,
                             account_id: entered.account_id,
                             scene: entered.scene,
+                            presentation: runtime_content
+                                .resolve_entity_presentation(&world, entered.session_id),
                             player: entered.player,
                             deliveries: actor_delivery.register(session),
                         });
@@ -372,9 +435,7 @@ impl WorldHandle {
             tx,
             store,
             start_room_id,
-            archetype_catalog,
-            default_archetype_id,
-            initial_gameplay,
+            creation_catalog,
         };
         match startup_receive.await {
             Ok(Ok(())) => Ok(handle),
@@ -448,12 +509,8 @@ impl WorldHandle {
         authenticated_roster(self.store.as_ref(), &token).await
     }
 
-    pub fn archetype_catalog(&self) -> &[ArchetypeView] {
-        &self.archetype_catalog
-    }
-
-    pub fn default_archetype_id(&self) -> &str {
-        &self.default_archetype_id
+    pub fn creation_catalog(&self) -> &CharacterCreationCatalogView {
+        &self.creation_catalog
     }
 
     #[cfg(test)]
@@ -462,18 +519,28 @@ impl WorldHandle {
         token: String,
         name: String,
     ) -> Result<CharacterSnapshot, GameError> {
-        self.create_authenticated_character_with_archetype(token, name, None)
-            .await
+        self.create_authenticated_character_with_progression(
+            token,
+            name,
+            None,
+            CharacterBackgroundSelection::Default,
+            None,
+        )
+        .await
     }
 
-    pub async fn create_authenticated_character_with_archetype(
+    pub async fn create_authenticated_character_with_progression(
         &self,
         token: String,
         name: String,
-        archetype_id: Option<String>,
+        lineage_id: Option<String>,
+        background: CharacterBackgroundSelection,
+        base_class_id: Option<String>,
     ) -> Result<CharacterSnapshot, GameError> {
         let account = self.store.resolve_session(&token).await?;
-        let initial_gameplay = self.initial_gameplay(archetype_id.as_deref())?;
+        let initial_gameplay = self
+            .initial_gameplay(lineage_id, background, base_class_id)
+            .await?;
         self.store
             .load_or_create_character_with_gameplay(
                 account.id,
@@ -485,15 +552,23 @@ impl WorldHandle {
             .map_err(GameError::from)
     }
 
-    fn initial_gameplay(
+    async fn initial_gameplay(
         &self,
-        archetype_id: Option<&str>,
+        lineage_id: Option<String>,
+        background: CharacterBackgroundSelection,
+        base_class_id: Option<String>,
     ) -> Result<CharacterGameplaySnapshot, GameError> {
-        let requested = archetype_id.unwrap_or(self.default_archetype_id.as_ref());
-        self.initial_gameplay
-            .get(requested)
-            .cloned()
-            .ok_or_else(|| GameError::World(CoreWorldError::ArchetypeNotFound))
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(Command::InitialGameplay {
+                lineage_id,
+                background,
+                base_class_id,
+                reply,
+            })
+            .await
+            .map_err(|_| GameError::ActorStopped)?;
+        receive.await.map_err(|_| GameError::ActorStopped)?
     }
 
     pub async fn enter_authenticated_character(
@@ -569,7 +644,9 @@ impl WorldHandle {
         account_id: AccountId,
         name: String,
     ) -> Result<CharacterSnapshot, GameError> {
-        let initial_gameplay = self.initial_gameplay(None)?;
+        let initial_gameplay = self
+            .initial_gameplay(None, CharacterBackgroundSelection::Default, None)
+            .await?;
         self.store
             .load_or_create_character_with_gameplay(
                 account_id,
@@ -610,7 +687,7 @@ impl WorldHandle {
     pub async fn current_state(
         &self,
         session: SessionId,
-    ) -> Result<(SceneView, PlayerStateView), GameError> {
+    ) -> Result<(SceneView, ScenePresentation, PlayerStateView), GameError> {
         let (reply, receive) = oneshot::channel();
         self.tx
             .send(Command::CurrentState { session, reply })
@@ -806,14 +883,7 @@ async fn apply(
         }
         let mut scene = world.current_scene(session)?;
         runtime_content.resolve_scene(world, session, role, &mut scene);
-        let events = hook
-            .domain_events
-            .iter()
-            .map(|event| world.project_event(session, event))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+        let events = project_view_events(world, session, &hook.domain_events)?;
         if hook.changed || !hook.domain_events.is_empty() {
             broadcast_world_deliveries(
                 world,
@@ -826,6 +896,7 @@ async fn apply(
         }
         return Ok(AppliedAction {
             scene,
+            presentation: runtime_content.resolve_entity_presentation(world, session),
             player: world.player_state_view(session)?,
             output: combine_output(Some(outcome.output), hook.narration),
             events,
@@ -914,13 +985,7 @@ async fn apply(
         world.restore_checkpoint(checkpoint);
         return Err(error.into());
     }
-    let events = committed_events
-        .iter()
-        .map(|event| world.project_event(session, event))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    let events = project_view_events(world, session, &committed_events)?;
     let mut scene = world.current_scene(session)?;
     runtime_content.resolve_scene(world, session, role, &mut scene);
     if !committed_events.is_empty() || script_changed {
@@ -935,6 +1000,7 @@ async fn apply(
     }
     Ok(AppliedAction {
         scene,
+        presentation: runtime_content.resolve_entity_presentation(world, session),
         player: world.player_state_view(session)?,
         output: combine_output(outcome.output, narration),
         events,
@@ -946,14 +1012,79 @@ fn current_state(
     runtime_content: &RuntimeContent,
     session_roles: &HashMap<SessionId, AccountRole>,
     session: SessionId,
-) -> Result<(SceneView, PlayerStateView), GameError> {
+) -> Result<(SceneView, ScenePresentation, PlayerStateView), GameError> {
     let role = session_roles
         .get(&session)
         .copied()
         .unwrap_or(AccountRole::Player);
     let mut scene = world.current_scene(session)?;
     runtime_content.resolve_scene(world, session, role, &mut scene);
-    Ok((scene, world.player_state_view(session)?))
+    Ok((
+        scene,
+        runtime_content.resolve_entity_presentation(world, session),
+        world.player_state_view(session)?,
+    ))
+}
+
+fn project_view_events(
+    world: &World,
+    session: SessionId,
+    domain_events: &[DomainEvent],
+) -> Result<Vec<ProjectedViewEvent>, CoreWorldError> {
+    let ability_attackers = domain_events
+        .iter()
+        .filter_map(|event| match event {
+            DomainEvent::Gameplay {
+                event: GameplayEvent::NpcAbilityUsed { npc_id, .. },
+            } => Some(npc_id.as_str()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    domain_events
+        .iter()
+        .map(|domain_event| {
+            world.project_event(session, domain_event).map(|projected| {
+                projected.map(|event| ProjectedViewEvent {
+                    combat_cue: combat_cue_from_pair(domain_event, &event, &ability_attackers),
+                    event,
+                })
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|events| events.into_iter().flatten().collect())
+}
+
+/// Derives presentation intent exclusively from an authoritative domain fact
+/// paired with its successful observer projection. Text is deliberately not
+/// inspected and stable domain IDs are deliberately not copied.
+fn combat_cue_from_pair(
+    domain_event: &DomainEvent,
+    projected: &ViewEvent,
+    ability_attackers: &HashSet<&str>,
+) -> Option<AuthoritativeCombatCue> {
+    let (kind, entity_id) = match domain_event {
+        DomainEvent::Gameplay {
+            event: GameplayEvent::NpcAbilityUsed { .. },
+        } => (CombatCueKind::Attack, projected.actor_id.as_str()),
+        DomainEvent::Gameplay {
+            event: GameplayEvent::NpcDamaged {
+                remaining_health, ..
+            },
+        } if *remaining_health > 0 => (CombatCueKind::Hit, projected.target_id.as_deref()?),
+        DomainEvent::Gameplay {
+            event: GameplayEvent::NpcDefeated { .. },
+        } => (CombatCueKind::Defeat, projected.target_id.as_deref()?),
+        DomainEvent::Gameplay {
+            event: GameplayEvent::CharacterDamaged { npc_id, .. },
+        } if !ability_attackers.contains(npc_id.as_str()) => {
+            (CombatCueKind::Attack, projected.actor_id.as_str())
+        }
+        _ => return None,
+    };
+    Some(AuthoritativeCombatCue {
+        kind,
+        entity_id: entity_id.to_owned(),
+    })
 }
 
 fn broadcast_world_deliveries(
@@ -970,21 +1101,18 @@ fn broadcast_world_deliveries(
         .into_iter()
         .filter(|observer| Some(*observer) != excluded_session)
     {
-        let projected = domain_events
-            .iter()
-            .map(|event| world.project_event(observer, event))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|events| events.into_iter().flatten().collect::<Vec<_>>());
+        let projected = project_view_events(world, observer, domain_events);
         if !refreshes_state && matches!(&projected, Ok(events) if events.is_empty()) {
             continue;
         }
         let state = current_state(world, runtime_content, session_roles, observer);
         match (projected, state) {
-            (Ok(events), Ok((scene, player))) => {
+            (Ok(events), Ok((scene, presentation, player))) => {
                 delivery.send_world(
                     observer,
                     WorldDelivery {
                         scene,
+                        presentation,
                         player,
                         events,
                     },
@@ -1010,15 +1138,20 @@ fn send_targeted_narration_delivery(
 ) {
     let events = narration
         .iter()
-        .map(|line| world.project_private_narration(session, line))
+        .map(|line| {
+            world
+                .project_private_narration(session, line)
+                .map(ProjectedViewEvent::narrative)
+        })
         .collect::<Result<Vec<_>, _>>();
     let state = current_state(world, runtime_content, session_roles, session);
     match (events, state) {
-        (Ok(events), Ok((scene, player))) => {
+        (Ok(events), Ok((scene, presentation, player))) => {
             delivery.send_world(
                 session,
                 WorldDelivery {
                     scene,
+                    presentation,
                     player,
                     events,
                 },
@@ -1966,11 +2099,177 @@ mod tests {
         assert!(delivery.player.inventory.is_empty());
         assert_eq!(delivery.events.len(), 1);
         assert_eq!(
-            delivery.events[0].kind,
+            delivery.events[0].event.kind,
             tiamud_core::ViewEventKind::ItemTaken
         );
-        assert!(!delivery.events[0].actor_id.contains("Actor"));
-        assert!(!delivery.events[0].actor_id.contains("demo:"));
+        assert!(!delivery.events[0].event.actor_id.contains("Actor"));
+        assert!(!delivery.events[0].event.actor_id.contains("demo:"));
+    }
+
+    #[test]
+    fn authoritative_combat_cues_are_batch_aware_and_use_only_projected_ids() {
+        let mut world = World::demo();
+        let session = SessionId(7_001);
+        let character_id = CharacterId(7_002);
+        world
+            .spawn_npc(NpcDefinition {
+                stable_id: "test:cue-wolf".into(),
+                name: "cue wolf".into(),
+                description: "A wolf used to test projected combat cues.".into(),
+                room_id: "demo:lantern-square".into(),
+                level: 1,
+                max_health: 8,
+                strength: 3,
+                defence: 0,
+                experience_reward: 1,
+                loot_item_ids: Vec::new(),
+                respawn_ticks: 2,
+            })
+            .unwrap();
+        world
+            .connect(
+                session,
+                CharacterSnapshot {
+                    id: character_id,
+                    account_id: AccountId(7_003),
+                    name: "Cue Observer".into(),
+                    room_id: "demo:lantern-square".into(),
+                    item_locations: Default::default(),
+                },
+            )
+            .unwrap();
+        let ability = DomainEvent::Gameplay {
+            event: GameplayEvent::NpcAbilityUsed {
+                npc_id: "test:cue-wolf".into(),
+                npc_name: "cue wolf".into(),
+                character_id,
+                character_name: "Cue Observer".into(),
+                ability_id: "test:claw".into(),
+                ability_name: "Claw".into(),
+                room_id: "demo:lantern-square".into(),
+            },
+        };
+        let character_damaged = DomainEvent::Gameplay {
+            event: GameplayEvent::CharacterDamaged {
+                character_id,
+                character_name: "Cue Observer".into(),
+                npc_id: "test:cue-wolf".into(),
+                npc_name: "cue wolf".into(),
+                amount: 3,
+                remaining_health: 12,
+                room_id: "demo:lantern-square".into(),
+            },
+        };
+        let npc_damaged = |remaining_health| DomainEvent::Gameplay {
+            event: GameplayEvent::NpcDamaged {
+                character_id,
+                character_name: "Cue Observer".into(),
+                npc_id: "test:cue-wolf".into(),
+                npc_name: "cue wolf".into(),
+                amount: 3,
+                remaining_health,
+                room_id: "demo:lantern-square".into(),
+            },
+        };
+        let npc_defeated = DomainEvent::Gameplay {
+            event: GameplayEvent::NpcDefeated {
+                character_id,
+                character_name: "Cue Observer".into(),
+                npc_id: "test:cue-wolf".into(),
+                npc_name: "cue wolf".into(),
+                respawn_at_tick: 10,
+                room_id: "demo:lantern-square".into(),
+            },
+        };
+        let unrelated = DomainEvent::Gameplay {
+            event: GameplayEvent::ExperienceGained {
+                character_id,
+                character_name: "Cue Observer".into(),
+                amount: 1,
+                total: 1,
+                room_id: "demo:lantern-square".into(),
+            },
+        };
+
+        let ability_batch = project_view_events(
+            &world,
+            session,
+            &[ability.clone(), character_damaged.clone()],
+        )
+        .unwrap();
+        assert_eq!(ability_batch.len(), 2);
+        assert_eq!(
+            ability_batch[0].combat_cue,
+            Some(AuthoritativeCombatCue {
+                kind: CombatCueKind::Attack,
+                entity_id: ability_batch[0].event.actor_id.clone(),
+            })
+        );
+        assert!(ability_batch[1].combat_cue.is_none());
+
+        let fallback = project_view_events(&world, session, &[character_damaged]).unwrap();
+        assert_eq!(
+            fallback[0].combat_cue.as_ref().unwrap().kind,
+            CombatCueKind::Attack
+        );
+        assert_eq!(
+            fallback[0].combat_cue.as_ref().unwrap().entity_id,
+            fallback[0].event.actor_id
+        );
+
+        let outcomes = project_view_events(
+            &world,
+            session,
+            &[npc_damaged(4), npc_damaged(0), npc_defeated, unrelated],
+        )
+        .unwrap();
+        assert_eq!(
+            outcomes[0].combat_cue.as_ref().unwrap().kind,
+            CombatCueKind::Hit
+        );
+        assert_eq!(
+            outcomes[0].combat_cue.as_ref().unwrap().entity_id,
+            outcomes[0].event.target_id.clone().unwrap()
+        );
+        assert!(outcomes[1].combat_cue.is_none());
+        assert_eq!(
+            outcomes[2].combat_cue.as_ref().unwrap().kind,
+            CombatCueKind::Defeat
+        );
+        assert_eq!(
+            outcomes[2].combat_cue.as_ref().unwrap().entity_id,
+            outcomes[2].event.target_id.clone().unwrap()
+        );
+        assert!(outcomes[3].combat_cue.is_none());
+        for projected in ability_batch
+            .iter()
+            .chain(fallback.iter())
+            .chain(outcomes.iter())
+        {
+            if let Some(cue) = &projected.combat_cue {
+                assert!(cue.entity_id.starts_with('o'));
+                assert!(!cue.entity_id.contains("test:cue-wolf"));
+            }
+        }
+
+        let distant_session = SessionId(7_004);
+        world
+            .connect(
+                distant_session,
+                CharacterSnapshot {
+                    id: CharacterId(7_005),
+                    account_id: AccountId(7_006),
+                    name: "Distant Observer".into(),
+                    room_id: "demo:north-gate".into(),
+                    item_locations: Default::default(),
+                },
+            )
+            .unwrap();
+        assert!(
+            project_view_events(&world, distant_session, &[ability])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -2202,33 +2501,165 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_creation_persists_the_selected_archetype_sheet() {
+    async fn authenticated_creation_persists_the_selected_composed_sheet() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store.clone())
-            .await
-            .unwrap();
+        let loaded = crate::world_loader::default_loaded_world().unwrap();
+        let world = WorldHandle::spawn(
+            crate::world_loader::build_loaded_world(&loaded).unwrap(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
         let owner = world
             .register_account("Owner".into(), "a sufficiently long password".into())
             .await
             .unwrap();
-        let selected = world.archetype_catalog()[0].id.clone();
+        let lineage_id = world.creation_catalog().lineages[0].id.clone();
+        let background_id = world.creation_catalog().backgrounds[0].id.clone();
+        let base_class_id = world.creation_catalog().base_classes[0].id.clone();
 
         let character = world
-            .create_authenticated_character_with_archetype(
+            .create_authenticated_character_with_progression(
                 owner.token.as_str().to_owned(),
                 "Aria".into(),
-                Some(selected.clone()),
+                Some(lineage_id.clone()),
+                CharacterBackgroundSelection::Id(background_id.clone()),
+                Some(base_class_id.clone()),
+            )
+            .await
+            .unwrap();
+        let gameplay = store.load_character_gameplay(character.id).await.unwrap();
+        assert_eq!(gameplay.lineage_id, lineage_id);
+        assert_eq!(
+            gameplay.background_id.as_deref(),
+            Some(background_id.as_str())
+        );
+        assert_eq!(gameplay.base_class_id, base_class_id);
+        assert_eq!(gameplay.active_class_id, base_class_id);
+
+        let default_background = world
+            .create_authenticated_character_with_progression(
+                owner.token.as_str().to_owned(),
+                "Default Origin".into(),
+                None,
+                CharacterBackgroundSelection::Default,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(
             store
-                .load_character_gameplay(character.id)
+                .load_character_gameplay(default_background.id)
                 .await
                 .unwrap()
-                .archetype_id,
-            selected
+                .background_id
+                .as_deref(),
+            world.creation_catalog().default_background_id.as_deref()
         );
+
+        let no_background = world
+            .create_authenticated_character_with_progression(
+                owner.token.as_str().to_owned(),
+                "No Origin".into(),
+                None,
+                CharacterBackgroundSelection::None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_character_gameplay(no_background.id)
+                .await
+                .unwrap()
+                .background_id,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn talent_and_promotion_actions_persist_the_v3_progression_state() {
+        let store = Arc::new(MemoryStore::default());
+        let loaded = crate::world_loader::default_loaded_world().unwrap();
+        let world = WorldHandle::spawn(
+            crate::world_loader::build_loaded_world(&loaded).unwrap(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let owner = world
+            .register_account(
+                "Progression Owner".into(),
+                "a sufficiently long password".into(),
+            )
+            .await
+            .unwrap();
+        let character = world
+            .create_authenticated_character_with_progression(
+                owner.token.as_str().to_owned(),
+                "Iria".into(),
+                Some("tiamud:mortal".into()),
+                CharacterBackgroundSelection::Id("tiamud:city-guard".into()),
+                Some("tiamud:vanguard".into()),
+            )
+            .await
+            .unwrap();
+        {
+            let mut state = store.state.lock().unwrap();
+            let gameplay = state.gameplay.get_mut(&character.id).unwrap();
+            gameplay.level = 5;
+            gameplay.experience = 1_600;
+            gameplay.progression_points.insert("talent".into(), 1);
+        }
+
+        let entered = world
+            .enter_authenticated_character(owner.token.as_str().to_owned(), character.id)
+            .await
+            .unwrap();
+        let talent = world
+            .apply(
+                entered.session_id,
+                PlayerAction::AcquireTalent {
+                    graph_id: "tiamud:martial-talents".into(),
+                    node_id: "tiamud:guarded-stance".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            talent
+                .player
+                .character
+                .talents
+                .iter()
+                .find(|graph| graph.id == "tiamud:martial-talents")
+                .unwrap()
+                .nodes
+                .iter()
+                .find(|node| node.id == "tiamud:guarded-stance")
+                .map(|node| node.rank),
+            Some(1)
+        );
+
+        let promoted = world
+            .apply(
+                entered.session_id,
+                PlayerAction::Promote {
+                    class_id: "tiamud:bastion".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(promoted.player.character.base_class.id, "tiamud:vanguard");
+        assert_eq!(promoted.player.character.active_class.id, "tiamud:bastion");
+
+        let persisted = store.load_character_gameplay(character.id).await.unwrap();
+        assert_eq!(persisted.active_class_id, "tiamud:bastion");
+        assert_eq!(
+            persisted.talent_node_ranks["tiamud:martial-talents"]["tiamud:guarded-stance"],
+            1
+        );
+        assert_eq!(persisted.progression_points["talent"], 0);
     }
 
     #[tokio::test]
@@ -2344,8 +2775,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(narration.len(), 1);
         assert_eq!(narration[0].0, target);
-        assert_eq!(narration[0].1.text, "Target alone hears the bell.");
-        assert_ne!(narration[0].1.actor_id, "71");
+        assert_eq!(narration[0].1.event.text, "Target alone hears the bell.");
+        assert_ne!(narration[0].1.event.actor_id, "71");
         assert!(
             deliveries
                 .iter()
@@ -2820,9 +3251,14 @@ mod tests {
             tx,
             store,
             start_room_id: Arc::from("demo:lantern-square"),
-            archetype_catalog: Arc::from(Vec::<ArchetypeView>::new()),
-            default_archetype_id: Arc::from("wanderer"),
-            initial_gameplay: Arc::new(HashMap::new()),
+            creation_catalog: Arc::new(CharacterCreationCatalogView {
+                default_lineage_id: "mortal".into(),
+                default_background_id: None,
+                default_base_class_id: "wanderer".into(),
+                lineages: Vec::new(),
+                backgrounds: Vec::new(),
+                base_classes: Vec::new(),
+            }),
         };
         for _ in 0..WORLD_COMMAND_QUEUE_CAPACITY {
             let (reply, _receive) = oneshot::channel();

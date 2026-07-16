@@ -2275,8 +2275,8 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use tiamud_core::{
-        ActiveEffect, Direction, EffectKind, EquipmentSlot, ItemLocationSnapshot,
-        RuntimeItemLocation, World,
+        ActiveEffect, BackgroundSelection, Direction, EffectKind, EquipmentSlot,
+        ItemLocationSnapshot, PlayerAction, RuntimeItemLocation, SessionId, World, WorldError,
     };
 
     async fn account(store: &SqliteCharacterStore, name: &str) -> AccountSnapshot {
@@ -2981,22 +2981,12 @@ mod tests {
             .unwrap();
         let defaults = CharacterGameplaySnapshot::default();
         let gameplay = CharacterGameplaySnapshot {
-            archetype_id: defaults.archetype_id,
             level: 4,
             experience: 375,
             vitals: tiamud_core::Vitals {
                 health: 0,
                 max_health: defaults.vitals.max_health,
             },
-            attributes: defaults.attributes,
-            resources: defaults.resources,
-            ability_ids: defaults.ability_ids,
-            ability_cooldowns: defaults.ability_cooldowns,
-            ability_global_ready_tick: defaults.ability_global_ready_tick,
-            last_offensive_ability_tick: defaults.last_offensive_ability_tick,
-            resistances: defaults.resistances,
-            statuses: defaults.statuses,
-            skills: defaults.skills,
             equipment: std::collections::BTreeMap::from([(
                 EquipmentSlot::Weapon,
                 "demo:blue-lantern".to_owned(),
@@ -3022,6 +3012,7 @@ mod tests {
                 flag: "archive-follow-up".into(),
                 due_tick: 23,
             }],
+            ..defaults
         };
         let mut runtime = World::demo().runtime_snapshot();
         runtime.logical_tick = 17;
@@ -3052,6 +3043,122 @@ mod tests {
             gameplay
         );
         assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
+    }
+
+    #[tokio::test]
+    async fn v3_progression_survives_a_sqlite_restart_and_restores_fail_closed() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let database_path = temporary.path().join("progression.sqlite3");
+        let store = SqliteCharacterStore::open(&database_path).await.unwrap();
+        let owner = account(&store, "Progression Owner").await;
+        let loaded = crate::world_loader::default_loaded_world().unwrap();
+        let mut world = crate::world_loader::build_loaded_world(&loaded).unwrap();
+        let mut gameplay = world
+            .initial_gameplay(
+                Some("tiamud:mortal"),
+                BackgroundSelection::Id("tiamud:city-guard"),
+                Some("tiamud:vanguard"),
+            )
+            .unwrap();
+        gameplay.level = 5;
+        gameplay.experience = 1_600;
+        gameplay.progression_points.insert("talent".into(), 1);
+        gameplay.tags.insert("tiamud:founder".into());
+        let character = store
+            .load_or_create_character_with_gameplay(
+                owner.id,
+                "Iria",
+                world.start_room_id(),
+                gameplay.clone(),
+            )
+            .await
+            .unwrap();
+
+        world
+            .restore_character_gameplay(character.id, gameplay)
+            .unwrap();
+        world
+            .receive_progression_signal(character.id, "tiamud:heard-call")
+            .unwrap();
+        let session = SessionId(77);
+        world.connect(session, character.clone()).unwrap();
+        let talent = world
+            .apply(
+                session,
+                PlayerAction::AcquireTalent {
+                    graph_id: "tiamud:martial-talents".into(),
+                    node_id: "tiamud:guarded-stance".into(),
+                },
+            )
+            .unwrap();
+        let promotion = world
+            .apply(
+                session,
+                PlayerAction::Promote {
+                    class_id: "tiamud:bastion".into(),
+                },
+            )
+            .unwrap();
+        let mut events = talent.domain_events;
+        events.extend(promotion.domain_events);
+        store
+            .commit_action(
+                vec![world.durable_character_snapshot(session).unwrap()],
+                world.runtime_snapshot(),
+                events,
+            )
+            .await
+            .unwrap();
+        store.shutdown().await.unwrap();
+        drop(store);
+
+        let reopened = SqliteCharacterStore::open(&database_path).await.unwrap();
+        let restored = reopened
+            .load_character_gameplay(character.id)
+            .await
+            .unwrap();
+        assert_eq!(restored.lineage_id, "tiamud:mortal");
+        assert_eq!(restored.background_id.as_deref(), Some("tiamud:city-guard"));
+        assert_eq!(restored.base_class_id, "tiamud:vanguard");
+        assert_eq!(restored.active_class_id, "tiamud:bastion");
+        assert_eq!(
+            restored.class_history,
+            vec!["tiamud:vanguard".to_owned(), "tiamud:bastion".to_owned()]
+        );
+        assert_eq!(restored.progression_points["talent"], 0);
+        assert_eq!(
+            restored.talent_node_ranks["tiamud:martial-talents"]["tiamud:guarded-stance"],
+            1
+        );
+        assert!(restored.tags.contains("tiamud:founder"));
+        assert!(restored.received_signals.contains("tiamud:heard-call"));
+
+        let mut restarted_world = crate::world_loader::build_loaded_world(&loaded).unwrap();
+        restarted_world
+            .restore_character_gameplay(character.id, restored.clone())
+            .unwrap();
+        restarted_world.connect(session, character.clone()).unwrap();
+        assert_eq!(
+            restarted_world
+                .character_gameplay_snapshot(session)
+                .unwrap(),
+            restored
+        );
+        let mut unresolved = restored.clone();
+        unresolved.active_class_id = "missing:class".into();
+        unresolved.class_history[1] = "missing:class".into();
+        assert!(matches!(
+            restarted_world.restore_character_gameplay(character.id, unresolved),
+            Err(WorldError::InvalidGameplayDefinition)
+        ));
+        assert_eq!(
+            restarted_world
+                .character_gameplay_snapshot(session)
+                .unwrap(),
+            restored,
+            "a rejected unresolved definition must not mutate restored state"
+        );
+        reopened.shutdown().await.unwrap();
     }
 
     #[tokio::test]

@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             "/api/characters",
             get(web::characters).post(web::create_character),
         )
-        .route("/api/archetypes", get(web::archetypes))
+        .route("/api/character-options", get(web::character_options))
         .route("/ws", get(web::ws_handler))
         .fallback(web::static_asset)
         .with_state(state)

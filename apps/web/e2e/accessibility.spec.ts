@@ -11,8 +11,13 @@ async function installMockWorld(
       body: JSON.stringify({ characters: [{ id: 7, name: 'Aria' }] }),
     });
   });
-  await page.route('**/api/archetypes', async (route) => {
-    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' });
+  await page.route('**/api/character-options', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+      defaultLineageId: 'mortal', defaultBackgroundId: null, defaultBaseClassId: 'wanderer',
+      lineages: [{ id: 'mortal', label: 'Mortal', description: 'Adaptable people.' }],
+      backgrounds: [],
+      baseClasses: [{ id: 'wanderer', label: 'Wanderer', description: 'A flexible explorer.' }],
+    }) });
   });
   await page.addInitScript((initialSceneImage: Record<string, unknown> | null) => {
     const mockState = window as Window & {
@@ -80,7 +85,27 @@ async function installMockWorld(
               character: {
                 name: 'Aria', level: 1, experience: 0, nextLevelExperience: 100,
                 health: 20, maxHealth: 20, strength: 5, defence: 2,
-                archetype: { id: 'mystic', label: 'Mystic', description: 'A wielder of arcane power.' },
+                lineage: { id: 'mortal', label: 'Mortal', description: 'Adaptable people.' },
+                background: null,
+                baseClass: { id: 'mystic', label: 'Mystic', description: 'A wielder of arcane power.' },
+                activeClass: { id: 'mystic', label: 'Mystic', description: 'A wielder of arcane power.' },
+                classHistory: [{ id: 'mystic', label: 'Mystic', description: 'A wielder of arcane power.' }],
+                progressionPoints: { talent: 2 },
+                talents: [{
+                  id: 'mystic-path', label: 'Mystic Path', description: 'Shape power with precision.',
+                  pointPoolId: 'talent', availablePoints: 2,
+                  nodes: [{
+                    id: 'steady-flame', label: 'Steady Flame', description: 'Keep a spell stable.',
+                    rank: 0, maxRank: 2, nextCost: 1, available: true,
+                    requirements: [{ met: true, text: 'Reach level 1' }],
+                    command: 'talent learn mystic-path steady-flame',
+                  }],
+                }],
+                promotions: [{
+                  class: { id: 'stormcaller', label: 'Stormcaller', description: 'Call lightning from rain.' },
+                  available: true, requirements: [{ met: true, text: 'Train as a Mystic' }],
+                  command: 'promote stormcaller',
+                }],
                 attributes: [{ id: 'intellect', label: 'Intellect', value: 9 }],
                 resources: [{ id: 'mana', label: 'Mana', current: 12, max: 20 }],
                 abilities: [{
@@ -156,8 +181,13 @@ async function installRejectedWorld(page: import('@playwright/test').Page): Prom
       body: JSON.stringify({ characters: [{ id: 7, name: 'Aria' }] }),
     });
   });
-  await page.route('**/api/archetypes', async (route) => {
-    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' });
+  await page.route('**/api/character-options', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+      defaultLineageId: 'mortal', defaultBackgroundId: null, defaultBaseClassId: 'wanderer',
+      lineages: [{ id: 'mortal', label: 'Mortal', description: 'Adaptable people.' }],
+      backgrounds: [],
+      baseClasses: [{ id: 'wanderer', label: 'Wanderer', description: 'A flexible explorer.' }],
+    }) });
   });
   await page.addInitScript(() => {
     localStorage.setItem('tiamud.access.v1', JSON.stringify({
@@ -229,7 +259,7 @@ test('welcome remains usable when every artwork rendition fails', async ({ page 
   await expect(page.getByRole('heading', { name: 'Return to your story' })).toBeVisible();
 });
 
-test('character creation offers advertised archetypes and submits the selected id', async ({ page }) => {
+test('character creation keeps world defaults distinct from explicit v3 choices', async ({ page }) => {
   const creationBodies: unknown[] = [];
   await page.route('**/api/auth/login', async (route) => {
     await route.fulfill({
@@ -241,20 +271,33 @@ test('character creation offers advertised archetypes and submits the selected i
       }),
     });
   });
-  await page.route('**/api/archetypes', async (route) => {
+  await page.route('**/api/character-options', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
-        archetypes: [
-          { id: 'vanguard', label: 'Vanguard', description: 'A resilient front-line guardian.' },
-          { id: 'mystic', label: 'Mystic', description: 'A wielder of focused arcane power.' },
+        defaultLineageId: 'mortal',
+        defaultBackgroundId: 'scout',
+        defaultBaseClassId: 'wanderer',
+        lineages: [
+          { id: 'mortal', label: 'Mortal', description: 'Adaptable people.' },
+          { id: 'embermarked', label: 'Embermarked', description: 'Fire answers their blood.' },
+        ],
+        backgrounds: [
+          { id: 'scout', label: 'Caravan Scout', description: 'Knows the road.' },
+          { id: 'archive', label: 'Archive Apprentice', description: 'Studies old mysteries.' },
+        ],
+        baseClasses: [
+          { id: 'wanderer', label: 'Wanderer', description: 'A flexible explorer.' },
+          { id: 'arcanist', label: 'Arcanist', description: 'A wielder of focused arcane power.' },
         ],
       }),
     });
   });
   await page.route('**/api/characters', async (route) => {
     if (route.request().method() === 'POST') {
-      const request = route.request().postDataJSON() as { name: string; archetypeId?: string };
+      const request = route.request().postDataJSON() as {
+        name: string; lineageId?: string; backgroundId?: string | null; baseClassId?: string;
+      };
       creationBodies.push(request);
       await route.fulfill({
         status: 201,
@@ -274,14 +317,21 @@ test('character creation offers advertised archetypes and submits the selected i
   await page.getByLabel('Password').fill('long password');
   await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await expect(page.getByLabel('Archetype')).toBeVisible();
-  await expect(page.getByLabel('Archetype')).toHaveValue('');
-  await expect(page.getByText("Use the world author's suggested starting path.")).toBeVisible();
+  await expect(page.getByLabel('Lineage')).toHaveValue('');
+  await expect(page.getByLabel('Background')).toHaveValue('@default');
+  await expect(page.getByLabel('Base class')).toHaveValue('');
+  await expect(page.getByText('Adaptable people.')).toBeVisible();
+  await expect(page.getByText('Knows the road.')).toBeVisible();
+  await expect(page.getByText('A flexible explorer.')).toBeVisible();
   await page.getByLabel('Create an adventurer').fill('Wren');
   await page.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Enter as Wren' })).toBeVisible();
 
-  await page.getByLabel('Archetype').selectOption('mystic');
+  await page.getByLabel('Lineage').selectOption('embermarked');
+  await page.getByLabel('Background').selectOption('@none');
+  await page.getByLabel('Base class').selectOption('arcanist');
+  await expect(page.getByText('Fire answers their blood.')).toBeVisible();
+  await expect(page.getByText('Begin without a background package. This differs from the world default.')).toBeVisible();
   await expect(page.getByText('A wielder of focused arcane power.')).toBeVisible();
   await page.getByLabel('Create an adventurer').fill('Lyra');
   await page.getByRole('button', { name: 'Create', exact: true }).click();
@@ -289,7 +339,7 @@ test('character creation offers advertised archetypes and submits the selected i
   await expect(page.getByRole('button', { name: 'Enter as Lyra' })).toBeVisible();
   expect(creationBodies).toEqual([
     { name: 'Wren' },
-    { name: 'Lyra', archetypeId: 'mystic' },
+    { name: 'Lyra', lineageId: 'embermarked', backgroundId: null, baseClassId: 'arcanist' },
   ]);
 });
 
@@ -476,6 +526,26 @@ test('ability panel chooses a visible target and sends a structured ability acti
     abilityId: 'ember-bolt',
     target: 'opaque-wolf',
   });
+});
+
+test('progression controls send native promotion and talent actions', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+  await expect(page.getByRole('heading', { name: 'Stormcaller' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Promote to Stormcaller' }).click();
+  await page.getByRole('button', { name: 'Learn Steady Flame' }).click();
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.map((entry) => entry.data);
+  })).toEqual([
+    expect.objectContaining({ action: 'progression.promote', classId: 'stormcaller' }),
+    expect.objectContaining({
+      action: 'progression.talent', graphId: 'mystic-path', nodeId: 'steady-flame',
+    }),
+  ]);
 });
 
 test('presentation preferences reconnect with a fresh capability hello', async ({ page }) => {

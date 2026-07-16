@@ -17,7 +17,7 @@ use super::{
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 1_024;
 
-/// A WorldPack v2 plus optional authoring data ignored by older runtime readers.
+/// A WorldPack v3 plus optional authoring data ignored by older runtime readers.
 ///
 /// Keeping the additions at the top level preserves Rust source compatibility for
 /// existing `WorldPack` and `Room` struct literals. Serde's default unknown-field
@@ -31,6 +31,11 @@ pub struct WorldPackDocument {
     /// Keeping it outside `Room` preserves the portable gameplay schema.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub room_media: Vec<RoomMediaDefinition>,
+    /// Optional presentation annotations for item instances and NPC spawns.
+    /// These definitions never affect visibility or gameplay and are joined to
+    /// observer-safe scene entities only after the core has filtered them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_media: Vec<EntityMediaDefinition>,
     /// Gameplay-facing perception policy, grouped per room so hidden state is
     /// validated before the runtime can project it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -48,11 +53,123 @@ impl From<WorldPack> for WorldPackDocument {
         Self {
             world,
             room_media: Vec::new(),
+            entity_media: Vec::new(),
             room_perception: Vec::new(),
             scene_variants: Vec::new(),
             scripts: Vec::new(),
             content_tests: Vec::new(),
         }
+    }
+}
+
+pub const MAX_ENTITY_MEDIA_DEFINITIONS: usize = 512;
+pub const MAX_PROJECTED_ENTITY_MEDIA: usize = 12;
+pub const MAX_PROJECTED_ENTITY_POSES: usize = 32;
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityMediaKind {
+    Item,
+    Npc,
+}
+
+impl EntityMediaKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Item => "item",
+            Self::Npc => "npc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityMediaLayer {
+    Midground,
+    Foreground,
+    Overlay,
+}
+
+impl EntityMediaLayer {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Midground => "midground",
+            Self::Foreground => "foreground",
+            Self::Overlay => "overlay",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedFootprint {
+    /// Width in thousandths of the scene, constrained to 20..=600.
+    pub width_milli: u16,
+    /// Height in thousandths of the scene, constrained to 20..=800.
+    pub height_milli: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedAnchor {
+    /// Horizontal bottom-centre anchor in thousandths of the scene.
+    pub x_milli: u16,
+    /// Vertical bottom-centre anchor in thousandths, constrained to 200..=1000.
+    pub y_milli: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntitySpriteSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub png: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntitySpritePoses {
+    pub idle: EntitySpriteSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack: Option<EntitySpriteSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit: Option<EntitySpriteSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defeated: Option<EntitySpriteSource>,
+}
+
+impl EntitySpritePoses {
+    pub fn count(&self) -> usize {
+        1 + usize::from(self.attack.is_some())
+            + usize::from(self.hit.is_some())
+            + usize::from(self.defeated.is_some())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntityMediaDefinition {
+    pub kind: EntityMediaKind,
+    /// Stable item-instance ID for `item`, or stable NPC-spawn ID for `npc`.
+    pub subject_id: String,
+    /// Localized reviewed alternative text. Decorative sprites must omit it.
+    #[serde(default, skip_serializing_if = "LocalizedText::is_empty")]
+    pub alt: LocalizedText,
+    #[serde(default)]
+    pub decorative: bool,
+    pub footprint: NormalizedFootprint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_anchor: Option<NormalizedAnchor>,
+    #[serde(default)]
+    pub priority: i16,
+    pub layer: EntityMediaLayer,
+    pub poses: EntitySpritePoses,
+}
+
+impl EntityMediaDefinition {
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.subject_id)
     }
 }
 
@@ -983,11 +1100,23 @@ pub enum DocumentToolError {
     InvalidScene(#[from] SceneResolutionError),
     #[error("WorldPack JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("WorldPack v2 character progression cannot be normalized safely: {0}")]
+    LegacyProgression(String),
 }
 
 impl WorldPackDocument {
     pub fn from_json(bytes: &[u8]) -> Result<Self, DocumentToolError> {
-        Ok(serde_json::from_slice(bytes)?)
+        let mut document: Self = serde_json::from_slice(bytes)?;
+        if document.world.schema_version == 2 {
+            document.world.gameplay.character_progression =
+                crate::progression::normalize_v2_character_progression(
+                    std::mem::take(&mut document.world.gameplay.archetypes),
+                    document.world.gameplay.default_archetype_id.take(),
+                )
+                .map_err(DocumentToolError::LegacyProgression)?;
+            document.world.schema_version = crate::CURRENT_SCHEMA_VERSION;
+        }
+        Ok(document)
     }
 
     pub fn validate(&self) -> Result<(), ValidationErrors> {
@@ -1058,6 +1187,97 @@ impl WorldPackDocument {
             }
         }
 
+        if self.entity_media.len() > MAX_ENTITY_MEDIA_DEFINITIONS {
+            errors.push(ValidationError::TooManyEntityMedia);
+        }
+        let item_ids = self
+            .world
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<HashSet<_>>();
+        let npc_spawn_ids = self
+            .world
+            .gameplay
+            .npc_spawns
+            .iter()
+            .map(|spawn| spawn.id.as_str())
+            .collect::<HashSet<_>>();
+        let mut entity_media_subjects = HashSet::new();
+        for media in &self.entity_media {
+            let key = (media.kind, media.subject_id.as_str());
+            if !entity_media_subjects.insert(key) {
+                errors.push(ValidationError::DuplicateEntityMedia {
+                    kind: media.kind.as_str().to_owned(),
+                    subject_id: media.subject_id.clone(),
+                });
+                continue;
+            }
+            let subject_exists = match media.kind {
+                EntityMediaKind::Item => item_ids.contains(media.subject_id.as_str()),
+                EntityMediaKind::Npc => npc_spawn_ids.contains(media.subject_id.as_str()),
+            };
+            if !subject_exists {
+                invalid_entity_media(
+                    media,
+                    "the referenced item instance or NPC spawn does not exist",
+                    &mut errors,
+                );
+            }
+            if media.decorative {
+                if !media.alt.is_empty() {
+                    invalid_entity_media(
+                        media,
+                        "decorative sprites must have empty alt text",
+                        &mut errors,
+                    );
+                }
+            } else if let Err(reason) = media.alt.validate() {
+                invalid_entity_media(
+                    media,
+                    &format!("non-decorative sprites require valid localized alt text: {reason}"),
+                    &mut errors,
+                );
+            } else if media.alt.0.values().any(|text| text.len() > 256) {
+                invalid_entity_media(
+                    media,
+                    "entity sprite alt text is limited to 256 bytes per locale",
+                    &mut errors,
+                );
+            }
+            if !(20..=600).contains(&media.footprint.width_milli)
+                || !(20..=800).contains(&media.footprint.height_milli)
+            {
+                invalid_entity_media(
+                    media,
+                    "footprint must be within width 20..=600 and height 20..=800 thousandths",
+                    &mut errors,
+                );
+            }
+            if let Some(anchor) = media.preferred_anchor
+                && (anchor.x_milli > 1_000 || !(200..=1_000).contains(&anchor.y_milli))
+            {
+                invalid_entity_media(
+                    media,
+                    "preferred anchor must be within x 0..=1000 and y 200..=1000 thousandths",
+                    &mut errors,
+                );
+            }
+            if !(-100..=100).contains(&media.priority) {
+                invalid_entity_media(media, "priority must be within -100..=100", &mut errors);
+            }
+            validate_entity_sprite_source(media, "idle", &media.poses.idle, &mut errors);
+            for (pose, source) in [
+                ("attack", media.poses.attack.as_ref()),
+                ("hit", media.poses.hit.as_ref()),
+                ("defeated", media.poses.defeated.as_ref()),
+            ] {
+                if let Some(source) = source {
+                    validate_entity_sprite_source(media, pose, source, &mut errors);
+                }
+            }
+        }
+
         let npc_rooms = self
             .world
             .gameplay
@@ -1065,12 +1285,6 @@ impl WorldPackDocument {
             .iter()
             .map(|spawn| (spawn.id.as_str(), spawn.room_id.as_str()))
             .collect::<HashMap<_, _>>();
-        let item_ids = self
-            .world
-            .items
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect::<HashSet<_>>();
         let mut perception_rooms = HashSet::new();
         for perception in &self.room_perception {
             let room = self
@@ -1391,6 +1605,10 @@ impl WorldPackDocument {
                 self.room_media.iter().map(|media| (&media.room_id, media)),
                 other.room_media.iter().map(|media| (&media.room_id, media)),
             ),
+            entity_media: diff_entities_owned(
+                self.entity_media.iter().map(|media| (media.key(), media)),
+                other.entity_media.iter().map(|media| (media.key(), media)),
+            ),
             room_perception: diff_entities(
                 self.room_perception
                     .iter()
@@ -1508,6 +1726,9 @@ impl WorldPackDocument {
 
     fn canonicalized(&self) -> Self {
         let mut document = self.clone();
+        if let Some(progression) = &mut document.world.gameplay.character_progression {
+            crate::progression::canonicalize_character_progression(progression);
+        }
         document
             .world
             .items
@@ -1575,6 +1796,11 @@ impl WorldPackDocument {
         document
             .room_media
             .sort_by(|left, right| left.room_id.cmp(&right.room_id));
+        document.entity_media.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then_with(|| left.subject_id.cmp(&right.subject_id))
+        });
         document
             .room_perception
             .sort_by(|left, right| left.room_id.cmp(&right.room_id));
@@ -1609,6 +1835,62 @@ impl WorldPackDocument {
         }
         document
     }
+}
+
+fn invalid_entity_media(
+    media: &EntityMediaDefinition,
+    reason: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    errors.push(ValidationError::InvalidEntityMedia {
+        kind: media.kind.as_str().to_owned(),
+        subject_id: media.subject_id.clone(),
+        reason: reason.to_owned(),
+    });
+}
+
+fn validate_entity_sprite_source(
+    media: &EntityMediaDefinition,
+    pose: &str,
+    source: &EntitySpriteSource,
+    errors: &mut Vec<ValidationError>,
+) {
+    if source.webp.is_none() && source.png.is_none() {
+        invalid_entity_media(media, &format!("{pose} pose has no raster source"), errors);
+        return;
+    }
+    for (format, path) in [("webp", &source.webp), ("png", &source.png)] {
+        if let Some(path) = path
+            && !valid_entity_sprite_path(path, pose, format)
+        {
+            invalid_entity_media(
+                media,
+                &format!(
+                    "{pose} {format} path must be assets/<lowercase-sha256>/sprite-{pose}-{{320|640}}.{format}"
+                ),
+                errors,
+            );
+        }
+    }
+}
+
+fn valid_entity_sprite_path(path: &str, pose: &str, format: &str) -> bool {
+    let mut components = path.split('/');
+    let (Some("assets"), Some(hash), Some(file), None) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && [320, 640]
+            .iter()
+            .any(|size| file == format!("sprite-{pose}-{size}.{format}"))
 }
 
 fn validate_script(script: &ScriptDefinition, errors: &mut Vec<ValidationError>) {
@@ -1925,6 +2207,7 @@ impl EntityDiff {
 pub struct WorldPackDiff {
     pub metadata_changed: bool,
     pub room_media: EntityDiff,
+    pub entity_media: EntityDiff,
     pub room_perception: EntityDiff,
     pub rooms: EntityDiff,
     pub items: EntityDiff,
@@ -1943,6 +2226,7 @@ impl WorldPackDiff {
     pub fn is_empty(&self) -> bool {
         !self.metadata_changed
             && self.room_media.is_empty()
+            && self.entity_media.is_empty()
             && self.room_perception.is_empty()
             && self.rooms.is_empty()
             && self.items.is_empty()
@@ -1967,6 +2251,7 @@ impl fmt::Display for WorldPackDiff {
             writeln!(formatter, "metadata: changed")?;
         }
         write_entity_diff(formatter, "room media", &self.room_media)?;
+        write_entity_diff(formatter, "entity media", &self.entity_media)?;
         write_entity_diff(formatter, "room perception", &self.room_perception)?;
         write_entity_diff(formatter, "rooms", &self.rooms)?;
         write_entity_diff(formatter, "items", &self.items)?;
@@ -2016,6 +2301,28 @@ fn diff_entities<'a, T: PartialEq + 'a>(
     for id in after.keys() {
         if !before.contains_key(id) {
             diff.added.push((*id).to_owned());
+        }
+    }
+    diff
+}
+
+fn diff_entities_owned<'a, T: PartialEq + 'a>(
+    before: impl Iterator<Item = (String, &'a T)>,
+    after: impl Iterator<Item = (String, &'a T)>,
+) -> EntityDiff {
+    let before: BTreeMap<String, &T> = before.collect();
+    let after: BTreeMap<String, &T> = after.collect();
+    let mut diff = EntityDiff::default();
+    for (id, value) in &before {
+        match after.get(id) {
+            None => diff.removed.push(id.clone()),
+            Some(other) if *value != *other => diff.changed.push(id.clone()),
+            Some(_) => {}
+        }
+    }
+    for id in after.keys() {
+        if !before.contains_key(id) {
+            diff.added.push(id.clone());
         }
     }
     diff
@@ -2097,6 +2404,7 @@ mod tests {
                 gameplay: crate::GameplayDefinition::default(),
             },
             room_media: Vec::new(),
+            entity_media: Vec::new(),
             room_perception: Vec::new(),
             scene_variants: Vec::new(),
             scripts: Vec::new(),
@@ -2622,5 +2930,76 @@ mod tests {
         assert_eq!(diff.item_rules.added, ["demo:lantern"]);
         assert_eq!(diff.content_tests.added, ["smoke"]);
         assert!(diff.to_string().contains("scene variants: + demo:square"));
+    }
+
+    fn sprite_source(pose: &str) -> EntitySpriteSource {
+        let hash = "a".repeat(64);
+        EntitySpriteSource {
+            webp: Some(format!("assets/{hash}/sprite-{pose}-640.webp")),
+            png: Some(format!("assets/{hash}/sprite-{pose}-640.png")),
+        }
+    }
+
+    fn lantern_media() -> EntityMediaDefinition {
+        EntityMediaDefinition {
+            kind: EntityMediaKind::Item,
+            subject_id: "demo:lantern".into(),
+            alt: LocalizedText(BTreeMap::from([(
+                "en".into(),
+                "A cold blue lantern".into(),
+            )])),
+            decorative: false,
+            footprint: NormalizedFootprint {
+                width_milli: 180,
+                height_milli: 420,
+            },
+            preferred_anchor: Some(NormalizedAnchor {
+                x_milli: 250,
+                y_milli: 900,
+            }),
+            priority: 5,
+            layer: EntityMediaLayer::Foreground,
+            poses: EntitySpritePoses {
+                idle: sprite_source("idle"),
+                attack: None,
+                hit: Some(sprite_source("hit")),
+                defeated: None,
+            },
+        }
+    }
+
+    #[test]
+    fn entity_media_is_strict_validated_canonical_and_diffable() {
+        let mut before = document();
+        before.entity_media.push(lantern_media());
+        before.validate().unwrap();
+
+        let first = before.deterministic_artifact().unwrap();
+        let reparsed = WorldPackDocument::from_json(&first).unwrap();
+        assert_eq!(first, reparsed.deterministic_artifact().unwrap());
+
+        let mut after = before.clone();
+        after.entity_media[0].priority = 6;
+        let diff = before.diff(&after).unwrap();
+        assert_eq!(diff.entity_media.changed, ["item:demo:lantern"]);
+
+        let mut invalid = before;
+        invalid.entity_media[0].poses.idle.webp = Some("https://evil.invalid/sprite.webp".into());
+        let error = format!("{:?}", invalid.validate().unwrap_err().0);
+        assert!(error.contains("idle webp path must be assets/"));
+    }
+
+    #[test]
+    fn entity_media_rejects_unknown_or_duplicate_subjects_and_alt_misuse() {
+        let mut document = document();
+        let mut media = lantern_media();
+        media.subject_id = "demo:hidden-missing".into();
+        media.decorative = true;
+        document.entity_media.push(media.clone());
+        document.entity_media.push(media);
+        let error = format!("{:?}", document.validate().unwrap_err().0);
+        assert!(error.contains("DuplicateEntityMedia"));
+        assert!(error.contains("does not exist"));
+        assert!(error.contains("decorative sprites must have empty alt text"));
     }
 }

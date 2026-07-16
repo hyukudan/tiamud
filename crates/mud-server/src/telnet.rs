@@ -7,7 +7,7 @@ use crate::{
     persistence::StoreError,
     social::{SocialChannel, SocialMessage},
     telnet_transport::{TelnetStream, TelnetTransport},
-    world_actor::{GameError, WorldHandle},
+    world_actor::{CharacterBackgroundSelection, GameError, WorldHandle},
 };
 use flate2::{Compression, write::ZlibEncoder};
 use serde::Deserialize;
@@ -55,6 +55,7 @@ const MAX_GMCP_BYTES: usize = 8 * 1024;
 const MAX_GMCP_PACKAGE_BYTES: usize = 64;
 const MAX_GMCP_SUPPORTS: usize = 64;
 const MAX_GMCP_CLIENT_VALUE_BYTES: usize = 128;
+const MAX_GMCP_FALLBACK_TITLE_CHARS: usize = 256;
 const MAX_AUTH_ATTEMPTS: u8 = 5;
 const MAX_TTYPE_REQUESTS: u8 = 8;
 const MAX_RATE_VIOLATIONS: u8 = 3;
@@ -777,7 +778,7 @@ async fn choose_character(
         let Some(name) = read_required_line(connection, input).await? else {
             return Ok(None);
         };
-        return create_character_with_archetype(connection, world, input, token, name).await;
+        return create_character_with_progression(connection, world, input, token, name).await;
     }
 
     connection.write_all(b"Characters:\r\n").await?;
@@ -797,70 +798,169 @@ async fn choose_character(
     {
         return Ok(Some(character.clone()));
     }
-    create_character_with_archetype(connection, world, input, token, selection).await
+    create_character_with_progression(connection, world, input, token, selection).await
 }
 
-async fn create_character_with_archetype(
+async fn create_character_with_progression(
     connection: &mut TelnetConnection,
     world: &WorldHandle,
     input: &mut TelnetInput,
     token: &str,
     name: String,
 ) -> io::Result<Option<CharacterSnapshot>> {
-    let catalog = world.archetype_catalog();
-    let archetype_id = if catalog.len() <= 1 {
-        None
-    } else {
-        connection.write_all(b"Archetypes:\r\n").await?;
-        for (index, archetype) in catalog.iter().enumerate() {
-            connection
-                .write_all(
-                    format!(
-                        "  {}. {} -- {}{}\r\n",
-                        index + 1,
-                        archetype.label,
-                        archetype.description,
-                        if archetype.id == world.default_archetype_id() {
-                            " [default]"
-                        } else {
-                            ""
-                        }
-                    )
-                    .as_bytes(),
-                )
-                .await?;
-        }
-        loop {
-            connection
-                .write_all(b"Choose a number or archetype id (default for the suggested choice): ")
-                .await?;
-            let Some(selection) = read_required_line(connection, input).await? else {
-                return Ok(None);
-            };
-            if selection.eq_ignore_ascii_case("default") {
-                break None;
-            }
-            if let Ok(index) = selection.parse::<usize>()
-                && let Some(archetype) = index.checked_sub(1).and_then(|index| catalog.get(index))
-            {
-                break Some(archetype.id.clone());
-            }
-            if let Some(archetype) = catalog
-                .iter()
-                .find(|archetype| archetype.id.eq_ignore_ascii_case(&selection))
-            {
-                break Some(archetype.id.clone());
-            }
-            connection
-                .write_all(b"That archetype is not available.\r\n")
-                .await?;
-        }
+    let catalog = world.creation_catalog();
+    let Some(lineage) = choose_progression_option(
+        connection,
+        input,
+        "Lineages",
+        "lineage",
+        &catalog.lineages,
+        Some(&catalog.default_lineage_id),
+        false,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(background) = choose_progression_option(
+        connection,
+        input,
+        "Backgrounds",
+        "background",
+        &catalog.backgrounds,
+        catalog.default_background_id.as_deref(),
+        true,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(base_class) = choose_progression_option(
+        connection,
+        input,
+        "Base classes",
+        "base class",
+        &catalog.base_classes,
+        Some(&catalog.default_base_class_id),
+        false,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let lineage_id = match lineage {
+        ProgressionOptionSelection::Default => None,
+        ProgressionOptionSelection::Id(id) => Some(id),
+        ProgressionOptionSelection::None => unreachable!("lineage selection is required"),
+    };
+    let background = match background {
+        ProgressionOptionSelection::Default => CharacterBackgroundSelection::Default,
+        ProgressionOptionSelection::None => CharacterBackgroundSelection::None,
+        ProgressionOptionSelection::Id(id) => CharacterBackgroundSelection::Id(id),
+    };
+    let base_class_id = match base_class {
+        ProgressionOptionSelection::Default => None,
+        ProgressionOptionSelection::Id(id) => Some(id),
+        ProgressionOptionSelection::None => unreachable!("base class selection is required"),
     };
     world
-        .create_authenticated_character_with_archetype(token.to_owned(), name, archetype_id)
+        .create_authenticated_character_with_progression(
+            token.to_owned(),
+            name,
+            lineage_id,
+            background,
+            base_class_id,
+        )
         .await
         .map(Some)
         .map_err(io::Error::other)
+}
+
+enum ProgressionOptionSelection {
+    Default,
+    None,
+    Id(String),
+}
+
+/// Returns `None` when the connection closes. The selected value preserves the
+/// distinction between the authored default and explicitly choosing no origin.
+async fn choose_progression_option(
+    connection: &mut TelnetConnection,
+    input: &mut TelnetInput,
+    title: &str,
+    category: &str,
+    options: &[tiamud_core::ProgressionOptionView],
+    default_id: Option<&str>,
+    optional: bool,
+) -> io::Result<Option<ProgressionOptionSelection>> {
+    if options.is_empty() {
+        return Ok(Some(if optional {
+            ProgressionOptionSelection::None
+        } else {
+            ProgressionOptionSelection::Default
+        }));
+    }
+    if options.len() == 1 && !optional {
+        return Ok(Some(ProgressionOptionSelection::Id(options[0].id.clone())));
+    }
+    connection
+        .write_all(format!("{title}:\r\n").as_bytes())
+        .await?;
+    for (index, option) in options.iter().enumerate() {
+        connection
+            .write_all(
+                format!(
+                    "  {}. {} -- {}{}\r\n",
+                    index + 1,
+                    option.label,
+                    option.description,
+                    if default_id == Some(option.id.as_str()) {
+                        " [default]"
+                    } else {
+                        ""
+                    }
+                )
+                .as_bytes(),
+            )
+            .await?;
+    }
+    if optional {
+        connection.write_all(b"  0. None\r\n").await?;
+    }
+    loop {
+        connection
+            .write_all(
+                format!(
+                    "Choose a number or {category} id (type default{}): ",
+                    if optional { " or none" } else { "" }
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let Some(selection) = read_required_line(connection, input).await? else {
+            return Ok(None);
+        };
+        if selection.eq_ignore_ascii_case("default") {
+            return Ok(Some(ProgressionOptionSelection::Default));
+        }
+        if optional && (selection == "0" || selection.eq_ignore_ascii_case("none")) {
+            return Ok(Some(ProgressionOptionSelection::None));
+        }
+        if let Ok(index) = selection.parse::<usize>()
+            && let Some(option) = index.checked_sub(1).and_then(|index| options.get(index))
+        {
+            return Ok(Some(ProgressionOptionSelection::Id(option.id.clone())));
+        }
+        if let Some(option) = options
+            .iter()
+            .find(|option| option.id.eq_ignore_ascii_case(&selection))
+        {
+            return Ok(Some(ProgressionOptionSelection::Id(option.id.clone())));
+        }
+        connection
+            .write_all(format!("That {category} is not available.\r\n").as_bytes())
+            .await?;
+    }
 }
 
 async fn write_auth_error(connection: &mut TelnetConnection, error: &GameError) -> io::Result<()> {
@@ -886,7 +986,11 @@ fn public_error(error: &GameError) -> String {
             | tiamud_core::WorldError::AbilityNotKnown
             | tiamud_core::WorldError::AbilityUnavailable
             | tiamud_core::WorldError::InsufficientResource
-            | tiamud_core::WorldError::InvalidAbilityTarget),
+            | tiamud_core::WorldError::InvalidAbilityTarget
+            | tiamud_core::WorldError::ClassNotFound
+            | tiamud_core::WorldError::PromotionUnavailable
+            | tiamud_core::WorldError::TalentUnavailable
+            | tiamud_core::WorldError::InsufficientProgressionPoints),
         ) => error.to_string(),
         GameError::Persistence(
             StoreError::InvalidSession | StoreError::SessionExpired | StoreError::SessionRevoked,
@@ -991,7 +1095,7 @@ async fn serve_entered(
                             let mut bytes = Vec::new();
                             for event in delivery.events {
                                 bytes.extend_from_slice(b"\r\n");
-                                bytes.extend_from_slice(event.text.as_bytes());
+                                bytes.extend_from_slice(event.event.text.as_bytes());
                                 bytes.extend_from_slice(b"\r\n");
                             }
                             output.bytes(OutputPriority::Interactive, bytes)?;
@@ -1008,7 +1112,7 @@ async fn serve_entered(
                             OutputPriority::Critical,
                             b"\r\nWorld updates were coalesced; an authoritative snapshot follows.\r\n".to_vec(),
                         )?;
-                        let (scene, player) = world
+                        let (scene, _presentation, player) = world
                             .current_state(entered.session_id)
                             .await
                             .map_err(io::Error::other)?;
@@ -1117,7 +1221,9 @@ fn write_scene(
     player: &PlayerStateView,
 ) -> io::Result<()> {
     let mut bytes = render_scene(scene, &input.negotiation).into_bytes();
-    let gmcp = input.negotiation.scene_gmcp(scene);
+    let gmcp = input
+        .negotiation
+        .scene_gmcp_with_metrics(scene, output.shared.metrics.as_deref());
     let media_transition = gmcp
         .windows(b"Client.Media.".len())
         .any(|window| window == b"Client.Media.");
@@ -1377,6 +1483,7 @@ struct GmcpClient {
     decorative_enabled: bool,
     comm_stub_sent: bool,
     group_stub_sent: bool,
+    scene_overflow_notice_sent: bool,
     active_media: Option<SceneAudio>,
 }
 
@@ -1396,6 +1503,7 @@ impl Default for GmcpClient {
             decorative_enabled: true,
             comm_stub_sent: false,
             group_stub_sent: false,
+            scene_overflow_notice_sent: false,
             active_media: None,
         }
     }
@@ -1806,7 +1914,16 @@ impl TelnetSession {
         }
     }
 
+    #[cfg(test)]
     fn scene_gmcp(&mut self, scene: &SceneView) -> Vec<u8> {
+        self.scene_gmcp_with_metrics(scene, None)
+    }
+
+    fn scene_gmcp_with_metrics(
+        &mut self,
+        scene: &SceneView,
+        metrics: Option<&RuntimeMetrics>,
+    ) -> Vec<u8> {
         if !self.q.local_enabled(OPT_GMCP) {
             return Vec::new();
         }
@@ -1827,7 +1944,40 @@ impl TelnetSession {
                 "exits": exits,
             }),
         );
-        append_gmcp(&mut output, "Tiamud.Scene", &json!(scene));
+        if !append_gmcp(&mut output, "Tiamud.Scene", &json!(scene)) {
+            if let Some(metrics) = metrics {
+                metrics.gmcp_scene_overflow();
+            }
+            let (title, title_truncated) = bounded_gmcp_fallback_title(&scene.title);
+            let fallback = json!({
+                "viewId": scene.view_id,
+                "revision": scene.revision,
+                "title": title,
+                "truncated": true,
+                "titleTruncated": title_truncated,
+                "overflow": {
+                    "package": "Tiamud.Scene",
+                    "maximumBytes": MAX_GMCP_BYTES,
+                },
+            });
+            if !append_gmcp(&mut output, "Tiamud.Scene", &fallback) {
+                warn!("failed to encode bounded Tiamud.Scene overflow fallback");
+            }
+            if self.gmcp.supports("tiamud.overflow")
+                && !self.gmcp.scene_overflow_notice_sent
+                && append_gmcp(
+                    &mut output,
+                    "Tiamud.Overflow",
+                    &json!({
+                        "package": "Tiamud.Scene",
+                        "reason": "messageTooLarge",
+                        "maximumBytes": MAX_GMCP_BYTES,
+                    }),
+                )
+            {
+                self.gmcp.scene_overflow_notice_sent = true;
+            }
+        }
         if self.gmcp.assets_opt_in
             && !self.rich_output_blocked()
             && let Some(image) = &scene.image
@@ -2101,6 +2251,7 @@ const GMCP_PACKAGES: &[&str] = &[
     "Tiamud.Assets 1",
     "Tiamud.CellFrame 1",
     "Tiamud.Client 1",
+    "Tiamud.Overflow 1",
 ];
 
 fn append_initial_gmcp(output: &mut Vec<u8>) {
@@ -2128,6 +2279,15 @@ fn append_gmcp(output: &mut Vec<u8>, package: &str, data: &Value) -> bool {
     append_telnet_escaped(output, &json);
     output.extend_from_slice(&[IAC, SE]);
     true
+}
+
+fn bounded_gmcp_fallback_title(value: &str) -> (String, bool) {
+    let mut characters = value.chars();
+    let title = characters
+        .by_ref()
+        .take(MAX_GMCP_FALLBACK_TITLE_CHARS)
+        .collect();
+    (title, characters.next().is_some())
 }
 
 fn append_telnet_escaped(output: &mut Vec<u8>, bytes: &[u8]) {
@@ -3154,6 +3314,10 @@ mod tests {
                 .any(|payload| payload.starts_with(b"Char.Items "))
         );
         assert!(session.gmcp.media_opt_in);
+        assert!(payloads.iter().all(|payload| {
+            !String::from_utf8_lossy(payload).contains("presentation")
+                && !String::from_utf8_lossy(payload).contains("sprite-idle")
+        }));
 
         let stopped = session.handle(vec![TelnetEvent::Subnegotiation {
             option: OPT_GMCP,
@@ -3165,6 +3329,110 @@ mod tests {
                 .any(|payload| payload.starts_with(b"Client.Media.Stop "))
         );
         assert!(!session.gmcp.media_opt_in);
+    }
+
+    #[test]
+    fn oversized_gmcp_scene_uses_valid_bounded_fallback_notice_and_metric() {
+        let mut session = TelnetSession::default();
+        session.begin_initial_negotiation();
+        session.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        session.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Tiamud.Scene 1","Tiamud.Overflow 1"]"#.to_vec(),
+        }]);
+        let mut scene = sample_scene();
+        scene.title = "é".repeat(MAX_GMCP_FALLBACK_TITLE_CHARS + 44);
+        scene.prose = vec![format!(
+            "secret-overflow-marker:{}",
+            "x".repeat(MAX_GMCP_BYTES)
+        )];
+        let metrics = RuntimeMetrics::default();
+
+        let first = gmcp_payloads(&session.scene_gmcp_with_metrics(&scene, Some(&metrics)));
+        assert!(first.iter().all(|payload| payload.len() <= MAX_GMCP_BYTES));
+        let fallback_payload = first
+            .iter()
+            .find_map(|payload| payload.strip_prefix(b"Tiamud.Scene "))
+            .expect("a minimal scene fallback must replace the oversized projection");
+        let fallback: Value = serde_json::from_slice(fallback_payload).unwrap();
+        assert_eq!(fallback["viewId"], scene.view_id);
+        assert_eq!(fallback["revision"], scene.revision);
+        assert_eq!(fallback["truncated"], true);
+        assert_eq!(fallback["titleTruncated"], true);
+        assert_eq!(
+            fallback["title"].as_str().unwrap().chars().count(),
+            MAX_GMCP_FALLBACK_TITLE_CHARS
+        );
+        assert_eq!(fallback["overflow"]["package"], "Tiamud.Scene");
+        assert_eq!(fallback["overflow"]["maximumBytes"], MAX_GMCP_BYTES);
+        assert!(!String::from_utf8_lossy(fallback_payload).contains("secret-overflow-marker"));
+        assert_eq!(
+            first
+                .iter()
+                .filter(|payload| payload.starts_with(b"Tiamud.Overflow "))
+                .count(),
+            1
+        );
+
+        let second = gmcp_payloads(&session.scene_gmcp_with_metrics(&scene, Some(&metrics)));
+        assert!(
+            second
+                .iter()
+                .any(|payload| payload.starts_with(b"Tiamud.Scene "))
+        );
+        assert!(
+            !second
+                .iter()
+                .any(|payload| payload.starts_with(b"Tiamud.Overflow "))
+        );
+        assert!(metrics.prometheus(0).contains(
+            "tiamud_outbound_budget_exceeded_total{transport=\"gmcp\",message=\"scene\"} 2"
+        ));
+
+        let mut unnegotiated = TelnetSession::default();
+        unnegotiated.begin_initial_negotiation();
+        unnegotiated.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        let payloads = gmcp_payloads(&unnegotiated.scene_gmcp(&scene));
+        assert!(
+            payloads
+                .iter()
+                .any(|payload| payload.starts_with(b"Tiamud.Scene "))
+        );
+        assert!(
+            !payloads
+                .iter()
+                .any(|payload| payload.starts_with(b"Tiamud.Overflow "))
+        );
+    }
+
+    #[test]
+    fn normal_gmcp_scene_remains_complete_and_unmarked() {
+        let mut session = TelnetSession::default();
+        session.begin_initial_negotiation();
+        session.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        let scene = sample_scene();
+        let payloads = gmcp_payloads(&session.scene_gmcp(&scene));
+        let scene_payload = payloads
+            .iter()
+            .find_map(|payload| payload.strip_prefix(b"Tiamud.Scene "))
+            .unwrap();
+        let complete: Value = serde_json::from_slice(scene_payload).unwrap();
+        assert_eq!(complete["prose"], json!(scene.prose));
+        assert!(complete.get("truncated").is_none());
+        assert!(
+            !payloads
+                .iter()
+                .any(|payload| payload.starts_with(b"Tiamud.Overflow "))
+        );
     }
 
     #[test]

@@ -90,6 +90,59 @@ fn composes_cross_area_cycles_and_is_order_independent() {
 }
 
 #[test]
+fn progression_references_require_declared_area_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+    let progression_area = json!({
+        "schemaVersion": 2,
+        "id": "a",
+        "rooms": [room("a:start", None)],
+        "levelThresholds": [{"level":2,"totalExperienceRequired":100}],
+        "lineages": [{
+            "id":"demo:mortal","name":"Mortal","description":"A mortal.","uiOrder":10
+        }],
+        "baseClasses": [{
+            "id":"demo:warden","name":"Warden","description":"A warden.","uiOrder":10,
+            "creationGrants":[
+                {"kind":"attribute","attributeId":"max_health","amount":10},
+                {"kind":"ability","abilityId":"demo:strike"}
+            ]
+        }]
+    });
+    let abilities_area = json!({
+        "schemaVersion": 2,
+        "id": "b",
+        "abilities": [{
+            "id":"demo:strike","name":"Strike","description":"A strike.",
+            "category":"martial","targeting":"single_enemy",
+            "damage":{"target":"target","damageType":"physical","baseAmount":1}
+        }]
+    });
+    write_json(&temp.path().join("a.json"), &progression_area);
+    write_json(&temp.path().join("b.json"), &abilities_area);
+    let manifest = temp.path().join("world.project.json");
+    write_json(
+        &manifest,
+        &json!({
+            "schemaVersion":2,"id":"demo","name":"Demo","startRoomId":"a:start",
+            "defaultLineageId":"demo:mortal","defaultBaseClassId":"demo:warden",
+            "areas":[{"id":"a","path":"a.json"},{"id":"b","path":"b.json"}]
+        }),
+    );
+    assert!(matches!(
+        compose_world_project(&manifest),
+        Err(CompositionError::UndeclaredDependency {
+            kind: world_pack::AreaCrossReferenceKind::ProgressionReference,
+            ..
+        })
+    ));
+
+    let mut declared = progression_area;
+    declared["dependsOn"] = json!(["b"]);
+    write_json(&temp.path().join("a.json"), &declared);
+    compose_world_project(&manifest).unwrap();
+}
+
+#[test]
 fn real_three_area_project_has_no_semantic_or_canonical_drift() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let composed = compose_world_project(root.join("worlds/lantern-square.project.json")).unwrap();
@@ -214,7 +267,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
     }
 
     for bad_area in [
-        json!({"schemaVersion":2,"id":"a","rooms":[room("a:start", None)]}),
+        json!({"schemaVersion":3,"id":"a","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","rooms":[room("a:start", None)],"unknown":true}),
         json!({"schemaVersion":1,"id":"wrong","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","dependsOn":["missing"],"rooms":[room("a:start", None)]}),
@@ -449,7 +502,7 @@ fn compose_is_present_in_top_level_and_subcommand_help() {
     let help = String::from_utf8_lossy(&compose.stdout);
     assert!(help.contains("world.project.json") || help.contains("<PROJECT>"));
     assert!(help.contains("--output"));
-    assert!(help.contains("AreaPack v1"));
+    assert!(help.contains("AreaPack v2"));
 }
 
 #[test]

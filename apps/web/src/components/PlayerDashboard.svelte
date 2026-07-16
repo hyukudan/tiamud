@@ -7,9 +7,13 @@
     oncommand: (command: string) => void;
     onaction: (action: string, target: string | undefined, label: string) => void;
     onability: (abilityId: string, target: string | undefined, label: string) => void;
+    onpromote: (classId: string, label: string) => void;
+    ontalent: (graphId: string, nodeId: string, label: string) => void;
   }
 
-  let { value, abilityTargets = [], oncommand, onaction, onability }: Props = $props();
+  let {
+    value, abilityTargets = [], oncommand, onaction, onability, onpromote, ontalent,
+  }: Props = $props();
   let socialTarget = $state('');
   let chatText = $state('');
   let partyTarget = $state('');
@@ -24,6 +28,10 @@
     readyToClaim: 'Reward ready',
     completed: 'Completed',
   })[status];
+
+  const humanizeId = (id: string): string => id.split(/[_:.-]+/).filter(Boolean)
+    .map((part) => (part[0]?.toUpperCase() ?? '') + part.slice(1))
+    .join(' ');
 
   function perform(action: SceneAction): void {
     const [verb = '', ...tail] = action.command.trim().split(/\s+/);
@@ -101,8 +109,18 @@
         <p class="eyebrow">Character</p>
         <h2 id="character-state-title">{value.character.name}</h2>
         <p>
-          {#if value.character.archetype}{value.character.archetype.label} · {/if}Level {value.character.level}
-          · {value.character.experience} / {value.character.nextLevelExperience} XP
+          {value.character.lineage.label} · {value.character.activeClass.label} · Level {value.character.level}
+          {#if value.character.nextLevelExperience > 0}
+            · {value.character.experience} / {value.character.nextLevelExperience} XP
+          {:else}
+            · {value.character.experience} XP · maximum level
+          {/if}
+        </p>
+        <p class="character-origin">
+          {value.character.background?.label ?? 'No background'}
+          {#if value.character.baseClass.id !== value.character.activeClass.id}
+            · began as {value.character.baseClass.label}
+          {/if}
         </p>
       </div>
       <div class="health-readout">
@@ -172,6 +190,115 @@
         </ul>
       {/if}
     </section>
+
+    <details class="dashboard-panel progression-panel" open>
+      <summary>Progression <span>{value.character.talents.length} paths</span></summary>
+      <div class="panel-body">
+        <section aria-labelledby="class-history-title">
+          <h3 id="class-history-title">Class evolution</h3>
+          <ol class="class-history">
+            {#each value.character.classHistory as characterClass (characterClass.id)}
+              <li class:current={characterClass.id === value.character.activeClass.id}>
+                <strong>{characterClass.label}</strong>
+                {#if characterClass.id === value.character.activeClass.id}<span>Current</span>{/if}
+                <p>{characterClass.description}</p>
+              </li>
+            {/each}
+          </ol>
+        </section>
+
+        {#if Object.keys(value.character.progressionPoints).length > 0}
+          <dl class="progression-points" aria-label="Available progression points">
+            {#each Object.entries(value.character.progressionPoints) as [poolId, amount] (poolId)}
+              <div><dt>{humanizeId(poolId)}</dt><dd>{amount}</dd></div>
+            {/each}
+          </dl>
+        {/if}
+
+        {#if value.character.promotions.length > 0}
+          <section aria-labelledby="promotions-title">
+            <h3 id="promotions-title">Advanced classes</h3>
+            <ul class="progression-list promotion-list">
+              {#each value.character.promotions as promotion (promotion.class.id)}
+                <li>
+                  <div>
+                    <h4 id={`promotion-${promotion.class.id}`}>{promotion.class.label}</h4>
+                    <p>{promotion.class.description}</p>
+                    {#if promotion.requirements.length > 0}
+                      <ul class="requirement-list" aria-label={`${promotion.class.label} requirements`}>
+                        {#each promotion.requirements as requirement, index (`${requirement.text}-${index}`)}
+                          <li class:met={requirement.met}>
+                            <span aria-hidden="true">{requirement.met ? '✓' : '○'}</span>
+                            {requirement.text}
+                          </li>
+                        {/each}
+                      </ul>
+                    {/if}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!promotion.available}
+                    aria-describedby={`promotion-${promotion.class.id}`}
+                    onclick={() => onpromote(
+                      promotion.class.id,
+                      promotion.command || `promote ${promotion.class.id}`,
+                    )}
+                  >Promote to {promotion.class.label}</button>
+                </li>
+              {/each}
+            </ul>
+          </section>
+        {/if}
+
+        {#if value.character.talents.length > 0}
+          <section aria-labelledby="talent-paths-title">
+            <h3 id="talent-paths-title">Talent paths</h3>
+            {#each value.character.talents as graph (graph.id)}
+              <article class="talent-graph" aria-labelledby={`talent-graph-${graph.id}`}>
+                <div class="talent-graph-heading">
+                  <div>
+                    <h4 id={`talent-graph-${graph.id}`}>{graph.label}</h4>
+                    <p>{graph.description}</p>
+                  </div>
+                  <strong>{graph.availablePoints} points</strong>
+                </div>
+                <ul class="progression-list talent-list">
+                  {#each graph.nodes as node (node.id)}
+                    <li>
+                      <div>
+                        <h5 id={`talent-${graph.id}-${node.id}`}>{node.label}</h5>
+                        <p>{node.description}</p>
+                        <p class="talent-rank">Rank {node.rank} / {node.maxRank}{#if node.nextCost !== undefined} · next costs {node.nextCost}{/if}</p>
+                        {#if node.requirements.length > 0}
+                          <ul class="requirement-list" aria-label={`${node.label} requirements`}>
+                            {#each node.requirements as requirement, index (`${requirement.text}-${index}`)}
+                              <li class:met={requirement.met}>
+                                <span aria-hidden="true">{requirement.met ? '✓' : '○'}</span>
+                                {requirement.text}
+                              </li>
+                            {/each}
+                          </ul>
+                        {/if}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={!node.available || node.nextCost === undefined}
+                        aria-describedby={`talent-${graph.id}-${node.id}`}
+                        onclick={() => ontalent(
+                          graph.id,
+                          node.id,
+                          node.command || `talent learn ${graph.id} ${node.id}`,
+                        )}
+                      >{node.rank === 0 ? 'Learn' : 'Improve'} {node.label}</button>
+                    </li>
+                  {/each}
+                </ul>
+              </article>
+            {/each}
+          </section>
+        {/if}
+      </div>
+    </details>
 
     {#if value.character.abilities.length > 0}
       <details class="dashboard-panel ability-panel" open>

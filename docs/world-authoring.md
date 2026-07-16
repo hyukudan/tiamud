@@ -1,5 +1,10 @@
 # Autoría, validación y publicación de mundos
 
+> **Historical document:** this Spanish guide describes the former WorldPack
+> v2 / AreaPack v1 implementation. The current WorldPack v3 authoring entry
+> point is the English [`docs/authoring/` hub](authoring/README.md). Keep this
+> page for migration context; do not copy its v2 schemas into new content.
+
 Esta guía describe el contrato que consume el servidor de Tiamud y el flujo
 editorial que lo produce. La autoridad actual son los tipos y validadores de
 `world-pack`; el ejemplo revisado es

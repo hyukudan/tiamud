@@ -14,7 +14,14 @@ const player: PlayerStateSnapshot = {
     maxHealth: 25,
     strength: 7,
     defence: 3,
-    archetype: { id: 'spellblade', label: 'Spellblade', description: 'Steel guided by ember lore.' },
+    lineage: { id: 'embermarked', label: 'Embermarked', description: 'Fire answers their blood.' },
+    background: { id: 'archive', label: 'Archive Apprentice', description: 'Trained among old records.' },
+    baseClass: { id: 'arcanist', label: 'Arcanist', description: 'Shapes disciplined magic.' },
+    activeClass: { id: 'spellblade', label: 'Spellblade', description: 'Steel guided by ember lore.' },
+    classHistory: [
+      { id: 'arcanist', label: 'Arcanist', description: 'Shapes disciplined magic.' },
+      { id: 'spellblade', label: 'Spellblade', description: 'Steel guided by ember lore.' },
+    ],
     attributes: [
       { id: 'agility', label: 'Agility', value: 8 },
       { id: 'intellect', label: 'Intellect', value: 11 },
@@ -31,6 +38,23 @@ const player: PlayerStateSnapshot = {
     }, {
       id: 'mending-light', name: 'Mending Light', description: 'Restores the caster.', kind: 'spell',
       resourceCosts: [], cooldownRemaining: 0, usable: true, targeting: 'optionalTarget',
+    }],
+    progressionPoints: { talent: 2 },
+    talents: [{
+      id: 'ember-path', label: 'Ember Path', description: 'Control fire without being consumed.',
+      pointPoolId: 'talent', availablePoints: 2,
+      nodes: [{
+        id: 'steady-flame', label: 'Steady Flame', description: 'Keep spells stable under pressure.',
+        rank: 1, maxRank: 3, nextCost: 2, available: true,
+        requirements: [{ met: true, text: 'Reach level 2' }],
+        command: 'talent learn ember-path steady-flame',
+      }],
+    }],
+    promotions: [{
+      class: { id: 'stormcaller', label: 'Stormcaller', description: 'Calls lightning from rain.' },
+      available: false,
+      requirements: [{ met: false, text: 'Hear the lantern whisper' }],
+      command: 'promote stormcaller',
     }],
     skills: [{ id: 'combat', label: 'Combat', rank: 14 }],
     effects: [],
@@ -93,12 +117,15 @@ describe('PlayerDashboard', () => {
         oncommand: () => undefined,
         onaction: () => undefined,
         onability: () => undefined,
+        onpromote: () => undefined,
+        ontalent: () => undefined,
       },
     });
 
     for (const label of [
       'Health', 'Inventory', 'Discovered map', 'Quests', 'Party', 'Coin and market',
       'Chat and adventurers', 'Manage ignore list', 'Abilities', 'Mana', 'Agility', 'Resistances',
+      'Progression', 'Class evolution', 'Advanced classes', 'Talent paths',
     ]) {
       expect(body).toContain(label);
     }
@@ -106,6 +133,12 @@ describe('PlayerDashboard', () => {
     expect(body).toContain('First Hunt');
     expect(body).toContain('Lantern Market');
     expect(body).toContain('Spellblade');
+    expect(body).toContain('Embermarked');
+    expect(body).toContain('Archive Apprentice');
+    expect(body).toContain('Stormcaller');
+    expect(body).toContain('Hear the lantern whisper');
+    expect(body).toContain('Steady Flame');
+    expect(body).toContain('Rank 1 / 3');
     expect(body).toContain('Ember Bolt');
     expect(body).toContain('Target for Ember Bolt');
     expect(body).toContain('rain wolf');

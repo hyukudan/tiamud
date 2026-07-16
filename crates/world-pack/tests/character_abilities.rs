@@ -2,21 +2,130 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use world_pack::{
-    AbilityEffectTarget, AbilityStatusEffect, AreaPack, DamageType, LevelProgressionDefinition,
-    MAX_ABILITY_COOLDOWN_TICKS, MAX_ABILITY_EFFECT_DURATION_TICKS, MAX_GAMEPLAY_VALUE,
-    MAX_RESISTANCE_PERCENT, MAX_RESOURCES_PER_ARCHETYPE, MAX_STATS_PER_ARCHETYPE, ValidationError,
+    AbilityEffectTarget, AbilityStatusEffect, ArchetypeDefinition, AreaPack, DamageType,
+    GrantDefinition, LevelProgressionDefinition, MAX_ABILITY_COOLDOWN_TICKS,
+    MAX_ABILITY_EFFECT_DURATION_TICKS, MAX_GAMEPLAY_VALUE, MAX_RESISTANCE_PERCENT,
+    MAX_RESOURCES_PER_ARCHETYPE, MAX_SKILL_VALUE, MAX_STATS_PER_ARCHETYPE, ValidationError,
     WorldPack, WorldPackDocument,
 };
 
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 fn reviewed_world() -> WorldPack {
-    serde_json::from_slice(REVIEWED_WORLD).unwrap()
+    let mut pack: WorldPack = serde_json::from_slice(REVIEWED_WORLD).unwrap();
+    let progression = pack.gameplay.character_progression.take().unwrap();
+    pack.gameplay.default_archetype_id = Some(progression.defaults.base_class_id);
+    pack.gameplay.archetypes = progression
+        .base_classes
+        .into_iter()
+        .map(|class| {
+            let mut archetype = ArchetypeDefinition {
+                id: class.id,
+                name: class.name,
+                description: class.description,
+                initial_attributes: BTreeMap::new(),
+                initial_skills: BTreeMap::new(),
+                initial_resources: BTreeMap::new(),
+                resource_regeneration: BTreeMap::new(),
+                initial_resistances: BTreeMap::new(),
+                initial_ability_ids: Vec::new(),
+                level_progression: Vec::new(),
+            };
+            apply_legacy_grants(
+                class.creation_grants,
+                &mut archetype.initial_attributes,
+                &mut archetype.initial_skills,
+                &mut archetype.initial_resources,
+                &mut archetype.resource_regeneration,
+                &mut archetype.initial_resistances,
+                &mut archetype.initial_ability_ids,
+            );
+            for milestone in class.level_grants {
+                let mut attributes = BTreeMap::new();
+                let mut skills = BTreeMap::new();
+                let mut resources = BTreeMap::new();
+                let mut regeneration = BTreeMap::new();
+                let mut resistances = BTreeMap::new();
+                let mut abilities = Vec::new();
+                apply_legacy_grants(
+                    milestone.grants,
+                    &mut attributes,
+                    &mut skills,
+                    &mut resources,
+                    &mut regeneration,
+                    &mut resistances,
+                    &mut abilities,
+                );
+                archetype
+                    .level_progression
+                    .push(LevelProgressionDefinition {
+                        level: milestone.level,
+                        total_experience_required: progression
+                            .level_thresholds
+                            .iter()
+                            .find(|entry| entry.level == milestone.level)
+                            .unwrap()
+                            .total_experience_required,
+                        attribute_gains: attributes,
+                        skill_gains: skills,
+                        resource_gains: resources,
+                        ability_unlock_ids: abilities,
+                    });
+            }
+            archetype
+        })
+        .collect();
+    pack
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_legacy_grants(
+    grants: Vec<GrantDefinition>,
+    attributes: &mut BTreeMap<String, u32>,
+    skills: &mut BTreeMap<String, u16>,
+    resources: &mut BTreeMap<String, u32>,
+    regeneration: &mut BTreeMap<String, u32>,
+    resistances: &mut BTreeMap<DamageType, u16>,
+    abilities: &mut Vec<String>,
+) {
+    for grant in grants {
+        match grant {
+            GrantDefinition::Attribute {
+                attribute_id,
+                amount,
+            } => {
+                attributes.insert(attribute_id, amount);
+            }
+            GrantDefinition::Skill { skill_id, amount } => {
+                skills.insert(skill_id, amount);
+            }
+            GrantDefinition::ResourceMax {
+                resource_id,
+                amount,
+            } => {
+                resources.insert(resource_id, amount);
+            }
+            GrantDefinition::ResourceRegeneration {
+                resource_id,
+                amount,
+            } => {
+                regeneration.insert(resource_id, amount);
+            }
+            GrantDefinition::Ability { ability_id } => abilities.push(ability_id),
+            GrantDefinition::Resistance {
+                damage_type,
+                percent,
+            } => {
+                resistances.insert(damage_type, percent);
+            }
+            GrantDefinition::Points { .. } | GrantDefinition::Tag { .. } => {}
+        }
+    }
 }
 
 #[test]
-fn old_world_pack_v2_defaults_to_no_character_catalog() {
-    let pack: WorldPack = serde_json::from_value(json!({
+fn old_world_pack_v2_is_normalized_without_inventing_a_character_catalog() {
+    let bytes = serde_json::to_vec(&json!({
         "schemaVersion": 2,
         "id": "legacy-v2",
         "name": "Legacy v2",
@@ -28,8 +137,11 @@ fn old_world_pack_v2_defaults_to_no_character_catalog() {
         }]
     }))
     .unwrap();
+    let pack = WorldPackDocument::from_json(&bytes).unwrap().world;
 
     pack.validate().unwrap();
+    assert_eq!(pack.schema_version, world_pack::CURRENT_SCHEMA_VERSION);
+    assert!(pack.gameplay.character_progression.is_none());
     assert!(pack.gameplay.default_archetype_id.is_none());
     assert!(pack.gameplay.archetypes.is_empty());
     assert!(pack.gameplay.abilities.is_empty());
@@ -267,6 +379,77 @@ fn cumulative_resource_capacity_accepts_the_cap_and_rejects_excess_or_overflow()
     arcanist.level_progression[0].resource_gains = BTreeMap::from([("mana".to_owned(), 1)]);
     let messages = invalid_gameplay_messages(&overflowing);
     assert!(messages.contains("resource \"mana\" overflows during progression"));
+}
+
+#[test]
+fn cumulative_attributes_and_skills_accept_the_caps_and_reject_excess_or_overflow() {
+    let mut at_cap = reviewed_world();
+    let archetype = &mut at_cap.gameplay.archetypes[0];
+    archetype.initial_attributes = BTreeMap::from([
+        ("agility".to_owned(), MAX_GAMEPLAY_VALUE - 2),
+        ("defence".to_owned(), MAX_GAMEPLAY_VALUE - 2),
+        ("max_health".to_owned(), MAX_GAMEPLAY_VALUE - 2),
+        ("strength".to_owned(), MAX_GAMEPLAY_VALUE - 2),
+    ]);
+    archetype.initial_skills = BTreeMap::from([("combat".to_owned(), MAX_SKILL_VALUE - 2)]);
+    archetype.initial_resources.clear();
+    archetype.resource_regeneration.clear();
+    archetype.initial_ability_ids.clear();
+    archetype.level_progression = vec![
+        LevelProgressionDefinition {
+            level: 2,
+            total_experience_required: 100,
+            attribute_gains: BTreeMap::from([
+                ("agility".to_owned(), 1),
+                ("defence".to_owned(), 1),
+                ("max_health".to_owned(), 1),
+                ("strength".to_owned(), 1),
+            ]),
+            skill_gains: BTreeMap::from([("combat".to_owned(), 1)]),
+            resource_gains: BTreeMap::new(),
+            ability_unlock_ids: Vec::new(),
+        },
+        LevelProgressionDefinition {
+            level: 3,
+            total_experience_required: 300,
+            attribute_gains: BTreeMap::from([
+                ("agility".to_owned(), 1),
+                ("defence".to_owned(), 1),
+                ("max_health".to_owned(), 1),
+                ("strength".to_owned(), 1),
+            ]),
+            skill_gains: BTreeMap::from([("combat".to_owned(), 1)]),
+            resource_gains: BTreeMap::new(),
+            ability_unlock_ids: Vec::new(),
+        },
+    ];
+    at_cap.validate().unwrap();
+
+    let mut over_cap = at_cap.clone();
+    let last = &mut over_cap.gameplay.archetypes[0].level_progression[1];
+    last.attribute_gains.values_mut().for_each(|gain| *gain = 2);
+    last.skill_gains.insert("combat".to_owned(), 2);
+    let messages = invalid_gameplay_messages(&over_cap);
+    for attribute in ["agility", "defence", "max_health", "strength"] {
+        assert!(messages.contains(&format!(
+            "attribute \"{attribute}\" exceeds {MAX_GAMEPLAY_VALUE} during progression"
+        )));
+    }
+    assert!(messages.contains(&format!(
+        "skill \"combat\" exceeds {MAX_SKILL_VALUE} during progression"
+    )));
+
+    let mut overflowing = at_cap;
+    let archetype = &mut overflowing.gameplay.archetypes[0];
+    archetype
+        .initial_attributes
+        .insert("agility".to_owned(), u32::MAX);
+    archetype
+        .initial_skills
+        .insert("combat".to_owned(), u16::MAX);
+    let messages = invalid_gameplay_messages(&overflowing);
+    assert!(messages.contains("attribute \"agility\" overflows during progression"));
+    assert!(messages.contains("skill \"combat\" overflows during progression"));
 }
 
 #[test]

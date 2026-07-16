@@ -1,4 +1,4 @@
-//! Data-driven character archetypes, resources, abilities and status effects.
+//! Data-driven resources, abilities and status effects.
 //!
 //! These types deliberately do not depend on WorldPack. The server converts a
 //! reviewed authoring document into these bounded runtime definitions.
@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 
 use crate::CharacterId;
 
-pub const MAX_ARCHETYPES: usize = 32;
 pub const MAX_ABILITIES: usize = 512;
 pub const MAX_KNOWN_ABILITIES: usize = 64;
 pub const MAX_ABILITY_EFFECTS: usize = 8;
@@ -16,7 +15,6 @@ pub const MAX_ABILITY_RESOURCE_COSTS: usize = 4;
 pub const MAX_RESOURCE_POOLS: usize = 16;
 pub const MAX_RESISTANCES: usize = 16;
 pub const MAX_ACTIVE_STATUSES: usize = 32;
-pub const MAX_LEVEL_MILESTONES: usize = 99;
 pub const MAX_PROGRESSION_LEVEL: u32 = 100;
 pub const MAX_STATS: usize = 64;
 pub const MAX_SKILL_VALUE: u16 = 1_000;
@@ -54,7 +52,7 @@ impl DamageType {
 pub enum AbilityCategory {
     Martial,
     Spell,
-    Innate,
+    Utility,
 }
 
 impl AbilityCategory {
@@ -62,7 +60,7 @@ impl AbilityCategory {
         match self {
             Self::Martial => "martial",
             Self::Spell => "spell",
-            Self::Innate => "utility",
+            Self::Utility => "utility",
         }
     }
 }
@@ -161,43 +159,6 @@ pub struct AbilityDefinition {
     pub status_effects: Vec<AbilityStatusEffectDefinition>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LevelProgressionDefinition {
-    pub level: u32,
-    pub total_experience_required: u64,
-    #[serde(default)]
-    pub attribute_gains: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub skill_gains: BTreeMap<String, u16>,
-    #[serde(default)]
-    pub resource_gains: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub ability_unlock_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArchetypeDefinition {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub initial_attributes: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub initial_skills: BTreeMap<String, u16>,
-    #[serde(default)]
-    pub initial_resources: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub resource_regeneration: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub initial_resistances: BTreeMap<DamageType, u16>,
-    #[serde(default)]
-    pub initial_ability_ids: Vec<String>,
-    #[serde(default)]
-    pub level_progression: Vec<LevelProgressionDefinition>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NpcAbilitySetDefinition {
     pub npc_id: String,
@@ -241,14 +202,6 @@ pub struct ActiveStatusEffect {
     pub attribute: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_type: Option<DamageType>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArchetypeView {
-    pub id: String,
-    pub label: String,
-    pub description: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

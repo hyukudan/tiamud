@@ -54,6 +54,40 @@ export interface SceneAction {
   command: string;
 }
 
+export type SceneEntityPose = 'idle' | 'attack' | 'hit' | 'defeated';
+
+export interface SceneEntityVisualSource {
+  /**
+   * Optional manifest/AVIF fields remain reserved for additive negotiation.
+   * The v1 server emits only validated direct WebP/PNG raster sources and
+   * sheds optional annotations before the 16 KiB frame boundary.
+   */
+  manifest?: string;
+  avif?: string;
+  webp?: string;
+  png?: string;
+}
+
+export interface SceneEntityVisual {
+  alt: string;
+  decorative: boolean;
+  footprint: { width: number; height: number };
+  preferredAnchor?: { x: number; y: number };
+  priority: number;
+  layer: 'midground' | 'foreground' | 'overlay';
+  poses: Record<'idle', SceneEntityVisualSource> & Partial<
+    Record<Exclude<SceneEntityPose, 'idle'>, SceneEntityVisualSource>
+  >;
+}
+
+export interface SceneEntityPresentation extends SceneEntityVisual {
+  id: string;
+}
+
+export interface ScenePresentation {
+  entities: SceneEntityPresentation[];
+}
+
 export interface SceneItem {
   id: string;
   label: string;
@@ -83,6 +117,7 @@ export interface SceneSnapshot {
   title: string;
   prose: string[];
   image?: SceneImage;
+  presentation?: ScenePresentation;
   exits: SceneExit[];
   items: SceneItem[];
   npcs: SceneNpc[];
@@ -108,9 +143,24 @@ export interface MessageAppendData {
   actorId: string;
   targetId?: string;
   itemId?: string;
+  cue?: MessagePresentationCue;
 }
 
-export interface SyncSnapshotData {
+export interface SyncSceneData {
+  syncId: string;
+  afterSeq: number;
+  scene: SceneSnapshot;
+}
+
+export interface SyncPlayerData {
+  syncId: string;
+  afterSeq: number;
+  player: PlayerStateSnapshot;
+  complete: true;
+}
+
+export interface SyncRecoveryData {
+  syncId: string;
   afterSeq: number;
   scene: SceneSnapshot;
   player: PlayerStateSnapshot;
@@ -141,6 +191,16 @@ export interface EntityRemoveData {
   revision: number;
   kind: 'item' | 'npc';
   id: string;
+}
+
+export type MessagePresentationCueKind = 'attack' | 'hit' | 'heal' | 'defeat';
+
+export interface MessagePresentationCue {
+  kind: MessagePresentationCueKind;
+  entityId?: string;
+  pose?: SceneEntityPose;
+  intensity: 1 | 2 | 3;
+  durationMs: number;
 }
 
 export interface VitalsUpdateData {
@@ -196,11 +256,31 @@ export interface PlayerCharacterSnapshot {
     remainingTicks: number;
   }>;
   recoveryInTicks?: number;
-  archetype?: {
+  lineage: {
     id: string;
     label: string;
     description: string;
   };
+  background?: {
+    id: string;
+    label: string;
+    description: string;
+  };
+  baseClass: {
+    id: string;
+    label: string;
+    description: string;
+  };
+  activeClass: {
+    id: string;
+    label: string;
+    description: string;
+  };
+  classHistory: Array<{
+    id: string;
+    label: string;
+    description: string;
+  }>;
   attributes: Array<{
     id: string;
     label: string;
@@ -236,6 +316,35 @@ export interface PlayerCharacterSnapshot {
     cooldownRemaining: number;
     usable: boolean;
     targeting: 'self' | 'optionalTarget' | 'explicitTarget';
+  }>;
+  progressionPoints: Record<string, number>;
+  talents: Array<{
+    id: string;
+    label: string;
+    description: string;
+    pointPoolId: string;
+    availablePoints: number;
+    nodes: Array<{
+      id: string;
+      label: string;
+      description: string;
+      rank: number;
+      maxRank: number;
+      nextCost?: number;
+      available: boolean;
+      requirements: Array<{ met: boolean; text: string }>;
+      command: string;
+    }>;
+  }>;
+  promotions: Array<{
+    class: {
+      id: string;
+      label: string;
+      description: string;
+    };
+    available: boolean;
+    requirements: Array<{ met: boolean; text: string }>;
+    command: string;
   }>;
 }
 
@@ -314,11 +423,17 @@ export type ServerMessage =
   | Envelope<'action.result', ActionResultData>
   | Envelope<'server.notice', ServerNoticeData>
   | Envelope<'message.append', MessageAppendData>
-  | Envelope<'sync.snapshot', SyncSnapshotData>
+  | Envelope<'sync.scene', SyncSceneData>
+  | Envelope<'sync.player', SyncPlayerData>
   | Envelope<'server.heartbeat', ServerHeartbeatData>
   | Envelope<'media.play', MediaPlayData>
   | Envelope<'media.stop', MediaStopData>
   | Envelope<'chat.message', ChatMessageData>;
+
+export type LiveServerMessage = Exclude<
+  ServerMessage,
+  Envelope<'sync.scene', SyncSceneData> | Envelope<'sync.player', SyncPlayerData>
+>;
 
 export type ClientHello = Envelope<
   'client.hello',
@@ -351,6 +466,9 @@ export type ActionPerform = Envelope<
     action: string;
     target?: string;
     abilityId?: string;
+    classId?: string;
+    graphId?: string;
+    nodeId?: string;
   }
 >;
 
@@ -372,11 +490,6 @@ const positiveIntegerOrUndefined = (value: unknown): number | undefined =>
 
 const nonNegativeIntegerOrUndefined = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-
-const hasOnlyKeys = (value: Record<string, unknown>, allowed: readonly string[]): boolean => {
-  const keys = new Set(allowed);
-  return Object.keys(value).every((key) => keys.has(key));
-};
 
 const boundedString = (value: unknown, maximum: number): string | undefined => {
   const text = stringOrUndefined(value);
@@ -410,7 +523,7 @@ const parseActions = (value: unknown): SceneAction[] | undefined => {
   if (!Array.isArray(value) || value.length > 8) return undefined;
   const actions: SceneAction[] = [];
   for (const entry of value) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['label', 'command'])) return undefined;
+    if (!isRecord(entry)) return undefined;
     const label = boundedString(entry.label, 128);
     const command = boundedString(entry.command, 1024);
     if (!label || !command) return undefined;
@@ -419,30 +532,66 @@ const parseActions = (value: unknown): SceneAction[] | undefined => {
   return actions;
 };
 
+type ProgressionOption = PlayerCharacterSnapshot['lineage'];
+type RequirementStatus = PlayerCharacterSnapshot['promotions'][number]['requirements'][number];
+
+const parseProgressionOption = (value: unknown): ProgressionOption | undefined => {
+  if (!isRecord(value)) return undefined;
+  const id = definitionId(value.id);
+  const label = boundedString(value.label, 128);
+  const description = boundedPossiblyEmptyString(value.description, 2048);
+  return id && label && description !== undefined ? { id, label, description } : undefined;
+};
+
+const parseRequirementStatuses = (value: unknown): RequirementStatus[] | undefined => {
+  if (!Array.isArray(value) || value.length > 128) return undefined;
+  const requirements: RequirementStatus[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.met !== 'boolean') return undefined;
+    const text = boundedString(entry.text, 512);
+    if (!text) return undefined;
+    requirements.push({ met: entry.met, text });
+  }
+  return requirements;
+};
+
 const parseCharacterProgression = (
   character: Record<string, unknown>,
 ): Pick<
   PlayerCharacterSnapshot,
-  'archetype' | 'attributes' | 'resistances' | 'statuses' | 'resources' | 'abilities'
+  'lineage' | 'background' | 'baseClass' | 'activeClass' | 'classHistory' |
+  'attributes' | 'resistances' | 'statuses' | 'resources' | 'abilities' |
+  'progressionPoints' | 'talents' | 'promotions'
 > | undefined => {
-  let archetype: PlayerCharacterSnapshot['archetype'];
-  if (character.archetype !== undefined && character.archetype !== null) {
-    if (!isRecord(character.archetype) || !hasOnlyKeys(character.archetype, ['id', 'label', 'description'])) {
-      return undefined;
-    }
-    const id = definitionId(character.archetype.id);
-    const label = boundedString(character.archetype.label, 128);
-    const description = boundedPossiblyEmptyString(character.archetype.description, 2048);
-    if (!id || !label || description === undefined) return undefined;
-    archetype = { id, label, description };
+  const lineage = parseProgressionOption(character.lineage);
+  const baseClass = parseProgressionOption(character.baseClass);
+  const activeClass = parseProgressionOption(character.activeClass);
+  if (!lineage || !baseClass || !activeClass) return undefined;
+
+  let background: PlayerCharacterSnapshot['background'];
+  if (character.background !== undefined && character.background !== null) {
+    background = parseProgressionOption(character.background);
+    if (!background) return undefined;
   }
+
+  if (!Array.isArray(character.classHistory) ||
+    character.classHistory.length === 0 || character.classHistory.length > 8) return undefined;
+  const classHistory: PlayerCharacterSnapshot['classHistory'] = [];
+  const classIds = new Set<string>();
+  for (const entry of character.classHistory) {
+    const option = parseProgressionOption(entry);
+    if (!option || classIds.has(option.id)) return undefined;
+    classIds.add(option.id);
+    classHistory.push(option);
+  }
+  if (!classIds.has(baseClass.id) || !classIds.has(activeClass.id)) return undefined;
 
   const attributes: PlayerCharacterSnapshot['attributes'] = [];
   const attributeIds = new Set<string>();
   if (character.attributes !== undefined) {
     if (!Array.isArray(character.attributes) || character.attributes.length > 64) return undefined;
     for (const entry of character.attributes) {
-      if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'value'])) return undefined;
+      if (!isRecord(entry)) return undefined;
       const id = statId(entry.id);
       const label = boundedString(entry.label, 128);
       const value = numberOrUndefined(entry.value);
@@ -458,7 +607,7 @@ const parseCharacterProgression = (
   if (character.resistances !== undefined) {
     if (!Array.isArray(character.resistances) || character.resistances.length > 16) return undefined;
     for (const entry of character.resistances) {
-      if (!isRecord(entry) || !hasOnlyKeys(entry, ['damageType', 'percent'])) return undefined;
+      if (!isRecord(entry)) return undefined;
       const damageType = definitionId(entry.damageType);
       const percent = numberOrUndefined(entry.percent);
       if (resistanceTypes.has(damageType ?? '') ||
@@ -474,7 +623,7 @@ const parseCharacterProgression = (
   if (character.statuses !== undefined) {
     if (!Array.isArray(character.statuses) || character.statuses.length > 32) return undefined;
     for (const entry of character.statuses) {
-      if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'kind', 'magnitude', 'remainingTicks'])) {
+      if (!isRecord(entry)) {
         return undefined;
       }
       const id = definitionId(entry.id);
@@ -499,7 +648,7 @@ const parseCharacterProgression = (
   if (character.resources !== undefined) {
     if (!Array.isArray(character.resources) || character.resources.length > 16) return undefined;
     for (const entry of character.resources) {
-      if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'current', 'max'])) return undefined;
+      if (!isRecord(entry)) return undefined;
       const id = statId(entry.id);
       const label = boundedString(entry.label, 128);
       const current = nonNegativeIntegerOrUndefined(entry.current);
@@ -516,10 +665,7 @@ const parseCharacterProgression = (
   if (character.abilities !== undefined) {
     if (!Array.isArray(character.abilities) || character.abilities.length > 64) return undefined;
     for (const entry of character.abilities) {
-      if (!isRecord(entry) || !hasOnlyKeys(entry, [
-        'id', 'name', 'description', 'kind', 'resourceCosts',
-        'cooldownRemaining', 'usable', 'targeting',
-      ])) return undefined;
+      if (!isRecord(entry)) return undefined;
       const id = definitionId(entry.id);
       const name = boundedString(entry.name, 128);
       const description = typeof entry.description === 'string' && entry.description.length <= 2048
@@ -533,7 +679,7 @@ const parseCharacterProgression = (
       const resourceCosts: PlayerCharacterSnapshot['abilities'][number]['resourceCosts'] = [];
       const costResourceIds = new Set<string>();
       for (const rawCost of rawCosts) {
-        if (!isRecord(rawCost) || !hasOnlyKeys(rawCost, ['resourceId', 'label', 'amount'])) return undefined;
+        if (!isRecord(rawCost)) return undefined;
         const resourceId = statId(rawCost.resourceId);
         const label = boundedString(rawCost.label, 128);
         const amount = positiveIntegerOrUndefined(rawCost.amount);
@@ -555,35 +701,110 @@ const parseCharacterProgression = (
     }
   }
 
+  if (!isRecord(character.progressionPoints) || Object.keys(character.progressionPoints).length > 4) {
+    return undefined;
+  }
+  const progressionPoints: PlayerCharacterSnapshot['progressionPoints'] = {};
+  for (const [poolId, rawAmount] of Object.entries(character.progressionPoints)) {
+    const amount = nonNegativeIntegerOrUndefined(rawAmount);
+    if (!statId(poolId) || amount === undefined || amount > 10_000) return undefined;
+    progressionPoints[poolId] = amount;
+  }
+
+  if (!Array.isArray(character.talents) || character.talents.length > 16) return undefined;
+  const talents: PlayerCharacterSnapshot['talents'] = [];
+  const talentGraphIds = new Set<string>();
+  for (const rawGraph of character.talents) {
+    if (!isRecord(rawGraph) || !Array.isArray(rawGraph.nodes) || rawGraph.nodes.length > 32) return undefined;
+    const id = definitionId(rawGraph.id);
+    const label = boundedString(rawGraph.label, 128);
+    const description = boundedPossiblyEmptyString(rawGraph.description, 2048);
+    const pointPoolId = statId(rawGraph.pointPoolId);
+    const availablePoints = nonNegativeIntegerOrUndefined(rawGraph.availablePoints);
+    if (!id || talentGraphIds.has(id) || !label || description === undefined || !pointPoolId ||
+      availablePoints === undefined || availablePoints > 10_000) return undefined;
+    talentGraphIds.add(id);
+
+    const nodes: PlayerCharacterSnapshot['talents'][number]['nodes'] = [];
+    const nodeIds = new Set<string>();
+    for (const rawNode of rawGraph.nodes) {
+      if (!isRecord(rawNode)) return undefined;
+      const nodeId = definitionId(rawNode.id);
+      const nodeLabel = boundedString(rawNode.label, 128);
+      const nodeDescription = boundedPossiblyEmptyString(rawNode.description, 2048);
+      const rank = nonNegativeIntegerOrUndefined(rawNode.rank);
+      const maxRank = positiveIntegerOrUndefined(rawNode.maxRank);
+      const nextCost = rawNode.nextCost === null || rawNode.nextCost === undefined
+        ? undefined
+        : positiveIntegerOrUndefined(rawNode.nextCost);
+      const requirements = parseRequirementStatuses(rawNode.requirements);
+      const command = boundedString(rawNode.command, 1024);
+      if (!nodeId || nodeIds.has(nodeId) || !nodeLabel || nodeDescription === undefined ||
+        rank === undefined || maxRank === undefined || maxRank > 5 || rank > maxRank ||
+        (rawNode.nextCost !== null && rawNode.nextCost !== undefined &&
+          (nextCost === undefined || nextCost > 10_000)) ||
+        typeof rawNode.available !== 'boolean' || !requirements || !command ||
+        (rank === maxRank && nextCost !== undefined)) return undefined;
+      nodeIds.add(nodeId);
+      nodes.push({
+        id: nodeId,
+        label: nodeLabel,
+        description: nodeDescription,
+        rank,
+        maxRank,
+        ...(nextCost === undefined ? {} : { nextCost }),
+        available: rawNode.available,
+        requirements,
+        command,
+      });
+    }
+    talents.push({ id, label, description, pointPoolId, availablePoints, nodes });
+  }
+
+  if (!Array.isArray(character.promotions) || character.promotions.length > 64) return undefined;
+  const promotions: PlayerCharacterSnapshot['promotions'] = [];
+  const promotionIds = new Set<string>();
+  for (const rawPromotion of character.promotions) {
+    if (!isRecord(rawPromotion)) return undefined;
+    const promotionClass = parseProgressionOption(rawPromotion.class);
+    const requirements = parseRequirementStatuses(rawPromotion.requirements);
+    const command = boundedString(rawPromotion.command, 1024);
+    if (!promotionClass || promotionIds.has(promotionClass.id) ||
+      typeof rawPromotion.available !== 'boolean' || !requirements || !command) return undefined;
+    promotionIds.add(promotionClass.id);
+    promotions.push({ class: promotionClass, available: rawPromotion.available, requirements, command });
+  }
+
   return {
-    ...(archetype ? { archetype } : {}), attributes, resistances, statuses, resources, abilities,
+    lineage,
+    ...(background ? { background } : {}),
+    baseClass,
+    activeClass,
+    classHistory,
+    attributes,
+    resistances,
+    statuses,
+    resources,
+    abilities,
+    progressionPoints,
+    talents,
+    promotions,
   };
 };
 
 export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefined {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      'revision', 'character', 'inventory', 'equipment', 'map', 'quests', 'party',
-      'partyInvites', 'economy', 'social',
-    ])
-  ) return undefined;
+  if (!isRecord(value)) return undefined;
 
   const revision = positiveIntegerOrUndefined(value.revision);
   const character = value.character;
   if (
     revision === undefined ||
-    !isRecord(character) ||
-    !hasOnlyKeys(character, [
-      'name', 'level', 'experience', 'nextLevelExperience', 'health', 'maxHealth',
-      'strength', 'defence', 'skills', 'effects', 'recoveryInTicks',
-      'archetype', 'attributes', 'resistances', 'statuses', 'resources', 'abilities',
-    ])
+    !isRecord(character)
   ) return undefined;
   const name = boundedString(character.name, 64);
   const level = positiveIntegerOrUndefined(character.level);
   const experience = nonNegativeIntegerOrUndefined(character.experience);
-  const nextLevelExperience = positiveIntegerOrUndefined(character.nextLevelExperience);
+  const nextLevelExperience = nonNegativeIntegerOrUndefined(character.nextLevelExperience);
   const health = nonNegativeIntegerOrUndefined(character.health);
   const maxHealth = positiveIntegerOrUndefined(character.maxHealth);
   const strength = positiveIntegerOrUndefined(character.strength);
@@ -600,7 +821,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   ) return undefined;
   const effects: PlayerCharacterSnapshot['effects'] = [];
   for (const effect of character.effects) {
-    if (!isRecord(effect) || !hasOnlyKeys(effect, ['kind', 'magnitude', 'remainingTicks'])) return undefined;
+    if (!isRecord(effect)) return undefined;
     const kind = effect.kind;
     const magnitude = positiveIntegerOrUndefined(effect.magnitude);
     const remainingTicks = positiveIntegerOrUndefined(effect.remainingTicks);
@@ -615,7 +836,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   if (character.skills !== undefined) {
     if (!Array.isArray(character.skills) || character.skills.length > 64) return undefined;
     for (const skill of character.skills) {
-      if (!isRecord(skill) || !hasOnlyKeys(skill, ['id', 'label', 'rank'])) return undefined;
+      if (!isRecord(skill)) return undefined;
       const id = statId(skill.id);
       const label = boundedString(skill.label, 128);
       const rank = nonNegativeIntegerOrUndefined(skill.rank);
@@ -630,7 +851,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   if (!Array.isArray(value.inventory) || value.inventory.length > 256) return undefined;
   const inventory: PlayerItemSnapshot[] = [];
   for (const entry of value.inventory) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'description', 'actions'])) return undefined;
+    if (!isRecord(entry)) return undefined;
     const id = opaqueId(entry.id);
     const label = boundedString(entry.label, 256);
     const description = typeof entry.description === 'string' && entry.description.length <= 4096
@@ -644,7 +865,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   if (!Array.isArray(value.equipment) || value.equipment.length > 3) return undefined;
   const equipment: EquippedItemSnapshot[] = [];
   for (const entry of value.equipment) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'slot', 'label', 'actions'])) return undefined;
+    if (!isRecord(entry)) return undefined;
     const id = opaqueId(entry.id);
     const slot = entry.slot;
     const label = boundedString(entry.label, 256);
@@ -657,7 +878,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
 
   const map = value.map;
   if (
-    !isRecord(map) || !hasOnlyKeys(map, ['currentRoomId', 'rooms', 'paths']) ||
+    !isRecord(map) ||
     !Array.isArray(map.rooms) || map.rooms.length > 512 ||
     !Array.isArray(map.paths) || map.paths.length > 3072
   ) return undefined;
@@ -665,7 +886,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   if (!currentRoomId) return undefined;
   const rooms: PlayerStateSnapshot['map']['rooms'] = [];
   for (const entry of map.rooms) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'title', 'current'])) return undefined;
+    if (!isRecord(entry)) return undefined;
     const id = opaqueId(entry.id);
     const title = boundedString(entry.title, 256);
     if (!id || !title || typeof entry.current !== 'boolean') return undefined;
@@ -675,7 +896,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   const paths: PlayerStateSnapshot['map']['paths'] = [];
   const roomIds = new Set(rooms.map((room) => room.id));
   for (const entry of map.paths) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['from', 'direction', 'to'])) return undefined;
+    if (!isRecord(entry)) return undefined;
     const from = opaqueId(entry.from);
     const direction = boundedString(entry.direction, 16);
     const to = entry.to === undefined ? undefined : opaqueId(entry.to);
@@ -688,7 +909,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   if (!Array.isArray(value.quests) || value.quests.length > 32) return undefined;
   const quests: PlayerStateSnapshot['quests'] = [];
   for (const entry of value.quests) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'summary', 'status', 'current', 'target', 'actions'])) {
+    if (!isRecord(entry)) {
       return undefined;
     }
     const id = contentId(entry.id);
@@ -708,12 +929,12 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
 
   let party: PlayerStateSnapshot['party'];
   if (value.party !== undefined && value.party !== null) {
-    if (!isRecord(value.party) || !hasOnlyKeys(value.party, ['leader', 'members', 'actions']) ||
+    if (!isRecord(value.party) ||
       typeof value.party.leader !== 'boolean' || !Array.isArray(value.party.members) ||
       value.party.members.length === 0 || value.party.members.length > 6) return undefined;
     const members: NonNullable<PlayerStateSnapshot['party']>['members'] = [];
     for (const entry of value.party.members) {
-      if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'name', 'leader', 'online'])) return undefined;
+      if (!isRecord(entry)) return undefined;
       const id = opaqueId(entry.id);
       const memberName = boundedString(entry.name, 64);
       if (!id || !memberName || typeof entry.leader !== 'boolean' || typeof entry.online !== 'boolean') {
@@ -729,7 +950,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   if (!Array.isArray(value.partyInvites) || value.partyInvites.length > 12) return undefined;
   const partyInvites: PlayerStateSnapshot['partyInvites'] = [];
   for (const entry of value.partyInvites) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['leaderName', 'expiresInTicks', 'actions'])) return undefined;
+    if (!isRecord(entry)) return undefined;
     const leaderName = boundedString(entry.leaderName, 64);
     const expiresInTicks = nonNegativeIntegerOrUndefined(entry.expiresInTicks);
     const actions = parseActions(entry.actions);
@@ -739,7 +960,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
 
   const economy = value.economy;
   if (
-    !isRecord(economy) || !hasOnlyKeys(economy, ['coins', 'commodities', 'shopAvailable', 'shop']) ||
+    !isRecord(economy) ||
     nonNegativeIntegerOrUndefined(economy.coins) === undefined ||
     typeof economy.shopAvailable !== 'boolean' ||
     !Array.isArray(economy.commodities) || economy.commodities.length > 32 ||
@@ -747,7 +968,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   ) return undefined;
   const commodities: PlayerStateSnapshot['economy']['commodities'] = [];
   for (const entry of economy.commodities) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'quantity'])) return undefined;
+    if (!isRecord(entry)) return undefined;
     const id = contentId(entry.id);
     const label = boundedString(entry.label, 128);
     const quantity = positiveIntegerOrUndefined(entry.quantity);
@@ -756,7 +977,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   }
   const shop: PlayerStateSnapshot['economy']['shop'] = [];
   for (const entry of economy.shop) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'buyPrice', 'sellPrice', 'stock', 'owned', 'actions'])) {
+    if (!isRecord(entry)) {
       return undefined;
     }
     const id = contentId(entry.id);
@@ -773,12 +994,12 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   if (!economy.shopAvailable && shop.length > 0) return undefined;
 
   const social = value.social;
-  if (!isRecord(social) || !hasOnlyKeys(social, ['online']) || !Array.isArray(social.online) || social.online.length > 256) {
+  if (!isRecord(social) || !Array.isArray(social.online) || social.online.length > 256) {
     return undefined;
   }
   const online: PlayerStateSnapshot['social']['online'] = [];
   for (const entry of social.online) {
-    if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'name', 'selfCharacter'])) return undefined;
+    if (!isRecord(entry)) return undefined;
     const id = opaqueId(entry.id);
     const onlineName = boundedString(entry.name, 64);
     if (!id || !onlineName || typeof entry.selfCharacter !== 'boolean') return undefined;
@@ -813,6 +1034,12 @@ const PLAYER_VALIDATION_SHELL = {
   character: {
     name: 'validation', level: 1, experience: 0, nextLevelExperience: 100,
     health: 1, maxHealth: 1, strength: 1, defence: 0, effects: [], recoveryInTicks: null,
+    lineage: { id: 'mortal', label: 'Mortal', description: '' },
+    background: null,
+    baseClass: { id: 'wanderer', label: 'Wanderer', description: '' },
+    activeClass: { id: 'wanderer', label: 'Wanderer', description: '' },
+    classHistory: [{ id: 'wanderer', label: 'Wanderer', description: '' }],
+    progressionPoints: {}, talents: [], promotions: [],
   },
   inventory: [],
   equipment: [],
@@ -841,6 +1068,149 @@ const assetUrlOrUndefined = (value: unknown): string | undefined => {
   return url && /^\/assets\/[a-f0-9]{64}\/scene-(?:640|1280)\.(?:avif|webp|jpg|png)$/.test(url)
     ? url
     : undefined;
+};
+
+const entityManifestUrlOrUndefined = (value: unknown): string | undefined => {
+  const url = stringOrUndefined(value);
+  return url && /^\/assets\/[a-f0-9]{64}\/manifest\.json$/.test(url) ? url : undefined;
+};
+
+const MAX_SCENE_PRESENTATION_ENTITIES = 12;
+const MAX_SCENE_PRESENTATION_POSES = 32;
+const MAX_ENTITY_SOURCE_REFERENCES = 2;
+
+const entityRasterUrlOrUndefined = (value: unknown, pose: SceneEntityPose): string | undefined => {
+  const url = stringOrUndefined(value);
+  return url && new RegExp(
+    `^/assets/[a-f0-9]{64}/sprite-${pose}(?:-(?:320|640|1280))?\\.(?:avif|webp|png)$`,
+  ).test(url)
+    ? url
+    : undefined;
+};
+
+const safeVisualText = (value: unknown, maximum: number, allowEmpty = false): string | undefined => {
+  if (typeof value !== 'string' || value.length > maximum || /[\u0000-\u001f\u007f]/.test(value)) {
+    return undefined;
+  }
+  return allowEmpty || value.trim().length > 0 ? value : undefined;
+};
+
+const normalizedUnit = (value: unknown, minimum = 0, maximum = 1): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum
+    ? value
+    : undefined;
+
+const parseEntityVisualSource = (
+  value: unknown,
+  pose: SceneEntityPose,
+): SceneEntityVisualSource | undefined => {
+  if (!isRecord(value)) return undefined;
+  const source: SceneEntityVisualSource = {
+    manifest: entityManifestUrlOrUndefined(value.manifest),
+    avif: entityRasterUrlOrUndefined(value.avif, pose),
+    webp: entityRasterUrlOrUndefined(value.webp, pose),
+    png: entityRasterUrlOrUndefined(value.png, pose),
+  };
+  const supplied = (['manifest', 'avif', 'webp', 'png'] as const)
+    .flatMap((key) => value[key] === undefined ? [] : [[key, value[key]] as const]);
+  if (supplied.length === 0 || supplied.length > MAX_ENTITY_SOURCE_REFERENCES ||
+    supplied.some(([key, candidate]) => source[key as keyof SceneEntityVisualSource] !== candidate)) {
+    return undefined;
+  }
+  return source.manifest || source.avif || source.webp || source.png ? source : undefined;
+};
+
+const parseEntityVisual = (value: unknown): SceneEntityVisual | undefined => {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.decorative !== 'boolean' || !isRecord(value.footprint) ||
+    !isRecord(value.poses)) return undefined;
+
+  const alt = safeVisualText(value.alt, 256, value.decorative);
+  const width = normalizedUnit(value.footprint.width, 0.02, 0.6);
+  const height = normalizedUnit(value.footprint.height, 0.02, 0.8);
+  const priority = numberOrUndefined(value.priority);
+  const layer = value.layer;
+  if (alt === undefined || (value.decorative && alt !== '') || width === undefined || height === undefined ||
+    priority === undefined || !Number.isSafeInteger(priority) || priority < -100 || priority > 100 ||
+    (layer !== 'midground' && layer !== 'foreground' && layer !== 'overlay')) return undefined;
+
+  let preferredAnchor: SceneEntityVisual['preferredAnchor'];
+  if (value.preferredAnchor !== undefined) {
+    if (!isRecord(value.preferredAnchor)) return undefined;
+    const x = normalizedUnit(value.preferredAnchor.x);
+    const y = normalizedUnit(value.preferredAnchor.y, 0.2, 1);
+    if (x === undefined || y === undefined) return undefined;
+    preferredAnchor = { x, y };
+  }
+
+  const idle = parseEntityVisualSource(value.poses.idle, 'idle');
+  if (!idle) return undefined;
+  const poses: SceneEntityVisual['poses'] = { idle };
+  for (const pose of ['attack', 'hit', 'defeated'] as const) {
+    if (value.poses[pose] !== undefined) {
+      const source = parseEntityVisualSource(value.poses[pose], pose);
+      if (!source) return undefined;
+      poses[pose] = source;
+    }
+  }
+
+  return {
+    alt,
+    decorative: value.decorative,
+    footprint: { width, height },
+    ...(preferredAnchor ? { preferredAnchor } : {}),
+    priority,
+    layer,
+    poses,
+  };
+};
+
+const parseScenePresentation = (value: unknown): ScenePresentation | undefined => {
+  if (!isRecord(value) || !Array.isArray(value.entities) ||
+    value.entities.length > MAX_SCENE_PRESENTATION_ENTITIES) return undefined;
+  const entities: SceneEntityPresentation[] = [];
+  const ids = new Set<string>();
+  let poseCount = 0;
+  for (const entry of value.entities) {
+    if (!isRecord(entry)) continue;
+    const id = opaqueId(entry.id);
+    if (!id || ids.has(id)) continue;
+    const annotation = Object.fromEntries(
+      Object.entries(entry).filter(([key]) => key !== 'id'),
+    );
+    const visual = parseEntityVisual(annotation);
+    if (!visual) continue;
+    poseCount += Object.keys(visual.poses).length;
+    if (poseCount > MAX_SCENE_PRESENTATION_POSES) return undefined;
+    ids.add(id);
+    entities.push({ id, ...visual });
+  }
+  return entities.length > 0 ? { entities } : undefined;
+};
+
+const parseMessagePresentationCue = (
+  value: unknown,
+  actorId: string,
+  targetId: string | undefined,
+): MessagePresentationCue | undefined => {
+  if (!isRecord(value)) return undefined;
+  const kind = value.kind;
+  const entityId = value.entityId === undefined ? undefined : opaqueId(value.entityId);
+  const pose = value.pose;
+  const intensity = value.intensity;
+  const durationMs = positiveIntegerOrUndefined(value.durationMs);
+  if ((kind !== 'attack' && kind !== 'hit' && kind !== 'heal' && kind !== 'defeat') ||
+    (value.entityId !== undefined && (!entityId || (entityId !== actorId && entityId !== targetId))) ||
+    (pose !== undefined && pose !== 'idle' && pose !== 'attack' && pose !== 'hit' && pose !== 'defeated') ||
+    (intensity !== 1 && intensity !== 2 && intensity !== 3) ||
+    durationMs === undefined || durationMs > 800) return undefined;
+  return {
+    kind,
+    ...(entityId ? { entityId } : {}),
+    ...(pose ? { pose } : {}),
+    intensity,
+    durationMs,
+  };
 };
 
 const toProse = (value: unknown): string[] => {
@@ -960,7 +1330,7 @@ const toActions = (value: unknown): SceneAction[] => {
 
 const toItems = (value: unknown): SceneItem[] => {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((entry, index) => {
+  return value.slice(0, 256).flatMap((entry, index) => {
     if (!isRecord(entry)) return [];
     const label = stringOrUndefined(entry.label) ?? stringOrUndefined(entry.name);
     if (!label) return [];
@@ -982,7 +1352,7 @@ const toItems = (value: unknown): SceneItem[] => {
 
 const toNpcs = (value: unknown): SceneNpc[] => {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((entry, index) => {
+  return value.slice(0, 256).flatMap((entry, index) => {
     if (!isRecord(entry)) return [];
     const label = stringOrUndefined(entry.label) ?? stringOrUndefined(entry.name);
     if (!label) return [];
@@ -1021,6 +1391,7 @@ const normaliseScene = (data: Record<string, unknown>): SceneSnapshot => ({
   title: stringOrUndefined(data.title) ?? 'An unknown place',
   prose: toProse(data.prose ?? data.description),
   image: toImage(data),
+  presentation: parseScenePresentation(data.presentation),
   exits: toExits(data.exits),
   items: toItems(data.items),
   npcs: toNpcs(data.npcs),
@@ -1028,12 +1399,11 @@ const normaliseScene = (data: Record<string, unknown>): SceneSnapshot => ({
 });
 
 const parseScenePatch = (data: Record<string, unknown>): ScenePatchData | undefined => {
-  if (!hasOnlyKeys(data, ['viewId', 'revision', 'title', 'prose', 'image', 'exits', 'weather'])) {
-    return undefined;
-  }
   const viewId = opaqueId(data.viewId);
   const revision = positiveIntegerOrUndefined(data.revision);
-  if (!viewId || revision === undefined || Object.keys(data).length <= 2) return undefined;
+  const hasKnownUpdate = ['title', 'prose', 'image', 'exits', 'weather']
+    .some((key) => data[key] !== undefined);
+  if (!viewId || revision === undefined || !hasKnownUpdate) return undefined;
   const patch: ScenePatchData = { viewId, revision };
   if (data.title !== undefined) {
     const title = boundedString(data.title, 256);
@@ -1066,7 +1436,7 @@ const parseScenePatch = (data: Record<string, unknown>): ScenePatchData | undefi
 };
 
 const parseEntityUpsert = (data: Record<string, unknown>): EntityUpsertData | undefined => {
-  if (!hasOnlyKeys(data, ['viewId', 'revision', 'kind', 'id', 'entity']) || !isRecord(data.entity)) {
+  if (!isRecord(data.entity)) {
     return undefined;
   }
   const viewId = opaqueId(data.viewId);
@@ -1095,7 +1465,6 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
 
   if (
     !isRecord(candidate) ||
-    !hasOnlyKeys(candidate, ['v', 'type', 'seq', 'id', 'data']) ||
     candidate.v !== PROTOCOL_VERSION ||
     typeof candidate.type !== 'string' ||
     !isRecord(candidate.data) ||
@@ -1149,7 +1518,6 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       return upsert ? { ...base, type: candidate.type, data: upsert } : undefined;
     }
     case 'entity.remove': {
-      if (!hasOnlyKeys(candidate.data, ['viewId', 'revision', 'kind', 'id'])) return undefined;
       const viewId = opaqueId(candidate.data.viewId);
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       const id = opaqueId(candidate.data.id);
@@ -1164,7 +1532,6 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       return player ? { ...base, type: candidate.type, data: player } : undefined;
     }
     case 'vitals.update': {
-      if (!hasOnlyKeys(candidate.data, ['revision', 'character'])) return undefined;
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       if (revision === undefined) return undefined;
       const validated = validatePlayerFragment(revision, { character: candidate.data.character });
@@ -1173,7 +1540,6 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
         : undefined;
     }
     case 'inventory.patch': {
-      if (!hasOnlyKeys(candidate.data, ['revision', 'inventory', 'equipment'])) return undefined;
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       if (revision === undefined) return undefined;
       const validated = validatePlayerFragment(revision, {
@@ -1189,7 +1555,6 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
         : undefined;
     }
     case 'map.snapshot': {
-      if (!hasOnlyKeys(candidate.data, ['revision', 'map'])) return undefined;
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       if (revision === undefined) return undefined;
       const validated = validatePlayerFragment(revision, { map: candidate.data.map });
@@ -1257,6 +1622,8 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       ) {
         return undefined;
       }
+      const normalizedTargetId = stringOrUndefined(targetId);
+      const cue = parseMessagePresentationCue(candidate.data.cue, actorId, normalizedTargetId);
       return {
         ...base,
         type: candidate.type,
@@ -1265,34 +1632,49 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
           kind,
           text,
           actorId,
-          targetId: stringOrUndefined(targetId),
+          targetId: normalizedTargetId,
           itemId: stringOrUndefined(itemId),
+          ...(cue ? { cue } : {}),
         },
       };
     }
-    case 'sync.snapshot': {
+    case 'sync.scene': {
       const afterSeq = nonNegativeIntegerOrUndefined(candidate.data.afterSeq);
-      const player = parsePlayerState(candidate.data.player);
+      const syncId = boundedString(candidate.data.syncId, 25);
       if (
-        !hasOnlyKeys(candidate.data, ['afterSeq', 'scene', 'player']) ||
+        !syncId || !/^sync-[1-9][0-9]{0,19}$/.test(syncId) ||
         afterSeq === undefined ||
         !isRecord(candidate.data.scene) ||
-        typeof candidate.data.scene.title !== 'string' ||
-        !player
+        typeof candidate.data.scene.title !== 'string'
       ) {
         return undefined;
       }
       return {
         ...base,
         type: candidate.type,
-        data: { afterSeq, scene: normaliseScene(candidate.data.scene), player },
+        data: { syncId, afterSeq, scene: normaliseScene(candidate.data.scene) },
+      };
+    }
+    case 'sync.player': {
+      const afterSeq = nonNegativeIntegerOrUndefined(candidate.data.afterSeq);
+      const syncId = boundedString(candidate.data.syncId, 25);
+      const player = parsePlayerState(candidate.data.player);
+      if (
+        !syncId || !/^sync-[1-9][0-9]{0,19}$/.test(syncId) ||
+        afterSeq === undefined || candidate.data.complete !== true || !player
+      ) {
+        return undefined;
+      }
+      return {
+        ...base,
+        type: candidate.type,
+        data: { syncId, afterSeq, player, complete: true },
       };
     }
     case 'media.play': {
       const channel = candidate.data.channel;
       const url = stringOrUndefined(candidate.data.url);
       if (
-        !hasOnlyKeys(candidate.data, ['channel', 'url', 'loop']) ||
         (channel !== 'music' && channel !== 'ambience' && channel !== 'effects') ||
         !url ||
         !/^\/assets\/[a-f0-9]{64}\/audio-[a-z0-9-]+\.(?:opus|ogg|mp3)$/.test(url) ||
@@ -1305,7 +1687,6 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
     case 'media.stop': {
       const channel = candidate.data.channel;
       if (
-        !hasOnlyKeys(candidate.data, ['channel']) ||
         (channel !== undefined &&
           channel !== 'music' &&
           channel !== 'ambience' &&
@@ -1320,7 +1701,6 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const sender = stringOrUndefined(candidate.data.sender);
       const text = stringOrUndefined(candidate.data.text);
       if (
-        !hasOnlyKeys(candidate.data, ['channel', 'sender', 'text']) ||
         (channel !== 'say' && channel !== 'tell') ||
         !sender ||
         !text ||
@@ -1407,6 +1787,26 @@ export function createAbilityPerform(
       abilityId,
       ...(target === undefined ? {} : { target }),
     },
+  };
+}
+
+export function createPromotionPerform(classId: string, requestId: string): ActionPerform {
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'action.perform',
+    data: { requestId, action: 'progression.promote', classId },
+  };
+}
+
+export function createTalentPerform(
+  graphId: string,
+  nodeId: string,
+  requestId: string,
+): ActionPerform {
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'action.perform',
+    data: { requestId, action: 'progression.talent', graphId, nodeId },
   };
 }
 

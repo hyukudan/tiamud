@@ -629,7 +629,7 @@ mod tests {
         fs::write(
             path,
             r#"{
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "id": "test-world",
                 "name": "Test World",
                 "startRoomId": "room:start",
@@ -733,7 +733,7 @@ mod tests {
         fs::write(
             &world,
             r#"{
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "id": "broken",
                 "name": "Broken",
                 "startRoomId": "room:missing",

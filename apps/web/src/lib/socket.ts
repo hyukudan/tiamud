@@ -4,18 +4,33 @@ import {
   createClientHello,
   createCommandSubmit,
   createHeartbeatAck,
+  createPromotionPerform,
   createSyncRequest,
+  createTalentPerform,
   parseServerMessage,
   type ConnectionState,
+  type LiveServerMessage,
   type ServerMessage,
+  type SyncRecoveryData,
 } from './protocol';
 import { WEBSOCKET_SUBPROTOCOL } from './brand';
 
 export interface ConnectionCallbacks {
-  onMessage(message: ServerMessage): void;
+  onMessage(message: LiveServerMessage): void;
+  onSync?(recovery: SyncRecoveryData): void;
   onStateChange(state: ConnectionState): void;
   onProtocolError?(): void;
   onAccessRejected?(message: string, clearCredentials: boolean): void;
+}
+
+interface SyncBuffer {
+  syncId: string;
+  afterSeq: number;
+  highestSequence: number;
+  scene?: SyncRecoveryData['scene'];
+  sceneSequence?: number;
+  player?: SyncRecoveryData['player'];
+  playerSequence?: number;
 }
 
 export interface ConnectionAuth {
@@ -53,6 +68,8 @@ export class TiamudConnection {
   #closedByClient = false;
   #lastSequence?: number;
   #syncPending = false;
+  #syncAfterSeq?: number;
+  #syncBuffer?: SyncBuffer;
   #syncTimer?: ReturnType<typeof setTimeout>;
   #lastServerActivity = 0;
   #watchdogTimer?: ReturnType<typeof setInterval>;
@@ -216,6 +233,18 @@ export class TiamudConnection {
     return true;
   }
 
+  promote(classId: string, requestId: string): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createPromotionPerform(classId, requestId)));
+    return true;
+  }
+
+  acquireTalent(graphId: string, nodeId: string, requestId: string): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createTalentPerform(graphId, nodeId, requestId)));
+    return true;
+  }
+
   close(): void {
     this.#closedByClient = true;
     this.#reconnectImmediately = false;
@@ -241,13 +270,8 @@ export class TiamudConnection {
       return;
     }
 
-    if (message.type === 'sync.snapshot') {
-      if (this.#lastSequence !== undefined && sequence <= this.#lastSequence) {
-        return;
-      }
-      this.#lastSequence = sequence;
-      this.#clearSyncWait();
-      this.#callbacks.onMessage(message);
+    if (message.type === 'sync.scene' || message.type === 'sync.player') {
+      this.#handleSyncHalf(message, sequence);
       return;
     }
 
@@ -284,12 +308,60 @@ export class TiamudConnection {
       return;
     }
     this.#syncPending = true;
+    this.#syncAfterSeq = afterSeq;
+    this.#syncBuffer = undefined;
     socket.send(JSON.stringify(createSyncRequest(afterSeq)));
     this.#syncTimer = setTimeout(() => {
       if (this.#socket === socket && this.#syncPending && socket.readyState === WebSocket.OPEN) {
         socket.close(4002, 'State synchronization timeout');
       }
     }, SYNC_RESPONSE_TIMEOUT_MS);
+  }
+
+  #handleSyncHalf(
+    message: Extract<ServerMessage, { type: 'sync.scene' | 'sync.player' }>,
+    sequence: number,
+  ): void {
+    if (!this.#syncPending || this.#syncAfterSeq === undefined ||
+      message.data.afterSeq !== this.#syncAfterSeq ||
+      (this.#lastSequence !== undefined && sequence <= this.#lastSequence)) return;
+
+    let buffer = this.#syncBuffer;
+    if (!buffer || buffer.syncId !== message.data.syncId) {
+      if (buffer) return;
+      buffer = {
+        syncId: message.data.syncId,
+        afterSeq: message.data.afterSeq,
+        highestSequence: sequence,
+      };
+      this.#syncBuffer = buffer;
+    } else {
+      if (sequence <= buffer.highestSequence) return;
+      buffer.highestSequence = sequence;
+    }
+
+    if (message.type === 'sync.scene') {
+      if (buffer.scene !== undefined) return;
+      buffer.scene = message.data.scene;
+      buffer.sceneSequence = sequence;
+    } else {
+      if (buffer.player !== undefined) return;
+      buffer.player = message.data.player;
+      buffer.playerSequence = sequence;
+    }
+
+    if (!buffer.scene || !buffer.player || buffer.sceneSequence === undefined ||
+      buffer.playerSequence === undefined || buffer.sceneSequence >= buffer.playerSequence) return;
+
+    const recovery: SyncRecoveryData = {
+      syncId: buffer.syncId,
+      afterSeq: buffer.afterSeq,
+      scene: buffer.scene,
+      player: buffer.player,
+    };
+    this.#lastSequence = Math.max(this.#lastSequence ?? 0, buffer.playerSequence);
+    this.#clearSyncWait();
+    this.#callbacks.onSync?.(recovery);
   }
 
   #startWatchdog(socket: WebSocket): void {
@@ -314,6 +386,8 @@ export class TiamudConnection {
 
   #clearSyncWait(): void {
     this.#syncPending = false;
+    this.#syncAfterSeq = undefined;
+    this.#syncBuffer = undefined;
     if (this.#syncTimer) {
       clearTimeout(this.#syncTimer);
       this.#syncTimer = undefined;

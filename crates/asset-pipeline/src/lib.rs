@@ -1,4 +1,4 @@
-//! Offline compiler for bounded, content-addressed atmospheric scene assets.
+//! Offline compiler for bounded, content-addressed scene and entity assets.
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -9,17 +9,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, GenericImageView, ImageEncoder, ImageFormat, ImageReader, RgbImage};
+use image::{
+    DynamicImage, GenericImageView, ImageEncoder, ImageFormat, ImageReader, RgbImage, RgbaImage,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const TARGET_WIDTHS: [u32; 2] = [640, 1280];
-const SCHEMA_VERSION: u8 = 2;
+pub const SPRITE_TARGET_WIDTHS: [u32; 2] = [320, 640];
+const ATMOSPHERE_SCHEMA_VERSION: u8 = 2;
+const ENTITY_SPRITE_SCHEMA_VERSION: u8 = 3;
 const JPEG_QUALITY: u8 = 84;
 const AVIF_QUALITY: f32 = 64.0;
 const AVIF_SPEED: u8 = 8;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+const DEFAULT_SPRITE_MAX_VARIANT_BYTES: usize = 512 * 1024;
 #[cfg(feature = "webp-encoding")]
 const WEBP_QUALITY: f32 = 82.0;
 
@@ -32,8 +37,93 @@ pub struct BuildRequest {
     pub output_dir: PathBuf,
     pub limits: BuildLimits,
     pub metadata: AuthoringMetadata,
+    /// Explicit publication profile. Sprite poses are metadata, never inferred
+    /// from a source filename.
+    pub profile: AssetProfile,
     /// Publish only deterministic PNG variants, even when the source is opaque.
+    /// This option applies only to atmospheric assets.
     pub lossless: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AssetProfile {
+    #[default]
+    Atmosphere,
+    EntitySprite {
+        pose: SpritePose,
+    },
+}
+
+impl AssetProfile {
+    const fn kind(self) -> AssetKind {
+        match self {
+            Self::Atmosphere => AssetKind::Atmosphere,
+            Self::EntitySprite { .. } => AssetKind::EntitySprite,
+        }
+    }
+
+    const fn pose(self) -> Option<SpritePose> {
+        match self {
+            Self::Atmosphere => None,
+            Self::EntitySprite { pose } => Some(pose),
+        }
+    }
+
+    const fn target_widths(self) -> &'static [u32] {
+        match self {
+            Self::Atmosphere => &TARGET_WIDTHS,
+            Self::EntitySprite { .. } => &SPRITE_TARGET_WIDTHS,
+        }
+    }
+
+    const fn minimum_source_width(self) -> u32 {
+        match self {
+            Self::Atmosphere => 1280,
+            Self::EntitySprite { .. } => 640,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AssetKind {
+    Atmosphere,
+    EntitySprite,
+}
+
+impl fmt::Display for AssetKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Atmosphere => "atmosphere",
+            Self::EntitySprite => "entity-sprite",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpritePose {
+    Idle,
+    Attack,
+    Hit,
+    Defeated,
+}
+
+impl SpritePose {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Attack => "attack",
+            Self::Hit => "hit",
+            Self::Defeated => "defeated",
+        }
+    }
+}
+
+impl fmt::Display for SpritePose {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,7 +195,9 @@ pub struct AssetManifest {
     pub schema: u8,
     pub asset_id: String,
     pub revision: u32,
-    pub kind: String,
+    pub kind: AssetKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pose: Option<SpritePose>,
     /// Fallback only. WorldPack scenes provide the contextual/localized alt.
     pub alt: String,
     pub focal_point: FocalPoint,
@@ -228,10 +320,24 @@ pub enum PipelineError {
     SourceTooLarge { actual: u64, maximum: u64 },
     #[error("source width {actual} is below the required 1280 pixels; upscaling is disabled")]
     SourceTooNarrow { actual: u32 },
+    #[error(
+        "{kind} source width {actual} is below the required {minimum} pixels; upscaling is disabled"
+    )]
+    SourceTooNarrowForProfile {
+        kind: AssetKind,
+        actual: u32,
+        minimum: u32,
+    },
     #[error("source dimensions {width}x{height} exceed the configured limits")]
     InvalidDimensions { width: u32, height: u32 },
     #[error("unsupported source format; use PNG, JPEG, or WebP")]
     UnsupportedSourceFormat,
+    #[error("animated image sources are unsupported; publish one reviewed static pose at a time")]
+    UnsupportedAnimation,
+    #[error("entity-sprite assets require a source with non-opaque alpha pixels")]
+    SpriteRequiresTransparency,
+    #[error("the lossless option is valid only for atmosphere assets")]
+    LosslessSpriteProfile,
     #[error("required {0} encoder is unavailable")]
     MissingRequiredEncoder(AssetFormat),
     #[error("{format} encoder failed: {message}")]
@@ -279,16 +385,21 @@ impl PipelineError {
 /// changing the manifest contract. Implementations must return the exact bytes for
 /// the advertised format; substituting formats is forbidden.
 pub trait VariantEncoders {
-    fn formats(&self) -> Vec<AssetFormat>;
+    fn rgb_formats(&self) -> Vec<AssetFormat>;
 
-    fn encode(&self, format: AssetFormat, image: &RgbImage) -> Result<Vec<u8>, PipelineError>;
+    fn rgba_formats(&self) -> Vec<AssetFormat>;
+
+    fn encode_rgb(&self, format: AssetFormat, image: &RgbImage) -> Result<Vec<u8>, PipelineError>;
+
+    fn encode_rgba(&self, format: AssetFormat, image: &RgbaImage)
+    -> Result<Vec<u8>, PipelineError>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultEncoders;
 
 impl VariantEncoders for DefaultEncoders {
-    fn formats(&self) -> Vec<AssetFormat> {
+    fn rgb_formats(&self) -> Vec<AssetFormat> {
         let mut formats = vec![AssetFormat::Avif];
         #[cfg(feature = "webp-encoding")]
         formats.push(AssetFormat::Webp);
@@ -296,7 +407,14 @@ impl VariantEncoders for DefaultEncoders {
         formats
     }
 
-    fn encode(&self, format: AssetFormat, image: &RgbImage) -> Result<Vec<u8>, PipelineError> {
+    fn rgba_formats(&self) -> Vec<AssetFormat> {
+        #[cfg(feature = "webp-encoding")]
+        return vec![AssetFormat::Webp];
+        #[cfg(not(feature = "webp-encoding"))]
+        Vec::new()
+    }
+
+    fn encode_rgb(&self, format: AssetFormat, image: &RgbImage) -> Result<Vec<u8>, PipelineError> {
         match format {
             AssetFormat::Avif => encode_avif(image),
             #[cfg(feature = "webp-encoding")]
@@ -305,6 +423,21 @@ impl VariantEncoders for DefaultEncoders {
             AssetFormat::Webp => Err(PipelineError::MissingRequiredEncoder(AssetFormat::Webp)),
             AssetFormat::Jpeg => encode_jpeg(image),
             AssetFormat::Png => encode_png_rgb(image),
+        }
+    }
+
+    fn encode_rgba(
+        &self,
+        format: AssetFormat,
+        image: &RgbaImage,
+    ) -> Result<Vec<u8>, PipelineError> {
+        match format {
+            #[cfg(feature = "webp-encoding")]
+            AssetFormat::Webp => encode_webp_rgba(image),
+            #[cfg(not(feature = "webp-encoding"))]
+            AssetFormat::Webp => Err(PipelineError::MissingRequiredEncoder(AssetFormat::Webp)),
+            AssetFormat::Png => encode_png_rgba(image),
+            other => Err(PipelineError::MissingRequiredEncoder(other)),
         }
     }
 }
@@ -420,7 +553,9 @@ pub fn build_quarantined(
         .parent()
         .ok_or_else(|| PipelineError::InvalidQuarantine("record has no parent".to_owned()))?
         .join("source.png");
-    request.lossless |= record.has_transparency;
+    if matches!(request.profile, AssetProfile::Atmosphere) {
+        request.lossless |= record.has_transparency;
+    }
     build_asset(&request)
 }
 
@@ -435,29 +570,65 @@ pub fn build_asset_with(
     let source = decode_bounded_source(&source_bytes, request.limits)?;
     let (source_width, source_height) = source.dimensions();
 
-    if source_width < *TARGET_WIDTHS.last().expect("target widths are non-empty") {
-        return Err(PipelineError::SourceTooNarrow {
-            actual: source_width,
-        });
+    let minimum_source_width = request.profile.minimum_source_width();
+    if source_width < minimum_source_width {
+        return if matches!(request.profile, AssetProfile::Atmosphere) {
+            Err(PipelineError::SourceTooNarrow {
+                actual: source_width,
+            })
+        } else {
+            Err(PipelineError::SourceTooNarrowForProfile {
+                kind: request.profile.kind(),
+                actual: source_width,
+                minimum: minimum_source_width,
+            })
+        };
     }
     let has_transparency = has_transparency(&source);
-    let formats = if request.lossless || has_transparency {
-        vec![AssetFormat::Png]
-    } else {
-        let formats = encoders.formats();
-        for required in [AssetFormat::Avif, AssetFormat::Jpeg] {
-            if !formats.contains(&required) {
-                return Err(PipelineError::MissingRequiredEncoder(required));
-            }
+    let formats = match request.profile {
+        AssetProfile::Atmosphere if request.lossless || has_transparency => {
+            vec![AssetFormat::Png]
         }
-        formats
+        AssetProfile::Atmosphere => {
+            let formats = encoders.rgb_formats();
+            for required in [AssetFormat::Avif, AssetFormat::Jpeg] {
+                if !formats.contains(&required) {
+                    return Err(PipelineError::MissingRequiredEncoder(required));
+                }
+            }
+            formats
+        }
+        AssetProfile::EntitySprite { .. } if request.lossless => {
+            return Err(PipelineError::LosslessSpriteProfile);
+        }
+        AssetProfile::EntitySprite { .. } if !has_transparency => {
+            return Err(PipelineError::SpriteRequiresTransparency);
+        }
+        AssetProfile::EntitySprite { .. } => {
+            let mut formats = encoders.rgba_formats();
+            if !formats.contains(&AssetFormat::Webp) {
+                return Err(PipelineError::MissingRequiredEncoder(AssetFormat::Webp));
+            }
+            formats.retain(|format| *format == AssetFormat::Webp);
+            formats.push(AssetFormat::Png);
+            formats
+        }
     };
 
     let source_rgb = source.to_rgb8();
     let source_rgba = (request.lossless || has_transparency).then(|| source.to_rgba8());
     let dominant_color = dominant_color(&source_rgb);
-    let mut encoded_variants = Vec::with_capacity(TARGET_WIDTHS.len() * formats.len());
-    for width in TARGET_WIDTHS {
+    let target_widths = request.profile.target_widths();
+    let mut encoded_variants = Vec::with_capacity(target_widths.len() * formats.len());
+    let maximum_variant_bytes = if matches!(request.profile, AssetProfile::EntitySprite { .. }) {
+        request
+            .limits
+            .max_variant_bytes
+            .min(DEFAULT_SPRITE_MAX_VARIANT_BYTES)
+    } else {
+        request.limits.max_variant_bytes
+    };
+    for &width in target_widths {
         let height = scaled_height(source_width, source_height, width);
         let resized = image::imageops::resize(&source_rgb, width, height, FilterType::Lanczos3);
         let resized_rgba = source_rgba
@@ -465,17 +636,26 @@ pub fn build_asset_with(
             .map(|image| image::imageops::resize(image, width, height, FilterType::Lanczos3));
 
         for format in &formats {
-            let bytes = if *format == AssetFormat::Png {
+            let bytes = if matches!(request.profile, AssetProfile::EntitySprite { .. })
+                && *format == AssetFormat::Png
+            {
+                encode_png_rgba(resized_rgba.as_ref().expect("sprite RGBA source prepared"))?
+            } else if matches!(request.profile, AssetProfile::EntitySprite { .. }) {
+                encoders.encode_rgba(
+                    *format,
+                    resized_rgba.as_ref().expect("sprite RGBA source prepared"),
+                )?
+            } else if *format == AssetFormat::Png {
                 encode_png_rgba(resized_rgba.as_ref().expect("PNG source prepared"))?
             } else {
-                encoders.encode(*format, &resized)?
+                encoders.encode_rgb(*format, &resized)?
             };
-            if bytes.len() > request.limits.max_variant_bytes {
+            if bytes.len() > maximum_variant_bytes {
                 return Err(PipelineError::VariantTooLarge {
                     format: *format,
                     width,
                     actual: bytes.len(),
-                    maximum: request.limits.max_variant_bytes,
+                    maximum: maximum_variant_bytes,
                 });
             }
             encoded_variants.push(EncodedVariant {
@@ -491,10 +671,10 @@ pub fn build_asset_with(
     let asset_hash = asset_digest(
         &alt,
         &source_sha256,
-        source_width,
-        source_height,
+        (source_width, source_height),
         &metadata,
         &dominant_color,
+        request.profile,
         &encoded_variants,
     );
     let asset_id = format!("sha256:{asset_hash}");
@@ -502,7 +682,7 @@ pub fn build_asset_with(
     let variants = encoded_variants
         .iter()
         .map(|variant| {
-            let file_name = format!("scene-{}.{}", variant.width, variant.format.extension());
+            let file_name = variant_file_name(request.profile, variant.width, variant.format);
             PublishedVariant {
                 format: variant.format,
                 media_type: variant.format.media_type().to_owned(),
@@ -516,10 +696,14 @@ pub fn build_asset_with(
         .collect();
 
     let manifest = AssetManifest {
-        schema: SCHEMA_VERSION,
+        schema: match request.profile {
+            AssetProfile::Atmosphere => ATMOSPHERE_SCHEMA_VERSION,
+            AssetProfile::EntitySprite { .. } => ENTITY_SPRITE_SCHEMA_VERSION,
+        },
         asset_id: asset_id.clone(),
         revision: metadata.revision,
-        kind: "atmosphere".to_owned(),
+        kind: request.profile.kind(),
+        pose: request.profile.pose(),
         alt,
         focal_point: metadata.focal_point,
         dominant_color,
@@ -550,7 +734,7 @@ pub fn build_asset_with(
     // bundle. A rejected manifest must not leave an orphaned asset directory.
     fs::create_dir_all(&bundle_dir).map_err(|error| PipelineError::io(&bundle_dir, error))?;
     for variant in &encoded_variants {
-        let file_name = format!("scene-{}.{}", variant.width, variant.format.extension());
+        let file_name = variant_file_name(request.profile, variant.width, variant.format);
         write_immutable(&bundle_dir.join(file_name), &variant.bytes)?;
     }
     let manifest_path = bundle_dir.join("manifest.json");
@@ -733,6 +917,9 @@ fn decode_bounded_source(bytes: &[u8], limits: BuildLimits) -> Result<DynamicIma
     ) {
         return Err(PipelineError::UnsupportedSourceFormat);
     }
+    if is_animated_source(bytes, format) {
+        return Err(PipelineError::UnsupportedAnimation);
+    }
 
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     let mut decode_limits = image::Limits::default();
@@ -752,6 +939,75 @@ fn decode_bounded_source(bytes: &[u8], limits: BuildLimits) -> Result<DynamicIma
         return Err(PipelineError::InvalidDimensions { width, height });
     }
     Ok(decoded)
+}
+
+fn is_animated_source(bytes: &[u8], format: ImageFormat) -> bool {
+    match format {
+        ImageFormat::Png => png_has_animation_control(bytes),
+        ImageFormat::WebP => webp_has_animation_chunks(bytes),
+        _ => false,
+    }
+}
+
+fn png_has_animation_control(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return false;
+    }
+    let mut offset = 8_usize;
+    while offset.saturating_add(12) <= bytes.len() {
+        let length = u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize;
+        let chunk_end = match offset
+            .checked_add(12)
+            .and_then(|base| base.checked_add(length))
+        {
+            Some(end) if end <= bytes.len() => end,
+            _ => return false,
+        };
+        if &bytes[offset + 4..offset + 8] == b"acTL" {
+            return true;
+        }
+        if &bytes[offset + 4..offset + 8] == b"IEND" {
+            return false;
+        }
+        offset = chunk_end;
+    }
+    false
+}
+
+fn webp_has_animation_chunks(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return false;
+    }
+    let mut offset = 12_usize;
+    while offset.saturating_add(8) <= bytes.len() {
+        let chunk = &bytes[offset..offset + 4];
+        let length = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
+        if chunk == b"ANIM" || chunk == b"ANMF" {
+            return true;
+        }
+        let padded = match length.checked_add(length & 1) {
+            Some(value) => value,
+            None => return false,
+        };
+        offset = match offset
+            .checked_add(8)
+            .and_then(|base| base.checked_add(padded))
+        {
+            Some(value) if value <= bytes.len() => value,
+            _ => return false,
+        };
+    }
+    false
 }
 
 fn has_transparency(source: &DynamicImage) -> bool {
@@ -791,6 +1047,17 @@ fn encode_avif(image: &RgbImage) -> Result<Vec<u8>, PipelineError> {
 #[cfg(feature = "webp-encoding")]
 fn encode_webp(image: &RgbImage) -> Result<Vec<u8>, PipelineError> {
     webp::Encoder::from_rgb(image.as_raw(), image.width(), image.height())
+        .encode_simple(false, WEBP_QUALITY)
+        .map(|memory| memory.to_vec())
+        .map_err(|error| PipelineError::Encoder {
+            format: AssetFormat::Webp,
+            message: format!("{error:?}"),
+        })
+}
+
+#[cfg(feature = "webp-encoding")]
+fn encode_webp_rgba(image: &RgbaImage) -> Result<Vec<u8>, PipelineError> {
+    webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height())
         .encode_simple(false, WEBP_QUALITY)
         .map(|memory| memory.to_vec())
         .map_err(|error| PipelineError::Encoder {
@@ -850,14 +1117,22 @@ fn encode_png_rgba(image: &image::RgbaImage) -> Result<Vec<u8>, PipelineError> {
 fn asset_digest(
     alt: &str,
     source_sha256: &str,
-    source_width: u32,
-    source_height: u32,
+    source_dimensions: (u32, u32),
     metadata: &AuthoringMetadata,
     dominant_color: &str,
+    profile: AssetProfile,
     variants: &[EncodedVariant],
 ) -> String {
+    let (source_width, source_height) = source_dimensions;
     let mut digest = Sha256::new();
-    digest.update(b"tiamud-atmospheric-asset-v2\0");
+    match profile {
+        AssetProfile::Atmosphere => digest.update(b"tiamud-atmospheric-asset-v2\0"),
+        AssetProfile::EntitySprite { pose } => {
+            digest.update(b"tiamud-entity-sprite-v1\0");
+            digest.update(pose.as_str().as_bytes());
+            digest.update(b"\0");
+        }
+    }
     digest.update((alt.len() as u64).to_be_bytes());
     digest.update(alt.as_bytes());
     digest.update(source_sha256.as_bytes());
@@ -890,6 +1165,15 @@ fn asset_digest(
         digest.update(variant.sha256.as_bytes());
     }
     hex::encode(digest.finalize())
+}
+
+fn variant_file_name(profile: AssetProfile, width: u32, format: AssetFormat) -> String {
+    match profile {
+        AssetProfile::Atmosphere => format!("scene-{width}.{}", format.extension()),
+        AssetProfile::EntitySprite { pose } => {
+            format!("sprite-{pose}-{width}.{}", format.extension())
+        }
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1004,11 +1288,29 @@ mod tests {
     struct FakeEncoders;
 
     impl VariantEncoders for FakeEncoders {
-        fn formats(&self) -> Vec<AssetFormat> {
+        fn rgb_formats(&self) -> Vec<AssetFormat> {
             vec![AssetFormat::Avif, AssetFormat::Webp, AssetFormat::Jpeg]
         }
 
-        fn encode(&self, format: AssetFormat, image: &RgbImage) -> Result<Vec<u8>, PipelineError> {
+        fn rgba_formats(&self) -> Vec<AssetFormat> {
+            vec![AssetFormat::Webp]
+        }
+
+        fn encode_rgb(
+            &self,
+            format: AssetFormat,
+            image: &RgbImage,
+        ) -> Result<Vec<u8>, PipelineError> {
+            let mut output = format!("{format}:{}x{}:", image.width(), image.height()).into_bytes();
+            output.extend_from_slice(Sha256::digest(image.as_raw()).as_slice());
+            Ok(output)
+        }
+
+        fn encode_rgba(
+            &self,
+            format: AssetFormat,
+            image: &RgbaImage,
+        ) -> Result<Vec<u8>, PipelineError> {
             let mut output = format!("{format}:{}x{}:", image.width(), image.height()).into_bytes();
             output.extend_from_slice(Sha256::digest(image.as_raw()).as_slice());
             Ok(output)
@@ -1063,6 +1365,7 @@ mod tests {
             output_dir: PathBuf::from("unused"),
             limits: BuildLimits::default(),
             metadata: reviewed_metadata(),
+            profile: AssetProfile::Atmosphere,
             lossless: false,
         };
         assert!(matches!(
@@ -1081,6 +1384,7 @@ mod tests {
             output_dir: PathBuf::from("unused"),
             limits: BuildLimits::default(),
             metadata,
+            profile: AssetProfile::Atmosphere,
             lossless: false,
         };
         assert!(matches!(
@@ -1111,6 +1415,7 @@ mod tests {
                 ..BuildLimits::default()
             },
             metadata: reviewed_metadata(),
+            profile: AssetProfile::Atmosphere,
             lossless: false,
         };
         assert!(matches!(
@@ -1130,6 +1435,7 @@ mod tests {
             output_dir: temp.path().join("narrow-out"),
             limits: BuildLimits::default(),
             metadata: reviewed_metadata(),
+            profile: AssetProfile::Atmosphere,
             lossless: false,
         };
         assert!(matches!(
@@ -1145,6 +1451,7 @@ mod tests {
             output_dir: temp.path().join("transparent-out"),
             limits: BuildLimits::default(),
             metadata: reviewed_metadata(),
+            profile: AssetProfile::Atmosphere,
             lossless: false,
         };
         let result = build_asset_with(&transparent_request, &FakeEncoders).unwrap();
@@ -1179,6 +1486,7 @@ mod tests {
             output_dir: temp.path().join("one"),
             limits: BuildLimits::default(),
             metadata: reviewed_metadata(),
+            profile: AssetProfile::Atmosphere,
             lossless: false,
         };
         let request_two = BuildRequest {
@@ -1218,6 +1526,7 @@ mod tests {
             output_dir: output_dir.clone(),
             limits,
             metadata: reviewed_metadata(),
+            profile: AssetProfile::Atmosphere,
             lossless: false,
         };
 
@@ -1275,6 +1584,7 @@ mod tests {
             output_dir: temp.path().join("published"),
             limits: BuildLimits::default(),
             metadata: reviewed_metadata(),
+            profile: AssetProfile::Atmosphere,
             lossless: false,
         };
         assert!(matches!(
@@ -1308,27 +1618,367 @@ mod tests {
         ));
     }
 
+    fn sprite_request(source: PathBuf, output_dir: PathBuf, pose: SpritePose) -> BuildRequest {
+        BuildRequest {
+            source,
+            alt: "A translucent training automaton.".to_owned(),
+            output_dir,
+            limits: BuildLimits::default(),
+            metadata: reviewed_metadata(),
+            profile: AssetProfile::EntitySprite { pose },
+            lossless: false,
+        }
+    }
+
+    #[cfg(feature = "webp-encoding")]
+    #[test]
+    fn static_sprite_manifest_and_variants_are_bounded_deterministic_and_preserve_alpha() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("sprite.png");
+        write_png(&source, 640, 8, Some(96));
+        let first_request = sprite_request(
+            source.clone(),
+            temp.path().join("published-one"),
+            SpritePose::Hit,
+        );
+        let second_request =
+            sprite_request(source, temp.path().join("published-two"), SpritePose::Hit);
+
+        let first = build_asset(&first_request).unwrap();
+        let second = build_asset(&second_request).unwrap();
+
+        assert_eq!(first.asset_id, second.asset_id);
+        assert_eq!(first.manifest_sha256, second.manifest_sha256);
+        assert_eq!(first.manifest, second.manifest);
+        assert_eq!(first.manifest.schema, ENTITY_SPRITE_SCHEMA_VERSION);
+        assert_eq!(first.manifest.kind, AssetKind::EntitySprite);
+        assert_eq!(first.manifest.pose, Some(SpritePose::Hit));
+        assert_eq!(first.manifest.variants.len(), 4);
+        assert!(
+            first
+                .manifest
+                .variants
+                .iter()
+                .all(|variant| variant.bytes <= DEFAULT_SPRITE_MAX_VARIANT_BYTES)
+        );
+        assert_eq!(
+            first
+                .manifest
+                .variants
+                .iter()
+                .map(|variant| (variant.format, variant.width))
+                .collect::<Vec<_>>(),
+            vec![
+                (AssetFormat::Webp, 320),
+                (AssetFormat::Png, 320),
+                (AssetFormat::Webp, 640),
+                (AssetFormat::Png, 640),
+            ]
+        );
+
+        let asset_hash = first.asset_id.strip_prefix("sha256:").unwrap();
+        for variant in &first.manifest.variants {
+            assert_eq!(
+                variant.path,
+                format!(
+                    "{asset_hash}/sprite-hit-{}.{}",
+                    variant.width,
+                    variant.format.extension()
+                )
+            );
+            assert_ne!(variant.format, AssetFormat::Jpeg);
+            assert_ne!(variant.format, AssetFormat::Avif);
+            let bytes = fs::read(
+                first
+                    .manifest_path
+                    .parent()
+                    .unwrap()
+                    .join(variant.path.rsplit('/').next().unwrap()),
+            )
+            .unwrap();
+            let decoded = image::load_from_memory_with_format(
+                &bytes,
+                match variant.format {
+                    AssetFormat::Webp => ImageFormat::WebP,
+                    AssetFormat::Png => ImageFormat::Png,
+                    other => panic!("unexpected sprite format {other}"),
+                },
+            )
+            .unwrap()
+            .to_rgba8();
+            assert!(decoded.pixels().all(|pixel| pixel.0[3] == 96));
+
+            let first_bytes = fs::read(
+                first
+                    .manifest_path
+                    .parent()
+                    .unwrap()
+                    .join(variant.path.rsplit('/').next().unwrap()),
+            )
+            .unwrap();
+            let second_bytes = fs::read(
+                second
+                    .manifest_path
+                    .parent()
+                    .unwrap()
+                    .join(variant.path.rsplit('/').next().unwrap()),
+            )
+            .unwrap();
+            assert_eq!(first_bytes, second_bytes);
+        }
+        assert_eq!(
+            fs::read(first.manifest_path).unwrap(),
+            fs::read(second.manifest_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn atmosphere_profile_keeps_schema_two_names_widths_and_format_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("atmosphere.png");
+        write_png(&source, 1280, 8, None);
+        let result = build_asset_with(
+            &BuildRequest {
+                source,
+                alt: "A quiet atmospheric backdrop.".to_owned(),
+                output_dir: temp.path().join("published"),
+                limits: BuildLimits::default(),
+                metadata: reviewed_metadata(),
+                profile: AssetProfile::Atmosphere,
+                lossless: false,
+            },
+            &FakeEncoders,
+        )
+        .unwrap();
+
+        assert_eq!(result.manifest.schema, 2);
+        assert_eq!(result.manifest.kind, AssetKind::Atmosphere);
+        assert_eq!(result.manifest.pose, None);
+        assert_eq!(
+            result
+                .manifest
+                .variants
+                .iter()
+                .map(|variant| (variant.format, variant.width))
+                .collect::<Vec<_>>(),
+            vec![
+                (AssetFormat::Avif, 640),
+                (AssetFormat::Webp, 640),
+                (AssetFormat::Jpeg, 640),
+                (AssetFormat::Avif, 1280),
+                (AssetFormat::Webp, 1280),
+                (AssetFormat::Jpeg, 1280),
+            ]
+        );
+        assert!(
+            result
+                .manifest
+                .variants
+                .iter()
+                .all(|variant| { variant.path.contains(&format!("/scene-{}.", variant.width)) })
+        );
+        let manifest_bytes = fs::read(result.manifest_path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert!(json.get("pose").is_none());
+        let reparsed: AssetManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(reparsed, result.manifest);
+    }
+
+    #[derive(Debug)]
+    struct OversizedSpriteEncoders;
+
+    impl VariantEncoders for OversizedSpriteEncoders {
+        fn rgb_formats(&self) -> Vec<AssetFormat> {
+            vec![AssetFormat::Avif, AssetFormat::Jpeg]
+        }
+
+        fn rgba_formats(&self) -> Vec<AssetFormat> {
+            vec![AssetFormat::Webp]
+        }
+
+        fn encode_rgb(
+            &self,
+            _format: AssetFormat,
+            _image: &RgbImage,
+        ) -> Result<Vec<u8>, PipelineError> {
+            unreachable!("sprite test must not use RGB encoding")
+        }
+
+        fn encode_rgba(
+            &self,
+            _format: AssetFormat,
+            _image: &RgbaImage,
+        ) -> Result<Vec<u8>, PipelineError> {
+            Ok(vec![0; DEFAULT_SPRITE_MAX_VARIANT_BYTES + 1])
+        }
+    }
+
+    #[test]
+    fn sprite_profile_rejects_upscaling_opaque_sources_lossless_mode_and_oversized_renditions() {
+        let temp = tempfile::tempdir().unwrap();
+        let narrow = temp.path().join("narrow.png");
+        write_png(&narrow, 639, 4, Some(128));
+        assert!(matches!(
+            build_asset_with(
+                &sprite_request(narrow, temp.path().join("narrow-out"), SpritePose::Idle),
+                &FakeEncoders
+            ),
+            Err(PipelineError::SourceTooNarrowForProfile {
+                kind: AssetKind::EntitySprite,
+                actual: 639,
+                minimum: 640
+            })
+        ));
+
+        let opaque = temp.path().join("opaque.png");
+        write_png(&opaque, 640, 4, None);
+        assert!(matches!(
+            build_asset_with(
+                &sprite_request(opaque, temp.path().join("opaque-out"), SpritePose::Idle),
+                &FakeEncoders
+            ),
+            Err(PipelineError::SpriteRequiresTransparency)
+        ));
+
+        let transparent = temp.path().join("transparent.png");
+        write_png(&transparent, 640, 4, Some(128));
+        let mut lossless = sprite_request(
+            transparent.clone(),
+            temp.path().join("lossless-out"),
+            SpritePose::Idle,
+        );
+        lossless.lossless = true;
+        assert!(matches!(
+            build_asset_with(&lossless, &FakeEncoders),
+            Err(PipelineError::LosslessSpriteProfile)
+        ));
+
+        let oversized_output = temp.path().join("oversized-out");
+        let oversized = sprite_request(transparent, oversized_output.clone(), SpritePose::Attack);
+        assert!(matches!(
+            build_asset_with(&oversized, &OversizedSpriteEncoders),
+            Err(PipelineError::VariantTooLarge {
+                format: AssetFormat::Webp,
+                width: 320,
+                maximum: DEFAULT_SPRITE_MAX_VARIANT_BYTES,
+                ..
+            })
+        ));
+        assert!(!oversized_output.exists());
+    }
+
+    #[test]
+    fn pose_metadata_cannot_be_used_for_path_injection_and_animated_sources_are_rejected() {
+        assert!(serde_json::from_str::<SpritePose>(r#""../../idle""#).is_err());
+
+        let mut animated_webp = b"RIFF\x0c\x00\x00\x00WEBPANIM".to_vec();
+        animated_webp.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(is_animated_source(&animated_webp, ImageFormat::WebP));
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("animated.png");
+        write_png(&source, 640, 4, Some(128));
+        let mut bytes = fs::read(&source).unwrap();
+        let mut animation_chunk = Vec::new();
+        animation_chunk.extend_from_slice(&8_u32.to_be_bytes());
+        animation_chunk.extend_from_slice(b"acTL");
+        animation_chunk.extend_from_slice(&1_u32.to_be_bytes());
+        animation_chunk.extend_from_slice(&0_u32.to_be_bytes());
+        animation_chunk.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.splice(8..8, animation_chunk);
+        fs::write(&source, bytes).unwrap();
+
+        assert!(matches!(
+            build_asset_with(
+                &sprite_request(source, temp.path().join("animated-out"), SpritePose::Attack),
+                &FakeEncoders
+            ),
+            Err(PipelineError::UnsupportedAnimation)
+        ));
+    }
+
+    #[cfg(not(feature = "webp-encoding"))]
+    #[test]
+    fn sprite_profile_fails_closed_when_the_required_webp_alpha_encoder_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("sprite.png");
+        write_png(&source, 640, 4, Some(128));
+        assert!(matches!(
+            build_asset(&sprite_request(
+                source,
+                temp.path().join("published"),
+                SpritePose::Idle
+            )),
+            Err(PipelineError::MissingRequiredEncoder(AssetFormat::Webp))
+        ));
+    }
+
+    #[cfg(feature = "webp-encoding")]
+    #[test]
+    fn reviewed_quarantine_can_publish_a_static_alpha_sprite_without_forcing_png_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("incoming.png");
+        write_png(&source, 640, 4, Some(128));
+        let staged = quarantine_source(&QuarantineRequest {
+            source,
+            quarantine_dir: temp.path().join("quarantine"),
+            limits: BuildLimits::default(),
+        })
+        .unwrap();
+        review_quarantine(
+            &staged.record_path,
+            "Tiamud reviewer",
+            "2026-07-15T00:00:00Z",
+            BuildLimits::default().max_source_bytes,
+        )
+        .unwrap();
+
+        let result = build_quarantined(
+            &staged.record_path,
+            sprite_request(
+                PathBuf::new(),
+                temp.path().join("published"),
+                SpritePose::Idle,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .manifest
+                .variants
+                .iter()
+                .map(|variant| variant.format)
+                .collect::<Vec<_>>(),
+            vec![
+                AssetFormat::Webp,
+                AssetFormat::Png,
+                AssetFormat::Webp,
+                AssetFormat::Png
+            ]
+        );
+    }
+
     #[test]
     fn default_encoders_emit_the_advertised_formats() {
         let image = RgbImage::from_pixel(4, 4, image::Rgb([24, 48, 72]));
         let encoders = DefaultEncoders;
 
-        let avif = encoders.encode(AssetFormat::Avif, &image).unwrap();
+        let avif = encoders.encode_rgb(AssetFormat::Avif, &image).unwrap();
         assert!(avif.windows(4).any(|bytes| bytes == b"ftyp"));
         assert_eq!(
             avif,
-            encoders.encode(AssetFormat::Avif, &image).unwrap(),
+            encoders.encode_rgb(AssetFormat::Avif, &image).unwrap(),
             "the pinned single-threaded AVIF encoder must be byte-deterministic"
         );
 
         #[cfg(feature = "webp-encoding")]
         {
-            let webp = encoders.encode(AssetFormat::Webp, &image).unwrap();
+            let webp = encoders.encode_rgb(AssetFormat::Webp, &image).unwrap();
             assert_eq!(&webp[..4], b"RIFF");
             assert_eq!(&webp[8..12], b"WEBP");
         }
 
-        let jpeg = encoders.encode(AssetFormat::Jpeg, &image).unwrap();
+        let jpeg = encoders.encode_rgb(AssetFormat::Jpeg, &image).unwrap();
         assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
     }
 }

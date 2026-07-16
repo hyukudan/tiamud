@@ -1,11 +1,12 @@
 use world_pack::{
-    AbilityCategory, AbilityStatusEffect, CURRENT_SCHEMA_VERSION, ExitTarget, WorldPack,
+    AbilityCategory, AbilityStatusEffect, CURRENT_SCHEMA_VERSION, ExitTarget, GrantDefinition,
+    WorldPack,
 };
 
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 #[test]
-fn reviewed_runtime_fixture_matches_world_pack_v2() {
+fn reviewed_runtime_fixture_matches_world_pack_v3() {
     let pack: WorldPack = serde_json::from_slice(REVIEWED_WORLD).unwrap();
 
     pack.validate().unwrap();
@@ -35,23 +36,41 @@ fn reviewed_runtime_fixture_matches_world_pack_v2() {
     assert_eq!(pack.gameplay.item_rules.len(), 3);
     assert_eq!(pack.gameplay.npc_prototypes.len(), 1);
     assert_eq!(pack.gameplay.npc_spawns.len(), 1);
-    assert_eq!(
-        pack.gameplay.default_archetype_id.as_deref(),
-        Some("tiamud:wanderer")
-    );
-    assert_eq!(pack.gameplay.archetypes.len(), 3);
+    assert!(pack.gameplay.default_archetype_id.is_none());
+    assert!(pack.gameplay.archetypes.is_empty());
     assert_eq!(pack.gameplay.abilities.len(), 3);
     assert_eq!(pack.gameplay.npc_ability_sets.len(), 1);
-    let arcanist = pack
-        .gameplay
-        .archetypes
+    let progression = pack.gameplay.character_progression.as_ref().unwrap();
+    assert_eq!(progression.defaults.base_class_id, "tiamud:wanderer");
+    assert_eq!(progression.lineages.len(), 3);
+    assert_eq!(progression.backgrounds.len(), 3);
+    assert_eq!(progression.base_classes.len(), 3);
+    assert_eq!(progression.advanced_classes.len(), 4);
+    let arcanist = progression
+        .base_classes
         .iter()
-        .find(|archetype| archetype.id == "tiamud:arcanist")
+        .find(|class| class.id == "tiamud:arcanist")
         .unwrap();
-    assert_eq!(arcanist.initial_attributes["intellect"], 8);
-    assert_eq!(arcanist.initial_resources["mana"], 14);
-    assert_eq!(arcanist.resource_regeneration["mana"], 2);
-    assert_eq!(arcanist.level_progression[0].total_experience_required, 100);
+    assert!(
+        arcanist
+            .creation_grants
+            .contains(&GrantDefinition::Attribute {
+                attribute_id: "intellect".to_owned(),
+                amount: 8,
+            })
+    );
+    assert!(
+        arcanist
+            .creation_grants
+            .contains(&GrantDefinition::ResourceMax {
+                resource_id: "mana".to_owned(),
+                amount: 14,
+            })
+    );
+    assert_eq!(
+        progression.level_thresholds[0].total_experience_required,
+        100
+    );
     let martial = pack
         .gameplay
         .abilities
