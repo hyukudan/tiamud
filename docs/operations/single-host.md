@@ -172,7 +172,7 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v9, both SQLite and PostgreSQL retain the v8
+In current schema v10, both SQLite and PostgreSQL retain the v8
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
@@ -201,13 +201,12 @@ tiamud-admin migrate \
 sudo systemctl start tiamud
 ```
 
-## Emergency administrator recovery
+## Emergency Implementor recovery
 
-Schema migration only selected the first administrator during the historical
-v6 role transition. It never recreates an administrator during an ordinary
-restart. If an SQLite installation has no administrator, stop the server and
-use the explicit, audited break-glass command with an existing registered
-account:
+Schema migration never recreates canonical staff authority during an ordinary
+restart. If an installation has no `administrator` or `implementor` profile,
+stop the server and use the explicit, audited break-glass command with an
+existing registered account:
 
 ```sh
 sudo systemctl stop tiamud
@@ -220,27 +219,38 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires the current schema, refuses to run while any admin
-already exists, and commits the role change and `recover_admin` audit record in
-one transaction. `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the
-server, take and verify the installation's normal `pg_dump`/physical backup,
-then run `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply
-this equivalent transaction:
+The command requires schema v10 and refuses to run while any operational
+`administrator` or `implementor` profile exists. A legacy `admin` role alone
+does not count as executable authority. Recovery replaces the target's profile
+with `implementor`, clears its lore title and previous direct assignments,
+installs exactly the twelve closed capabilities, and retains the legacy
+`admin` role only for compatibility. Profile, bundle, role, canonical
+append-only `staff_audit` entry and compatibility `moderation_audit` entry
+commit in one transaction; any failure rolls all of them back.
+
+`tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
+verify the installation's normal `pg_dump` or physical backup, then run
+`psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
+equivalent schema-v10 transaction:
 
 ```sql
 BEGIN;
-LOCK TABLE accounts IN EXCLUSIVE MODE;
-LOCK TABLE moderation_audit IN ROW EXCLUSIVE MODE;
+LOCK TABLE accounts, staff_profiles, staff_capability_assignments,
+           moderation_audit, staff_audit IN EXCLUSIVE MODE;
 SELECT set_config('tiamud.recovery_account', :'target_account', true);
 DO $$
 DECLARE
     target_id BIGINT;
+    recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 8 THEN
-        RAISE EXCEPTION 'administrator recovery requires Tiamud schema 8';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 10 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 10';
     END IF;
-    IF EXISTS (SELECT 1 FROM accounts WHERE role = 'admin') THEN
-        RAISE EXCEPTION 'an administrator already exists';
+    IF EXISTS (
+        SELECT 1 FROM staff_profiles
+        WHERE profile_key IN ('administrator', 'implementor')
+    ) THEN
+        RAISE EXCEPTION 'an administrator or implementor profile already exists';
     END IF;
     SELECT id INTO target_id
     FROM accounts
@@ -249,20 +259,60 @@ BEGIN
     IF target_id IS NULL THEN
         RAISE EXCEPTION 'the target must be an existing registered account';
     END IF;
+
     UPDATE accounts SET role = 'admin' WHERE id = target_id;
+
+    INSERT INTO staff_profiles
+        (account_id, profile_key, lore_title, assigned_by_account_id,
+         created_at, updated_at)
+    VALUES
+        (target_id, 'implementor', NULL, target_id, recovered_at, recovered_at)
+    ON CONFLICT (account_id) DO UPDATE SET
+        profile_key = EXCLUDED.profile_key,
+        lore_title = NULL,
+        assigned_by_account_id = EXCLUDED.assigned_by_account_id,
+        updated_at = EXCLUDED.updated_at;
+
+    DELETE FROM staff_capability_assignments WHERE account_id = target_id;
+    INSERT INTO staff_capability_assignments
+        (account_id, capability, assigned_by_account_id, created_at)
+    SELECT target_id, recovered.capability, target_id, recovered_at
+    FROM (VALUES
+        ('reports.view'),
+        ('reports.resolve'),
+        ('moderation.mute'),
+        ('moderation.ban'),
+        ('staff.assign'),
+        ('staff.inspect'),
+        ('staff.where'),
+        ('staff.goto'),
+        ('staff.transfer'),
+        ('staff.restore'),
+        ('staff.announce'),
+        ('staff.audit')
+    ) AS recovered(capability);
+
     INSERT INTO moderation_audit
         (actor_account_id, target_account_id, action, details_json, created_at)
     VALUES
         (target_id, target_id, 'recover_admin',
-         '{"source":"postgres_break_glass"}',
-         floor(extract(epoch FROM now()))::BIGINT);
+         '{"profile":"implementor","source":"postgres_break_glass"}',
+         recovered_at);
+    INSERT INTO staff_audit
+        (actor_account_id, target_account_id, capability, action,
+         reason, details_json, created_at)
+    VALUES
+        (target_id, target_id, 'staff.assign', 'recover_admin',
+         'Offline break-glass recovery',
+         '{"profile":"implementor","source":"postgres_break_glass"}',
+         recovered_at);
 END $$;
 COMMIT;
 ```
 
-Check that the transaction reports `COMMIT`, verify the audit row and role,
-then restart Tiamud. Any raised exception aborts the transaction; use
-`ROLLBACK` before correcting the cause.
+Check that the transaction reports `COMMIT`, verify the profile, all twelve
+capabilities and both audit rows, then restart Tiamud. Any raised exception
+aborts the transaction; use `ROLLBACK` before correcting the cause.
 
 ## PostgreSQL-first public profile
 
@@ -307,10 +357,11 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v9, including durable social
-channel subscriptions, refuses a non-empty target and
-commits schema plus rows in one PostgreSQL transaction. Configure exactly one
-line in the service environment and remove/comment the other:
+The mover requires the current SQLite schema v10, including durable social
+channel subscriptions, staff profiles, capability assignments, report
+resolutions and staff audit. It refuses a non-empty target and commits schema
+plus rows in one PostgreSQL transaction. Configure exactly one line in the
+service environment and remove/comment the other:
 
 ```text
 TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
@@ -323,9 +374,9 @@ The repository's retained [PostgreSQL 18 schema-v8 acceptance
 run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the earlier v8 adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
 authenticated restart against a separate disposable server process. It does
-not prove or claim a schema-v9 acceptance run. Focused v9 migration, store and
-transfer tests cover the additive subscription table, but they do not replace
-this exercise or establish monitoring, TLS, PostgreSQL
+not prove or claim a schema-v10 acceptance run. Focused v10 migration, store
+and transfer tests cover subscriptions and the additive staff tables, but they
+do not replace this exercise or establish monitoring, TLS, PostgreSQL
 backup/restore or point-in-time recovery for a production installation.
 
 ## Binary and world update

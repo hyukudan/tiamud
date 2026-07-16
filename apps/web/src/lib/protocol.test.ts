@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
+  type ActionPerformFields,
   createAbilityPerform,
   createActionPerform,
   createClientHello,
@@ -130,6 +131,122 @@ describe('protocol messages', () => {
         requestId: 'request-5', action: 'progression.talent', graphId: 'wayfarer', nodeId: 'sure-step',
       },
     });
+  });
+
+  it('creates the exact structured staff phase-2 payloads', () => {
+    const cases: Array<{
+      action: string;
+      fields?: ActionPerformFields;
+      requestId: string;
+    }> = [
+      { action: 'staff.status', requestId: 'staff-status' },
+      {
+        action: 'staff.reports',
+        fields: { reason: 'weekly review' },
+        requestId: 'staff-reports',
+      },
+      {
+        action: 'staff.report.resolve',
+        fields: {
+          reportId: 7,
+          resolution: 'action_taken',
+          reason: 'evidence verified',
+        },
+        requestId: 'staff-resolve',
+      },
+      {
+        action: 'staff.inspect',
+        fields: { target: 'Aria', reason: 'support request' },
+        requestId: 'staff-inspect',
+      },
+      {
+        action: 'staff.where',
+        fields: { target: 'Aria', reason: 'locate incident' },
+        requestId: 'staff-where',
+      },
+      {
+        action: 'staff.goto',
+        fields: { target: 'Aria', reason: 'respond to incident' },
+        requestId: 'staff-goto',
+      },
+      {
+        action: 'staff.transfer',
+        fields: { target: 'Aria', reason: 'unstick character' },
+        requestId: 'staff-transfer',
+      },
+      {
+        action: 'staff.restore',
+        fields: { target: 'Aria', reason: 'recover after incident' },
+        requestId: 'staff-restore',
+      },
+      {
+        action: 'staff.announce',
+        fields: { message: 'The shard will restart soon.', reason: 'planned maintenance' },
+        requestId: 'staff-announce',
+      },
+      {
+        action: 'staff.audit',
+        fields: { reason: 'weekly review' },
+        requestId: 'staff-audit',
+      },
+      {
+        action: 'staff.profile.set',
+        fields: {
+          target: 'Aria', profile: 'moderator', loreTitle: 'Warden', reason: 'approved promotion',
+        },
+        requestId: 'staff-profile',
+      },
+      {
+        action: 'staff.profile.set',
+        fields: { target: 'Aria', profile: null, loreTitle: null, reason: 'assignment ended' },
+        requestId: 'staff-profile-clear',
+      },
+      {
+        action: 'staff.capability.set',
+        fields: {
+          target: 'Aria', capability: 'reports.resolve', enabled: true, reason: 'temporary duty',
+        },
+        requestId: 'staff-capability',
+      },
+    ];
+
+    for (const { action, fields, requestId } of cases) {
+      expect(createActionPerform(action, fields, requestId)).toEqual({
+        v: 1,
+        type: 'action.perform',
+        data: { requestId, action, ...fields },
+      });
+    }
+
+    expect(createActionPerform(
+      'staff.profile.set',
+      { target: 'Aria', reason: 'unchanged optional fields' },
+      'staff-profile-omitted',
+    ).data).not.toHaveProperty('profile');
+    expect(createActionPerform(
+      'staff.profile.set',
+      { target: 'Aria', profile: null, loreTitle: null, reason: 'clear assignment' },
+      'staff-profile-null',
+    ).data).toMatchObject({ profile: null, loreTitle: null });
+  });
+
+  it('rejects invalid report ids and never emits the server-only announcement channel', () => {
+    expectTypeOf<NonNullable<ActionPerformFields['channel']>>()
+      .toEqualTypeOf<'general' | 'newbie' | 'staff'>();
+
+    for (const reportId of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => createActionPerform(
+        'staff.report.resolve',
+        { reportId, resolution: 'dismissed', reason: 'invalid report id' },
+        'staff-bad-report',
+      )).toThrow(RangeError);
+    }
+
+    expect(() => createActionPerform(
+      'social.channel.say',
+      { channel: 'announcement', message: 'forged' } as unknown as ActionPerformFields,
+      'forged-announcement',
+    )).toThrow('channel is not sendable');
   });
 
   it('normalises the current visual scene shape', () => {
@@ -919,7 +1036,7 @@ describe('protocol messages', () => {
     if (additive?.type !== 'chat.message') throw new Error('expected chat message');
     expect('blocked' in additive.data).toBe(false);
 
-    for (const channel of ['party', 'general', 'newbie', 'staff'] as const) {
+    for (const channel of ['announcement', 'party', 'general', 'newbie', 'staff'] as const) {
       expect(parseServerMessage(JSON.stringify({
         v: 1,
         type: 'chat.message',

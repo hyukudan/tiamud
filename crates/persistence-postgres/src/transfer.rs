@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transaction};
 
-const TABLES: [&str; 14] = APPLICATION_TABLES;
+const TABLES: [&str; 17] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -127,6 +127,18 @@ pub fn copy_sqlite_to_postgres(
         rows: copy_moderation_audit(&source, &mut target)?,
     });
     tables.push(TableCount {
+        table: "staff_profiles",
+        rows: copy_staff_profiles(&source, &mut target)?,
+    });
+    tables.push(TableCount {
+        table: "staff_capability_assignments",
+        rows: copy_staff_capability_assignments(&source, &mut target)?,
+    });
+    tables.push(TableCount {
+        table: "staff_audit",
+        rows: copy_staff_audit(&source, &mut target)?,
+    });
+    tables.push(TableCount {
         table: "character_adventure",
         rows: copy_character_adventure(&source, &mut target)?,
     });
@@ -156,7 +168,9 @@ fn lock_target_tables<C: GenericClient>(target: &mut C) -> Result<(), postgres::
                     world_runtime, social_ignores, social_blocks,
                     social_channel_subscriptions,
                     moderation_mutes, account_bans, social_reports,
-                    moderation_audit, character_adventure, world_adventure
+                    moderation_audit, staff_profiles,
+                    staff_capability_assignments, staff_audit,
+                    character_adventure, world_adventure
          IN ACCESS EXCLUSIVE MODE",
     )
 }
@@ -476,7 +490,8 @@ fn copy_social_reports<C: GenericClient>(
 ) -> Result<u64, TransferError> {
     let mut statement = source.prepare(
         "SELECT id, reporter_character_id, target_character_id, reason,
-                created_at, status
+                created_at, status, resolution, resolution_reason,
+                resolved_by_account_id, resolved_at
          FROM social_reports ORDER BY id",
     )?;
     let mut rows = statement.query([])?;
@@ -488,11 +503,16 @@ fn copy_social_reports<C: GenericClient>(
         let reason: String = row.get(3)?;
         let created_at: i64 = row.get(4)?;
         let status: String = row.get(5)?;
+        let resolution: Option<String> = row.get(6)?;
+        let resolution_reason: Option<String> = row.get(7)?;
+        let resolved_by: Option<i64> = row.get(8)?;
+        let resolved_at: Option<i64> = row.get(9)?;
         target.execute(
             "INSERT INTO social_reports
                  (id, reporter_character_id, target_character_id, reason,
-                  created_at, status)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+                  created_at, status, resolution, resolution_reason,
+                  resolved_by_account_id, resolved_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             &[
                 &id,
                 &reporter,
@@ -500,6 +520,10 @@ fn copy_social_reports<C: GenericClient>(
                 &reason,
                 &created_at,
                 &status,
+                &resolution,
+                &resolution_reason,
+                &resolved_by,
+                &resolved_at,
             ],
         )?;
         count += 1;
@@ -535,6 +559,111 @@ fn copy_moderation_audit<C: GenericClient>(
                 &actor,
                 &target_account,
                 &action,
+                &details_json,
+                &created_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn copy_staff_profiles<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT account_id, profile_key, lore_title, assigned_by_account_id,
+                created_at, updated_at
+         FROM staff_profiles ORDER BY account_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let account_id: i64 = row.get(0)?;
+        let profile_key: String = row.get(1)?;
+        let lore_title: Option<String> = row.get(2)?;
+        let assigned_by: i64 = row.get(3)?;
+        let created_at: i64 = row.get(4)?;
+        let updated_at: i64 = row.get(5)?;
+        target.execute(
+            "INSERT INTO staff_profiles
+                 (account_id, profile_key, lore_title, assigned_by_account_id,
+                  created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &account_id,
+                &profile_key,
+                &lore_title,
+                &assigned_by,
+                &created_at,
+                &updated_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn copy_staff_capability_assignments<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT account_id, capability, assigned_by_account_id, created_at
+         FROM staff_capability_assignments
+         ORDER BY account_id, capability",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let account_id: i64 = row.get(0)?;
+        let capability: String = row.get(1)?;
+        let assigned_by: i64 = row.get(2)?;
+        let created_at: i64 = row.get(3)?;
+        target.execute(
+            "INSERT INTO staff_capability_assignments
+                 (account_id, capability, assigned_by_account_id, created_at)
+             VALUES ($1, $2, $3, $4)",
+            &[&account_id, &capability, &assigned_by, &created_at],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn copy_staff_audit<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT sequence, actor_account_id, target_account_id, capability,
+                action, reason, details_json, created_at
+         FROM staff_audit ORDER BY sequence",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let sequence: i64 = row.get(0)?;
+        let actor: i64 = row.get(1)?;
+        let target_account: Option<i64> = row.get(2)?;
+        let capability: String = row.get(3)?;
+        let action: String = row.get(4)?;
+        let reason: String = row.get(5)?;
+        let details_json: String = row.get(6)?;
+        let created_at: i64 = row.get(7)?;
+        target.execute(
+            "INSERT INTO staff_audit
+                 (sequence, actor_account_id, target_account_id, capability,
+                  action, reason, details_json, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &sequence,
+                &actor,
+                &target_account,
+                &capability,
+                &action,
+                &reason,
                 &details_json,
                 &created_at,
             ],
@@ -613,7 +742,9 @@ fn reset_sequences<C: GenericClient>(target: &mut C) -> Result<(), postgres::Err
          SELECT setval(pg_get_serial_sequence('social_reports', 'id')::regclass,
                        COALESCE(MAX(id), 1), COUNT(*) > 0) FROM social_reports;
          SELECT setval(pg_get_serial_sequence('moderation_audit', 'sequence')::regclass,
-                       COALESCE(MAX(sequence), 1), COUNT(*) > 0) FROM moderation_audit;",
+                       COALESCE(MAX(sequence), 1), COUNT(*) > 0) FROM moderation_audit;
+         SELECT setval(pg_get_serial_sequence('staff_audit', 'sequence')::regclass,
+                       COALESCE(MAX(sequence), 1), COUNT(*) > 0) FROM staff_audit;",
     )
 }
 
@@ -648,7 +779,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 9
+                required: 10
             }
         ));
         assert_eq!(
@@ -687,7 +818,7 @@ mod tests {
     fn transfer_manifest_is_parent_before_child_and_complete() {
         assert_eq!(TABLES[0], "accounts");
         assert_eq!(TABLES[1], "characters");
-        assert_eq!(TABLES.len(), 14);
+        assert_eq!(TABLES.len(), 17);
         assert_eq!(TABLES.last(), Some(&"world_adventure"));
     }
 }

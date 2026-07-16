@@ -9,6 +9,7 @@ use std::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use tempfile::Builder;
 use thiserror::Error;
+use tiamud_core::{StaffCapability, StaffProfileKey};
 use tiamud_persistence_sqlite::{
     MigrationReport, SCHEMA_VERSION, SchemaError, migrate as migrate_schema,
 };
@@ -174,7 +175,9 @@ pub enum AdminError {
         found: i64,
         required: i64,
     },
-    #[error("database {0:?} already has an administrator; use in-game moderation instead")]
+    #[error(
+        "database {0:?} already has an administrator or implementor profile; use in-game staff assignment instead"
+    )]
     AdminAlreadyExists(PathBuf),
     #[error("account {account:?} does not exist in database {path:?}")]
     AccountNotFound { path: PathBuf, account: String },
@@ -380,11 +383,12 @@ pub fn migrate(
     })
 }
 
-/// Recover an installation that deliberately or accidentally has no admin.
+/// Recover an installation that deliberately or accidentally has no operational admin.
 ///
 /// This is an offline break-glass operation: it refuses to replace normal
-/// moderation while any administrator exists and records the promotion in the
-/// same transaction as the role change.
+/// staff assignment while any administrator or implementor profile exists. It
+/// installs one exact Implementor bundle and records both the canonical staff
+/// audit and the retained legacy moderation audit in the same transaction.
 pub fn recover_admin(
     database: impl AsRef<Path>,
     account_name: &str,
@@ -415,7 +419,10 @@ pub fn recover_admin(
         .map_err(|source| database_error(database, source))?;
     let has_admin = transaction
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM accounts WHERE role = 'admin')",
+            "SELECT EXISTS(
+                 SELECT 1 FROM staff_profiles
+                 WHERE profile_key IN ('administrator', 'implementor')
+             )",
             [],
             |row| row.get::<_, bool>(0),
         )
@@ -452,13 +459,57 @@ pub fn recover_admin(
             [account.0],
         )
         .map_err(|source| database_error(database, source))?;
+    let now = transaction
+        .query_row("SELECT unixepoch()", [], |row| row.get::<_, i64>(0))
+        .map_err(|source| database_error(database, source))?;
+    transaction
+        .execute(
+            "INSERT INTO staff_profiles
+                 (account_id, profile_key, lore_title, assigned_by_account_id,
+                  created_at, updated_at)
+             VALUES (?1, ?2, NULL, ?1, ?3, ?3)
+             ON CONFLICT(account_id) DO UPDATE SET
+                 profile_key = excluded.profile_key,
+                 lore_title = NULL,
+                 assigned_by_account_id = excluded.assigned_by_account_id,
+                 updated_at = excluded.updated_at",
+            params![account.0, StaffProfileKey::Implementor.as_str(), now],
+        )
+        .map_err(|source| database_error(database, source))?;
+    transaction
+        .execute(
+            "DELETE FROM staff_capability_assignments WHERE account_id = ?1",
+            [account.0],
+        )
+        .map_err(|source| database_error(database, source))?;
+    for capability in StaffCapability::ALL {
+        transaction
+            .execute(
+                "INSERT INTO staff_capability_assignments
+                     (account_id, capability, assigned_by_account_id, created_at)
+                 VALUES (?1, ?2, ?1, ?3)",
+                params![account.0, capability.as_str(), now],
+            )
+            .map_err(|source| database_error(database, source))?;
+    }
     transaction
         .execute(
             "INSERT INTO moderation_audit
                  (actor_account_id, target_account_id, action, details_json, created_at)
              VALUES (?1, ?1, 'recover_admin',
-                     '{\"source\":\"tiamud-admin_offline_recovery\"}', unixepoch())",
-            [account.0],
+                     '{\"profile\":\"implementor\",\"source\":\"tiamud-admin_offline_recovery\"}', ?2)",
+            params![account.0, now],
+        )
+        .map_err(|source| database_error(database, source))?;
+    transaction
+        .execute(
+            "INSERT INTO staff_audit
+                 (actor_account_id, target_account_id, capability, action,
+                  reason, details_json, created_at)
+             VALUES (?1, ?1, ?2, 'recover_admin',
+                     'Offline break-glass recovery',
+                     '{\"profile\":\"implementor\",\"source\":\"tiamud-admin_offline_recovery\"}', ?3)",
+            params![account.0, StaffCapability::StaffAssign.as_str(), now],
         )
         .map_err(|source| database_error(database, source))?;
     transaction
@@ -604,7 +655,7 @@ fn load_world_pack(path: &Path) -> Result<WorldPack, AdminError> {
 mod tests {
     use super::*;
     use rusqlite::params;
-    use std::io::Write;
+    use std::{collections::BTreeSet, io::Write};
     use tempfile::TempDir;
 
     fn create_database(path: &Path) {
@@ -898,16 +949,26 @@ mod tests {
     }
 
     #[test]
-    fn offline_admin_recovery_is_explicit_audited_and_single_use() {
+    fn offline_admin_recovery_installs_the_exact_implementor_bundle_and_is_single_use() {
         let temporary = TempDir::new().unwrap();
         let database = temporary.path().join("current.sqlite3");
         let mut connection = Connection::open(&database).unwrap();
         migrate_schema(&mut connection).unwrap();
         connection
-            .execute(
+            .execute_batch(
                 "INSERT INTO accounts (name, password_hash, auth_state, role)
-                 VALUES ('Keeper', 'hash', 'registered', 'player')",
-                [],
+                     VALUES ('Keeper', 'hash', 'registered', 'player');
+                 INSERT INTO accounts (name, password_hash, auth_state, role)
+                     VALUES ('Legacy Admin', 'hash', 'registered', 'admin');
+                 INSERT INTO staff_profiles
+                     (account_id, profile_key, lore_title, assigned_by_account_id,
+                      created_at, updated_at)
+                     SELECT id, 'helper', 'Old title', id, 1, 1
+                     FROM accounts WHERE name = 'Keeper';
+                 INSERT INTO staff_capability_assignments
+                     (account_id, capability, assigned_by_account_id, created_at)
+                     SELECT id, 'reports.view', id, 1
+                     FROM accounts WHERE name = 'Keeper';",
             )
             .unwrap();
         drop(connection);
@@ -928,6 +989,47 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
+                    "SELECT profile_key, lore_title, assigned_by_account_id
+                     FROM staff_profiles WHERE account_id = ?1",
+                    [report.account_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                StaffProfileKey::Implementor.as_str().to_owned(),
+                None,
+                report.account_id,
+            )
+        );
+        let capabilities = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT capability FROM staff_capability_assignments
+                     WHERE account_id = ?1 ORDER BY capability",
+                )
+                .unwrap();
+            statement
+                .query_map([report.account_id], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<BTreeSet<_>>>()
+                .unwrap()
+        };
+        assert_eq!(
+            capabilities,
+            StaffCapability::ALL
+                .into_iter()
+                .map(|capability| capability.as_str().to_owned())
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            connection
+                .query_row(
                     "SELECT action FROM moderation_audit WHERE target_account_id = ?1",
                     [report.account_id],
                     |row| row.get::<_, String>(0),
@@ -935,11 +1037,191 @@ mod tests {
                 .unwrap(),
             "recover_admin"
         );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT actor_account_id, target_account_id, capability, action,
+                            reason, details_json
+                     FROM staff_audit WHERE target_account_id = ?1",
+                    [report.account_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                report.account_id,
+                Some(report.account_id),
+                StaffCapability::StaffAssign.as_str().to_owned(),
+                "recover_admin".to_owned(),
+                "Offline break-glass recovery".to_owned(),
+                "{\"profile\":\"implementor\",\"source\":\"tiamud-admin_offline_recovery\"}"
+                    .to_owned(),
+            )
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE staff_audit SET reason = 'rewritten'
+                     WHERE target_account_id = ?1",
+                    [report.account_id],
+                )
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute(
+                    "DELETE FROM staff_audit WHERE target_account_id = ?1",
+                    [report.account_id],
+                )
+                .is_err()
+        );
         drop(connection);
 
         assert!(matches!(
             recover_admin(&database, "Keeper"),
             Err(AdminError::AdminAlreadyExists(_))
         ));
+    }
+
+    #[test]
+    fn offline_admin_recovery_refuses_an_existing_operational_profile() {
+        let temporary = TempDir::new().unwrap();
+        let database = temporary.path().join("existing-admin.sqlite3");
+        let mut connection = Connection::open(&database).unwrap();
+        migrate_schema(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO accounts (name, password_hash, auth_state, role)
+                     VALUES ('Existing', 'hash', 'registered', 'player');
+                 INSERT INTO accounts (name, password_hash, auth_state, role)
+                     VALUES ('Candidate', 'hash', 'registered', 'player');
+                 INSERT INTO staff_profiles
+                     (account_id, profile_key, lore_title, assigned_by_account_id,
+                      created_at, updated_at)
+                     SELECT id, 'administrator', NULL, id, 1, 1
+                     FROM accounts WHERE name = 'Existing';",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            recover_admin(&database, "Candidate"),
+            Err(AdminError::AdminAlreadyExists(_))
+        ));
+
+        let connection = Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT role FROM accounts WHERE name = 'Candidate'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "player"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM staff_audit", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn offline_admin_recovery_rolls_back_if_the_canonical_audit_cannot_commit() {
+        let temporary = TempDir::new().unwrap();
+        let database = temporary.path().join("failed-recovery.sqlite3");
+        let mut connection = Connection::open(&database).unwrap();
+        migrate_schema(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO accounts (name, password_hash, auth_state, role)
+                     VALUES ('Keeper', 'hash', 'registered', 'player');
+                 INSERT INTO staff_profiles
+                     (account_id, profile_key, lore_title, assigned_by_account_id,
+                      created_at, updated_at)
+                     SELECT id, 'helper', 'Old title', id, 1, 1
+                     FROM accounts WHERE name = 'Keeper';
+                 INSERT INTO staff_capability_assignments
+                     (account_id, capability, assigned_by_account_id, created_at)
+                     SELECT id, 'reports.view', id, 1
+                     FROM accounts WHERE name = 'Keeper';
+                 CREATE TRIGGER fail_recover_staff_audit
+                     BEFORE INSERT ON staff_audit
+                     WHEN NEW.action = 'recover_admin'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected staff audit failure');
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            recover_admin(&database, "Keeper"),
+            Err(AdminError::Database { .. })
+        ));
+
+        let connection = Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT accounts.role, staff_profiles.profile_key,
+                            staff_profiles.lore_title
+                     FROM accounts
+                     JOIN staff_profiles ON staff_profiles.account_id = accounts.id
+                     WHERE accounts.name = 'Keeper'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "player".to_owned(),
+                "helper".to_owned(),
+                Some("Old title".to_owned()),
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT capability FROM staff_capability_assignments",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "reports.view"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM moderation_audit", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM staff_audit", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
     }
 }

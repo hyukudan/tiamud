@@ -12,6 +12,7 @@ rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tiamud-core = { path = "../mud-core" }
 tiamud-persistence-sqlite = { path = "../persistence-sqlite" }
 world-pack = { path = "../world-pack" }
 

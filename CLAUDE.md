@@ -28,7 +28,7 @@ describe el baseline vigente de personajes y medios.
   el paquete web admite pnpm 10+.
 - Un servidor Rust posee un actor de mundo con escritor único. Navegador y
   Telnet comparten dominio, persistencia y proyección.
-- PostgreSQL esquema v9 es el perfil público recomendado; SQLite esquema v9 es
+- PostgreSQL esquema v10 es el perfil público recomendado; SQLite esquema v10 es
   la ruta local sin servicios. Cada proceso abre uno y nunca doble-escribe.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
@@ -40,14 +40,23 @@ describe el baseline vigente de personajes y medios.
   resistencias y estados de extremo a extremo.
 - La fase social 1 está implementada: `say`, `tell`, `reply` online, grupos de
   seis miembros con chat y liderazgo, y suscripciones durables a `general`,
-  `newbie`, `staff`. `staff` exige Moderator/Admin; Web, texto Telnet y GMCP
-  comparten política. No hay correo/historial, telepatía, capacidades de staff,
-  tiers/rareza ni botín aleatorio.
+  `newbie`, `staff`. `staff` exige perfil `moderator`, `administrator` o
+  `implementor`; `helper` y `builder` no acceden. Web, texto Telnet y GMCP
+  comparten política. No hay correo/historial ni telepatía.
 - Accept, revoke, kick y transfer resuelven el nombre de un personaje conectado.
   La membresía de grupo sí persiste cuando alguien se desconecta, pero esas
   operaciones dirigidas no administran un objetivo offline.
-- Roles `Player`/`Moderator`/`Admin` son autoridad asignada, separada de XP.
-  Futuros rangos narrativos serán presentación sobre capacidades auditables.
+- La fase staff 2 usa perfiles `helper`/`builder`/`moderator`/`administrator`/
+  `implementor`, título narrativo opcional y doce capacidades cerradas. Incluye
+  cola/resolución de reportes, inspect/where/goto/transfer/restore, anuncios y
+  consulta de auditoría con motivos obligatorios y registro append-only. La
+  primera cuenta registrada recibe `implementor`; los Admin migrados reciben
+  `administrator`. Cambiar perfil sustituye las asignaciones por su bundle y
+  solo se puede actuar sobre rangos estrictamente inferiores.
+- Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación y
+  percepción; nunca bastan para ejecutar comandos ni abren por sí
+  solos el canal `staff`. La autorización tampoco procede de título, XP, clase,
+  talentos o WorldPack.
 - La composición opcional de sprites está conectada y es segura ante
   percepción. Faltan sprites revisados, jugador separado, heal cue y lápida.
 - Texto plano siempre completo. Medios, ANSI, GMCP rico y gráficos son
@@ -59,7 +68,7 @@ describe el baseline vigente de personajes y medios.
 La evidencia histórica retenida informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
 mixto limpio y 3.081.428 ejecuciones fuzz Telnet. Vincula aquel árbol: no es
-aceptación v9 ni permite omitir nuevas pruebas. GitHub Actions puede bloquearse
+aceptación v10 ni permite omitir nuevas pruebas. GitHub Actions puede bloquearse
 por facturación antes de ejecutar.
 
 ## Reglas de decisión
@@ -84,6 +93,10 @@ por facturación antes de ejecutar.
 - Medios pasan por pipeline y manifiesto revisado; perderlos no cambia juego.
 - Antes de botín repetible/aleatorio, crea identidad durable y derechos de
   propiedad. No añadas cajas de botín pagadas al baseline.
+- Las acciones staff que tocan el mundo resuelven un personaje conectado y
+  comprueban una capacidad concreta. Conserva la sintaxis textual con `|` para
+  separar cuerpo y motivo en inspect/where/goto/transfer/restore, announce,
+  profile y capability.
 
 ## Verificación mínima
 

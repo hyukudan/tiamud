@@ -105,6 +105,7 @@ pub enum PlayerAction {
     Weather,
     Time,
     Social(SocialAction),
+    Staff(StaffAction),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,6 +148,228 @@ pub enum AccountRole {
 impl AccountRole {
     pub fn can_moderate(self, target: Self) -> bool {
         matches!(self, Self::Moderator | Self::Admin) && self > target
+    }
+}
+
+/// Closed, durable authorization vocabulary for in-game staff work.
+///
+/// These capabilities are assigned to accounts by administrators. They are
+/// deliberately unrelated to character level, class, talents or WorldPack
+/// content.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum StaffCapability {
+    #[serde(rename = "reports.view")]
+    ReportsView,
+    #[serde(rename = "reports.resolve")]
+    ReportsResolve,
+    #[serde(rename = "moderation.mute")]
+    ModerationMute,
+    #[serde(rename = "moderation.ban")]
+    ModerationBan,
+    #[serde(rename = "staff.assign")]
+    StaffAssign,
+    #[serde(rename = "staff.inspect")]
+    StaffInspect,
+    #[serde(rename = "staff.where")]
+    StaffWhere,
+    #[serde(rename = "staff.goto")]
+    StaffGoto,
+    #[serde(rename = "staff.transfer")]
+    StaffTransfer,
+    #[serde(rename = "staff.restore")]
+    StaffRestore,
+    #[serde(rename = "staff.announce")]
+    StaffAnnounce,
+    #[serde(rename = "staff.audit")]
+    StaffAudit,
+}
+
+impl StaffCapability {
+    pub const ALL: [Self; 12] = [
+        Self::ReportsView,
+        Self::ReportsResolve,
+        Self::ModerationMute,
+        Self::ModerationBan,
+        Self::StaffAssign,
+        Self::StaffInspect,
+        Self::StaffWhere,
+        Self::StaffGoto,
+        Self::StaffTransfer,
+        Self::StaffRestore,
+        Self::StaffAnnounce,
+        Self::StaffAudit,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReportsView => "reports.view",
+            Self::ReportsResolve => "reports.resolve",
+            Self::ModerationMute => "moderation.mute",
+            Self::ModerationBan => "moderation.ban",
+            Self::StaffAssign => "staff.assign",
+            Self::StaffInspect => "staff.inspect",
+            Self::StaffWhere => "staff.where",
+            Self::StaffGoto => "staff.goto",
+            Self::StaffTransfer => "staff.transfer",
+            Self::StaffRestore => "staff.restore",
+            Self::StaffAnnounce => "staff.announce",
+            Self::StaffAudit => "staff.audit",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|capability| capability.as_str().eq_ignore_ascii_case(value.trim()))
+    }
+}
+
+/// Operational profile used to seed a reviewed capability bundle.
+/// `lore_title` is stored separately and never authorizes an action.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaffProfileKey {
+    Helper,
+    Builder,
+    Moderator,
+    Administrator,
+    Implementor,
+}
+
+impl StaffProfileKey {
+    pub const ALL: [Self; 5] = [
+        Self::Helper,
+        Self::Builder,
+        Self::Moderator,
+        Self::Administrator,
+        Self::Implementor,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Helper => "helper",
+            Self::Builder => "builder",
+            Self::Moderator => "moderator",
+            Self::Administrator => "administrator",
+            Self::Implementor => "implementor",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|profile| profile.as_str().eq_ignore_ascii_case(value.trim()))
+    }
+
+    pub fn default_capabilities(self) -> &'static [StaffCapability] {
+        const HELPER: &[StaffCapability] = &[
+            StaffCapability::ReportsView,
+            StaffCapability::ReportsResolve,
+        ];
+        const BUILDER: &[StaffCapability] = &[];
+        const MODERATOR: &[StaffCapability] = &[
+            StaffCapability::ReportsView,
+            StaffCapability::ReportsResolve,
+            StaffCapability::ModerationMute,
+            StaffCapability::ModerationBan,
+        ];
+        match self {
+            Self::Helper => HELPER,
+            Self::Builder => BUILDER,
+            Self::Moderator => MODERATOR,
+            Self::Administrator | Self::Implementor => &StaffCapability::ALL,
+        }
+    }
+
+    /// Explicit staff hierarchy for negative authorization. Declaration order
+    /// is presentation only and must never become policy accidentally.
+    pub const fn authority_rank(self) -> u8 {
+        match self {
+            Self::Helper => 10,
+            Self::Builder => 20,
+            Self::Moderator => 30,
+            Self::Administrator => 40,
+            Self::Implementor => 50,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StaffAction {
+    Status,
+    Reports {
+        reason: String,
+    },
+    ResolveReport {
+        report_id: i64,
+        resolution: StaffReportResolution,
+        reason: String,
+    },
+    Inspect {
+        target: String,
+        reason: String,
+    },
+    Where {
+        target: String,
+        reason: String,
+    },
+    Goto {
+        target: String,
+        reason: String,
+    },
+    Transfer {
+        target: String,
+        reason: String,
+    },
+    Restore {
+        target: String,
+        reason: String,
+    },
+    Announce {
+        message: String,
+        reason: String,
+    },
+    Audit {
+        reason: String,
+    },
+    SetProfile {
+        target: String,
+        profile: Option<StaffProfileKey>,
+        lore_title: Option<String>,
+        reason: String,
+    },
+    SetCapability {
+        target: String,
+        capability: StaffCapability,
+        enabled: bool,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaffReportResolution {
+    Dismissed,
+    ActionTaken,
+    NoAction,
+}
+
+impl StaffReportResolution {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dismissed => "dismissed",
+            Self::ActionTaken => "action_taken",
+            Self::NoAction => "no_action",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dismissed" => Some(Self::Dismissed),
+            "action_taken" | "action-taken" => Some(Self::ActionTaken),
+            "no_action" | "no-action" => Some(Self::NoAction),
+            _ => None,
+        }
     }
 }
 
@@ -206,7 +429,10 @@ pub enum SocialAction {
         duration_seconds: Option<u64>,
         reason: String,
     },
-    Unmute(String),
+    Unmute {
+        target: String,
+        reason: String,
+    },
     Report {
         target: String,
         reason: String,
@@ -216,10 +442,14 @@ pub enum SocialAction {
         duration_seconds: Option<u64>,
         reason: String,
     },
-    Unban(String),
+    Unban {
+        target: String,
+        reason: String,
+    },
     SetRole {
         target: String,
         role: AccountRole,
+        reason: String,
     },
 }
 
@@ -453,14 +683,37 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
         ("unignore", SocialAction::Unignore),
         ("block", SocialAction::Block),
         ("unblock", SocialAction::Unblock),
-        ("unmute", SocialAction::Unmute),
-        ("unban", SocialAction::Unban),
     ] {
         if normalised == command {
             return Err(ParseActionError::MissingTarget { command });
         }
         if let Some(target) = command_tail(input, command) {
             return Ok(PlayerAction::Social(constructor(target)));
+        }
+    }
+    for (command, is_unban) in [("unmute", false), ("unban", true)] {
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget { command });
+        }
+        if let Some(rest) = command_tail(input, command) {
+            let Some((target, reason)) = rest.split_once(char::is_whitespace) else {
+                return Err(ParseActionError::MissingTarget { command });
+            };
+            let reason = reason.trim();
+            if target.is_empty() || reason.is_empty() {
+                return Err(ParseActionError::MissingTarget { command });
+            }
+            return Ok(PlayerAction::Social(if is_unban {
+                SocialAction::Unban {
+                    target: target.to_owned(),
+                    reason: reason.to_owned(),
+                }
+            } else {
+                SocialAction::Unmute {
+                    target: target.to_owned(),
+                    reason: reason.to_owned(),
+                }
+            }));
         }
     }
     for (command, is_ban) in [("mute", false), ("ban", true)] {
@@ -510,10 +763,14 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
         return Err(ParseActionError::MissingTarget { command: "report" });
     }
     if let Some(rest) = command_tail(input, "role") {
-        let Some((target, role)) = rest.split_once(char::is_whitespace) else {
+        let mut parts = rest.splitn(3, char::is_whitespace);
+        let target = parts.next().unwrap_or_default().trim();
+        let role = parts.next().unwrap_or_default().trim();
+        let reason = parts.next().unwrap_or_default().trim();
+        if target.is_empty() || role.is_empty() || reason.is_empty() {
             return Err(ParseActionError::MissingTarget { command: "role" });
-        };
-        let role = match role.trim().to_ascii_lowercase().as_str() {
+        }
+        let role = match role.to_ascii_lowercase().as_str() {
             "player" => AccountRole::Player,
             "moderator" | "mod" => AccountRole::Moderator,
             "admin" => AccountRole::Admin,
@@ -522,10 +779,150 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
         return Ok(PlayerAction::Social(SocialAction::SetRole {
             target: target.to_owned(),
             role,
+            reason: reason.to_owned(),
         }));
     }
     if normalised == "role" {
         return Err(ParseActionError::MissingTarget { command: "role" });
+    }
+    if matches!(normalised.as_str(), "staff" | "staff status") {
+        return Ok(PlayerAction::Staff(StaffAction::Status));
+    }
+    if let Some(reason) = command_tail_phrase(input, "staff reports") {
+        return Ok(PlayerAction::Staff(StaffAction::Reports { reason }));
+    }
+    if normalised == "staff reports" {
+        return Err(ParseActionError::MissingTarget { command: "staff" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "staff resolve") {
+        let mut parts = rest.splitn(3, char::is_whitespace);
+        let report_id = parts.next().unwrap_or_default().trim();
+        let resolution = parts.next().unwrap_or_default().trim();
+        let reason = parts.next().unwrap_or_default().trim();
+        if report_id.is_empty() || resolution.is_empty() || reason.is_empty() {
+            return Err(ParseActionError::MissingTarget { command: "staff" });
+        }
+        let report_id = report_id
+            .parse::<i64>()
+            .ok()
+            .filter(|report_id| *report_id > 0)
+            .ok_or_else(|| ParseActionError::Unknown(input.to_owned()))?;
+        let resolution = StaffReportResolution::parse(resolution)
+            .ok_or_else(|| ParseActionError::Unknown(input.to_owned()))?;
+        return Ok(PlayerAction::Staff(StaffAction::ResolveReport {
+            report_id,
+            resolution,
+            reason: reason.to_owned(),
+        }));
+    }
+    if normalised == "staff resolve" {
+        return Err(ParseActionError::MissingTarget { command: "staff" });
+    }
+    type StaffTargetConstructor = fn(String, String) -> StaffAction;
+    let staff_target_commands: [(&str, StaffTargetConstructor); 5] = [
+        ("staff inspect", |target, reason| StaffAction::Inspect {
+            target,
+            reason,
+        }),
+        ("staff where", |target, reason| StaffAction::Where {
+            target,
+            reason,
+        }),
+        ("staff goto", |target, reason| StaffAction::Goto {
+            target,
+            reason,
+        }),
+        ("staff transfer", |target, reason| StaffAction::Transfer {
+            target,
+            reason,
+        }),
+        ("staff restore", |target, reason| StaffAction::Restore {
+            target,
+            reason,
+        }),
+    ];
+    for (command, constructor) in staff_target_commands {
+        if let Some(rest) = command_tail_phrase(input, command) {
+            let (target, reason) = split_staff_reason(&rest)
+                .ok_or(ParseActionError::MissingTarget { command: "staff" })?;
+            return Ok(PlayerAction::Staff(constructor(target, reason)));
+        }
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget { command: "staff" });
+        }
+    }
+    if let Some(rest) = command_tail_phrase(input, "staff announce") {
+        let (message, reason) = split_staff_reason(&rest)
+            .ok_or(ParseActionError::MissingTarget { command: "staff" })?;
+        return Ok(PlayerAction::Staff(StaffAction::Announce {
+            message,
+            reason,
+        }));
+    }
+    if normalised == "staff announce" {
+        return Err(ParseActionError::MissingTarget { command: "staff" });
+    }
+    if let Some(reason) = command_tail_phrase(input, "staff audit") {
+        return Ok(PlayerAction::Staff(StaffAction::Audit { reason }));
+    }
+    if normalised == "staff audit" {
+        return Err(ParseActionError::MissingTarget { command: "staff" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "staff profile") {
+        let (body, reason) = split_staff_reason(&rest)
+            .ok_or(ParseActionError::MissingTarget { command: "staff" })?;
+        let mut parts = body.splitn(3, char::is_whitespace);
+        let target = parts.next().unwrap_or_default().trim();
+        let profile = parts.next().unwrap_or_default().trim();
+        let lore_title = parts.next().unwrap_or_default().trim();
+        if target.is_empty() || profile.is_empty() || lore_title.is_empty() {
+            return Err(ParseActionError::MissingTarget { command: "staff" });
+        }
+        let profile = if profile.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            Some(
+                StaffProfileKey::parse(profile)
+                    .ok_or_else(|| ParseActionError::Unknown(input.to_owned()))?,
+            )
+        };
+        let lore_title = (!lore_title.eq_ignore_ascii_case("none")).then(|| lore_title.to_owned());
+        return Ok(PlayerAction::Staff(StaffAction::SetProfile {
+            target: target.to_owned(),
+            profile,
+            lore_title,
+            reason,
+        }));
+    }
+    if normalised == "staff profile" {
+        return Err(ParseActionError::MissingTarget { command: "staff" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "staff capability") {
+        let (body, reason) = split_staff_reason(&rest)
+            .ok_or(ParseActionError::MissingTarget { command: "staff" })?;
+        let mut parts = body.split_whitespace();
+        let operation = parts.next().unwrap_or_default();
+        let target = parts.next().unwrap_or_default();
+        let capability = parts.next().unwrap_or_default();
+        if target.is_empty() || capability.is_empty() || parts.next().is_some() {
+            return Err(ParseActionError::MissingTarget { command: "staff" });
+        }
+        let enabled = match operation.to_ascii_lowercase().as_str() {
+            "grant" => true,
+            "revoke" => false,
+            _ => return Err(ParseActionError::Unknown(input.to_owned())),
+        };
+        let capability = StaffCapability::parse(capability)
+            .ok_or_else(|| ParseActionError::Unknown(input.to_owned()))?;
+        return Ok(PlayerAction::Staff(StaffAction::SetCapability {
+            target: target.to_owned(),
+            capability,
+            enabled,
+            reason,
+        }));
+    }
+    if normalised == "staff capability" || normalised.starts_with("staff ") {
+        return Err(ParseActionError::MissingTarget { command: "staff" });
     }
     if let Some(direction) = Direction::parse(&normalised) {
         return Ok(PlayerAction::Move(direction));
@@ -583,6 +980,13 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
         }
     }
     Err(ParseActionError::Unknown(input.trim().to_owned()))
+}
+
+fn split_staff_reason(value: &str) -> Option<(String, String)> {
+    let (body, reason) = value.rsplit_once('|')?;
+    let body = body.trim();
+    let reason = reason.trim();
+    (!body.is_empty() && !reason.is_empty()).then(|| (body.to_owned(), reason.to_owned()))
 }
 
 fn command_tail(input: &str, command: &str) -> Option<String> {
@@ -1750,6 +2154,12 @@ pub enum DomainEvent {
         to_room_id: String,
         direction: Direction,
     },
+    CharacterRelocated {
+        actor_id: CharacterId,
+        actor_name: String,
+        from_room_id: String,
+        to_room_id: String,
+    },
     ItemTaken {
         actor_id: CharacterId,
         actor_name: String,
@@ -1946,6 +2356,12 @@ pub enum GameplayEvent {
         character_id: CharacterId,
         character_name: String,
         amount: i32,
+        health: i32,
+        room_id: String,
+    },
+    CharacterRestored {
+        character_id: CharacterId,
+        character_name: String,
         health: i32,
         room_id: String,
     },
@@ -4198,6 +4614,7 @@ impl World {
     pub fn replay_persisted_event(&mut self, event: &DomainEvent) -> Result<(), WorldError> {
         match event {
             DomainEvent::CharacterMoved { .. }
+            | DomainEvent::CharacterRelocated { .. }
             | DomainEvent::Gameplay { .. }
             | DomainEvent::Adventure { .. } => Ok(()),
             DomainEvent::ItemTaken {
@@ -4250,6 +4667,7 @@ impl World {
         for event in events.iter().rev() {
             match event {
                 DomainEvent::CharacterMoved { .. }
+                | DomainEvent::CharacterRelocated { .. }
                 | DomainEvent::Gameplay { .. }
                 | DomainEvent::Adventure { .. } => {}
                 DomainEvent::ItemTaken {
@@ -4397,6 +4815,194 @@ impl World {
         })
     }
 
+    /// Builds a bounded, staff-only diagnostic view. Callers must authorize
+    /// `staff.inspect` and audit the access before exposing this text.
+    pub fn staff_inspection_as_plain_text(&self, session: SessionId) -> Result<String, WorldError> {
+        let character = self.character(session)?;
+        let room = room_checked(&self.entities, character.location)?;
+        let gameplay = self
+            .character_gameplay
+            .get(&character.id)
+            .ok_or(WorldError::InvalidEntity)?;
+        let carried = self
+            .item_locations
+            .values()
+            .filter(|location| {
+                matches!(location, SharedItemLocation::Carried(owner) if *owner == character.id)
+            })
+            .count();
+        Ok(format!(
+            concat!(
+                "Character: {}\r\n",
+                "Room: {}\r\n",
+                "Progression: level {}, XP {}, class {}\r\n",
+                "Vitals: {}/{} health; {} resources; {} statuses\r\n",
+                "Inventory: {} carried; {} equipped\r\n"
+            ),
+            character.name,
+            room.title,
+            gameplay.level,
+            gameplay.experience,
+            gameplay.active_class_id,
+            gameplay.vitals.health,
+            gameplay.vitals.max_health,
+            gameplay.resources.len(),
+            gameplay.statuses.len(),
+            carried,
+            gameplay.equipment.len(),
+        ))
+    }
+
+    /// Returns stable operational location data for an already authorized
+    /// staff diagnostic. Stable room identity never enters ordinary views.
+    pub fn staff_location_as_plain_text(&self, session: SessionId) -> Result<String, WorldError> {
+        let character = self.character(session)?;
+        let room = room_checked(&self.entities, character.location)?;
+        Ok(format!("{} is in {}.\r\n", character.name, room.title))
+    }
+
+    /// Relocates the acting staff character to a connected target.
+    pub fn staff_goto(
+        &mut self,
+        actor: SessionId,
+        target: SessionId,
+    ) -> Result<ActionOutcome, WorldError> {
+        self.staff_relocate(actor, target, actor, "You travel to the target.\r\n")
+    }
+
+    /// Brings a connected target to the acting staff character.
+    pub fn staff_transfer(
+        &mut self,
+        actor: SessionId,
+        target: SessionId,
+    ) -> Result<ActionOutcome, WorldError> {
+        self.staff_relocate(
+            target,
+            actor,
+            actor,
+            "The target is transferred to you.\r\n",
+        )
+    }
+
+    fn staff_relocate(
+        &mut self,
+        moving: SessionId,
+        destination: SessionId,
+        response_session: SessionId,
+        output: &str,
+    ) -> Result<ActionOutcome, WorldError> {
+        let moving_entity = *self
+            .sessions
+            .get(&moving)
+            .ok_or(WorldError::UnknownSession)?;
+        let destination_entity = *self
+            .sessions
+            .get(&destination)
+            .ok_or(WorldError::UnknownSession)?;
+        let destination_location = self
+            .entities
+            .get(destination_entity)
+            .and_then(|entity| match entity {
+                Entity::Character(character) => Some(character.location),
+                _ => None,
+            })
+            .ok_or(WorldError::InvalidEntity)?;
+        let to_room_id = room_checked(&self.entities, destination_location)?
+            .stable_id
+            .clone();
+        let (actor_id, actor_name, from_room_id) = self
+            .entities
+            .get(moving_entity)
+            .and_then(|entity| match entity {
+                Entity::Character(character) => {
+                    Some((character.id, character.name.clone(), character.location))
+                }
+                _ => None,
+            })
+            .map(|(id, name, location)| {
+                room_checked(&self.entities, location)
+                    .map(|room| (id, name, room.stable_id.clone()))
+            })
+            .transpose()?
+            .ok_or(WorldError::InvalidEntity)?;
+        if from_room_id == to_room_id {
+            return Err(WorldError::GameplayUnavailable);
+        }
+        match self.entities.get_mut(moving_entity) {
+            Some(Entity::Character(character)) => character.location = destination_location,
+            _ => return Err(WorldError::InvalidEntity),
+        }
+        self.revision = self.revision.wrapping_add(1).max(1);
+        let event = DomainEvent::CharacterRelocated {
+            actor_id,
+            actor_name,
+            from_room_id,
+            to_room_id: to_room_id.clone(),
+        };
+        self.bump_view_revisions(&event)?;
+        self.observer_views
+            .get_mut(&moving)
+            .ok_or(WorldError::InvalidEntity)?
+            .discovered_rooms
+            .insert(to_room_id);
+        Ok(ActionOutcome {
+            scene: self.scene_for(response_session)?,
+            output: Some(output.to_owned()),
+            changed_character: Some(self.character_snapshot(moving)?),
+            domain_events: vec![event],
+        })
+    }
+
+    /// Fully restores a connected character's bounded gameplay resources.
+    /// The caller is responsible for capability/hierarchy checks and durable
+    /// audit in the same transaction as the resulting snapshots.
+    pub fn staff_restore(
+        &mut self,
+        actor: SessionId,
+        target: SessionId,
+    ) -> Result<ActionOutcome, WorldError> {
+        let target_character = self.character(target)?;
+        let character_id = target_character.id;
+        let character_name = target_character.name.clone();
+        let room_id = room_checked(&self.entities, target_character.location)?
+            .stable_id
+            .clone();
+        let gameplay = self
+            .character_gameplay
+            .get_mut(&character_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        gameplay.vitals.health = gameplay.vitals.max_health;
+        for resource in gameplay.resources.values_mut() {
+            resource.current = resource.max;
+        }
+        gameplay.statuses.clear();
+        gameplay.effects.clear();
+        gameplay.ability_cooldowns.clear();
+        gameplay.ability_global_ready_tick = self.logical_tick;
+        gameplay.recovery_at_tick = None;
+        for npc in self.npcs.values_mut() {
+            if npc.engaged_character == Some(character_id) {
+                npc.engaged_character = None;
+            }
+        }
+        self.revision = self.revision.wrapping_add(1).max(1);
+        let event = DomainEvent::Gameplay {
+            event: GameplayEvent::CharacterRestored {
+                character_id,
+                character_name,
+                health: gameplay.vitals.health,
+                room_id,
+            },
+        };
+        self.bump_view_revisions(&event)?;
+        Ok(ActionOutcome {
+            scene: self.scene_for(actor)?,
+            output: Some("The target has been fully restored.\r\n".to_owned()),
+            changed_character: Some(self.character_snapshot(target)?),
+            domain_events: vec![event],
+        })
+    }
+
     pub fn restore_character(
         &mut self,
         session: SessionId,
@@ -4531,7 +5137,9 @@ impl World {
                 changed_character: None,
                 domain_events: Vec::new(),
             }),
-            PlayerAction::Social(_) => Err(WorldError::GameplayUnavailable),
+            PlayerAction::Social(_) | PlayerAction::Staff(_) => {
+                Err(WorldError::GameplayUnavailable)
+            }
             PlayerAction::Move(direction) => {
                 let location = self.character(session)?.location;
                 let source_room = room_checked(&self.entities, location)?;
@@ -6993,6 +7601,32 @@ impl World {
                     None,
                 )
             }
+            DomainEvent::CharacterRelocated {
+                actor_id,
+                actor_name,
+                from_room_id,
+                ..
+            } => {
+                let text = if viewer.id == *actor_id {
+                    "You are relocated by staff authority.".to_owned()
+                } else {
+                    let viewer_room = room_checked(&self.entities, viewer.location)?
+                        .stable_id
+                        .as_str();
+                    if viewer_room == from_room_id {
+                        format!("{actor_name} vanishes.")
+                    } else {
+                        format!("{actor_name} appears.")
+                    }
+                };
+                (
+                    ViewEventKind::CharacterMoved,
+                    opaque_id(observer.salt, "character", &actor_id.0.to_string()),
+                    None,
+                    text,
+                    None,
+                )
+            }
             DomainEvent::ItemTaken {
                 actor_id,
                 actor_name,
@@ -7229,6 +7863,12 @@ impl World {
                     || (viewer_room == from_room_id
                         && self.exit_visible_to(session, from_room_id, *direction)?)
             }
+            DomainEvent::CharacterRelocated {
+                actor_id,
+                from_room_id,
+                to_room_id,
+                ..
+            } => viewer.id == *actor_id || viewer_room == from_room_id || viewer_room == to_room_id,
             DomainEvent::ItemTaken {
                 actor_id,
                 item_id,
@@ -7883,6 +8523,7 @@ fn gameplay_event_room(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::ItemUnequipped { room_id, .. }
         | GameplayEvent::ItemUsed { room_id, .. }
         | GameplayEvent::CharacterHealed { room_id, .. }
+        | GameplayEvent::CharacterRestored { room_id, .. }
         | GameplayEvent::EffectApplied { room_id, .. }
         | GameplayEvent::EffectExpired { room_id, .. } => Some(room_id),
     }
@@ -7907,6 +8548,7 @@ fn gameplay_event_character(event: &GameplayEvent) -> Option<CharacterId> {
         | GameplayEvent::ItemUnequipped { character_id, .. }
         | GameplayEvent::ItemUsed { character_id, .. }
         | GameplayEvent::CharacterHealed { character_id, .. }
+        | GameplayEvent::CharacterRestored { character_id, .. }
         | GameplayEvent::EffectApplied { character_id, .. }
         | GameplayEvent::EffectExpired { character_id, .. } => Some(*character_id),
         GameplayEvent::TickAdvanced { .. }
@@ -7939,6 +8581,7 @@ fn gameplay_event_npc(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::ItemUnequipped { .. }
         | GameplayEvent::ItemUsed { .. }
         | GameplayEvent::CharacterHealed { .. }
+        | GameplayEvent::CharacterRestored { .. }
         | GameplayEvent::EffectApplied { .. }
         | GameplayEvent::EffectExpired { .. } => None,
     }
@@ -7967,6 +8610,7 @@ fn gameplay_event_item(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::CharacterRecovered { .. }
         | GameplayEvent::NpcRespawned { .. }
         | GameplayEvent::CharacterHealed { .. }
+        | GameplayEvent::CharacterRestored { .. }
         | GameplayEvent::EffectApplied { .. }
         | GameplayEvent::EffectExpired { .. } => None,
     }
@@ -8261,6 +8905,20 @@ fn project_gameplay_event(
                 format!("You recover {amount} health.")
             } else {
                 format!("{character_name} looks healthier.")
+            },
+            None,
+        ),
+        GameplayEvent::CharacterRestored {
+            character_id: character,
+            character_name,
+            ..
+        } => (
+            character_id(*character),
+            None,
+            if viewer_id == *character {
+                "You are fully restored by staff authority.".into()
+            } else {
+                format!("{character_name} is fully restored.")
             },
             None,
         ),
@@ -8733,12 +9391,166 @@ mod tests {
             }))
         );
         assert_eq!(
-            parse_action("role Aria moderator"),
+            parse_action("role Aria moderator operational promotion"),
             Ok(PlayerAction::Social(SocialAction::SetRole {
                 target: "Aria".into(),
                 role: AccountRole::Moderator,
+                reason: "operational promotion".into(),
             }))
         );
+        assert_eq!(
+            parse_action("unmute Griefer appeal accepted"),
+            Ok(PlayerAction::Social(SocialAction::Unmute {
+                target: "Griefer".into(),
+                reason: "appeal accepted".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn parses_staff_commands_with_closed_values_and_mandatory_reasons() {
+        assert_eq!(
+            parse_action("staff inspect Aria | investigate stuck character"),
+            Ok(PlayerAction::Staff(StaffAction::Inspect {
+                target: "Aria".into(),
+                reason: "investigate stuck character".into(),
+            }))
+        );
+        assert_eq!(
+            parse_action("staff announce Server restart in ten minutes | planned maintenance"),
+            Ok(PlayerAction::Staff(StaffAction::Announce {
+                message: "Server restart in ten minutes".into(),
+                reason: "planned maintenance".into(),
+            }))
+        );
+        assert_eq!(
+            parse_action("staff resolve 7 action_taken verified harassment"),
+            Ok(PlayerAction::Staff(StaffAction::ResolveReport {
+                report_id: 7,
+                resolution: StaffReportResolution::ActionTaken,
+                reason: "verified harassment".into(),
+            }))
+        );
+        assert_eq!(
+            parse_action("staff profile Aria helper Angel of Welcome | onboarding assignment"),
+            Ok(PlayerAction::Staff(StaffAction::SetProfile {
+                target: "Aria".into(),
+                profile: Some(StaffProfileKey::Helper),
+                lore_title: Some("Angel of Welcome".into()),
+                reason: "onboarding assignment".into(),
+            }))
+        );
+        assert_eq!(
+            parse_action("staff capability grant Aria reports.view | support rotation"),
+            Ok(PlayerAction::Staff(StaffAction::SetCapability {
+                target: "Aria".into(),
+                capability: StaffCapability::ReportsView,
+                enabled: true,
+                reason: "support rotation".into(),
+            }))
+        );
+        for invalid in [
+            "staff inspect Aria",
+            "staff announce notice without reason",
+            "staff resolve 0 action_taken invalid id",
+            "staff resolve 7 arbitrary invalid resolution",
+            "staff capability grant Aria unknown | invalid capability",
+        ] {
+            assert!(parse_action(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn staff_profiles_use_explicit_ranks_and_closed_default_bundles() {
+        assert!(
+            StaffProfileKey::Helper.authority_rank() < StaffProfileKey::Moderator.authority_rank()
+        );
+        assert!(
+            StaffProfileKey::Administrator.authority_rank()
+                < StaffProfileKey::Implementor.authority_rank()
+        );
+        assert_eq!(StaffProfileKey::Builder.default_capabilities(), &[]);
+        assert!(
+            StaffProfileKey::Moderator
+                .default_capabilities()
+                .contains(&StaffCapability::ModerationBan)
+        );
+        assert_eq!(
+            StaffProfileKey::Administrator.default_capabilities(),
+            &StaffCapability::ALL
+        );
+    }
+
+    #[test]
+    fn staff_relocation_and_restore_are_checkpoint_safe_and_project_no_stable_ids() {
+        let mut world = World::demo();
+        let actor = SessionId(501);
+        let target = SessionId(502);
+        world
+            .connect(
+                actor,
+                CharacterSnapshot {
+                    id: CharacterId(501),
+                    account_id: AccountId(501),
+                    name: "Keeper".into(),
+                    room_id: "demo:lantern-square".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        world
+            .connect(
+                target,
+                CharacterSnapshot {
+                    id: CharacterId(502),
+                    account_id: AccountId(502),
+                    name: "Aria".into(),
+                    room_id: "demo:north-gate".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+
+        let inspection = world.staff_inspection_as_plain_text(target).unwrap();
+        assert!(inspection.contains("Character: Aria"));
+        assert!(!inspection.contains("demo:north-gate"));
+        assert!(!inspection.contains("account #"));
+
+        let checkpoint = world.checkpoint();
+        let relocated = world.staff_goto(actor, target).unwrap();
+        assert!(matches!(
+            relocated.domain_events.as_slice(),
+            [DomainEvent::CharacterRelocated { actor_id, .. }] if *actor_id == CharacterId(501)
+        ));
+        assert_eq!(
+            world.character_snapshot(actor).unwrap().room_id,
+            "demo:north-gate"
+        );
+        world.restore_checkpoint(checkpoint);
+        assert_eq!(
+            world.character_snapshot(actor).unwrap().room_id,
+            "demo:lantern-square"
+        );
+
+        let mut gameplay = world.character_gameplay_snapshot(target).unwrap();
+        gameplay.vitals.health = 0;
+        gameplay.recovery_at_tick = Some(world.logical_tick().saturating_add(3));
+        world
+            .restore_character_gameplay(CharacterId(502), gameplay)
+            .unwrap();
+        let restored = world.staff_restore(actor, target).unwrap();
+        assert!(matches!(
+            restored.domain_events.as_slice(),
+            [DomainEvent::Gameplay {
+                event: GameplayEvent::CharacterRestored { character_id, .. }
+            }] if *character_id == CharacterId(502)
+        ));
+        let restored_gameplay = world.character_gameplay_snapshot(target).unwrap();
+        assert_eq!(
+            restored_gameplay.vitals.health,
+            restored_gameplay.vitals.max_health
+        );
+        assert_eq!(restored_gameplay.recovery_at_tick, None);
     }
 
     #[test]

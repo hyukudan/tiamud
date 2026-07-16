@@ -47,10 +47,10 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
-pub(crate) const APPLICATION_TABLES: [&str; 14] = [
+pub(crate) const APPLICATION_TABLES: [&str; 17] = [
     "accounts",
     "characters",
     "auth_sessions",
@@ -63,6 +63,9 @@ pub(crate) const APPLICATION_TABLES: [&str; 14] = [
     "account_bans",
     "social_reports",
     "moderation_audit",
+    "staff_profiles",
+    "staff_capability_assignments",
+    "staff_audit",
     "character_adventure",
     "world_adventure",
 ];
@@ -192,7 +195,27 @@ CREATE TABLE social_reports (
     reason TEXT NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 2048),
     created_at BIGINT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'reviewing', 'closed')),
+        CHECK (status IN ('open', 'resolved')),
+    resolution TEXT
+        CHECK (resolution IS NULL OR resolution IN ('dismissed', 'action_taken', 'no_action')),
+    resolution_reason TEXT
+        CHECK (resolution_reason IS NULL OR octet_length(resolution_reason) BETWEEN 1 AND 2048),
+    resolved_by_account_id BIGINT REFERENCES accounts(id),
+    resolved_at BIGINT,
+    CHECK (
+        (status = 'open'
+         AND resolution IS NULL
+         AND resolution_reason IS NULL
+         AND resolved_by_account_id IS NULL
+         AND resolved_at IS NULL)
+        OR
+        (status = 'resolved'
+         AND resolution IS NOT NULL
+         AND resolution_reason IS NOT NULL
+         AND resolved_by_account_id IS NOT NULL
+         AND resolved_at IS NOT NULL
+         AND resolved_at >= created_at)
+    ),
     CHECK (reporter_character_id <> target_character_id)
 );
 CREATE INDEX social_reports_status_idx
@@ -209,6 +232,81 @@ CREATE TABLE moderation_audit (
 CREATE INDEX moderation_audit_actor_idx
     ON moderation_audit (actor_account_id, sequence);
 
+CREATE TABLE staff_profiles (
+    account_id BIGINT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    profile_key TEXT NOT NULL
+        CHECK (profile_key IN ('helper', 'builder', 'moderator', 'administrator', 'implementor')),
+    lore_title TEXT
+        CHECK (lore_title IS NULL OR octet_length(lore_title) BETWEEN 1 AND 128),
+    assigned_by_account_id BIGINT NOT NULL REFERENCES accounts(id),
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    CHECK (updated_at >= created_at)
+);
+CREATE INDEX staff_profiles_profile_idx
+    ON staff_profiles (profile_key, account_id);
+
+CREATE TABLE staff_capability_assignments (
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    capability TEXT NOT NULL CHECK (capability IN (
+        'reports.view',
+        'reports.resolve',
+        'moderation.mute',
+        'moderation.ban',
+        'staff.assign',
+        'staff.inspect',
+        'staff.where',
+        'staff.goto',
+        'staff.transfer',
+        'staff.restore',
+        'staff.announce',
+        'staff.audit'
+    )),
+    assigned_by_account_id BIGINT NOT NULL REFERENCES accounts(id),
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (account_id, capability)
+);
+CREATE INDEX staff_capabilities_capability_idx
+    ON staff_capability_assignments (capability, account_id);
+
+CREATE TABLE staff_audit (
+    sequence BIGSERIAL PRIMARY KEY,
+    actor_account_id BIGINT NOT NULL REFERENCES accounts(id),
+    target_account_id BIGINT REFERENCES accounts(id),
+    capability TEXT NOT NULL CHECK (capability IN (
+        'reports.view',
+        'reports.resolve',
+        'moderation.mute',
+        'moderation.ban',
+        'staff.assign',
+        'staff.inspect',
+        'staff.where',
+        'staff.goto',
+        'staff.transfer',
+        'staff.restore',
+        'staff.announce',
+        'staff.audit'
+    )),
+    action TEXT NOT NULL CHECK (octet_length(action) BETWEEN 1 AND 64),
+    reason TEXT NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 1024),
+    details_json TEXT NOT NULL CHECK (octet_length(details_json) <= 4096),
+    created_at BIGINT NOT NULL
+);
+CREATE INDEX staff_audit_actor_idx
+    ON staff_audit (actor_account_id, sequence);
+CREATE FUNCTION tiamud_reject_staff_audit_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'staff_audit is append-only';
+END;
+$$;
+CREATE TRIGGER staff_audit_no_update
+    BEFORE UPDATE ON staff_audit
+    FOR EACH ROW EXECUTE FUNCTION tiamud_reject_staff_audit_mutation();
+CREATE TRIGGER staff_audit_no_delete
+    BEFORE DELETE ON staff_audit
+    FOR EACH ROW EXECUTE FUNCTION tiamud_reject_staff_audit_mutation();
+
 CREATE TABLE character_adventure (
     character_id BIGINT PRIMARY KEY REFERENCES characters(id) ON DELETE CASCADE,
     state_json TEXT NOT NULL CHECK (octet_length(state_json) <= 65536),
@@ -221,7 +319,7 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 9);
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 10);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -262,6 +360,132 @@ SET version = 9, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 8;
 "#;
 
+const UPGRADE_V9_TO_V10_SQL: &str = r#"
+ALTER TABLE social_reports
+    ADD COLUMN resolution TEXT,
+    ADD COLUMN resolution_reason TEXT,
+    ADD COLUMN resolved_by_account_id BIGINT REFERENCES accounts(id),
+    ADD COLUMN resolved_at BIGINT;
+UPDATE social_reports SET status = 'open' WHERE status <> 'open';
+ALTER TABLE social_reports
+    DROP CONSTRAINT IF EXISTS social_reports_status_check,
+    ADD CONSTRAINT social_reports_status_check
+        CHECK (status IN ('open', 'resolved')),
+    ADD CONSTRAINT social_reports_resolution_check CHECK (
+        (status = 'open'
+         AND resolution IS NULL
+         AND resolution_reason IS NULL
+         AND resolved_by_account_id IS NULL
+         AND resolved_at IS NULL)
+        OR
+        (status = 'resolved'
+         AND resolution IS NOT NULL
+         AND resolution IN ('dismissed', 'action_taken', 'no_action')
+         AND resolution_reason IS NOT NULL
+         AND octet_length(resolution_reason) BETWEEN 1 AND 2048
+         AND resolved_by_account_id IS NOT NULL
+         AND resolved_at IS NOT NULL
+         AND resolved_at >= created_at)
+    );
+
+CREATE TABLE staff_profiles (
+    account_id BIGINT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    profile_key TEXT NOT NULL
+        CHECK (profile_key IN ('helper', 'builder', 'moderator', 'administrator', 'implementor')),
+    lore_title TEXT
+        CHECK (lore_title IS NULL OR octet_length(lore_title) BETWEEN 1 AND 128),
+    assigned_by_account_id BIGINT NOT NULL REFERENCES accounts(id),
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    CHECK (updated_at >= created_at)
+);
+CREATE INDEX staff_profiles_profile_idx
+    ON staff_profiles (profile_key, account_id);
+
+CREATE TABLE staff_capability_assignments (
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    capability TEXT NOT NULL CHECK (capability IN (
+        'reports.view', 'reports.resolve', 'moderation.mute', 'moderation.ban',
+        'staff.assign', 'staff.inspect', 'staff.where', 'staff.goto',
+        'staff.transfer', 'staff.restore', 'staff.announce', 'staff.audit'
+    )),
+    assigned_by_account_id BIGINT NOT NULL REFERENCES accounts(id),
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (account_id, capability)
+);
+CREATE INDEX staff_capabilities_capability_idx
+    ON staff_capability_assignments (capability, account_id);
+
+CREATE TABLE staff_audit (
+    sequence BIGSERIAL PRIMARY KEY,
+    actor_account_id BIGINT NOT NULL REFERENCES accounts(id),
+    target_account_id BIGINT REFERENCES accounts(id),
+    capability TEXT NOT NULL CHECK (capability IN (
+        'reports.view', 'reports.resolve', 'moderation.mute', 'moderation.ban',
+        'staff.assign', 'staff.inspect', 'staff.where', 'staff.goto',
+        'staff.transfer', 'staff.restore', 'staff.announce', 'staff.audit'
+    )),
+    action TEXT NOT NULL CHECK (octet_length(action) BETWEEN 1 AND 64),
+    reason TEXT NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 1024),
+    details_json TEXT NOT NULL CHECK (octet_length(details_json) <= 4096),
+    created_at BIGINT NOT NULL
+);
+CREATE INDEX staff_audit_actor_idx
+    ON staff_audit (actor_account_id, sequence);
+CREATE FUNCTION tiamud_reject_staff_audit_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'staff_audit is append-only';
+END;
+$$;
+CREATE TRIGGER staff_audit_no_update
+    BEFORE UPDATE ON staff_audit
+    FOR EACH ROW EXECUTE FUNCTION tiamud_reject_staff_audit_mutation();
+CREATE TRIGGER staff_audit_no_delete
+    BEFORE DELETE ON staff_audit
+    FOR EACH ROW EXECUTE FUNCTION tiamud_reject_staff_audit_mutation();
+
+INSERT INTO staff_profiles
+    (account_id, profile_key, lore_title, assigned_by_account_id, created_at, updated_at)
+SELECT id,
+       CASE role WHEN 'admin' THEN 'administrator' ELSE 'moderator' END,
+       NULL, id, floor(extract(epoch FROM now()))::BIGINT,
+       floor(extract(epoch FROM now()))::BIGINT
+FROM accounts
+WHERE role IN ('moderator', 'admin')
+ON CONFLICT (account_id) DO NOTHING;
+
+INSERT INTO staff_capability_assignments
+    (account_id, capability, assigned_by_account_id, created_at)
+SELECT accounts.id, capabilities.capability, accounts.id,
+       floor(extract(epoch FROM now()))::BIGINT
+FROM accounts
+CROSS JOIN (VALUES
+    ('reports.view'),
+    ('reports.resolve'),
+    ('moderation.mute'),
+    ('moderation.ban'),
+    ('staff.assign'),
+    ('staff.inspect'),
+    ('staff.where'),
+    ('staff.goto'),
+    ('staff.transfer'),
+    ('staff.restore'),
+    ('staff.announce'),
+    ('staff.audit')
+) AS capabilities(capability)
+WHERE accounts.role = 'admin'
+   OR (accounts.role = 'moderator'
+       AND capabilities.capability IN (
+           'reports.view', 'reports.resolve', 'moderation.mute', 'moderation.ban'
+       ))
+ON CONFLICT (account_id, capability) DO NOTHING;
+
+UPDATE tiamud_schema
+SET version = 10, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 9;
+"#;
+
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
 WITH candidate AS (
     SELECT id FROM accounts
@@ -300,17 +524,17 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v9 schema or migration from v6/v7/v8"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v10 schema or migration from v6/v7/v8/v9"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v9 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v10 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6/v7/v8 are upgraded to v9, and v9 is verified.
+/// at the current version, v6/v7/v8/v9 are upgraded to v10, and v10 is verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
     let report = migrate_in_transaction(&mut transaction)?;
@@ -343,17 +567,29 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
         return Err(SchemaError::InvalidMetadata);
     }
     let found: i32 = rows[0].get(0);
+    // The automatic first-admin promotion belongs only to the v6 role
+    // migration. It must precede v10's one-time role-to-capability seed so the
+    // promoted account receives the administrator profile and capabilities.
+    if found == 6 {
+        client.batch_execute(ENSURE_BOOTSTRAP_ADMIN_SQL)?;
+    }
     match found {
         6 => {
             client.batch_execute(UPGRADE_V6_TO_V7_SQL)?;
             client.batch_execute(UPGRADE_V7_TO_V8_SQL)?;
             client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
+            client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
         }
         7 => {
             client.batch_execute(UPGRADE_V7_TO_V8_SQL)?;
             client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
+            client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
         }
-        8 => client.batch_execute(UPGRADE_V8_TO_V9_SQL)?,
+        8 => {
+            client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
+            client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
+        }
+        9 => client.batch_execute(UPGRADE_V9_TO_V10_SQL)?,
         SCHEMA_VERSION => {}
         _ => return Err(SchemaError::UnsupportedVersion { found }),
     }
@@ -365,13 +601,6 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
             return Err(SchemaError::MissingTable { table });
         }
     }
-    // The automatic first-admin promotion belongs to the v6 role migration.
-    // Re-running it for an already-current schema would silently undo an
-    // operator's deliberate no-admin state after a restart.
-    if found == 6 {
-        client.batch_execute(ENSURE_BOOTSTRAP_ADMIN_SQL)?;
-    }
-
     Ok(MigrationReport {
         from: found,
         to: SCHEMA_VERSION,
@@ -410,6 +639,9 @@ mod tests {
             "account_bans",
             "social_reports",
             "moderation_audit",
+            "staff_profiles",
+            "staff_capability_assignments",
+            "staff_audit",
             "character_adventure",
             "world_adventure",
         ] {
@@ -418,7 +650,7 @@ mod tests {
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 9)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 10)"));
         assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
@@ -445,6 +677,47 @@ mod tests {
         assert!(UPGRADE_V8_TO_V9_SQL.contains("'general', 'newbie', 'staff'"));
         assert!(UPGRADE_V8_TO_V9_SQL.contains("PRIMARY KEY (character_id, channel)"));
         assert!(UPGRADE_V8_TO_V9_SQL.contains("SET version = 9"));
+    }
+
+    #[test]
+    fn v10_upgrade_adds_closed_staff_authority_and_resolvable_reports() {
+        for profile in [
+            "helper",
+            "builder",
+            "moderator",
+            "administrator",
+            "implementor",
+        ] {
+            assert!(UPGRADE_V9_TO_V10_SQL.contains(&format!("'{profile}'")));
+            assert!(SCHEMA_SQL.contains(&format!("'{profile}'")));
+        }
+        for capability in [
+            "reports.view",
+            "reports.resolve",
+            "moderation.mute",
+            "moderation.ban",
+            "staff.assign",
+            "staff.inspect",
+            "staff.where",
+            "staff.goto",
+            "staff.transfer",
+            "staff.restore",
+            "staff.announce",
+            "staff.audit",
+        ] {
+            assert!(UPGRADE_V9_TO_V10_SQL.contains(&format!("'{capability}'")));
+            assert!(SCHEMA_SQL.contains(&format!("'{capability}'")));
+        }
+        assert!(UPGRADE_V9_TO_V10_SQL.contains("status IN ('open', 'resolved')"));
+        assert!(SCHEMA_SQL.contains("status IN ('open', 'resolved')"));
+        assert!(UPGRADE_V9_TO_V10_SQL.contains("resolved_by_account_id"));
+        assert!(SCHEMA_SQL.contains("resolved_by_account_id"));
+        assert!(UPGRADE_V9_TO_V10_SQL.contains("staff_audit_no_update"));
+        assert!(UPGRADE_V9_TO_V10_SQL.contains("staff_audit_no_delete"));
+        assert!(SCHEMA_SQL.contains("staff_audit_no_update"));
+        assert!(SCHEMA_SQL.contains("staff_audit_no_delete"));
+        assert!(UPGRADE_V9_TO_V10_SQL.contains("accounts.role = 'moderator'"));
+        assert!(UPGRADE_V9_TO_V10_SQL.contains("SET version = 10"));
     }
 
     #[test]

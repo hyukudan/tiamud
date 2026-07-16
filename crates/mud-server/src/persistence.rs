@@ -8,6 +8,7 @@ use crate::{
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use std::{
+    collections::BTreeSet,
     future::Future,
     io,
     path::Path,
@@ -18,8 +19,8 @@ use std::{
 use thiserror::Error;
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
-    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, SocialChannelName,
-    WorldRuntimeSnapshot,
+    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, SocialChannelName, StaffCapability,
+    StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot,
 };
 use tiamud_persistence_sqlite::{SchemaError, migrate};
 use tokio::{
@@ -41,6 +42,9 @@ pub(super) const DOMAIN_EVENT_RETENTION: i64 = 10_000;
 pub const MAX_SOCIAL_REASON_BYTES: usize = 1_024;
 pub const MAX_REPORT_REASON_BYTES: usize = 2_048;
 const MAX_AUDIT_DETAILS_BYTES: usize = 4_096;
+const MAX_STAFF_ACTION_BYTES: usize = 64;
+const MAX_STAFF_LORE_TITLE_BYTES: usize = 128;
+const STAFF_LIST_LIMIT: i64 = 10;
 const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
 const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -65,13 +69,63 @@ pub enum ModerationAction {
         expires_at: Option<i64>,
         reason: String,
     },
-    Unmute,
+    Unmute {
+        reason: String,
+    },
     Ban {
         expires_at: Option<i64>,
         reason: String,
     },
-    Unban,
-    SetRole(AccountRole),
+    Unban {
+        reason: String,
+    },
+    SetRole {
+        role: AccountRole,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaffAccess {
+    pub account_id: AccountId,
+    pub role: AccountRole,
+    pub profile: Option<StaffProfileKey>,
+    pub lore_title: Option<String>,
+    pub capabilities: BTreeSet<StaffCapability>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaffReport {
+    pub id: i64,
+    pub reporter_character_id: CharacterId,
+    pub reporter_name: String,
+    pub target_character_id: CharacterId,
+    pub target_account_id: AccountId,
+    pub target_name: String,
+    pub reason: String,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaffAuditEntry {
+    pub sequence: i64,
+    pub actor_account_id: AccountId,
+    pub target_account_id: Option<AccountId>,
+    pub capability: StaffCapability,
+    pub action: String,
+    pub reason: String,
+    pub details_json: String,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaffAuditRecord {
+    pub actor_account_id: AccountId,
+    pub target_account_id: Option<AccountId>,
+    pub capability: StaffCapability,
+    pub action: String,
+    pub reason: String,
+    pub details: serde_json::Value,
 }
 
 #[cfg(test)]
@@ -148,6 +202,16 @@ pub enum StoreError {
     AccountBanned,
     #[error("invalid or oversized social input")]
     InvalidSocialInput,
+    #[error("invalid or oversized staff input")]
+    InvalidStaffInput,
+    #[error("persisted staff state is invalid: {0}")]
+    InvalidStaffState(String),
+    #[error("that account does not hold the required staff capability")]
+    StaffForbidden,
+    #[error("the staff hierarchy does not permit that target or assignment")]
+    StaffHierarchy,
+    #[error("staff report {0} is not available for resolution")]
+    StaffReportUnavailable(i64),
     #[error("database schema version {found} is newer than supported version {supported}")]
     UnsupportedSchemaVersion { found: i64, supported: i64 },
 }
@@ -302,6 +366,41 @@ pub trait CharacterStore: Send + Sync {
         action: ModerationAction,
     ) -> Result<(), StoreError>;
 
+    async fn staff_access(&self, character_id: CharacterId) -> Result<StaffAccess, StoreError>;
+
+    async fn staff_reports(&self, audit: StaffAuditRecord) -> Result<Vec<StaffReport>, StoreError>;
+
+    async fn resolve_staff_report(
+        &self,
+        report_id: i64,
+        resolution: StaffReportResolution,
+        resolution_reason: &str,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+
+    async fn set_staff_profile(
+        &self,
+        target_account: AccountId,
+        profile: Option<StaffProfileKey>,
+        lore_title: Option<&str>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+
+    async fn set_staff_capability(
+        &self,
+        target_account: AccountId,
+        capability: StaffCapability,
+        enabled: bool,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+
+    async fn staff_audit_entries(
+        &self,
+        audit: StaffAuditRecord,
+    ) -> Result<Vec<StaffAuditEntry>, StoreError>;
+
+    async fn append_staff_audit(&self, audit: StaffAuditRecord) -> Result<(), StoreError>;
+
     #[cfg(test)]
     async fn audit_log(&self) -> Result<Vec<AuditEntry>, StoreError>;
 
@@ -312,6 +411,14 @@ pub trait CharacterStore: Send + Sync {
         characters: Vec<DurableCharacterSnapshot>,
         runtime: WorldRuntimeSnapshot,
         events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError>;
+
+    async fn commit_staff_action(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+        audit: StaffAuditRecord,
     ) -> Result<(), StoreError>;
 }
 
@@ -365,6 +472,72 @@ impl CharacterStore for MeasuredCharacterStore {
     ) -> Result<AuthenticatedSession, StoreError> {
         self.transaction(self.inner.register_account(name, password))
             .await
+    }
+
+    async fn staff_access(&self, character_id: CharacterId) -> Result<StaffAccess, StoreError> {
+        self.inner.staff_access(character_id).await
+    }
+
+    async fn staff_reports(&self, audit: StaffAuditRecord) -> Result<Vec<StaffReport>, StoreError> {
+        self.transaction(self.inner.staff_reports(audit)).await
+    }
+
+    async fn resolve_staff_report(
+        &self,
+        report_id: i64,
+        resolution: StaffReportResolution,
+        resolution_reason: &str,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.resolve_staff_report(
+            report_id,
+            resolution,
+            resolution_reason,
+            audit,
+        ))
+        .await
+    }
+
+    async fn set_staff_profile(
+        &self,
+        target_account: AccountId,
+        profile: Option<StaffProfileKey>,
+        lore_title: Option<&str>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        self.transaction(
+            self.inner
+                .set_staff_profile(target_account, profile, lore_title, audit),
+        )
+        .await
+    }
+
+    async fn set_staff_capability(
+        &self,
+        target_account: AccountId,
+        capability: StaffCapability,
+        enabled: bool,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.set_staff_capability(
+            target_account,
+            capability,
+            enabled,
+            audit,
+        ))
+        .await
+    }
+
+    async fn staff_audit_entries(
+        &self,
+        audit: StaffAuditRecord,
+    ) -> Result<Vec<StaffAuditEntry>, StoreError> {
+        self.transaction(self.inner.staff_audit_entries(audit))
+            .await
+    }
+
+    async fn append_staff_audit(&self, audit: StaffAuditRecord) -> Result<(), StoreError> {
+        self.transaction(self.inner.append_staff_audit(audit)).await
     }
 
     async fn login_account(
@@ -546,6 +719,20 @@ impl CharacterStore for MeasuredCharacterStore {
         self.transaction(self.inner.commit_action(characters, runtime, events))
             .await
     }
+
+    async fn commit_staff_action(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        self.transaction(
+            self.inner
+                .commit_staff_action(characters, runtime, events, audit),
+        )
+        .await
+    }
 }
 
 pub(super) enum Request {
@@ -617,6 +804,13 @@ pub(super) enum Request {
         events: Vec<DomainEvent>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    CommitStaffAction {
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+        audit: StaffAuditRecord,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     SocialProfile {
         character_id: CharacterId,
         reply: oneshot::Sender<Result<SocialProfile, StoreError>>,
@@ -661,6 +855,43 @@ pub(super) enum Request {
         actor: CharacterId,
         target: CharacterId,
         action: ModerationAction,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    StaffAccess {
+        character_id: CharacterId,
+        reply: oneshot::Sender<Result<StaffAccess, StoreError>>,
+    },
+    StaffReports {
+        audit: StaffAuditRecord,
+        reply: oneshot::Sender<Result<Vec<StaffReport>, StoreError>>,
+    },
+    ResolveStaffReport {
+        report_id: i64,
+        resolution: StaffReportResolution,
+        resolution_reason: String,
+        audit: StaffAuditRecord,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SetStaffProfile {
+        target_account: AccountId,
+        profile: Option<StaffProfileKey>,
+        lore_title: Option<String>,
+        audit: StaffAuditRecord,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    SetStaffCapability {
+        target_account: AccountId,
+        capability: StaffCapability,
+        enabled: bool,
+        audit: StaffAuditRecord,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    StaffAuditEntries {
+        audit: StaffAuditRecord,
+        reply: oneshot::Sender<Result<Vec<StaffAuditEntry>, StoreError>>,
+    },
+    AppendStaffAudit {
+        audit: StaffAuditRecord,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     #[cfg(test)]
@@ -820,6 +1051,22 @@ impl SqliteCharacterStore {
                                 &events,
                             ));
                         }
+                        Request::CommitStaffAction {
+                            characters,
+                            runtime,
+                            events,
+                            audit,
+                            reply,
+                        } => {
+                            let _ = reply.send(commit_staff_action(
+                                &mut connection,
+                                &characters,
+                                &runtime,
+                                &events,
+                                audit,
+                                unix_timestamp(),
+                            ));
+                        }
                         Request::SocialProfile {
                             character_id,
                             reply,
@@ -906,6 +1153,78 @@ impl SqliteCharacterStore {
                                 actor,
                                 target,
                                 action,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::StaffAccess {
+                            character_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(staff_access(&connection, character_id));
+                        }
+                        Request::StaffReports { audit, reply } => {
+                            let _ =
+                                reply.send(staff_reports(&mut connection, audit, unix_timestamp()));
+                        }
+                        Request::ResolveStaffReport {
+                            report_id,
+                            resolution,
+                            resolution_reason,
+                            audit,
+                            reply,
+                        } => {
+                            let _ = reply.send(resolve_staff_report(
+                                &mut connection,
+                                report_id,
+                                resolution,
+                                &resolution_reason,
+                                audit,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::SetStaffProfile {
+                            target_account,
+                            profile,
+                            lore_title,
+                            audit,
+                            reply,
+                        } => {
+                            let _ = reply.send(set_staff_profile(
+                                &mut connection,
+                                target_account,
+                                profile,
+                                lore_title.as_deref(),
+                                audit,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::SetStaffCapability {
+                            target_account,
+                            capability,
+                            enabled,
+                            audit,
+                            reply,
+                        } => {
+                            let _ = reply.send(set_staff_capability(
+                                &mut connection,
+                                target_account,
+                                capability,
+                                enabled,
+                                audit,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::StaffAuditEntries { audit, reply } => {
+                            let _ = reply.send(staff_audit_entries(
+                                &mut connection,
+                                audit,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::AppendStaffAudit { audit, reply } => {
+                            let _ = reply.send(append_staff_audit_transaction(
+                                &mut connection,
+                                audit,
                                 unix_timestamp(),
                             ));
                         }
@@ -1323,6 +1642,102 @@ impl CharacterStore for SqliteCharacterStore {
         .await
     }
 
+    async fn staff_access(&self, character_id: CharacterId) -> Result<StaffAccess, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::StaffAccess {
+                character_id,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn staff_reports(&self, audit: StaffAuditRecord) -> Result<Vec<StaffReport>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::StaffReports { audit, reply }, receive)
+            .await
+    }
+
+    async fn resolve_staff_report(
+        &self,
+        report_id: i64,
+        resolution: StaffReportResolution,
+        resolution_reason: &str,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::ResolveStaffReport {
+                report_id,
+                resolution,
+                resolution_reason: resolution_reason.to_owned(),
+                audit,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn set_staff_profile(
+        &self,
+        target_account: AccountId,
+        profile: Option<StaffProfileKey>,
+        lore_title: Option<&str>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::SetStaffProfile {
+                target_account,
+                profile,
+                lore_title: lore_title.map(str::to_owned),
+                audit,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn set_staff_capability(
+        &self,
+        target_account: AccountId,
+        capability: StaffCapability,
+        enabled: bool,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::SetStaffCapability {
+                target_account,
+                capability,
+                enabled,
+                audit,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn staff_audit_entries(
+        &self,
+        audit: StaffAuditRecord,
+    ) -> Result<Vec<StaffAuditEntry>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::StaffAuditEntries { audit, reply }, receive)
+            .await
+    }
+
+    async fn append_staff_audit(&self, audit: StaffAuditRecord) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::AppendStaffAudit { audit, reply }, receive)
+            .await
+    }
+
     #[cfg(test)]
     async fn audit_log(&self) -> Result<Vec<AuditEntry>, StoreError> {
         let (reply, receive) = oneshot::channel();
@@ -1341,6 +1756,27 @@ impl CharacterStore for SqliteCharacterStore {
                 characters,
                 runtime,
                 events,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn commit_staff_action(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::CommitStaffAction {
+                characters,
+                runtime,
+                events,
+                audit,
                 reply,
             },
             receive,
@@ -1464,6 +1900,21 @@ fn finish_register_account(
         name: name.to_owned(),
     };
     if role == AccountRole::Admin {
+        transaction.execute(
+            "INSERT INTO staff_profiles
+                 (account_id, profile_key, lore_title, assigned_by_account_id,
+                  created_at, updated_at)
+             VALUES (?1, 'implementor', NULL, ?1, ?2, ?2)",
+            params![account.id.0, now],
+        )?;
+        for capability in StaffCapability::ALL {
+            transaction.execute(
+                "INSERT INTO staff_capability_assignments
+                     (account_id, capability, assigned_by_account_id, created_at)
+                 VALUES (?1, ?2, ?1, ?3)",
+                params![account.id.0, capability.as_str(), now],
+            )?;
+        }
         append_audit(
             &transaction,
             account.id,
@@ -1471,6 +1922,15 @@ fn finish_register_account(
             "bootstrap_admin",
             serde_json::json!({"source": "first_registered_account"}),
             now,
+        )?;
+        transaction.execute(
+            "INSERT INTO staff_audit
+                 (actor_account_id, target_account_id, capability, action,
+                  reason, details_json, created_at)
+             VALUES (?1, ?1, 'staff.assign', 'bootstrap.implementor',
+                     'First registered account bootstrap',
+                     '{\"source\":\"first_registered_account\"}', ?2)",
+            params![account.id.0, now],
         )?;
     }
     let session = issue_session(&transaction, account, now)?;
@@ -1744,6 +2204,179 @@ fn social_profile(
     })
 }
 
+#[derive(Clone, Debug)]
+struct PreparedStaffAudit {
+    actor_account_id: AccountId,
+    target_account_id: Option<AccountId>,
+    capability: StaffCapability,
+    action: String,
+    reason: String,
+    details_json: String,
+}
+
+fn staff_access(
+    connection: &Connection,
+    character_id: CharacterId,
+) -> Result<StaffAccess, StoreError> {
+    let account_id = connection
+        .query_row(
+            "SELECT account_id FROM characters WHERE id = ?1",
+            [character_id.0],
+            |row| row.get::<_, i64>(0).map(AccountId),
+        )
+        .optional()?
+        .ok_or(StoreError::SocialTargetNotFound)?;
+    staff_access_by_account(connection, account_id)
+}
+
+fn staff_access_by_account(
+    connection: &Connection,
+    account_id: AccountId,
+) -> Result<StaffAccess, StoreError> {
+    let (role, profile, lore_title) = connection
+        .query_row(
+            "SELECT accounts.role, staff_profiles.profile_key, staff_profiles.lore_title
+             FROM accounts
+             LEFT JOIN staff_profiles ON staff_profiles.account_id = accounts.id
+             WHERE accounts.id = ?1",
+            [account_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::AccountNotFound(account_id))?;
+    let profile = profile
+        .as_deref()
+        .map(|value| {
+            StaffProfileKey::parse(value)
+                .ok_or_else(|| StoreError::InvalidStaffState(format!("profile {value:?}")))
+        })
+        .transpose()?;
+    let mut statement = connection.prepare(
+        "SELECT capability FROM staff_capability_assignments
+         WHERE account_id = ?1 ORDER BY capability",
+    )?;
+    let raw = statement
+        .query_map([account_id.0], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let capabilities = raw
+        .into_iter()
+        .map(|value| {
+            StaffCapability::parse(&value)
+                .ok_or_else(|| StoreError::InvalidStaffState(format!("capability {value:?}")))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if profile.is_none() && !capabilities.is_empty() {
+        return Err(StoreError::InvalidStaffState(format!(
+            "account {} has capabilities without a profile",
+            account_id.0
+        )));
+    }
+    Ok(StaffAccess {
+        account_id,
+        role: role_from_database(&role)?,
+        profile,
+        lore_title,
+        capabilities,
+    })
+}
+
+fn prepare_staff_audit(record: StaffAuditRecord) -> Result<PreparedStaffAudit, StoreError> {
+    let action = normalise_staff_text(&record.action, MAX_STAFF_ACTION_BYTES)?;
+    let reason = normalise_staff_text(&record.reason, MAX_SOCIAL_REASON_BYTES)?;
+    let details_json = serde_json::to_string(&record.details)?;
+    if details_json.len() > MAX_AUDIT_DETAILS_BYTES {
+        return Err(StoreError::InvalidStaffInput);
+    }
+    if record.target_account_id == Some(record.actor_account_id) {
+        return Err(StoreError::StaffHierarchy);
+    }
+    Ok(PreparedStaffAudit {
+        actor_account_id: record.actor_account_id,
+        target_account_id: record.target_account_id,
+        capability: record.capability,
+        action,
+        reason,
+        details_json,
+    })
+}
+
+fn normalise_staff_text(value: &str, maximum: usize) -> Result<String, StoreError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
+        Err(StoreError::InvalidStaffInput)
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn normalise_lore_title(value: Option<&str>) -> Result<Option<String>, StoreError> {
+    value
+        .map(|value| normalise_staff_text(value, MAX_STAFF_LORE_TITLE_BYTES))
+        .transpose()
+}
+
+fn validate_staff_authority(
+    connection: &Connection,
+    audit: &PreparedStaffAudit,
+    expected_capability: Option<StaffCapability>,
+    target_account: Option<AccountId>,
+) -> Result<StaffAccess, StoreError> {
+    if expected_capability.is_some_and(|expected| expected != audit.capability)
+        || audit.target_account_id != target_account
+    {
+        return Err(StoreError::StaffForbidden);
+    }
+    let actor = staff_access_by_account(connection, audit.actor_account_id)?;
+    if !actor.capabilities.contains(&audit.capability) {
+        return Err(StoreError::StaffForbidden);
+    }
+    let Some(actor_profile) = actor.profile else {
+        return Err(StoreError::StaffForbidden);
+    };
+    if let Some(target_account) = target_account {
+        if target_account == actor.account_id {
+            return Err(StoreError::StaffHierarchy);
+        }
+        let target = staff_access_by_account(connection, target_account)?;
+        if target
+            .profile
+            .is_some_and(|profile| profile.authority_rank() >= actor_profile.authority_rank())
+        {
+            return Err(StoreError::StaffHierarchy);
+        }
+    }
+    Ok(actor)
+}
+
+fn insert_staff_audit(
+    connection: &Connection,
+    audit: &PreparedStaffAudit,
+    now: i64,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "INSERT INTO staff_audit
+             (actor_account_id, target_account_id, capability, action,
+              reason, details_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            audit.actor_account_id.0,
+            audit.target_account_id.map(|account| account.0),
+            audit.capability.as_str(),
+            audit.action,
+            audit.reason,
+            audit.details_json,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
 fn social_target(
     connection: &Connection,
     name: &str,
@@ -1947,6 +2580,319 @@ fn report_character(
     Ok(())
 }
 
+fn staff_reports(
+    connection: &mut Connection,
+    audit: StaffAuditRecord,
+    now: i64,
+) -> Result<Vec<StaffReport>, StoreError> {
+    let audit = prepare_staff_audit(audit)?;
+    let transaction = connection.transaction()?;
+    let actor = validate_staff_authority(
+        &transaction,
+        &audit,
+        Some(StaffCapability::ReportsView),
+        None,
+    )?;
+    let actor_rank = actor
+        .profile
+        .ok_or(StoreError::StaffForbidden)?
+        .authority_rank();
+    insert_staff_audit(&transaction, &audit, now)?;
+    let reports = {
+        let mut statement = transaction.prepare(
+            "SELECT reports.id,
+                    reporter.id, reporter.name,
+                    target.id, target.account_id, target.name,
+                    reports.reason, reports.created_at
+             FROM social_reports AS reports
+             JOIN characters AS reporter ON reporter.id = reports.reporter_character_id
+             JOIN characters AS target ON target.id = reports.target_character_id
+             LEFT JOIN staff_profiles AS target_staff
+                    ON target_staff.account_id = target.account_id
+             WHERE reports.status = 'open'
+               AND CASE target_staff.profile_key
+                       WHEN 'helper' THEN 10
+                       WHEN 'builder' THEN 20
+                       WHEN 'moderator' THEN 30
+                       WHEN 'administrator' THEN 40
+                       WHEN 'implementor' THEN 50
+                       ELSE 0
+                   END < ?1
+             ORDER BY reports.created_at, reports.id
+             LIMIT ?2",
+        )?;
+        statement
+            .query_map(params![i64::from(actor_rank), STAFF_LIST_LIMIT], |row| {
+                Ok(StaffReport {
+                    id: row.get(0)?,
+                    reporter_character_id: CharacterId(row.get(1)?),
+                    reporter_name: row.get(2)?,
+                    target_character_id: CharacterId(row.get(3)?),
+                    target_account_id: AccountId(row.get(4)?),
+                    target_name: row.get(5)?,
+                    reason: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    transaction.commit()?;
+    Ok(reports)
+}
+
+fn resolve_staff_report(
+    connection: &mut Connection,
+    report_id: i64,
+    resolution: StaffReportResolution,
+    resolution_reason: &str,
+    audit: StaffAuditRecord,
+    now: i64,
+) -> Result<(), StoreError> {
+    if report_id <= 0 {
+        return Err(StoreError::StaffReportUnavailable(report_id));
+    }
+    let resolution_reason = normalise_staff_text(resolution_reason, MAX_REPORT_REASON_BYTES)?;
+    let mut audit = prepare_staff_audit(audit)?;
+    let transaction = connection.transaction()?;
+    let target_account = transaction
+        .query_row(
+            "SELECT target.account_id
+             FROM social_reports AS reports
+             JOIN characters AS target ON target.id = reports.target_character_id
+             WHERE reports.id = ?1 AND reports.status = 'open'",
+            [report_id],
+            |row| row.get::<_, i64>(0).map(AccountId),
+        )
+        .optional()?
+        .ok_or(StoreError::StaffReportUnavailable(report_id))?;
+    if audit
+        .target_account_id
+        .is_some_and(|account_id| account_id != target_account)
+    {
+        return Err(StoreError::StaffForbidden);
+    }
+    audit.target_account_id = Some(target_account);
+    validate_staff_authority(
+        &transaction,
+        &audit,
+        Some(StaffCapability::ReportsResolve),
+        Some(target_account),
+    )?;
+    let updated = transaction.execute(
+        "UPDATE social_reports
+         SET status = 'resolved', resolution = ?1, resolution_reason = ?2,
+             resolved_by_account_id = ?3, resolved_at = ?4
+         WHERE id = ?5 AND status = 'open'",
+        params![
+            resolution.as_str(),
+            resolution_reason,
+            audit.actor_account_id.0,
+            now,
+            report_id
+        ],
+    )?;
+    if updated != 1 {
+        return Err(StoreError::StaffReportUnavailable(report_id));
+    }
+    insert_staff_audit(&transaction, &audit, now)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn set_staff_profile(
+    connection: &mut Connection,
+    target_account: AccountId,
+    profile: Option<StaffProfileKey>,
+    lore_title: Option<&str>,
+    audit: StaffAuditRecord,
+    now: i64,
+) -> Result<(), StoreError> {
+    let lore_title = normalise_lore_title(lore_title)?;
+    if profile.is_none() && lore_title.is_some() {
+        return Err(StoreError::InvalidStaffInput);
+    }
+    let audit = prepare_staff_audit(audit)?;
+    let transaction = connection.transaction()?;
+    let actor = validate_staff_authority(
+        &transaction,
+        &audit,
+        Some(StaffCapability::StaffAssign),
+        Some(target_account),
+    )?;
+    let actor_profile = actor.profile.ok_or(StoreError::StaffForbidden)?;
+    if profile.is_some_and(|profile| profile.authority_rank() >= actor_profile.authority_rank()) {
+        return Err(StoreError::StaffHierarchy);
+    }
+    if profile.is_some_and(|profile| {
+        profile
+            .default_capabilities()
+            .iter()
+            .any(|capability| !actor.capabilities.contains(capability))
+    }) {
+        return Err(StoreError::StaffForbidden);
+    }
+    transaction.execute(
+        "DELETE FROM staff_capability_assignments WHERE account_id = ?1",
+        [target_account.0],
+    )?;
+    if let Some(profile) = profile {
+        transaction.execute(
+            "INSERT INTO staff_profiles
+                 (account_id, profile_key, lore_title, assigned_by_account_id,
+                  created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(account_id) DO UPDATE SET
+                 profile_key = excluded.profile_key,
+                 lore_title = excluded.lore_title,
+                 assigned_by_account_id = excluded.assigned_by_account_id,
+                 updated_at = excluded.updated_at",
+            params![
+                target_account.0,
+                profile.as_str(),
+                lore_title,
+                audit.actor_account_id.0,
+                now
+            ],
+        )?;
+        for capability in profile.default_capabilities() {
+            transaction.execute(
+                "INSERT INTO staff_capability_assignments
+                     (account_id, capability, assigned_by_account_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    target_account.0,
+                    capability.as_str(),
+                    audit.actor_account_id.0,
+                    now
+                ],
+            )?;
+        }
+    } else {
+        transaction.execute(
+            "DELETE FROM staff_profiles WHERE account_id = ?1",
+            [target_account.0],
+        )?;
+    }
+    insert_staff_audit(&transaction, &audit, now)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn set_staff_capability(
+    connection: &mut Connection,
+    target_account: AccountId,
+    capability: StaffCapability,
+    enabled: bool,
+    audit: StaffAuditRecord,
+    now: i64,
+) -> Result<(), StoreError> {
+    let audit = prepare_staff_audit(audit)?;
+    let transaction = connection.transaction()?;
+    let actor = validate_staff_authority(
+        &transaction,
+        &audit,
+        Some(StaffCapability::StaffAssign),
+        Some(target_account),
+    )?;
+    let target = staff_access_by_account(&transaction, target_account)?;
+    if enabled && (target.profile.is_none() || !actor.capabilities.contains(&capability)) {
+        return Err(StoreError::StaffForbidden);
+    }
+    if enabled {
+        transaction.execute(
+            "INSERT INTO staff_capability_assignments
+                 (account_id, capability, assigned_by_account_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id, capability) DO UPDATE SET
+                 assigned_by_account_id = excluded.assigned_by_account_id,
+                 created_at = excluded.created_at",
+            params![
+                target_account.0,
+                capability.as_str(),
+                audit.actor_account_id.0,
+                now
+            ],
+        )?;
+    } else {
+        transaction.execute(
+            "DELETE FROM staff_capability_assignments
+             WHERE account_id = ?1 AND capability = ?2",
+            params![target_account.0, capability.as_str()],
+        )?;
+    }
+    insert_staff_audit(&transaction, &audit, now)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn staff_audit_entries(
+    connection: &mut Connection,
+    audit: StaffAuditRecord,
+    now: i64,
+) -> Result<Vec<StaffAuditEntry>, StoreError> {
+    let audit = prepare_staff_audit(audit)?;
+    let transaction = connection.transaction()?;
+    validate_staff_authority(
+        &transaction,
+        &audit,
+        Some(StaffCapability::StaffAudit),
+        None,
+    )?;
+    insert_staff_audit(&transaction, &audit, now)?;
+    let entries = {
+        let mut statement = transaction.prepare(
+            "SELECT sequence, actor_account_id, target_account_id, capability,
+                    action, reason, details_json, created_at
+             FROM staff_audit ORDER BY sequence DESC LIMIT ?1",
+        )?;
+        let raw = statement
+            .query_map([STAFF_LIST_LIMIT], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        raw.into_iter()
+            .map(|row| {
+                Ok(StaffAuditEntry {
+                    sequence: row.0,
+                    actor_account_id: AccountId(row.1),
+                    target_account_id: row.2.map(AccountId),
+                    capability: StaffCapability::parse(&row.3).ok_or_else(|| {
+                        StoreError::InvalidStaffState(format!("capability {:?}", row.3))
+                    })?,
+                    action: row.4,
+                    reason: row.5,
+                    details_json: row.6,
+                    created_at: row.7,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?
+    };
+    transaction.commit()?;
+    Ok(entries)
+}
+
+fn append_staff_audit_transaction(
+    connection: &mut Connection,
+    audit: StaffAuditRecord,
+    now: i64,
+) -> Result<(), StoreError> {
+    let audit = prepare_staff_audit(audit)?;
+    let transaction = connection.transaction()?;
+    validate_staff_authority(&transaction, &audit, None, audit.target_account_id)?;
+    insert_staff_audit(&transaction, &audit, now)?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn moderate_character(
     connection: &mut Connection,
     actor: CharacterId,
@@ -1957,26 +2903,83 @@ fn moderate_character(
     if actor == target {
         return Err(StoreError::SocialSelfTarget);
     }
+    let (required_capability, action_name, reason, details) = match &action {
+        ModerationAction::Mute { expires_at, reason } => {
+            validate_expiry(*expires_at, now)?;
+            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
+            (
+                StaffCapability::ModerationMute,
+                "mute",
+                reason.clone(),
+                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
+            )
+        }
+        ModerationAction::Unmute { reason } => {
+            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
+            (
+                StaffCapability::ModerationMute,
+                "unmute",
+                reason.clone(),
+                serde_json::json!({"reason": reason}),
+            )
+        }
+        ModerationAction::Ban { expires_at, reason } => {
+            validate_expiry(*expires_at, now)?;
+            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
+            (
+                StaffCapability::ModerationBan,
+                "ban",
+                reason.clone(),
+                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
+            )
+        }
+        ModerationAction::Unban { reason } => {
+            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
+            (
+                StaffCapability::ModerationBan,
+                "unban",
+                reason.clone(),
+                serde_json::json!({"reason": reason}),
+            )
+        }
+        ModerationAction::SetRole { role, reason } => {
+            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
+            (
+                StaffCapability::StaffAssign,
+                "set_role",
+                reason.clone(),
+                serde_json::json!({"role": role_as_database(*role), "reason": reason}),
+            )
+        }
+    };
     let transaction = connection.transaction()?;
     let actor_profile = social_profile(&transaction, actor, now)?;
     let target_profile = social_profile(&transaction, target, now)?;
     if actor_profile.account_id == target_profile.account_id {
         return Err(StoreError::SocialSelfTarget);
     }
-    let role_change = matches!(action, ModerationAction::SetRole(_));
-    let authorized = if role_change {
-        actor_profile.role == AccountRole::Admin
-    } else {
-        actor_profile.role.can_moderate(target_profile.role)
-    };
-    if !authorized {
-        return Err(StoreError::SocialForbidden);
+    let staff_audit = prepare_staff_audit(StaffAuditRecord {
+        actor_account_id: actor_profile.account_id,
+        target_account_id: Some(target_profile.account_id),
+        capability: required_capability,
+        action: action_name.to_owned(),
+        reason: reason.clone(),
+        details: details.clone(),
+    })?;
+    if let Err(error) = validate_staff_authority(
+        &transaction,
+        &staff_audit,
+        Some(required_capability),
+        Some(target_profile.account_id),
+    ) {
+        return Err(match error {
+            StoreError::StaffForbidden | StoreError::StaffHierarchy => StoreError::SocialForbidden,
+            error => error,
+        });
     }
 
-    let (action_name, details) = match action {
-        ModerationAction::Mute { expires_at, reason } => {
-            let reason = normalise_social_text(&reason, MAX_SOCIAL_REASON_BYTES)?;
-            validate_expiry(expires_at, now)?;
+    match action {
+        ModerationAction::Mute { expires_at, .. } => {
             revoke_active(
                 &transaction,
                 "moderation_mutes",
@@ -1991,17 +2994,13 @@ fn moderate_character(
                 params![
                     target_profile.account_id.0,
                     actor_profile.account_id.0,
-                    reason,
+                    &reason,
                     now,
                     expires_at
                 ],
             )?;
-            (
-                "mute",
-                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
-            )
         }
-        ModerationAction::Unmute => {
+        ModerationAction::Unmute { .. } => {
             revoke_active(
                 &transaction,
                 "moderation_mutes",
@@ -2009,11 +3008,8 @@ fn moderate_character(
                 actor_profile.account_id,
                 now,
             )?;
-            ("unmute", serde_json::json!({}))
         }
-        ModerationAction::Ban { expires_at, reason } => {
-            let reason = normalise_social_text(&reason, MAX_SOCIAL_REASON_BYTES)?;
-            validate_expiry(expires_at, now)?;
+        ModerationAction::Ban { expires_at, .. } => {
             revoke_active(
                 &transaction,
                 "account_bans",
@@ -2028,7 +3024,7 @@ fn moderate_character(
                 params![
                     target_profile.account_id.0,
                     actor_profile.account_id.0,
-                    reason,
+                    &reason,
                     now,
                     expires_at
                 ],
@@ -2038,12 +3034,8 @@ fn moderate_character(
                  WHERE account_id = ?2",
                 params![now, target_profile.account_id.0],
             )?;
-            (
-                "ban",
-                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
-            )
         }
-        ModerationAction::Unban => {
+        ModerationAction::Unban { .. } => {
             revoke_active(
                 &transaction,
                 "account_bans",
@@ -2051,19 +3043,14 @@ fn moderate_character(
                 actor_profile.account_id,
                 now,
             )?;
-            ("unban", serde_json::json!({}))
         }
-        ModerationAction::SetRole(role) => {
+        ModerationAction::SetRole { role, .. } => {
             transaction.execute(
                 "UPDATE accounts SET role = ?1 WHERE id = ?2",
                 params![role_as_database(role), target_profile.account_id.0],
             )?;
-            (
-                "set_role",
-                serde_json::json!({"role": role_as_database(role)}),
-            )
         }
-    };
+    }
     append_audit(
         &transaction,
         actor_profile.account_id,
@@ -2072,6 +3059,7 @@ fn moderate_character(
         details,
         now,
     )?;
+    insert_staff_audit(&transaction, &staff_audit, now)?;
     transaction.commit()?;
     Ok(())
 }
@@ -2364,6 +3352,25 @@ fn commit_action(
         runtime,
         events,
         DOMAIN_EVENT_RETENTION,
+        None,
+    )
+}
+
+fn commit_staff_action(
+    connection: &mut Connection,
+    characters: &[DurableCharacterSnapshot],
+    runtime: &WorldRuntimeSnapshot,
+    events: &[DomainEvent],
+    audit: StaffAuditRecord,
+    now: i64,
+) -> Result<(), StoreError> {
+    commit_action_with_retention(
+        connection,
+        characters,
+        runtime,
+        events,
+        DOMAIN_EVENT_RETENTION,
+        Some((audit, now)),
     )
 }
 
@@ -2373,6 +3380,7 @@ fn commit_action_with_retention(
     runtime: &WorldRuntimeSnapshot,
     events: &[DomainEvent],
     event_retention: i64,
+    staff_audit: Option<(StaffAuditRecord, i64)>,
 ) -> Result<(), StoreError> {
     debug_assert!(event_retention > 0);
     let gameplay_json = characters
@@ -2409,8 +3417,14 @@ fn commit_action_with_retention(
         .iter()
         .map(|event| bounded_json(event, "domain event", MAX_EVENT_JSON_BYTES))
         .collect::<Result<Vec<_>, _>>()?;
+    let staff_audit = staff_audit
+        .map(|(audit, now)| prepare_staff_audit(audit).map(|audit| (audit, now)))
+        .transpose()?;
 
     let transaction = connection.transaction()?;
+    if let Some((audit, _)) = &staff_audit {
+        validate_staff_authority(&transaction, audit, None, audit.target_account_id)?;
+    }
     for ((snapshot, gameplay_json), adventure_json) in
         characters.iter().zip(gameplay_json).zip(adventure_json)
     {
@@ -2480,6 +3494,9 @@ fn commit_action_with_retention(
            AND sequence <= ?1",
         params![last_event_sequence, event_retention],
     )?;
+    if let Some((audit, now)) = &staff_audit {
+        insert_staff_audit(&transaction, audit, *now)?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -2938,6 +3955,7 @@ mod tests {
                 &runtime,
                 &[test_domain_event()],
                 TEST_RETENTION,
+                None,
             )
             .unwrap();
         }
@@ -3590,6 +4608,158 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn sqlite_report_resolution_binds_the_real_target_and_rejects_a_discordant_audit() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let admin = register_account(
+            &mut connection,
+            "Admin",
+            "correct horse battery staple",
+            1_000,
+        )
+        .unwrap();
+        let reporter = register_account(
+            &mut connection,
+            "Reporter",
+            "another correct horse battery",
+            1_000,
+        )
+        .unwrap();
+        let target = register_account(
+            &mut connection,
+            "Target",
+            "a third correct horse battery",
+            1_000,
+        )
+        .unwrap();
+        let reporter_character =
+            load_or_create_character(&connection, reporter.account.id, "Bryn", "room:start")
+                .unwrap();
+        let target_character =
+            load_or_create_character(&connection, target.account.id, "Cyra", "room:start").unwrap();
+
+        report_character(
+            &mut connection,
+            reporter_character.id,
+            target_character.id,
+            "harassment in public chat",
+            1_100,
+        )
+        .unwrap();
+        let report_id = connection
+            .query_row("SELECT MAX(id) FROM social_reports", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        resolve_staff_report(
+            &mut connection,
+            report_id,
+            StaffReportResolution::ActionTaken,
+            "evidence verified",
+            StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: None,
+                capability: StaffCapability::ReportsResolve,
+                action: "report_resolve".to_owned(),
+                reason: "evidence verified".to_owned(),
+                details: serde_json::json!({"report_id": report_id}),
+            },
+            1_200,
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status, resolution, resolution_reason,
+                            resolved_by_account_id
+                     FROM social_reports WHERE id = ?1",
+                    [report_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "resolved".to_owned(),
+                "action_taken".to_owned(),
+                "evidence verified".to_owned(),
+                admin.account.id.0,
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT target_account_id FROM staff_audit
+                     WHERE action = 'report_resolve'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            target.account.id.0
+        );
+
+        report_character(
+            &mut connection,
+            reporter_character.id,
+            target_character.id,
+            "a second incident",
+            1_300,
+        )
+        .unwrap();
+        let second_report_id = connection
+            .query_row("SELECT MAX(id) FROM social_reports", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        let audit_rows_before = connection
+            .query_row("SELECT COUNT(*) FROM staff_audit", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert!(matches!(
+            resolve_staff_report(
+                &mut connection,
+                second_report_id,
+                StaffReportResolution::Dismissed,
+                "forged target",
+                StaffAuditRecord {
+                    actor_account_id: admin.account.id,
+                    target_account_id: Some(reporter.account.id),
+                    capability: StaffCapability::ReportsResolve,
+                    action: "report_resolve".to_owned(),
+                    reason: "forged target".to_owned(),
+                    details: serde_json::json!({"report_id": second_report_id}),
+                },
+                1_400,
+            ),
+            Err(StoreError::StaffForbidden)
+        ));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM social_reports WHERE id = ?1",
+                    [second_report_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "open"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM staff_audit", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            audit_rows_before
+        );
+    }
+
     #[tokio::test]
     async fn social_policy_roles_bans_and_audit_survive_restart() {
         let directory = tempfile::tempdir().unwrap();
@@ -3679,7 +4849,43 @@ mod tests {
             .moderate_character(
                 admin_character.id,
                 player_character.id,
-                ModerationAction::SetRole(AccountRole::Moderator),
+                ModerationAction::SetRole {
+                    role: AccountRole::Moderator,
+                    reason: "approved moderation assignment".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .moderate_character(
+                    player_character.id,
+                    third_character.id,
+                    ModerationAction::Mute {
+                        expires_at: None,
+                        reason: "legacy role is not authority".into(),
+                    },
+                )
+                .await,
+            Err(StoreError::SocialForbidden)
+        ));
+        store
+            .set_staff_profile(
+                player.account.id,
+                Some(StaffProfileKey::Moderator),
+                None,
+                StaffAuditRecord {
+                    actor_account_id: admin.account.id,
+                    target_account_id: Some(player.account.id),
+                    capability: StaffCapability::StaffAssign,
+                    action: "staff_profile_set".into(),
+                    reason: "approved moderation assignment".into(),
+                    details: serde_json::json!({
+                        "actor_name": "Aster",
+                        "target_name": "Bryn",
+                        "profile": "moderator",
+                    }),
+                },
             )
             .await
             .unwrap();
@@ -3778,6 +4984,201 @@ mod tests {
                 .unwrap(),
             "harassment in public chat"
         );
+    }
+
+    #[test]
+    fn staff_authority_reports_and_audit_are_closed_bounded_and_hierarchical() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let admin = finish_register_account(&mut connection, "Admin", "hash", 1_000).unwrap();
+        let reporter = finish_register_account(&mut connection, "Reporter", "hash", 1_001).unwrap();
+        let target = finish_register_account(&mut connection, "Target", "hash", 1_002).unwrap();
+        let admin_character =
+            load_or_create_character(&connection, admin.account.id, "Aster", "room:start").unwrap();
+        let reporter_character =
+            load_or_create_character(&connection, reporter.account.id, "Bryn", "room:start")
+                .unwrap();
+        let target_character =
+            load_or_create_character(&connection, target.account.id, "Cyra", "room:start").unwrap();
+
+        let access = staff_access(&connection, admin_character.id).unwrap();
+        assert_eq!(access.profile, Some(StaffProfileKey::Implementor));
+        assert_eq!(
+            access.capabilities,
+            StaffCapability::ALL.into_iter().collect()
+        );
+
+        for sequence in 0..12 {
+            report_character(
+                &mut connection,
+                reporter_character.id,
+                target_character.id,
+                &format!("report {sequence}"),
+                1_100 + sequence,
+            )
+            .unwrap();
+        }
+        report_character(
+            &mut connection,
+            reporter_character.id,
+            admin_character.id,
+            "report targeting equal staff authority",
+            1_200,
+        )
+        .unwrap();
+        let reports = staff_reports(
+            &mut connection,
+            StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: None,
+                capability: StaffCapability::ReportsView,
+                action: "reports.list".into(),
+                reason: "review open reports".into(),
+                details: serde_json::json!({}),
+            },
+            1_201,
+        )
+        .unwrap();
+        assert_eq!(reports.len(), usize::try_from(STAFF_LIST_LIMIT).unwrap());
+        assert!(
+            reports
+                .iter()
+                .all(|report| report.target_account_id == target.account.id)
+        );
+
+        let report_id = reports[0].id;
+        resolve_staff_report(
+            &mut connection,
+            report_id,
+            StaffReportResolution::ActionTaken,
+            "moderation action recorded",
+            StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: None,
+                capability: StaffCapability::ReportsResolve,
+                action: "reports.resolve".into(),
+                reason: "review completed".into(),
+                details: serde_json::json!({"report_id": report_id}),
+            },
+            1_202,
+        )
+        .unwrap();
+        let resolution: (String, String, String, i64) = connection
+            .query_row(
+                "SELECT status, resolution, resolution_reason, resolved_by_account_id
+                 FROM social_reports WHERE id = ?1",
+                [report_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            resolution,
+            (
+                "resolved".into(),
+                "action_taken".into(),
+                "moderation action recorded".into(),
+                admin.account.id.0,
+            )
+        );
+
+        connection
+            .execute(
+                "INSERT INTO staff_profiles
+                     (account_id, profile_key, lore_title, assigned_by_account_id,
+                      created_at, updated_at)
+                 VALUES (?1, 'builder', NULL, ?2, 1202, 1202)",
+                params![reporter.account.id.0, admin.account.id.0],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO staff_capability_assignments
+                     (account_id, capability, assigned_by_account_id, created_at)
+                 VALUES (?1, 'staff.where', ?2, 1202)",
+                params![reporter.account.id.0, admin.account.id.0],
+            )
+            .unwrap();
+
+        set_staff_profile(
+            &mut connection,
+            reporter.account.id,
+            Some(StaffProfileKey::Moderator),
+            Some("Custodio de la plaza"),
+            StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: Some(reporter.account.id),
+                capability: StaffCapability::StaffAssign,
+                action: "staff.profile.set".into(),
+                reason: "approved moderator assignment".into(),
+                details: serde_json::json!({"profile": "moderator"}),
+            },
+            1_203,
+        )
+        .unwrap();
+        let reporter_access = staff_access(&connection, reporter_character.id).unwrap();
+        assert_eq!(reporter_access.profile, Some(StaffProfileKey::Moderator));
+        assert_eq!(
+            reporter_access.capabilities,
+            StaffProfileKey::Moderator
+                .default_capabilities()
+                .iter()
+                .copied()
+                .collect()
+        );
+
+        assert!(matches!(
+            set_staff_profile(
+                &mut connection,
+                target.account.id,
+                Some(StaffProfileKey::Implementor),
+                None,
+                StaffAuditRecord {
+                    actor_account_id: admin.account.id,
+                    target_account_id: Some(target.account.id),
+                    capability: StaffCapability::StaffAssign,
+                    action: "staff.profile.set".into(),
+                    reason: "attempt equal profile".into(),
+                    details: serde_json::json!({}),
+                },
+                1_204,
+            ),
+            Err(StoreError::StaffHierarchy)
+        ));
+        assert!(matches!(
+            set_staff_capability(
+                &mut connection,
+                target.account.id,
+                StaffCapability::StaffWhere,
+                true,
+                StaffAuditRecord {
+                    actor_account_id: reporter.account.id,
+                    target_account_id: Some(target.account.id),
+                    capability: StaffCapability::StaffAssign,
+                    action: "staff.capability.set".into(),
+                    reason: "attempt without assignment authority".into(),
+                    details: serde_json::json!({"capability": "staff.where"}),
+                },
+                1_205,
+            ),
+            Err(StoreError::StaffForbidden)
+        ));
+
+        let audit = staff_audit_entries(
+            &mut connection,
+            StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: None,
+                capability: StaffCapability::StaffAudit,
+                action: "staff.audit.list".into(),
+                reason: "bounded audit review".into(),
+                details: serde_json::json!({}),
+            },
+            1_206,
+        )
+        .unwrap();
+        assert!(!audit.is_empty());
+        assert!(audit.len() <= usize::try_from(STAFF_LIST_LIMIT).unwrap());
+        assert!(audit.iter().all(|entry| entry.sequence > 0));
     }
 
     #[tokio::test]

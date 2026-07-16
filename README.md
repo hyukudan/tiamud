@@ -43,8 +43,12 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   tiempos de reutilización y estados están acotados.
 - **Grupos y conversación:** `say` local, `tell` y `reply` en línea, chat de
   grupo, liderazgo completo y canales suscritos `general`, `newbie` y `staff`.
-  `staff` exige rol Moderator/Admin. Navegador, Telnet y GMCP comparten la misma
-  política social.
+  `staff` exige perfil `moderator`, `administrator` o `implementor`. Navegador,
+  Telnet y GMCP comparten la misma política social.
+- **Staff por capacidades:** cinco perfiles operativos, doce capacidades
+  cerradas, cola y resolución de reportes, acciones de diagnóstico/reparación
+  del mundo y auditoría append-only. El perfil puede añadir un título narrativo,
+  pero ni ese título ni XP, clase, WorldPack o el rol legado autorizan comandos.
 - **Una ruta autoritativa:** navegador y Telnet producen las mismas
   `PlayerAction`, pasan por las mismas reglas y mutan un único actor de mundo.
 - **Clientes web y terminal:** Svelte 5 adaptable; Telnet plano/ANSI; GMCP,
@@ -135,6 +139,15 @@ say / tell / reply         who / help / ignore / block
 channels                   channel join / leave <canal>
 channel say <canal> <texto>  gossip / newbie / wiznet <texto>
 balance / shop / buy ...
+staff
+staff status                staff reports <motivo>
+staff resolve <id> <dismissed|action_taken|no_action> <motivo>
+staff inspect <nombre> | <motivo>   staff where <nombre> | <motivo>
+staff goto <nombre> | <motivo>      staff transfer <nombre> | <motivo>
+staff restore <nombre> | <motivo>   staff announce <texto> | <motivo>
+staff audit <motivo>
+staff profile <nombre> <helper|builder|moderator|administrator|implementor|none> <título|none> | <motivo>
+staff capability <grant|revoke> <nombre> <capacidad> | <motivo>
 ```
 
 ## Despliegue en un único equipo
@@ -167,10 +180,19 @@ SQLite a PostgreSQL es una operación sin conexión, no replicación. Los datos
 consultables siguen siendo relacionales; las instantáneas JSON acotadas se
 guardan como texto opaco porque el servidor no consulta su interior.
 
-Ambos adaptadores usan actualmente el **esquema v9**. La migración v8→v9 añade
-la tabla relacional de suscripciones a `general`, `newbie` y `staff`; el
-traslado SQLite→PostgreSQL también la copia. La evidencia PostgreSQL v8
-retenida sigue siendo evidencia de v8 y no se presenta como aceptación v9.
+Ambos adaptadores implementan actualmente el **esquema v10**. La migración
+v9→v10 añade perfiles, asignaciones de capacidades, resolución cerrada de
+reportes y auditoría de staff append-only; conserva las suscripciones v9. El
+traslado SQLite→PostgreSQL copia también estas relaciones. La evidencia real
+PostgreSQL retenida acredita v8: todavía no existe una aceptación PostgreSQL
+v10 contra un servidor real.
+
+Si una instalación pierde toda autoridad administrativa, la recuperación
+offline documentada no se limita al rol legado: `tiamud-admin recover-admin`
+instala un `implementor` con exactamente las doce capacidades y ambas
+auditorías en una transacción. Se niega si ya existe un perfil
+`administrator`/`implementor`; el procedimiento SQLite y su equivalente
+PostgreSQL están en la [guía de operación](docs/operations/single-host.md#emergency-implementor-recovery).
 
 `/health/live` y `/health/ready` exponen salud. `/metrics` ofrece Prometheus en
 el mismo punto de escucha, ligado por defecto a bucle local; la configuración
@@ -243,8 +265,8 @@ implementado de la hoja de ruta.
 | --- | --- | --- |
 | Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`. | Correo e historial durable, shout/yell espacial, emotes, tablones y telepatía definida por el mundo. `tell` no es telepatía. |
 | Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos, elegibilidad y reparto de botín. |
-| Canales | Suscripción persistente en SQLite/PostgreSQL v9; `staff` exige Moderator/Admin al unirse, enviar y recibir; rate limit, mute, ignore/block y buzones acotados. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
-| Staff | Roles `Player`, `Moderator`, `Admin`; report, mute/unmute, ban/unban y asignación Admin de roles con auditoría durable. | Perfiles de capacidades granulares, títulos Angel/Semidiós/Dios, inspect/goto/transfer/restore/announce y OLC seguro. La autoridad nunca se obtiene por XP. |
+| Canales | Suscripción persistente en SQLite/PostgreSQL v10; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
+| Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Fases de inventario/botín 3–4. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
 | Inventario | Objetos únicos durables, take/drop/use, tres slots, consumibles y efectos acotados. | Prototipos/instancias repetibles, pilas, peso/capacidad, contenedores, give/trade, durabilidad, afijos, nivel y rareza/tier. |
 | Botín | Un NPC posee IDs únicos fijos y los transfiere al ser derrotado; RNG persistente y seguro ante reinicio. | Tablas ponderadas, cantidades, tiradas de rareza, derechos de grupo, protección de duplicados y contenedores aleatorios. |
 
@@ -263,17 +285,21 @@ La autoridad administrativa permanece separada de la progresión:
 ```mermaid
 flowchart LR
     accTitle: Progresión del personaje y autoridad de staff separadas
-    accDescr: La experiencia mejora el personaje jugable. Un administrador asigna por separado un rol o futuras capacidades de staff; las acciones sensibles dejan auditoría y nunca se obtienen jugando.
+    accDescr: La experiencia mejora el personaje jugable. Una designación separada asigna perfil y capacidades concretas; el título narrativo y el rol legado no autorizan comandos. Las acciones sensibles dejan auditoría y nunca se obtienen jugando.
 
     XP[XP de juego] --> Level[Nivel]
     Level --> Talents[Talentos y promoción]
     Talents --> Play[Poder jugable]
 
-    Appointment[Designación administrativa] --> Role[Rol actual]
-    Role --> Moderation[Moderación autorizada]
-    Future[Perfiles de capacidades<br/>pendientes] -.-> StaffActions[Comandos staff futuros]
-    Moderation --> Audit[(Auditoría durable)]
-    StaffActions -.-> Audit
+    Appointment[Designación administrativa] --> Profile[Perfil operativo]
+    Profile --> Capability[Capacidad concreta]
+    Appointment --> Capability
+    Capability --> StaffActions[Comando staff autorizado]
+    Appointment --> Lore[Título narrativo opcional]
+    Legacy[Rol legado] --> Perception[Tier de moderación y percepción]
+    Profile --> StaffChannel[Acceso al canal staff si moderator o superior]
+    Capability --> Audit[(Auditoría durable)]
+    StaffActions --> Audit
 ```
 
 ## Escenas y multimedia
@@ -404,6 +430,14 @@ ejecución combinada tuvo un flake Firefox que pasó al repetir; no se oculta.
 No se ejecutó PostgreSQL real v9. El detalle está en el
 [registro de fase social 1](docs/project/log/2026-07-16-social-phase-1-and-schema-v9.md).
 
+La fase staff 2 y el esquema v10 superan las pruebas bloqueadas de todo el
+workspace, clippy estricto, formato, 183 pruebas de servidor, 100 pruebas web,
+check/build y 30/30 escenarios Playwright soportados (15 Chromium y 15
+Firefox). WebKit sigue sin arrancar en este host por dependencias del sistema y
+no se ejecutó una aceptación PostgreSQL real v10. El contrato, los comandos y
+la evidencia exacta están en el
+[registro de fase staff 2](docs/project/log/2026-07-16-staff-capabilities-phase-2.md).
+
 Una prueba corta de carga no sustituye al soak de 24 horas. WebKit no arranca
 en el host local actual por bibliotecas GTK/GStreamer/medios ausentes; eso no
 es un pase ni un fallo de aplicación.
@@ -425,8 +459,8 @@ Siguientes líneas técnicas y de producto:
 
 - diseñar telepatía como habilidad de autoría, no renombrar `tell`;
 - añadir correo/historial/emotes solo con retención y moderación explícitas;
-- introducir perfiles de staff por capacidades y una superficie pequeña,
-  reversible y auditada; la XP nunca concede autoridad;
+- consolidar la superficie de staff por capacidades ya implementada, sin
+  convertir roles, títulos narrativos, XP o WorldPack en autoridad;
 - separar prototipos de instancias antes de pilas, contenedores, comercio,
   tiers/rareza y tablas de botín;
 - mantener fuera del baseline las cajas de botín pagadas;

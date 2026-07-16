@@ -1009,6 +1009,12 @@ fn public_error(error: &GameError) -> String {
         GameError::Persistence(StoreError::SocialForbidden) => {
             "Your account is not authorized for that social action.".to_owned()
         }
+        GameError::Persistence(StoreError::StaffForbidden | StoreError::StaffHierarchy) => {
+            "Your account is not authorized for that staff action.".to_owned()
+        }
+        GameError::Persistence(StoreError::StaffReportUnavailable(_)) => {
+            "That report is not available for resolution.".to_owned()
+        }
         GameError::Persistence(StoreError::ChatMuted) => {
             "You cannot send chat while your account is muted.".to_owned()
         }
@@ -1017,6 +1023,9 @@ fn public_error(error: &GameError) -> String {
         }
         GameError::Persistence(StoreError::InvalidSocialInput) => {
             "The social action is invalid or rate limited.".to_owned()
+        }
+        GameError::Persistence(StoreError::InvalidStaffInput) => {
+            "The staff action is invalid or exceeds its limits.".to_owned()
         }
         GameError::Persistence(
             StoreError::InvalidSession | StoreError::SessionExpired | StoreError::SessionRevoked,
@@ -1222,10 +1231,19 @@ fn output_queue_bytes(output: &TelnetOutputQueue, bytes: Vec<u8>) -> io::Result<
     output.bytes(OutputPriority::Interactive, bytes)
 }
 
-const SOCIAL_CHANNEL_NAMES: [&str; 6] = ["say", "tell", "party", "general", "newbie", "staff"];
+const SOCIAL_CHANNEL_NAMES: [&str; 7] = [
+    "announcement",
+    "say",
+    "tell",
+    "party",
+    "general",
+    "newbie",
+    "staff",
+];
 
 fn social_channel_name(channel: SocialChannel) -> &'static str {
     match channel {
+        SocialChannel::Announcement => "announcement",
         SocialChannel::Say => "say",
         SocialChannel::Tell => "tell",
         SocialChannel::Party => "party",
@@ -3297,7 +3315,7 @@ mod tests {
             .expect("Comm support must advertise the complete channel list");
         assert_eq!(
             String::from_utf8(channel_list.clone()).unwrap(),
-            r#"Comm.Channel.List {"channels":["say","tell","party","general","newbie","staff"]}"#
+            r#"Comm.Channel.List {"channels":["announcement","say","tell","party","general","newbie","staff"]}"#
         );
         assert!(
             payloads
@@ -3598,8 +3616,9 @@ mod tests {
     }
 
     #[test]
-    fn telnet_social_text_names_all_six_channels() {
+    fn telnet_social_text_names_all_seven_channels() {
         let cases = [
+            (SocialChannel::Announcement, "announcement"),
             (SocialChannel::Say, "say"),
             (SocialChannel::Tell, "tell"),
             (SocialChannel::Party, "party"),
@@ -3632,7 +3651,7 @@ mod tests {
     }
 
     #[test]
-    fn gmcp_social_delivery_is_bounded_for_all_six_channels() {
+    fn gmcp_social_delivery_is_bounded_for_all_seven_channels() {
         let mut session = TelnetSession::default();
         session.begin_initial_negotiation();
         session.handle(vec![TelnetEvent::Negotiation {
@@ -3645,6 +3664,7 @@ mod tests {
         }]);
 
         let cases = [
+            (SocialChannel::Announcement, "announcement"),
             (SocialChannel::Say, "say"),
             (SocialChannel::Tell, "tell"),
             (SocialChannel::Party, "party"),

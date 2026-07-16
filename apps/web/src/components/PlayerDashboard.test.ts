@@ -163,5 +163,7 @@ describe('PlayerDashboard', () => {
     }
     expect(dashboardSource).toContain('{ channel: communityChannel, message }');
     expect(dashboardSource).toContain('{ target }');
+    expect(dashboardSource).toContain('<option value="staff">');
+    expect(dashboardSource).not.toContain('<option value="announcement">');
   });
 });

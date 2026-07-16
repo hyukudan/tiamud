@@ -59,7 +59,24 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
              INSERT INTO moderation_audit
                  (sequence, actor_account_id, target_account_id, action,
                   details_json, created_at)
-             VALUES (3, 1, 2, 'role.set', '{}', 1000);",
+             VALUES (3, 1, 2, 'role.set', '{}', 1000);
+             INSERT INTO staff_profiles
+                 (account_id, profile_key, lore_title, assigned_by_account_id,
+                  created_at, updated_at)
+             VALUES (1, 'administrator', 'Keeper of Lanterns', 1, 900, 950);
+             INSERT INTO staff_capability_assignments
+                 (account_id, capability, assigned_by_account_id, created_at)
+             VALUES (1, 'reports.resolve', 1, 900);
+             INSERT INTO social_reports
+                 (id, reporter_character_id, target_character_id, reason, created_at,
+                  status, resolution, resolution_reason, resolved_by_account_id, resolved_at)
+             VALUES (20, 11, 10, 'Repeated harassment', 910, 'resolved', 'action_taken',
+                     'Reviewed and moderated', 1, 960);
+             INSERT INTO staff_audit
+                 (sequence, actor_account_id, target_account_id, capability, action,
+                  reason, details_json, created_at)
+             VALUES (5, 1, 2, 'reports.resolve', 'report.resolve',
+                     'Reviewed report', '{\"reportId\":20}', 960);",
         )
         .unwrap();
     let gameplay_json = r#"{"lineageId":"tiamud:mortal","backgroundId":"tiamud:city-guard","baseClassId":"tiamud:vanguard","activeClassId":"tiamud:bastion","classHistory":["tiamud:vanguard","tiamud:bastion"],"progressionPoints":{"talent":0},"talentNodeRanks":{"tiamud:martial-talents":{"tiamud:guarded-stance":1}},"tags":["tiamud:founder"],"receivedSignals":["tiamud:heard-call"]}"#;
@@ -73,7 +90,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     let report =
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres).unwrap();
-    assert_eq!(report.total_rows, 11);
+    assert_eq!(report.total_rows, 15);
     assert_eq!(
         postgres
             .query_one("SELECT COUNT(*)::BIGINT FROM characters", &[])
@@ -122,7 +139,36 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 9, to: 9 }
+        tiamud_persistence_postgres::MigrationReport { from: 10, to: 10 }
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT profile_key, lore_title FROM staff_profiles WHERE account_id = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, String>(0),
+        "administrator"
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT resolution_reason FROM social_reports WHERE id = 20",
+                &[],
+            )
+            .unwrap()
+            .get::<_, String>(0),
+        "Reviewed and moderated"
+    );
+    assert!(
+        postgres
+            .execute(
+                "UPDATE staff_audit SET reason = 'rewritten' WHERE sequence = 5",
+                &[],
+            )
+            .is_err(),
+        "staff audit must reject mutation"
     );
     assert_eq!(
         postgres
@@ -146,17 +192,36 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             "DROP TABLE character_adventure;
              DROP TABLE world_adventure;
              DROP TABLE social_channel_subscriptions;
+             DROP TABLE staff_audit;
+             DROP TABLE staff_capability_assignments;
+             DROP TABLE staff_profiles;
+             DROP FUNCTION tiamud_reject_staff_audit_mutation();
+             UPDATE social_reports SET status = 'open';
+             ALTER TABLE social_reports
+                 DROP CONSTRAINT social_reports_status_check,
+                 DROP COLUMN resolution CASCADE,
+                 DROP COLUMN resolution_reason CASCADE,
+                 DROP COLUMN resolved_by_account_id CASCADE,
+                 DROP COLUMN resolved_at CASCADE,
+                 ADD CONSTRAINT social_reports_status_check
+                     CHECK (status IN ('open', 'reviewing', 'closed'));
              ALTER TABLE world_runtime DROP COLUMN last_event_sequence;
              UPDATE tiamud_schema SET version = 6 WHERE singleton = 1",
         )
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 9 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 10 }
     );
     assert!(
         postgres
             .query_one("SELECT to_regclass('character_adventure') IS NOT NULL", &[])
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+    assert!(
+        postgres
+            .query_one("SELECT to_regclass('staff_profiles') IS NOT NULL", &[])
             .unwrap()
             .get::<_, bool>(0)
     );

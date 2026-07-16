@@ -36,10 +36,12 @@ PostgreSQL se recomienda para instalaciones públicas nuevas; SQLite es la
 alternativa local sin servicio. Se selecciona uno y nunca se hace doble
 escritura.
 
-Ambos adaptadores usan el esquema v9. La migración aditiva v8→v9 incorpora
-suscripciones durables al conjunto cerrado `general`, `newbie`, `staff`; el
-traslado SQLite→PostgreSQL copia la relación. La aceptación PostgreSQL v8
-retenida precede esta migración y no se relabela como aceptación v9.
+Ambos adaptadores implementan el esquema v10. Conserva las suscripciones
+durables v9 y añade perfiles/capacidades de staff, resolución cerrada de
+reportes y auditoría append-only. El traslado SQLite→PostgreSQL copia estas
+relaciones en una transacción. La aceptación PostgreSQL real retenida es v8;
+no se relabela como aceptación v10 y aún falta ejecutar v10 contra un servidor
+PostgreSQL real.
 
 La operación está en [single-host.md](operations/single-host.md). Microservicios
 y orquestación no son objetivo sin carga medida que lo justifique.
@@ -141,19 +143,64 @@ create/invite/accept/revoke/kick/transfer/disband/leave/status y ofrecen
 `party say`, `gsay`, `gtell`.
 
 `general`, `newbie`, `staff` exigen suscripción durable. Unirse, enviar y
-recibir `staff` requiere rol Moderator/Admin. La membresía del grupo sobrevive
-a la desconexión, pero accept/revoke/kick/transfer resuelven un nombre conectado
-y no administran un objetivo offline.
+recibir `staff` requiere perfil `moderator`, `administrator` o `implementor`;
+`helper` y `builder` no acceden. La membresía del grupo sobrevive a la
+desconexión, pero accept/revoke/kick/transfer resuelven un nombre conectado y no
+administran un objetivo offline.
 
 La misma política, rate limit, mute, ignore/block y buzones por sesión sirve a
 acciones web, comandos Telnet y `Comm.Channel.Text` GMCP. No existen correo o
 historial durable, shout/yell espacial, telepatía authored, follow/assist/
 rescue, selección general de aliados, XP/misión compartida ni reparto de botín.
 
-La autoridad de cuenta es independiente de la ficha. Los roles cerrados son
-Player, Moderator, Admin; se asignan y nunca se ganan por XP, nivel, clase o
-talentos. Moderación/cambios son durables y auditados. Títulos Angel/Semidiós/
-Dios, perfiles granulares y comandos generales wizard siguen pendientes.
+La autoridad ejecutable de staff es independiente de la ficha y usa una de
+doce capacidades cerradas: `reports.view`, `reports.resolve`,
+`moderation.mute`, `moderation.ban`, `staff.assign`, `staff.inspect`,
+`staff.where`, `staff.goto`, `staff.transfer`, `staff.restore`,
+`staff.announce`, `staff.audit`. Nunca se obtiene por XP, nivel, clase,
+talentos o WorldPack.
+
+Los perfiles operativos cerrados son `helper`, `builder`, `moderator`,
+`administrator`, `implementor`. Siembran bundles revisados de capacidades y
+pueden llevar un `lore_title` opcional; perfil y título no sustituyen la
+comprobación de capacidad. Los roles `Player`, `Moderator`, `Admin` se
+conservan solo como tier legado para moderación y percepción: por sí solos
+nunca autorizan un comando ni abren el canal `staff`. Ese canal requiere perfil
+`moderator`, `administrator` o `implementor`; `helper` y `builder` no acceden.
+La primera cuenta registrada recibe `implementor`; las cuentas Admin migradas
+reciben `administrator`. Cambiar perfil elimina las asignaciones anteriores y
+siembra exactamente el bundle del perfil nuevo. La jerarquía impide actuar
+sobre la propia cuenta o un rango igual/superior.
+
+La fase 2 implementa cola de reportes y resolución `dismissed`,
+`action_taken` o `no_action`; `inspect`, `where`, `goto`, `transfer`,
+`restore`, `announce`, consulta de auditoría y asignación explícita de
+perfil/capacidad. Todas exigen motivo. Las acciones que tocan el mundo resuelven
+un personaje conectado; asignaciones y reportes usan identidad durable. Las
+mutaciones sensibles y su auditoría se confirman atómicamente, y `staff_audit`
+rechaza actualización y borrado.
+
+Sintaxis textual normativa de fase 2:
+
+```text
+staff
+staff status
+staff reports <motivo>
+staff resolve <id> <dismissed|action_taken|no_action> <motivo>
+staff inspect <nombre> | <motivo>
+staff where <nombre> | <motivo>
+staff goto <nombre> | <motivo>
+staff transfer <nombre> | <motivo>
+staff restore <nombre> | <motivo>
+staff announce <texto> | <motivo>
+staff audit <motivo>
+staff profile <nombre> <helper|builder|moderator|administrator|implementor|none> <título|none> | <motivo>
+staff capability <grant|revoke> <nombre> <capacidad> | <motivo>
+```
+
+Web expone acciones estructuradas estrictas equivalentes. Telnet usa el mismo
+analizador; los anuncios llegan como `announcement` en texto, Web
+`chat.message` y GMCP `Comm.Channel.Text`.
 
 Los IDs de objeto describen objetos únicos con ubicación autoritativa. Los NPC
 poseen botín fijo validado y lo transfieren al morir. No hay split prototipo/
@@ -247,7 +294,8 @@ secuencia ni se infieren de prosa. Referencia:
 | Perfil de sprite transparente | WebP alfa + PNG implementado |
 | Sidecar de entidades seguro | Implementado; sin sprites de muestra |
 | Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
-| Social fase 1 y esquema v9 | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL v9 completa aún no retenida |
+| Social fase 1 y esquema v10 | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v10 aún no retenida |
+| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; gates integrados aún no registrados aquí |
 | Protocolo atómico de delta denso | Pendiente |
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación

@@ -1,7 +1,7 @@
 use crate::{
     persistence::{
         CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, ModerationAction,
-        SocialRelationKind, StoreError,
+        SocialRelationKind, StaffAccess, StoreError,
     },
     world_actor::GameError,
 };
@@ -11,8 +11,8 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tiamud_core::{
-    AccountId, AccountRole, CharacterId, ConnectedCharacter, SessionId, SocialAction,
-    SocialChannelName, World,
+    AccountId, CharacterId, ConnectedCharacter, SessionId, SocialAction, SocialChannelName,
+    StaffCapability, StaffProfileKey, World,
 };
 
 pub const MAX_CHAT_MESSAGE_BYTES: usize = 512;
@@ -25,6 +25,7 @@ pub const MAX_MODERATION_DURATION_SECONDS: u64 = 365 * 24 * 60 * 60;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SocialChannel {
+    Announcement,
     Say,
     Tell,
     Party,
@@ -83,7 +84,7 @@ pub struct PlannedSocialDelivery {
 pub struct AppliedSocial {
     pub outcome: SocialOutcome,
     pub deliveries: Vec<PlannedSocialDelivery>,
-    pub role_update: Option<(AccountId, AccountRole)>,
+    pub authority_update: Option<AccountId>,
 }
 
 impl SocialRuntime {
@@ -129,13 +130,13 @@ pub async fn apply_social(
     world: &mut World,
     store: &dyn CharacterStore,
     session: SessionId,
-    actor_role: AccountRole,
-    session_roles: &HashMap<SessionId, AccountRole>,
+    actor_access: &StaffAccess,
+    session_accesses: &HashMap<SessionId, StaffAccess>,
     action: SocialAction,
 ) -> Result<AppliedSocial, GameError> {
     let actor = world.character_snapshot(session)?;
     let mut deliveries = Vec::new();
-    let mut role_update = None;
+    let mut authority_update = None;
     let outcome = match action {
         SocialAction::Say(message) => {
             let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
@@ -253,7 +254,7 @@ pub async fn apply_social(
             let lines = SocialChannelName::ALL
                 .into_iter()
                 .map(|channel| {
-                    let state = if !channel_allowed(actor_role, channel) {
+                    let state = if !channel_allowed(Some(actor_access), channel) {
                         "unavailable"
                     } else if joined.contains(&channel) {
                         "joined"
@@ -269,7 +270,7 @@ pub async fn apply_social(
             })
         }
         SocialAction::ChannelJoin(channel) => {
-            ensure_channel_allowed(actor_role, channel)?;
+            ensure_channel_allowed(actor_access, channel)?;
             store
                 .set_social_channel_subscription(actor.id, channel, true)
                 .await?;
@@ -286,7 +287,7 @@ pub async fn apply_social(
             })
         }
         SocialAction::ChannelSay { channel, message } => {
-            ensure_channel_allowed(actor_role, channel)?;
+            ensure_channel_allowed(actor_access, channel)?;
             let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
             ensure_chat_allowed(runtime, store, actor.id).await?;
             let joined = store.social_channel_subscriptions(actor.id).await?;
@@ -302,13 +303,7 @@ pub async fn apply_social(
             let recipients = connected.iter().filter(|candidate| {
                 candidate.character_id != actor.id
                     && subscribers.contains(&candidate.character_id)
-                    && channel_allowed(
-                        session_roles
-                            .get(&candidate.session_id)
-                            .copied()
-                            .unwrap_or(AccountRole::Player),
-                        channel,
-                    )
+                    && channel_allowed(session_accesses.get(&candidate.session_id), channel)
             });
             plan_allowed(
                 &mut deliveries,
@@ -417,6 +412,7 @@ pub async fn apply_social(
                 world,
                 store,
                 actor.id,
+                actor_access,
                 &target,
                 duration_seconds,
                 reason,
@@ -434,6 +430,7 @@ pub async fn apply_social(
                 world,
                 store,
                 actor.id,
+                actor_access,
                 &target,
                 duration_seconds,
                 reason,
@@ -441,18 +438,34 @@ pub async fn apply_social(
             )
             .await
         }
-        SocialAction::Unmute(target) => remove_moderation(store, actor.id, &target, false).await,
-        SocialAction::Unban(target) => remove_moderation(store, actor.id, &target, true).await,
-        SocialAction::SetRole { target, role } => {
+        SocialAction::Unmute { target, reason } => {
+            remove_moderation(store, actor.id, actor_access, &target, reason, false).await
+        }
+        SocialAction::Unban { target, reason } => {
+            remove_moderation(store, actor.id, actor_access, &target, reason, true).await
+        }
+        SocialAction::SetRole {
+            target,
+            role,
+            reason,
+        } => {
+            let reason = normalise_text(&reason, MAX_SOCIAL_REASON_BYTES)?;
             let target = store.social_target(&target).await?;
+            authorize_staff_target(
+                store,
+                actor_access,
+                target.character_id,
+                StaffCapability::StaffAssign,
+            )
+            .await?;
             store
                 .moderate_character(
                     actor.id,
                     target.character_id,
-                    ModerationAction::SetRole(role),
+                    ModerationAction::SetRole { role, reason },
                 )
                 .await?;
-            role_update = Some((target.account_id, role));
+            authority_update = Some(target.account_id);
             Ok(SocialOutcome {
                 output: format!("{} now has the {role:?} role.\r\n", target.character_name),
             })
@@ -461,7 +474,7 @@ pub async fn apply_social(
     Ok(AppliedSocial {
         outcome,
         deliveries,
-        role_update,
+        authority_update,
     })
 }
 
@@ -488,6 +501,7 @@ async fn apply_moderation(
     world: &mut World,
     store: &dyn CharacterStore,
     actor: CharacterId,
+    actor_access: &StaffAccess,
     target_name: &str,
     duration_seconds: Option<u64>,
     reason: String,
@@ -496,6 +510,12 @@ async fn apply_moderation(
     let reason = normalise_text(&reason, MAX_SOCIAL_REASON_BYTES)?;
     let expires_at = moderation_expiry(duration_seconds)?;
     let target = store.social_target(target_name).await?;
+    let capability = if is_ban {
+        StaffCapability::ModerationBan
+    } else {
+        StaffCapability::ModerationMute
+    };
+    authorize_staff_target(store, actor_access, target.character_id, capability).await?;
     let moderation = if is_ban {
         ModerationAction::Ban { expires_at, reason }
     } else {
@@ -524,18 +544,27 @@ async fn apply_moderation(
 async fn remove_moderation(
     store: &dyn CharacterStore,
     actor: CharacterId,
+    actor_access: &StaffAccess,
     target_name: &str,
+    reason: String,
     is_unban: bool,
 ) -> Result<SocialOutcome, GameError> {
+    let reason = normalise_text(&reason, MAX_SOCIAL_REASON_BYTES)?;
     let target = store.social_target(target_name).await?;
+    let capability = if is_unban {
+        StaffCapability::ModerationBan
+    } else {
+        StaffCapability::ModerationMute
+    };
+    authorize_staff_target(store, actor_access, target.character_id, capability).await?;
     store
         .moderate_character(
             actor,
             target.character_id,
             if is_unban {
-                ModerationAction::Unban
+                ModerationAction::Unban { reason }
             } else {
-                ModerationAction::Unmute
+                ModerationAction::Unmute { reason }
             },
         )
         .await?;
@@ -611,14 +640,52 @@ fn resolve_connected_id(
         .ok_or(StoreError::SocialTargetNotFound)
 }
 
-fn channel_allowed(role: AccountRole, channel: SocialChannelName) -> bool {
-    channel != SocialChannelName::Staff || role >= AccountRole::Moderator
+fn channel_allowed(access: Option<&StaffAccess>, channel: SocialChannelName) -> bool {
+    channel != SocialChannelName::Staff
+        || access.is_some_and(|access| {
+            matches!(
+                access.profile,
+                Some(
+                    StaffProfileKey::Moderator
+                        | StaffProfileKey::Administrator
+                        | StaffProfileKey::Implementor
+                )
+            )
+        })
 }
 
-fn ensure_channel_allowed(role: AccountRole, channel: SocialChannelName) -> Result<(), StoreError> {
-    channel_allowed(role, channel)
+fn ensure_channel_allowed(
+    access: &StaffAccess,
+    channel: SocialChannelName,
+) -> Result<(), StoreError> {
+    channel_allowed(Some(access), channel)
         .then_some(())
         .ok_or(StoreError::SocialForbidden)
+}
+
+async fn authorize_staff_target(
+    store: &dyn CharacterStore,
+    actor: &StaffAccess,
+    target: CharacterId,
+    capability: StaffCapability,
+) -> Result<(), StoreError> {
+    if !actor.capabilities.contains(&capability) {
+        return Err(StoreError::SocialForbidden);
+    }
+    let target = store.staff_access(target).await?;
+    let actor_rank = actor
+        .profile
+        .map(StaffProfileKey::authority_rank)
+        .unwrap_or(0);
+    let target_rank = target
+        .profile
+        .map(StaffProfileKey::authority_rank)
+        .unwrap_or(0);
+    if actor.account_id == target.account_id || actor_rank <= target_rank {
+        Err(StoreError::SocialForbidden)
+    } else {
+        Ok(())
+    }
 }
 
 fn normalise_text(value: &str, maximum: usize) -> Result<String, StoreError> {
@@ -652,7 +719,8 @@ fn moderation_expiry(duration_seconds: Option<u64>) -> Result<Option<i64>, Store
 fn help_text(topic: Option<&str>) -> String {
     match topic.map(str::trim).filter(|topic| !topic.is_empty()) {
         Some(topic) if topic.eq_ignore_ascii_case("moderation") => concat!(
-            "Moderation: mute/unmute, ban/unban and role require the appropriate role.\r\n",
+            "Moderation: mute/unmute, ban/unban and role require the assigned capability.\r\n",
+            "Every moderation action requires an explicit reason.\r\n",
             "Durations use m, h or d; use permanent for no expiry.\r\n"
         )
         .to_owned(),
@@ -660,7 +728,7 @@ fn help_text(topic: Option<&str>) -> String {
             "Social: say <message>, tell <name> <message>, reply <message>, who.\r\n",
             "Party: party say/invite/accept/revoke/kick/transfer/disband/leave/status.\r\n",
             "Channels: channel list, channel join/leave <general|newbie|staff>, ",
-            "channel say <channel> <message>. Staff requires a moderator or administrator.\r\n",
+            "channel say <channel> <message>. Staff requires a moderator, administrator or implementor profile.\r\n",
             "Safety: ignore/unignore, block/unblock and report <name> <reason>.\r\n"
         )
         .to_owned(),
@@ -679,7 +747,7 @@ fn help_text(topic: Option<&str>) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::time::Duration;
+    use std::{collections::BTreeSet, time::Duration};
     use tiamud_core::{AccountId, AccountRole};
 
     #[test]
@@ -725,5 +793,28 @@ mod tests {
         assert!(moderation_expiry(Some(60)).unwrap().is_some());
         assert!(moderation_expiry(Some(MAX_MODERATION_DURATION_SECONDS + 1)).is_err());
         assert_eq!(moderation_expiry(None).unwrap(), None);
+    }
+
+    #[test]
+    fn helper_and_builder_profiles_cannot_enter_the_staff_channel() {
+        for profile in [StaffProfileKey::Helper, StaffProfileKey::Builder] {
+            let access = StaffAccess {
+                account_id: AccountId(1),
+                role: AccountRole::Admin,
+                profile: Some(profile),
+                lore_title: None,
+                capabilities: BTreeSet::new(),
+            };
+            assert!(!channel_allowed(Some(&access), SocialChannelName::Staff));
+        }
+
+        let moderator = StaffAccess {
+            account_id: AccountId(2),
+            role: AccountRole::Player,
+            profile: Some(StaffProfileKey::Moderator),
+            lore_title: None,
+            capabilities: BTreeSet::new(),
+        };
+        assert!(channel_allowed(Some(&moderator), SocialChannelName::Staff));
     }
 }

@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MigrationReport {
@@ -82,6 +82,10 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
                  DEFAULT '{\"level\":1,\"experience\":0,\"vitals\":{\"health\":20,\"maxHealth\":20},\"attributes\":{\"strength\":5,\"defence\":2},\"equipment\":{},\"effects\":[],\"recoveryAtTick\":null}'
                  CHECK(length(gameplay_json) <= 65536);",
         )?;
+    }
+
+    if from < 10 && table_exists(&transaction, "social_reports")? {
+        migrate_social_reports_v10(&transaction)?;
     }
 
     transaction.execute_batch(
@@ -164,7 +168,27 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 2048),
              created_at INTEGER NOT NULL,
              status TEXT NOT NULL DEFAULT 'open'
-                 CHECK(status IN ('open', 'reviewing', 'closed')),
+                 CHECK(status IN ('open', 'resolved')),
+             resolution TEXT
+                 CHECK(resolution IS NULL OR resolution IN ('dismissed', 'action_taken', 'no_action')),
+             resolution_reason TEXT
+                 CHECK(resolution_reason IS NULL OR length(resolution_reason) BETWEEN 1 AND 2048),
+             resolved_by_account_id INTEGER REFERENCES accounts(id),
+             resolved_at INTEGER,
+             CHECK(
+                 (status = 'open'
+                  AND resolution IS NULL
+                  AND resolution_reason IS NULL
+                  AND resolved_by_account_id IS NULL
+                  AND resolved_at IS NULL)
+                 OR
+                 (status = 'resolved'
+                  AND resolution IS NOT NULL
+                  AND resolution_reason IS NOT NULL
+                  AND resolved_by_account_id IS NOT NULL
+                  AND resolved_at IS NOT NULL
+                  AND resolved_at >= created_at)
+             ),
              CHECK(reporter_character_id != target_character_id)
          );
          CREATE INDEX IF NOT EXISTS social_reports_status_idx
@@ -179,6 +203,76 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
          );
          CREATE INDEX IF NOT EXISTS moderation_audit_actor_idx
              ON moderation_audit(actor_account_id, sequence);
+         CREATE TABLE IF NOT EXISTS staff_profiles (
+             account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+             profile_key TEXT NOT NULL
+                 CHECK(profile_key IN ('helper', 'builder', 'moderator', 'administrator', 'implementor')),
+             lore_title TEXT
+                 CHECK(lore_title IS NULL OR length(lore_title) BETWEEN 1 AND 128),
+             assigned_by_account_id INTEGER NOT NULL REFERENCES accounts(id),
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             CHECK(updated_at >= created_at)
+         );
+         CREATE INDEX IF NOT EXISTS staff_profiles_profile_idx
+             ON staff_profiles(profile_key, account_id);
+         CREATE TABLE IF NOT EXISTS staff_capability_assignments (
+             account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+             capability TEXT NOT NULL CHECK(capability IN (
+                 'reports.view',
+                 'reports.resolve',
+                 'moderation.mute',
+                 'moderation.ban',
+                 'staff.assign',
+                 'staff.inspect',
+                 'staff.where',
+                 'staff.goto',
+                 'staff.transfer',
+                 'staff.restore',
+                 'staff.announce',
+                 'staff.audit'
+             )),
+             assigned_by_account_id INTEGER NOT NULL REFERENCES accounts(id),
+             created_at INTEGER NOT NULL,
+             PRIMARY KEY(account_id, capability)
+         );
+         CREATE INDEX IF NOT EXISTS staff_capabilities_capability_idx
+             ON staff_capability_assignments(capability, account_id);
+         CREATE TABLE IF NOT EXISTS staff_audit (
+             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+             actor_account_id INTEGER NOT NULL REFERENCES accounts(id),
+             target_account_id INTEGER REFERENCES accounts(id),
+             capability TEXT NOT NULL CHECK(capability IN (
+                 'reports.view',
+                 'reports.resolve',
+                 'moderation.mute',
+                 'moderation.ban',
+                 'staff.assign',
+                 'staff.inspect',
+                 'staff.where',
+                 'staff.goto',
+                 'staff.transfer',
+                 'staff.restore',
+                 'staff.announce',
+                 'staff.audit'
+             )),
+             action TEXT NOT NULL CHECK(length(action) BETWEEN 1 AND 64),
+             reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 1024),
+             details_json TEXT NOT NULL CHECK(length(details_json) <= 4096),
+             created_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS staff_audit_actor_idx
+             ON staff_audit(actor_account_id, sequence);
+         CREATE TRIGGER IF NOT EXISTS staff_audit_no_update
+             BEFORE UPDATE ON staff_audit
+             BEGIN
+                 SELECT RAISE(ABORT, 'staff_audit is append-only');
+             END;
+         CREATE TRIGGER IF NOT EXISTS staff_audit_no_delete
+             BEFORE DELETE ON staff_audit
+             BEGIN
+                 SELECT RAISE(ABORT, 'staff_audit is append-only');
+             END;
          CREATE TABLE IF NOT EXISTS character_adventure (
              character_id INTEGER PRIMARY KEY REFERENCES characters(id) ON DELETE CASCADE,
              state_json TEXT NOT NULL CHECK(length(state_json) <= 65536),
@@ -189,7 +283,7 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              state_json TEXT NOT NULL CHECK(length(state_json) <= 1048576),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         PRAGMA user_version = 9;",
+         PRAGMA user_version = 10;",
     )?;
     // A legacy snapshot does not prove which event sequence it covers. Keep a
     // NULL watermark until the next successful runtime commit establishes it;
@@ -225,12 +319,96 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
             )?;
         }
     }
+    if from < 10 {
+        seed_legacy_staff_authority(&transaction)?;
+    }
     transaction.commit()?;
 
     Ok(MigrationReport {
         from,
         to: SCHEMA_VERSION,
     })
+}
+
+fn migrate_social_reports_v10(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "DROP INDEX IF EXISTS social_reports_status_idx;
+         ALTER TABLE social_reports RENAME TO social_reports_v9;
+         CREATE TABLE social_reports (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             reporter_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+             target_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+             reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 2048),
+             created_at INTEGER NOT NULL,
+             status TEXT NOT NULL DEFAULT 'open'
+                 CHECK(status IN ('open', 'resolved')),
+             resolution TEXT
+                 CHECK(resolution IS NULL OR resolution IN ('dismissed', 'action_taken', 'no_action')),
+             resolution_reason TEXT
+                 CHECK(resolution_reason IS NULL OR length(resolution_reason) BETWEEN 1 AND 2048),
+             resolved_by_account_id INTEGER REFERENCES accounts(id),
+             resolved_at INTEGER,
+             CHECK(
+                 (status = 'open'
+                  AND resolution IS NULL
+                  AND resolution_reason IS NULL
+                  AND resolved_by_account_id IS NULL
+                  AND resolved_at IS NULL)
+                 OR
+                 (status = 'resolved'
+                  AND resolution IS NOT NULL
+                  AND resolution_reason IS NOT NULL
+                  AND resolved_by_account_id IS NOT NULL
+                  AND resolved_at IS NOT NULL
+                  AND resolved_at >= created_at)
+             ),
+             CHECK(reporter_character_id != target_character_id)
+         );
+         INSERT INTO social_reports
+             (id, reporter_character_id, target_character_id, reason, created_at, status)
+         SELECT id, reporter_character_id, target_character_id, reason, created_at, 'open'
+         FROM social_reports_v9
+         ORDER BY id;
+         DROP TABLE social_reports_v9;",
+    )
+}
+
+fn seed_legacy_staff_authority(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "INSERT INTO staff_profiles
+             (account_id, profile_key, lore_title, assigned_by_account_id, created_at, updated_at)
+         SELECT id,
+                CASE role WHEN 'admin' THEN 'administrator' ELSE 'moderator' END,
+                NULL, id, unixepoch(), unixepoch()
+         FROM accounts
+         WHERE role IN ('moderator', 'admin')
+         ON CONFLICT(account_id) DO NOTHING;
+
+         INSERT INTO staff_capability_assignments
+             (account_id, capability, assigned_by_account_id, created_at)
+         SELECT accounts.id, capabilities.capability, accounts.id, unixepoch()
+         FROM accounts
+         JOIN (
+             SELECT 'reports.view' AS capability
+             UNION ALL SELECT 'reports.resolve'
+             UNION ALL SELECT 'moderation.mute'
+             UNION ALL SELECT 'moderation.ban'
+             UNION ALL SELECT 'staff.assign'
+             UNION ALL SELECT 'staff.inspect'
+             UNION ALL SELECT 'staff.where'
+             UNION ALL SELECT 'staff.goto'
+             UNION ALL SELECT 'staff.transfer'
+             UNION ALL SELECT 'staff.restore'
+             UNION ALL SELECT 'staff.announce'
+             UNION ALL SELECT 'staff.audit'
+         ) AS capabilities
+         WHERE accounts.role = 'admin'
+            OR (accounts.role = 'moderator'
+                AND capabilities.capability IN (
+                    'reports.view', 'reports.resolve', 'moderation.mute', 'moderation.ban'
+                ))
+         ON CONFLICT(account_id, capability) DO NOTHING;",
+    )
 }
 
 fn table_exists(connection: &Transaction<'_>, table: &str) -> rusqlite::Result<bool> {
@@ -295,16 +473,42 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let report = migrate(&mut connection).unwrap();
 
-        assert_eq!(report, MigrationReport { from: 0, to: 9 });
+        assert_eq!(report, MigrationReport { from: 0, to: 10 });
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            9
+            10
         );
         assert!(
             connection
                 .prepare("SELECT item_locations_json FROM characters")
+                .is_ok()
+        );
+        assert!(
+            connection
+                .prepare(
+                    "SELECT account_id, profile_key, lore_title, assigned_by_account_id,
+                            created_at, updated_at
+                     FROM staff_profiles",
+                )
+                .is_ok()
+        );
+        assert!(
+            connection
+                .prepare(
+                    "SELECT account_id, capability, assigned_by_account_id, created_at
+                     FROM staff_capability_assignments",
+                )
+                .is_ok()
+        );
+        assert!(
+            connection
+                .prepare(
+                    "SELECT sequence, actor_account_id, target_account_id, capability,
+                            action, reason, details_json, created_at
+                     FROM staff_audit",
+                )
                 .is_ok()
         );
         assert!(
@@ -410,7 +614,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 3, to: 9 }
+            MigrationReport { from: 3, to: 10 }
         );
         assert_eq!(
             connection
@@ -454,7 +658,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 4, to: 9 }
+            MigrationReport { from: 4, to: 10 }
         );
         let gameplay: String = connection
             .query_row(
@@ -519,7 +723,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 5, to: 9 }
+            MigrationReport { from: 5, to: 10 }
         );
         assert_eq!(
             connection
@@ -576,7 +780,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 6, to: 9 }
+            MigrationReport { from: 6, to: 10 }
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
@@ -628,7 +832,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 7, to: 9 }
+            MigrationReport { from: 7, to: 10 }
         );
         assert_eq!(
             connection
@@ -717,7 +921,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 8, to: 9 }
+            MigrationReport { from: 8, to: 10 }
         );
         assert_eq!(
             connection
@@ -759,7 +963,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 9, to: 9 }
+            MigrationReport { from: 10, to: 10 }
         );
         assert_eq!(
             connection
@@ -778,6 +982,189 @@ mod tests {
                 })
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn upgrades_v9_to_closed_staff_authority_and_report_resolution_contract() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 INSERT INTO accounts (id, name, auth_state, role)
+                 VALUES (1, 'Admin', 'registered', 'admin'),
+                        (2, 'Moderator', 'registered', 'moderator'),
+                        (3, 'Player', 'registered', 'player');
+                 INSERT INTO characters (id, account_id, name, room_id)
+                 VALUES (10, 1, 'Aster', 'demo:square'),
+                        (11, 2, 'Bryn', 'demo:square'),
+                        (12, 3, 'Cira', 'demo:square');
+                 DROP TRIGGER staff_audit_no_update;
+                 DROP TRIGGER staff_audit_no_delete;
+                 DROP TABLE staff_audit;
+                 DROP TABLE staff_capability_assignments;
+                 DROP TABLE staff_profiles;
+                 DROP TABLE social_reports;
+                 CREATE TABLE social_reports (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     reporter_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+                     target_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+                     reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 2048),
+                     created_at INTEGER NOT NULL,
+                     status TEXT NOT NULL DEFAULT 'open'
+                         CHECK(status IN ('open', 'reviewing', 'closed')),
+                     CHECK(reporter_character_id != target_character_id)
+                 );
+                 CREATE INDEX social_reports_status_idx
+                     ON social_reports(status, created_at);
+                 INSERT INTO social_reports
+                     (id, reporter_character_id, target_character_id, reason, created_at, status)
+                 VALUES (20, 12, 11, 'Open report', 100, 'open'),
+                        (21, 12, 11, 'Legacy review', 101, 'reviewing'),
+                        (22, 12, 11, 'Legacy closed', 102, 'closed');
+                 PRAGMA user_version = 9;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 9, to: 10 }
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT profile_key FROM staff_profiles WHERE account_id = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "administrator"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT profile_key FROM staff_profiles WHERE account_id = 2",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "moderator"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM staff_profiles WHERE account_id = 3",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM staff_capability_assignments WHERE account_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            12
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM staff_capability_assignments WHERE account_id = 2",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM social_reports WHERE status = 'open'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            3,
+            "legacy reviewing/closed rows are reopened instead of inventing resolution authority"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT reason FROM social_reports WHERE id = 22",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Legacy closed"
+        );
+
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO staff_profiles
+                         (account_id, profile_key, assigned_by_account_id, created_at, updated_at)
+                     VALUES (3, 'wizard', 1, 200, 200)",
+                    [],
+                )
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO staff_capability_assignments
+                         (account_id, capability, assigned_by_account_id, created_at)
+                     VALUES (3, 'staff.force', 1, 200)",
+                    [],
+                )
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE social_reports
+                     SET status = 'resolved', resolution = 'dismissed'
+                     WHERE id = 20",
+                    [],
+                )
+                .is_err()
+        );
+        connection
+            .execute(
+                "UPDATE social_reports
+                 SET status = 'resolved', resolution = 'dismissed',
+                     resolution_reason = 'Insufficient evidence',
+                     resolved_by_account_id = 2, resolved_at = 300
+                 WHERE id = 20",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO staff_audit
+                     (actor_account_id, target_account_id, capability, action,
+                      reason, details_json, created_at)
+                 VALUES (2, 3, 'reports.resolve', 'report.resolve',
+                         'Reviewed report', '{\"reportId\":20}', 300)",
+                [],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    "UPDATE staff_audit SET reason = 'rewritten' WHERE sequence = 1",
+                    [],
+                )
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute("DELETE FROM staff_audit WHERE sequence = 1", [])
+                .is_err()
         );
     }
 }

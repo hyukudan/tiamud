@@ -327,6 +327,8 @@
 
   function socialHistoryLabel(message: SocialMessageData): string {
     switch (message.channel) {
+      case 'announcement':
+        return `${message.sender} announces`;
       case 'say':
         return `${message.sender} says`;
       case 'tell':

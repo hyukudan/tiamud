@@ -20,6 +20,8 @@ describe('Tiamud entry flow', () => {
   });
 
   it('labels local, direct, party, and world-channel social messages in history', () => {
+    expect(appSource).toContain("case 'announcement'");
+    expect(appSource).toContain('`${message.sender} announces`');
     expect(appSource).toContain("case 'say'");
     expect(appSource).toContain("case 'tell'");
     expect(appSource).toContain("case 'party'");

@@ -1,9 +1,10 @@
 use crate::{
     auth::AuthenticatedSession,
     delivery::{DeliveryInbox, DeliveryRouter},
-    persistence::{CharacterStore, StoreError},
+    persistence::{CharacterStore, StaffAccess, StoreError},
     runtime_content::{RuntimeContent, ScenePresentation},
-    social::{SocialRuntime, apply_social},
+    social::{SocialChannel, SocialMessage, SocialRuntime, apply_social},
+    staff::{apply_staff, derived_role},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -145,7 +146,7 @@ enum Command {
     EnterPreparedCharacter {
         snapshot: CharacterSnapshot,
         gameplay: Box<CharacterGameplaySnapshot>,
-        role: AccountRole,
+        staff_access: StaffAccess,
         reply: oneshot::Sender<Result<EnteredWorld, GameError>>,
     },
     Apply {
@@ -216,6 +217,7 @@ impl WorldHandle {
             let mut world = world;
             let mut next_session = 1_u64;
             let mut session_roles = HashMap::new();
+            let mut session_staff_accesses = HashMap::new();
 
             let startup = match actor_store.load_runtime_snapshot().await {
                 Ok(Some(snapshot)) => {
@@ -320,7 +322,7 @@ impl WorldHandle {
                     Command::EnterPreparedCharacter {
                         snapshot,
                         gameplay,
-                        role,
+                        staff_access,
                         reply,
                     } => {
                         let session = allocate_session(&mut next_session);
@@ -333,12 +335,15 @@ impl WorldHandle {
                         )
                         .await;
                         let result = finish_enter(
-                            &mut world,
-                            &runtime_content,
-                            &mut session_roles,
-                            actor_store.as_ref(),
-                            &mut actor_delivery,
-                            role,
+                            FinishEnterResources {
+                                world: &mut world,
+                                runtime_content: &runtime_content,
+                                session_roles: &mut session_roles,
+                                session_staff_accesses: &mut session_staff_accesses,
+                                store: actor_store.as_ref(),
+                                delivery: &mut actor_delivery,
+                            },
+                            staff_access,
                             result,
                         )
                         .await
@@ -353,6 +358,7 @@ impl WorldHandle {
                         });
                         if let Err(Ok(entered)) = reply.send(result) {
                             session_roles.remove(&entered.session_id);
+                            session_staff_accesses.remove(&entered.session_id);
                             if let Ok(character) = world.character_snapshot(entered.session_id) {
                                 social.disconnected(character.id);
                             }
@@ -376,6 +382,7 @@ impl WorldHandle {
                                 social: &mut social,
                                 store: actor_store.as_ref(),
                                 session_roles: &mut session_roles,
+                                session_staff_accesses: &mut session_staff_accesses,
                                 delivery: &mut actor_delivery,
                             },
                             session,
@@ -389,6 +396,7 @@ impl WorldHandle {
                         let role = session_roles
                             .remove(&session)
                             .unwrap_or(AccountRole::Player);
+                        session_staff_accesses.remove(&session);
                         let checkpoint = world.checkpoint();
                         let hook = runtime_content.run_hook(
                             &mut world,
@@ -591,13 +599,13 @@ impl WorldHandle {
         // world mutation that grants the live character lease.
         let snapshot = self.store.load_character(account_id, character_id).await?;
         let gameplay = self.store.load_character_gameplay(character_id).await?;
-        let role = self.store.social_profile(character_id).await?.role;
+        let staff_access = self.store.staff_access(character_id).await?;
         let (reply, receive) = oneshot::channel();
         self.tx
             .send(Command::EnterPreparedCharacter {
                 snapshot,
                 gameplay: Box::new(gameplay),
-                role,
+                staff_access,
                 reply,
             })
             .await
@@ -799,16 +807,30 @@ async fn enter_prepared_character(
     })
 }
 
+struct FinishEnterResources<'a> {
+    world: &'a mut World,
+    runtime_content: &'a RuntimeContent,
+    session_roles: &'a mut HashMap<SessionId, AccountRole>,
+    session_staff_accesses: &'a mut HashMap<SessionId, StaffAccess>,
+    store: &'a dyn CharacterStore,
+    delivery: &'a mut DeliveryRouter,
+}
+
 async fn finish_enter(
-    world: &mut World,
-    runtime_content: &RuntimeContent,
-    session_roles: &mut HashMap<SessionId, AccountRole>,
-    store: &dyn CharacterStore,
-    delivery: &mut DeliveryRouter,
-    role: AccountRole,
+    resources: FinishEnterResources<'_>,
+    staff_access: StaffAccess,
     result: Result<PreparedWorldEntry, GameError>,
 ) -> Result<PreparedWorldEntry, GameError> {
+    let FinishEnterResources {
+        world,
+        runtime_content,
+        session_roles,
+        session_staff_accesses,
+        store,
+        delivery,
+    } = resources;
     let mut entered = result?;
+    let role = derived_role(&staff_access);
     world.set_observer_role(entered.session_id, role)?;
     let checkpoint = world.checkpoint();
     let hook = runtime_content.run_hook(world, entered.session_id, role, ScriptHook::OnEnter);
@@ -839,6 +861,7 @@ async fn finish_enter(
     runtime_content.resolve_scene(world, entered.session_id, role, &mut entered.scene);
     entered.player = world.player_state_view(entered.session_id)?;
     session_roles.insert(entered.session_id, role);
+    session_staff_accesses.insert(entered.session_id, staff_access);
     Ok(entered)
 }
 
@@ -848,6 +871,7 @@ struct ApplyResources<'a> {
     social: &'a mut SocialRuntime,
     store: &'a dyn CharacterStore,
     session_roles: &'a mut HashMap<SessionId, AccountRole>,
+    session_staff_accesses: &'a mut HashMap<SessionId, StaffAccess>,
     delivery: &'a mut DeliveryRouter,
 }
 
@@ -863,9 +887,62 @@ async fn apply(
         social,
         store,
         session_roles,
+        session_staff_accesses,
         delivery,
     } = resources;
     let checkpoint = world.checkpoint();
+    let action = match action {
+        PlayerAction::Staff(action) => {
+            let applied = apply_staff(world, store, session, action).await?;
+            if let Some(account_id) = applied.refresh_account {
+                refresh_session_authority(
+                    world,
+                    store,
+                    session_roles,
+                    session_staff_accesses,
+                    account_id,
+                )
+                .await?;
+            }
+            if let Some(message) = applied.announcement {
+                for recipient in world.connected_sessions() {
+                    delivery.send_social(
+                        recipient,
+                        SocialMessage {
+                            channel: SocialChannel::Announcement,
+                            sender: "Tiamud".to_owned(),
+                            text: message.clone(),
+                        },
+                    );
+                }
+            }
+            let events = project_view_events(world, session, &applied.domain_events)?;
+            let actor_role = session_roles
+                .get(&session)
+                .copied()
+                .unwrap_or(AccountRole::Player);
+            let mut scene = world.current_scene(session)?;
+            runtime_content.resolve_scene(world, session, actor_role, &mut scene);
+            if !applied.domain_events.is_empty() {
+                broadcast_world_deliveries(
+                    world,
+                    runtime_content,
+                    session_roles,
+                    Some(session),
+                    &applied.domain_events,
+                    delivery,
+                );
+            }
+            return Ok(AppliedAction {
+                scene,
+                presentation: runtime_content.resolve_entity_presentation(world, session),
+                player: world.player_state_view(session)?,
+                output: Some(applied.output),
+                events,
+            });
+        }
+        action => action,
+    };
     if let PlayerAction::Social(action) = action {
         let talks = matches!(
             &action,
@@ -875,8 +952,20 @@ async fn apply(
                 | tiamud_core::SocialAction::Reply(_)
                 | tiamud_core::SocialAction::ChannelSay { .. }
         );
-        let applied =
-            apply_social(social, world, store, session, role, session_roles, action).await?;
+        let actor_access = session_staff_accesses
+            .get(&session)
+            .cloned()
+            .ok_or(CoreWorldError::UnknownSession)?;
+        let applied = apply_social(
+            social,
+            world,
+            store,
+            session,
+            &actor_access,
+            session_staff_accesses,
+            action,
+        )
+        .await?;
         let hook = if talks {
             runtime_content.run_hook(world, session, role, ScriptHook::OnTalk)
         } else {
@@ -901,15 +990,22 @@ async fn apply(
                 social.record_delivered_tell(planned.recipient_id, sender);
             }
         }
-        if let Some((account_id, updated_role)) = applied.role_update {
-            for connected in world.connected_characters()? {
-                if connected.account_id == account_id {
-                    session_roles.insert(connected.session_id, updated_role);
-                }
-            }
+        if let Some(account_id) = applied.authority_update {
+            refresh_session_authority(
+                world,
+                store,
+                session_roles,
+                session_staff_accesses,
+                account_id,
+            )
+            .await?;
         }
         let mut scene = world.current_scene(session)?;
-        runtime_content.resolve_scene(world, session, role, &mut scene);
+        let current_role = session_roles
+            .get(&session)
+            .copied()
+            .unwrap_or(AccountRole::Player);
+        runtime_content.resolve_scene(world, session, current_role, &mut scene);
         let events = project_view_events(world, session, &hook.domain_events)?;
         if hook.changed || !hook.domain_events.is_empty() {
             broadcast_world_deliveries(
@@ -1032,6 +1128,47 @@ async fn apply(
         output: combine_output(outcome.output, narration),
         events,
     })
+}
+
+async fn refresh_session_authority(
+    world: &mut World,
+    store: &dyn CharacterStore,
+    session_roles: &mut HashMap<SessionId, AccountRole>,
+    session_staff_accesses: &mut HashMap<SessionId, StaffAccess>,
+    account_id: AccountId,
+) -> Result<(), GameError> {
+    let connected = world
+        .connected_characters()?
+        .into_iter()
+        .filter(|character| character.account_id == account_id)
+        .collect::<Vec<_>>();
+    let Some(first) = connected.first() else {
+        return Ok(());
+    };
+    let access = match store.staff_access(first.character_id).await {
+        Ok(access) => access,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                account_id = account_id.0,
+                "could not refresh staff authority; live sessions were reduced to player access"
+            );
+            StaffAccess {
+                account_id,
+                role: AccountRole::Player,
+                profile: None,
+                lore_title: None,
+                capabilities: Default::default(),
+            }
+        }
+    };
+    let role = derived_role(&access);
+    for character in connected {
+        world.set_observer_role(character.session_id, role)?;
+        session_roles.insert(character.session_id, role);
+        session_staff_accesses.insert(character.session_id, access.clone());
+    }
+    Ok(())
 }
 
 fn current_state(
@@ -1461,6 +1598,12 @@ mod tests {
         blocks: HashSet<(CharacterId, CharacterId)>,
         channel_subscriptions: BTreeSet<(CharacterId, SocialChannelName)>,
         audit: Vec<crate::persistence::AuditEntry>,
+        staff_profiles: HashMap<AccountId, (tiamud_core::StaffProfileKey, Option<String>)>,
+        staff_capabilities: HashMap<AccountId, BTreeSet<tiamud_core::StaffCapability>>,
+        next_staff_report: i64,
+        staff_reports: Vec<crate::persistence::StaffReport>,
+        resolved_staff_reports: HashSet<i64>,
+        staff_audit: Vec<crate::persistence::StaffAuditEntry>,
     }
 
     #[derive(Default)]
@@ -1569,6 +1712,96 @@ mod tests {
         })
     }
 
+    fn memory_staff_access_for_account(
+        state: &MemoryState,
+        account_id: AccountId,
+    ) -> Result<crate::persistence::StaffAccess, StoreError> {
+        if !state.accounts.contains_key(&account_id) {
+            return Err(StoreError::AccountNotFound(account_id));
+        }
+        let (profile, lore_title) = state
+            .staff_profiles
+            .get(&account_id)
+            .map(|(profile, title)| (Some(*profile), title.clone()))
+            .unwrap_or((None, None));
+        Ok(crate::persistence::StaffAccess {
+            account_id,
+            role: state
+                .roles
+                .get(&account_id)
+                .copied()
+                .unwrap_or(tiamud_core::AccountRole::Player),
+            profile,
+            lore_title,
+            capabilities: state
+                .staff_capabilities
+                .get(&account_id)
+                .cloned()
+                .unwrap_or_default(),
+        })
+    }
+
+    fn memory_staff_access(
+        state: &MemoryState,
+        character_id: CharacterId,
+    ) -> Result<crate::persistence::StaffAccess, StoreError> {
+        let character = state
+            .characters
+            .get(&character_id)
+            .ok_or(StoreError::SocialTargetNotFound)?;
+        memory_staff_access_for_account(state, character.account_id)
+    }
+
+    fn memory_authorize_staff(
+        state: &MemoryState,
+        audit: &crate::persistence::StaffAuditRecord,
+    ) -> Result<crate::persistence::StaffAccess, StoreError> {
+        let actor = memory_staff_access_for_account(state, audit.actor_account_id)?;
+        if !actor.capabilities.contains(&audit.capability) {
+            return Err(StoreError::StaffForbidden);
+        }
+        if let Some(target_account) = audit.target_account_id {
+            let target = memory_staff_access_for_account(state, target_account)?;
+            let actor_rank = actor
+                .profile
+                .map(tiamud_core::StaffProfileKey::authority_rank)
+                .unwrap_or(0);
+            let target_rank = target
+                .profile
+                .map(tiamud_core::StaffProfileKey::authority_rank)
+                .unwrap_or(0);
+            if actor.account_id == target.account_id || actor_rank <= target_rank {
+                return Err(StoreError::StaffHierarchy);
+            }
+        }
+        Ok(actor)
+    }
+
+    fn memory_append_staff_audit(
+        state: &mut MemoryState,
+        audit: crate::persistence::StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        memory_authorize_staff(state, &audit)?;
+        let reason = audit.reason.trim().to_owned();
+        if reason.is_empty()
+            || reason.len() > crate::persistence::MAX_SOCIAL_REASON_BYTES
+            || reason.chars().any(char::is_control)
+        {
+            return Err(StoreError::InvalidStaffInput);
+        }
+        state.staff_audit.push(crate::persistence::StaffAuditEntry {
+            sequence: i64::try_from(state.staff_audit.len() + 1).unwrap(),
+            actor_account_id: audit.actor_account_id,
+            target_account_id: audit.target_account_id,
+            capability: audit.capability,
+            action: audit.action,
+            reason,
+            details_json: serde_json::to_string(&audit.details)?,
+            created_at: 1,
+        });
+        Ok(())
+    }
+
     fn memory_audit(
         state: &mut MemoryState,
         actor: AccountId,
@@ -1620,6 +1853,20 @@ mod tests {
             let token = SessionToken::generate();
             state.accounts.insert(account.id, account.clone());
             state.roles.insert(account.id, role);
+            if role == tiamud_core::AccountRole::Admin {
+                state.staff_profiles.insert(
+                    account.id,
+                    (tiamud_core::StaffProfileKey::Administrator, None),
+                );
+                state.staff_capabilities.insert(
+                    account.id,
+                    tiamud_core::StaffProfileKey::Administrator
+                        .default_capabilities()
+                        .iter()
+                        .copied()
+                        .collect(),
+                );
+            }
             state.passwords.insert(account.id, password.to_owned());
             state.sessions.insert(token.as_str().to_owned(), account.id);
             Ok(AuthenticatedSession {
@@ -1976,6 +2223,18 @@ mod tests {
             if actor.account_id == target.account_id {
                 return Err(StoreError::SocialSelfTarget);
             }
+            state.next_staff_report += 1;
+            let report_id = state.next_staff_report;
+            state.staff_reports.push(crate::persistence::StaffReport {
+                id: report_id,
+                reporter_character_id: actor.character_id,
+                reporter_name: actor.character_name.clone(),
+                target_character_id: target.character_id,
+                target_account_id: target.account_id,
+                target_name: target.character_name.clone(),
+                reason: reason.trim().to_owned(),
+                created_at: 1,
+            });
             memory_audit(
                 &mut state,
                 actor.account_id,
@@ -2000,9 +2259,30 @@ mod tests {
             if actor.account_id == target.account_id {
                 return Err(StoreError::SocialSelfTarget);
             }
-            let role_change = matches!(&action, crate::persistence::ModerationAction::SetRole(_));
-            if (role_change && actor.role != tiamud_core::AccountRole::Admin)
-                || (!role_change && !actor.role.can_moderate(target.role))
+            let capability = match &action {
+                crate::persistence::ModerationAction::Mute { .. }
+                | crate::persistence::ModerationAction::Unmute { .. } => {
+                    tiamud_core::StaffCapability::ModerationMute
+                }
+                crate::persistence::ModerationAction::Ban { .. }
+                | crate::persistence::ModerationAction::Unban { .. } => {
+                    tiamud_core::StaffCapability::ModerationBan
+                }
+                crate::persistence::ModerationAction::SetRole { .. } => {
+                    tiamud_core::StaffCapability::StaffAssign
+                }
+            };
+            let actor_access = memory_staff_access_for_account(&state, actor.account_id)?;
+            let target_access = memory_staff_access_for_account(&state, target.account_id)?;
+            if !actor_access.capabilities.contains(&capability)
+                || actor_access
+                    .profile
+                    .map(tiamud_core::StaffProfileKey::authority_rank)
+                    .unwrap_or(0)
+                    <= target_access
+                        .profile
+                        .map(tiamud_core::StaffProfileKey::authority_rank)
+                        .unwrap_or(0)
             {
                 return Err(StoreError::SocialForbidden);
             }
@@ -2011,7 +2291,7 @@ mod tests {
                     state.muted.insert(target.account_id);
                     "mute"
                 }
-                crate::persistence::ModerationAction::Unmute => {
+                crate::persistence::ModerationAction::Unmute { .. } => {
                     state.muted.remove(&target.account_id);
                     "unmute"
                 }
@@ -2019,11 +2299,11 @@ mod tests {
                     state.banned.insert(target.account_id);
                     "ban"
                 }
-                crate::persistence::ModerationAction::Unban => {
+                crate::persistence::ModerationAction::Unban { .. } => {
                     state.banned.remove(&target.account_id);
                     "unban"
                 }
-                crate::persistence::ModerationAction::SetRole(role) => {
+                crate::persistence::ModerationAction::SetRole { role, .. } => {
                     state.roles.insert(target.account_id, role);
                     "set_role"
                 }
@@ -2035,6 +2315,186 @@ mod tests {
                 action_name,
             );
             Ok(())
+        }
+
+        async fn staff_access(
+            &self,
+            character_id: CharacterId,
+        ) -> Result<crate::persistence::StaffAccess, StoreError> {
+            memory_staff_access(&self.state.lock().unwrap(), character_id)
+        }
+
+        async fn staff_reports(
+            &self,
+            audit: crate::persistence::StaffAuditRecord,
+        ) -> Result<Vec<crate::persistence::StaffReport>, StoreError> {
+            let mut state = self.state.lock().unwrap();
+            let actor = memory_authorize_staff(&state, &audit)?;
+            let actor_rank = actor
+                .profile
+                .map(tiamud_core::StaffProfileKey::authority_rank)
+                .ok_or(StoreError::StaffForbidden)?;
+            memory_append_staff_audit(&mut state, audit)?;
+            Ok(state
+                .staff_reports
+                .iter()
+                .filter(|report| !state.resolved_staff_reports.contains(&report.id))
+                .filter(|report| {
+                    memory_staff_access_for_account(&state, report.target_account_id)
+                        .ok()
+                        .and_then(|access| {
+                            access
+                                .profile
+                                .map(tiamud_core::StaffProfileKey::authority_rank)
+                        })
+                        .unwrap_or(0)
+                        < actor_rank
+                })
+                .take(10)
+                .cloned()
+                .collect())
+        }
+
+        async fn resolve_staff_report(
+            &self,
+            report_id: i64,
+            _resolution: tiamud_core::StaffReportResolution,
+            resolution_reason: &str,
+            mut audit: crate::persistence::StaffAuditRecord,
+        ) -> Result<(), StoreError> {
+            let resolution_reason = resolution_reason.trim();
+            if report_id <= 0
+                || resolution_reason.is_empty()
+                || resolution_reason.len() > crate::persistence::MAX_SOCIAL_REASON_BYTES
+                || resolution_reason.chars().any(char::is_control)
+            {
+                return Err(StoreError::InvalidStaffInput);
+            }
+            let mut state = self.state.lock().unwrap();
+            let target_account = state
+                .staff_reports
+                .iter()
+                .find(|report| report.id == report_id)
+                .map(|report| report.target_account_id)
+                .ok_or(StoreError::StaffReportUnavailable(report_id))?;
+            if state.resolved_staff_reports.contains(&report_id) {
+                return Err(StoreError::StaffReportUnavailable(report_id));
+            }
+            if audit
+                .target_account_id
+                .is_some_and(|audited_target| audited_target != target_account)
+            {
+                return Err(StoreError::StaffForbidden);
+            }
+            audit.target_account_id = Some(target_account);
+            memory_append_staff_audit(&mut state, audit)?;
+            state.resolved_staff_reports.insert(report_id);
+            Ok(())
+        }
+
+        async fn set_staff_profile(
+            &self,
+            target_account: AccountId,
+            profile: Option<tiamud_core::StaffProfileKey>,
+            lore_title: Option<&str>,
+            mut audit: crate::persistence::StaffAuditRecord,
+        ) -> Result<(), StoreError> {
+            let lore_title = lore_title
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned);
+            if lore_title
+                .as_ref()
+                .is_some_and(|title| title.len() > 128 || title.chars().any(char::is_control))
+                || (profile.is_none() && lore_title.is_some())
+            {
+                return Err(StoreError::InvalidStaffInput);
+            }
+            audit.target_account_id = Some(target_account);
+            let mut state = self.state.lock().unwrap();
+            let actor = memory_authorize_staff(&state, &audit)?;
+            if profile.is_some_and(|profile| {
+                profile.authority_rank()
+                    >= actor
+                        .profile
+                        .map(tiamud_core::StaffProfileKey::authority_rank)
+                        .unwrap_or(0)
+            }) {
+                return Err(StoreError::StaffHierarchy);
+            }
+            if profile.is_some_and(|profile| {
+                profile
+                    .default_capabilities()
+                    .iter()
+                    .any(|capability| !actor.capabilities.contains(capability))
+            }) {
+                return Err(StoreError::StaffForbidden);
+            }
+            memory_append_staff_audit(&mut state, audit)?;
+            if let Some(profile) = profile {
+                state
+                    .staff_profiles
+                    .insert(target_account, (profile, lore_title));
+                state.staff_capabilities.insert(
+                    target_account,
+                    profile.default_capabilities().iter().copied().collect(),
+                );
+                state.roles.insert(
+                    target_account,
+                    match profile {
+                        tiamud_core::StaffProfileKey::Administrator
+                        | tiamud_core::StaffProfileKey::Implementor => AccountRole::Admin,
+                        tiamud_core::StaffProfileKey::Moderator => AccountRole::Moderator,
+                        tiamud_core::StaffProfileKey::Helper
+                        | tiamud_core::StaffProfileKey::Builder => AccountRole::Player,
+                    },
+                );
+            } else {
+                state.staff_profiles.remove(&target_account);
+                state.staff_capabilities.remove(&target_account);
+                state.roles.insert(target_account, AccountRole::Player);
+            }
+            Ok(())
+        }
+
+        async fn set_staff_capability(
+            &self,
+            target_account: AccountId,
+            capability: tiamud_core::StaffCapability,
+            enabled: bool,
+            mut audit: crate::persistence::StaffAuditRecord,
+        ) -> Result<(), StoreError> {
+            audit.target_account_id = Some(target_account);
+            let mut state = self.state.lock().unwrap();
+            let actor = memory_authorize_staff(&state, &audit)?;
+            let target = memory_staff_access_for_account(&state, target_account)?;
+            if enabled && (target.profile.is_none() || !actor.capabilities.contains(&capability)) {
+                return Err(StoreError::StaffForbidden);
+            }
+            memory_append_staff_audit(&mut state, audit)?;
+            let capabilities = state.staff_capabilities.entry(target_account).or_default();
+            if enabled {
+                capabilities.insert(capability);
+            } else {
+                capabilities.remove(&capability);
+            }
+            Ok(())
+        }
+
+        async fn staff_audit_entries(
+            &self,
+            audit: crate::persistence::StaffAuditRecord,
+        ) -> Result<Vec<crate::persistence::StaffAuditEntry>, StoreError> {
+            let mut state = self.state.lock().unwrap();
+            memory_append_staff_audit(&mut state, audit)?;
+            Ok(state.staff_audit.iter().rev().take(10).cloned().collect())
+        }
+
+        async fn append_staff_audit(
+            &self,
+            audit: crate::persistence::StaffAuditRecord,
+        ) -> Result<(), StoreError> {
+            memory_append_staff_audit(&mut self.state.lock().unwrap(), audit)
         }
 
         async fn audit_log(&self) -> Result<Vec<crate::persistence::AuditEntry>, StoreError> {
@@ -2062,6 +2522,43 @@ mod tests {
                     });
                 }
             }
+            for snapshot in characters {
+                state
+                    .gameplay
+                    .insert(snapshot.character.id, snapshot.gameplay);
+                state
+                    .characters
+                    .insert(snapshot.character.id, snapshot.character);
+            }
+            state.runtime = Some(runtime);
+            state.domain_events.extend(events);
+            Ok(())
+        }
+
+        async fn commit_staff_action(
+            &self,
+            characters: Vec<tiamud_core::DurableCharacterSnapshot>,
+            runtime: WorldRuntimeSnapshot,
+            events: Vec<tiamud_core::DomainEvent>,
+            audit: crate::persistence::StaffAuditRecord,
+        ) -> Result<(), StoreError> {
+            if self.fail_saves.load(Ordering::SeqCst) {
+                return Err(StoreError::WorkerStopped);
+            }
+            let mut state = self.state.lock().unwrap();
+            for snapshot in &characters {
+                if !matches!(
+                    state.characters.get(&snapshot.character.id),
+                    Some(stored) if stored.account_id == snapshot.character.account_id
+                ) {
+                    return Err(StoreError::CharacterNotFound {
+                        account_id: snapshot.character.account_id,
+                        character_id: snapshot.character.id,
+                    });
+                }
+            }
+            memory_authorize_staff(&state, &audit)?;
+            memory_append_staff_audit(&mut state, audit)?;
             for snapshot in characters {
                 state
                     .gameplay
@@ -3242,6 +3739,403 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staff_announcement_requires_the_exact_capability_and_fans_out_once() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let admin = world
+            .register_account("Admin".into(), "correct horse battery staple".into())
+            .await
+            .unwrap();
+        let player = world
+            .register_account("Player".into(), "another correct horse battery".into())
+            .await
+            .unwrap();
+        let admin_character = world
+            .create_authenticated_character(admin.token.as_str().into(), "Aster".into())
+            .await
+            .unwrap();
+        let player_character = world
+            .create_authenticated_character(player.token.as_str().into(), "Bryn".into())
+            .await
+            .unwrap();
+        let mut admin_entered = world
+            .enter_authenticated_character(admin.token.as_str().into(), admin_character.id)
+            .await
+            .unwrap();
+        let mut player_entered = world
+            .enter_authenticated_character(player.token.as_str().into(), player_character.id)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            world
+                .apply(
+                    player_entered.session_id,
+                    PlayerAction::Staff(tiamud_core::StaffAction::Announce {
+                        message: "forged".into(),
+                        reason: "should be denied".into(),
+                    }),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::StaffForbidden))
+        ));
+
+        world
+            .apply(
+                admin_entered.session_id,
+                PlayerAction::Staff(tiamud_core::StaffAction::Announce {
+                    message: "The gates close at dusk.".into(),
+                    reason: "scheduled event".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        for inbox in [
+            &mut admin_entered.deliveries,
+            &mut player_entered.deliveries,
+        ] {
+            let announcement = next_social(inbox).await;
+            assert_eq!(
+                announcement.channel,
+                crate::social::SocialChannel::Announcement
+            );
+            assert_eq!(announcement.text, "The gates close at dusk.");
+            assert!(inbox.try_recv().is_err());
+        }
+        let state = store.state.lock().unwrap();
+        assert_eq!(
+            state
+                .staff_audit
+                .iter()
+                .filter(|entry| entry.action == "staff_announce")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_staff_relocation_rolls_back_world_and_audit_together() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let admin = world
+            .register_account("Admin".into(), "correct horse battery staple".into())
+            .await
+            .unwrap();
+        let player = world
+            .register_account("Player".into(), "another correct horse battery".into())
+            .await
+            .unwrap();
+        let admin_character = world
+            .create_authenticated_character(admin.token.as_str().into(), "Aster".into())
+            .await
+            .unwrap();
+        let player_character = world
+            .create_authenticated_character(player.token.as_str().into(), "Bryn".into())
+            .await
+            .unwrap();
+        let admin_entered = world
+            .enter_authenticated_character(admin.token.as_str().into(), admin_character.id)
+            .await
+            .unwrap();
+        let player_entered = world
+            .enter_authenticated_character(player.token.as_str().into(), player_character.id)
+            .await
+            .unwrap();
+        world
+            .apply(
+                player_entered.session_id,
+                PlayerAction::Move(Direction::North),
+            )
+            .await
+            .unwrap();
+        let before = world
+            .current_state(admin_entered.session_id)
+            .await
+            .unwrap()
+            .0;
+        let audit_before = store.state.lock().unwrap().staff_audit.len();
+        store.fail_saves.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            world
+                .apply(
+                    admin_entered.session_id,
+                    PlayerAction::Staff(tiamud_core::StaffAction::Goto {
+                        target: "Bryn".into(),
+                        reason: "investigate location".into(),
+                    }),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::WorkerStopped))
+        ));
+        let after = world
+            .current_state(admin_entered.session_id)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(after.title, before.title);
+        assert_eq!(store.state.lock().unwrap().staff_audit.len(), audit_before);
+    }
+
+    #[tokio::test]
+    async fn staff_restore_is_dispatched_even_when_the_target_is_defeated() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let admin = world
+            .register_account("Admin".into(), "correct horse battery staple".into())
+            .await
+            .unwrap();
+        let player = world
+            .register_account("Player".into(), "another correct horse battery".into())
+            .await
+            .unwrap();
+        let admin_character = world
+            .create_authenticated_character(admin.token.as_str().into(), "Aster".into())
+            .await
+            .unwrap();
+        let player_character = world
+            .create_authenticated_character(player.token.as_str().into(), "Bryn".into())
+            .await
+            .unwrap();
+        {
+            let mut state = store.state.lock().unwrap();
+            let gameplay = state.gameplay.get_mut(&player_character.id).unwrap();
+            gameplay.vitals.health = 0;
+            gameplay.recovery_at_tick = Some(50);
+        }
+        let admin_entered = world
+            .enter_authenticated_character(admin.token.as_str().into(), admin_character.id)
+            .await
+            .unwrap();
+        let player_entered = world
+            .enter_authenticated_character(player.token.as_str().into(), player_character.id)
+            .await
+            .unwrap();
+
+        world
+            .apply(
+                admin_entered.session_id,
+                PlayerAction::Staff(tiamud_core::StaffAction::Restore {
+                    target: "Bryn".into(),
+                    reason: "recover from a stuck defeat".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        let player = world
+            .current_state(player_entered.session_id)
+            .await
+            .unwrap()
+            .2;
+        assert_eq!(player.character.health, player.character.max_health);
+        assert_eq!(player.character.recovery_in_ticks, None);
+    }
+
+    #[tokio::test]
+    async fn memory_staff_profile_rejects_a_bundle_the_assigner_cannot_delegate() {
+        let store = MemoryStore::default();
+        let admin = store
+            .register_account("Admin", "correct horse battery staple")
+            .await
+            .unwrap();
+        let target = store
+            .register_account("Player", "another correct horse battery")
+            .await
+            .unwrap();
+        store
+            .load_or_create_character(admin.account.id, "Aster", "demo:lantern-square")
+            .await
+            .unwrap();
+        store
+            .load_or_create_character(target.account.id, "Bryn", "demo:lantern-square")
+            .await
+            .unwrap();
+        {
+            let mut state = store.state.lock().unwrap();
+            state
+                .staff_capabilities
+                .get_mut(&admin.account.id)
+                .unwrap()
+                .remove(&tiamud_core::StaffCapability::ReportsResolve);
+        }
+        let audit_before = store.state.lock().unwrap().staff_audit.len();
+
+        let result = store
+            .set_staff_profile(
+                target.account.id,
+                Some(tiamud_core::StaffProfileKey::Helper),
+                None,
+                crate::persistence::StaffAuditRecord {
+                    actor_account_id: admin.account.id,
+                    target_account_id: Some(target.account.id),
+                    capability: tiamud_core::StaffCapability::StaffAssign,
+                    action: "staff_profile_set".to_owned(),
+                    reason: "delegate helper duties".to_owned(),
+                    details: serde_json::json!({"target_name": "Bryn"}),
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(StoreError::StaffForbidden)));
+        let state = store.state.lock().unwrap();
+        assert!(!state.staff_profiles.contains_key(&target.account.id));
+        assert!(!state.staff_capabilities.contains_key(&target.account.id));
+        assert_eq!(state.staff_audit.len(), audit_before);
+    }
+
+    #[tokio::test]
+    async fn memory_staff_report_and_audit_lists_share_the_production_limit() {
+        let store = MemoryStore::default();
+        let admin = store
+            .register_account("Admin", "correct horse battery staple")
+            .await
+            .unwrap();
+        let player = store
+            .register_account("Player", "another correct horse battery")
+            .await
+            .unwrap();
+        let admin_character = store
+            .load_or_create_character(admin.account.id, "Aster", "demo:lantern-square")
+            .await
+            .unwrap();
+        let player_character = store
+            .load_or_create_character(player.account.id, "Bryn", "demo:lantern-square")
+            .await
+            .unwrap();
+        for index in 0..12 {
+            store
+                .report_character(
+                    admin_character.id,
+                    player_character.id,
+                    &format!("report reason {index}"),
+                )
+                .await
+                .unwrap();
+        }
+
+        let reports = store
+            .staff_reports(crate::persistence::StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: None,
+                capability: tiamud_core::StaffCapability::ReportsView,
+                action: "reports_view".to_owned(),
+                reason: "review report queue".to_owned(),
+                details: serde_json::json!({"actor_name": "Aster"}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(reports.len(), 10);
+
+        for index in 0..12 {
+            store
+                .append_staff_audit(crate::persistence::StaffAuditRecord {
+                    actor_account_id: admin.account.id,
+                    target_account_id: None,
+                    capability: tiamud_core::StaffCapability::StaffAudit,
+                    action: format!("audit_seed_{index}"),
+                    reason: "retain bounded audit evidence".to_owned(),
+                    details: serde_json::json!({"actor_name": "Aster"}),
+                })
+                .await
+                .unwrap();
+        }
+        let audit = store
+            .staff_audit_entries(crate::persistence::StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: None,
+                capability: tiamud_core::StaffCapability::StaffAudit,
+                action: "staff_audit_view".to_owned(),
+                reason: "review staff audit".to_owned(),
+                details: serde_json::json!({"actor_name": "Aster"}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(audit.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn memory_report_resolution_rejects_a_discordant_audit_target_without_side_effects() {
+        let store = MemoryStore::default();
+        let admin = store
+            .register_account("Admin", "correct horse battery staple")
+            .await
+            .unwrap();
+        let player = store
+            .register_account("Player", "another correct horse battery")
+            .await
+            .unwrap();
+        let admin_character = store
+            .load_or_create_character(admin.account.id, "Aster", "demo:lantern-square")
+            .await
+            .unwrap();
+        let player_character = store
+            .load_or_create_character(player.account.id, "Bryn", "demo:lantern-square")
+            .await
+            .unwrap();
+        store
+            .report_character(
+                admin_character.id,
+                player_character.id,
+                "a report requiring review",
+            )
+            .await
+            .unwrap();
+        let audit_before = store.state.lock().unwrap().staff_audit.len();
+
+        let discordant = store
+            .resolve_staff_report(
+                1,
+                tiamud_core::StaffReportResolution::NoAction,
+                "reviewed without action",
+                crate::persistence::StaffAuditRecord {
+                    actor_account_id: admin.account.id,
+                    target_account_id: Some(admin.account.id),
+                    capability: tiamud_core::StaffCapability::ReportsResolve,
+                    action: "report_resolve".to_owned(),
+                    reason: "resolve report".to_owned(),
+                    details: serde_json::json!({"actor_name": "Aster"}),
+                },
+            )
+            .await;
+        assert!(matches!(discordant, Err(StoreError::StaffForbidden)));
+        {
+            let state = store.state.lock().unwrap();
+            assert!(!state.resolved_staff_reports.contains(&1));
+            assert_eq!(state.staff_audit.len(), audit_before);
+        }
+
+        store
+            .resolve_staff_report(
+                1,
+                tiamud_core::StaffReportResolution::NoAction,
+                "reviewed without action",
+                crate::persistence::StaffAuditRecord {
+                    actor_account_id: admin.account.id,
+                    target_account_id: None,
+                    capability: tiamud_core::StaffCapability::ReportsResolve,
+                    action: "report_resolve".to_owned(),
+                    reason: "resolve report".to_owned(),
+                    details: serde_json::json!({"actor_name": "Aster"}),
+                },
+            )
+            .await
+            .unwrap();
+        let state = store.state.lock().unwrap();
+        assert!(state.resolved_staff_reports.contains(&1));
+        assert_eq!(state.staff_audit.len(), audit_before + 1);
+        assert_eq!(
+            state.staff_audit.last().unwrap().target_account_id,
+            Some(player.account.id)
+        );
+    }
+
+    #[tokio::test]
     async fn failed_on_talk_commit_does_not_publish_the_social_plan() {
         let store = Arc::new(MemoryStore::default());
         let content = RuntimeContent::new(
@@ -3461,9 +4355,11 @@ mod tests {
         world
             .apply(
                 admin_entered.session_id,
-                PlayerAction::Social(SocialAction::SetRole {
+                PlayerAction::Staff(tiamud_core::StaffAction::SetProfile {
                     target: "Bryn".into(),
-                    role: AccountRole::Moderator,
+                    profile: Some(tiamud_core::StaffProfileKey::Moderator),
+                    lore_title: None,
+                    reason: "staff channel test".into(),
                 }),
             )
             .await
@@ -3493,9 +4389,11 @@ mod tests {
         world
             .apply(
                 admin_entered.session_id,
-                PlayerAction::Social(SocialAction::SetRole {
+                PlayerAction::Staff(tiamud_core::StaffAction::SetProfile {
                     target: "Bryn".into(),
-                    role: AccountRole::Player,
+                    profile: None,
+                    lore_title: None,
+                    reason: "staff channel test demotion".into(),
                 }),
             )
             .await
@@ -3576,9 +4474,11 @@ mod tests {
         world
             .apply(
                 admin_entered.session_id,
-                PlayerAction::Social(SocialAction::SetRole {
+                PlayerAction::Staff(tiamud_core::StaffAction::SetProfile {
                     target: "Bryn".into(),
-                    role: AccountRole::Moderator,
+                    profile: Some(tiamud_core::StaffProfileKey::Moderator),
+                    lore_title: None,
+                    reason: "moderation test".into(),
                 }),
             )
             .await

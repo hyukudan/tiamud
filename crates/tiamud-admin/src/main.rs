@@ -25,7 +25,7 @@ enum Command {
         #[arg(long)]
         backup: PathBuf,
     },
-    /// Promote one registered account when the database has no administrator.
+    /// Recover one registered account as Implementor when no administrator/implementor profile exists.
     RecoverAdmin {
         #[arg(long)]
         database: PathBuf,
@@ -97,7 +97,7 @@ fn run(cli: Cli) -> Result<(), tiamud_admin::AdminError> {
         Command::RecoverAdmin { database, account } => {
             let report = tiamud_admin::recover_admin(database, &account)?;
             println!(
-                "recovered administrator {:?} (account id {}) in {:?}; audit entry recorded",
+                "recovered Implementor {:?} (account id {}) in {:?}; staff and compatibility audits recorded",
                 report.account_name, report.account_id, report.database
             );
         }

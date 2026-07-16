@@ -32,7 +32,7 @@ use std::{
 use tiamud_core::{
     AccountRole, CharacterId, CharacterSnapshot, EconomyAction, PartyAction, PlayerAction,
     PlayerStateView, QuestAction, SceneView, SessionId, SocialAction, SocialChannelName,
-    WorldError, parse_action,
+    StaffAction, StaffCapability, StaffProfileKey, StaffReportResolution, WorldError, parse_action,
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
@@ -46,6 +46,9 @@ const MAX_COMMAND_BYTES: usize = 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_PROTOCOL_ERRORS: u8 = 3;
 const MAX_ACTION_TARGET_BYTES: usize = 256;
+const MAX_STAFF_TARGET_BYTES: usize = 64;
+const MAX_STAFF_REASON_BYTES: usize = 1_024;
+const MAX_STAFF_LORE_TITLE_BYTES: usize = 128;
 const MAX_ABILITY_ID_BYTES: usize = 128;
 const MAX_PROGRESSION_ID_BYTES: usize = 128;
 const MAX_JSON_DEPTH: usize = 16;
@@ -205,6 +208,37 @@ struct ActionPerformData {
     reason: Option<String>,
     #[serde(default)]
     role: Option<AccountRole>,
+    #[serde(default)]
+    report_id: Option<i64>,
+    #[serde(default)]
+    resolution: Option<StaffReportResolution>,
+    #[serde(default, deserialize_with = "deserialize_nullable_field")]
+    profile: NullableField<StaffProfileKey>,
+    #[serde(default, deserialize_with = "deserialize_nullable_field")]
+    lore_title: NullableField<String>,
+    #[serde(default)]
+    capability: Option<StaffCapability>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum NullableField<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+fn deserialize_nullable_field<'de, D, T>(deserializer: D) -> Result<NullableField<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(match Option::<T>::deserialize(deserializer)? {
+        Some(value) => NullableField::Value(value),
+        None => NullableField::Null,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1921,11 +1955,18 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         || reason.len() > MAX_REPORT_REASON_BYTES
                         || reason.chars().any(char::is_control)
                 })
+                || matches!(
+                    &data.lore_title,
+                    NullableField::Value(title)
+                        if title.is_empty()
+                            || title.len() > MAX_STAFF_LORE_TITLE_BYTES
+                            || title.chars().any(char::is_control)
+                )
             {
                 return Err(ClientMessageError::InvalidEnvelope);
             }
             let signature = format!(
-                "action:{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{:?}",
+                "action:{}\0{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}",
                 data.action,
                 data.ability_id.as_deref().unwrap_or_default(),
                 data.class_id.as_deref().unwrap_or_default(),
@@ -1937,6 +1978,12 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 data.duration_seconds,
                 data.reason.as_deref().unwrap_or_default(),
                 data.role,
+                data.report_id,
+                data.resolution,
+                data.profile,
+                data.lore_title,
+                data.capability,
+                data.enabled,
             );
             let action = structured_action(&data);
             Ok(ClientMessage::Action(RequestedAction {
@@ -2018,6 +2065,15 @@ fn valid_definition_id(value: &str, maximum: usize) -> bool {
 
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
+    let has_staff_fields = data.report_id.is_some()
+        || data.resolution.is_some()
+        || !matches!(data.profile, NullableField::Missing)
+        || !matches!(data.lore_title, NullableField::Missing)
+        || data.capability.is_some()
+        || data.enabled.is_some();
+    if !action.starts_with("staff.") && has_staff_fields {
+        return Err(format!("Action {action:?} has unexpected fields."));
+    }
     let target = data.target.as_deref();
     let has_progression_fields =
         || data.class_id.is_some() || data.graph_id.is_some() || data.node_id.is_some();
@@ -2041,7 +2097,13 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             && data.channel.is_none()
             && data.duration_seconds.is_none()
             && data.reason.is_none()
-            && data.role.is_none())
+            && data.role.is_none()
+            && data.report_id.is_none()
+            && data.resolution.is_none()
+            && matches!(data.profile, NullableField::Missing)
+            && matches!(data.lore_title, NullableField::Missing)
+            && data.capability.is_none()
+            && data.enabled.is_none())
         .then_some(())
         .ok_or_else(|| format!("Action {action:?} has unexpected fields."))
     };
@@ -2059,6 +2121,44 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let gameplay_target = || {
         no_social_extras()?;
         required_target()
+    };
+    let no_non_staff_fields = || {
+        (data.ability_id.is_none()
+            && data.class_id.is_none()
+            && data.graph_id.is_none()
+            && data.node_id.is_none()
+            && data.channel.is_none()
+            && data.duration_seconds.is_none()
+            && data.role.is_none())
+        .then_some(())
+        .ok_or_else(|| format!("Action {action:?} has unexpected fields."))
+    };
+    let no_staff_extension_fields = || {
+        (data.report_id.is_none()
+            && data.resolution.is_none()
+            && matches!(data.profile, NullableField::Missing)
+            && matches!(data.lore_title, NullableField::Missing)
+            && data.capability.is_none()
+            && data.enabled.is_none())
+        .then_some(())
+        .ok_or_else(|| format!("Action {action:?} has unexpected fields."))
+    };
+    let staff_target = || {
+        let target = required_target()?;
+        if target.len() > MAX_STAFF_TARGET_BYTES {
+            return Err("Staff target is too long.".to_owned());
+        }
+        Ok(target)
+    };
+    let staff_reason = || {
+        let reason = data
+            .reason
+            .clone()
+            .ok_or_else(|| format!("Action {action:?} requires reason."))?;
+        if reason.len() > MAX_STAFF_REASON_BYTES {
+            return Err("Staff reason is too long.".to_owned());
+        }
+        Ok(reason)
     };
     match action {
         "look" => exact_no_fields().map(|()| PlayerAction::Look),
@@ -2337,6 +2437,139 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 reason,
             }))
         }
+        "staff.status" => exact_no_fields().map(|()| PlayerAction::Staff(StaffAction::Status)),
+        "staff.reports" => {
+            no_target()?;
+            no_non_staff_fields()?;
+            no_staff_extension_fields()?;
+            if data.message.is_some() {
+                return Err("Staff reports has unexpected fields.".to_owned());
+            }
+            Ok(PlayerAction::Staff(StaffAction::Reports {
+                reason: staff_reason()?,
+            }))
+        }
+        "staff.report.resolve" => {
+            no_target()?;
+            no_non_staff_fields()?;
+            if data.message.is_some()
+                || !matches!(data.profile, NullableField::Missing)
+                || !matches!(data.lore_title, NullableField::Missing)
+                || data.capability.is_some()
+                || data.enabled.is_some()
+            {
+                return Err("Staff report resolution has unexpected fields.".to_owned());
+            }
+            let report_id = data
+                .report_id
+                .filter(|report_id| *report_id > 0)
+                .ok_or_else(|| {
+                    "Staff report resolution requires a positive reportId.".to_owned()
+                })?;
+            let resolution = data
+                .resolution
+                .ok_or_else(|| "Staff report resolution requires resolution.".to_owned())?;
+            Ok(PlayerAction::Staff(StaffAction::ResolveReport {
+                report_id,
+                resolution,
+                reason: staff_reason()?,
+            }))
+        }
+        "staff.inspect" | "staff.where" | "staff.goto" | "staff.transfer" | "staff.restore" => {
+            no_non_staff_fields()?;
+            no_staff_extension_fields()?;
+            if data.message.is_some() {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            let target = staff_target()?;
+            let reason = staff_reason()?;
+            let action = match action {
+                "staff.inspect" => StaffAction::Inspect { target, reason },
+                "staff.where" => StaffAction::Where { target, reason },
+                "staff.goto" => StaffAction::Goto { target, reason },
+                "staff.transfer" => StaffAction::Transfer { target, reason },
+                _ => StaffAction::Restore { target, reason },
+            };
+            Ok(PlayerAction::Staff(action))
+        }
+        "staff.announce" => {
+            no_target()?;
+            no_non_staff_fields()?;
+            no_staff_extension_fields()?;
+            let message = data
+                .message
+                .clone()
+                .ok_or_else(|| "Staff announcement requires message.".to_owned())?;
+            Ok(PlayerAction::Staff(StaffAction::Announce {
+                message,
+                reason: staff_reason()?,
+            }))
+        }
+        "staff.audit" => {
+            no_target()?;
+            no_non_staff_fields()?;
+            no_staff_extension_fields()?;
+            if data.message.is_some() {
+                return Err("Staff audit has unexpected fields.".to_owned());
+            }
+            Ok(PlayerAction::Staff(StaffAction::Audit {
+                reason: staff_reason()?,
+            }))
+        }
+        "staff.profile.set" => {
+            no_non_staff_fields()?;
+            if data.message.is_some()
+                || data.report_id.is_some()
+                || data.resolution.is_some()
+                || data.capability.is_some()
+                || data.enabled.is_some()
+            {
+                return Err("Staff profile assignment has unexpected fields.".to_owned());
+            }
+            let profile = match &data.profile {
+                NullableField::Missing => {
+                    return Err("Staff profile assignment requires profile.".to_owned());
+                }
+                NullableField::Null => None,
+                NullableField::Value(profile) => Some(*profile),
+            };
+            let lore_title = match &data.lore_title {
+                NullableField::Missing => {
+                    return Err("Staff profile assignment requires loreTitle.".to_owned());
+                }
+                NullableField::Null => None,
+                NullableField::Value(title) => Some(title.clone()),
+            };
+            Ok(PlayerAction::Staff(StaffAction::SetProfile {
+                target: staff_target()?,
+                profile,
+                lore_title,
+                reason: staff_reason()?,
+            }))
+        }
+        "staff.capability.set" => {
+            no_non_staff_fields()?;
+            if data.message.is_some()
+                || data.report_id.is_some()
+                || data.resolution.is_some()
+                || !matches!(data.profile, NullableField::Missing)
+                || !matches!(data.lore_title, NullableField::Missing)
+            {
+                return Err("Staff capability assignment has unexpected fields.".to_owned());
+            }
+            let capability = data
+                .capability
+                .ok_or_else(|| "Staff capability assignment requires capability.".to_owned())?;
+            let enabled = data
+                .enabled
+                .ok_or_else(|| "Staff capability assignment requires enabled.".to_owned())?;
+            Ok(PlayerAction::Staff(StaffAction::SetCapability {
+                target: staff_target()?,
+                capability,
+                enabled,
+                reason: staff_reason()?,
+            }))
+        }
         "moderation.mute" | "moderation.ban" => {
             let target = social_target()?;
             if has_progression_fields()
@@ -2371,11 +2604,27 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "moderation.unmute" | "moderation.unban" => {
             let target = social_target()?;
-            no_social_extras()?;
+            if has_progression_fields()
+                || data.ability_id.is_some()
+                || data.message.is_some()
+                || data.channel.is_some()
+                || data.duration_seconds.is_some()
+                || data.role.is_some()
+                || has_staff_fields
+            {
+                return Err("Moderation reversal has unexpected fields.".to_owned());
+            }
+            let reason = data
+                .reason
+                .clone()
+                .ok_or_else(|| "Moderation reversal requires reason.".to_owned())?;
+            if reason.len() > MAX_SOCIAL_REASON_BYTES {
+                return Err("Moderation reason is too long.".to_owned());
+            }
             Ok(PlayerAction::Social(if action == "moderation.unban" {
-                SocialAction::Unban(target)
+                SocialAction::Unban { target, reason }
             } else {
-                SocialAction::Unmute(target)
+                SocialAction::Unmute { target, reason }
             }))
         }
         "moderation.role" => {
@@ -2385,14 +2634,25 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 || data.message.is_some()
                 || data.channel.is_some()
                 || data.duration_seconds.is_some()
-                || data.reason.is_some()
+                || has_staff_fields
             {
                 return Err("Role action has unexpected fields.".to_owned());
             }
             let role = data
                 .role
                 .ok_or_else(|| "Role action requires role.".to_owned())?;
-            Ok(PlayerAction::Social(SocialAction::SetRole { target, role }))
+            let reason = data
+                .reason
+                .clone()
+                .ok_or_else(|| "Role action requires reason.".to_owned())?;
+            if reason.len() > MAX_SOCIAL_REASON_BYTES {
+                return Err("Role reason is too long.".to_owned());
+            }
+            Ok(PlayerAction::Social(SocialAction::SetRole {
+                target,
+                role,
+                reason,
+            }))
         }
         _ => Err(format!("Unknown structured action: {action}")),
     }
@@ -2436,6 +2696,12 @@ fn public_game_error(error: &GameError) -> String {
         GameError::Persistence(StoreError::SocialForbidden) => {
             "Your account is not authorized for that social action.".to_owned()
         }
+        GameError::Persistence(StoreError::StaffForbidden | StoreError::StaffHierarchy) => {
+            "Your account is not authorized for that staff action.".to_owned()
+        }
+        GameError::Persistence(StoreError::StaffReportUnavailable(_)) => {
+            "That report is not available for resolution.".to_owned()
+        }
         GameError::Persistence(StoreError::ChatMuted) => {
             "You cannot send chat while your account is muted.".to_owned()
         }
@@ -2444,6 +2710,9 @@ fn public_game_error(error: &GameError) -> String {
         }
         GameError::Persistence(StoreError::InvalidSocialInput) => {
             "The social action is invalid or rate limited.".to_owned()
+        }
+        GameError::Persistence(StoreError::InvalidStaffInput) => {
+            "The staff action is invalid or exceeds its limits.".to_owned()
         }
         GameError::Persistence(StoreError::AccountBanned) => {
             "This account is suspended.".to_owned()
@@ -3147,6 +3416,199 @@ mod tests {
 
         for (message, expected) in cases {
             assert_eq!(requested_action(message).action, Ok(expected));
+        }
+    }
+
+    #[test]
+    fn structured_staff_actions_map_exactly() {
+        let cases = [
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-status","action":"staff.status"}}"#,
+                PlayerAction::Staff(StaffAction::Status),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-reports","action":"staff.reports","reason":"weekly review"}}"#,
+                PlayerAction::Staff(StaffAction::Reports {
+                    reason: "weekly review".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-resolve","action":"staff.report.resolve","reportId":7,"resolution":"action_taken","reason":"evidence verified"}}"#,
+                PlayerAction::Staff(StaffAction::ResolveReport {
+                    report_id: 7,
+                    resolution: StaffReportResolution::ActionTaken,
+                    reason: "evidence verified".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-inspect","action":"staff.inspect","target":"Aria","reason":"support request"}}"#,
+                PlayerAction::Staff(StaffAction::Inspect {
+                    target: "Aria".into(),
+                    reason: "support request".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-where","action":"staff.where","target":"Aria","reason":"locate incident"}}"#,
+                PlayerAction::Staff(StaffAction::Where {
+                    target: "Aria".into(),
+                    reason: "locate incident".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-goto","action":"staff.goto","target":"Aria","reason":"respond to incident"}}"#,
+                PlayerAction::Staff(StaffAction::Goto {
+                    target: "Aria".into(),
+                    reason: "respond to incident".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-transfer","action":"staff.transfer","target":"Aria","reason":"unstick character"}}"#,
+                PlayerAction::Staff(StaffAction::Transfer {
+                    target: "Aria".into(),
+                    reason: "unstick character".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-restore","action":"staff.restore","target":"Aria","reason":"recover after incident"}}"#,
+                PlayerAction::Staff(StaffAction::Restore {
+                    target: "Aria".into(),
+                    reason: "recover after incident".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-announce","action":"staff.announce","message":"The shard will restart soon.","reason":"planned maintenance"}}"#,
+                PlayerAction::Staff(StaffAction::Announce {
+                    message: "The shard will restart soon.".into(),
+                    reason: "planned maintenance".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-audit","action":"staff.audit","reason":"weekly review"}}"#,
+                PlayerAction::Staff(StaffAction::Audit {
+                    reason: "weekly review".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-profile","action":"staff.profile.set","target":"Aria","profile":"moderator","loreTitle":"Warden","reason":"approved promotion"}}"#,
+                PlayerAction::Staff(StaffAction::SetProfile {
+                    target: "Aria".into(),
+                    profile: Some(StaffProfileKey::Moderator),
+                    lore_title: Some("Warden".into()),
+                    reason: "approved promotion".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-profile-clear","action":"staff.profile.set","target":"Aria","profile":null,"loreTitle":null,"reason":"assignment ended"}}"#,
+                PlayerAction::Staff(StaffAction::SetProfile {
+                    target: "Aria".into(),
+                    profile: None,
+                    lore_title: None,
+                    reason: "assignment ended".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-capability","action":"staff.capability.set","target":"Aria","capability":"reports.resolve","enabled":true,"reason":"temporary duty"}}"#,
+                PlayerAction::Staff(StaffAction::SetCapability {
+                    target: "Aria".into(),
+                    capability: StaffCapability::ReportsResolve,
+                    enabled: true,
+                    reason: "temporary duty".into(),
+                }),
+            ),
+        ];
+
+        for (message, expected) in cases {
+            assert_eq!(requested_action(message).action, Ok(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn structured_staff_actions_are_strict_and_bounded() {
+        for message in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-extra","action":"staff.status","enabled":true}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-zero-report","action":"staff.report.resolve","reportId":0,"resolution":"dismissed","reason":"invalid id"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-missing-profile","action":"staff.profile.set","target":"Aria","loreTitle":null,"reason":"incomplete"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-missing-lore","action":"staff.profile.set","target":"Aria","profile":null,"reason":"incomplete"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-missing-enabled","action":"staff.capability.set","target":"Aria","capability":"reports.view","reason":"incomplete"}}"#,
+        ] {
+            assert!(requested_action(message).action.is_err(), "{message}");
+        }
+
+        assert_eq!(
+            parse_client_message(
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"staff-bad-resolution","action":"staff.report.resolve","reportId":1,"resolution":"closed","reason":"invalid state"}}"#,
+            )
+            .unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
+
+        let oversized_target = format!(
+            r#"{{"v":1,"type":"action.perform","data":{{"requestId":"staff-long-target","action":"staff.inspect","target":"{}","reason":"review"}}}}"#,
+            "a".repeat(MAX_STAFF_TARGET_BYTES + 1)
+        );
+        assert!(requested_action(&oversized_target).action.is_err());
+
+        let oversized_reason = format!(
+            r#"{{"v":1,"type":"action.perform","data":{{"requestId":"staff-long-reason","action":"staff.audit","reason":"{}"}}}}"#,
+            "a".repeat(MAX_STAFF_REASON_BYTES + 1)
+        );
+        assert!(requested_action(&oversized_reason).action.is_err());
+
+        let oversized_lore = format!(
+            r#"{{"v":1,"type":"action.perform","data":{{"requestId":"staff-long-lore","action":"staff.profile.set","target":"Aria","profile":"helper","loreTitle":"{}","reason":"review"}}}}"#,
+            "a".repeat(MAX_STAFF_LORE_TITLE_BYTES + 1)
+        );
+        assert_eq!(
+            parse_client_message(&oversized_lore).unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
+
+        let oversized_message = format!(
+            r#"{{"v":1,"type":"action.perform","data":{{"requestId":"staff-long-message","action":"staff.announce","message":"{}","reason":"review"}}}}"#,
+            "a".repeat(MAX_CHAT_MESSAGE_BYTES + 1)
+        );
+        assert_eq!(
+            parse_client_message(&oversized_message).unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
+    }
+
+    #[test]
+    fn structured_moderation_reversals_and_roles_require_reasons() {
+        let cases = [
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"unmute","action":"moderation.unmute","target":"Aria","reason":"appeal accepted"}}"#,
+                PlayerAction::Social(SocialAction::Unmute {
+                    target: "Aria".into(),
+                    reason: "appeal accepted".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"unban","action":"moderation.unban","target":"Aria","reason":"appeal accepted"}}"#,
+                PlayerAction::Social(SocialAction::Unban {
+                    target: "Aria".into(),
+                    reason: "appeal accepted".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"role","action":"moderation.role","target":"Aria","role":"moderator","reason":"approved assignment"}}"#,
+                PlayerAction::Social(SocialAction::SetRole {
+                    target: "Aria".into(),
+                    role: AccountRole::Moderator,
+                    reason: "approved assignment".into(),
+                }),
+            ),
+        ];
+        for (message, expected) in cases {
+            assert_eq!(requested_action(message).action, Ok(expected), "{message}");
+        }
+
+        for message in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"unmute-no-reason","action":"moderation.unmute","target":"Aria"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"unban-no-reason","action":"moderation.unban","target":"Aria"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"role-no-reason","action":"moderation.role","target":"Aria","role":"moderator"}}"#,
+        ] {
+            assert!(requested_action(message).action.is_err(), "{message}");
         }
     }
 

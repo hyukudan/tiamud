@@ -62,11 +62,12 @@ matriz, memoria y documentación pública a la vez.
 - Mundo y conversación usan buzones acotados de 256 entradas por sesión,
   encaminados por `SessionId`. Conserva el fan-out O(S), recuperación por lag y
   limpieza segura ante cancelación.
-- PostgreSQL esquema v9 es el perfil recomendado para un host público nuevo.
-  SQLite esquema v9 es la ruta local/predeterminada sin servicios. Se abre un
+- PostgreSQL esquema v10 es el perfil recomendado para un host público nuevo.
+  SQLite esquema v10 es la ruta local/predeterminada sin servicios. Se abre un
   único sistema autoritativo; no hay doble escritura.
 - `tiamud-migrate-postgres` traslada sin conexión una instantánea SQLite actual
-  a PostgreSQL vacío en una transacción, incluidas suscripciones de canal.
+  a PostgreSQL vacío en una transacción, incluidas suscripciones, perfiles,
+  capacidades, reportes resueltos y auditoría de staff.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
@@ -111,13 +112,30 @@ matriz, memoria y documentación pública a la vez.
   administración dirigida de un líder/invitado/miembro desconectado.
 - La conversación incluye `say` local, `tell`, `reply` en memoria mientras el
   destinatario siga conectado, chat de grupo y canales `general`, `newbie` y
-  `staff`. Suscripciones son durables en v9; `staff` requiere Moderator/Admin
-  al unirse, enviar y recibir. Web, Telnet y `Comm.Channel.Text` GMCP comparten
-  política. No hay correo/historial durable, shout/yell ni telepatía authored.
-- Autoridad de cuenta y progresión están separadas. Solo existen `Player`,
-  `Moderator`, `Admin`; moderación y asignación de rol son durables. No hay
-  escalera de inmortales, matriz de capacidades ni superficie general de
-  comandos wizard.
+  `staff`. Suscripciones son durables en v10; `staff` requiere perfil
+  `moderator`, `administrator` o `implementor` al unirse, enviar y recibir;
+  `helper` y `builder` no acceden. Web, Telnet y `Comm.Channel.Text` GMCP
+  comparten política. No hay correo/historial durable, shout/yell ni telepatía
+  authored.
+- La autoridad ejecutable de staff usa capacidades cerradas y nunca procede de
+  XP, nivel, clase, talentos o WorldPack. Los perfiles `helper`, `builder`,
+  `moderator`, `administrator` e `implementor` siembran bundles revisados y
+  admiten un `lore_title` opcional que no autoriza nada. Las doce capacidades
+  son `reports.view`, `reports.resolve`, `moderation.mute`, `moderation.ban`,
+  `staff.assign`, `staff.inspect`, `staff.where`, `staff.goto`,
+  `staff.transfer`, `staff.restore`, `staff.announce` y `staff.audit`.
+- Los roles `Player`, `Moderator`, `Admin` se conservan solo como tier legado,
+  moderación y percepción; poseer uno nunca basta para ejecutar un comando ni
+  abre por sí solo el canal `staff`. La primera cuenta registrada recibe
+  `implementor`; un Admin migrado recibe `administrator`. Cambiar un perfil
+  elimina las asignaciones previas y siembra exactamente su bundle; toda acción
+  sobre otra cuenta exige rango de perfil estrictamente inferior. Reportes,
+  sanciones, asignaciones y acciones staff exigen motivo; la auditoría v10 es
+  durable y append-only.
+- `staff inspect|where|goto|transfer|restore <nombre> | <motivo>` actúa solo
+  sobre objetivos conectados. `staff announce <texto> | <motivo>`, la cola y
+  resolución cerrada de reportes, asignación de perfil/capacidad y consulta de
+  auditoría comparten Web/Telnet y la misma autorización del actor.
 - No existe entrenamiento general por uso. El incremento heredado de `combat`
   tras una derrota de NPC es deuda del mundo de ejemplo.
 
@@ -181,7 +199,7 @@ no autoriza saltarse pruebas tras cambios:
   `tiamud-server`.
 - 96 pruebas web y 28 escenarios combinados Chromium/Firefox.
 - PostgreSQL 18.4 validó **esquema v8**, restauración SQLite, mover, juego mixto
-  y reinicio autenticado. No se relabela como aceptación v9.
+  y reinicio autenticado. No se relabela como aceptación v10.
 - Perfil mixto de 30 s en `2b18cfe`: 66 rondas, 145 acciones, 10/10 readiness,
   cero errores/drops y cero buzones vivos al apagar.
 - Fuzz del parser Telnet: 3.081.428 ejecuciones en 121 s sin crash, timeout, OOM
@@ -211,8 +229,9 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
    prosa.
 8. IDs publicados son identidad durable. Tras release v3, renombrar exige
    alias/tombstone/migración explícita.
-9. Autoridad futura de staff separada de XP, nivel, clase y talentos. Usa
-   capacidades auditables y títulos opcionales, no Angel/Dios como autorización.
+9. Autoridad de staff separada de XP, nivel, clase y talentos. Usa la capacidad
+   concreta y auditoría append-only; perfiles y títulos son asignación/presentación,
+   no autorización implícita.
 10. Antes de botín repetible/aleatorio, separa prototipo e instancia y define
     propiedad/reparto atómicos. Cajas, llaves y tiradas pagadas quedan fuera.
 11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
@@ -227,8 +246,8 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 | --- | --- |
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
-| `crates/persistence-sqlite/` | SQLite esquema v9 y almacenamiento local |
-| `crates/persistence-postgres/` | PostgreSQL esquema v9, adaptador y mover |
+| `crates/persistence-sqlite/` | SQLite esquema v10 y almacenamiento local |
+| `crates/persistence-postgres/` | PostgreSQL esquema v10, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
@@ -358,7 +377,8 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - sin entrenamiento general, migración general de IDs, multiclase, sprite de
   jugador, heal cue del servidor ni lápida de derrota;
 - fase social 1 implementada, pero sin correo/historial, shout/yell o telepatía;
-- sin perfiles de capacidades staff ni comandos generales de mundo;
+- fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
+  obtenible por rol legado, título, XP o WorldPack;
 - sin tiers/rareza, prototipos repetibles, stacks, contenedores, trade o botín
   aleatorio;
 - backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;

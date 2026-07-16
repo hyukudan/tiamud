@@ -236,7 +236,30 @@ export interface MediaStopData {
 
 export type CommunityChannel = 'general' | 'newbie' | 'staff';
 
-export type SocialMessageChannel = 'say' | 'tell' | 'party' | CommunityChannel;
+export type SocialMessageChannel = 'announcement' | 'say' | 'tell' | 'party' | CommunityChannel;
+
+export type StaffReportResolution = 'dismissed' | 'action_taken' | 'no_action';
+
+export type StaffProfile =
+  | 'helper'
+  | 'builder'
+  | 'moderator'
+  | 'administrator'
+  | 'implementor';
+
+export type StaffCapability =
+  | 'reports.view'
+  | 'reports.resolve'
+  | 'moderation.mute'
+  | 'moderation.ban'
+  | 'staff.assign'
+  | 'staff.inspect'
+  | 'staff.where'
+  | 'staff.goto'
+  | 'staff.transfer'
+  | 'staff.restore'
+  | 'staff.announce'
+  | 'staff.audit';
 
 export interface SocialMessageData {
   channel: SocialMessageChannel;
@@ -470,6 +493,13 @@ export interface ActionPerformFields {
   target?: string;
   message?: string;
   channel?: CommunityChannel;
+  reason?: string;
+  reportId?: number;
+  resolution?: StaffReportResolution;
+  profile?: StaffProfile | null;
+  loreTitle?: string | null;
+  capability?: StaffCapability;
+  enabled?: boolean;
 }
 
 export type ActionPerform = Envelope<
@@ -1714,6 +1744,7 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const text = stringOrUndefined(candidate.data.text);
       if (
         (
+          channel !== 'announcement' &&
           channel !== 'say' &&
           channel !== 'tell' &&
           channel !== 'party' &&
@@ -1785,6 +1816,14 @@ export function createActionPerform(
   fields: ActionPerformFields | undefined,
   requestId: string,
 ): ActionPerform {
+  if (fields?.reportId !== undefined &&
+    (!Number.isSafeInteger(fields.reportId) || fields.reportId <= 0)) {
+    throw new RangeError('reportId must be a positive safe integer');
+  }
+  if (fields?.channel !== undefined &&
+    !(['general', 'newbie', 'staff'] as const).includes(fields.channel)) {
+    throw new RangeError('channel is not sendable');
+  }
   return {
     v: PROTOCOL_VERSION,
     type: 'action.perform',

@@ -5,6 +5,7 @@ mod persistence;
 mod persistence_postgres;
 mod runtime_content;
 mod social;
+mod staff;
 mod telnet;
 mod telnet_transport;
 mod web;

@@ -15,23 +15,24 @@ sobre la aceptación de la especificación histórica.
   aceptar, revocar, expulsar, transferir liderazgo, disolver, salir y consultar
   estado, además de `party say` con alias `gsay`/`gtell`.
 - Sí existen `reply` en línea y los canales suscritos `general`, `newbie` y
-  `staff`; este último exige rol Moderator o Admin. No existen correo sin
-  conexión, historial durable de conversación ni una habilidad de telepatía.
-- Sí existen los roles de cuenta `Player`, `Moderator` y `Admin`, separados de
-  la progresión del personaje. Un Admin asigna los roles; la XP nunca los
-  concede.
+  `staff`; este último exige perfil `moderator`, `administrator` o
+  `implementor`. No existen correo sin conexión, historial durable de
+  conversación ni una habilidad de telepatía.
+- Sí existen los perfiles `helper`, `builder`, `moderator`, `administrator` e
+  `implementor`, doce capacidades cerradas y un título narrativo opcional. La
+  XP, la ficha, WorldPack, el perfil visible y el rol legado nunca sustituyen
+  la capacidad concreta.
 - Sí existen comandos de moderación dentro del juego: reportar, silenciar,
   expulsar, revertir sanciones y cambiar roles según autoridad.
-- No existe una jerarquía de Angel/Semidiós/Dios ni una suite de comandos de
-  inmortal para inspeccionar o modificar el mundo.
+- Sí existen cola/resolución de reportes, inspect/where/goto/transfer/restore,
+  anuncios y consulta de auditoría, con motivos obligatorios y límites.
 - Sí existen inventario, equipo, consumibles y botín fijo de NPC.
 - No existen rareza/tier, peso, capacidad, pilas, contenedores, comercio,
   objetos repetibles ni tablas de botín aleatorias.
 
-La primera fase de comunicación y reglas de grupo ya está implementada. La
-secuencia pendiente es: autoridad de staff por capacidades; prototipos e
-instancias de objetos; propiedad y reparto del botín; y, solo después, rareza
-y tablas aleatorias.
+Las fases 1, comunicación/grupo, y 2, staff por capacidades, están
+implementadas. La secuencia pendiente es: prototipos e instancias de objetos;
+propiedad y reparto del botín; y, solo después, rareza y tablas aleatorias.
 
 ## Estado verificado en el código
 
@@ -39,8 +40,8 @@ y tablas aleatorias.
 
 `SocialAction` ofrece `Say`, `PartySay`, `Tell`, `Reply`, listado/alta/baja/envío
 de canal, `Who`, `Help`, ignore/block, reportes, mute/ban, reversión de
-sanciones y cambio de rol. `SocialChannel` contiene `Say`, `Tell`, `Party`,
-`General`, `Newbie` y `Staff`.
+sanciones y cambio de rol. `SocialChannel` contiene `Announcement`, `Say`,
+`Tell`, `Party`, `General`, `Newbie` y `Staff`.
 
 - `say` se entrega a otros personajes conectados en la misma sala;
 - `tell` se entrega a un personaje conectado, aunque esté en otra sala;
@@ -48,18 +49,19 @@ sanciones y cambio de rol. `SocialChannel` contiene `Say`, `Tell`, `Party`,
   se entregó y exige que siga conectado; no es correo durable;
 - `party say` se entrega solo a los demás miembros conectados del grupo;
 - `general`, `newbie` y `staff` exigen suscripción durable; `staff` solo está
-  disponible para cuentas Moderator/Admin, tanto al unirse o enviar como al
-  recibir;
+  disponible para perfiles `moderator`, `administrator` o `implementor`, tanto
+  al unirse o enviar como al recibir; `helper` y `builder` no acceden;
 - un `tell` bloqueado o ignorado se confirma igual que uno entregado para no
   filtrar el estado privado del receptor;
 - el texto y el destinatario están acotados, y el chat tiene rate limit;
 - la entrega usa el router directo y los buzones acotados por sesión;
 - reportes, relaciones, sanciones y suscripciones sobreviven a un reinicio.
 
-SQLite y PostgreSQL usan actualmente el esquema v9. La migración v8→v9 añade
-la relación `social_channel_subscriptions`; el traslado sin conexión también
-la copia. La evidencia histórica PostgreSQL v8 sigue acreditando v8 y no se
-presenta como aceptación v9.
+SQLite y PostgreSQL implementan actualmente el esquema v10. Conserva
+`social_channel_subscriptions` de v9 y añade perfiles, capacidades, resolución
+cerrada de reportes y auditoría append-only; el traslado sin conexión también
+los copia. La evidencia histórica PostgreSQL real sigue acreditando v8 y no se
+presenta como aceptación v10.
 
 Por tanto, `tell` sirve como mensaje privado online clásico, pero no debe
 presentarse como telepatía: no consume una habilidad o recurso, no aplica
@@ -90,17 +92,71 @@ de misión/XP compartido ni política de botín.
 
 ### Staff y moderación
 
-La autoridad actual es de cuenta y tiene tres valores ordenados: `Player`,
-`Moderator` y `Admin`. Moderator y Admin pueden moderar únicamente roles
-inferiores; solo Admin puede cambiar roles. El primer registro de una base
-nueva recibe Admin y deja una auditoría de bootstrap. Existe recuperación
-offline de emergencia para una instalación que se quede sin administrador.
+La autorización ejecutable es de cuenta y comprueba una capacidad concreta.
+Los roles `Player`, `Moderator`, `Admin` solo conservan el tier legado de
+moderación y percepción; nunca son suficientes para ejecutar un comando ni
+abren por sí solos el canal `staff`. Ese canal exige perfil `moderator`,
+`administrator` o `implementor`; `helper` y `builder` no acceden. El primer
+registro de una base nueva conserva Admin como bootstrap legado y recibe
+perfil `implementor` con las doce capacidades. Los Admin migrados desde v9
+reciben `administrator`. Existe recuperación offline de emergencia para una
+instalación sin admin.
+
+Los perfiles cerrados y su bundle inicial son:
+
+| Perfil | Bundle inicial |
+| --- | --- |
+| `helper` | `reports.view`, `reports.resolve` |
+| `builder` | Ninguna capacidad implícita; se asigna explícitamente lo necesario. |
+| `moderator` | Reportes más `moderation.mute`, `moderation.ban` |
+| `administrator` | Las doce capacidades. |
+| `implementor` | Las doce capacidades; rango operativo excepcional. |
+
+El `lore_title` opcional puede presentar “Angel”, “Semidiós”, “Dios” u otro
+título del mundo, pero no concede autoridad. Las capacidades canónicas son:
+
+```text
+reports.view       reports.resolve
+moderation.mute    moderation.ban
+staff.assign       staff.inspect       staff.where
+staff.goto         staff.transfer      staff.restore
+staff.announce     staff.audit
+```
+
+Cambiar un perfil borra las asignaciones anteriores y siembra exactamente el
+bundle revisado del perfil nuevo; las capacidades directas se aplican después,
+de forma explícita. Tanto la asignación como las acciones dirigidas rechazan la
+propia cuenta y cualquier objetivo de rango igual o superior.
 
 Dentro del juego se pueden ejecutar `report`, `mute`, `unmute`, `ban`,
-`unban` y `role`. Las sanciones y los cambios de rol son durables y auditados.
-No existen `goto`, `transfer`, `restore`, `load/spawn`, `purge`, `stat`,
-`invis`, `holylight`, `snoop`, `switch`, `force` ni edición online
-del mundo. `tiamud-admin` es una herramienta de operador fuera del juego.
+`unban`, `role` y la superficie staff de fase 2. Todos los cambios sensibles
+exigen motivo. La cola solo contiene reportes abiertos; resolver requiere uno
+de `dismissed`, `action_taken`, `no_action` y conserva resolución, motivo,
+responsable y fecha.
+
+```text
+staff
+staff status
+staff reports <motivo>
+staff resolve <id> <dismissed|action_taken|no_action> <motivo>
+staff inspect <nombre> | <motivo>
+staff where <nombre> | <motivo>
+staff goto <nombre> | <motivo>
+staff transfer <nombre> | <motivo>
+staff restore <nombre> | <motivo>
+staff announce <texto> | <motivo>
+staff audit <motivo>
+staff profile <nombre> <helper|builder|moderator|administrator|implementor|none> <título|none> | <motivo>
+staff capability <grant|revoke> <nombre> <capacidad> | <motivo>
+```
+
+Inspect/where/goto/transfer/restore resuelven un personaje conectado y no son
+administración offline. Perfil/capacidad y resolución de reportes usan
+identidad durable. Las mutaciones y su entrada de auditoría se escriben
+atómicamente; `staff_audit` es append-only por restricciones y triggers en
+ambos adaptadores. Siguen ausentes `load/spawn`, `purge`, `invis`, `holylight`,
+`snoop`, `switch`, `force` y edición online. `tiamud-admin` permanece en la
+capa de operador.
 
 ### Inventario y botín
 
@@ -169,13 +225,14 @@ flowchart LR
 3. Implementados revocar invitación, expulsar, transferir y disolver.
 4. Implementados los canales suscritos `newbie`, `general` y `staff`, con
    permisos, rate limit, mute, ignore/block y entrega mediante buzones
-   acotados. La suscripción persiste en ambos adaptadores; `staff` exige rol.
+   acotados. La suscripción persiste en ambos adaptadores; `staff` exige perfil
+   `moderator`, `administrator` o `implementor`.
 5. Pendiente `shout`/`yell` como propagación espacial definida por el mundo y
    acotada, no como otro nombre para el canal global.
 6. Pendientes emotes/sociales con plantillas estrictas que nunca conviertan
    texto del jugador en ANSI, HTML, MXP o instrucciones evaluables.
 
-Web usa acciones estructuradas y representa los seis valores de
+Web usa acciones estructuradas y representa los siete valores de
 `SocialMessage`; Telnet comparte los comandos de texto y proyecta cada entrega
 como texto y como `Comm.Channel.Text` cuando GMCP `Comm` está negociado. Esta
 paridad no convierte GMCP en una segunda autoridad.
@@ -221,31 +278,21 @@ flowchart TB
     subgraph Staff[Autoridad asignada]
         Assign[Designación explícita] --> Profile[Perfil de capacidades]
         Assign --> Lore[Título visible opcional]
-        Profile --> Command[Comando autorizado]
+        Profile --> Bundle[Bundle inicial revisado]
+        Assign --> Capability[Asignación directa]
+        Bundle --> Capability
+        Capability --> Command[Comando autorizado]
         Command --> Reason[Motivo y límites]
         Reason --> Audit[(Auditoría durable)]
     end
 ```
 
-Una configuración podría mostrar perfiles como Angel, Semidiós, Dios e
-Implementor, pero esos nombres no deben ser la autorización canónica del
-motor. Un mundo no fantástico puede llamarlos Helper, Builder, Moderator y
-Administrator. Las capacidades permiten que un builder publique borradores
-sin poder banear, y que un moderator atienda reportes sin poder crear objetos.
-
-| Perfil orientativo | Capacidades posibles | No concede por defecto |
-| --- | --- | --- |
-| Helper / Angel | Ayuda, canal newbie, clasificar reportes. | Sanciones, viaje o mutación del mundo. |
-| Builder / Semidiós | Previsualizar y validar borradores de áreas asignadas. | Publicación directa, cuentas o moderación. |
-| Moderator | Consultar cola de reportes, mute/ban de rangos inferiores, resolver casos. | Spawn, restore, roles o secretos de operación. |
-| Administrator / Dios | Asignar perfiles, announce, inspect, viaje/transfer/restore controlados. | Acceso implícito al host, base de datos o secretos. |
-| Implementor | Recuperación excepcional y cambio de política. | Uso cotidiano desde un personaje normal. |
-
-Los primeros comandos de mundo deberían ser de diagnóstico y reversibles:
-`staff inspect`, `staff where`, `staff goto`, `staff transfer`,
-`staff restore`, `staff announce` y `staff audit`. Toda acción que afecte a
-otro personaje debe exigir motivo, comprobar una capacidad concreta, rechazar
-objetivos iguales o superiores, limitar el alcance y dejar auditoría durable.
+Los perfiles canónicos son identificadores operativos no localizados. “Angel”,
+“Semidiós” o “Dios” caben como `lore_title`, nunca como autorización. La
+comprobación usa el conjunto efectivo de capacidades y la jerarquía negativa
+de perfiles; rechaza objetivos iguales o superiores aunque exista la capacidad
+funcional. Cada comando de mundo implementado exige motivo, limita el alcance,
+opera sobre un personaje conectado y deja auditoría durable.
 
 `force`, `snoop` y `switch` tienen riesgos de abuso y privacidad; no son
 requisitos del baseline. `load/spawn` y `purge` pueden romper la economía o la
@@ -345,15 +392,17 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 - chat de grupo, `reply`, revocación/expulsión/transferencia/disolución;
 - canales `newbie`/`general`/`staff` suscritos y moderados;
 - paridad navegador, texto Telnet y GMCP;
-- cobertura de ignore/block/mute, límites, desconexión, rol de `staff` y cero
+- cobertura de ignore/block/mute, límites, desconexión, perfil de `staff` y cero
   fuga entre grupos.
 
-### Fase 2 — staff por capacidades — pendiente
+### Fase 2 — staff por capacidades — implementada
 
 - perfiles y capacidades separados de progresión;
-- cola de reportes y razones obligatorias;
+- cola y resolución cerrada de reportes y razones obligatorias;
 - inspect/where/goto/transfer/restore/announce/audit acotados;
-- autorización negativa, jerarquía, persistencia y auditoría en SQLite/Postgres;
+- autorización negativa, jerarquía, persistencia v10 y auditoría append-only
+  en SQLite/PostgreSQL;
+- acciones estructuradas Web y texto/announcement Telnet+GMCP equivalentes;
 - ninguna autoridad obtenible mediante XP, clase, talento o WorldPack.
 
 ### Fase 3 — objetos repetibles e inventario — pendiente
