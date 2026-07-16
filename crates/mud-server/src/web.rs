@@ -1668,7 +1668,8 @@ fn queue_semantic_updates(
         return false;
     }
     if (previous_player.inventory != player.inventory
-        || previous_player.equipment != player.equipment)
+        || previous_player.equipment != player.equipment
+        || previous_player.inventory_capacity != player.inventory_capacity)
         && !queue_sequenced(
             outbound,
             sequence,
@@ -1679,6 +1680,7 @@ fn queue_semantic_updates(
                 "revision": player.revision,
                 "inventory": player.inventory,
                 "equipment": player.equipment,
+                "inventoryCapacity": player.inventory_capacity,
             }),
         )
     {
@@ -4120,6 +4122,9 @@ mod tests {
                 id: format!("o{index:016x}"),
                 label: format!("Budget item {index}"),
                 description: "p".repeat(2_500),
+                rarity: "common".into(),
+                item_level: 1,
+                weight_grams: 1,
                 actions: Vec::new(),
             })
             .collect();
@@ -4285,6 +4290,9 @@ mod tests {
                 id: format!("o{index:016x}"),
                 label: format!("Oversized budget item {index}"),
                 description: "p".repeat(4_096),
+                rarity: "common".into(),
+                item_level: 1,
+                weight_grams: 1,
                 actions: Vec::new(),
             })
             .collect();
@@ -4355,8 +4363,12 @@ mod tests {
             .collect::<String>();
         assert!(wire.contains("\"type\":\"entity.remove\""));
         assert!(wire.contains("\"type\":\"inventory.patch\""));
+        assert!(wire.contains("\"inventoryCapacity\""));
+        assert!(wire.contains("\"rarity\""));
+        assert!(wire.contains("\"itemLevel\""));
         assert!(!wire.contains("demo:lantern-square"));
         assert!(!wire.contains("demo:blue-lantern"));
+        assert!(!wire.contains("prototypeId"));
         assert!(!wire.contains("characterId"));
     }
 }

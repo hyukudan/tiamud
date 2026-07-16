@@ -4,6 +4,20 @@ const PROTOCOL = 'tiamud.v1';
 const REQUEST_TIMEOUT_MS = 10_000;
 const OPAQUE_ID = /^o[0-9a-f]{16}$/;
 const DIRECTIONS = new Set(['north', 'east', 'south', 'west', 'up', 'down']);
+const ITEM_RARITIES = new Set(['common', 'uncommon', 'rare', 'epic', 'legendary']);
+const EQUIPMENT_SLOTS = new Set(['weapon', 'body', 'trinket']);
+const MAX_ITEM_LEVEL = 1_000;
+const MAX_ITEM_WEIGHT_GRAMS = 1_000_000;
+const MAX_ITEM_SLOT_COST = 100;
+const MAX_INVENTORY_SLOTS = 1_000;
+const MAX_INVENTORY_WEIGHT_GRAMS = 1_000_000;
+const MAX_SCENE_PRESENTATION_ENTITIES = 12;
+const MAX_SCENE_PRESENTATION_POSES = 32;
+const MAX_ENTITY_SOURCE_REFERENCES = 2;
+const SOCIAL_CHANNELS = new Set([
+  'announcement', 'say', 'tell', 'party', 'general', 'newbie', 'staff',
+]);
+const MEDIA_CHANNELS = new Set(['music', 'ambience', 'effects']);
 
 export async function provisionBot(baseUrl, runId, index, recordLatency = () => {}) {
   const accountName = `Load-${runId}-${index}`;
@@ -99,7 +113,7 @@ export class TiamudBot {
       synced.scene.viewId !== gate.viewId ||
       synced.scene.revision < replay.scene.revision
     ) {
-      throw new Error(`Bot ${this.#index} received an inconsistent sync.snapshot.`);
+      throw new Error(`Bot ${this.#index} received an inconsistent sync recovery pair.`);
     }
 
     await this.#socket.close();
@@ -117,8 +131,10 @@ export class TiamudBot {
       throw new Error(`Bot ${this.#index} is not connected.`);
     }
     this.#roundCounter += 1;
-    const south = requiredExit(this.#scene, 'south');
-    const square = (await this.#command(south.command, undefined, 'command.south')).scene;
+    const south = optionalExit(this.#scene, 'south');
+    const square = south
+      ? (await this.#command(south.command, undefined, 'command.south')).scene
+      : this.#scene;
     requiredExit(square, 'north');
     if (this.#roundCounter % 8 === 1) {
       await this.#command(
@@ -128,8 +144,10 @@ export class TiamudBot {
       );
     }
     await this.#command('look', undefined, 'command.look.square');
-    const north = requiredExit(this.#scene, 'north');
-    const gate = (await this.#command(north.command, undefined, 'command.north')).scene;
+    const north = optionalExit(this.#scene, 'north');
+    const gate = north
+      ? (await this.#command(north.command, undefined, 'command.north')).scene
+      : this.#scene;
     requiredExit(gate, 'south');
 
     // One bot periodically drives the deterministic default NPC so multiple
@@ -144,6 +162,11 @@ export class TiamudBot {
       }
     }
     await this.#command('look', undefined, 'command.look.gate');
+    const returnNorth = optionalExit(this.#scene, 'north');
+    if (returnNorth) {
+      await this.#command(returnNorth.command, undefined, 'command.north.after-recovery');
+    }
+    requiredExit(this.#scene, 'south');
 
     if (this.#roundCounter % 8 === 0) {
       const requestId = this.#nextRequestId('round-idempotent-look');
@@ -165,7 +188,7 @@ export class TiamudBot {
         synced.scene.viewId !== replay.scene.viewId ||
         synced.scene.revision < replay.scene.revision
       ) {
-        throw new Error(`Bot ${this.#index} received an inconsistent periodic sync.snapshot.`);
+        throw new Error(`Bot ${this.#index} received an inconsistent periodic sync recovery pair.`);
       }
     }
 
@@ -315,16 +338,33 @@ class StrictTiamudSocket {
     return { result, scene };
   }
 
-  async sync(afterSeq, recordLatency, metric = 'sync.snapshot') {
+  async sync(afterSeq, recordLatency, metric = 'sync.recovery') {
     const started = performance.now();
     this.#send({ v: 1, type: 'sync.request', data: { afterSeq } });
-    const snapshot = (
+    const sceneHalf = (
       await this.#waitFor(
-        (message) => message.type === 'sync.snapshot' && message.data.afterSeq === afterSeq,
+        (message) => message.type === 'sync.scene' && message.data.afterSeq === afterSeq,
       )
     ).data;
+    const playerHalf = (
+      await this.#waitFor(
+        (message) => message.type === 'sync.player' &&
+          message.data.afterSeq === afterSeq &&
+          message.data.syncId === sceneHalf.syncId,
+      )
+    ).data;
+    // The correlated player half makes every earlier sequence gap irrelevant:
+    // the pair is the new complete authoritative baseline. A gap caused by
+    // coalescing state frames immediately before the recovery itself must not
+    // trigger a redundant second recovery on the next command.
+    this.#sequenceGapAfter = undefined;
     recordLatency(metric, performance.now() - started);
-    return snapshot;
+    return {
+      syncId: sceneHalf.syncId,
+      afterSeq,
+      scene: sceneHalf.scene,
+      player: playerHalf.player,
+    };
   }
 
   async #recoverSequenceGap(recordLatency) {
@@ -426,7 +466,7 @@ class StrictTiamudSocket {
   }
 }
 
-function parseServerMessage(raw) {
+export function parseServerMessage(raw) {
   let message;
   try {
     message = JSON.parse(raw);
@@ -490,27 +530,56 @@ function parseServerMessage(raw) {
       if (message.data.message !== null) optionalString(message.data.message, 'action.result message');
       break;
     case 'server.notice':
-      assertOnlyKeys(message.data, ['level', 'message'], 'server.notice.data');
+      assertOnlyKeys(message.data, ['level', 'code', 'message'], 'server.notice.data');
       if (!['info', 'warning', 'error'].includes(message.data.level)) {
         throw new Error('server.notice has an invalid level.');
       }
-      requiredString(message.data.message, 'server.notice message');
+      if (message.data.code !== undefined) {
+        assertBoundedString(message.data.code, 64, 'server.notice code');
+        if (!/^[a-z][a-z0-9_.-]*$/.test(message.data.code)) {
+          throw new Error('server.notice code is invalid.');
+        }
+      }
+      assertBoundedString(message.data.message, 1024, 'server.notice message');
       break;
     case 'message.append':
       validateViewEvent(message.data);
       break;
     case 'chat.message':
       assertOnlyKeys(message.data, ['channel', 'sender', 'text'], 'chat.message.data');
-      if (!['say', 'tell'].includes(message.data.channel)) {
+      if (!SOCIAL_CHANNELS.has(message.data.channel)) {
         throw new Error('chat.message has an invalid channel.');
       }
       assertBoundedString(message.data.sender, 64, 'chat.message sender');
-      assertBoundedString(message.data.text, 1024, 'chat.message text');
+      assertBoundedString(message.data.text, 512, 'chat.message text');
       break;
-    case 'sync.snapshot':
-      assertOnlyKeys(message.data, ['afterSeq', 'scene', 'player'], 'sync.snapshot.data');
-      assertNonNegativeInteger(message.data.afterSeq, 'sync.snapshot afterSeq');
+    case 'media.play':
+      assertOnlyKeys(message.data, ['channel', 'url', 'loop'], 'media.play.data');
+      validateMediaChannel(message.data.channel, 'media.play channel');
+      validateAudioUrl(message.data.url, 'media.play url');
+      assertBoolean(message.data.loop, 'media.play loop');
+      break;
+    case 'media.stop':
+      assertOnlyKeys(message.data, ['channel'], 'media.stop.data');
+      if (message.data.channel !== undefined) {
+        validateMediaChannel(message.data.channel, 'media.stop channel');
+      }
+      break;
+    case 'sync.scene':
+      assertOnlyKeys(message.data, ['syncId', 'afterSeq', 'scene'], 'sync.scene.data');
+      validateSyncId(message.data.syncId, 'sync.scene syncId');
+      assertNonNegativeInteger(message.data.afterSeq, 'sync.scene afterSeq');
       validateScene(message.data.scene);
+      break;
+    case 'sync.player':
+      assertOnlyKeys(
+        message.data,
+        ['syncId', 'afterSeq', 'player', 'complete'],
+        'sync.player.data',
+      );
+      validateSyncId(message.data.syncId, 'sync.player syncId');
+      assertNonNegativeInteger(message.data.afterSeq, 'sync.player afterSeq');
+      if (message.data.complete !== true) throw new Error('sync.player is not complete.');
       validatePlayerState(message.data.player);
       break;
     default:
@@ -586,28 +655,23 @@ function validateVitalsUpdate(data) {
   assertRecord(data, 'vitals.update.data');
   assertOnlyKeys(data, ['revision', 'character'], 'vitals.update.data');
   assertPositiveInteger(data.revision, 'vitals update revision');
-  assertRecord(data.character, 'vitals update character');
-  assertNonNegativeInteger(data.character.health, 'vitals update health');
-  assertPositiveInteger(data.character.maxHealth, 'vitals update max health');
-  assertArrayMax(data.character.effects, 32, 'vitals update effects');
+  validatePlayerCharacter(data.character);
 }
 
 function validateInventoryPatch(data) {
   assertRecord(data, 'inventory.patch.data');
-  assertOnlyKeys(data, ['revision', 'inventory', 'equipment'], 'inventory.patch.data');
+  assertOnlyKeys(
+    data,
+    ['revision', 'inventory', 'equipment', 'inventoryCapacity'],
+    'inventory.patch.data',
+  );
   assertPositiveInteger(data.revision, 'inventory patch revision');
-  assertArrayMax(data.inventory, 256, 'inventory patch inventory');
-  assertArrayMax(data.equipment, 3, 'inventory patch equipment');
-  for (const item of data.inventory) {
-    assertRecord(item, 'inventory patch item');
-    assertOpaqueId(item.id, 'inventory patch item id');
-    validateActions(item.actions, 'inventory patch item actions');
-  }
-  for (const item of data.equipment) {
-    assertRecord(item, 'inventory patch equipment');
-    assertOpaqueId(item.id, 'inventory patch equipment id');
-    validateActions(item.actions, 'inventory patch equipment actions');
-  }
+  validatePlayerInventory(
+    data.inventory,
+    data.equipment,
+    data.inventoryCapacity,
+    'inventory patch',
+  );
 }
 
 function validateMapSnapshot(data) {
@@ -624,45 +688,71 @@ function validateScene(scene) {
   assertRecord(scene, 'scene');
   assertOnlyKeys(
     scene,
-    ['viewId', 'revision', 'title', 'prose', 'image', 'exits', 'items', 'npcs', 'weather'],
+    [
+      'viewId', 'revision', 'title', 'prose', 'image', 'audio', 'presentation',
+      'exits', 'items', 'npcs', 'weather',
+    ],
     'scene',
   );
   assertOpaqueId(scene.viewId, 'scene viewId');
   assertPositiveInteger(scene.revision, 'scene revision');
-  requiredString(scene.title, 'scene title');
+  assertBoundedString(scene.title, 256, 'scene title');
   assertRecord(scene.weather, 'scene weather');
   assertOnlyKeys(
     scene.weather,
     ['condition', 'day', 'hour', 'nextChangeInTicks'],
     'scene weather',
   );
-  requiredString(scene.weather.condition, 'scene weather condition');
+  assertBoundedString(scene.weather.condition, 48, 'scene weather condition');
   assertPositiveInteger(scene.weather.day, 'scene weather day');
   assertNonNegativeInteger(scene.weather.hour, 'scene weather hour');
+  if (scene.weather.hour > 23) throw new Error('Scene weather hour exceeds 23.');
   assertNonNegativeInteger(scene.weather.nextChangeInTicks, 'scene weather next change');
-  if (!Array.isArray(scene.prose) || !scene.prose.every((line) => typeof line === 'string')) {
-    throw new Error('Scene prose is not a string array.');
-  }
-  if (!Array.isArray(scene.exits)) throw new Error('Scene exits is not an array.');
+  assertArrayMax(scene.prose, 32, 'scene prose');
+  for (const line of scene.prose) assertStringMax(line, 4096, 'scene prose line');
+  assertArrayMax(scene.exits, 32, 'scene exits');
+  const exitIds = new Set();
+  const exitCommands = new Set();
   for (const exit of scene.exits) {
     assertRecord(exit, 'scene exit');
     assertOnlyKeys(exit, ['id', 'label', 'command'], 'scene exit');
     assertOpaqueId(exit.id, 'scene exit id');
-    requiredString(exit.label, 'scene exit label');
-    requiredString(exit.command, 'scene exit command');
+    assertBoundedString(exit.label, 128, 'scene exit label');
+    assertBoundedString(exit.command, 32, 'scene exit command');
     if (!DIRECTIONS.has(exit.command)) throw new Error(`Unexpected exit command ${exit.command}.`);
+    if (exitIds.has(exit.id) || exitCommands.has(exit.command)) {
+      throw new Error('Scene contains a duplicate exit id or command.');
+    }
+    exitIds.add(exit.id);
+    exitCommands.add(exit.command);
   }
   if (!Array.isArray(scene.items)) throw new Error('Scene items is not an array.');
-  for (const item of scene.items) validateSceneEntity(item, 'item');
+  assertArrayMax(scene.items, 256, 'scene items');
+  const itemIds = new Set();
+  for (const item of scene.items) {
+    validateSceneEntity(item, 'item');
+    if (itemIds.has(item.id)) throw new Error('Scene contains a duplicate item id.');
+    itemIds.add(item.id);
+  }
   if (!Array.isArray(scene.npcs)) throw new Error('Scene npcs is not an array.');
+  assertArrayMax(scene.npcs, 256, 'scene npcs');
+  const npcIds = new Set();
   for (const npc of scene.npcs) {
     validateSceneEntity(npc, 'npc', ['health', 'maxHealth']);
-    if (!Number.isInteger(npc.health) || !Number.isInteger(npc.maxHealth)) {
-      throw new Error('NPC health is not integral.');
+    assertNonNegativeInteger(npc.health, 'scene NPC health');
+    assertPositiveInteger(npc.maxHealth, 'scene NPC max health');
+    if (npc.health > npc.maxHealth || npc.maxHealth > 1_000_000) {
+      throw new Error('Scene NPC health is inconsistent.');
     }
+    if (npcIds.has(npc.id)) throw new Error('Scene contains a duplicate NPC id.');
+    npcIds.add(npc.id);
   }
   if (scene.image !== undefined) {
     validateSceneImage(scene.image, 'scene image');
+  }
+  if (scene.audio !== undefined) validateSceneAudio(scene.audio, 'scene audio');
+  if (scene.presentation !== undefined) {
+    validateScenePresentation(scene.presentation, new Set([...itemIds, ...npcIds]));
   }
   const serialized = JSON.stringify(scene);
   if (serialized.includes('demo:') || serialized.includes('tiamud:')) {
@@ -699,13 +789,174 @@ function validateSceneImage(image, label) {
   }
 }
 
+function validateSceneAudio(audio, label) {
+  assertRecord(audio, label);
+  assertOnlyKeys(audio, ['channel', 'url', 'loop'], label);
+  validateMediaChannel(audio.channel, `${label} channel`);
+  validateAudioUrl(audio.url, `${label} url`);
+  assertBoolean(audio.loop, `${label} loop`);
+}
+
+function validateScenePresentation(presentation, visibleEntityIds) {
+  assertRecord(presentation, 'scene presentation');
+  assertOnlyKeys(presentation, ['entities'], 'scene presentation');
+  assertArrayMax(
+    presentation.entities,
+    MAX_SCENE_PRESENTATION_ENTITIES,
+    'scene presentation entities',
+  );
+  if (presentation.entities.length === 0) {
+    throw new Error('Scene presentation contains no entities.');
+  }
+  const ids = new Set();
+  let poseCount = 0;
+  for (const entity of presentation.entities) {
+    assertRecord(entity, 'scene presentation entity');
+    assertOnlyKeys(
+      entity,
+      [
+        'id', 'alt', 'decorative', 'footprint', 'preferredAnchor', 'priority',
+        'layer', 'poses',
+      ],
+      'scene presentation entity',
+    );
+    assertOpaqueId(entity.id, 'scene presentation entity id');
+    if (!visibleEntityIds.has(entity.id) || ids.has(entity.id)) {
+      throw new Error('Scene presentation references an invisible or duplicate entity.');
+    }
+    ids.add(entity.id);
+    assertBoolean(entity.decorative, 'scene presentation decorative marker');
+    validateVisualText(entity.alt, 256, entity.decorative, 'scene presentation alt');
+    assertRecord(entity.footprint, 'scene presentation footprint');
+    assertOnlyKeys(entity.footprint, ['width', 'height'], 'scene presentation footprint');
+    assertFiniteRange(entity.footprint.width, 0.02, 0.6, 'scene presentation width');
+    assertFiniteRange(entity.footprint.height, 0.02, 0.8, 'scene presentation height');
+    if (entity.preferredAnchor !== undefined) {
+      assertRecord(entity.preferredAnchor, 'scene presentation preferred anchor');
+      assertOnlyKeys(entity.preferredAnchor, ['x', 'y'], 'scene presentation preferred anchor');
+      assertFiniteRange(entity.preferredAnchor.x, 0, 1, 'scene presentation anchor x');
+      assertFiniteRange(entity.preferredAnchor.y, 0.2, 1, 'scene presentation anchor y');
+    }
+    assertSignedInteger(entity.priority, -100, 100, 'scene presentation priority');
+    if (!['midground', 'foreground', 'overlay'].includes(entity.layer)) {
+      throw new Error('Scene presentation layer is invalid.');
+    }
+    assertRecord(entity.poses, 'scene presentation poses');
+    assertOnlyKeys(entity.poses, ['idle', 'attack', 'hit', 'defeated'], 'scene presentation poses');
+    if (entity.poses.idle === undefined) throw new Error('Scene presentation has no idle pose.');
+    for (const pose of ['idle', 'attack', 'hit', 'defeated']) {
+      if (entity.poses[pose] !== undefined) {
+        validateEntityVisualSource(entity.poses[pose], pose);
+        poseCount += 1;
+      }
+    }
+    if (poseCount > MAX_SCENE_PRESENTATION_POSES) {
+      throw new Error('Scene presentation exceeds its pose bound.');
+    }
+  }
+}
+
+function validateEntityVisualSource(source, pose) {
+  assertRecord(source, `scene presentation ${pose} source`);
+  assertOnlyKeys(
+    source,
+    ['manifest', 'avif', 'webp', 'png'],
+    `scene presentation ${pose} source`,
+  );
+  const supplied = Object.entries(source);
+  if (supplied.length === 0 || supplied.length > MAX_ENTITY_SOURCE_REFERENCES) {
+    throw new Error(`Scene presentation ${pose} source count is invalid.`);
+  }
+  for (const [kind, url] of supplied) {
+    if (kind === 'manifest') {
+      if (!isEntityManifestUrl(url)) {
+        throw new Error(`Scene presentation ${pose} manifest is invalid.`);
+      }
+    } else if (!isEntityRasterUrl(url, pose, kind)) {
+      throw new Error(`Scene presentation ${pose} ${kind} source is invalid.`);
+    }
+  }
+}
+
+function validateMessagePresentationCue(cue, actorId, targetId) {
+  assertRecord(cue, 'message presentation cue');
+  assertOnlyKeys(
+    cue,
+    ['kind', 'entityId', 'pose', 'intensity', 'durationMs'],
+    'message presentation cue',
+  );
+  if (!['attack', 'hit', 'heal', 'defeat'].includes(cue.kind)) {
+    throw new Error('Message presentation cue kind is invalid.');
+  }
+  if (cue.entityId !== undefined) {
+    assertOpaqueId(cue.entityId, 'message presentation cue entity id');
+    if (cue.entityId !== actorId && cue.entityId !== targetId) {
+      throw new Error('Message presentation cue references an unrelated entity.');
+    }
+  }
+  if (
+    cue.pose !== undefined &&
+    !['idle', 'attack', 'hit', 'defeated'].includes(cue.pose)
+  ) {
+    throw new Error('Message presentation cue pose is invalid.');
+  }
+  if (![1, 2, 3].includes(cue.intensity)) {
+    throw new Error('Message presentation cue intensity is invalid.');
+  }
+  assertPositiveInteger(cue.durationMs, 'message presentation cue duration');
+  if (cue.durationMs > 800) throw new Error('Message presentation cue duration exceeds 800 ms.');
+}
+
+function validateMediaChannel(channel, label) {
+  if (!MEDIA_CHANNELS.has(channel)) throw new Error(`${label} is invalid.`);
+}
+
+function validateAudioUrl(url, label) {
+  if (
+    typeof url !== 'string' ||
+    url.length > 161 ||
+    !/^\/assets\/[a-f0-9]{64}\/audio-[a-z0-9-]+\.(?:opus|ogg|mp3)$/.test(url)
+  ) {
+    throw new Error(`${label} is invalid.`);
+  }
+}
+
+function isEntityManifestUrl(value) {
+  return typeof value === 'string' &&
+    /^\/assets\/[a-f0-9]{64}\/manifest\.json$/.test(value);
+}
+
+function isEntityRasterUrl(value, pose, kind) {
+  return typeof value === 'string' &&
+    new RegExp(
+      `^/assets/[a-f0-9]{64}/sprite-${pose}(?:-(?:320|640|1280))?\\.${kind}$`,
+    ).test(value);
+}
+
+function validateVisualText(value, maximum, decorative, label) {
+  if (
+    typeof value !== 'string' ||
+    value.length > maximum ||
+    /[\u0000-\u001f\u007f]/.test(value) ||
+    (decorative ? value !== '' : value.trim().length === 0)
+  ) {
+    throw new Error(`${label} is invalid.`);
+  }
+}
+
 function validateSceneEntity(entity, kind, extraKeys = []) {
   assertRecord(entity, `scene ${kind}`);
-  assertOnlyKeys(entity, ['id', 'label', 'description', 'actions', ...extraKeys], `scene ${kind}`);
+  const itemKeys = kind === 'item' ? ['rarity', 'itemLevel', 'weightGrams'] : [];
+  assertOnlyKeys(
+    entity,
+    ['id', 'label', 'description', 'actions', ...itemKeys, ...extraKeys],
+    `scene ${kind}`,
+  );
   assertOpaqueId(entity.id, `scene ${kind} id`);
-  requiredString(entity.label, `scene ${kind} label`);
-  if (typeof entity.description !== 'string') throw new Error(`Scene ${kind} description is invalid.`);
-  if (!Array.isArray(entity.actions)) throw new Error(`Scene ${kind} actions is not an array.`);
+  assertBoundedString(entity.label, 256, `scene ${kind} label`);
+  assertStringMax(entity.description, 4096, `scene ${kind} description`);
+  if (kind === 'item') validateItemMetadata(entity, 'scene item');
+  assertArrayMax(entity.actions, 8, `scene ${kind} actions`);
   for (const action of entity.actions) {
     assertRecord(action, `scene ${kind} action`);
     assertOnlyKeys(action, ['label', 'command'], `scene ${kind} action`);
@@ -723,76 +974,21 @@ function validatePlayerState(player) {
   assertOnlyKeys(
     player,
     [
-      'revision', 'character', 'inventory', 'equipment', 'map', 'quests', 'party',
+      'revision', 'character', 'inventory', 'equipment', 'inventoryCapacity', 'map', 'quests', 'party',
       'partyInvites', 'economy', 'social',
     ],
     'player',
   );
   assertPositiveInteger(player.revision, 'player revision');
 
-  const character = player.character;
-  assertRecord(character, 'player character');
-  assertOnlyKeys(
-    character,
-    [
-      'name', 'level', 'experience', 'nextLevelExperience', 'health', 'maxHealth',
-      'strength', 'defence', 'skills', 'effects', 'recoveryInTicks',
-    ],
-    'player character',
+  validatePlayerCharacter(player.character);
+
+  validatePlayerInventory(
+    player.inventory,
+    player.equipment,
+    player.inventoryCapacity,
+    'player',
   );
-  assertBoundedString(character.name, 64, 'player character name');
-  assertPositiveInteger(character.level, 'player character level');
-  assertNonNegativeInteger(character.experience, 'player character experience');
-  assertPositiveInteger(character.nextLevelExperience, 'player next level experience');
-  assertNonNegativeInteger(character.health, 'player health');
-  assertPositiveInteger(character.maxHealth, 'player max health');
-  if (character.health > character.maxHealth) throw new Error('Player health exceeds max health.');
-  assertPositiveInteger(character.strength, 'player strength');
-  assertNonNegativeInteger(character.defence, 'player defence');
-  assertArrayMax(character.skills, 32, 'player skills');
-  for (const skill of character.skills) {
-    assertRecord(skill, 'player skill');
-    assertOnlyKeys(skill, ['id', 'label', 'rank'], 'player skill');
-    assertContentId(skill.id, 'player skill id');
-    assertBoundedString(skill.label, 128, 'player skill label');
-    assertNonNegativeInteger(skill.rank, 'player skill rank');
-    if (skill.rank > 100) throw new Error('Player skill rank exceeds its bound.');
-  }
-  if (character.recoveryInTicks !== null && character.recoveryInTicks !== undefined) {
-    assertNonNegativeInteger(character.recoveryInTicks, 'player recovery ticks');
-  }
-  assertArrayMax(character.effects, 32, 'player effects');
-  for (const effect of character.effects) {
-    assertRecord(effect, 'player effect');
-    assertOnlyKeys(effect, ['kind', 'magnitude', 'remainingTicks'], 'player effect');
-    if (effect.kind !== 'regeneration' && effect.kind !== 'strength') {
-      throw new Error('Player effect kind is invalid.');
-    }
-    assertPositiveInteger(effect.magnitude, 'player effect magnitude');
-    assertPositiveInteger(effect.remainingTicks, 'player effect remaining ticks');
-  }
-
-  assertArrayMax(player.inventory, 256, 'player inventory');
-  for (const item of player.inventory) {
-    assertRecord(item, 'player inventory item');
-    assertOnlyKeys(item, ['id', 'label', 'description', 'actions'], 'player inventory item');
-    assertOpaqueId(item.id, 'player inventory item id');
-    assertBoundedString(item.label, 256, 'player inventory item label');
-    assertStringMax(item.description, 4096, 'player inventory item description');
-    validateActions(item.actions, 'player inventory item actions');
-  }
-
-  assertArrayMax(player.equipment, 3, 'player equipment');
-  for (const item of player.equipment) {
-    assertRecord(item, 'player equipment item');
-    assertOnlyKeys(item, ['id', 'slot', 'label', 'actions'], 'player equipment item');
-    assertOpaqueId(item.id, 'player equipment item id');
-    if (!['weapon', 'body', 'trinket'].includes(item.slot)) {
-      throw new Error('Player equipment slot is invalid.');
-    }
-    assertBoundedString(item.label, 256, 'player equipment item label');
-    validateActions(item.actions, 'player equipment item actions');
-  }
 
   const map = player.map;
   assertRecord(map, 'player map');
@@ -925,9 +1121,385 @@ function validatePlayerState(player) {
     assertBoolean(online.selfCharacter, 'player online character self marker');
   }
 
-  const serialized = JSON.stringify(player);
-  if (serialized.includes('demo:') || serialized.includes('tiamud:')) {
-    throw new Error('Authorized player state leaked a stable WorldPack identifier.');
+}
+
+function validatePlayerCharacter(character) {
+  assertRecord(character, 'player character');
+  assertOnlyKeys(
+    character,
+    [
+      'name', 'lineage', 'background', 'baseClass', 'activeClass', 'classHistory',
+      'level', 'experience', 'nextLevelExperience', 'health', 'maxHealth',
+      'strength', 'defence', 'attributes', 'skills', 'resources', 'abilities',
+      'resistances', 'statuses', 'progressionPoints', 'talents', 'promotions',
+      'effects', 'recoveryInTicks',
+    ],
+    'player character',
+  );
+  assertBoundedString(character.name, 64, 'player character name');
+  assertPositiveInteger(character.level, 'player character level');
+  if (character.level > 100) throw new Error('Player character level exceeds 100.');
+  assertNonNegativeInteger(character.experience, 'player character experience');
+  assertNonNegativeInteger(character.nextLevelExperience, 'player next level experience');
+  assertNonNegativeInteger(character.health, 'player health');
+  assertPositiveInteger(character.maxHealth, 'player max health');
+  assertNonNegativeInteger(character.strength, 'player strength');
+  assertNonNegativeInteger(character.defence, 'player defence');
+  if (
+    character.health > character.maxHealth ||
+    character.maxHealth > 1_000_000 ||
+    character.strength > 1_000_000 ||
+    character.defence > 1_000_000
+  ) {
+    throw new Error('Player character vitals or attributes exceed their bounds.');
+  }
+  if (character.recoveryInTicks !== null && character.recoveryInTicks !== undefined) {
+    assertNonNegativeInteger(character.recoveryInTicks, 'player recovery ticks');
+  }
+
+  const lineageId = validateProgressionOption(character.lineage, 'player lineage');
+  const baseClassId = validateProgressionOption(character.baseClass, 'player base class');
+  const activeClassId = validateProgressionOption(character.activeClass, 'player active class');
+  if (character.background !== undefined) {
+    validateProgressionOption(character.background, 'player background');
+  }
+  assertArrayMax(character.classHistory, 8, 'player class history');
+  if (character.classHistory.length === 0) throw new Error('Player class history is empty.');
+  const classIds = new Set();
+  for (const entry of character.classHistory) {
+    const id = validateProgressionOption(entry, 'player class history entry');
+    if (classIds.has(id)) throw new Error('Player class history contains a duplicate class.');
+    classIds.add(id);
+  }
+  if (!classIds.has(baseClassId) || !classIds.has(activeClassId)) {
+    throw new Error('Player class history does not contain the base and active classes.');
+  }
+  if (!lineageId) throw new Error('Player lineage is invalid.');
+
+  const attributeIds = new Set();
+  assertArrayMax(character.attributes, 64, 'player attributes');
+  for (const attribute of character.attributes) {
+    assertRecord(attribute, 'player attribute');
+    assertOnlyKeys(attribute, ['id', 'label', 'value'], 'player attribute');
+    assertStatId(attribute.id, 'player attribute id');
+    assertBoundedString(attribute.label, 128, 'player attribute label');
+    assertSignedInteger(attribute.value, -2_147_483_648, 2_147_483_647, 'player attribute value');
+    if (attributeIds.has(attribute.id)) throw new Error('Player attributes contain a duplicate id.');
+    attributeIds.add(attribute.id);
+  }
+
+  const skillIds = new Set();
+  assertArrayMax(character.skills, 64, 'player skills');
+  for (const skill of character.skills) {
+    assertRecord(skill, 'player skill');
+    assertOnlyKeys(skill, ['id', 'label', 'rank'], 'player skill');
+    assertStatId(skill.id, 'player skill id');
+    assertBoundedString(skill.label, 128, 'player skill label');
+    assertNonNegativeInteger(skill.rank, 'player skill rank');
+    if (skill.rank > 1_000 || skillIds.has(skill.id)) {
+      throw new Error('Player skills contain an invalid rank or duplicate id.');
+    }
+    skillIds.add(skill.id);
+  }
+
+  const resourceIds = new Set();
+  assertArrayMax(character.resources, 16, 'player resources');
+  for (const resource of character.resources) {
+    assertRecord(resource, 'player resource');
+    assertOnlyKeys(resource, ['id', 'label', 'current', 'max'], 'player resource');
+    assertStatId(resource.id, 'player resource id');
+    assertBoundedString(resource.label, 128, 'player resource label');
+    assertNonNegativeInteger(resource.current, 'player resource current');
+    assertPositiveInteger(resource.max, 'player resource maximum');
+    if (resource.current > resource.max || resource.max > 1_000_000 || resourceIds.has(resource.id)) {
+      throw new Error('Player resources contain an inconsistent value or duplicate id.');
+    }
+    resourceIds.add(resource.id);
+  }
+
+  const abilityIds = new Set();
+  assertArrayMax(character.abilities, 64, 'player abilities');
+  for (const ability of character.abilities) {
+    assertRecord(ability, 'player ability');
+    assertOnlyKeys(
+      ability,
+      [
+        'id', 'name', 'description', 'kind', 'resourceCosts', 'cooldownRemaining',
+        'usable', 'targeting',
+      ],
+      'player ability',
+    );
+    assertDefinitionId(ability.id, 'player ability id');
+    assertBoundedString(ability.name, 128, 'player ability name');
+    assertStringMax(ability.description, 2048, 'player ability description');
+    if (!['martial', 'spell', 'utility'].includes(ability.kind)) {
+      throw new Error('Player ability kind is invalid.');
+    }
+    assertNonNegativeInteger(ability.cooldownRemaining, 'player ability cooldown');
+    if (ability.cooldownRemaining > 10_000) throw new Error('Player ability cooldown exceeds 10000.');
+    assertBoolean(ability.usable, 'player ability usable state');
+    if (!['self', 'optionalTarget', 'explicitTarget'].includes(ability.targeting)) {
+      throw new Error('Player ability targeting is invalid.');
+    }
+    if (abilityIds.has(ability.id)) throw new Error('Player abilities contain a duplicate id.');
+    abilityIds.add(ability.id);
+    assertArrayMax(ability.resourceCosts, 4, 'player ability resource costs');
+    const costResourceIds = new Set();
+    for (const cost of ability.resourceCosts) {
+      assertRecord(cost, 'player ability resource cost');
+      assertOnlyKeys(cost, ['resourceId', 'label', 'amount'], 'player ability resource cost');
+      assertStatId(cost.resourceId, 'player ability resource id');
+      assertBoundedString(cost.label, 128, 'player ability resource label');
+      assertPositiveInteger(cost.amount, 'player ability resource amount');
+      if (
+        cost.amount > 1_000_000 ||
+        !resourceIds.has(cost.resourceId) ||
+        costResourceIds.has(cost.resourceId)
+      ) {
+        throw new Error('Player ability resource cost is inconsistent.');
+      }
+      costResourceIds.add(cost.resourceId);
+    }
+  }
+
+  assertArrayMax(character.resistances, 16, 'player resistances');
+  const resistanceTypes = new Set();
+  for (const resistance of character.resistances) {
+    assertRecord(resistance, 'player resistance');
+    assertOnlyKeys(resistance, ['damageType', 'percent'], 'player resistance');
+    if (!['physical', 'arcane', 'fire', 'frost', 'lightning'].includes(resistance.damageType)) {
+      throw new Error('Player resistance damage type is invalid.');
+    }
+    assertNonNegativeInteger(resistance.percent, 'player resistance percent');
+    if (resistance.percent > 90 || resistanceTypes.has(resistance.damageType)) {
+      throw new Error('Player resistances contain an invalid percent or duplicate type.');
+    }
+    resistanceTypes.add(resistance.damageType);
+  }
+
+  assertArrayMax(character.statuses, 32, 'player statuses');
+  for (const status of character.statuses) validateStatus(status);
+
+  assertRecord(character.progressionPoints, 'player progression points');
+  const progressionPoints = Object.entries(character.progressionPoints);
+  if (progressionPoints.length > 4) throw new Error('Player progression points exceed four pools.');
+  for (const [poolId, amount] of progressionPoints) {
+    assertStatId(poolId, 'player progression pool id');
+    assertNonNegativeInteger(amount, 'player progression point amount');
+    if (amount > 10_000) throw new Error('Player progression points exceed 10000.');
+  }
+
+  validateTalents(character.talents);
+  validatePromotions(character.promotions);
+
+  assertArrayMax(character.effects, 32, 'player effects');
+  for (const effect of character.effects) {
+    assertRecord(effect, 'player effect');
+    assertOnlyKeys(effect, ['kind', 'magnitude', 'remainingTicks'], 'player effect');
+    if (effect.kind !== 'regeneration' && effect.kind !== 'strength') {
+      throw new Error('Player effect kind is invalid.');
+    }
+    assertPositiveInteger(effect.magnitude, 'player effect magnitude');
+    assertPositiveInteger(effect.remainingTicks, 'player effect remaining ticks');
+    if (effect.magnitude > 100_000 || effect.remainingTicks > 10_000) {
+      throw new Error('Player effect exceeds its magnitude or duration bound.');
+    }
+  }
+}
+
+function validateProgressionOption(option, label) {
+  assertRecord(option, label);
+  assertOnlyKeys(option, ['id', 'label', 'description'], label);
+  assertDefinitionId(option.id, `${label} id`);
+  assertBoundedString(option.label, 128, `${label} label`);
+  assertStringMax(option.description, 2048, `${label} description`);
+  return option.id;
+}
+
+function validateRequirementStatuses(requirements, label) {
+  assertArrayMax(requirements, 128, label);
+  for (const requirement of requirements) {
+    assertRecord(requirement, `${label} entry`);
+    assertOnlyKeys(requirement, ['met', 'text'], `${label} entry`);
+    assertBoolean(requirement.met, `${label} met state`);
+    assertBoundedString(requirement.text, 512, `${label} text`);
+  }
+}
+
+function validateStatus(status) {
+  assertRecord(status, 'player status');
+  assertOnlyKeys(status, ['id', 'label', 'kind', 'magnitude', 'remainingTicks'], 'player status');
+  assertDefinitionId(status.id, 'player status id');
+  assertBoundedString(status.label, 128, 'player status label');
+  if (!['attribute_modifier', 'regeneration', 'damage_over_time', 'stun'].includes(status.kind)) {
+    throw new Error('Player status kind is invalid.');
+  }
+  assertSignedInteger(status.magnitude, -100_000, 100_000, 'player status magnitude');
+  assertPositiveInteger(status.remainingTicks, 'player status remaining ticks');
+  if (status.remainingTicks > 10_000) throw new Error('Player status duration exceeds 10000.');
+  if (
+    (status.kind === 'attribute_modifier' && status.magnitude === 0) ||
+    (['regeneration', 'damage_over_time'].includes(status.kind) && status.magnitude <= 0) ||
+    (status.kind === 'stun' && status.magnitude !== 0)
+  ) {
+    throw new Error('Player status magnitude is inconsistent with its kind.');
+  }
+}
+
+function validateTalents(talents) {
+  assertArrayMax(talents, 16, 'player talent graphs');
+  const graphIds = new Set();
+  for (const graph of talents) {
+    assertRecord(graph, 'player talent graph');
+    assertOnlyKeys(
+      graph,
+      ['id', 'label', 'description', 'pointPoolId', 'availablePoints', 'nodes'],
+      'player talent graph',
+    );
+    assertDefinitionId(graph.id, 'player talent graph id');
+    assertBoundedString(graph.label, 128, 'player talent graph label');
+    assertStringMax(graph.description, 2048, 'player talent graph description');
+    assertStatId(graph.pointPoolId, 'player talent point pool id');
+    assertNonNegativeInteger(graph.availablePoints, 'player talent available points');
+    if (graph.availablePoints > 10_000 || graphIds.has(graph.id)) {
+      throw new Error('Player talent graph has invalid points or a duplicate id.');
+    }
+    graphIds.add(graph.id);
+    assertArrayMax(graph.nodes, 32, 'player talent nodes');
+    const nodeIds = new Set();
+    for (const node of graph.nodes) {
+      assertRecord(node, 'player talent node');
+      assertOnlyKeys(
+        node,
+        [
+          'id', 'label', 'description', 'rank', 'maxRank', 'nextCost', 'available',
+          'requirements', 'command',
+        ],
+        'player talent node',
+      );
+      assertDefinitionId(node.id, 'player talent node id');
+      assertBoundedString(node.label, 128, 'player talent node label');
+      assertStringMax(node.description, 2048, 'player talent node description');
+      assertNonNegativeInteger(node.rank, 'player talent node rank');
+      assertPositiveInteger(node.maxRank, 'player talent node max rank');
+      if (node.maxRank > 5 || node.rank > node.maxRank || nodeIds.has(node.id)) {
+        throw new Error('Player talent node has an invalid rank or duplicate id.');
+      }
+      if (node.nextCost !== null && node.nextCost !== undefined) {
+        assertPositiveInteger(node.nextCost, 'player talent node next cost');
+        if (node.nextCost > 10_000 || node.rank === node.maxRank) {
+          throw new Error('Player talent node next cost is inconsistent.');
+        }
+      }
+      assertBoolean(node.available, 'player talent node availability');
+      validateRequirementStatuses(node.requirements, 'player talent node requirements');
+      assertBoundedString(node.command, 1024, 'player talent node command');
+      nodeIds.add(node.id);
+    }
+  }
+}
+
+function validatePromotions(promotions) {
+  assertArrayMax(promotions, 64, 'player promotions');
+  const classIds = new Set();
+  for (const promotion of promotions) {
+    assertRecord(promotion, 'player promotion');
+    assertOnlyKeys(promotion, ['class', 'available', 'requirements', 'command'], 'player promotion');
+    const classId = validateProgressionOption(promotion.class, 'player promotion class');
+    if (classIds.has(classId)) throw new Error('Player promotions contain a duplicate class.');
+    classIds.add(classId);
+    assertBoolean(promotion.available, 'player promotion availability');
+    validateRequirementStatuses(promotion.requirements, 'player promotion requirements');
+    assertBoundedString(promotion.command, 1024, 'player promotion command');
+  }
+}
+
+function validatePlayerInventory(inventory, equipment, capacity, label) {
+  assertArrayMax(inventory, 256, `${label} inventory`);
+  assertArrayMax(equipment, 3, `${label} equipment`);
+  const instanceIds = new Set();
+  for (const item of inventory) {
+    const itemLabel = `${label} inventory item`;
+    assertRecord(item, itemLabel);
+    assertOnlyKeys(
+      item,
+      ['id', 'label', 'description', 'rarity', 'itemLevel', 'weightGrams', 'actions'],
+      itemLabel,
+    );
+    assertOpaqueId(item.id, `${itemLabel} id`);
+    assertBoundedString(item.label, 256, `${itemLabel} label`);
+    assertStringMax(item.description, 4096, `${itemLabel} description`);
+    validateItemMetadata(item, itemLabel);
+    validateActions(item.actions, `${itemLabel} actions`);
+    if (instanceIds.has(item.id)) throw new Error(`${label} inventory contains a duplicate item id.`);
+    instanceIds.add(item.id);
+  }
+
+  const occupiedSlots = new Set();
+  for (const item of equipment) {
+    const itemLabel = `${label} equipment item`;
+    assertRecord(item, itemLabel);
+    assertOnlyKeys(
+      item,
+      ['id', 'slot', 'label', 'rarity', 'itemLevel', 'weightGrams', 'actions'],
+      itemLabel,
+    );
+    assertOpaqueId(item.id, `${itemLabel} id`);
+    if (!EQUIPMENT_SLOTS.has(item.slot)) throw new Error(`${itemLabel} slot is invalid.`);
+    assertBoundedString(item.label, 256, `${itemLabel} label`);
+    validateItemMetadata(item, itemLabel);
+    validateActions(item.actions, `${itemLabel} actions`);
+    if (instanceIds.has(item.id)) throw new Error(`${label} contains a duplicate item id.`);
+    if (occupiedSlots.has(item.slot)) throw new Error(`${label} equipment contains a duplicate slot.`);
+    instanceIds.add(item.id);
+    occupiedSlots.add(item.slot);
+  }
+
+  validateInventoryCapacity(capacity, inventory, equipment, label);
+}
+
+function validateItemMetadata(item, label) {
+  if (!ITEM_RARITIES.has(item.rarity)) throw new Error(`${label} rarity is invalid.`);
+  assertPositiveInteger(item.itemLevel, `${label} itemLevel`);
+  if (item.itemLevel > MAX_ITEM_LEVEL) {
+    throw new Error(`${label} itemLevel exceeds ${MAX_ITEM_LEVEL}.`);
+  }
+  assertNonNegativeInteger(item.weightGrams, `${label} weightGrams`);
+  if (item.weightGrams > MAX_ITEM_WEIGHT_GRAMS) {
+    throw new Error(`${label} weightGrams exceeds ${MAX_ITEM_WEIGHT_GRAMS}.`);
+  }
+}
+
+function validateInventoryCapacity(capacity, inventory, equipment, label) {
+  assertRecord(capacity, `${label} inventory capacity`);
+  assertOnlyKeys(
+    capacity,
+    ['usedSlots', 'maxSlots', 'usedWeightGrams', 'maxWeightGrams'],
+    `${label} inventory capacity`,
+  );
+  assertNonNegativeInteger(capacity.usedSlots, `${label} used slots`);
+  assertPositiveInteger(capacity.maxSlots, `${label} max slots`);
+  assertNonNegativeInteger(capacity.usedWeightGrams, `${label} used weight`);
+  assertNonNegativeInteger(capacity.maxWeightGrams, `${label} max weight`);
+  if (capacity.maxSlots > MAX_INVENTORY_SLOTS || capacity.usedSlots > capacity.maxSlots) {
+    throw new Error(`${label} inventory slot capacity is inconsistent.`);
+  }
+  if (
+    capacity.maxWeightGrams > MAX_INVENTORY_WEIGHT_GRAMS ||
+    capacity.usedWeightGrams > capacity.maxWeightGrams
+  ) {
+    throw new Error(`${label} inventory weight capacity is inconsistent.`);
+  }
+
+  const projectedWeight = [...inventory, ...equipment]
+    .reduce((total, item) => total + item.weightGrams, 0);
+  if (capacity.usedWeightGrams !== projectedWeight) {
+    throw new Error(`${label} used weight does not match its projected items.`);
+  }
+  const minimumSlots = inventory.length;
+  const maximumSlots = inventory.length * MAX_ITEM_SLOT_COST;
+  if (capacity.usedSlots < minimumSlots || capacity.usedSlots > maximumSlots) {
+    throw new Error(`${label} used slots cannot describe its projected inventory.`);
   }
 }
 
@@ -945,7 +1517,7 @@ function validateViewEvent(event) {
   assertRecord(event, 'message.append.data');
   assertOnlyKeys(
     event,
-    ['revision', 'kind', 'text', 'actorId', 'targetId', 'itemId'],
+    ['revision', 'kind', 'text', 'actorId', 'targetId', 'itemId', 'cue'],
     'message.append.data',
   );
   assertPositiveInteger(event.revision, 'message revision');
@@ -956,12 +1528,21 @@ function validateViewEvent(event) {
   assertOpaqueId(event.actorId, 'message actorId');
   if (event.targetId !== undefined) assertOpaqueId(event.targetId, 'message targetId');
   if (event.itemId !== undefined) assertOpaqueId(event.itemId, 'message itemId');
+  if (event.cue !== undefined) {
+    validateMessagePresentationCue(event.cue, event.actorId, event.targetId);
+  }
 }
 
 function requiredExit(scene, command) {
   const exit = scene.exits.find((candidate) => candidate.command === command);
   if (!exit) throw new Error(`Scene ${scene.title} has no authorized ${command} exit.`);
   assertOpaqueId(exit.id, `${command} exit id`);
+  return exit;
+}
+
+function optionalExit(scene, command) {
+  const exit = scene.exits.find((candidate) => candidate.command === command);
+  if (exit) assertOpaqueId(exit.id, `${command} exit id`);
   return exit;
 }
 
@@ -1055,9 +1636,33 @@ function assertOpaqueId(value, label) {
   }
 }
 
+function validateSyncId(value, label) {
+  if (typeof value !== 'string' || !/^sync-[1-9][0-9]{0,19}$/.test(value)) {
+    throw new Error(`${label} is invalid.`);
+  }
+}
+
 function assertContentId(value, label) {
   if (typeof value !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(value)) {
     throw new Error(`${label} is not a bounded content id.`);
+  }
+}
+
+function assertDefinitionId(value, label) {
+  if (
+    typeof value !== 'string' ||
+    !/^[a-z0-9](?:[a-z0-9_.:-]{0,126}[a-z0-9])?$/.test(value)
+  ) {
+    throw new Error(`${label} is not a bounded definition id.`);
+  }
+}
+
+function assertStatId(value, label) {
+  if (
+    typeof value !== 'string' ||
+    !/^[a-z0-9](?:[a-z0-9_.:-]{0,62}[a-z0-9])?$/.test(value)
+  ) {
+    throw new Error(`${label} is not a bounded stat id.`);
   }
 }
 
@@ -1096,6 +1701,18 @@ function assertPositiveInteger(value, label) {
 
 function assertNonNegativeInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} is negative.`);
+}
+
+function assertSignedInteger(value, minimum, maximum, label) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} is outside [${minimum}, ${maximum}].`);
+  }
+}
+
+function assertFiniteRange(value, minimum, maximum, label) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} is outside [${minimum}, ${maximum}].`);
+  }
 }
 
 function delay(milliseconds) {

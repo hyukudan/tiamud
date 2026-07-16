@@ -32,7 +32,8 @@ const scene = (entities: SceneEntityPresentation[]): SceneSnapshot => ({
   prose: ['Text remains authoritative.'],
   exits: [],
   items: [{
-    id: 'o1111111111111111', label: 'lantern', description: 'Cold light.', actions: [],
+    id: 'o1111111111111111', label: 'lantern', description: 'Cold light.',
+    rarity: 'uncommon', itemLevel: 3, weightGrams: 800, actions: [],
   }],
   npcs: [{
     id: 'o2222222222222222', label: 'rain wolf', description: 'It watches.',

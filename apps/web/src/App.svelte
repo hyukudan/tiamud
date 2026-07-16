@@ -477,6 +477,7 @@
             revision: message.data.revision,
             inventory: message.data.inventory,
             equipment: message.data.equipment,
+            inventoryCapacity: message.data.inventoryCapacity,
           };
         }
         break;
@@ -859,6 +860,7 @@
                   <li>
                     <div>
                       <strong>{item.label}</strong>
+                      <p>{item.rarity} · level {item.itemLevel} · {(item.weightGrams / 1000).toFixed(1)} kg</p>
                       {#if item.description}<p>{item.description}</p>{/if}
                     </div>
                     <div class="item-actions">

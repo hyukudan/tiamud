@@ -1,7 +1,11 @@
 # ADR 0007: WorldPack v3 character composition and class promotion
 
-- Status: Accepted; implementation in progress
+- Status: Accepted; character model implemented
 - Date: 2026-07-16
+
+Serialization note: ADR 0009 later raised the enclosing pack to WorldPack v4
+and AreaPack v3 for item identity. The v3 character vocabulary decided here
+remains implemented and unchanged inside those current formats.
 
 ## Context
 
@@ -60,11 +64,12 @@ attributes, skills, nodes and world progress without hard-coded Rust branches.
 One global curve and one active class keep balance, UI and persistence
 tractable.
 
-WorldPack v3 is a deliberate pre-release schema break. The repository must
-update its reviewed world, composition tests, server loader, durable snapshot,
-creation flows and clients together before claiming the model is shipped. A
-v2 normalizer preserves practical importer value but is not a promise that an
-old binary understands v3 fields.
+WorldPack v3 was a deliberate pre-release schema break. The reviewed world,
+composition tests, server loader, durable snapshot, creation flows and clients
+were updated together before the model was claimed as shipped. A v2 normalizer
+preserves practical importer value but is not a promise that an old binary
+understands newer fields. ADR 0009's later v4 envelope does not change this
+character decision.
 
 This ADR supersedes the character-package and per-archetype progression parts
 of ADR 0006. ADR 0006 remains authoritative for abilities, combat validation,

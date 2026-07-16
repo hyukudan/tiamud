@@ -282,7 +282,10 @@ function verifyTelnet(port) {
     const socket = net.createConnection(port, '127.0.0.1');
     let received = Buffer.alloc(0);
     let state = 'access';
-    const timer = setTimeout(() => reject(new Error('Telnet smoke test timed out.')), 5_000);
+    const timer = setTimeout(
+      () => reject(new Error(`Telnet smoke test timed out while waiting for ${state}.`)),
+      5_000,
+    );
 
     socket.on('data', (chunk) => {
       received = Buffer.concat([received, chunk]);
@@ -300,9 +303,21 @@ function verifyTelnet(port) {
         received = Buffer.alloc(0);
         socket.write('smoke-password\r\n');
       } else if (state === 'character' && text.includes('Name your first character:')) {
-        state = 'scene';
+        state = 'lineage';
         received = Buffer.alloc(0);
         socket.write('Telnet Explorer\r\n');
+      } else if (state === 'lineage' && text.includes('Choose a number or lineage id')) {
+        state = 'background';
+        received = Buffer.alloc(0);
+        socket.write('default\r\n');
+      } else if (state === 'background' && text.includes('Choose a number or background id')) {
+        state = 'base-class';
+        received = Buffer.alloc(0);
+        socket.write('default\r\n');
+      } else if (state === 'base-class' && text.includes('Choose a number or base class id')) {
+        state = 'scene';
+        received = Buffer.alloc(0);
+        socket.write('default\r\n');
       } else if (state === 'scene' && text.includes('Lantern Square')) {
         state = 'moved';
         received = Buffer.alloc(0);

@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "id": "square",
   "dependsOn": [
     "archive",
     "north-gate"
   ],
-  "items": [
+  "itemPrototypes": [
     {
       "id": "tiamud:blue-lantern",
       "name": "blue-glass lantern",
@@ -14,7 +14,14 @@
         "lantern",
         "blue lantern",
         "lamp"
-      ]
+      ],
+      "equipmentSlot": "trinket",
+      "weightGrams": 1200,
+      "slotCost": 2,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
     },
     {
       "id": "tiamud:ember-tonic",
@@ -24,7 +31,38 @@
         "tonic",
         "potion",
         "vial"
-      ]
+      ],
+      "healAmount": 6,
+      "consumable": true,
+      "effect": {
+        "kind": "regeneration",
+        "magnitude": 2,
+        "remainingTicks": 3
+      },
+      "weightGrams": 250,
+      "slotCost": 1,
+      "rarity": "uncommon",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
+    }
+  ],
+  "initialItemInstances": [
+    {
+      "id": "tiamud:blue-lantern",
+      "prototypeId": "tiamud:blue-lantern",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:lantern-square"
+      }
+    },
+    {
+      "id": "tiamud:ember-tonic",
+      "prototypeId": "tiamud:ember-tonic",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:lantern-square"
+      }
     }
   ],
   "rooms": [
@@ -33,10 +71,6 @@
       "title": "Lantern Square",
       "description": "Rain has polished the old stones to a dark shine. Beneath the clock tower, a few late travellers gather around a blue-glass lantern.\n\nThe illustration, when available, is atmospheric only; the text remains the complete source of playable information.",
       "assetManifest": "assets/8ade88f0df1adb294333e72d3fa2d0863543dc0263ebe3038208f3c9e415924c/manifest.json",
-      "items": [
-        "tiamud:blue-lantern",
-        "tiamud:ember-tonic"
-      ],
       "exits": [
         {
           "direction": "north",
@@ -53,22 +87,6 @@
           }
         }
       ]
-    }
-  ],
-  "itemRules": [
-    {
-      "itemId": "tiamud:blue-lantern",
-      "equipmentSlot": "trinket"
-    },
-    {
-      "itemId": "tiamud:ember-tonic",
-      "healAmount": 6,
-      "consumable": true,
-      "effect": {
-        "kind": "regeneration",
-        "magnitude": 2,
-        "remainingTicks": 3
-      }
     }
   ],
   "levelThresholds": [

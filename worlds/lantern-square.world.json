@@ -1,12 +1,12 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "id": "lantern-square",
   "name": "Tiamud: Lantern Square",
   "startRoomId": "demo:lantern-square",
   "source": {
     "format": "world-pack"
   },
-  "items": [
+  "itemPrototypes": [
     {
       "id": "tiamud:blue-lantern",
       "name": "blue-glass lantern",
@@ -15,7 +15,17 @@
         "blue lantern",
         "lamp",
         "lantern"
-      ]
+      ],
+      "equipmentSlot": "trinket",
+      "attackBonus": 0,
+      "healAmount": 0,
+      "consumable": false,
+      "weightGrams": 1200,
+      "slotCost": 2,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
     },
     {
       "id": "tiamud:bronze-sword",
@@ -25,7 +35,17 @@
         "blade",
         "bronze sword",
         "sword"
-      ]
+      ],
+      "equipmentSlot": "weapon",
+      "attackBonus": 4,
+      "healAmount": 0,
+      "consumable": false,
+      "weightGrams": 2500,
+      "slotCost": 2,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
     },
     {
       "id": "tiamud:ember-tonic",
@@ -35,7 +55,21 @@
         "potion",
         "tonic",
         "vial"
-      ]
+      ],
+      "attackBonus": 0,
+      "healAmount": 6,
+      "consumable": true,
+      "effect": {
+        "kind": "regeneration",
+        "magnitude": 2,
+        "remainingTicks": 3
+      },
+      "weightGrams": 250,
+      "slotCost": 1,
+      "rarity": "uncommon",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
     },
     {
       "id": "tiamud:road-token",
@@ -44,7 +78,16 @@
       "aliases": [
         "iron token",
         "token"
-      ]
+      ],
+      "attackBonus": 0,
+      "healAmount": 0,
+      "consumable": false,
+      "weightGrams": 50,
+      "slotCost": 1,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
     },
     {
       "id": "tiamud:weathered-map",
@@ -53,7 +96,16 @@
       "aliases": [
         "map",
         "old map"
-      ]
+      ],
+      "attackBonus": 0,
+      "healAmount": 0,
+      "consumable": false,
+      "weightGrams": 200,
+      "slotCost": 1,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
     },
     {
       "id": "tiamud:wolf-clasp",
@@ -63,7 +115,66 @@
         "clasp",
         "silver clasp",
         "wolf clasp"
-      ]
+      ],
+      "attackBonus": 0,
+      "healAmount": 0,
+      "consumable": false,
+      "weightGrams": 100,
+      "slotCost": 1,
+      "rarity": "uncommon",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
+    }
+  ],
+  "initialItemInstances": [
+    {
+      "id": "tiamud:blue-lantern",
+      "prototypeId": "tiamud:blue-lantern",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:lantern-square"
+      }
+    },
+    {
+      "id": "tiamud:bronze-sword",
+      "prototypeId": "tiamud:bronze-sword",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:archive"
+      }
+    },
+    {
+      "id": "tiamud:ember-tonic",
+      "prototypeId": "tiamud:ember-tonic",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:lantern-square"
+      }
+    },
+    {
+      "id": "tiamud:road-token",
+      "prototypeId": "tiamud:road-token",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:north-gate"
+      }
+    },
+    {
+      "id": "tiamud:weathered-map",
+      "prototypeId": "tiamud:weathered-map",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:archive"
+      }
+    },
+    {
+      "id": "tiamud:wolf-clasp",
+      "prototypeId": "tiamud:wolf-clasp",
+      "location": {
+        "kind": "npc_spawn",
+        "npcSpawnId": "tiamud:gate-stalker-1"
+      }
     }
   ],
   "rooms": [
@@ -79,10 +190,6 @@
             "room_id": "demo:lantern-square"
           }
         }
-      ],
-      "items": [
-        "tiamud:bronze-sword",
-        "tiamud:weathered-map"
       ]
     },
     {
@@ -105,10 +212,6 @@
             "room_id": "demo:archive"
           }
         }
-      ],
-      "items": [
-        "tiamud:blue-lantern",
-        "tiamud:ember-tonic"
       ]
     },
     {
@@ -123,41 +226,11 @@
             "room_id": "demo:lantern-square"
           }
         }
-      ],
-      "items": [
-        "tiamud:road-token"
       ]
     }
   ],
   "gameplay": {
     "rngSeed": 6073466303471576068,
-    "itemRules": [
-      {
-        "itemId": "tiamud:blue-lantern",
-        "equipmentSlot": "trinket",
-        "attackBonus": 0,
-        "healAmount": 0,
-        "consumable": false
-      },
-      {
-        "itemId": "tiamud:bronze-sword",
-        "equipmentSlot": "weapon",
-        "attackBonus": 4,
-        "healAmount": 0,
-        "consumable": false
-      },
-      {
-        "itemId": "tiamud:ember-tonic",
-        "attackBonus": 0,
-        "healAmount": 6,
-        "consumable": true,
-        "effect": {
-          "kind": "regeneration",
-          "magnitude": 2,
-          "remainingTicks": 3
-        }
-      }
-    ],
     "npcPrototypes": [
       {
         "id": "tiamud:gate-stalker",
@@ -168,10 +241,7 @@
         "strength": 3,
         "defence": 1,
         "experienceReward": 60,
-        "respawnTicks": 8,
-        "lootItemIds": [
-          "tiamud:wolf-clasp"
-        ]
+        "respawnTicks": 8
       }
     ],
     "npcSpawns": [

@@ -1,8 +1,8 @@
 //! Strict, bounded, offline composition of modular authoring areas.
 //!
-//! AreaPack v2 is deliberately an authoring format, not a runtime hot-load
+//! AreaPack v3 is deliberately an authoring format, not a runtime hot-load
 //! protocol. Composition resolves and validates the complete graph, then emits
-//! one validated [`WorldPackDocument`] v3 consumed by the runtime.
+//! one validated [`WorldPackDocument`] v4 consumed by the runtime.
 //! Area identities, source digests, ownership and cross-area edges are exposed
 //! in [`CompositionReport`] so a later catalog/activation design can build on
 //! stable facts without weakening today's all-or-nothing runtime validation.
@@ -21,15 +21,15 @@ use thiserror::Error;
 use crate::{
     AbilityDefinition, AdvancedClassDefinition, ArchetypeDefinition, BackgroundDefinition,
     BaseClassDefinition, CharacterDefaultsDefinition, CharacterProgressionDefinition, ContentTest,
-    EntityMediaDefinition, EntityMediaKind, ExitTarget, GameplayDefinition, GrantDefinition, Item,
-    ItemRule, LevelThresholdDefinition, LineageDefinition, NpcAbilitySet, NpcPrototype, NpcSpawn,
-    RequirementDefinition, RequirementPredicate, Room, RoomMediaDefinition,
+    EntityMediaDefinition, EntityMediaKind, ExitTarget, GameplayDefinition, GrantDefinition,
+    InitialItemInstance, ItemPrototype, LevelThresholdDefinition, LineageDefinition, NpcAbilitySet,
+    NpcPrototype, NpcSpawn, RequirementDefinition, RequirementPredicate, Room, RoomMediaDefinition,
     RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition, SourceMetadata,
     TalentGraphDefinition, ValidationErrors, WorldPack, WorldPackDocument,
 };
 
 pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 2;
-pub const AREA_PACK_SCHEMA_VERSION: u32 = 2;
+pub const AREA_PACK_SCHEMA_VERSION: u32 = 3;
 pub const MAX_PROJECT_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_AREA_COUNT: usize = 256;
 pub const MAX_AREA_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -123,11 +123,11 @@ pub struct AreaPack {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub items: Vec<Item>,
+    pub item_prototypes: Vec<ItemPrototype>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_item_instances: Vec<InitialItemInstance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rooms: Vec<Room>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub item_rules: Vec<ItemRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_prototypes: Vec<NpcPrototype>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -164,6 +164,37 @@ pub struct AreaPack {
     pub content_tests: Vec<ContentTest>,
 }
 
+fn normalize_legacy_area_items(value: &mut serde_json::Value) -> Result<(), String> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "AreaPack root must be an object".to_owned())?;
+    let mut gameplay = serde_json::Map::new();
+    for (area_key, gameplay_key) in [
+        ("itemRules", "itemRules"),
+        ("npcPrototypes", "npcPrototypes"),
+        ("npcSpawns", "npcSpawns"),
+    ] {
+        if let Some(field) = root.remove(area_key) {
+            gameplay.insert(gameplay_key.to_owned(), field);
+        }
+    }
+    root.insert("gameplay".to_owned(), serde_json::Value::Object(gameplay));
+    crate::authoring::normalize_legacy_items(value)?;
+    let root = value
+        .as_object_mut()
+        .expect("legacy normalizer preserves the AreaPack root object");
+    let gameplay = root
+        .remove("gameplay")
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(|| "legacy item normalization lost gameplay fields".to_owned())?;
+    for key in ["npcPrototypes", "npcSpawns"] {
+        if let Some(field) = gameplay.get(key) {
+            root.insert(key.to_owned(), field.clone());
+        }
+    }
+    Ok(())
+}
+
 impl<'de> Deserialize<'de> for AreaPack {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -177,11 +208,11 @@ impl<'de> Deserialize<'de> for AreaPack {
             #[serde(default)]
             depends_on: Vec<String>,
             #[serde(default)]
-            items: Vec<Item>,
+            item_prototypes: Vec<ItemPrototype>,
+            #[serde(default)]
+            initial_item_instances: Vec<InitialItemInstance>,
             #[serde(default)]
             rooms: Vec<Room>,
-            #[serde(default)]
-            item_rules: Vec<ItemRule>,
             #[serde(default)]
             npc_prototypes: Vec<NpcPrototype>,
             #[serde(default)]
@@ -218,10 +249,22 @@ impl<'de> Deserialize<'de> for AreaPack {
             content_tests: Vec<ContentTest>,
         }
 
-        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut value = serde_json::Value::deserialize(deserializer)?;
         audit_area_pack_keys(&value).map_err(D::Error::custom)?;
+        let schema_version = value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| D::Error::custom("AreaPack schemaVersion is required"))?;
+        if schema_version == 1 || schema_version == 2 {
+            normalize_legacy_area_items(&mut value).map_err(D::Error::custom)?;
+        } else if schema_version == u64::from(AREA_PACK_SCHEMA_VERSION) {
+            reject_native_area_legacy_item_fields(&value).map_err(D::Error::custom)?;
+        }
         let raw: RawAreaPack = serde_json::from_value(value).map_err(D::Error::custom)?;
-        if raw.schema_version != 1 && raw.schema_version != AREA_PACK_SCHEMA_VERSION {
+        if raw.schema_version != 1
+            && raw.schema_version != 2
+            && raw.schema_version != AREA_PACK_SCHEMA_VERSION
+        {
             return Err(D::Error::custom(format!(
                 "unsupported area schema {}",
                 raw.schema_version
@@ -230,7 +273,7 @@ impl<'de> Deserialize<'de> for AreaPack {
         let mut level_thresholds = raw.level_thresholds;
         let mut lineages = raw.lineages;
         let mut base_classes = raw.base_classes;
-        if raw.schema_version == 1 && !raw.archetypes.is_empty() {
+        if raw.schema_version <= 2 && !raw.archetypes.is_empty() {
             let imported = crate::progression::normalize_v2_character_progression(
                 raw.archetypes.clone(),
                 None,
@@ -241,7 +284,7 @@ impl<'de> Deserialize<'de> for AreaPack {
             lineages.extend(imported.lineages);
             base_classes.extend(imported.base_classes);
         }
-        let archetypes = if raw.schema_version == 1 {
+        let archetypes = if raw.schema_version <= 2 {
             Vec::new()
         } else {
             raw.archetypes
@@ -250,9 +293,9 @@ impl<'de> Deserialize<'de> for AreaPack {
             schema_version: AREA_PACK_SCHEMA_VERSION,
             id: raw.id,
             depends_on: raw.depends_on,
-            items: raw.items,
+            item_prototypes: raw.item_prototypes,
+            initial_item_instances: raw.initial_item_instances,
             rooms: raw.rooms,
-            item_rules: raw.item_rules,
             npc_prototypes: raw.npc_prototypes,
             npc_spawns: raw.npc_spawns,
             archetypes,
@@ -274,12 +317,40 @@ impl<'de> Deserialize<'de> for AreaPack {
     }
 }
 
+fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<(), String> {
+    let Some(root) = value.as_object() else {
+        return Ok(());
+    };
+    if root.contains_key("items") || root.contains_key("itemRules") {
+        return Err("AreaPack v3 must use itemPrototypes and initialItemInstances".to_owned());
+    }
+    if root
+        .get("rooms")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
+    {
+        return Err("AreaPack v3 rooms cannot declare legacy items".to_owned());
+    }
+    if root
+        .get("npcPrototypes")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|prototypes| {
+            prototypes
+                .iter()
+                .any(|prototype| prototype.get("lootItemIds").is_some())
+        })
+    {
+        return Err("AreaPack v3 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AreaOwnership {
     pub rooms: Vec<String>,
-    pub items: Vec<String>,
-    pub item_rules: Vec<String>,
+    pub item_prototypes: Vec<String>,
+    pub initial_item_instances: Vec<String>,
     pub npc_prototypes: Vec<String>,
     pub npc_spawns: Vec<String>,
     pub archetypes: Vec<String>,
@@ -314,9 +385,9 @@ pub struct AreaComposition {
 #[serde(rename_all = "snake_case")]
 pub enum AreaCrossReferenceKind {
     RoomExit,
-    RoomItem,
-    ItemRule,
-    NpcLoot,
+    ItemInstancePrototype,
+    ItemInstanceRoom,
+    ItemInstanceNpcSpawn,
     NpcSpawnPrototype,
     NpcSpawnRoom,
     ArchetypeAbility,
@@ -670,7 +741,8 @@ fn compose_loaded(
                 dialect: None,
                 file: None,
             }),
-            items: Vec::new(),
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
             rooms: Vec::new(),
             gameplay: GameplayDefinition {
                 rng_seed: manifest.rng_seed,
@@ -685,7 +757,7 @@ fn compose_loaded(
         scripts: Vec::new(),
         content_tests: Vec::new(),
     };
-    let mut global_ids: HashMap<String, (&'static str, String)> = HashMap::new();
+    let mut global_ids: HashMap<String, Vec<(&'static str, String)>> = HashMap::new();
     let mut ownership = Vec::with_capacity(areas.len());
 
     for area in &areas {
@@ -698,9 +770,15 @@ fn compose_loaded(
         )?;
         register_entities(
             &mut global_ids,
-            "item",
+            "item prototype",
             &pack.id,
-            pack.items.iter().map(|v| &v.id),
+            pack.item_prototypes.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "initial item instance",
+            &pack.id,
+            pack.initial_item_instances.iter().map(|v| &v.id),
         )?;
         register_entities(
             &mut global_ids,
@@ -785,11 +863,16 @@ fn compose_loaded(
             depends_on: sorted(pack.depends_on.clone()),
             ownership: AreaOwnership {
                 rooms: sorted(pack.rooms.iter().map(|value| value.id.clone()).collect()),
-                items: sorted(pack.items.iter().map(|value| value.id.clone()).collect()),
-                item_rules: sorted(
-                    pack.item_rules
+                item_prototypes: sorted(
+                    pack.item_prototypes
                         .iter()
-                        .map(|value| value.item_id.clone())
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                initial_item_instances: sorted(
+                    pack.initial_item_instances
+                        .iter()
+                        .map(|value| value.id.clone())
                         .collect(),
                 ),
                 npc_prototypes: sorted(
@@ -893,13 +976,15 @@ fn compose_loaded(
             },
         });
 
-        document.world.items.extend(pack.items.clone());
-        document.world.rooms.extend(pack.rooms.clone());
         document
             .world
-            .gameplay
-            .item_rules
-            .extend(pack.item_rules.clone());
+            .item_prototypes
+            .extend(pack.item_prototypes.clone());
+        document
+            .world
+            .initial_item_instances
+            .extend(pack.initial_item_instances.clone());
+        document.world.rooms.extend(pack.rooms.clone());
         document
             .world
             .gameplay
@@ -1029,7 +1114,10 @@ fn compose_loaded(
                 unreachable!("artifact generation does not resolve scenes: {error}")
             }
             crate::DocumentToolError::LegacyProgression(error) => {
-                unreachable!("composed artifacts are already WorldPack v3: {error}")
+                unreachable!("composed artifacts are already WorldPack v4: {error}")
+            }
+            crate::DocumentToolError::LegacyItems(error) => {
+                unreachable!("composed artifacts already use native v4 items: {error}")
             }
         })?;
     if artifact.len() > MAX_COMPOSED_WORLD_BYTES {
@@ -1065,21 +1153,31 @@ fn canonical_project_digest(manifest: &WorldProjectManifest) -> Result<String, C
 }
 
 fn register_entities<'a>(
-    global: &mut HashMap<String, (&'static str, String)>,
+    global: &mut HashMap<String, Vec<(&'static str, String)>>,
     kind: &'static str,
     area: &str,
     ids: impl Iterator<Item = &'a String>,
 ) -> Result<(), CompositionError> {
     for id in ids {
-        if let Some((first_kind, first_area)) = global.insert(id.clone(), (kind, area.to_owned())) {
-            return Err(CompositionError::DuplicateGlobalEntityId {
-                id: id.clone(),
-                first_kind,
-                first_area,
-                second_kind: kind,
-                second_area: area.to_owned(),
-            });
+        let registrations = global.entry(id.clone()).or_default();
+        if let Some((first_kind, first_area)) = registrations.first() {
+            let typed_legacy_pair = registrations.len() == 1
+                && matches!(
+                    (*first_kind, kind),
+                    ("item prototype", "initial item instance")
+                        | ("initial item instance", "item prototype")
+                );
+            if !typed_legacy_pair {
+                return Err(CompositionError::DuplicateGlobalEntityId {
+                    id: id.clone(),
+                    first_kind,
+                    first_area: first_area.clone(),
+                    second_kind: kind,
+                    second_area: area.to_owned(),
+                });
+            }
         }
+        registrations.push((kind, area.to_owned()));
     }
     Ok(())
 }
@@ -1088,8 +1186,13 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
     let room_owner = owner_map(areas, |area| {
         area.rooms.iter().map(|value| value.id.as_str())
     });
-    let item_owner = owner_map(areas, |area| {
-        area.items.iter().map(|value| value.id.as_str())
+    let item_prototype_owner = owner_map(areas, |area| {
+        area.item_prototypes.iter().map(|value| value.id.as_str())
+    });
+    let item_instance_owner = owner_map(areas, |area| {
+        area.initial_item_instances
+            .iter()
+            .map(|value| value.id.as_str())
     });
     let prototype_owner = owner_map(areas, |area| {
         area.npc_prototypes.iter().map(|value| value.id.as_str())
@@ -1173,43 +1276,44 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                     );
                 }
             }
-            for item in &room.items {
-                if let Some(owner) = item_owner.get(item.as_str()) {
-                    add_edge(
-                        &mut edges,
-                        from,
-                        owner,
-                        AreaCrossReferenceKind::RoomItem,
-                        &room.id,
-                        item,
-                    );
-                }
-            }
         }
-        for rule in &area.pack.item_rules {
-            if let Some(owner) = item_owner.get(rule.item_id.as_str()) {
+        for instance in &area.pack.initial_item_instances {
+            if let Some(owner) = item_prototype_owner.get(instance.prototype_id.as_str()) {
                 add_edge(
                     &mut edges,
                     from,
                     owner,
-                    AreaCrossReferenceKind::ItemRule,
-                    &rule.item_id,
-                    &rule.item_id,
+                    AreaCrossReferenceKind::ItemInstancePrototype,
+                    &instance.id,
+                    &instance.prototype_id,
                 );
             }
-        }
-        for prototype in &area.pack.npc_prototypes {
-            for item in &prototype.loot_item_ids {
-                if let Some(owner) = item_owner.get(item.as_str()) {
-                    add_edge(
-                        &mut edges,
-                        from,
-                        owner,
-                        AreaCrossReferenceKind::NpcLoot,
-                        &prototype.id,
-                        item,
-                    );
+            match &instance.location {
+                crate::InitialItemLocation::Room { room_id } => {
+                    if let Some(owner) = room_owner.get(room_id.as_str()) {
+                        add_edge(
+                            &mut edges,
+                            from,
+                            owner,
+                            AreaCrossReferenceKind::ItemInstanceRoom,
+                            &instance.id,
+                            room_id,
+                        );
+                    }
                 }
+                crate::InitialItemLocation::NpcSpawn { npc_spawn_id } => {
+                    if let Some(owner) = spawn_owner.get(npc_spawn_id.as_str()) {
+                        add_edge(
+                            &mut edges,
+                            from,
+                            owner,
+                            AreaCrossReferenceKind::ItemInstanceNpcSpawn,
+                            &instance.id,
+                            npc_spawn_id,
+                        );
+                    }
+                }
+                crate::InitialItemLocation::Staged => {}
             }
         }
         for spawn in &area.pack.npc_spawns {
@@ -1400,7 +1504,7 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
         }
         for media in &area.pack.entity_media {
             let owner = match media.kind {
-                EntityMediaKind::Item => item_owner.get(media.subject_id.as_str()),
+                EntityMediaKind::Item => item_prototype_owner.get(media.subject_id.as_str()),
                 EntityMediaKind::Npc => spawn_owner.get(media.subject_id.as_str()),
             };
             if let Some(owner) = owner {
@@ -1426,7 +1530,7 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                 );
             }
             for item in perception.hidden_items.keys() {
-                if let Some(owner) = item_owner.get(item.as_str()) {
+                if let Some(owner) = item_instance_owner.get(item.as_str()) {
                     add_edge(
                         &mut edges,
                         from,
@@ -1839,7 +1943,7 @@ fn safe_identifier(value: &str) -> bool {
 }
 
 /// Existing runtime WorldPack readers intentionally tolerate future fields.
-/// AreaPack v2 does not: this format-specific key audit makes every structured
+/// AreaPack v3 does not: this format-specific key audit makes every structured
 /// authoring record fail closed without changing runtime deserialization.
 fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionError> {
     let Some(area) = audit_object(
@@ -1848,6 +1952,8 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
             "schemaVersion",
             "id",
             "dependsOn",
+            "itemPrototypes",
+            "initialItemInstances",
             "items",
             "rooms",
             "itemRules",
@@ -1874,6 +1980,16 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
     else {
         return Ok(());
     };
+    audit_array(
+        area.get("itemPrototypes"),
+        "$.itemPrototypes",
+        audit_item_prototype,
+    )?;
+    audit_array(
+        area.get("initialItemInstances"),
+        "$.initialItemInstances",
+        audit_initial_item_instance,
+    )?;
     audit_array(area.get("items"), "$.items", audit_item)?;
     audit_array(area.get("rooms"), "$.rooms", audit_room)?;
     audit_array(area.get("itemRules"), "$.itemRules", audit_item_rule)?;
@@ -1913,6 +2029,58 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
 
 fn audit_item(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
     audit_object(value, &["id", "name", "description", "aliases"], path).map(|_| ())
+}
+
+fn audit_item_prototype(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    let Some(prototype) = audit_object(
+        value,
+        &[
+            "id",
+            "name",
+            "description",
+            "aliases",
+            "equipmentSlot",
+            "attackBonus",
+            "healAmount",
+            "consumable",
+            "effect",
+            "weightGrams",
+            "slotCost",
+            "rarity",
+            "itemLevel",
+            "stackPolicy",
+            "transferPolicy",
+        ],
+        path,
+    )?
+    else {
+        return Ok(());
+    };
+    if let Some(effect) = prototype.get("effect") {
+        audit_object(
+            effect,
+            &["kind", "magnitude", "remainingTicks"],
+            &format!("{path}.effect"),
+        )?;
+    }
+    Ok(())
+}
+
+fn audit_initial_item_instance(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<(), CompositionError> {
+    let Some(instance) = audit_object(value, &["id", "prototypeId", "location"], path)? else {
+        return Ok(());
+    };
+    if let Some(location) = instance.get("location") {
+        audit_object(
+            location,
+            &["kind", "roomId", "npcSpawnId"],
+            &format!("{path}.location"),
+        )?;
+    }
+    Ok(())
 }
 
 fn audit_room(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {

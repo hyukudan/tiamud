@@ -226,7 +226,9 @@ export class TiamudTelnetBot {
         );
         connection.sendLine('1');
       }
-      const transcript = await connection.waitFor('> ', 'game prompt');
+      const transcript = mode === 'register'
+        ? await finishDefaultCharacterCreation(connection)
+        : await connection.waitFor('> ', 'game prompt');
       const expected = this.#location === 'gate' ? 'The North Gate' : 'Lantern Square';
       if (!transcript.includes(expected)) {
         throw new Error(`Telnet bot ${this.#index} entered an unexpected scene.`);
@@ -242,6 +244,11 @@ export class TiamudTelnetBot {
   async #command(command, expectedText, metric) {
     await this.#pace();
     const started = performance.now();
+    // A busy MUD can render an unsolicited scene and prompt between commands.
+    // Do not let a stale title/prompt satisfy the command we are about to send.
+    // Clearing is synchronous with sendLine, so data received afterwards is
+    // causally later than this harness-side boundary.
+    this.#connection.discardBufferedText();
     this.#connection.sendLine(command);
     // Telnet sessions can receive asynchronous scene/chat updates, each with
     // its own prompt. Wait for command-specific evidence before accepting the
@@ -305,15 +312,27 @@ class TelnetTextConnection {
     this.#socket.write(`${value}\r\n`);
   }
 
+  discardBufferedText() {
+    this.#text = '';
+  }
+
   async waitFor(marker, label, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const result = await this.waitForAny([marker], label, timeoutMs);
+    return result.transcript;
+  }
+
+  async waitForAny(markers, label, timeoutMs = REQUEST_TIMEOUT_MS) {
     const deadline = performance.now() + timeoutMs;
     for (;;) {
-      const index = this.#text.indexOf(marker);
-      if (index >= 0) {
-        const end = index + marker.length;
+      const found = markers
+        .map((marker) => ({ marker, index: this.#text.indexOf(marker) }))
+        .filter((candidate) => candidate.index >= 0)
+        .sort((left, right) => left.index - right.index)[0];
+      if (found) {
+        const end = found.index + found.marker.length;
         const transcript = this.#text.slice(0, end);
         this.#text = this.#text.slice(end);
-        return transcript;
+        return { marker: found.marker, transcript };
       }
       if (this.#terminalError) throw this.#terminalError;
       const remaining = deadline - performance.now();
@@ -366,6 +385,24 @@ class TelnetTextConnection {
   #wake() {
     this.#waiter?.();
   }
+}
+
+async function finishDefaultCharacterCreation(connection) {
+  const gamePrompt = '> ';
+  const selectionPrompts = [
+    'Choose a number or lineage id (type default): ',
+    'Choose a number or background id (type default or none): ',
+    'Choose a number or base class id (type default): ',
+  ];
+  for (let step = 0; step <= selectionPrompts.length; step += 1) {
+    const result = await connection.waitForAny(
+      [gamePrompt, ...selectionPrompts],
+      'character progression or game prompt',
+    );
+    if (result.marker === gamePrompt) return result.transcript;
+    connection.sendLine('default');
+  }
+  throw new Error('Telnet character creation exceeded its bounded progression prompts.');
 }
 
 function negotiationReply(command, option) {

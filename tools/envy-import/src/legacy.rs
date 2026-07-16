@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
-use world_pack::{Item, LegacyBitvector, WorldPack};
+use world_pack::{
+    InitialItemInstance, InitialItemLocation, ItemPrototype, ItemRarity, ItemStackPolicy,
+    ItemTransferPolicy, LegacyBitvector, WorldPack,
+};
 
 use super::{
     Cursor, ImportError, TextEncoding, decode, line_number, parse_integer_line,
@@ -811,6 +814,7 @@ fn translate_object_resets(
         .filter_map(|(index, room)| room.legacy_vnum.map(|vnum| (vnum, index)))
         .collect::<HashMap<_, _>>();
     let mut ordinals = HashMap::<i64, usize>::new();
+    let mut emitted_prototypes = HashSet::new();
 
     for reset in resets.iter_mut().filter(|reset| reset.command == "O") {
         if reset.arguments.len() < 3 {
@@ -861,6 +865,7 @@ fn translate_object_resets(
         };
         let ordinal = ordinals.entry(object_vnum).or_default();
         *ordinal += 1;
+        let prototype_id = format!("{pack_id}:object:{object_vnum}");
         let item_id = format!("{pack_id}:object:{object_vnum}:{}", *ordinal);
         let name = usable_name(&object.short_description, &object.keywords, object_vnum);
         let description =
@@ -871,13 +876,32 @@ fn translate_object_resets(
             .filter(|alias| !alias.eq_ignore_ascii_case(&name))
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
-        pack.items.push(Item {
+        if emitted_prototypes.insert(object_vnum) {
+            pack.item_prototypes.push(ItemPrototype {
+                id: prototype_id.clone(),
+                name,
+                description,
+                aliases,
+                equipment_slot: None,
+                attack_bonus: 0,
+                heal_amount: 0,
+                consumable: false,
+                effect: None,
+                weight_grams: 0,
+                slot_cost: 1,
+                rarity: ItemRarity::Common,
+                item_level: 1,
+                stack_policy: ItemStackPolicy::Unique,
+                transfer_policy: ItemTransferPolicy::Transferable,
+            });
+        }
+        pack.initial_item_instances.push(InitialItemInstance {
             id: item_id.clone(),
-            name,
-            description,
-            aliases,
+            prototype_id,
+            location: InitialItemLocation::Room {
+                room_id: pack.rooms[room_index].id.clone(),
+            },
         });
-        pack.rooms[room_index].items.push(item_id.clone());
         reset.world_pack_item_id = Some(item_id);
     }
 }
@@ -1219,7 +1243,7 @@ fn append_loss_diagnostics(
             "MOBILES",
             Some(mobile.line),
             Some(mobile.vnum),
-            "mobile prototype is preserved as inert legacy data; WorldPack v2 has no NPC prototype field",
+            "mobile prototype is preserved as inert legacy data; this conservative importer does not translate NPC statistics",
             "author the NPC in Tiamud's gameplay model and compare its attributes with this record",
         ));
     }
@@ -1255,7 +1279,7 @@ fn append_loss_diagnostics(
             Some(reset.line),
             reset.arguments.first().copied(),
             &format!(
-                "{} reset is preserved as inert data because WorldPack v2 cannot express its semantics safely",
+                "{} reset is preserved as inert data because this importer cannot translate its semantics safely",
                 reset.command
             ),
             "recreate the reset with Tiamud NPC, equipment, container, door or spawn authoring primitives",
@@ -1277,7 +1301,7 @@ fn append_loss_diagnostics(
             "SHOPS",
             Some(shop.line),
             Some(shop.keeper_vnum),
-            &format!("shop is inert; {keeper_note}, and WorldPack v2 has no economy/shop field"),
+            &format!("shop is inert; {keeper_note}, and the importer does not publish historical shop policy"),
             "author a Tiamud shop and verify buy types, margins and opening hours manually",
         ));
     }

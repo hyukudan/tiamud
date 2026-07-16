@@ -78,6 +78,9 @@ const validPlayerState = () => ({
   },
   inventory: [],
   equipment: [],
+  inventoryCapacity: {
+    usedSlots: 0, maxSlots: 24, usedWeightGrams: 0, maxWeightGrams: 30000,
+  },
   map: {
     currentRoomId: 'o1111111111111111',
     rooms: [{ id: 'o1111111111111111', title: 'Lantern Square', current: true }],

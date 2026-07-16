@@ -92,6 +92,9 @@ export interface SceneItem {
   id: string;
   label: string;
   description: string;
+  rarity: ItemRarity;
+  itemLevel: number;
+  weightGrams: number;
   actions: SceneAction[];
 }
 
@@ -212,6 +215,7 @@ export interface InventoryPatchData {
   revision: number;
   inventory: PlayerItemSnapshot[];
   equipment: EquippedItemSnapshot[];
+  inventoryCapacity: InventoryCapacitySnapshot;
 }
 
 export interface MapSnapshotData {
@@ -382,6 +386,9 @@ export interface PlayerItemSnapshot {
   id: string;
   label: string;
   description: string;
+  rarity: ItemRarity;
+  itemLevel: number;
+  weightGrams: number;
   actions: SceneAction[];
 }
 
@@ -389,7 +396,19 @@ export interface EquippedItemSnapshot {
   id: string;
   slot: 'weapon' | 'body' | 'trinket';
   label: string;
+  rarity: ItemRarity;
+  itemLevel: number;
+  weightGrams: number;
   actions: SceneAction[];
+}
+
+export type ItemRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
+
+export interface InventoryCapacitySnapshot {
+  usedSlots: number;
+  maxSlots: number;
+  usedWeightGrams: number;
+  maxWeightGrams: number;
 }
 
 export interface PlayerStateSnapshot {
@@ -397,6 +416,7 @@ export interface PlayerStateSnapshot {
   character: PlayerCharacterSnapshot;
   inventory: PlayerItemSnapshot[];
   equipment: EquippedItemSnapshot[];
+  inventoryCapacity: InventoryCapacitySnapshot;
   map: {
     currentRoomId: string;
     rooms: Array<{ id: string; title: string; current: boolean }>;
@@ -532,6 +552,26 @@ const positiveIntegerOrUndefined = (value: unknown): number | undefined =>
 
 const nonNegativeIntegerOrUndefined = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+const itemRarityOrUndefined = (value: unknown): ItemRarity | undefined =>
+  value === 'common' || value === 'uncommon' || value === 'rare' || value === 'epic' ||
+    value === 'legendary'
+    ? value
+    : undefined;
+
+const parseInventoryCapacity = (value: unknown): InventoryCapacitySnapshot | undefined => {
+  if (!isRecord(value)) return undefined;
+  const usedSlots = nonNegativeIntegerOrUndefined(value.usedSlots);
+  const maxSlots = positiveIntegerOrUndefined(value.maxSlots);
+  const usedWeightGrams = nonNegativeIntegerOrUndefined(value.usedWeightGrams);
+  const maxWeightGrams = nonNegativeIntegerOrUndefined(value.maxWeightGrams);
+  if (usedSlots === undefined || maxSlots === undefined || maxSlots > 1_000 || usedSlots > maxSlots ||
+    usedWeightGrams === undefined || maxWeightGrams === undefined ||
+    maxWeightGrams > 1_000_000 || usedWeightGrams > maxWeightGrams) {
+    return undefined;
+  }
+  return { usedSlots, maxSlots, usedWeightGrams, maxWeightGrams };
+};
 
 const boundedString = (value: unknown, maximum: number): string | undefined => {
   const text = stringOrUndefined(value);
@@ -899,9 +939,15 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const description = typeof entry.description === 'string' && entry.description.length <= 4096
       ? entry.description
       : undefined;
+    const rarity = itemRarityOrUndefined(entry.rarity);
+    const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
+    const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const actions = parseActions(entry.actions);
-    if (!id || !label || description === undefined || !actions) return undefined;
-    inventory.push({ id, label, description, actions });
+    if (!id || !label || description === undefined || !rarity || itemLevel === undefined ||
+      itemLevel > 1_000 || weightGrams === undefined || weightGrams > 1_000_000 || !actions) {
+      return undefined;
+    }
+    inventory.push({ id, label, description, rarity, itemLevel, weightGrams, actions });
   }
 
   if (!Array.isArray(value.equipment) || value.equipment.length > 3) return undefined;
@@ -911,12 +957,20 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const id = opaqueId(entry.id);
     const slot = entry.slot;
     const label = boundedString(entry.label, 256);
+    const rarity = itemRarityOrUndefined(entry.rarity);
+    const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
+    const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const actions = parseActions(entry.actions);
-    if (!id || (slot !== 'weapon' && slot !== 'body' && slot !== 'trinket') || !label || !actions) {
+    if (!id || (slot !== 'weapon' && slot !== 'body' && slot !== 'trinket') || !label ||
+      !rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
+      weightGrams > 1_000_000 || !actions) {
       return undefined;
     }
-    equipment.push({ id, slot, label, actions });
+    equipment.push({ id, slot, label, rarity, itemLevel, weightGrams, actions });
   }
+
+  const inventoryCapacity = parseInventoryCapacity(value.inventoryCapacity);
+  if (!inventoryCapacity) return undefined;
 
   const map = value.map;
   if (
@@ -1057,6 +1111,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     },
     inventory,
     equipment,
+    inventoryCapacity,
     map: { currentRoomId, rooms, paths },
     quests,
     ...(party ? { party } : {}),
@@ -1085,6 +1140,9 @@ const PLAYER_VALIDATION_SHELL = {
   },
   inventory: [],
   equipment: [],
+  inventoryCapacity: {
+    usedSlots: 0, maxSlots: 1, usedWeightGrams: 0, maxWeightGrams: 1,
+  },
   map: {
     currentRoomId: 'o0000000000000000',
     rooms: [{ id: 'o0000000000000000', title: 'validation', current: true }],
@@ -1098,7 +1156,7 @@ const PLAYER_VALIDATION_SHELL = {
 
 const validatePlayerFragment = (
   revision: number,
-  fragment: Partial<Record<'character' | 'inventory' | 'equipment' | 'map', unknown>>,
+  fragment: Partial<Record<'character' | 'inventory' | 'equipment' | 'inventoryCapacity' | 'map', unknown>>,
 ): PlayerStateSnapshot | undefined => parsePlayerState({
   ...PLAYER_VALIDATION_SHELL,
   revision,
@@ -1377,11 +1435,19 @@ const toItems = (value: unknown): SceneItem[] => {
     const label = stringOrUndefined(entry.label) ?? stringOrUndefined(entry.name);
     if (!label) return [];
     const id = stringOrUndefined(entry.id) ?? `item-${index}`;
+    const rarity = itemRarityOrUndefined(entry.rarity);
+    const itemLevel = positiveIntegerOrUndefined(entry.itemLevel);
+    const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
+    if (!rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
+      weightGrams > 1_000_000) return [];
     const suppliedActions = toActions(entry.actions);
     return [{
       id,
       label,
       description: stringOrUndefined(entry.description) ?? '',
+      rarity,
+      itemLevel,
+      weightGrams,
       actions: suppliedActions.length > 0
         ? suppliedActions
         : [
@@ -1587,12 +1653,18 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const validated = validatePlayerFragment(revision, {
         inventory: candidate.data.inventory,
         equipment: candidate.data.equipment,
+        inventoryCapacity: candidate.data.inventoryCapacity,
       });
       return validated
         ? {
             ...base,
             type: candidate.type,
-            data: { revision, inventory: validated.inventory, equipment: validated.equipment },
+            data: {
+              revision,
+              inventory: validated.inventory,
+              equipment: validated.equipment,
+              inventoryCapacity: validated.inventoryCapacity,
+            },
           }
         : undefined;
     }

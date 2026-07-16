@@ -29,9 +29,11 @@ use crate::{
         SessionToken, digest_token, validate_password,
     },
     persistence::{
-        CharacterStore, DOMAIN_EVENT_RETENTION, ModerationAction, PreparedLogin, Request,
-        SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry, StaffAuditRecord,
-        StaffReport, StoreError,
+        CharacterStore, DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, ModerationAction,
+        PreparedLogin, Request, SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry,
+        StaffAuditRecord, StaffReport, StoreError, decode_runtime_snapshot,
+        decode_startup_owner_gameplay, ensure_all_startup_owners_loaded,
+        normalise_startup_owner_ids,
     },
 };
 
@@ -52,6 +54,7 @@ const STAFF_LIST_LIMIT: i64 = 10;
 const MAX_MODERATION_DURATION_SECONDS: i64 = 365 * 24 * 60 * 60;
 const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
 const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const POSTGRES_CHARACTER_BATCH_SIZE: usize = MAX_RUNTIME_JSON_BYTES / MAX_CHARACTER_JSON_BYTES;
 
 #[derive(Clone)]
 pub struct PostgresCharacterStore {
@@ -182,6 +185,15 @@ impl PostgresCharacterStore {
                         } => {
                             let _ =
                                 reply.send(load_character_gameplay(&mut connection, character_id));
+                        }
+                        Request::LoadCharacterGameplayBatch {
+                            character_ids,
+                            reply,
+                        } => {
+                            let _ = reply.send(load_character_gameplay_batch(
+                                &mut connection,
+                                character_ids,
+                            ));
                         }
                         Request::LoadRuntimeSnapshot { reply } => {
                             let _ = reply.send(load_runtime_snapshot(&mut connection));
@@ -632,6 +644,21 @@ impl CharacterStore for PostgresCharacterStore {
         self.request(
             Request::LoadCharacterGameplay {
                 character_id,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn load_character_gameplay_batch(
+        &self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoadCharacterGameplayBatch {
+                character_ids,
                 reply,
             },
             receive,
@@ -1374,17 +1401,48 @@ fn load_character_gameplay<C: GenericClient>(
     serde_json::from_str(&json).map_err(StoreError::from)
 }
 
+fn load_character_gameplay_batch<C: GenericClient>(
+    connection: &mut C,
+    character_ids: Vec<CharacterId>,
+) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
+    let character_ids = normalise_startup_owner_ids(character_ids)?;
+    let mut total_json_bytes = 0_usize;
+    let mut aggregates = Vec::new();
+    for batch in character_ids.chunks(POSTGRES_CHARACTER_BATCH_SIZE) {
+        let database_ids = batch.iter().map(|id| id.0).collect::<Vec<_>>();
+        // `query` materializes one batch. At 16 rows times the existing 64 KiB
+        // document cap, allocation remains within the 1 MiB aggregate budget
+        // before decoding can reject and stop subsequent batches.
+        let rows = connection.query(
+            "SELECT id, gameplay_json FROM characters WHERE id = ANY($1) ORDER BY id",
+            &[&database_ids],
+        )?;
+        for row in rows {
+            let character_id = CharacterId(row.get(0));
+            let json: String = row.get(1);
+            aggregates.push(decode_startup_owner_gameplay(
+                character_id,
+                &json,
+                &mut total_json_bytes,
+            )?);
+        }
+    }
+    ensure_all_startup_owners_loaded(&character_ids, &aggregates)?;
+    Ok(aggregates)
+}
+
 fn load_runtime_snapshot<C: GenericClient>(
     connection: &mut C,
 ) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
     connection
         .query_opt(
-            "SELECT snapshot_json FROM world_runtime WHERE singleton = 1",
+            "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
             &[],
         )?
         .map(|row| {
-            let json: String = row.get(0);
-            serde_json::from_str(&json).map_err(StoreError::from)
+            let snapshot_version: i64 = row.get(0);
+            let json: String = row.get(1);
+            decode_runtime_snapshot(snapshot_version, &json)
         })
         .transpose()
 }
@@ -2597,8 +2655,8 @@ mod tests {
     use super::*;
     use std::{collections::BTreeMap, env, process, time::Duration};
     use tiamud_core::{
-        AdventureRuntimeSnapshot, Direction, ItemLocationSnapshot, RuntimeItemLocation,
-        WORLD_RUNTIME_SNAPSHOT_VERSION,
+        AdventureRuntimeSnapshot, Direction, ItemInstanceId, ItemLocationSnapshot,
+        RuntimeItemInstanceSnapshot, RuntimeItemLocation, WORLD_RUNTIME_SNAPSHOT_VERSION,
     };
 
     fn scoped_url(base: &str, schema: &str) -> String {
@@ -2716,6 +2774,14 @@ mod tests {
                 .unwrap(),
             selected_gameplay
         );
+        let all_gameplay = store
+            .load_character_gameplay_batch(vec![player_character.id, keeper_character.id])
+            .await
+            .unwrap();
+        assert_eq!(all_gameplay.len(), 2);
+        assert_eq!(all_gameplay[0].character_id, keeper_character.id);
+        assert_eq!(all_gameplay[1].character_id, player_character.id);
+        assert_eq!(all_gameplay[1].gameplay, selected_gameplay);
         assert_eq!(
             store.list_characters(keeper.account.id).await.unwrap(),
             vec![keeper_character.clone()]
@@ -2739,10 +2805,14 @@ mod tests {
             revision: 9,
             logical_tick: 3,
             rng_state: 42,
-            item_locations: BTreeMap::from([(
-                "item:lamp".into(),
-                RuntimeItemLocation::Carried {
-                    character_id: keeper_character.id,
+            next_item_instance_sequence: 1,
+            item_instances: BTreeMap::from([(
+                ItemInstanceId("item:lamp".into()),
+                RuntimeItemInstanceSnapshot {
+                    prototype_id: "item:lamp".into(),
+                    location: RuntimeItemLocation::Carried {
+                        character_id: keeper_character.id,
+                    },
                 },
             )]),
             npcs: BTreeMap::new(),

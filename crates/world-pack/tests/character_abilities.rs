@@ -12,7 +12,7 @@ use world_pack::{
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 fn reviewed_world() -> WorldPack {
-    let mut pack: WorldPack = serde_json::from_slice(REVIEWED_WORLD).unwrap();
+    let mut pack = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap().world;
     let progression = pack.gameplay.character_progression.take().unwrap();
     pack.gameplay.default_archetype_id = Some(progression.defaults.base_class_id);
     pack.gameplay.archetypes = progression

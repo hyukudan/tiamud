@@ -70,15 +70,21 @@ fn imports_all_supported_historical_sections_without_executing_content() {
 fn only_unconditional_room_object_resets_become_world_pack_items() {
     let result = parse_import(FULL_AREA, "synthetic-full", None, TextEncoding::Ascii).unwrap();
 
-    assert_eq!(result.world_pack.items.len(), 1);
-    let item = &result.world_pack.items[0];
-    assert_eq!(item.id, "synthetic-full:object:2000:1");
-    assert_eq!(item.name, "a brass lantern");
-    assert!(item.aliases.iter().any(|alias| alias == "lantern"));
+    assert_eq!(result.world_pack.item_prototypes.len(), 1);
+    assert_eq!(result.world_pack.initial_item_instances.len(), 1);
+    let prototype = &result.world_pack.item_prototypes[0];
+    assert_eq!(prototype.id, "synthetic-full:object:2000");
+    assert_eq!(prototype.name, "a brass lantern");
+    assert!(prototype.aliases.iter().any(|alias| alias == "lantern"));
     assert_eq!(
-        result.world_pack.rooms[0].items,
-        ["synthetic-full:object:2000:1"]
+        result.world_pack.initial_item_instances[0].id,
+        "synthetic-full:object:2000:1"
     );
+    assert!(matches!(
+        &result.world_pack.initial_item_instances[0].location,
+        world_pack::InitialItemLocation::Room { room_id }
+            if room_id == &result.world_pack.rooms[0].id
+    ));
     assert_eq!(
         result.legacy.resets[2].world_pack_item_id.as_deref(),
         Some("synthetic-full:object:2000:1")
@@ -314,7 +320,8 @@ fn conditional_object_reset_is_not_misrepresented_as_an_initial_item() {
         .replace("O 0 2000 1 100", "O 1 2000 1 100");
     let result = parse_import(source.as_bytes(), "conditional", None, TextEncoding::Ascii).unwrap();
 
-    assert!(result.world_pack.items.is_empty());
+    assert!(result.world_pack.item_prototypes.is_empty());
+    assert!(result.world_pack.initial_item_instances.is_empty());
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "conditional_object_reset_not_converted" && diagnostic.vnum == Some(2000)
     }));
@@ -334,7 +341,8 @@ fn missing_reset_targets_produce_line_specific_diagnostics() {
 
     assert_eq!(diagnostic.vnum, Some(2999));
     assert!(diagnostic.line.is_some());
-    assert!(result.world_pack.items.is_empty());
+    assert!(result.world_pack.item_prototypes.is_empty());
+    assert!(result.world_pack.initial_item_instances.is_empty());
 }
 
 #[test]
@@ -394,7 +402,8 @@ fn crlf_area_files_parse_with_the_same_section_semantics() {
     let result = parse_import(crlf.as_bytes(), "crlf", None, TextEncoding::Ascii).unwrap();
 
     assert_eq!(result.legacy.mobiles[0].vnum, 1000);
-    assert_eq!(result.world_pack.items.len(), 1);
+    assert_eq!(result.world_pack.item_prototypes.len(), 1);
+    assert_eq!(result.world_pack.initial_item_instances.len(), 1);
     assert_eq!(result.legacy.shops[0].keeper_vnum, 1000);
 }
 
@@ -405,16 +414,27 @@ fn repeated_object_resets_create_stable_distinct_item_instances() {
         .replace("O 0 2000 1 100", "O 0 2000 1 100\nO 0 2000 2 101");
     let result = parse_import(source.as_bytes(), "instances", None, TextEncoding::Ascii).unwrap();
 
-    assert_eq!(result.world_pack.items.len(), 2);
-    assert_eq!(result.world_pack.items[0].id, "instances:object:2000:1");
-    assert_eq!(result.world_pack.items[1].id, "instances:object:2000:2");
+    assert_eq!(result.world_pack.item_prototypes.len(), 1);
     assert_eq!(
-        result.world_pack.rooms[0].items,
-        ["instances:object:2000:1"]
+        result.world_pack.item_prototypes[0].id,
+        "instances:object:2000"
+    );
+    assert_eq!(result.world_pack.initial_item_instances.len(), 2);
+    assert_eq!(
+        result.world_pack.initial_item_instances[0].id,
+        "instances:object:2000:1"
     );
     assert_eq!(
-        result.world_pack.rooms[1].items,
-        ["instances:object:2000:2"]
+        result.world_pack.initial_item_instances[1].id,
+        "instances:object:2000:2"
+    );
+    assert_eq!(
+        result.world_pack.initial_item_instances[0].prototype_id,
+        "instances:object:2000"
+    );
+    assert_eq!(
+        result.world_pack.initial_item_instances[1].prototype_id,
+        "instances:object:2000"
     );
     result.world_pack.validate().unwrap();
 }

@@ -13,7 +13,7 @@ use tiamud_core::{StaffCapability, StaffProfileKey};
 use tiamud_persistence_sqlite::{
     MigrationReport, SCHEMA_VERSION, SchemaError, migrate as migrate_schema,
 };
-use world_pack::{ValidationErrors, WorldPack};
+use world_pack::{DocumentToolError, ValidationErrors, WorldPack, WorldPackDocument};
 
 /// Database schema understood by the current Tiamud server.
 ///
@@ -118,6 +118,12 @@ pub enum AdminError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("WorldPack {path:?} cannot be normalized: {source}")]
+    WorldPackNormalization {
+        path: PathBuf,
+        #[source]
+        source: DocumentToolError,
+    },
     #[error("WorldPack {path:?} is invalid: {source}")]
     WorldPackValidation {
         path: PathBuf,
@@ -199,7 +205,7 @@ pub fn check(
         database_schema_version,
         world_pack_id: pack.id,
         room_count: pack.rooms.len(),
-        item_count: pack.items.len(),
+        item_count: pack.initial_item_instances.len(),
     })
 }
 
@@ -638,17 +644,27 @@ fn load_world_pack(path: &Path) -> Result<WorldPack, AdminError> {
         });
     }
 
-    let pack: WorldPack =
-        serde_json::from_slice(&bytes).map_err(|source| AdminError::WorldPackJson {
+    let document = WorldPackDocument::from_json(&bytes).map_err(|source| match source {
+        DocumentToolError::Json(source) => AdminError::WorldPackJson {
             path: path.to_owned(),
             source,
-        })?;
-    pack.validate()
+        },
+        DocumentToolError::InvalidDocument(source) => AdminError::WorldPackValidation {
+            path: path.to_owned(),
+            source,
+        },
+        source => AdminError::WorldPackNormalization {
+            path: path.to_owned(),
+            source,
+        },
+    })?;
+    document
+        .validate()
         .map_err(|source| AdminError::WorldPackValidation {
             path: path.to_owned(),
             source,
         })?;
-    Ok(pack)
+    Ok(document.world)
 }
 
 #[cfg(test)]
@@ -784,15 +800,19 @@ mod tests {
         fs::write(
             &world,
             r#"{
-                "schemaVersion": 3,
+                "schemaVersion": 4,
                 "id": "broken",
                 "name": "Broken",
                 "startRoomId": "room:missing",
+                "initialItemInstances": [{
+                    "id": "item:missing",
+                    "prototypeId": "prototype:missing",
+                    "location": { "kind": "room", "roomId": "room:missing" }
+                }],
                 "rooms": [{
                     "id": "room:start",
                     "title": "Start",
-                    "description": "The beginning.",
-                    "items": ["item:missing"]
+                    "description": "The beginning."
                 }]
             }"#,
         )

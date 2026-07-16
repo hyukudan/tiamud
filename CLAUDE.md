@@ -32,12 +32,24 @@ describe el baseline vigente de personajes y medios.
   la ruta local sin servicios. Cada proceso abre uno y nunca doble-escribe.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
-- WorldPack v3 y AreaPack v2 son actuales. Datos v2/v1/Envy se normalizan en
-  fronteras explícitas. El servidor carga un paquete completo; ADR 0005 para
-  carga caliente/LRU es futuro.
+- WorldPack v4 y AreaPack v3 son actuales. WorldPack v3/v2, AreaPack v2/v1 y
+  Envy se normalizan en fronteras explícitas. El servidor carga un paquete
+  completo; ADR 0005 para carga caliente/LRU es futuro.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
+- La fase de inventario 3A separa `itemPrototypes` de instancias durables,
+  persiste `WorldRuntimeSnapshot` v2 con conversión explícita desde v1 y aplica
+  capacidad por slots/peso. Rareza cerrada, `itemLevel` y peso se proyectan
+  como texto con IDs opacos derivados de una sal aleatoria por sesión; Telnet
+  muestra y acepta esas referencias para desambiguar. Los medios de objeto
+  referencian el prototipo y `hiddenItems` la instancia. El arranque valida de
+  forma acotada propietarios, equipo y capacidad también para desconectados,
+  sin retener sus agregados en el mundo activo. SQLite/PostgreSQL conservan el
+  snapshot único en esquema v10; restore conserva nuevas instancias iniciales
+  del WorldPack y superpone el snapshot sin resucitar instancias runtime
+  ausentes. No existe tabla espejo ni esquema v11. En 3A solo se acepta
+  `transferable`.
 - La fase social 1 está implementada: `say`, `tell`, `reply` online, grupos de
   seis miembros con chat y liderazgo, y suscripciones durables a `general`,
   `newbie`, `staff`. `staff` exige perfil `moderator`, `administrator` o
@@ -65,7 +77,18 @@ describe el baseline vigente de personajes y medios.
   obligatorio.
 - Software: `MIT OR Apache-2.0`; contenido original: `CC-BY-4.0`.
 
-La evidencia histórica retenida informa 409 pruebas Rust, 158 de servidor, 96
+El árbol integrado de inventario 3A supera formato, pruebas bloqueadas del
+workspace y clippy estricto; 77 pruebas de core, 80 de WorldPack, 28 del
+importador, 195 de servidor, `svelte-check` 0/0, 100 pruebas web, build y 30/30
+escenarios Playwright soportados. Licencias y avisos de 307 dependencias Rust y
+76 web también pasan. La suite Node del harness pasa; el humo,
+carga CI exacta de 16 usuarios (16 bootstraps/32 rondas) y soak corto de 30 s
+con dos usuarios (64 rondas, readiness 8/8) terminan sin errores y con todos los
+veredictos en `pass`. No se ejecutaron PostgreSQL real v10, WebKit local ni soak
+de 24 horas. Esa evidencia operacional procede de un árbol dirty precommit: es
+diagnóstico local, no evidencia publicable ni de CI.
+
+La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
 mixto limpio y 3.081.428 ejecuciones fuzz Telnet. Vincula aquel árbol: no es
 aceptación v10 ni permite omitir nuevas pruebas. GitHub Actions puede bloquearse
@@ -91,8 +114,9 @@ por facturación antes de ejecutar.
 - Protocolo requiere Rust, TypeScript estricto, socket/recovery, Playwright y
   paridad Telnet/GMCP.
 - Medios pasan por pipeline y manifiesto revisado; perderlos no cambia juego.
-- Antes de botín repetible/aleatorio, crea identidad durable y derechos de
-  propiedad. No añadas cajas de botín pagadas al baseline.
+- La identidad durable prototype/instance ya existe. Antes de botín
+  repetible/aleatorio, implementa propiedad, procedencia y derechos de reparto
+  atómicos. No añadas cajas de botín pagadas al baseline.
 - Las acciones staff que tocan el mundo resuelven un personaje conectado y
   comprueban una capacidad concreta. Conserva la sintaxis textual con `|` para
   separar cuerpo y motivo en inspect/where/goto/transfer/restore, announce,
@@ -112,7 +136,7 @@ pnpm --dir apps/web e2e
 
 bash scripts/verify-project-licenses.sh
 node scripts/generate-third-party-notices.mjs --check
-node --test scripts/verify-soak-report.test.mjs scripts/telnet-bot.test.mjs
+node --test scripts/bot.test.mjs scripts/verify-soak-report.test.mjs scripts/telnet-bot.test.mjs
 ```
 
 PostgreSQL necesita `TIAMUD_TEST_POSTGRES_URL` desechable y explícita. Las

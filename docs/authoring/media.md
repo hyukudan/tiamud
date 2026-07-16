@@ -1,29 +1,37 @@
-# Atmospheric media and entity sprites
+# Medios atmosféricos y sprites de entidad
 
-Media accompanies the prose; it never carries exclusive gameplay information.
-The server resolves perception first and sends only media for the scene and
-entities the character can already know. Telnet and image-disabled browser
-sessions remain complete.
+Los medios acompañan a la prosa; nunca contienen información jugable
+exclusiva. El servidor resuelve primero la percepción y solo envía medios de la
+escena y de entidades que el personaje ya puede conocer. Telnet y las sesiones
+de navegador sin imágenes siguen siendo completas.
 
-## Atmospheric scenes
+## Escenas atmosféricas
 
-Opaque scene art is compiled offline to AVIF-first browser variants with WebP
-and JPEG fallbacks. Transparent or explicitly lossless atmospheric sources use
-PNG. Rooms reference a reviewed content-addressed manifest, while `roomMedia`
-provides localized alternative text and optional audio. `sceneVariants` may
-select another authorized manifest for bounded time, weather, quest and
-perception conditions.
+La ilustración opaca de escena se compila fuera de línea a variantes AVIF
+preferentes para el navegador, con alternativas WebP y JPEG. Las fuentes
+atmosféricas transparentes o explícitamente lossless usan PNG. Las salas
+referencian un manifiesto revisado y direccionado por contenido; `roomMedia`
+aporta texto alternativo localizado y audio opcional. `sceneVariants` puede
+seleccionar otro manifiesto autorizado según condiciones acotadas de tiempo,
+clima, misión y percepción.
 
-Read the exact encoder policy and commands in the
-[asset pipeline guide](../../crates/asset-pipeline/README.md).
+La política exacta de codificación y los comandos están en la
+[guía del pipeline de recursos](../../crates/asset-pipeline/README.md).
 
-## Entity sprites
+## Sprites de entidad
 
-`entityMedia` optionally decorates an existing item instance or NPC spawn. It
-does not create an entity. The `idle` pose is required; `attack`, `hit` and
-`defeated` are optional. Each pose points only to strict same-project
-content-addressed WebP-alpha and/or PNG files produced by the entity-sprite
-asset profile.
+`entityMedia` decora opcionalmente un prototipo reusable de objeto o un spawn de
+NPC existentes; no crea una entidad. Para `kind: item`, `subjectId` es el ID del
+**prototipo**, no el de una instancia: el servidor reutiliza la definición para
+cada instancia de ese prototipo que ya sea visible. Para `kind: npc`,
+`subjectId` es el ID del spawn. En cambio, `roomPerception.hiddenItems` usa IDs
+de **instancia**, por lo que una unidad puede permanecer oculta sin ocultar las
+demás del mismo prototipo.
+
+La pose `idle` es obligatoria; `attack`, `hit` y `defeated` son opcionales. Cada
+pose solo puede apuntar a ficheros WebP con alfa y/o PNG estrictos, del mismo
+proyecto, direccionados por contenido y generados con el perfil
+`entity-sprite`.
 
 ```json
 {
@@ -47,10 +55,10 @@ asset profile.
 }
 ```
 
-Replace `<sha256>` with the lowercase 64-character bundle ID emitted by
-`tiamud-assets`. A decorative sprite must omit `alt`; a non-decorative sprite
-requires valid localized alternative text. Coordinates and footprints use
-thousandths of the scene, not CSS pixels.
+Sustituye `<sha256>` por el ID de bundle de 64 caracteres hexadecimales en
+minúsculas emitido por `tiamud-assets`. Un sprite decorativo debe omitir `alt`;
+uno no decorativo requiere texto alternativo localizado válido. Las coordenadas
+y la huella usan milésimas de la escena, no píxeles CSS.
 
 ```sh
 cargo run --locked -p tiamud-asset-pipeline --bin tiamud-assets -- \
@@ -64,17 +72,18 @@ cargo run --locked -p tiamud-asset-pipeline --bin tiamud-assets -- \
   --reviewed-at "2026-07-16T00:00:00Z"
 ```
 
-Compile every pose separately and copy the exact emitted paths into the owning
-AreaPack. Entity sprites currently use static WebP alpha plus PNG fallback;
-alpha AVIF remains deferred. No SVG, remote URL, inline data or animation
-script is accepted.
+Compila cada pose por separado y copia las rutas emitidas exactas en el
+AreaPack propietario. Los sprites de entidad usan actualmente WebP alfa
+estático con alternativa PNG; AVIF con alfa sigue aplazado. No se aceptan SVG,
+URL remotas, datos inline ni scripts de animación.
 
-## Browser behavior
+## Comportamiento del navegador
 
-The browser uses deterministic responsive placement and may omit decoration
-under density, data-saving, accessibility or decode budgets. Semantic entity
-lists and native action controls remain present. Cosmetic combat cues may
-select only an already-authored pose and never affect combat timing or state.
+El navegador usa colocación responsive determinista y puede omitir decoración
+según los presupuestos de densidad, ahorro de datos, accesibilidad o
+decodificación. Las listas semánticas de entidades y los controles nativos de
+acción permanecen. Las pistas cosméticas de combate solo pueden elegir una pose
+ya creada y nunca afectan al tiempo ni al estado del combate.
 
-See the [scene compositor design](../design/scene-compositor-v1.md) for layout,
-overflow, motion and accessibility rules.
+Consulta el [diseño del compositor de escena](../design/scene-compositor-v1.md)
+para las reglas de layout, overflow, movimiento y accesibilidad.

@@ -1,10 +1,10 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "id": "north-gate",
   "dependsOn": [
     "square"
   ],
-  "items": [
+  "itemPrototypes": [
     {
       "id": "tiamud:road-token",
       "name": "iron road token",
@@ -12,7 +12,13 @@
       "aliases": [
         "token",
         "iron token"
-      ]
+      ],
+      "weightGrams": 50,
+      "slotCost": 1,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
     },
     {
       "id": "tiamud:wolf-clasp",
@@ -22,7 +28,31 @@
         "clasp",
         "wolf clasp",
         "silver clasp"
-      ]
+      ],
+      "weightGrams": 100,
+      "slotCost": 1,
+      "rarity": "uncommon",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
+    }
+  ],
+  "initialItemInstances": [
+    {
+      "id": "tiamud:road-token",
+      "prototypeId": "tiamud:road-token",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:north-gate"
+      }
+    },
+    {
+      "id": "tiamud:wolf-clasp",
+      "prototypeId": "tiamud:wolf-clasp",
+      "location": {
+        "kind": "npc_spawn",
+        "npcSpawnId": "tiamud:gate-stalker-1"
+      }
     }
   ],
   "rooms": [
@@ -30,9 +60,6 @@
       "id": "demo:north-gate",
       "title": "The North Gate",
       "description": "An iron-bound gate stands open between squat stone towers. The road continues into fields silvered by rain.",
-      "items": [
-        "tiamud:road-token"
-      ],
       "exits": [
         {
           "direction": "south",
@@ -54,10 +81,7 @@
       "strength": 3,
       "defence": 1,
       "experienceReward": 60,
-      "respawnTicks": 8,
-      "lootItemIds": [
-        "tiamud:wolf-clasp"
-      ]
+      "respawnTicks": 8
     }
   ],
   "npcSpawns": [

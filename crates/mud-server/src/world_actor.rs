@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthenticatedSession,
     delivery::{DeliveryInbox, DeliveryRouter},
-    persistence::{CharacterStore, StaffAccess, StoreError},
+    persistence::{CharacterStore, DurableCharacterGameplay, StaffAccess, StoreError},
     runtime_content::{RuntimeContent, ScenePresentation},
     social::{SocialChannel, SocialMessage, SocialRuntime, apply_social},
     staff::{apply_staff, derived_role},
@@ -255,6 +255,34 @@ impl WorldHandle {
             };
             if let Err(error) = startup {
                 return report_startup_failure(startup_reply, error);
+            }
+            let runtime_owner_ids = world
+                .runtime_item_owner_ids()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let durable_gameplay = match actor_store
+                .load_character_gameplay_batch(runtime_owner_ids)
+                .await
+            {
+                Ok(aggregates) => aggregates,
+                Err(error) => {
+                    return report_startup_failure(
+                        startup_reply,
+                        GameError::Startup {
+                            stage: "load_character_aggregates",
+                            reason: error.to_string(),
+                        },
+                    );
+                }
+            };
+            if let Err(error) = validate_startup_character_aggregates(&world, durable_gameplay) {
+                return report_startup_failure(
+                    startup_reply,
+                    GameError::Startup {
+                        stage: "validate_character_aggregates",
+                        reason: error.to_string(),
+                    },
+                );
             }
             if startup_reply.send(Ok(())).is_err() {
                 error!(
@@ -734,6 +762,25 @@ impl WorldHandle {
             .map_err(|_| GameError::ActorStopped)?;
         receive.await.map_err(|_| GameError::ActorStopped)
     }
+}
+
+fn validate_startup_character_aggregates(
+    world: &World,
+    aggregates: Vec<DurableCharacterGameplay>,
+) -> Result<(), CoreWorldError> {
+    let expected_owners = world.runtime_item_owner_ids();
+    let mut durable_characters = std::collections::BTreeSet::new();
+    if aggregates.iter().any(|aggregate| {
+        aggregate.character_id.0 <= 0 || !durable_characters.insert(aggregate.character_id)
+    }) || durable_characters != expected_owners
+    {
+        return Err(CoreWorldError::InvalidRuntimeSnapshot);
+    }
+
+    for aggregate in aggregates {
+        world.validate_character_gameplay_snapshot(aggregate.character_id, &aggregate.gameplay)?;
+    }
+    Ok(())
 }
 
 fn report_startup_failure(reply: oneshot::Sender<Result<(), GameError>>, failure: GameError) {
@@ -1574,8 +1621,9 @@ mod tests {
     };
     use tiamud_core::{
         AccountRole, ActiveEffect, CharacterGameplaySnapshot, Direction, EconomyAction, EffectKind,
-        EquipmentSlot, ItemDefinition, ItemGameplayDefinition, NpcDefinition, PartyAction,
-        QuestAction, RoomDefinition, SocialAction, SocialChannelName, WorldDefinition,
+        EquipmentSlot, InitialItemInstanceDefinition, InitialItemLocation, ItemInstanceId,
+        ItemPrototypeDefinition, ItemRarity, ItemStackPolicy, ItemTransferPolicy, NpcDefinition,
+        PartyAction, QuestAction, RoomDefinition, SocialAction, SocialChannelName, WorldDefinition,
         WorldRuntimeSnapshot,
     };
     use tiamud_scripting::{ScriptCapability, ScriptLimits};
@@ -1613,66 +1661,93 @@ mod tests {
     }
 
     fn durable_gameplay_world() -> World {
-        let mut world = World::from_definition_with_staged_items(
-            WorldDefinition {
-                start_room_id: "test:arena".into(),
-                items: vec![
-                    ItemDefinition {
-                        stable_id: "test:sword".into(),
-                        name: "bronze sword".into(),
-                        description: "A balanced old blade.".into(),
-                        aliases: vec!["sword".into()],
-                    },
-                    ItemDefinition {
-                        stable_id: "test:potion".into(),
-                        name: "ember potion".into(),
-                        description: "It glows warmly.".into(),
-                        aliases: vec!["potion".into()],
-                    },
-                    ItemDefinition {
-                        stable_id: "test:loot".into(),
-                        name: "silver fang".into(),
-                        description: "A trophy from the guardian.".into(),
-                        aliases: vec!["fang".into()],
-                    },
-                ],
-                rooms: vec![RoomDefinition {
-                    stable_id: "test:arena".into(),
-                    title: "Arena".into(),
-                    prose: vec!["Ancient banners stir overhead.".into()],
-                    image: None,
-                    audio: None,
-                    exits: Vec::new(),
-                    item_ids: vec!["test:sword".into(), "test:potion".into()],
-                }],
-            },
-            vec!["test:loot".into()],
-        )
+        let mut world = World::from_definition(WorldDefinition {
+            start_room_id: "test:arena".into(),
+            item_prototypes: vec![
+                ItemPrototypeDefinition {
+                    prototype_id: "test:sword".into(),
+                    name: "bronze sword".into(),
+                    description: "A balanced old blade.".into(),
+                    aliases: vec!["sword".into()],
+                    equipment_slot: Some(EquipmentSlot::Weapon),
+                    attack_bonus: 8,
+                    heal_amount: 0,
+                    consumable: false,
+                    effect: None,
+                    weight_grams: 2_000,
+                    slot_cost: 1,
+                    rarity: ItemRarity::Common,
+                    item_level: 1,
+                    stack_policy: ItemStackPolicy::Unique,
+                    transfer_policy: ItemTransferPolicy::Transferable,
+                },
+                ItemPrototypeDefinition {
+                    prototype_id: "test:potion".into(),
+                    name: "ember potion".into(),
+                    description: "It glows warmly.".into(),
+                    aliases: vec!["potion".into()],
+                    equipment_slot: None,
+                    attack_bonus: 0,
+                    heal_amount: 1,
+                    consumable: true,
+                    effect: Some(ActiveEffect {
+                        kind: EffectKind::Strength,
+                        magnitude: 2,
+                        remaining_ticks: 4,
+                    }),
+                    weight_grams: 250,
+                    slot_cost: 1,
+                    rarity: ItemRarity::Uncommon,
+                    item_level: 2,
+                    stack_policy: ItemStackPolicy::Unique,
+                    transfer_policy: ItemTransferPolicy::Transferable,
+                },
+                ItemPrototypeDefinition {
+                    prototype_id: "test:loot".into(),
+                    name: "silver fang".into(),
+                    description: "A trophy from the guardian.".into(),
+                    aliases: vec!["fang".into()],
+                    equipment_slot: None,
+                    attack_bonus: 0,
+                    heal_amount: 0,
+                    consumable: false,
+                    effect: None,
+                    weight_grams: 100,
+                    slot_cost: 1,
+                    rarity: ItemRarity::Rare,
+                    item_level: 2,
+                    stack_policy: ItemStackPolicy::Unique,
+                    transfer_policy: ItemTransferPolicy::Transferable,
+                },
+            ],
+            initial_item_instances: vec![
+                InitialItemInstanceDefinition {
+                    instance_id: ItemInstanceId("test:sword".into()),
+                    prototype_id: "test:sword".into(),
+                    location: InitialItemLocation::Room("test:arena".into()),
+                },
+                InitialItemInstanceDefinition {
+                    instance_id: ItemInstanceId("test:potion".into()),
+                    prototype_id: "test:potion".into(),
+                    location: InitialItemLocation::Room("test:arena".into()),
+                },
+                InitialItemInstanceDefinition {
+                    instance_id: ItemInstanceId("test:loot".into()),
+                    prototype_id: "test:loot".into(),
+                    location: InitialItemLocation::NpcSpawn("test:guardian".into()),
+                },
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "test:arena".into(),
+                title: "Arena".into(),
+                prose: vec!["Ancient banners stir overhead.".into()],
+                image: None,
+                audio: None,
+                exits: Vec::new(),
+                item_ids: Vec::new(),
+            }],
+        })
         .unwrap();
-        world
-            .configure_item_gameplay(ItemGameplayDefinition {
-                item_id: "test:sword".into(),
-                equipment_slot: Some(EquipmentSlot::Weapon),
-                attack_bonus: 8,
-                heal_amount: 0,
-                consumable: false,
-                effect: None,
-            })
-            .unwrap();
-        world
-            .configure_item_gameplay(ItemGameplayDefinition {
-                item_id: "test:potion".into(),
-                equipment_slot: None,
-                attack_bonus: 0,
-                heal_amount: 1,
-                consumable: true,
-                effect: Some(ActiveEffect {
-                    kind: EffectKind::Strength,
-                    magnitude: 2,
-                    remaining_ticks: 4,
-                }),
-            })
-            .unwrap();
         world
             .spawn_npc(NpcDefinition {
                 stable_id: "test:guardian".into(),
@@ -1684,7 +1759,7 @@ mod tests {
                 strength: 1,
                 defence: 0,
                 experience_reward: 120,
-                loot_item_ids: vec!["test:loot".into()],
+                loot_item_ids: vec![ItemInstanceId("test:loot".into())],
                 respawn_ticks: 3,
             })
             .unwrap();
@@ -2076,6 +2151,33 @@ mod tests {
                 .get(&character_id)
                 .cloned()
                 .ok_or(StoreError::CharacterGameplayNotFound(character_id))
+        }
+
+        async fn load_character_gameplay_batch(
+            &self,
+            character_ids: Vec<CharacterId>,
+        ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
+            let state = self.state.lock().unwrap();
+            let character_ids = crate::persistence::normalise_startup_owner_ids(character_ids)?;
+            let mut total_json_bytes = 0_usize;
+            character_ids
+                .into_iter()
+                .map(|character_id| {
+                    if !state.characters.contains_key(&character_id) {
+                        return Err(StoreError::CharacterGameplayNotFound(character_id));
+                    }
+                    let gameplay = state
+                        .gameplay
+                        .get(&character_id)
+                        .ok_or(StoreError::CharacterGameplayNotFound(character_id))?;
+                    let json = serde_json::to_string(gameplay)?;
+                    crate::persistence::decode_startup_owner_gameplay(
+                        character_id,
+                        &json,
+                        &mut total_json_bytes,
+                    )
+                })
+                .collect()
         }
 
         async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
@@ -2591,6 +2693,196 @@ mod tests {
         ));
     }
 
+    fn seed_offline_character(
+        store: &MemoryStore,
+        character_id: CharacterId,
+        gameplay: CharacterGameplaySnapshot,
+    ) {
+        let account_id = AccountId(character_id.0);
+        let mut state = store.state.lock().unwrap();
+        state.accounts.insert(
+            account_id,
+            AccountSnapshot {
+                id: account_id,
+                name: format!("offline-owner-{}", character_id.0),
+            },
+        );
+        state.characters.insert(
+            character_id,
+            CharacterSnapshot {
+                id: character_id,
+                account_id,
+                name: format!("Offline Owner {}", character_id.0),
+                room_id: "test:arena".into(),
+                item_locations: Default::default(),
+            },
+        );
+        state.gameplay.insert(character_id, gameplay);
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_item_owned_by_missing_durable_character() {
+        let store = Arc::new(MemoryStore::default());
+        let mut runtime = durable_gameplay_world().runtime_snapshot();
+        runtime
+            .item_instances
+            .get_mut(&ItemInstanceId("test:sword".into()))
+            .unwrap()
+            .location = tiamud_core::RuntimeItemLocation::Carried {
+            character_id: CharacterId(404),
+        };
+        store.state.lock().unwrap().runtime = Some(runtime);
+
+        let result = WorldHandle::spawn(durable_gameplay_world(), store).await;
+
+        assert!(matches!(
+            result,
+            Err(GameError::Startup {
+                stage: "load_character_aggregates",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_offline_equipment_mismatch() {
+        let store = Arc::new(MemoryStore::default());
+        let character_id = CharacterId(7);
+        seed_offline_character(&store, character_id, CharacterGameplaySnapshot::default());
+        let mut runtime = durable_gameplay_world().runtime_snapshot();
+        runtime
+            .item_instances
+            .get_mut(&ItemInstanceId("test:sword".into()))
+            .unwrap()
+            .location = tiamud_core::RuntimeItemLocation::Equipped {
+            character_id,
+            slot: EquipmentSlot::Weapon,
+        };
+        store.state.lock().unwrap().runtime = Some(runtime);
+
+        let result = WorldHandle::spawn(durable_gameplay_world(), store).await;
+
+        assert!(matches!(
+            result,
+            Err(GameError::Startup {
+                stage: "validate_character_aggregates",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_offline_inventory_over_capacity() {
+        let store = Arc::new(MemoryStore::default());
+        let character_id = CharacterId(8);
+        let mut gameplay = CharacterGameplaySnapshot::default();
+        gameplay.inventory_capacity.max_weight_grams = 1_000;
+        seed_offline_character(&store, character_id, gameplay);
+        let mut runtime = durable_gameplay_world().runtime_snapshot();
+        runtime
+            .item_instances
+            .get_mut(&ItemInstanceId("test:sword".into()))
+            .unwrap()
+            .location = tiamud_core::RuntimeItemLocation::Carried { character_id };
+        store.state.lock().unwrap().runtime = Some(runtime);
+
+        let result = WorldHandle::spawn(durable_gameplay_world(), store).await;
+
+        assert!(matches!(
+            result,
+            Err(GameError::Startup {
+                stage: "validate_character_aggregates",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_accepts_valid_offline_equipment_owner() {
+        let store = Arc::new(MemoryStore::default());
+        let character_id = CharacterId(9);
+        let mut gameplay = CharacterGameplaySnapshot::default();
+        gameplay
+            .equipment
+            .insert(EquipmentSlot::Weapon, ItemInstanceId("test:sword".into()));
+        seed_offline_character(&store, character_id, gameplay);
+        // A durable account unrelated to the runtime owner graph is not read
+        // or retained during startup, even if its gameplay row is unavailable.
+        store.state.lock().unwrap().characters.insert(
+            CharacterId(99),
+            CharacterSnapshot {
+                id: CharacterId(99),
+                account_id: AccountId(99),
+                name: "Unreferenced".into(),
+                room_id: "test:arena".into(),
+                item_locations: Default::default(),
+            },
+        );
+        let mut runtime = durable_gameplay_world().runtime_snapshot();
+        runtime
+            .item_instances
+            .get_mut(&ItemInstanceId("test:sword".into()))
+            .unwrap()
+            .location = tiamud_core::RuntimeItemLocation::Equipped {
+            character_id,
+            slot: EquipmentSlot::Weapon,
+        };
+        store.state.lock().unwrap().runtime = Some(runtime);
+
+        let world = WorldHandle::spawn(durable_gameplay_world(), store)
+            .await
+            .unwrap();
+
+        world.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn startup_validation_does_not_install_offline_gameplay() {
+        let character_id = CharacterId(10);
+        let mut gameplay = CharacterGameplaySnapshot {
+            coins: 77,
+            ..CharacterGameplaySnapshot::default()
+        };
+        gameplay
+            .equipment
+            .insert(EquipmentSlot::Weapon, ItemInstanceId("test:sword".into()));
+        let mut world = durable_gameplay_world();
+        let mut runtime = world.runtime_snapshot();
+        runtime
+            .item_instances
+            .get_mut(&ItemInstanceId("test:sword".into()))
+            .unwrap()
+            .location = tiamud_core::RuntimeItemLocation::Equipped {
+            character_id,
+            slot: EquipmentSlot::Weapon,
+        };
+        world.restore_runtime_snapshot(runtime).unwrap();
+
+        validate_startup_character_aggregates(
+            &world,
+            vec![DurableCharacterGameplay {
+                character_id,
+                gameplay,
+            }],
+        )
+        .unwrap();
+        world
+            .connect(
+                SessionId(10),
+                CharacterSnapshot {
+                    id: character_id,
+                    account_id: AccountId(10),
+                    name: "Offline Owner 10".into(),
+                    room_id: "test:arena".into(),
+                    item_locations: Default::default(),
+                },
+            )
+            .unwrap();
+
+        let connected = world.character_gameplay_snapshot(SessionId(10)).unwrap();
+        assert_eq!(connected, CharacterGameplaySnapshot::default());
+    }
+
     #[tokio::test]
     async fn persistence_failure_rolls_back_a_critical_move() {
         let store = Arc::new(MemoryStore::default());
@@ -2870,13 +3162,29 @@ mod tests {
             .apply(entered.session_id, PlayerAction::Inventory)
             .await
             .unwrap();
-        assert!(inventory.output.unwrap().contains("ember potion"));
+        assert!(
+            inventory
+                .output
+                .as_deref()
+                .unwrap()
+                .contains("ember potion")
+        );
+        assert_eq!(inventory.player.inventory[0].rarity, "uncommon");
+        assert_eq!(inventory.player.inventory[0].item_level, 2);
+        assert_eq!(inventory.player.inventory_capacity.used_slots, 1);
+        assert_eq!(inventory.player.inventory_capacity.used_weight_grams, 250);
         let state = store.state.lock().unwrap();
         let character_id = *state.characters.keys().next().unwrap();
         assert!(state.gameplay[&character_id].effects.is_empty());
         assert!(matches!(
-            state.runtime.as_ref().unwrap().item_locations["test:potion"],
-            tiamud_core::RuntimeItemLocation::Carried { .. }
+            state
+                .runtime
+                .as_ref()
+                .unwrap()
+                .item_instances
+                .get(&ItemInstanceId("test:potion".into()))
+                .map(|instance| &instance.location),
+            Some(tiamud_core::RuntimeItemLocation::Carried { .. })
         ));
     }
 
@@ -2965,10 +3273,14 @@ mod tests {
             .apply(collector.session_id, PlayerAction::Inventory)
             .await
             .unwrap();
-        assert_eq!(
-            inventory.output.as_deref(),
-            Some("You are carrying:\r\n- blue-glass lantern\r\n")
-        );
+        let output = inventory.output.unwrap();
+        assert!(output.starts_with(
+            "Capacity: 1/24 slots; 1000/50000 g.\r\n\
+                 You are carrying:\r\n\
+                 - blue-glass lantern [common; level 1; 1000 g; ref o"
+        ));
+        assert!(output.ends_with("]\r\n"));
+        assert!(!output.contains("demo:blue-lantern"));
     }
 
     #[tokio::test]
@@ -3470,14 +3782,20 @@ mod tests {
             let runtime = state.runtime.as_ref().unwrap();
             let defeated_at = runtime.npcs["test:guardian"].respawn_at_tick.unwrap();
             assert!(matches!(
-                runtime.item_locations["test:potion"],
-                tiamud_core::RuntimeItemLocation::Consumed
+                runtime
+                    .item_instances
+                    .get(&ItemInstanceId("test:potion".into()))
+                    .map(|instance| &instance.location),
+                Some(tiamud_core::RuntimeItemLocation::Consumed)
             ));
             (character_id, gameplay, defeated_at)
         };
         assert_eq!(gameplay.level, 2);
         assert_eq!(gameplay.experience, 120);
-        assert_eq!(gameplay.equipment[&EquipmentSlot::Weapon], "test:sword");
+        assert_eq!(
+            gameplay.equipment[&EquipmentSlot::Weapon],
+            ItemInstanceId("test:sword".into())
+        );
         assert!(!gameplay.effects.is_empty());
         assert_eq!(gameplay.coins, 28);
         assert_eq!(gameplay.commodities["tonic"], 1);
@@ -3515,7 +3833,13 @@ mod tests {
             .await
             .unwrap();
         assert!(inventory.output.unwrap().contains("weapon: bronze sword"));
+        assert_eq!(entered.player.inventory_capacity.used_slots, 0);
+        assert_eq!(entered.player.inventory_capacity.used_weight_grams, 2_000);
+        assert_eq!(entered.player.equipment[0].rarity, "common");
+        assert_eq!(entered.player.equipment[0].item_level, 1);
         assert_eq!(entered.scene.items[0].label, "silver fang");
+        assert_eq!(entered.scene.items[0].rarity, "rare");
+        assert_eq!(entered.scene.items[0].item_level, 2);
         assert!(entered.scene.npcs.is_empty());
         let claimed = restarted
             .apply(

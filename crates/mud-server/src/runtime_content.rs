@@ -80,7 +80,7 @@ impl RuntimeContent {
             .into_iter()
             .filter_map(|entity| {
                 self.entity_media
-                    .get(&(EntityMediaKind::Item, entity.stable_id))
+                    .get(&(EntityMediaKind::Item, entity.prototype_id))
                     .map(|media| ProjectedEntityMedia::from_definition(entity.opaque_id, media))
             })
             .chain(visible.npcs.into_iter().filter_map(|entity| {
@@ -895,6 +895,87 @@ mod tests {
                 .unwrap()
                 .contains("blue-lantern")
         );
+    }
+
+    #[test]
+    fn repeated_instances_join_media_by_prototype_without_exposing_either_identity() {
+        let prototype_id = "test:lantern";
+        let first_instance = "test:lantern-a";
+        let second_instance = "test:lantern-b";
+        let mut world = World::from_definition(tiamud_core::WorldDefinition {
+            start_room_id: "test:room".into(),
+            item_prototypes: vec![tiamud_core::ItemPrototypeDefinition {
+                prototype_id: prototype_id.into(),
+                name: "reviewed lantern".into(),
+                description: "A reusable reviewed prototype.".into(),
+                aliases: vec!["lantern".into()],
+                equipment_slot: None,
+                attack_bonus: 0,
+                heal_amount: 0,
+                consumable: false,
+                effect: None,
+                weight_grams: 800,
+                slot_cost: 1,
+                rarity: tiamud_core::ItemRarity::Uncommon,
+                item_level: 3,
+                stack_policy: tiamud_core::ItemStackPolicy::Unique,
+                transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+            }],
+            initial_item_instances: vec![first_instance, second_instance]
+                .into_iter()
+                .map(|instance_id| tiamud_core::InitialItemInstanceDefinition {
+                    instance_id: tiamud_core::ItemInstanceId(instance_id.into()),
+                    prototype_id: prototype_id.into(),
+                    location: tiamud_core::InitialItemLocation::Room("test:room".into()),
+                })
+                .collect(),
+            rooms: vec![tiamud_core::RoomDefinition {
+                stable_id: "test:room".into(),
+                title: "Media room".into(),
+                prose: vec!["A bounded test room.".into()],
+                image: None,
+                audio: None,
+                exits: Vec::new(),
+                item_ids: Vec::new(),
+            }],
+        })
+        .unwrap();
+        let session = SessionId(89);
+        world
+            .connect(
+                session,
+                tiamud_core::CharacterSnapshot {
+                    id: tiamud_core::CharacterId(93),
+                    account_id: tiamud_core::AccountId(94),
+                    name: "Media Observer".into(),
+                    room_id: "test:room".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+
+        let scene_ids = world
+            .current_scene(session)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<BTreeSet<_>>();
+        let projected = RuntimeContent::default()
+            .with_entity_media(vec![test_entity_media(prototype_id)])
+            .resolve_entity_presentation(&world, session);
+        let projected_ids = projected
+            .entities
+            .iter()
+            .map(|entity| entity.id.clone())
+            .collect::<BTreeSet<_>>();
+        let json = serde_json::to_string(&projected).unwrap();
+
+        assert_eq!(projected.entities.len(), 2);
+        assert_eq!(projected_ids, scene_ids);
+        assert!(!json.contains(prototype_id));
+        assert!(!json.contains(first_instance));
+        assert!(!json.contains(second_instance));
     }
 
     #[test]

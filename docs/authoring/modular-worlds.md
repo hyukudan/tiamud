@@ -1,8 +1,8 @@
 # Projects, areas and composition
 
 The current modular source format is a **WorldProject manifest v2** containing
-strict **AreaPack v2** files. `tiamud-world compose` validates the complete
-graph and produces one canonical **WorldPack v3** document.
+strict **AreaPack v3** files. `tiamud-world compose` validates the complete
+graph and produces one canonical **WorldPack v4** document.
 
 Use [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json)
 and [`worlds/areas/square.area.json`](../../worlds/areas/square.area.json) as
@@ -10,9 +10,16 @@ reviewed examples.
 
 ## Ownership and dependencies
 
-An area owns every room, item, NPC, ability, progression entry, media record,
-script and content test it declares. Stable IDs are globally unique across the
-composed project.
+An area owns every room, item prototype, initial item instance, NPC, ability,
+progression entry, media record, script and content test it declares. Stable
+IDs are globally unique across the composed project. A legacy-normalized
+prototype/instance pair may preserve the same historical string because the
+two IDs occupy distinct typed namespaces.
+
+An item `entityMedia` record depends on the area that owns its prototype.
+`roomPerception.hiddenItems` instead depends on the area that owns the concrete
+initial instance. This distinction lets all visible units reuse one sprite
+definition while visibility remains instance-specific.
 
 `dependsOn` must name every other area referenced by structured data. Cycles
 are allowed: two areas may contain exits to each other. An undeclared edge,
@@ -22,9 +29,11 @@ dependency.
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "id": "north-gate",
   "dependsOn": ["square"],
+  "itemPrototypes": [],
+  "initialItemInstances": [],
   "rooms": [],
   "npcPrototypes": [],
   "npcSpawns": [],
@@ -49,13 +58,14 @@ resolution, source digests, declared dependencies, global references and the
 finished WorldPack. It writes atomically and refuses to replace an existing
 output.
 
-The canonical artifact records area source digests, ownership and audited
-cross-area references. Semantically irrelevant source ordering is
-canonicalized, making diffs and reproducibility checks useful.
+The `CompositionReport` records area source digests, ownership and audited
+cross-area references; the flat runtime artifact does not retain area identity.
+Semantically irrelevant source ordering is canonicalized, making diffs and
+reproducibility checks useful.
 
 ## Direct WorldPack authoring
 
-A monolithic WorldPack v3 remains valid, but AreaPacks are preferable once
+A monolithic WorldPack v4 remains valid, but AreaPacks are preferable once
 multiple builders or regions are involved. Use `tiamud-world build` to validate
 and canonicalize a direct document:
 

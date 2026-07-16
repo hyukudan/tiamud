@@ -388,7 +388,6 @@ pub fn parse_import(
             description,
             asset_manifest: None,
             exits,
-            items: Vec::new(),
             legacy: Some(LegacyRoomData {
                 flags,
                 sector,
@@ -435,7 +434,8 @@ pub fn parse_import(
             dialect: Some("envymud-2.2-stock".to_owned()),
             file: source_file,
         }),
-        items: Vec::new(),
+        item_prototypes: Vec::new(),
+        initial_item_instances: Vec::new(),
         rooms,
         gameplay: world_pack::GameplayDefinition::default(),
     };

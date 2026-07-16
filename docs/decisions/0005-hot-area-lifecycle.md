@@ -6,10 +6,12 @@
 
 ## Contexto
 
-Tiamud ya permite dividir la autoría en un `WorldProjectManifest` v1 y módulos
-estrictos `AreaPack` v1. `tiamud-world compose` valida el grafo completo y
-produce, sin conexión, el único `WorldPackDocument` v2 plano que consume el
-servidor actual.
+Cuando se aceptó esta decisión, Tiamud dividía la autoría en un
+`WorldProjectManifest` v1 y módulos `AreaPack` v1 que componían un
+`WorldPackDocument` v2. La frontera vigente ha evolucionado a manifiesto v2,
+AreaPack v3 y WorldPack v4, pero conserva el mismo comportamiento relevante:
+`tiamud-world compose` valida el grafo completo sin conexión y el servidor
+consume un solo artefacto plano al arrancar.
 
 Esa composición resuelve el problema editorial inmediato: varias personas
 pueden poseer áreas distintas, revisar dependencias y obtener digests
@@ -48,8 +50,9 @@ Se adopta como arquitectura objetivo un modelo híbrido:
 6. Los clientes cargarán multimedia por digest y bajo demanda. La prosa y toda
    información jugable seguirán siendo completas sin esos recursos.
 
-Esta decisión no cambia el formato WorldPack v2 ni el runtime actual. Define la
-frontera que deberá cumplir una implementación futura.
+Esta decisión no exige otro cambio de formato ni altera el runtime actual.
+WorldPack v4/AreaPack v3 siguen siendo la frontera hasta que una implementación
+futura de áreas calientes acepte un ADR y migración propios.
 
 ## Catálogo residente
 

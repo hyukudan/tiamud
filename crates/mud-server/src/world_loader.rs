@@ -20,7 +20,11 @@ use tiamud_core::{
     CharacterProgressionDefinition as CoreCharacterProgressionDefinition,
     DamageType as CoreDamageType, Direction as CoreDirection, EffectKind as CoreEffectKind,
     EquipmentSlot as CoreEquipmentSlot, ExitDefinition, GrantDefinition as CoreGrantDefinition,
-    ItemDefinition, ItemGameplayDefinition, LevelGrantDefinition as CoreLevelGrantDefinition,
+    InitialItemInstanceDefinition as CoreInitialItemInstanceDefinition,
+    InitialItemLocation as CoreInitialItemLocation, ItemInstanceId,
+    ItemPrototypeDefinition as CoreItemPrototypeDefinition, ItemRarity as CoreItemRarity,
+    ItemStackPolicy as CoreItemStackPolicy, ItemTransferPolicy as CoreItemTransferPolicy,
+    LevelGrantDefinition as CoreLevelGrantDefinition,
     LevelThresholdDefinition as CoreLevelThresholdDefinition, LightLevel as CoreLightLevel,
     LineageDefinition as CoreLineageDefinition,
     NpcAbilitySetDefinition as CoreNpcAbilitySetDefinition, NpcDefinition,
@@ -34,7 +38,9 @@ use tiamud_core::{
 };
 use world_pack::{
     AudioCue, Direction as PackDirection, EffectKind as PackEffectKind,
-    EquipmentSlot as PackEquipmentSlot, ExitTarget, LightLevel as PackLightLevel,
+    EquipmentSlot as PackEquipmentSlot, ExitTarget, InitialItemLocation as PackInitialItemLocation,
+    ItemRarity as PackItemRarity, ItemStackPolicy as PackItemStackPolicy,
+    ItemTransferPolicy as PackItemTransferPolicy, LightLevel as PackLightLevel,
     RoomMediaDefinition, RoomPerceptionDefinition, ValidationErrors, WorldPack, WorldPackDocument,
 };
 
@@ -50,7 +56,6 @@ pub fn default_world_definition() -> Result<WorldDefinition, WorldLoadError> {
 pub struct LoadedWorldDefinition {
     pub definition: WorldDefinition,
     pub rng_seed: Option<u64>,
-    pub item_rules: Vec<ItemGameplayDefinition>,
     pub character_progression: CoreCharacterProgressionDefinition,
     pub abilities: Vec<CoreAbilityDefinition>,
     pub npcs: Vec<NpcDefinition>,
@@ -70,24 +75,15 @@ pub enum WorldInitializationError {
     Configure(#[from] WorldError),
 }
 
-/// Applies the complete authored startup contract to the runtime world. NPC
-/// loot is explicitly staged outside all rooms, then transferred to its spawn
-/// owner; it is never briefly visible as duplicate room content.
+/// Applies the complete authored startup contract to the runtime world.
+/// Initial instances assigned to an NPC spawn remain staged until that NPC is
+/// created, so prototype reuse never makes loot briefly visible in a room.
 pub fn build_loaded_world(
     loaded: &LoadedWorldDefinition,
 ) -> Result<World, WorldInitializationError> {
-    let staged_loot = loaded
-        .npcs
-        .iter()
-        .flat_map(|npc| npc.loot_item_ids.iter().cloned())
-        .collect();
-    let mut world =
-        World::from_definition_with_staged_items(loaded.definition.clone(), staged_loot)?;
+    let mut world = World::from_definition(loaded.definition.clone())?;
     if let Some(seed) = loaded.rng_seed {
         world.set_rng_seed(seed);
-    }
-    for rule in &loaded.item_rules {
-        world.configure_item_gameplay(rule.clone())?;
     }
     for (room_id, light) in &loaded.room_light {
         world.configure_room_light(room_id, *light)?;
@@ -161,7 +157,7 @@ pub fn parse_loaded_world(bytes: &[u8]) -> Result<LoadedWorldDefinition, WorldLo
         });
     }
 
-    let document: WorldPackDocument = serde_json::from_slice(bytes)?;
+    let document = WorldPackDocument::from_json(bytes)?;
     document.validate()?;
     convert_document(document)
 }
@@ -209,7 +205,6 @@ fn convert_pack(
 ) -> Result<LoadedWorldDefinition, WorldLoadError> {
     let world_pack::GameplayDefinition {
         rng_seed,
-        item_rules: pack_item_rules,
         npc_prototypes,
         npc_spawns,
         character_progression,
@@ -218,16 +213,53 @@ fn convert_pack(
         ..
     } = std::mem::take(&mut pack.gameplay);
     let start_room_id = pack.start_room_id.clone();
-    let items = pack
-        .items
+    let item_prototypes = std::mem::take(&mut pack.item_prototypes)
         .into_iter()
-        .map(|item| ItemDefinition {
-            stable_id: item.id,
+        .map(|item| CoreItemPrototypeDefinition {
+            prototype_id: item.id,
             name: item.name,
             description: item.description,
             aliases: item.aliases,
+            equipment_slot: item.equipment_slot.map(map_equipment_slot),
+            attack_bonus: item.attack_bonus,
+            heal_amount: item.heal_amount,
+            consumable: item.consumable,
+            effect: item.effect.map(|effect| ActiveEffect {
+                kind: map_effect_kind(effect.kind),
+                magnitude: effect.magnitude,
+                remaining_ticks: effect.remaining_ticks,
+            }),
+            weight_grams: item.weight_grams,
+            slot_cost: item.slot_cost,
+            rarity: map_item_rarity(item.rarity),
+            item_level: item.item_level,
+            stack_policy: map_item_stack_policy(item.stack_policy),
+            transfer_policy: map_item_transfer_policy(item.transfer_policy),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let initial_item_instances = std::mem::take(&mut pack.initial_item_instances)
+        .into_iter()
+        .map(|instance| CoreInitialItemInstanceDefinition {
+            instance_id: ItemInstanceId(instance.id),
+            prototype_id: instance.prototype_id,
+            location: match instance.location {
+                PackInitialItemLocation::Room { room_id } => CoreInitialItemLocation::Room(room_id),
+                PackInitialItemLocation::NpcSpawn { npc_spawn_id } => {
+                    CoreInitialItemLocation::NpcSpawn(npc_spawn_id)
+                }
+                PackInitialItemLocation::Staged => CoreInitialItemLocation::Staged,
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut loot_by_npc = HashMap::<String, Vec<ItemInstanceId>>::new();
+    for instance in &initial_item_instances {
+        if let CoreInitialItemLocation::NpcSpawn(npc_id) = &instance.location {
+            loot_by_npc
+                .entry(npc_id.clone())
+                .or_default()
+                .push(instance.instance_id.clone());
+        }
+    }
     let room_ids_by_vnum = pack
         .rooms
         .iter()
@@ -298,30 +330,16 @@ fn convert_pack(
             image,
             audio,
             exits,
-            item_ids: room.items,
+            item_ids: Vec::new(),
         });
     }
 
     let definition = WorldDefinition {
         start_room_id,
-        items,
+        item_prototypes,
+        initial_item_instances,
         rooms,
     };
-    let item_rules = pack_item_rules
-        .into_iter()
-        .map(|rule| ItemGameplayDefinition {
-            item_id: rule.item_id,
-            equipment_slot: rule.equipment_slot.map(map_equipment_slot),
-            attack_bonus: rule.attack_bonus,
-            heal_amount: rule.heal_amount,
-            consumable: rule.consumable,
-            effect: rule.effect.map(|effect| ActiveEffect {
-                kind: map_effect_kind(effect.kind),
-                magnitude: effect.magnitude,
-                remaining_ticks: effect.remaining_ticks,
-            }),
-        })
-        .collect();
     let character_progression = character_progression
         .map(map_character_progression)
         .ok_or(WorldLoadError::MissingCharacterProgression)?;
@@ -339,6 +357,7 @@ fn convert_pack(
         .into_iter()
         .filter_map(|spawn| {
             let prototype = prototypes.get(&spawn.prototype_id)?;
+            let loot_item_ids = loot_by_npc.remove(&spawn.id).unwrap_or_default();
             if let Some(definition) = npc_ability_sets_by_prototype.get(&spawn.prototype_id) {
                 npc_ability_sets.push(CoreNpcAbilitySetDefinition {
                     npc_id: spawn.id.clone(),
@@ -358,7 +377,7 @@ fn convert_pack(
                 strength: prototype.strength,
                 defence: prototype.defence,
                 experience_reward: prototype.experience_reward,
-                loot_item_ids: prototype.loot_item_ids.clone(),
+                loot_item_ids,
                 respawn_ticks: prototype.respawn_ticks,
             })
         })
@@ -387,7 +406,6 @@ fn convert_pack(
     Ok(LoadedWorldDefinition {
         definition,
         rng_seed,
-        item_rules,
         character_progression,
         abilities,
         npcs,
@@ -797,6 +815,30 @@ fn map_effect_kind(kind: PackEffectKind) -> CoreEffectKind {
     }
 }
 
+fn map_item_rarity(rarity: PackItemRarity) -> CoreItemRarity {
+    match rarity {
+        PackItemRarity::Common => CoreItemRarity::Common,
+        PackItemRarity::Uncommon => CoreItemRarity::Uncommon,
+        PackItemRarity::Rare => CoreItemRarity::Rare,
+        PackItemRarity::Epic => CoreItemRarity::Epic,
+        PackItemRarity::Legendary => CoreItemRarity::Legendary,
+    }
+}
+
+fn map_item_stack_policy(policy: PackItemStackPolicy) -> CoreItemStackPolicy {
+    match policy {
+        PackItemStackPolicy::Unique => CoreItemStackPolicy::Unique,
+    }
+}
+
+fn map_item_transfer_policy(policy: PackItemTransferPolicy) -> CoreItemTransferPolicy {
+    match policy {
+        PackItemTransferPolicy::Transferable => CoreItemTransferPolicy::Transferable,
+        PackItemTransferPolicy::CharacterBound => CoreItemTransferPolicy::CharacterBound,
+        PackItemTransferPolicy::NonTransferable => CoreItemTransferPolicy::NonTransferable,
+    }
+}
+
 fn runtime_asset_manifest_path(path: &str) -> bool {
     let mut components = path.split('/');
     let (Some("assets"), Some(hash), Some("manifest.json"), None) = (
@@ -855,6 +897,8 @@ pub enum WorldLoadError {
     MissingCharacterProgression,
     #[error("WorldPack is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("WorldPack could not be decoded or normalized: {0}")]
+    Document(#[from] world_pack::DocumentToolError),
     #[error(transparent)]
     Validation(#[from] ValidationErrors),
     #[error(
@@ -986,9 +1030,26 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_pack_loads_item_rules_and_an_npc_spawn() {
+    fn reviewed_pack_loads_item_prototypes_instances_and_an_npc_spawn() {
         let loaded = default_loaded_world().unwrap();
-        assert_eq!(loaded.item_rules.len(), 3);
+        assert_eq!(loaded.definition.item_prototypes.len(), 6);
+        assert_eq!(loaded.definition.initial_item_instances.len(), 6);
+        let tonic = loaded
+            .definition
+            .item_prototypes
+            .iter()
+            .find(|prototype| prototype.prototype_id == "tiamud:ember-tonic")
+            .unwrap();
+        assert!(matches!(
+            tonic.rarity,
+            CoreItemRarity::Common
+                | CoreItemRarity::Uncommon
+                | CoreItemRarity::Rare
+                | CoreItemRarity::Epic
+                | CoreItemRarity::Legendary
+        ));
+        assert!(tonic.item_level > 0);
+        assert!(tonic.weight_grams > 0);
         assert_eq!(
             loaded.character_progression.defaults.lineage_id,
             "tiamud:mortal"
@@ -1012,7 +1073,10 @@ mod tests {
         assert_eq!(loaded.npcs.len(), 1);
         assert_eq!(loaded.npc_ability_sets.len(), 1);
         assert_eq!(loaded.npcs[0].stable_id, "tiamud:gate-stalker-1");
-        assert_eq!(loaded.npcs[0].loot_item_ids, ["tiamud:wolf-clasp"]);
+        assert_eq!(
+            loaded.npcs[0].loot_item_ids,
+            [ItemInstanceId("tiamud:wolf-clasp".into())]
+        );
         assert_eq!(loaded.rng_seed, Some(6_073_466_303_471_576_068));
         assert!(
             loaded
@@ -1156,7 +1220,10 @@ mod tests {
         let snapshot = world.runtime_snapshot();
         assert!(snapshot.npcs.contains_key("tiamud:gate-stalker-1"));
         assert_eq!(
-            snapshot.item_locations.get("tiamud:wolf-clasp"),
+            snapshot
+                .item_instances
+                .get(&ItemInstanceId("tiamud:wolf-clasp".into()))
+                .map(|instance| &instance.location),
             Some(&tiamud_core::RuntimeItemLocation::HeldByNpc {
                 npc_id: "tiamud:gate-stalker-1".into(),
             })

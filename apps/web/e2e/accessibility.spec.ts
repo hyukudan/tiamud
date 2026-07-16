@@ -119,9 +119,13 @@ async function installMockWorld(
               },
               inventory: [{
                 id: 'o2222222222222222', label: 'blue lantern', description: 'Cold blue light.',
+                rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
                 actions: [{ label: 'Drop', command: 'drop o2222222222222222' }],
               }],
               equipment: [],
+              inventoryCapacity: {
+                usedSlots: 1, maxSlots: 24, usedWeightGrams: 800, maxWeightGrams: 30000,
+              },
               map: {
                 currentRoomId: 'o1111111111111111',
                 rooms: [{ id: 'o1111111111111111', title: 'Lantern Square', current: true }],

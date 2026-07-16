@@ -26,13 +26,16 @@ sobre la aceptación de la especificación histórica.
   expulsar, revertir sanciones y cambiar roles según autoridad.
 - Sí existen cola/resolución de reportes, inspect/where/goto/transfer/restore,
   anuncios y consulta de auditoría, con motivos obligatorios y límites.
-- Sí existen inventario, equipo, consumibles y botín fijo de NPC.
-- No existen rareza/tier, peso, capacidad, pilas, contenedores, comercio,
-  objetos repetibles ni tablas de botín aleatorias.
+- Sí existen inventario, equipo, consumibles, botín fijo de NPC, prototipos
+  reutilizables, instancias durables, capacidad por slots/peso y
+  rareza/`itemLevel` textual.
+- No existen pilas, contenedores, give/trade, derechos o reparto de botín,
+  afijos ni tablas de botín aleatorias.
 
-Las fases 1, comunicación/grupo, y 2, staff por capacidades, están
-implementadas. La secuencia pendiente es: prototipos e instancias de objetos;
-propiedad y reparto del botín; y, solo después, rareza y tablas aleatorias.
+Las fases 1, comunicación/grupo, 2, staff por capacidades, y 3A, fundamento de
+objetos, están implementadas. La secuencia pendiente es: pilas/contenedores y
+transferencias; propiedad y reparto del botín; y, solo después, drops
+repetibles, afijos y tablas aleatorias.
 
 ## Estado verificado en el código
 
@@ -160,16 +163,47 @@ capa de operador.
 
 ### Inventario y botín
 
-Un objeto actual del WorldPack es simultáneamente una definición y una
-instancia única identificada por su ID estable. Puede estar staged, en una
-sala, en un inventario, equipado, en posesión de un NPC o consumido. Las reglas
-añaden opcionalmente un slot de equipo, ataque, curación, consumo y un efecto
-acotado. Los slots actuales son arma, cuerpo y abalorio.
+WorldPack v4/AreaPack v3 separan `itemPrototypes` de
+`initialItemInstances`. El prototipo contiene nombre, descripción, aliases,
+equipo/ataque/curación/efecto, peso, coste de slot, rareza, nivel y políticas
+cerradas. Cada instancia durable referencia un prototipo y comienza en una
+sala, un `npc_spawn` o `staged`. En runtime puede estar además en inventario,
+equipada, en poder de un NPC o consumida. Los slots de equipo actuales son
+arma, cuerpo y abalorio.
 
-Un prototipo de NPC declara una lista fija de IDs de objetos. El validador
-exige que existan, no se repitan y no se asignen a más de un spawn. Esos
-objetos se entregan al NPC al cargar el mundo y se transfieren al derrotarlo.
-Esto es botín fijo y determinista, no una tabla aleatoria repetible.
+El runtime crea instancias distintas del mismo prototipo con una secuencia
+monotónica persistida. `ItemInstanceId`, `prototypeId` y spawn no salen del
+servidor; Web, Telnet y GMCP reciben un ID opaco distinto por unidad, derivado
+de una sal criptográficamente aleatoria nueva por sesión. Telnet lo muestra
+como referencia y permite usarlo como selector exacto. Las consultas textuales
+ambiguas fallan en vez de escoger una unidad arbitraria. 3A no almacena origen
+o procedencia durable: la ubicación inicial authored no sustituye ese futuro
+registro de fase 4.
+
+La presentación de un objeto se autoriza por instancia visible, pero el
+registro `entityMedia` se comparte por prototipo. La política
+`roomPerception.hiddenItems` apunta a la instancia concreta; no es una regla de
+visibilidad para todas las unidades del prototipo.
+
+Cada personaje tiene capacidad por slots y peso. El peso suma inventario y
+equipo; los slots cuentan solo inventario. Equipar libera slots y desequipar o
+reemplazar equipo prevalidan la capacidad antes de mutar. La rareza cerrada
+`common`, `uncommon`, `rare`, `epic`, `legendary`, el `itemLevel` y el peso se
+muestran como texto; la capacidad usada/máxima se calcula en el servidor.
+
+El botín fijo actual es una instancia inicial ubicada en `npc_spawn`. El
+validador exige prototipo, instancia, spawn y ubicación coherentes. La unidad
+se entrega al NPC al cargar y se transfiere al derrotarlo. Esto sigue siendo
+botín fijo y determinista, no una tabla aleatoria repetible.
+
+`WorldRuntimeSnapshot` v2 persiste instancias y contador; la lectura v1 usa una
+conversión explícita. SQLite y PostgreSQL confirman ese snapshot único en la
+transacción existente de esquema v10. Al restaurar se conservan nuevas
+instancias iniciales del WorldPack y se superpone el estado durable, sin
+recuperar instancias runtime ausentes del snapshot. La barrera de arranque
+valida propietarios, equipo y capacidad de personajes conectados o
+desconectados mediante agregados acotados que descarta después. No hay tabla
+espejo ni esquema v11.
 
 ## Qué muestran los MUD clásicos
 
@@ -310,40 +344,44 @@ Son sistemas distintos y deben modelarse por separado.
 
 ```mermaid
 flowchart LR
-    accTitle: Modelo objetivo de objetos repetibles y botín
-    accDescr: Un prototipo authored define propiedades comunes. Una tabla validada y el RNG persistido crean una instancia durable con procedencia; la transacción la asigna a un propietario o contenedor y después permite equipo, comercio o consumo.
+    accTitle: Fundamento implementado y ampliaciones de objetos repetibles
+    accDescr: Un prototipo ya define propiedades comunes y el runtime crea instancias durables distintas con capacidad e identidad segura. Tablas, derechos, contenedores y comercio siguen como fases posteriores.
 
-    Prototype[ItemPrototype<br/>nombre · reglas · rareza base] --> Table[LootTable validada]
+    Prototype[ItemPrototype implementado<br/>nombre · reglas · rareza · peso] --> Instance[ItemInstance implementada<br/>ID durable · prototypeId · ubicación]
+    Sequence[(Secuencia persistida)] --> Instance
+    Instance --> Current[Inventario / equipo / NPC / sala]
+    Current --> Capacity[Slots + peso<br/>implementado]
+
+    Prototype -. fase 4 .-> Table[LootTable validada]
     RNG[(RNG persistido)] --> Roll[Tirada entera determinista]
     Table --> Roll
-    Roll --> Instance[ItemInstance<br/>ID opaco · prototypeId<br/>afijos · procedencia]
-    Instance --> Rights[Elegibilidad y propietario]
-    Rights --> Inventory[Inventario / contenedor]
-    Inventory --> Equip[Equipar]
-    Inventory --> Trade[Dar / intercambio confirmado]
-    Inventory --> Sink[Consumir / vender / destruir]
+    Roll --> Generated[Instancia nueva + procedencia]
+    Generated --> Rights[Elegibilidad y propietario]
+    Rights --> Future[Contenedor / reparto]
+    Current -. fase 3B/3C .-> Trade[Dar / intercambio confirmado]
 ```
 
-### Fundamento obligatorio
+### Fundamento y secuencia
 
-1. `ItemPrototype`: contenido authored estable y reutilizable.
-2. `ItemInstance`: ID durable único, `prototypeId`, origen, ubicación,
-   propietario/eligibilidad y, cuando proceda, seed o afijos resueltos.
-3. Inventario acotado por slots y peso; contenedores con capacidad y
-   profundidad máximas. Las pilas solo agrupan instancias fungibles con los
-   mismos metadatos.
-4. Transferencia atómica: `give` para casos simples e intercambio confirmado
+1. Implementado: `ItemPrototype`, contenido authored estable y reutilizable.
+2. Implementado: `ItemInstance`, ID durable único, `prototypeId` y ubicación;
+   el snapshot y rollback incluyen la secuencia creadora.
+3. Implementado: inventario acotado por slots y peso. Pendiente: contenedores
+   con capacidad/profundidad máximas y pilas que solo agrupen unidades
+   fungibles con metadatos idénticos.
+4. Pendiente: transferencia atómica, con `give` para casos simples e intercambio confirmado
    por ambas partes para objetos valiosos. Objetos de quest, ligados o no
-   transferibles deben declararlo.
-5. Derechos de botín: ventana exclusiva y política inicial determinista, por
+   transferibles deben declararlo. En 3A solo se acepta `transferable`;
+   `character_bound` y `non_transferable` se rechazan como valores reservados
+   hasta que 3C ejecute su semántica.
+5. Pendiente: derechos de botín con ventana exclusiva y política inicial determinista, por
    ejemplo round-robin, antes de dejarlo libre en la sala.
 
 ### Rareza y nivel de objeto
 
-Una rareza cerrada como common/uncommon/rare/epic/legendary puede servir para
-presupuesto de poder, frecuencia y presentación, pero no debe ser solo un
-color. El cliente y Telnet deben mostrar texto y significado. El WorldPack
-puede localizar las etiquetas visibles sin cambiar la enum canónica.
+La rareza cerrada `common|uncommon|rare|epic|legendary` ya forma parte del
+prototipo y se muestra como texto en navegador y Telnet/GMCP; nunca depende solo
+del color.
 
 `itemLevel`, calidad y afijos son ejes diferentes. Deben tener límites authored
 por slot/tier/nivel y aritmética saturada. Una rareza alta no puede saltarse
@@ -405,17 +443,24 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 - acciones estructuradas Web y texto/announcement Telnet+GMCP equivalentes;
 - ninguna autoridad obtenible mediante XP, clase, talento o WorldPack.
 
-### Fase 3 — objetos repetibles e inventario — pendiente
+### Fase 3A — fundamento prototype/instance — implementada
 
-- migración prototype/instance;
-- slots/peso, stacks y contenedores acotados;
-- give e intercambio confirmado;
-- snapshot, rollback, migración y proyección opaca en ambos transportes.
+- WorldPack v4/AreaPack v3, normalización v3/v2 y v2/v1 respectivamente;
+- prototipos reutilizables, instancias durables y contador monotónico;
+- snapshot v2, conversión explícita desde v1 y rollback exacto;
+- slots/peso, rareza/`itemLevel` textual e IDs opacos en ambos transportes;
+- snapshot único en SQLite/PostgreSQL v10, sin tabla espejo ni esquema v11.
 
-### Fase 4 — propiedad, rareza y botín aleatorio — pendiente
+### Fase 3B/3C/3D — inventario y transferencias — pendiente
+
+- pilas fungibles y contenedores con profundidad/capacidad acotadas;
+- `give` atómico y políticas de transferencia ejecutables;
+- intercambio con escrow, doble aceptación e invalidación ante cambios.
+
+### Fase 4 — propiedad y botín aleatorio — pendiente
 
 - elegibilidad y distribución de party;
-- rareza/item level/afijos con presupuestos;
+- procedencia durable y afijos con presupuestos de rareza/`itemLevel`;
 - tablas enteras validadas y tirada transaccional restart-safe;
 - probabilidades visibles, pruebas estadísticas deterministas y límites de
   economía;

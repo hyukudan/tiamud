@@ -80,8 +80,8 @@ jobs:
       - name: Lint Rust workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Test soak acceptance verifier
-        run: node --test scripts/verify-soak-report.test.mjs scripts/telnet-bot.test.mjs
+      - name: Test load and soak harnesses
+        run: node --test scripts/bot.test.mjs scripts/verify-soak-report.test.mjs scripts/telnet-bot.test.mjs
 
       - name: Run transport smoke test
         run: node scripts/smoke.mjs

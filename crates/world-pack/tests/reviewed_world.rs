@@ -1,20 +1,26 @@
 use world_pack::{
     AbilityCategory, AbilityStatusEffect, CURRENT_SCHEMA_VERSION, ExitTarget, GrantDefinition,
-    WorldPack,
+    WorldPackDocument,
 };
 
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 #[test]
-fn reviewed_runtime_fixture_matches_world_pack_v3() {
-    let pack: WorldPack = serde_json::from_slice(REVIEWED_WORLD).unwrap();
+fn reviewed_runtime_fixture_matches_world_pack_v4() {
+    let document = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap();
+    let pack = document.world;
 
     pack.validate().unwrap();
     assert_eq!(pack.schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(pack.start_room_id, "demo:lantern-square");
     assert!(pack.rooms.iter().any(|room| room.id == pack.start_room_id));
-    assert_eq!(pack.items.len(), 6);
-    assert!(pack.items.iter().all(|item| item.id.starts_with("tiamud:")));
+    assert_eq!(pack.item_prototypes.len(), 6);
+    assert_eq!(pack.initial_item_instances.len(), 6);
+    assert!(
+        pack.item_prototypes
+            .iter()
+            .all(|item| item.id.starts_with("tiamud:"))
+    );
     let manifest = pack
         .rooms
         .iter()
@@ -33,7 +39,13 @@ fn reviewed_runtime_fixture_matches_world_pack_v3() {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     );
-    assert_eq!(pack.gameplay.item_rules.len(), 3);
+    assert_eq!(
+        pack.item_prototypes
+            .iter()
+            .filter(|item| item.equipment_slot.is_some() || item.consumable)
+            .count(),
+        3
+    );
     assert_eq!(pack.gameplay.npc_prototypes.len(), 1);
     assert_eq!(pack.gameplay.npc_spawns.len(), 1);
     assert!(pack.gameplay.default_archetype_id.is_none());

@@ -2109,7 +2109,15 @@ impl TelnetSession {
             let inventory = player
                 .inventory
                 .iter()
-                .map(|item| json!({"id": item.id, "name": item.label}))
+                .map(|item| {
+                    json!({
+                        "id": item.id,
+                        "name": item.label,
+                        "rarity": item.rarity,
+                        "itemLevel": item.item_level,
+                        "weightGrams": item.weight_grams,
+                    })
+                })
                 .collect::<Vec<_>>();
             append_gmcp(
                 &mut output,
@@ -2117,13 +2125,23 @@ impl TelnetSession {
                 &json!({
                     "location": "inv",
                     "items": inventory,
+                    "capacity": player.inventory_capacity,
                     "revision": player.revision,
                 }),
             );
             let equipment = player
                 .equipment
                 .iter()
-                .map(|item| json!({"id": item.id, "name": item.label, "slot": item.slot}))
+                .map(|item| {
+                    json!({
+                        "id": item.id,
+                        "name": item.label,
+                        "slot": item.slot,
+                        "rarity": item.rarity,
+                        "itemLevel": item.item_level,
+                        "weightGrams": item.weight_grams,
+                    })
+                })
                 .collect::<Vec<_>>();
             append_gmcp(
                 &mut output,
@@ -2669,7 +2687,12 @@ fn render_scene(scene: &SceneView, session: &TelnetSession) -> String {
             &scene
                 .items
                 .iter()
-                .map(|item| item.label.as_str())
+                .map(|item| {
+                    format!(
+                        "{} [{} · level {} · {} g · ref {}]",
+                        item.label, item.rarity, item.item_level, item.weight_grams, item.id
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", "),
         );
@@ -3582,6 +3605,12 @@ mod tests {
                 },
             )
             .unwrap();
+        world
+            .apply(
+                session_id,
+                tiamud_core::PlayerAction::Take("blue-glass lantern".into()),
+            )
+            .unwrap();
         let player = world.player_state_view(session_id).unwrap();
         let payloads = gmcp_payloads(&session.player_gmcp(&player));
 
@@ -3611,7 +3640,11 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .into_owned();
+        assert!(wire.contains("\"capacity\""));
+        assert!(wire.contains("\"rarity\""));
+        assert!(wire.contains("\"itemLevel\""));
         assert!(!wire.contains("demo:lantern-square"));
+        assert!(!wire.contains("prototypeId"));
         assert!(!wire.contains("characterId"));
     }
 
@@ -4252,6 +4285,58 @@ mod tests {
                 next_change_in_ticks: 4,
             },
         }
+    }
+
+    #[test]
+    fn plain_telnet_scene_names_item_rarity_level_and_weight() {
+        let mut world = tiamud_core::World::demo();
+        let mut runtime = world.runtime_snapshot();
+        runtime.item_instances.insert(
+            tiamud_core::ItemInstanceId("runtime:1".into()),
+            tiamud_core::RuntimeItemInstanceSnapshot {
+                prototype_id: "demo:blue-lantern".into(),
+                location: tiamud_core::RuntimeItemLocation::Room {
+                    room_id: "demo:lantern-square".into(),
+                },
+            },
+        );
+        runtime.next_item_instance_sequence = 2;
+        world.restore_runtime_snapshot(runtime).unwrap();
+        let session_id = tiamud_core::SessionId(90);
+        world
+            .connect(
+                session_id,
+                tiamud_core::CharacterSnapshot {
+                    id: tiamud_core::CharacterId(91),
+                    account_id: tiamud_core::AccountId(92),
+                    name: "Plain Reader".into(),
+                    room_id: world.start_room_id().to_owned(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let scene = world.current_scene(session_id).unwrap();
+        assert_eq!(scene.items.len(), 2);
+        let item = scene.items.first().unwrap();
+        let selected_reference = item.id.clone();
+        let rendered = render_scene(&scene, &TelnetSession::default());
+
+        assert!(rendered.contains(&item.rarity));
+        assert!(rendered.contains(&format!("level {}", item.item_level)));
+        assert!(rendered.contains(&format!("{} g", item.weight_grams)));
+        assert!(scene.items.iter().all(|item| rendered.contains(&item.id)));
+        assert!(!rendered.contains("prototype"));
+        assert!(!rendered.contains("demo:blue-lantern"));
+
+        world
+            .apply(
+                session_id,
+                tiamud_core::PlayerAction::Take(selected_reference.clone()),
+            )
+            .unwrap();
+        assert_eq!(world.current_scene(session_id).unwrap().items.len(), 1);
+        let inventory = world.inventory_as_plain_text(session_id).unwrap();
+        assert!(inventory.contains(&format!("ref {selected_reference}")));
     }
 
     #[test]

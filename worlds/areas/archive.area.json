@@ -1,10 +1,10 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "id": "archive",
   "dependsOn": [
     "square"
   ],
-  "items": [
+  "itemPrototypes": [
     {
       "id": "tiamud:weathered-map",
       "name": "weathered map",
@@ -12,7 +12,13 @@
       "aliases": [
         "map",
         "old map"
-      ]
+      ],
+      "weightGrams": 200,
+      "slotCost": 1,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
     },
     {
       "id": "tiamud:bronze-sword",
@@ -22,7 +28,33 @@
         "sword",
         "bronze sword",
         "blade"
-      ]
+      ],
+      "equipmentSlot": "weapon",
+      "attackBonus": 4,
+      "weightGrams": 2500,
+      "slotCost": 2,
+      "rarity": "common",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "transferPolicy": "transferable"
+    }
+  ],
+  "initialItemInstances": [
+    {
+      "id": "tiamud:weathered-map",
+      "prototypeId": "tiamud:weathered-map",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:archive"
+      }
+    },
+    {
+      "id": "tiamud:bronze-sword",
+      "prototypeId": "tiamud:bronze-sword",
+      "location": {
+        "kind": "room",
+        "roomId": "demo:archive"
+      }
     }
   ],
   "rooms": [
@@ -30,10 +62,6 @@
       "id": "demo:archive",
       "title": "The Cartographer's Archive",
       "description": "Shelves of annotated maps surround a broad oak table. A dry stair climbs back toward the square.",
-      "items": [
-        "tiamud:weathered-map",
-        "tiamud:bronze-sword"
-      ],
       "exits": [
         {
           "direction": "up",
@@ -43,13 +71,6 @@
           }
         }
       ]
-    }
-  ],
-  "itemRules": [
-    {
-      "itemId": "tiamud:bronze-sword",
-      "equipmentSlot": "weapon",
-      "attackBonus": 4
     }
   ],
   "roomPerception": [

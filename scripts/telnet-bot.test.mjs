@@ -110,6 +110,21 @@ test('Telnet bot registers, creates, logs in, moves, speaks, reconnects, and qui
       }
       if (current === 'create') {
         assert.match(line, /^Telnet Explorer/);
+        connection.write('Choose a number or lineage id (type default): ');
+        return 'lineage';
+      }
+      if (current === 'lineage') {
+        assert.equal(line, 'default');
+        connection.write('Choose a number or background id (type default or none): ');
+        return 'background';
+      }
+      if (current === 'background') {
+        assert.equal(line, 'default');
+        connection.write('Choose a number or base class id (type default): ');
+        return 'base-class';
+      }
+      if (current === 'base-class') {
+        assert.equal(line, 'default');
         writeScene(connection, location);
         return 'playing';
       }

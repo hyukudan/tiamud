@@ -1,6 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use world_pack::{
     AreaPack, CompositionError, MAX_AREA_FILE_BYTES, MAX_PROJECT_MANIFEST_BYTES, WorldPackDocument,
     compose_world_project,
@@ -143,6 +144,83 @@ fn progression_references_require_declared_area_dependencies() {
 }
 
 #[test]
+fn item_media_cross_area_edges_target_the_reusable_prototype() {
+    let temp = tempfile::tempdir().unwrap();
+    let sprite = b"reviewed test sprite";
+    let sprite_hash = hex::encode(Sha256::digest(sprite));
+    let sprite_path = format!("assets/{sprite_hash}/sprite-idle-640.webp");
+    let absolute_sprite_path = temp.path().join(&sprite_path);
+    fs::create_dir_all(absolute_sprite_path.parent().unwrap()).unwrap();
+    fs::write(&absolute_sprite_path, sprite).unwrap();
+    let media_area = json!({
+        "schemaVersion": 3,
+        "id": "a",
+        "rooms": [room("a:start", None)],
+        "entityMedia": [{
+            "kind": "item",
+            "subjectId": "b:lantern",
+            "decorative": true,
+            "footprint": {"widthMilli": 100, "heightMilli": 100},
+            "layer": "foreground",
+            "poses": {"idle": {
+                "webp": sprite_path
+            }}
+        }]
+    });
+    let prototype_area = json!({
+        "schemaVersion": 3,
+        "id": "b",
+        "itemPrototypes": [{
+            "id": "b:lantern",
+            "name": "Lantern",
+            "description": "A reusable lantern prototype.",
+            "weightGrams": 0,
+            "slotCost": 1,
+            "rarity": "common",
+            "itemLevel": 1,
+            "stackPolicy": "unique",
+            "transferPolicy": "transferable"
+        }]
+    });
+    write_json(&temp.path().join("a.json"), &media_area);
+    write_json(&temp.path().join("b.json"), &prototype_area);
+    let manifest = temp.path().join("world.project.json");
+    write_json(
+        &manifest,
+        &json!({
+            "schemaVersion": 2,
+            "id": "demo",
+            "name": "Demo",
+            "startRoomId": "a:start",
+            "areas": [{"id":"a","path":"a.json"},{"id":"b","path":"b.json"}]
+        }),
+    );
+
+    assert!(matches!(
+        compose_world_project(&manifest),
+        Err(CompositionError::UndeclaredDependency {
+            kind: world_pack::AreaCrossReferenceKind::EntityMedia,
+            ..
+        })
+    ));
+
+    let mut declared = media_area;
+    declared["dependsOn"] = json!(["b"]);
+    write_json(&temp.path().join("a.json"), &declared);
+    let composed = compose_world_project(&manifest).unwrap();
+    assert!(
+        composed
+            .report
+            .cross_area_references
+            .iter()
+            .any(|reference| {
+                reference.kind == world_pack::AreaCrossReferenceKind::EntityMedia
+                    && reference.target_id == "b:lantern"
+            })
+    );
+}
+
+#[test]
 fn real_three_area_project_has_no_semantic_or_canonical_drift() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let composed = compose_world_project(root.join("worlds/lantern-square.project.json")).unwrap();
@@ -185,9 +263,16 @@ fn duplicate_global_entity_ids_fail_even_across_entity_kinds() {
     write_json(
         &temp.path().join("a.json"),
         &json!({
-            "schemaVersion": 1,
+            "schemaVersion": 3,
             "id": "a",
-            "items": [{"id":"shared:id","name":"Item","description":"Item."}],
+            "itemPrototypes": [{
+                "id":"shared:id","name":"Item","description":"Item.",
+                "weightGrams":0,"slotCost":1,"rarity":"common","itemLevel":1,
+                "stackPolicy":"unique","transferPolicy":"transferable"
+            }],
+            "initialItemInstances": [{
+                "id":"shared:id","prototypeId":"shared:id","location":{"kind":"staged"}
+            }],
             "rooms": [room("a:start", None)]
         }),
     );
@@ -208,6 +293,66 @@ fn duplicate_global_entity_ids_fail_even_across_entity_kinds() {
         compose_world_project(manifest),
         Err(CompositionError::DuplicateGlobalEntityId { id, .. }) if id == "shared:id"
     ));
+}
+
+#[test]
+fn prototype_and_instance_share_a_typed_id_across_areas() {
+    let temp = tempfile::tempdir().unwrap();
+    write_json(
+        &temp.path().join("a.json"),
+        &json!({
+            "schemaVersion": 3,
+            "id": "a",
+            "itemPrototypes": [{
+                "id":"shared:lantern","name":"Lantern","description":"A lantern.",
+                "weightGrams":0,"slotCost":1,"rarity":"common","itemLevel":1,
+                "stackPolicy":"unique","transferPolicy":"transferable"
+            }],
+            "rooms": [room("a:start", None)]
+        }),
+    );
+    write_json(
+        &temp.path().join("b.json"),
+        &json!({
+            "schemaVersion": 3,
+            "id": "b",
+            "dependsOn": ["a"],
+            "initialItemInstances": [{
+                "id":"shared:lantern",
+                "prototypeId":"shared:lantern",
+                "location":{"kind":"staged"}
+            }]
+        }),
+    );
+    let manifest = temp.path().join("world.project.json");
+    write_json(
+        &manifest,
+        &json!({
+            "schemaVersion":2,"id":"demo","name":"Demo","startRoomId":"a:start",
+            "areas":[{"id":"a","path":"a.json"},{"id":"b","path":"b.json"}]
+        }),
+    );
+
+    let composed = compose_world_project(manifest).unwrap();
+    assert_eq!(
+        composed.document.world.item_prototypes[0].id,
+        "shared:lantern"
+    );
+    assert_eq!(
+        composed.document.world.initial_item_instances[0].id,
+        "shared:lantern"
+    );
+    assert!(
+        composed
+            .report
+            .cross_area_references
+            .iter()
+            .any(|reference| {
+                reference.kind == world_pack::AreaCrossReferenceKind::ItemInstancePrototype
+                    && reference.from_area == "b"
+                    && reference.to_area == "a"
+            })
+    );
 }
 
 #[test]
@@ -267,7 +412,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
     }
 
     for bad_area in [
-        json!({"schemaVersion":3,"id":"a","rooms":[room("a:start", None)]}),
+        json!({"schemaVersion":4,"id":"a","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","rooms":[room("a:start", None)],"unknown":true}),
         json!({"schemaVersion":1,"id":"wrong","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","dependsOn":["missing"],"rooms":[room("a:start", None)]}),
@@ -502,7 +647,7 @@ fn compose_is_present_in_top_level_and_subcommand_help() {
     let help = String::from_utf8_lossy(&compose.stdout);
     assert!(help.contains("world.project.json") || help.contains("<PROJECT>"));
     assert!(help.contains("--output"));
-    assert!(help.contains("AreaPack v2"));
+    assert!(help.contains("AreaPack v3"));
 }
 
 #[test]
@@ -518,15 +663,15 @@ fn area_file_and_composed_artifact_size_limits_are_enforced() {
     ));
 
     let expanded = tempfile::tempdir().unwrap();
-    let aliases = vec!["x"; 1_400_000];
+    let prefix_values = vec![0; 2_000_000];
     write_json(
         &expanded.path().join("a.json"),
         &json!({
             "schemaVersion":1,
             "id":"a",
-            "items":[{"id":"a:item","name":"Item","description":"Item.","aliases":aliases}],
             "rooms":[{
-                "id":"a:start","title":"Start","description":"Start.","items":["a:item"]
+                "id":"a:start","title":"Start","description":"Start.",
+                "legacy":{"flags":0,"sector":0,"prefixValues":prefix_values}
             }]
         }),
     );

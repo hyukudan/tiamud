@@ -1,10 +1,10 @@
 # Character progression v3
 
-Status: implementation design for the unreleased WorldPack v3 model.
+Status: implemented v3 character-model design, carried by WorldPack v4.
 
 This document defines Tiamud's canonical character vocabulary and the first
 bounded progression model. It replaces the overloaded v2 `archetype` concept
-before any public deployment. Historical WorldPack v2 and Envy/Merc data are
+before any public deployment. Historical WorldPack v3/v2 and Envy/Merc data are
 import inputs; they are normalized into this model rather than dictating its
 public API.
 
@@ -176,7 +176,8 @@ starts empty.
 
 ## Authoring shape
 
-The exact serialized shape is owned by the WorldPack v3 Rust types and tests.
+The exact serialized shape is owned by the WorldPack v4 Rust types and tests;
+“v3” in this document names the character model, not the current pack schema.
 This reduced example illustrates the intended ergonomics:
 
 ```json

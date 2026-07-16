@@ -7,7 +7,7 @@ use world_pack::{
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 fn reviewed() -> WorldPack {
-    serde_json::from_slice(REVIEWED_WORLD).unwrap()
+    WorldPackDocument::from_json(REVIEWED_WORLD).unwrap().world
 }
 
 fn invalid_messages(pack: &WorldPack) -> String {
@@ -27,7 +27,7 @@ fn invalid_messages(pack: &WorldPack) -> String {
 fn reviewed_v3_catalog_has_one_global_auditable_curve_and_initial_choices() {
     let pack = reviewed();
     pack.validate().unwrap();
-    assert_eq!(pack.schema_version, 3);
+    assert_eq!(pack.schema_version, 4);
     assert!(pack.gameplay.archetypes.is_empty());
     let progression = pack.gameplay.character_progression.unwrap();
 
@@ -98,7 +98,7 @@ fn v2_archetypes_normalize_to_v3_without_guessing_a_second_xp_system() {
 
     let document = WorldPackDocument::from_json(&bytes).unwrap();
     document.validate().unwrap();
-    assert_eq!(document.world.schema_version, 3);
+    assert_eq!(document.world.schema_version, 4);
     assert!(document.world.gameplay.archetypes.is_empty());
     let progression = document.world.gameplay.character_progression.unwrap();
     assert_eq!(progression.defaults.lineage_id, "legacy:mortal");
@@ -129,7 +129,7 @@ fn v2_normalization_rejects_conflicting_per_class_xp_curves() {
 }
 
 #[test]
-fn area_v1_archetypes_have_a_bounded_import_path_to_native_v2_authoring() {
+fn area_v1_archetypes_have_a_bounded_import_path_to_native_v3_authoring() {
     let area: AreaPack = serde_json::from_value(json!({
         "schemaVersion": 1,
         "id": "legacy-area",
@@ -142,7 +142,7 @@ fn area_v1_archetypes_have_a_bounded_import_path_to_native_v2_authoring() {
         }]
     }))
     .unwrap();
-    assert_eq!(area.schema_version, 2);
+    assert_eq!(area.schema_version, 3);
     assert!(area.archetypes.is_empty());
     assert_eq!(area.lineages[0].id, "legacy:mortal");
     assert_eq!(area.base_classes[0].id, "legacy:scout");

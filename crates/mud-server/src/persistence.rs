@@ -6,7 +6,7 @@ use crate::{
     operations::RuntimeMetrics,
 };
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params, types::Type};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Type};
 use std::{
     collections::BTreeSet,
     future::Future,
@@ -19,8 +19,9 @@ use std::{
 use thiserror::Error;
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
-    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, SocialChannelName, StaffCapability,
-    StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot,
+    CharacterSnapshot, CompatibleWorldRuntimeSnapshot, DomainEvent, DurableCharacterSnapshot,
+    MAX_ITEM_INSTANCES, SocialChannelName, StaffCapability, StaffProfileKey, StaffReportResolution,
+    WorldRuntimeSnapshot,
 };
 use tiamud_persistence_sqlite::{SchemaError, migrate};
 use tokio::{
@@ -47,6 +48,19 @@ const MAX_STAFF_LORE_TITLE_BYTES: usize = 128;
 const STAFF_LIST_LIMIT: i64 = 10;
 const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
 const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Startup only reads characters referenced as runtime item owners. Their IDs
+/// are bounded by the runtime item graph, while their combined serialized
+/// gameplay cannot exceed the runtime snapshot's own persistence budget.
+pub(super) const MAX_STARTUP_ITEM_OWNERS: usize = MAX_ITEM_INSTANCES;
+pub(super) const MAX_STARTUP_OWNER_GAMEPLAY_BYTES: usize = MAX_RUNTIME_JSON_BYTES;
+const SQLITE_CHARACTER_BATCH_SIZE: usize = 900;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableCharacterGameplay {
+    pub character_id: CharacterId,
+    pub gameplay: CharacterGameplaySnapshot,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SocialProfile {
@@ -151,8 +165,12 @@ pub enum StoreError {
     PostgresSchema(#[from] tiamud_persistence_postgres::SchemaError),
     #[error("invalid persisted character state: {0}")]
     CharacterState(#[from] serde_json::Error),
+    #[error("the persisted world runtime snapshot is invalid or unsupported")]
+    InvalidRuntimeSnapshot,
     #[error("serialized {kind} exceeds the {maximum} byte persistence limit")]
     SnapshotTooLarge { kind: &'static str, maximum: usize },
+    #[error("durable character count exceeds the {maximum} aggregate startup limit")]
+    TooManyCharacterAggregates { maximum: usize },
     #[error("the persistence worker stopped unexpectedly")]
     WorkerStopped,
     #[error("the persistence worker did not answer within the bounded timeout")]
@@ -295,6 +313,13 @@ pub trait CharacterStore: Send + Sync {
         &self,
         character_id: CharacterId,
     ) -> Result<CharacterGameplaySnapshot, StoreError>;
+
+    /// Load only the durable gameplay aggregates requested by the restored
+    /// runtime, using set-based batches rather than one query per owner.
+    async fn load_character_gameplay_batch(
+        &self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<Vec<DurableCharacterGameplay>, StoreError>;
 
     async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError>;
 
@@ -619,6 +644,15 @@ impl CharacterStore for MeasuredCharacterStore {
         self.inner.load_character_gameplay(character_id).await
     }
 
+    async fn load_character_gameplay_batch(
+        &self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
+        self.inner
+            .load_character_gameplay_batch(character_ids)
+            .await
+    }
+
     async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
         self.inner.load_runtime_snapshot().await
     }
@@ -791,6 +825,10 @@ pub(super) enum Request {
     LoadCharacterGameplay {
         character_id: CharacterId,
         reply: oneshot::Sender<Result<CharacterGameplaySnapshot, StoreError>>,
+    },
+    LoadCharacterGameplayBatch {
+        character_ids: Vec<CharacterId>,
+        reply: oneshot::Sender<Result<Vec<DurableCharacterGameplay>, StoreError>>,
     },
     LoadRuntimeSnapshot {
         reply: oneshot::Sender<Result<Option<WorldRuntimeSnapshot>, StoreError>>,
@@ -1031,6 +1069,13 @@ impl SqliteCharacterStore {
                             reply,
                         } => {
                             let _ = reply.send(load_character_gameplay(&connection, character_id));
+                        }
+                        Request::LoadCharacterGameplayBatch {
+                            character_ids,
+                            reply,
+                        } => {
+                            let _ = reply
+                                .send(load_character_gameplay_batch(&connection, character_ids));
                         }
                         Request::LoadRuntimeSnapshot { reply } => {
                             let _ = reply.send(load_runtime_snapshot(&connection));
@@ -1477,6 +1522,21 @@ impl CharacterStore for SqliteCharacterStore {
         self.request(
             Request::LoadCharacterGameplay {
                 character_id,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn load_character_gameplay_batch(
+        &self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoadCharacterGameplayBatch {
+                character_ids,
                 reply,
             },
             receive,
@@ -3314,18 +3374,139 @@ fn load_character_gameplay(
     serde_json::from_str(&json).map_err(StoreError::from)
 }
 
+fn load_character_gameplay_batch(
+    connection: &Connection,
+    character_ids: Vec<CharacterId>,
+) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
+    let character_ids = normalise_startup_owner_ids(character_ids)?;
+    let mut aggregates = Vec::new();
+    let mut total_json_bytes = 0_usize;
+    for batch in character_ids.chunks(SQLITE_CHARACTER_BATCH_SIZE) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, gameplay_json FROM characters WHERE id IN ({placeholders}) ORDER BY id"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(batch.iter().map(|id| id.0)))?;
+        while let Some(row) = rows.next()? {
+            let character_id = CharacterId(row.get(0)?);
+            let json: String = row.get(1)?;
+            aggregates.push(decode_startup_owner_gameplay(
+                character_id,
+                &json,
+                &mut total_json_bytes,
+            )?);
+        }
+    }
+    ensure_all_startup_owners_loaded(&character_ids, &aggregates)?;
+    Ok(aggregates)
+}
+
+pub(super) fn normalise_startup_owner_ids(
+    mut character_ids: Vec<CharacterId>,
+) -> Result<Vec<CharacterId>, StoreError> {
+    character_ids.sort_unstable();
+    character_ids.dedup();
+    if character_ids.len() > MAX_STARTUP_ITEM_OWNERS {
+        return Err(StoreError::TooManyCharacterAggregates {
+            maximum: MAX_STARTUP_ITEM_OWNERS,
+        });
+    }
+    if let Some(invalid) = character_ids.iter().find(|id| id.0 <= 0) {
+        return Err(StoreError::CharacterGameplayNotFound(*invalid));
+    }
+    Ok(character_ids)
+}
+
+pub(super) fn decode_startup_owner_gameplay(
+    character_id: CharacterId,
+    json: &str,
+    total_json_bytes: &mut usize,
+) -> Result<DurableCharacterGameplay, StoreError> {
+    if json.len() > MAX_CHARACTER_JSON_BYTES {
+        return Err(StoreError::SnapshotTooLarge {
+            kind: "character gameplay",
+            maximum: MAX_CHARACTER_JSON_BYTES,
+        });
+    }
+    *total_json_bytes =
+        total_json_bytes
+            .checked_add(json.len())
+            .ok_or(StoreError::SnapshotTooLarge {
+                kind: "startup owner gameplay",
+                maximum: MAX_STARTUP_OWNER_GAMEPLAY_BYTES,
+            })?;
+    if *total_json_bytes > MAX_STARTUP_OWNER_GAMEPLAY_BYTES {
+        return Err(StoreError::SnapshotTooLarge {
+            kind: "startup owner gameplay",
+            maximum: MAX_STARTUP_OWNER_GAMEPLAY_BYTES,
+        });
+    }
+    Ok(DurableCharacterGameplay {
+        character_id,
+        gameplay: serde_json::from_str(json)?,
+    })
+}
+
+pub(super) fn ensure_all_startup_owners_loaded(
+    requested: &[CharacterId],
+    aggregates: &[DurableCharacterGameplay],
+) -> Result<(), StoreError> {
+    let loaded = aggregates
+        .iter()
+        .map(|aggregate| aggregate.character_id)
+        .collect::<BTreeSet<_>>();
+    requested
+        .iter()
+        .find(|character_id| !loaded.contains(character_id))
+        .map_or(Ok(()), |missing| {
+            Err(StoreError::CharacterGameplayNotFound(*missing))
+        })
+}
+
 fn load_runtime_snapshot(
     connection: &Connection,
 ) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
     connection
         .query_row(
-            "SELECT snapshot_json FROM world_runtime WHERE singleton = 1",
+            "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
             [],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?
-        .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+        .map(|(snapshot_version, json)| decode_runtime_snapshot(snapshot_version, &json))
         .transpose()
+}
+
+pub(super) fn decode_runtime_snapshot(
+    durable_version: i64,
+    json: &str,
+) -> Result<WorldRuntimeSnapshot, StoreError> {
+    // `str::len` is the UTF-8 byte length, unlike SQLite's text `length()`.
+    if json.len() > MAX_RUNTIME_JSON_BYTES {
+        return Err(StoreError::SnapshotTooLarge {
+            kind: "world runtime",
+            maximum: MAX_RUNTIME_JSON_BYTES,
+        });
+    }
+    let compatible =
+        serde_json::from_str::<CompatibleWorldRuntimeSnapshot>(json).map_err(StoreError::from)?;
+    let payload_version = match &compatible {
+        CompatibleWorldRuntimeSnapshot::V2(snapshot) => snapshot.snapshot_version,
+        CompatibleWorldRuntimeSnapshot::V1(snapshot) => snapshot.snapshot_version,
+    };
+    if i64::from(payload_version) != durable_version {
+        return Err(StoreError::InvalidRuntimeSnapshot);
+    }
+    let snapshot = compatible
+        .into_current()
+        .map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
+    if snapshot.snapshot_version != tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
+        return Err(StoreError::InvalidRuntimeSnapshot);
+    }
+    Ok(snapshot)
 }
 
 fn load_domain_events(connection: &Connection) -> Result<Vec<DomainEvent>, StoreError> {
@@ -3518,6 +3699,7 @@ mod tests {
     use super::*;
     use crate::auth::PasswordBackend;
     use std::{
+        collections::BTreeMap,
         sync::{
             Condvar, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -3525,8 +3707,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use tiamud_core::{
-        ActiveEffect, BackgroundSelection, Direction, EffectKind, EquipmentSlot,
+        ActiveEffect, BackgroundSelection, Direction, EffectKind, EquipmentSlot, ItemInstanceId,
         ItemLocationSnapshot, PlayerAction, RuntimeItemLocation, SessionId, World, WorldError,
+        WorldRuntimeSnapshotV1,
     };
 
     async fn account(store: &SqliteCharacterStore, name: &str) -> AccountSnapshot {
@@ -4222,6 +4405,139 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sqlite_runtime_loader_upgrades_v1_items_without_losing_identity_or_location() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let legacy = WorldRuntimeSnapshotV1 {
+            snapshot_version: 1,
+            revision: 7,
+            logical_tick: 3,
+            rng_state: 42,
+            item_locations: BTreeMap::from([(
+                "legacy:lamp".into(),
+                RuntimeItemLocation::Room {
+                    room_id: "demo:lantern-square".into(),
+                },
+            )]),
+            npcs: BTreeMap::new(),
+            adventure: tiamud_core::AdventureRuntimeSnapshot::default(),
+            progression_flags: Default::default(),
+        };
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 1, ?1, unixepoch())",
+                [serde_json::to_string(&legacy).unwrap()],
+            )
+            .unwrap();
+
+        let upgraded = load_runtime_snapshot(&connection).unwrap().unwrap();
+        assert_eq!(
+            upgraded.snapshot_version,
+            tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION
+        );
+        let item = upgraded
+            .item_instances
+            .get(&ItemInstanceId("legacy:lamp".into()))
+            .unwrap();
+        assert_eq!(item.prototype_id, "legacy:lamp");
+        assert_eq!(
+            item.location,
+            RuntimeItemLocation::Room {
+                room_id: "demo:lantern-square".into()
+            }
+        );
+    }
+
+    #[test]
+    fn sqlite_runtime_loader_rejects_an_unsupported_snapshot_version() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let legacy = serde_json::json!({
+            "snapshotVersion": 99,
+            "revision": 1,
+            "logicalTick": 0,
+            "rngState": 1,
+            "nextItemInstanceSequence": 1,
+            "itemInstances": {},
+            "npcs": {}
+        });
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 99, ?1, unixepoch())",
+                [legacy.to_string()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            load_runtime_snapshot(&connection),
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
+    fn sqlite_runtime_loader_rejects_column_payload_version_mismatch() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let runtime = World::demo().runtime_snapshot();
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 1, ?1, unixepoch())",
+                [serde_json::to_string(&runtime).unwrap()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            load_runtime_snapshot(&connection),
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
+    fn sqlite_runtime_loader_rejects_multibyte_snapshot_above_byte_limit() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let oversized = format!("\"{}\"", "é".repeat(MAX_RUNTIME_JSON_BYTES / 2));
+        assert!(oversized.chars().count() <= MAX_RUNTIME_JSON_BYTES);
+        assert!(oversized.len() > MAX_RUNTIME_JSON_BYTES);
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 2, ?1, unixepoch())",
+                [&oversized],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            load_runtime_snapshot(&connection),
+            Err(StoreError::SnapshotTooLarge {
+                kind: "world runtime",
+                maximum: MAX_RUNTIME_JSON_BYTES
+            })
+        ));
+    }
+
+    #[test]
+    fn startup_owner_gameplay_enforces_the_shared_aggregate_byte_budget() {
+        let json = serde_json::to_string(&CharacterGameplaySnapshot::default()).unwrap();
+        let mut total = MAX_STARTUP_OWNER_GAMEPLAY_BYTES - json.len() + 1;
+
+        assert!(matches!(
+            decode_startup_owner_gameplay(CharacterId(1), &json, &mut total),
+            Err(StoreError::SnapshotTooLarge {
+                kind: "startup owner gameplay",
+                maximum: MAX_STARTUP_OWNER_GAMEPLAY_BYTES
+            })
+        ));
+    }
+
     #[tokio::test]
     async fn gameplay_and_runtime_snapshots_round_trip_together() {
         let store = SqliteCharacterStore::open(":memory:").await.unwrap();
@@ -4240,7 +4556,7 @@ mod tests {
             },
             equipment: std::collections::BTreeMap::from([(
                 EquipmentSlot::Weapon,
-                "demo:blue-lantern".to_owned(),
+                ItemInstanceId("demo:blue-lantern".to_owned()),
             )]),
             effects: vec![ActiveEffect {
                 kind: EffectKind::Strength,
@@ -4269,13 +4585,14 @@ mod tests {
         runtime.logical_tick = 17;
         runtime.adventure.next_weather_tick = 20;
         runtime.adventure.shop_stock.insert("tonic".into(), 18);
-        runtime.item_locations.insert(
-            "demo:blue-lantern".into(),
-            RuntimeItemLocation::Equipped {
-                character_id: character.id,
-                slot: EquipmentSlot::Weapon,
-            },
-        );
+        runtime
+            .item_instances
+            .get_mut(&ItemInstanceId("demo:blue-lantern".into()))
+            .unwrap()
+            .location = RuntimeItemLocation::Equipped {
+            character_id: character.id,
+            slot: EquipmentSlot::Weapon,
+        };
 
         store
             .commit_action(
@@ -4292,6 +4609,16 @@ mod tests {
         assert_eq!(
             store.load_character_gameplay(character.id).await.unwrap(),
             gameplay
+        );
+        assert_eq!(
+            store
+                .load_character_gameplay_batch(vec![character.id])
+                .await
+                .unwrap(),
+            vec![DurableCharacterGameplay {
+                character_id: character.id,
+                gameplay: gameplay.clone(),
+            }]
         );
         assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
     }

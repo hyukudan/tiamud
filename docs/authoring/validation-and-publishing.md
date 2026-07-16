@@ -15,6 +15,9 @@ cargo run --locked -p world-pack --bin tiamud-world -- test \
 
 `validate` checks schema versions, bounds, IDs, references, progression graphs,
 creation combinations, scripts, media records and resolved local assets.
+For objects, media subjects must be prototype IDs and `hiddenItems` keys must be
+instance IDs; the validator rejects the opposite pairing. It also rejects any
+phase-3A transfer policy other than `transferable`.
 `test` runs the document's embedded content expectations. Run both explicitly;
 publishing does not replace content tests or human play review.
 

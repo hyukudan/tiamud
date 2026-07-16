@@ -415,7 +415,14 @@
     {/if}
 
     <details class="dashboard-panel" open>
-      <summary>Inventory <span>{value.inventory.length}</span></summary>
+      <summary>
+        Inventory
+        <span>
+          {value.inventoryCapacity.usedSlots}/{value.inventoryCapacity.maxSlots} slots ·
+          {(value.inventoryCapacity.usedWeightGrams / 1000).toFixed(1)}/
+          {(value.inventoryCapacity.maxWeightGrams / 1000).toFixed(1)} kg
+        </span>
+      </summary>
       <div class="panel-body">
         {#if value.inventory.length === 0 && value.equipment.length === 0}
           <p class="empty-copy">You are carrying nothing.</p>
@@ -425,7 +432,11 @@
           <ul class="dashboard-list inventory-list">
             {#each value.inventory as item (item.id)}
               <li>
-                <div><strong>{item.label}</strong><p>{item.description}</p></div>
+                <div>
+                  <strong>{item.label}</strong>
+                  <p>{item.rarity} · level {item.itemLevel} · {(item.weightGrams / 1000).toFixed(1)} kg</p>
+                  <p>{item.description}</p>
+                </div>
                 <div class="dashboard-actions">
                   {#each item.actions as action (action.command)}
                     <button type="button" onclick={() => perform(action)}>{action.label}</button>
@@ -440,7 +451,10 @@
           <ul class="dashboard-list">
             {#each value.equipment as item (item.slot)}
               <li>
-                <span><small>{item.slot}</small> <strong>{item.label}</strong></span>
+                <span>
+                  <small>{item.slot}</small> <strong>{item.label}</strong>
+                  · {item.rarity} · level {item.itemLevel} · {(item.weightGrams / 1000).toFixed(1)} kg
+                </span>
                 <div class="dashboard-actions">
                   {#each item.actions as action (action.command)}
                     <button type="button" onclick={() => perform(action)}>{action.label}</button>

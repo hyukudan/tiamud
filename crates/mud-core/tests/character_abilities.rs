@@ -20,7 +20,8 @@ const NPC_ID: &str = "test:sentinel";
 fn empty_world() -> World {
     World::from_definition(WorldDefinition {
         start_room_id: ROOM_ID.into(),
-        items: Vec::new(),
+        item_prototypes: Vec::new(),
+        initial_item_instances: Vec::new(),
         rooms: vec![RoomDefinition {
             stable_id: ROOM_ID.into(),
             title: "Test Arena".into(),

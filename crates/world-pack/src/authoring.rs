@@ -10,14 +10,14 @@ use tiamud_scripting::{MAX_MODULES_PER_ROOM_HOOK_BATCH, ScriptLimits, validate_m
 pub use tiamud_scripting::{ScriptCapability, ScriptHook};
 
 use super::{
-    Direction, ValidationError, ValidationErrors, WorldPack, valid_content_addressed_audio_path,
-    valid_relative_asset_path,
+    Direction, EffectRule, EquipmentSlot, ValidationError, ValidationErrors, WorldPack,
+    valid_content_addressed_audio_path, valid_relative_asset_path,
 };
 
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 1_024;
 
-/// A WorldPack v3 plus optional authoring data ignored by older runtime readers.
+/// A WorldPack v4 plus optional authoring data ignored by older runtime readers.
 ///
 /// Keeping the additions at the top level preserves Rust source compatibility for
 /// existing `WorldPack` and `Room` struct literals. Serde's default unknown-field
@@ -151,7 +151,7 @@ impl EntitySpritePoses {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EntityMediaDefinition {
     pub kind: EntityMediaKind,
-    /// Stable item-instance ID for `item`, or stable NPC-spawn ID for `npc`.
+    /// Stable item-prototype ID for `item`, or stable NPC-spawn ID for `npc`.
     pub subject_id: String,
     /// Localized reviewed alternative text. Decorative sprites must omit it.
     #[serde(default, skip_serializing_if = "LocalizedText::is_empty")]
@@ -1102,11 +1102,297 @@ pub enum DocumentToolError {
     Json(#[from] serde_json::Error),
     #[error("WorldPack v2 character progression cannot be normalized safely: {0}")]
     LegacyProgression(String),
+    #[error("legacy WorldPack items cannot be normalized safely: {0}")]
+    LegacyItems(String),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyItem {
+    id: String,
+    name: String,
+    description: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyItemRule {
+    item_id: String,
+    #[serde(default)]
+    equipment_slot: Option<EquipmentSlot>,
+    #[serde(default)]
+    attack_bonus: i32,
+    #[serde(default)]
+    heal_amount: i32,
+    #[serde(default)]
+    consumable: bool,
+    #[serde(default)]
+    effect: Option<EffectRule>,
+}
+
+pub(crate) fn normalize_legacy_items(value: &mut serde_json::Value) -> Result<(), String> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "WorldPack root must be an object".to_owned())?;
+    if root.contains_key("itemPrototypes") || root.contains_key("initialItemInstances") {
+        return Err("legacy schemas cannot also declare native v4 item fields".to_owned());
+    }
+
+    let legacy_items: Vec<LegacyItem> = serde_json::from_value(
+        root.remove("items")
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+    )
+    .map_err(|error| format!("invalid legacy items: {error}"))?;
+    let (legacy_rules, npc_spawns_by_prototype) = {
+        let gameplay = root
+            .entry("gameplay")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| "gameplay must be an object".to_owned())?;
+        let legacy_rules: Vec<LegacyItemRule> = serde_json::from_value(
+            gameplay
+                .remove("itemRules")
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+        )
+        .map_err(|error| format!("invalid legacy item rules: {error}"))?;
+        let mut npc_spawns_by_prototype: HashMap<String, Vec<String>> = HashMap::new();
+        if let Some(spawns) = gameplay
+            .get("npcSpawns")
+            .and_then(serde_json::Value::as_array)
+        {
+            for spawn in spawns {
+                let Some(spawn) = spawn.as_object() else {
+                    continue;
+                };
+                let (Some(id), Some(prototype_id)) = (
+                    spawn.get("id").and_then(serde_json::Value::as_str),
+                    spawn.get("prototypeId").and_then(serde_json::Value::as_str),
+                ) else {
+                    continue;
+                };
+                npc_spawns_by_prototype
+                    .entry(prototype_id.to_owned())
+                    .or_default()
+                    .push(id.to_owned());
+            }
+        }
+        (legacy_rules, npc_spawns_by_prototype)
+    };
+    let mut rules = HashMap::new();
+    for rule in legacy_rules {
+        if rules.insert(rule.item_id.clone(), rule).is_some() {
+            return Err("a legacy item has more than one gameplay rule".to_owned());
+        }
+    }
+
+    let mut locations = HashMap::new();
+    if let Some(rooms) = root
+        .get_mut("rooms")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for room in rooms {
+            let Some(room) = room.as_object_mut() else {
+                continue;
+            };
+            let room_id = room
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let placed = room
+                .remove("items")
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+            let placed = placed
+                .as_array()
+                .ok_or_else(|| format!("room {room_id:?} items must be an array"))?;
+            for item in placed {
+                let item_id = item
+                    .as_str()
+                    .ok_or_else(|| format!("room {room_id:?} has a non-string item id"))?;
+                insert_legacy_location(
+                    &mut locations,
+                    item_id,
+                    serde_json::json!({"kind":"room", "roomId":room_id}),
+                )?;
+            }
+        }
+    }
+
+    if let Some(prototypes) = root
+        .get_mut("gameplay")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|gameplay| gameplay.get_mut("npcPrototypes"))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for prototype in prototypes {
+            let Some(prototype) = prototype.as_object_mut() else {
+                continue;
+            };
+            let prototype_id = prototype
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let loot = prototype
+                .remove("lootItemIds")
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+            let loot = loot
+                .as_array()
+                .ok_or_else(|| format!("NPC prototype {prototype_id:?} loot must be an array"))?;
+            if loot.is_empty() {
+                continue;
+            }
+            let spawns = npc_spawns_by_prototype
+                .get(&prototype_id)
+                .filter(|spawns| spawns.len() == 1)
+                .ok_or_else(|| {
+                    format!(
+                        "NPC prototype {prototype_id:?} with legacy loot must have exactly one spawn"
+                    )
+                })?;
+            for item in loot {
+                let item_id = item.as_str().ok_or_else(|| {
+                    format!("NPC prototype {prototype_id:?} has a non-string loot item id")
+                })?;
+                insert_legacy_location(
+                    &mut locations,
+                    item_id,
+                    serde_json::json!({"kind":"npc_spawn", "npcSpawnId":spawns[0]}),
+                )?;
+            }
+        }
+    }
+
+    let mut seen_items = HashSet::new();
+    let mut item_prototypes = Vec::with_capacity(legacy_items.len());
+    let mut initial_instances = Vec::with_capacity(legacy_items.len());
+    for item in legacy_items {
+        if !seen_items.insert(item.id.clone()) {
+            return Err(format!(
+                "legacy item id {:?} appears more than once",
+                item.id
+            ));
+        }
+        let rule = rules.remove(&item.id).unwrap_or(LegacyItemRule {
+            item_id: item.id.clone(),
+            equipment_slot: None,
+            attack_bonus: 0,
+            heal_amount: 0,
+            consumable: false,
+            effect: None,
+        });
+        let location = locations
+            .remove(&item.id)
+            .ok_or_else(|| format!("legacy item {:?} has no unique initial location", item.id))?;
+        item_prototypes.push(serde_json::json!({
+            "id": item.id,
+            "name": item.name,
+            "description": item.description,
+            "aliases": item.aliases,
+            "equipmentSlot": rule.equipment_slot,
+            "attackBonus": rule.attack_bonus,
+            "healAmount": rule.heal_amount,
+            "consumable": rule.consumable,
+            "effect": rule.effect,
+            "weightGrams": 0,
+            "slotCost": 1,
+            "rarity": "common",
+            "itemLevel": 1,
+            "stackPolicy": "unique",
+            "transferPolicy": "transferable"
+        }));
+        initial_instances.push(serde_json::json!({
+            "id": item.id,
+            "prototypeId": item.id,
+            "location": location
+        }));
+    }
+    if let Some(item_id) = rules.keys().next() {
+        return Err(format!(
+            "legacy item rule references missing item {item_id:?}"
+        ));
+    }
+    if let Some(item_id) = locations.keys().next() {
+        return Err(format!(
+            "legacy placement references missing item {item_id:?}"
+        ));
+    }
+    root.insert(
+        "itemPrototypes".to_owned(),
+        serde_json::Value::Array(item_prototypes),
+    );
+    root.insert(
+        "initialItemInstances".to_owned(),
+        serde_json::Value::Array(initial_instances),
+    );
+    Ok(())
+}
+
+fn insert_legacy_location(
+    locations: &mut HashMap<String, serde_json::Value>,
+    item_id: &str,
+    location: serde_json::Value,
+) -> Result<(), String> {
+    if locations.insert(item_id.to_owned(), location).is_some() {
+        return Err(format!(
+            "legacy item {item_id:?} has more than one initial location"
+        ));
+    }
+    Ok(())
+}
+
+fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), String> {
+    let Some(root) = value.as_object() else {
+        return Ok(());
+    };
+    if root.contains_key("items")
+        || root
+            .get("gameplay")
+            .is_some_and(|gameplay| gameplay.get("itemRules").is_some())
+    {
+        return Err("WorldPack v4 must use itemPrototypes and initialItemInstances".to_owned());
+    }
+    if root
+        .get("rooms")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
+    {
+        return Err("WorldPack v4 rooms cannot declare legacy items".to_owned());
+    }
+    if root
+        .get("gameplay")
+        .and_then(|gameplay| gameplay.get("npcPrototypes"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|prototypes| {
+            prototypes
+                .iter()
+                .any(|prototype| prototype.get("lootItemIds").is_some())
+        })
+    {
+        return Err("WorldPack v4 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+    }
+    Ok(())
 }
 
 impl WorldPackDocument {
     pub fn from_json(bytes: &[u8]) -> Result<Self, DocumentToolError> {
-        let mut document: Self = serde_json::from_slice(bytes)?;
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+        let legacy_schema = value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|version| version == 2 || version == 3);
+        if legacy_schema {
+            normalize_legacy_items(&mut value).map_err(DocumentToolError::LegacyItems)?;
+        } else if value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            == Some(u64::from(crate::CURRENT_SCHEMA_VERSION))
+        {
+            reject_native_legacy_item_fields(&value).map_err(DocumentToolError::LegacyItems)?;
+        }
+        let mut document: Self = serde_json::from_value(value)?;
         if document.world.schema_version == 2 {
             document.world.gameplay.character_progression =
                 crate::progression::normalize_v2_character_progression(
@@ -1114,6 +1400,8 @@ impl WorldPackDocument {
                     document.world.gameplay.default_archetype_id.take(),
                 )
                 .map_err(DocumentToolError::LegacyProgression)?;
+        }
+        if legacy_schema {
             document.world.schema_version = crate::CURRENT_SCHEMA_VERSION;
         }
         Ok(document)
@@ -1192,9 +1480,15 @@ impl WorldPackDocument {
         }
         let item_ids = self
             .world
-            .items
+            .initial_item_instances
             .iter()
             .map(|item| item.id.as_str())
+            .collect::<HashSet<_>>();
+        let item_prototype_ids = self
+            .world
+            .item_prototypes
+            .iter()
+            .map(|prototype| prototype.id.as_str())
             .collect::<HashSet<_>>();
         let npc_spawn_ids = self
             .world
@@ -1214,13 +1508,13 @@ impl WorldPackDocument {
                 continue;
             }
             let subject_exists = match media.kind {
-                EntityMediaKind::Item => item_ids.contains(media.subject_id.as_str()),
+                EntityMediaKind::Item => item_prototype_ids.contains(media.subject_id.as_str()),
                 EntityMediaKind::Npc => npc_spawn_ids.contains(media.subject_id.as_str()),
             };
             if !subject_exists {
                 invalid_entity_media(
                     media,
-                    "the referenced item instance or NPC spawn does not exist",
+                    "the referenced item prototype or NPC spawn does not exist",
                     &mut errors,
                 );
             }
@@ -1462,7 +1756,7 @@ impl WorldPackDocument {
 
         let item_names: HashMap<&str, &str> = self
             .world
-            .items
+            .item_prototypes
             .iter()
             .map(|item| (item.id.as_str(), item.name.as_str()))
             .collect();
@@ -1495,10 +1789,22 @@ impl WorldPackDocument {
                         .and_then(|media| media.audio.clone())
                 }),
             exits: room.exits.iter().map(|exit| exit.direction).collect(),
-            items: room
-                .items
+            items: self
+                .world
+                .initial_item_instances
                 .iter()
-                .filter_map(|id| item_names.get(id.as_str()).map(ToString::to_string))
+                .filter(|instance| {
+                    matches!(
+                        &instance.location,
+                        crate::InitialItemLocation::Room { room_id: item_room_id }
+                            if item_room_id == room_id
+                    )
+                })
+                .filter_map(|instance| {
+                    item_names
+                        .get(instance.prototype_id.as_str())
+                        .map(ToString::to_string)
+                })
                 .collect(),
         })
     }
@@ -1622,22 +1928,27 @@ impl WorldPackDocument {
                 self.world.rooms.iter().map(|room| (&room.id, room)),
                 other.world.rooms.iter().map(|room| (&room.id, room)),
             ),
-            items: diff_entities(
-                self.world.items.iter().map(|item| (&item.id, item)),
-                other.world.items.iter().map(|item| (&item.id, item)),
-            ),
-            item_rules: diff_entities(
+            item_prototypes: diff_entities(
                 self.world
-                    .gameplay
-                    .item_rules
+                    .item_prototypes
                     .iter()
-                    .map(|rule| (&rule.item_id, rule)),
+                    .map(|item| (&item.id, item)),
                 other
                     .world
-                    .gameplay
-                    .item_rules
+                    .item_prototypes
                     .iter()
-                    .map(|rule| (&rule.item_id, rule)),
+                    .map(|item| (&item.id, item)),
+            ),
+            initial_item_instances: diff_entities(
+                self.world
+                    .initial_item_instances
+                    .iter()
+                    .map(|instance| (&instance.id, instance)),
+                other
+                    .world
+                    .initial_item_instances
+                    .iter()
+                    .map(|instance| (&instance.id, instance)),
             ),
             npc_prototypes: diff_entities(
                 self.world
@@ -1731,24 +2042,20 @@ impl WorldPackDocument {
         }
         document
             .world
-            .items
+            .item_prototypes
             .sort_by(|left, right| left.id.cmp(&right.id));
-        for item in &mut document.world.items {
+        for item in &mut document.world.item_prototypes {
             item.aliases.sort();
         }
         document
             .world
-            .gameplay
-            .item_rules
-            .sort_by(|left, right| left.item_id.cmp(&right.item_id));
+            .initial_item_instances
+            .sort_by(|left, right| left.id.cmp(&right.id));
         document
             .world
             .gameplay
             .npc_prototypes
             .sort_by(|left, right| left.id.cmp(&right.id));
-        for prototype in &mut document.world.gameplay.npc_prototypes {
-            prototype.loot_item_ids.sort();
-        }
         document
             .world
             .gameplay
@@ -1789,7 +2096,6 @@ impl WorldPackDocument {
             .rooms
             .sort_by(|left, right| left.id.cmp(&right.id));
         for room in &mut document.world.rooms {
-            room.items.sort();
             room.exits
                 .sort_by_key(|exit| direction_rank(exit.direction));
         }
@@ -2210,8 +2516,8 @@ pub struct WorldPackDiff {
     pub entity_media: EntityDiff,
     pub room_perception: EntityDiff,
     pub rooms: EntityDiff,
-    pub items: EntityDiff,
-    pub item_rules: EntityDiff,
+    pub item_prototypes: EntityDiff,
+    pub initial_item_instances: EntityDiff,
     pub npc_prototypes: EntityDiff,
     pub npc_spawns: EntityDiff,
     pub archetypes: EntityDiff,
@@ -2229,8 +2535,8 @@ impl WorldPackDiff {
             && self.entity_media.is_empty()
             && self.room_perception.is_empty()
             && self.rooms.is_empty()
-            && self.items.is_empty()
-            && self.item_rules.is_empty()
+            && self.item_prototypes.is_empty()
+            && self.initial_item_instances.is_empty()
             && self.npc_prototypes.is_empty()
             && self.npc_spawns.is_empty()
             && self.archetypes.is_empty()
@@ -2254,8 +2560,12 @@ impl fmt::Display for WorldPackDiff {
         write_entity_diff(formatter, "entity media", &self.entity_media)?;
         write_entity_diff(formatter, "room perception", &self.room_perception)?;
         write_entity_diff(formatter, "rooms", &self.rooms)?;
-        write_entity_diff(formatter, "items", &self.items)?;
-        write_entity_diff(formatter, "item rules", &self.item_rules)?;
+        write_entity_diff(formatter, "item prototypes", &self.item_prototypes)?;
+        write_entity_diff(
+            formatter,
+            "initial item instances",
+            &self.initial_item_instances,
+        )?;
         write_entity_diff(formatter, "NPC prototypes", &self.npc_prototypes)?;
         write_entity_diff(formatter, "NPC spawns", &self.npc_spawns)?;
         write_entity_diff(formatter, "archetypes", &self.archetypes)?;
@@ -2350,7 +2660,10 @@ impl ContentTestReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CURRENT_SCHEMA_VERSION, Exit, ExitTarget, Item, Room};
+    use crate::{
+        CURRENT_SCHEMA_VERSION, Exit, ExitTarget, InitialItemInstance, InitialItemLocation,
+        ItemPrototype, ItemRarity, ItemStackPolicy, ItemTransferPolicy, Room,
+    };
 
     fn room(id: &str, title: &str) -> Room {
         Room {
@@ -2360,14 +2673,12 @@ mod tests {
             description: format!("A complete description of {title}."),
             asset_manifest: None,
             exits: Vec::new(),
-            items: Vec::new(),
             legacy: None,
         }
     }
 
     fn document() -> WorldPackDocument {
         let mut square = room("demo:square", "Lantern Square");
-        square.items.push("demo:lantern".into());
         square.exits.push(Exit {
             direction: Direction::North,
             target: ExitTarget::Room {
@@ -2394,11 +2705,29 @@ mod tests {
                 name: "Demo".into(),
                 start_room_id: "demo:square".into(),
                 source: None,
-                items: vec![Item {
+                item_prototypes: vec![ItemPrototype {
                     id: "demo:lantern".into(),
                     name: "blue lantern".into(),
                     description: "A cold blue lantern.".into(),
                     aliases: vec!["lamp".into(), "lantern".into()],
+                    equipment_slot: None,
+                    attack_bonus: 0,
+                    heal_amount: 0,
+                    consumable: false,
+                    effect: None,
+                    weight_grams: 500,
+                    slot_cost: 1,
+                    rarity: ItemRarity::Common,
+                    item_level: 1,
+                    stack_policy: ItemStackPolicy::Unique,
+                    transfer_policy: ItemTransferPolicy::Transferable,
+                }],
+                initial_item_instances: vec![InitialItemInstance {
+                    id: "demo:lantern".into(),
+                    prototype_id: "demo:lantern".into(),
+                    location: InitialItemLocation::Room {
+                        room_id: "demo:square".into(),
+                    },
                 }],
                 rooms: vec![square, gate],
                 gameplay: crate::GameplayDefinition::default(),
@@ -2668,6 +2997,60 @@ mod tests {
     }
 
     #[test]
+    fn v3_items_normalize_to_typed_v4_identity_without_duplicate_authorities() {
+        let legacy = serde_json::json!({
+            "schemaVersion": 3,
+            "id": "legacy",
+            "name": "Legacy",
+            "startRoomId": "legacy:start",
+            "items": [{
+                "id": "legacy:blade",
+                "name": "blade",
+                "description": "A legacy blade.",
+                "aliases": ["sword"]
+            }],
+            "rooms": [{
+                "id": "legacy:start",
+                "title": "Start",
+                "description": "A starting room.",
+                "items": ["legacy:blade"]
+            }],
+            "gameplay": {
+                "itemRules": [{
+                    "itemId": "legacy:blade",
+                    "equipmentSlot": "weapon",
+                    "attackBonus": 4
+                }]
+            }
+        });
+        let document = WorldPackDocument::from_json(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        document.validate().unwrap();
+        assert_eq!(document.world.schema_version, crate::CURRENT_SCHEMA_VERSION);
+        assert_eq!(document.world.item_prototypes[0].id, "legacy:blade");
+        assert_eq!(document.world.initial_item_instances[0].id, "legacy:blade");
+        assert_eq!(
+            document.world.initial_item_instances[0].prototype_id,
+            "legacy:blade"
+        );
+        assert_eq!(document.world.item_prototypes[0].attack_bonus, 4);
+
+        let artifact = document.deterministic_artifact().unwrap();
+        let artifact: serde_json::Value = serde_json::from_slice(&artifact).unwrap();
+        assert!(artifact.get("items").is_none());
+        assert!(artifact["rooms"][0].get("items").is_none());
+        assert!(artifact["gameplay"].get("itemRules").is_none());
+    }
+
+    #[test]
+    fn v4_rejects_legacy_item_authorities() {
+        let mut native = serde_json::to_value(document()).unwrap();
+        native["rooms"][0]["items"] = serde_json::json!(["demo:lantern"]);
+        let error =
+            WorldPackDocument::from_json(&serde_json::to_vec(&native).unwrap()).unwrap_err();
+        assert!(matches!(error, DocumentToolError::LegacyItems(_)));
+    }
+
+    #[test]
     fn scene_resolution_never_exposes_variant_ids_or_conditions() {
         let mut document = document();
         add_variants(&mut document);
@@ -2832,7 +3215,7 @@ mod tests {
         add_variants(&mut left);
         let mut right = left.clone();
         right.world.rooms.reverse();
-        right.world.items[0].aliases.reverse();
+        right.world.item_prototypes[0].aliases.reverse();
         right.scene_variants[0].variants.reverse();
         if let Some(Condition::All(conditions)) = &mut right.scene_variants[0].variants[0].when {
             conditions.reverse();
@@ -2906,14 +3289,7 @@ mod tests {
         let before = document();
         let mut after = before.clone();
         add_variants(&mut after);
-        after.world.gameplay.item_rules.push(crate::ItemRule {
-            item_id: "demo:lantern".into(),
-            equipment_slot: Some(crate::EquipmentSlot::Trinket),
-            attack_bonus: 0,
-            heal_amount: 0,
-            consumable: false,
-            effect: None,
-        });
+        after.world.item_prototypes[0].equipment_slot = Some(crate::EquipmentSlot::Trinket);
         after.world.rooms[0].description.push_str(" Changed.");
         after.content_tests.push(ContentTest {
             name: "smoke".into(),
@@ -2927,7 +3303,7 @@ mod tests {
         let diff = before.diff(&after).unwrap();
         assert_eq!(diff.rooms.changed, ["demo:square"]);
         assert_eq!(diff.scene_variants.added, ["demo:square"]);
-        assert_eq!(diff.item_rules.added, ["demo:lantern"]);
+        assert_eq!(diff.item_prototypes.changed, ["demo:lantern"]);
         assert_eq!(diff.content_tests.added, ["smoke"]);
         assert!(diff.to_string().contains("scene variants: + demo:square"));
     }
@@ -2987,6 +3363,26 @@ mod tests {
         invalid.entity_media[0].poses.idle.webp = Some("https://evil.invalid/sprite.webp".into());
         let error = format!("{:?}", invalid.validate().unwrap_err().0);
         assert!(error.contains("idle webp path must be assets/"));
+    }
+
+    #[test]
+    fn item_media_targets_a_reusable_prototype_while_perception_targets_an_instance() {
+        let mut document = document();
+        document.world.initial_item_instances[0].id = "demo:lantern:one".into();
+        document.entity_media.push(lantern_media());
+        document.room_perception.push(RoomPerceptionDefinition {
+            room_id: "demo:square".into(),
+            light: LightLevel::Bright,
+            hidden_items: BTreeMap::from([("demo:lantern:one".into(), 20)]),
+            hidden_npcs: BTreeMap::new(),
+            secret_exits: BTreeMap::new(),
+        });
+
+        document.validate().unwrap();
+
+        document.entity_media[0].subject_id = "demo:lantern:one".into();
+        let error = format!("{:?}", document.validate().unwrap_err().0);
+        assert!(error.contains("item prototype or NPC spawn does not exist"));
     }
 
     #[test]

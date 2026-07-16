@@ -48,9 +48,9 @@ y orquestación no son objetivo sin carga medida que lo justifique.
 
 ## Datos de mundo y autoría
 
-WorldPack v3 es el objetivo canónico. AreaPack v2 permite composición modular
-estricta. WorldPack v2, AreaPack v1 y Envy/Merc se normalizan al importar o
-componer; el dominio v3 no conserva vocabulario heredado.
+WorldPack v4 es el objetivo canónico. AreaPack v3 permite composición modular
+estricta. WorldPack v3/v2, AreaPack v2/v1 y Envy/Merc se normalizan al importar
+o componer; el dominio no conserva vocabulario heredado.
 
 Propiedades obligatorias:
 
@@ -64,6 +64,54 @@ Propiedades obligatorias:
 
 Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
+
+### Objetos e inventario 3A
+
+WorldPack v4 separa `itemPrototypes`, que contienen contenido y reglas
+reutilizables, de `initialItemInstances`, que asignan cada unidad durable a una
+sala, un `npc_spawn` o `staged`. En runtime `ItemInstanceId` es una cadena
+tipada interna; las instancias nuevas usan una secuencia monotónica incluida en
+checkpoint, rollback y snapshot. Los clientes nunca reciben esa identidad ni
+`prototypeId`: Web, Telnet y GMCP operan con IDs opacos derivados de una sal
+criptográficamente aleatoria nueva por sesión. Telnet muestra la referencia de
+cada unidad visible o portada y permite emplearla como selector exacto.
+
+`entityMedia(kind=item)` referencia un prototipo reusable; el servidor aplica
+esa presentación solo a sus instancias ya visibles. En cambio,
+`roomPerception.hiddenItems` referencia la instancia concreta y no cambia la
+visibilidad de las demás unidades del mismo prototipo.
+
+Cada prototipo declara peso, coste de slot, rareza cerrada
+`common|uncommon|rare|epic|legendary`, `itemLevel`, política de pila y política
+de transferencia. La fase 3A acepta solo `unique` y `transferable`; los valores
+`character_bound` y `non_transferable` están definidos pero se rechazan como
+reservados hasta que 3C ejecute sus reglas. No hay pilas. Cada personaje tiene
+límites de slots y peso. El peso incluye inventario
+y equipo; los slots cuentan las unidades portadas, por lo que equipar libera
+slots y desequipar debe reservarlos. Take, unequip, reemplazo de equipo y
+concesiones de script prevalidan la operación completa y fallan sin mutación si
+excede capacidad.
+
+Rareza, nivel y peso aparecen como texto en escena, inventario y equipo. El
+color nunca es la única señal. La capacidad se calcula exclusivamente en el
+servidor y se proyecta como uso/máximo.
+
+`WorldRuntimeSnapshot` v2 conserva `itemInstances` y el siguiente contador. La
+lectura de v1 pasa por un DTO y una conversión explícitos; referencias
+huérfanas, ubicaciones incompatibles o contadores inválidos bloquean el
+arranque. La restauración conserva instancias iniciales nuevas del WorldPack
+actual y superpone el estado durable, sin resucitar instancias runtime ausentes
+del snapshot. Antes de abrir listeners se leen por lotes, se validan y se
+descartan los agregados de propietarios conectados o desconectados: existencia,
+equipo y capacidad deben concordar con las ubicaciones de instancia. En 3A ese
+snapshot acotado sigue siendo la única autoridad durable:
+SQLite y PostgreSQL lo confirman en su transacción de esquema v10 junto con los
+demás cambios. No hay tabla espejo ni esquema v11.
+
+Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
+WorldPack, 65.536 instancias runtime, 1 MiB para el snapshot y 1 MiB agregado
+para las fichas de propietarios inspeccionadas al arrancar; cada ficha tiene un
+máximo de 64 KiB.
 
 ## Modelo de personaje
 
@@ -202,12 +250,12 @@ Web expone acciones estructuradas estrictas equivalentes. Telnet usa el mismo
 analizador; los anuncios llegan como `announcement` en texto, Web
 `chat.message` y GMCP `Comm.Channel.Text`.
 
-Los IDs de objeto describen objetos únicos con ubicación autoritativa. Los NPC
-poseen botín fijo validado y lo transfieren al morir. No hay split prototipo/
-instancia reutilizable, pilas, capacidad/peso, contenedores, give/trade,
-rareza/nivel, afijos ni tablas ponderadas. Las recompensas repetibles necesitan
-identidad durable y derechos de botín. Cajas de botín pagadas o tiradas con
-moneda prémium quedan fuera del baseline.
+Los objetos separan prototipo reutilizable e instancia durable con ubicación
+autoritaria. Los NPC poseen instancias de botín fijo validadas y las
+transfieren al morir. Capacidad por slots/peso, rareza textual y `itemLevel`
+están implementados. Faltan pilas, contenedores, give/trade, afijos, propiedad y
+reparto de grupo, procedencia de drops repetibles y tablas ponderadas. Cajas de
+botín pagadas o tiradas con moneda prémium quedan fuera del baseline.
 
 Consulta la [hoja de ruta social/staff/botín](design/social-staff-and-loot-roadmap.md).
 
@@ -252,9 +300,9 @@ aplazados.
 
 ## Protocolo
 
-`tiamud.v1` WebSocket sigue experimental. Clientes reciben IDs opacos salados,
-revisiones y secuencias por sesión. Texto y percepción preceden cada
-representación.
+`tiamud.v1` WebSocket sigue experimental. Clientes reciben IDs opacos derivados
+de una sal criptográficamente aleatoria nueva por sesión, además de revisiones
+y secuencias por sesión. Texto y percepción preceden cada representación.
 
 Salvaguardas implementadas:
 
@@ -285,7 +333,7 @@ secuencia ni se infieren de prosa. Referencia:
 | --- | --- |
 | Combate y habilidades acotadas | Baseline implementado y probado |
 | Límites acumulados y nivel sin relleno | Implementado y probado |
-| WorldPack v3, validador, normalizador y catálogo | Integrado en servidor |
+| WorldPack v4/AreaPack v3, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v3/v2 y AreaPack v2/v1 se normalizan |
 | Linaje/clase/talento/promoción y persistencia | Implementado y probado |
 | Creación v3 navegador/Telnet | Default/none/explícito implementado |
 | Ficha, talentos y promociones web | Implementado y probado |
@@ -295,8 +343,17 @@ secuencia ni se infieren de prosa. Referencia:
 | Sidecar de entidades seguro | Implementado; sin sprites de muestra |
 | Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
 | Social fase 1 y esquema v10 | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v10 aún no retenida |
-| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; gates integrados aún no registrados aquí |
+| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v10 aún no retenida |
+| Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Protocolo atómico de delta denso | Pendiente |
+
+En el árbol integrado de fase 3A pasan formato, pruebas bloqueadas del workspace
+y clippy estricto; 77 pruebas de core, 80 de WorldPack, 28 del importador y 195
+del servidor; `svelte-check` sin errores ni avisos, 100/100 pruebas web y build;
+30/30 escenarios Playwright soportados; y las comprobaciones de licencias y
+avisos generados para 307 dependencias Rust y 76 web. No se ejecutaron
+PostgreSQL real v10, WebKit local ni soak de 24 horas. Estas puertas locales no
+demuestran por sí solas publicación o CI.
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
 cuando las puertas de integración cambien.

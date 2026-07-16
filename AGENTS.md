@@ -71,6 +71,13 @@ matriz, memoria y documentación pública a la vez.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
+- `WorldRuntimeSnapshot` v2 es la única autoridad durable de las instancias de
+  objeto. SQLite y PostgreSQL la confirman con personajes/eventos en su
+  transacción existente; no hay esquema v11 ni tabla espejo. La lectura v1
+  usa una migración explícita y falla cerrada ante referencias o contador
+  inválidos. Al restaurar un snapshot anterior se conservan las nuevas
+  instancias iniciales del WorldPack y se superponen las ubicaciones durables;
+  una instancia creada en runtime que no esté en el snapshot no reaparece.
 - Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
   sufijo diagnóstico cubierto de 10.000 secuencias.
 - Autenticación registrada compartida entre web y Telnet. Trabajo Argon2id,
@@ -79,15 +86,17 @@ matriz, memoria y documentación pública a la vez.
 
 ### Mundo, personajes y juego
 
-- WorldPack v3 es canónico; AreaPack v2 es la autoría modular nativa.
-  WorldPack v2, AreaPack v1 y Envy/Merc solo entran por normalización/importación.
+- WorldPack v4 es canónico; AreaPack v3 es la autoría modular nativa.
+  WorldPack v3/v2, AreaPack v2/v1 y Envy/Merc solo entran por
+  normalización/importación.
 - Se valida y carga un WorldPack completo antes de abrir listeners.
   `TIAMUD_WORLD_PACK` selecciona uno externo revisado; si no, se usa el
   embebido.
 - `tiamud-world compose` realiza composición modular determinista sin conexión.
   Carga/reemplazo caliente y expulsión LRU **no están implementados**. ADR 0005
   es diseño futuro.
-- El modelo v3 funciona de extremo a extremo: linaje, trasfondo opcional, clase
+- El modelo de personaje v3 funciona de extremo a extremo dentro de WorldPack
+  v4: linaje, trasfondo opcional, clase
   base/avanzada, XP global, clase activa, historial, reservas, talentos con
   rango y promoción atómica.
 - `archetype` no es identidad canónica. Normalízalo en la frontera; no crees un
@@ -101,8 +110,21 @@ matriz, memoria y documentación pública a la vez.
   respaldo. No hay IA generativa en ejecución.
 - Objetos/equipo, combate, derrota/recuperación, botín fijo, tiempo, clima,
   misiones, grupos, economía, conversación y moderación persisten en ambos
-  adaptadores. No amplíes la afirmación: no hay telepatía definida por el
-  mundo, tiers/rareza ni tablas de botín aleatorias.
+  adaptadores. Los objetos separan `itemPrototypes` de instancias durables;
+  cada personaje tiene capacidad autoritativa por slots/peso y rareza cerrada
+  `common|uncommon|rare|epic|legendary` más `itemLevel` textual en Web, Telnet
+  y GMCP. Los clientes solo reciben IDs opacos distintos por instancia,
+  derivados de una sal criptográficamente aleatoria nueva por sesión. Telnet
+  muestra la referencia opaca y permite usarla en comandos. En autoría,
+  `entityMedia(kind=item)` referencia el prototipo reusable, mientras
+  `roomPerception.hiddenItems` referencia la instancia concreta. En 3A solo
+  se acepta `transferable`. No
+  amplíes la afirmación: no hay telepatía definida por el mundo, pilas,
+  contenedores, give/trade, reparto de grupo ni tablas de botín aleatorias.
+- El arranque enumera de forma acotada los personajes que poseen instancias,
+  carga temporalmente sus agregados y valida existencia, equipo y capacidad,
+  incluidos los desconectados. Esos agregados no quedan retenidos como
+  personajes conectados. Una incoherencia bloquea listeners.
 - Los grupos admiten hasta seis miembros y soportan
   create/invite/accept/revoke/kick/transfer/disband/leave/status y `party say`
   (`gsay`/`gtell`). No hay follow/assist/rescue, selección general de aliados,
@@ -144,7 +166,8 @@ matriz, memoria y documentación pública a la vez.
 - Las acciones producen hechos persistentes; percepción proyecta después
   escena, jugador y eventos específicos del observador.
 - IDs estables, variantes secretas y contenido oculto quedan en el servidor.
-  Los clientes reciben IDs opacos y salados por sesión.
+  Los clientes reciben IDs opacos derivados de una sal criptográficamente
+  aleatoria nueva por sesión.
 - El texto contiene todos los hechos jugables. Imágenes, audio, ANSI, gráficos
   y composición son solo presentación.
 - `tiamud.v1` experimental usa secuencias monótonas, deduplicación acotada,
@@ -190,6 +213,21 @@ matriz, memoria y documentación pública a la vez.
   proveedor predeterminado; endpoints locales usan loopback y remotos HTTPS.
   Ningún borrador se publica sin validación y revisión humana.
 
+### Evidencia actual de fase 3A
+
+El árbol integrado de inventario 3A supera formato, pruebas bloqueadas del
+workspace y clippy estricto. Las suites enfocadas pasan 77 pruebas de core, 80
+de WorldPack, 28 del importador y 195 de `tiamud-server`; la web pasa
+`svelte-check` con 0 errores/avisos, 100/100 unitarias, build y 30/30 escenarios
+Playwright soportados (15 Chromium y 15 Firefox). Licencias y avisos generados
+de 307 dependencias Rust y 76 web también pasan. La suite Node del harness pasa;
+humo, carga CI exacta de 16 usuarios
+(16 bootstraps/32 rondas, 15 WebSocket + uno Telnet) y soak corto de 30 s con
+dos usuarios (64 rondas, readiness 8/8) terminan sin errores y con todos los
+veredictos en `pass`. No se ejecutaron PostgreSQL real v10, WebKit local ni soak
+de 24 horas. La evidencia operacional procede de un árbol dirty precommit: es
+diagnóstico local, no evidencia publicable ni de CI.
+
 ### Evidencia histórica retenida
 
 La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
@@ -232,8 +270,9 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 9. Autoridad de staff separada de XP, nivel, clase y talentos. Usa la capacidad
    concreta y auditoría append-only; perfiles y títulos son asignación/presentación,
    no autorización implícita.
-10. Antes de botín repetible/aleatorio, separa prototipo e instancia y define
-    propiedad/reparto atómicos. Cajas, llaves y tiradas pagadas quedan fuera.
+10. La fase 3A ya separa prototipo/instancia y aplica capacidad. Antes de botín
+    repetible/aleatorio, define propiedad, procedencia y reparto atómicos.
+    Cajas, llaves y tiradas pagadas quedan fuera.
 11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
     conservando snapshot atómico.
 12. No afirmes áreas calientes actuales, producción pública, WebKit actual,
@@ -337,7 +376,7 @@ actual Chromium/Firefox funcionan; WebKit carece de bibliotecas GTK/GStreamer.
 ```sh
 bash scripts/verify-project-licenses.sh
 node scripts/generate-third-party-notices.mjs --check
-node --test scripts/verify-soak-report.test.mjs scripts/telnet-bot.test.mjs
+node --test scripts/bot.test.mjs scripts/verify-soak-report.test.mjs scripts/telnet-bot.test.mjs
 node scripts/smoke.mjs
 node scripts/load.mjs --users 2 --telnet-users 1 --rounds 2 \
   --concurrency 2 --pace-ms 100
@@ -379,8 +418,9 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - fase social 1 implementada, pero sin correo/historial, shout/yell o telepatía;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
-- sin tiers/rareza, prototipos repetibles, stacks, contenedores, trade o botín
-  aleatorio;
+- fase 3A de inventario implementada: prototipos/instancias, creación durable,
+  capacidad por slots/peso, rareza e `itemLevel`; sin stacks, contenedores,
+  give/trade, derechos/reparto ni botín aleatorio;
 - backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;
 - marca/dominios y derechos de terceros siguen siendo trabajo legal externo.
 

@@ -2,35 +2,62 @@ use std::collections::HashSet;
 
 use tiamud_core::{
     AccountId, ActiveEffect, CharacterId, CharacterSnapshot, Direction, EconomyAction, EffectKind,
-    EquipmentSlot, ItemDefinition, ItemGameplayDefinition, PlayerAction, RoomDefinition,
-    RuntimeItemLocation, SessionId, World, WorldDefinition,
+    EquipmentSlot, InitialItemInstanceDefinition, InitialItemLocation, ItemGameplayDefinition,
+    ItemInstanceId, ItemPrototypeDefinition, ItemRarity, ItemStackPolicy, ItemTransferPolicy,
+    PlayerAction, RoomDefinition, RuntimeItemLocation, SessionId, World, WorldDefinition,
 };
 
 const ITEM_COUNT: usize = 3;
 
 fn property_world() -> (World, SessionId) {
+    let prototype =
+        |id: &str, name: &str, description: &str, alias: &str| ItemPrototypeDefinition {
+            prototype_id: id.into(),
+            name: name.into(),
+            description: description.into(),
+            aliases: vec![alias.into()],
+            equipment_slot: None,
+            attack_bonus: 0,
+            heal_amount: 0,
+            consumable: false,
+            effect: None,
+            weight_grams: 1_000,
+            slot_cost: 1,
+            rarity: ItemRarity::Common,
+            item_level: 1,
+            stack_policy: ItemStackPolicy::Unique,
+            transfer_policy: ItemTransferPolicy::Transferable,
+        };
     let mut world = World::from_definition(WorldDefinition {
         start_room_id: "property:market".into(),
-        items: vec![
-            ItemDefinition {
-                stable_id: "property:sword".into(),
-                name: "test sword".into(),
-                description: "A sword used to exercise equipment invariants.".into(),
-                aliases: vec!["sword".into()],
-            },
-            ItemDefinition {
-                stable_id: "property:charm".into(),
-                name: "test charm".into(),
-                description: "A reusable charm used to exercise effect bounds.".into(),
-                aliases: vec!["charm".into()],
-            },
-            ItemDefinition {
-                stable_id: "property:potion".into(),
-                name: "test potion".into(),
-                description: "A consumable used to exercise item transitions.".into(),
-                aliases: vec!["potion".into()],
-            },
+        item_prototypes: vec![
+            prototype(
+                "property:sword",
+                "test sword",
+                "A sword used to exercise equipment invariants.",
+                "sword",
+            ),
+            prototype(
+                "property:charm",
+                "test charm",
+                "A reusable charm used to exercise effect bounds.",
+                "charm",
+            ),
+            prototype(
+                "property:potion",
+                "test potion",
+                "A consumable used to exercise item transitions.",
+                "potion",
+            ),
         ],
+        initial_item_instances: ["property:sword", "property:charm", "property:potion"]
+            .into_iter()
+            .map(|id| InitialItemInstanceDefinition {
+                instance_id: ItemInstanceId(id.into()),
+                prototype_id: id.into(),
+                location: InitialItemLocation::Room("property:market".into()),
+            })
+            .collect(),
         rooms: vec![RoomDefinition {
             stable_id: "property:market".into(),
             title: "Property Market".into(),
@@ -130,10 +157,13 @@ fn assert_domain_invariants(world: &World, session: SessionId) {
     assert_eq!(equipped.len(), gameplay.equipment.len());
 
     let runtime = world.runtime_snapshot();
-    assert_eq!(runtime.item_locations.len(), ITEM_COUNT);
+    assert_eq!(runtime.item_instances.len(), ITEM_COUNT);
     for (slot, item_id) in &gameplay.equipment {
         assert_eq!(
-            runtime.item_locations.get(item_id),
+            runtime
+                .item_instances
+                .get(item_id)
+                .map(|instance| &instance.location),
             Some(&RuntimeItemLocation::Equipped {
                 character_id: CharacterId(1),
                 slot: *slot,

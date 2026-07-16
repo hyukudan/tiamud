@@ -37,7 +37,13 @@ pub use progression::{
     RequirementPredicate, TalentGraphDefinition, TalentNodeDefinition, TalentRankDefinition,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const MAX_ITEM_PROTOTYPES: usize = 1_024;
+pub const MAX_INITIAL_ITEM_INSTANCES: usize = 8_192;
+pub const MAX_ITEM_ALIASES: usize = 32;
+pub const MAX_ITEM_WEIGHT_GRAMS: u32 = 1_000_000;
+pub const MAX_ITEM_SLOT_COST: u16 = 100;
+pub const MAX_ITEM_LEVEL: u16 = 1_000;
 pub const MAX_ARCHETYPES: usize = 32;
 pub const MAX_ABILITIES: usize = 512;
 pub const MAX_NPC_ABILITY_SETS: usize = 512;
@@ -67,7 +73,9 @@ pub struct WorldPack {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub items: Vec<Item>,
+    pub item_prototypes: Vec<ItemPrototype>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_item_instances: Vec<InitialItemInstance>,
     #[serde(default)]
     pub rooms: Vec<Room>,
     #[serde(default, skip_serializing_if = "GameplayDefinition::is_empty")]
@@ -96,21 +104,78 @@ pub struct Room {
     pub asset_manifest: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exits: Vec<Exit>,
-    /// Stable IDs of the item instances initially visible in this room.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub items: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy: Option<LegacyRoomData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Item {
+pub struct ItemPrototype {
     pub id: String,
     pub name: String,
     pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equipment_slot: Option<EquipmentSlot>,
+    #[serde(default)]
+    pub attack_bonus: i32,
+    #[serde(default)]
+    pub heal_amount: i32,
+    #[serde(default)]
+    pub consumable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<EffectRule>,
+    pub weight_grams: u32,
+    pub slot_cost: u16,
+    pub rarity: ItemRarity,
+    pub item_level: u16,
+    pub stack_policy: ItemStackPolicy,
+    pub transfer_policy: ItemTransferPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitialItemInstance {
+    pub id: String,
+    pub prototype_id: String,
+    pub location: InitialItemLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum InitialItemLocation {
+    Room { room_id: String },
+    NpcSpawn { npc_spawn_id: String },
+    Staged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemRarity {
+    Common,
+    Uncommon,
+    Rare,
+    Epic,
+    Legendary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemStackPolicy {
+    Unique,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemTransferPolicy {
+    Transferable,
+    CharacterBound,
+    NonTransferable,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,12 +184,10 @@ pub struct GameplayDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rng_seed: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub item_rules: Vec<ItemRule>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_prototypes: Vec<NpcPrototype>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_spawns: Vec<NpcSpawn>,
-    /// Canonical WorldPack v3 character creation and advancement rules.
+    /// Canonical character creation and advancement model introduced by WorldPack v3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_progression: Option<CharacterProgressionDefinition>,
     /// Archetype selected when character creation does not name one.
@@ -134,8 +197,7 @@ pub struct GameplayDefinition {
     pub archetypes: Vec<ArchetypeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abilities: Vec<AbilityDefinition>,
-    /// Ability loadouts are separate from [`NpcPrototype`] so existing Rust
-    /// struct literals and WorldPack v2 JSON remain source-compatible.
+    /// Ability loadouts remain separate from [`NpcPrototype`] and reusable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_ability_sets: Vec<NpcAbilitySet>,
 }
@@ -143,7 +205,6 @@ pub struct GameplayDefinition {
 impl GameplayDefinition {
     pub fn is_empty(&self) -> bool {
         self.rng_seed.is_none()
-            && self.item_rules.is_empty()
             && self.npc_prototypes.is_empty()
             && self.npc_spawns.is_empty()
             && self.character_progression.is_none()
@@ -328,22 +389,6 @@ pub struct NpcAbilitySet {
     pub ability_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ItemRule {
-    pub item_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub equipment_slot: Option<EquipmentSlot>,
-    #[serde(default)]
-    pub attack_bonus: i32,
-    #[serde(default)]
-    pub heal_amount: i32,
-    #[serde(default)]
-    pub consumable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect: Option<EffectRule>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EquipmentSlot {
@@ -379,8 +424,6 @@ pub struct NpcPrototype {
     pub defence: i32,
     pub experience_reward: u64,
     pub respawn_ticks: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub loot_item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,16 +575,6 @@ impl WorldPack {
                     });
                 }
             }
-
-            let mut room_items = HashSet::new();
-            for item_id in &room.items {
-                if !room_items.insert(item_id.as_str()) {
-                    errors.push(ValidationError::DuplicateRoomItem {
-                        room_id: room.id.clone(),
-                        item_id: item_id.clone(),
-                    });
-                }
-            }
         }
 
         if !self.start_room_id.trim().is_empty() && !room_ids.contains(self.start_room_id.as_str())
@@ -551,22 +584,6 @@ impl WorldPack {
             ));
         }
 
-        let mut item_ids = HashSet::new();
-        for item in &self.items {
-            if item.id.trim().is_empty() {
-                errors.push(ValidationError::EmptyItemId);
-            } else if !item_ids.insert(item.id.as_str()) {
-                errors.push(ValidationError::DuplicateItemId(item.id.clone()));
-            }
-            if item.name.trim().is_empty() {
-                errors.push(ValidationError::EmptyItemName(item.id.clone()));
-            }
-            if item.description.trim().is_empty() {
-                errors.push(ValidationError::EmptyItemDescription(item.id.clone()));
-            }
-        }
-
-        let mut placed_items = HashMap::new();
         for room in &self.rooms {
             for exit in &room.exits {
                 if let ExitTarget::Room { room_id } = &exit.target
@@ -578,59 +595,113 @@ impl WorldPack {
                     });
                 }
             }
-            let mut room_items = HashSet::new();
-            for item_id in &room.items {
-                if !room_items.insert(item_id.as_str()) {
-                    continue;
-                }
-                if !item_ids.contains(item_id.as_str()) {
-                    errors.push(ValidationError::MissingItemTarget {
-                        room_id: room.id.clone(),
-                        item_id: item_id.clone(),
-                    });
-                } else if let Some(first_room) =
-                    placed_items.insert(item_id.as_str(), room.id.as_str())
-                {
-                    errors.push(ValidationError::ItemPlacedMoreThanOnce {
-                        item_id: item_id.clone(),
-                        first_room: first_room.to_owned(),
-                        second_room: room.id.clone(),
-                    });
-                }
-            }
         }
-        let declared_items = self
-            .items
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect::<HashSet<_>>();
-        let mut ruled_items = HashSet::new();
+
+        if self.item_prototypes.len() > MAX_ITEM_PROTOTYPES {
+            errors.push(ValidationError::TooManyItemPrototypes {
+                actual: self.item_prototypes.len(),
+                maximum: MAX_ITEM_PROTOTYPES,
+            });
+        }
         let max_gameplay_value =
             i32::try_from(MAX_GAMEPLAY_VALUE).expect("MAX_GAMEPLAY_VALUE fits in i32");
-        for rule in &self.gameplay.item_rules {
-            if !ruled_items.insert(rule.item_id.as_str()) {
+        let mut item_prototype_ids = HashSet::new();
+        for prototype in &self.item_prototypes {
+            if prototype.id.trim().is_empty() {
+                errors.push(ValidationError::EmptyItemId);
+            } else if !item_prototype_ids.insert(prototype.id.as_str()) {
+                errors.push(ValidationError::DuplicateItemId(prototype.id.clone()));
+            }
+            if prototype.name.trim().is_empty() {
+                errors.push(ValidationError::EmptyItemName(prototype.id.clone()));
+            }
+            if prototype.description.trim().is_empty() {
+                errors.push(ValidationError::EmptyItemDescription(prototype.id.clone()));
+            }
+            if prototype.aliases.len() > MAX_ITEM_ALIASES {
                 errors.push(ValidationError::InvalidGameplay(format!(
-                    "item {:?} has more than one gameplay rule",
-                    rule.item_id
+                    "item prototype {:?} has {} aliases; the maximum is {MAX_ITEM_ALIASES}",
+                    prototype.id,
+                    prototype.aliases.len()
                 )));
             }
-            if !declared_items.contains(rule.item_id.as_str()) {
+            let mut aliases = HashSet::new();
+            if prototype
+                .aliases
+                .iter()
+                .any(|alias| alias.trim().is_empty() || !aliases.insert(alias.to_ascii_lowercase()))
+            {
                 errors.push(ValidationError::InvalidGameplay(format!(
-                    "item gameplay rule references missing item {:?}",
-                    rule.item_id
+                    "item prototype {:?} has an empty or duplicate alias",
+                    prototype.id
                 )));
             }
-            if !(0..=max_gameplay_value).contains(&rule.attack_bonus)
-                || !(0..=max_gameplay_value).contains(&rule.heal_amount)
-                || rule.effect.is_some_and(|effect| {
+            if prototype.weight_grams > MAX_ITEM_WEIGHT_GRAMS
+                || !(1..=MAX_ITEM_SLOT_COST).contains(&prototype.slot_cost)
+                || !(1..=MAX_ITEM_LEVEL).contains(&prototype.item_level)
+                || !(0..=max_gameplay_value).contains(&prototype.attack_bonus)
+                || !(0..=max_gameplay_value).contains(&prototype.heal_amount)
+                || prototype.effect.is_some_and(|effect| {
                     !(1..=MAX_ABILITY_EFFECT_MAGNITUDE).contains(&effect.magnitude)
                         || !(1..=MAX_ABILITY_EFFECT_DURATION_TICKS)
                             .contains(&effect.remaining_ticks)
                 })
             {
                 errors.push(ValidationError::InvalidGameplay(format!(
-                    "item {:?} has invalid bonuses or effect bounds",
-                    rule.item_id
+                    "item prototype {:?} exceeds an item property bound",
+                    prototype.id
+                )));
+            }
+            if !prototype.consumable && (prototype.heal_amount != 0 || prototype.effect.is_some()) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "non-consumable item prototype {:?} declares a consumable effect",
+                    prototype.id
+                )));
+            }
+            if prototype.consumable && prototype.equipment_slot.is_some() {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "consumable item prototype {:?} cannot declare an equipment slot",
+                    prototype.id
+                )));
+            }
+            if prototype.transfer_policy != ItemTransferPolicy::Transferable {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "item prototype {:?} uses a transfer policy reserved for phase 3C",
+                    prototype.id
+                )));
+            }
+        }
+
+        if self.initial_item_instances.len() > MAX_INITIAL_ITEM_INSTANCES {
+            errors.push(ValidationError::TooManyInitialItemInstances {
+                actual: self.initial_item_instances.len(),
+                maximum: MAX_INITIAL_ITEM_INSTANCES,
+            });
+        }
+        let mut item_instance_ids = HashSet::new();
+        for instance in &self.initial_item_instances {
+            if instance.id.trim().is_empty() {
+                errors.push(ValidationError::InvalidGameplay(
+                    "initial item instance id must not be empty".to_owned(),
+                ));
+            } else if !item_instance_ids.insert(instance.id.as_str()) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "initial item instance id {:?} appears more than once",
+                    instance.id
+                )));
+            }
+            if !item_prototype_ids.contains(instance.prototype_id.as_str()) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "initial item instance {:?} references missing prototype {:?}",
+                    instance.id, instance.prototype_id
+                )));
+            }
+            if let InitialItemLocation::Room { room_id } = &instance.location
+                && !room_ids.contains(room_id.as_str())
+            {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "initial item instance {:?} references missing room {:?}",
+                    instance.id, room_id
                 )));
             }
         }
@@ -660,21 +731,6 @@ impl WorldPack {
                     prototype.id
                 )));
             }
-            let mut loot = HashSet::new();
-            for item_id in &prototype.loot_item_ids {
-                if !loot.insert(item_id.as_str()) {
-                    errors.push(ValidationError::InvalidGameplay(format!(
-                        "NPC prototype {:?} repeats loot item {:?}",
-                        prototype.id, item_id
-                    )));
-                }
-                if !declared_items.contains(item_id.as_str()) {
-                    errors.push(ValidationError::InvalidGameplay(format!(
-                        "NPC prototype {:?} references missing loot item {:?}",
-                        prototype.id, item_id
-                    )));
-                }
-            }
         }
 
         validate_character_and_abilities(&self.gameplay, &prototypes, &mut errors);
@@ -688,7 +744,6 @@ impl WorldPack {
 
         let mut spawn_ids = HashSet::new();
         let mut used_prototypes = HashSet::new();
-        let mut allocated_loot = HashSet::new();
         for spawn in &self.gameplay.npc_spawns {
             if spawn.id.trim().is_empty() || !spawn_ids.insert(spawn.id.as_str()) {
                 errors.push(ValidationError::InvalidGameplay(format!(
@@ -703,16 +758,8 @@ impl WorldPack {
                 )));
             }
             match prototypes.get(spawn.prototype_id.as_str()) {
-                Some(prototype) => {
+                Some(_) => {
                     used_prototypes.insert(spawn.prototype_id.as_str());
-                    for item_id in &prototype.loot_item_ids {
-                        if !allocated_loot.insert(item_id.as_str()) {
-                            errors.push(ValidationError::InvalidGameplay(format!(
-                                "loot item {:?} is allocated to more than one NPC spawn",
-                                item_id
-                            )));
-                        }
-                    }
                 }
                 None => errors.push(ValidationError::InvalidGameplay(format!(
                     "NPC spawn {:?} references missing prototype {:?}",
@@ -732,19 +779,14 @@ impl WorldPack {
             )));
         }
 
-        for item_id in item_ids {
-            match (
-                placed_items.get(item_id).copied(),
-                allocated_loot.contains(item_id),
-            ) {
-                (Some(room_id), true) => {
-                    errors.push(ValidationError::ItemPlacedAndAllocatedAsLoot {
-                        item_id: item_id.to_owned(),
-                        room_id: room_id.to_owned(),
-                    });
-                }
-                (None, false) => errors.push(ValidationError::UnplacedItem(item_id.to_owned())),
-                _ => {}
+        for instance in &self.initial_item_instances {
+            if let InitialItemLocation::NpcSpawn { npc_spawn_id } = &instance.location
+                && !spawn_ids.contains(npc_spawn_id.as_str())
+            {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "initial item instance {:?} references missing NPC spawn {:?}",
+                    instance.id, npc_spawn_id
+                )));
             }
         }
 
@@ -1701,24 +1743,14 @@ pub enum ValidationError {
     EmptyItemId,
     #[error("item id {0:?} appears more than once")]
     DuplicateItemId(String),
+    #[error("WorldPack declares {actual} item prototypes; the maximum is {maximum}")]
+    TooManyItemPrototypes { actual: usize, maximum: usize },
+    #[error("WorldPack declares {actual} initial item instances; the maximum is {maximum}")]
+    TooManyInitialItemInstances { actual: usize, maximum: usize },
     #[error("item {0:?} must have a name")]
     EmptyItemName(String),
     #[error("item {0:?} must have a description")]
     EmptyItemDescription(String),
-    #[error("room {room_id:?} lists item {item_id:?} more than once")]
-    DuplicateRoomItem { room_id: String, item_id: String },
-    #[error("room {room_id:?} points to missing item {item_id:?}")]
-    MissingItemTarget { room_id: String, item_id: String },
-    #[error("item {item_id:?} is placed in both {first_room:?} and {second_room:?}")]
-    ItemPlacedMoreThanOnce {
-        item_id: String,
-        first_room: String,
-        second_room: String,
-    },
-    #[error("item {item_id:?} is both placed in room {room_id:?} and allocated as NPC loot")]
-    ItemPlacedAndAllocatedAsLoot { item_id: String, room_id: String },
-    #[error("item {0:?} has no initial room")]
-    UnplacedItem(String),
     #[error("invalid gameplay definition: {0}")]
     InvalidGameplay(String),
     #[error("scene variants reference missing room {room_id:?}")]
@@ -1884,8 +1916,27 @@ mod tests {
             description: "A useful description.".to_owned(),
             asset_manifest: None,
             exits: Vec::new(),
-            items: Vec::new(),
             legacy: None,
+        }
+    }
+
+    fn item_prototype(id: &str) -> ItemPrototype {
+        ItemPrototype {
+            id: id.to_owned(),
+            name: "test item".into(),
+            description: "An item used by tests.".into(),
+            aliases: Vec::new(),
+            equipment_slot: None,
+            attack_bonus: 0,
+            heal_amount: 0,
+            consumable: false,
+            effect: None,
+            weight_grams: 100,
+            slot_cost: 1,
+            rarity: ItemRarity::Common,
+            item_level: 1,
+            stack_policy: ItemStackPolicy::Unique,
+            transfer_policy: ItemTransferPolicy::Transferable,
         }
     }
 
@@ -1896,7 +1947,8 @@ mod tests {
             name: "Test".to_owned(),
             start_room_id: "test:1".to_owned(),
             source: None,
-            items: Vec::new(),
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
             rooms: vec![room("test:1", 1)],
             gameplay: GameplayDefinition::default(),
         }
@@ -1916,13 +1968,15 @@ mod tests {
     #[test]
     fn gameplay_references_and_resource_bounds_are_validated() {
         let mut pack = pack();
-        pack.gameplay.item_rules.push(ItemRule {
-            item_id: "missing:item".to_owned(),
-            equipment_slot: None,
-            attack_bonus: -1,
-            heal_amount: 0,
-            consumable: false,
-            effect: None,
+        let mut invalid_item = item_prototype("test:invalid");
+        invalid_item.attack_bonus = -1;
+        pack.item_prototypes.push(invalid_item);
+        pack.initial_item_instances.push(InitialItemInstance {
+            id: "test:missing-instance".into(),
+            prototype_id: "missing:item".into(),
+            location: InitialItemLocation::Room {
+                room_id: "missing:room".into(),
+            },
         });
         pack.gameplay.npc_prototypes.push(NpcPrototype {
             id: "demo:wolf".to_owned(),
@@ -1934,7 +1988,6 @@ mod tests {
             defence: 0,
             experience_reward: 10,
             respawn_ticks: 2,
-            loot_item_ids: vec!["missing:loot".to_owned()],
         });
         pack.gameplay.npc_spawns.push(NpcSpawn {
             id: "demo:wolf-1".to_owned(),
@@ -1947,7 +2000,7 @@ mod tests {
                 .iter()
                 .filter(|error| matches!(error, ValidationError::InvalidGameplay(_)))
                 .count()
-                >= 3
+                >= 4
         );
     }
 
@@ -1955,55 +2008,51 @@ mod tests {
     fn item_gameplay_values_cannot_exceed_authored_caps() {
         let max_gameplay_value =
             i32::try_from(MAX_GAMEPLAY_VALUE).expect("MAX_GAMEPLAY_VALUE fits in i32");
-        let base_rule = ItemRule {
-            item_id: "test:blade".into(),
-            equipment_slot: Some(EquipmentSlot::Weapon),
-            attack_bonus: 1,
-            heal_amount: 0,
-            consumable: false,
-            effect: None,
-        };
-        let invalid_rules = [
-            ItemRule {
-                attack_bonus: max_gameplay_value + 1,
-                ..base_rule.clone()
-            },
-            ItemRule {
-                heal_amount: max_gameplay_value + 1,
-                ..base_rule.clone()
-            },
-            ItemRule {
-                effect: Some(EffectRule {
-                    kind: EffectKind::Strength,
-                    magnitude: MAX_ABILITY_EFFECT_MAGNITUDE + 1,
-                    remaining_ticks: 1,
-                }),
-                ..base_rule.clone()
-            },
-            ItemRule {
-                effect: Some(EffectRule {
-                    kind: EffectKind::Strength,
-                    magnitude: 1,
-                    remaining_ticks: MAX_ABILITY_EFFECT_DURATION_TICKS + 1,
-                }),
-                ..base_rule
-            },
-        ];
+        let mut base = item_prototype("test:blade");
+        base.equipment_slot = Some(EquipmentSlot::Weapon);
+        base.attack_bonus = 1;
+        let mut invalid_prototypes = Vec::new();
+        let mut invalid = base.clone();
+        invalid.attack_bonus = max_gameplay_value + 1;
+        invalid_prototypes.push(invalid);
+        let mut invalid = base.clone();
+        invalid.heal_amount = max_gameplay_value + 1;
+        invalid.consumable = true;
+        invalid.equipment_slot = None;
+        invalid_prototypes.push(invalid);
+        let mut invalid = base.clone();
+        invalid.effect = Some(EffectRule {
+            kind: EffectKind::Strength,
+            magnitude: MAX_ABILITY_EFFECT_MAGNITUDE + 1,
+            remaining_ticks: 1,
+        });
+        invalid.consumable = true;
+        invalid.equipment_slot = None;
+        invalid_prototypes.push(invalid);
+        let mut invalid = base;
+        invalid.effect = Some(EffectRule {
+            kind: EffectKind::Strength,
+            magnitude: 1,
+            remaining_ticks: MAX_ABILITY_EFFECT_DURATION_TICKS + 1,
+        });
+        invalid.consumable = true;
+        invalid.equipment_slot = None;
+        invalid_prototypes.push(invalid);
 
-        for rule in invalid_rules {
+        for prototype in invalid_prototypes {
             let mut candidate = pack();
-            candidate.items.push(Item {
-                id: "test:blade".into(),
-                name: "test blade".into(),
-                description: "A blade used to verify authoring bounds.".into(),
-                aliases: Vec::new(),
+            candidate.item_prototypes.push(prototype);
+            candidate.initial_item_instances.push(InitialItemInstance {
+                id: "test:blade-1".into(),
+                prototype_id: "test:blade".into(),
+                location: InitialItemLocation::Room {
+                    room_id: "test:1".into(),
+                },
             });
-            candidate.rooms[0].items.push("test:blade".into());
-            candidate.gameplay.item_rules.push(rule);
 
             assert!(candidate.validate().unwrap_err().0.iter().any(|error| {
                 matches!(error, ValidationError::InvalidGameplay(message)
-                    if message.contains("invalid bonuses or effect bounds"))
+                    if message.contains("item property bound"))
             }));
         }
     }
@@ -2022,7 +2071,6 @@ mod tests {
             defence: 1,
             experience_reward: 1,
             respawn_ticks: 1,
-            loot_item_ids: Vec::new(),
         };
         let mut invalid_prototypes = Vec::new();
         let mut invalid = base_prototype.clone();
@@ -2215,19 +2263,20 @@ mod tests {
 
     #[test]
     fn item_ids_and_initial_room_references_are_validated() {
-        let item = Item {
-            id: "test:lantern".into(),
-            name: "lantern".into(),
-            description: "A lantern.".into(),
-            aliases: vec!["lamp".into()],
-        };
+        let item = item_prototype("test:lantern");
         let mut valid = pack();
-        valid.items.push(item.clone());
-        valid.rooms[0].items.push(item.id.clone());
+        valid.item_prototypes.push(item.clone());
+        valid.initial_item_instances.push(InitialItemInstance {
+            id: "test:lantern-1".into(),
+            prototype_id: item.id.clone(),
+            location: InitialItemLocation::Room {
+                room_id: "test:1".into(),
+            },
+        });
         valid.validate().unwrap();
 
         let mut duplicate_id = valid.clone();
-        duplicate_id.items.push(item.clone());
+        duplicate_id.item_prototypes.push(item.clone());
         assert!(
             duplicate_id
                 .validate()
@@ -2237,76 +2286,57 @@ mod tests {
         );
 
         let mut missing = pack();
-        missing.rooms[0].items.push("test:missing".into());
-        assert_eq!(
-            missing.validate().unwrap_err().0,
-            vec![ValidationError::MissingItemTarget {
-                room_id: "test:1".into(),
-                item_id: "test:missing".into(),
-            }]
-        );
-
-        let mut duplicate_room_reference = valid.clone();
-        duplicate_room_reference.rooms[0]
-            .items
-            .push(item.id.clone());
-        assert!(duplicate_room_reference.validate().unwrap_err().0.contains(
-            &ValidationError::DuplicateRoomItem {
-                room_id: "test:1".into(),
-                item_id: item.id.clone(),
-            }
-        ));
-
-        let mut unplaced = pack();
-        unplaced.items.push(item);
-        assert_eq!(
-            unplaced.validate().unwrap_err().0,
-            vec![ValidationError::UnplacedItem("test:lantern".into())]
-        );
-    }
-
-    #[test]
-    fn an_item_cannot_start_in_two_rooms() {
-        let mut value = pack();
-        value.items.push(Item {
-            id: "test:lantern".into(),
-            name: "lantern".into(),
-            description: "A lantern.".into(),
-            aliases: Vec::new(),
-        });
-        value.rooms[0].items.push("test:lantern".into());
-        value.rooms[0].exits.push(Exit {
-            direction: Direction::North,
-            target: ExitTarget::Room {
-                room_id: "test:2".into(),
+        missing.initial_item_instances.push(InitialItemInstance {
+            id: "test:missing-1".into(),
+            prototype_id: "test:missing".into(),
+            location: InitialItemLocation::Room {
+                room_id: "missing:room".into(),
             },
-            description: String::new(),
-            keywords: String::new(),
-            legacy_values: Vec::new(),
         });
-        let mut other = room("test:2", 2);
-        other.items.push("test:lantern".into());
-        value.rooms.push(other);
+        let messages = missing
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(messages.contains("missing prototype"));
+        assert!(messages.contains("missing room"));
 
-        assert_eq!(
-            value.validate().unwrap_err().0,
-            vec![ValidationError::ItemPlacedMoreThanOnce {
-                item_id: "test:lantern".into(),
-                first_room: "test:1".into(),
-                second_room: "test:2".into(),
-            }]
+        let mut duplicate_instance = valid;
+        duplicate_instance
+            .initial_item_instances
+            .push(duplicate_instance.initial_item_instances[0].clone());
+        assert!(
+            duplicate_instance
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("validation failed")
         );
     }
 
     #[test]
-    fn an_item_must_start_in_exactly_one_room_or_one_loot_allocation() {
-        let item = Item {
-            id: "test:fang".into(),
-            name: "fang".into(),
-            description: "A sharp fang.".into(),
-            aliases: Vec::new(),
-        };
-        let prototype = NpcPrototype {
+    fn an_item_has_one_typed_initial_location() {
+        let mut value = pack();
+        value.item_prototypes.push(item_prototype("test:lantern"));
+        value.initial_item_instances.push(InitialItemInstance {
+            id: "test:lantern-1".into(),
+            prototype_id: "test:lantern".into(),
+            location: InitialItemLocation::Staged,
+        });
+        value.validate().unwrap();
+
+        let serialized = serde_json::to_value(&value.initial_item_instances[0]).unwrap();
+        assert_eq!(serialized["location"]["kind"], "staged");
+        assert!(serialized["location"].get("roomId").is_none());
+        assert!(serialized["location"].get("npcSpawnId").is_none());
+    }
+
+    #[test]
+    fn an_item_can_start_on_an_exact_npc_spawn() {
+        let npc_prototype = NpcPrototype {
             id: "test:wolf".into(),
             name: "wolf".into(),
             description: "A watchful wolf.".into(),
@@ -2316,42 +2346,116 @@ mod tests {
             defence: 0,
             experience_reward: 10,
             respawn_ticks: 2,
-            loot_item_ids: vec![item.id.clone()],
         };
         let spawn = NpcSpawn {
             id: "test:wolf-1".into(),
-            prototype_id: prototype.id.clone(),
+            prototype_id: npc_prototype.id.clone(),
             room_id: "test:1".into(),
         };
 
         let mut loot_only = pack();
-        loot_only.items.push(item.clone());
-        loot_only.gameplay.npc_prototypes.push(prototype.clone());
+        loot_only.item_prototypes.push(item_prototype("test:fang"));
+        loot_only.initial_item_instances.push(InitialItemInstance {
+            id: "test:fang-1".into(),
+            prototype_id: "test:fang".into(),
+            location: InitialItemLocation::NpcSpawn {
+                npc_spawn_id: spawn.id.clone(),
+            },
+        });
+        loot_only.gameplay.npc_prototypes.push(npc_prototype);
         loot_only.gameplay.npc_spawns.push(spawn.clone());
         loot_only.validate().unwrap();
 
-        let mut ambiguous = loot_only;
-        ambiguous.rooms[0].items.push(item.id.clone());
-        assert!(ambiguous.validate().unwrap_err().0.contains(
-            &ValidationError::ItemPlacedAndAllocatedAsLoot {
-                item_id: item.id.clone(),
-                room_id: "test:1".into(),
-            }
-        ));
-
-        let mut nowhere = pack();
-        nowhere.items.push(item);
-        nowhere.gameplay.npc_prototypes.push(prototype);
-        nowhere.gameplay.npc_spawns.push(NpcSpawn {
-            prototype_id: "missing:prototype".into(),
-            ..spawn
-        });
+        let mut missing_spawn = loot_only;
+        missing_spawn.initial_item_instances[0].location = InitialItemLocation::NpcSpawn {
+            npc_spawn_id: "missing:spawn".into(),
+        };
         assert!(
-            nowhere
+            missing_spawn
                 .validate()
                 .unwrap_err()
                 .0
-                .contains(&ValidationError::UnplacedItem("test:fang".into()))
+                .iter()
+                .any(|error| error.to_string().contains("missing NPC spawn"))
+        );
+    }
+
+    #[test]
+    fn item_capacity_and_property_bounds_are_explicit() {
+        let mut zero_weight = pack();
+        let mut prototype = item_prototype("test:weightless");
+        prototype.weight_grams = 0;
+        zero_weight.item_prototypes.push(prototype);
+        zero_weight.validate().unwrap();
+
+        for mutate in [
+            |prototype: &mut ItemPrototype| prototype.weight_grams = MAX_ITEM_WEIGHT_GRAMS + 1,
+            |prototype: &mut ItemPrototype| prototype.slot_cost = 0,
+            |prototype: &mut ItemPrototype| prototype.slot_cost = MAX_ITEM_SLOT_COST + 1,
+            |prototype: &mut ItemPrototype| prototype.item_level = 0,
+            |prototype: &mut ItemPrototype| prototype.item_level = MAX_ITEM_LEVEL + 1,
+        ] {
+            let mut candidate = pack();
+            let mut prototype = item_prototype("test:bounded");
+            mutate(&mut prototype);
+            candidate.item_prototypes.push(prototype);
+            assert!(candidate.validate().is_err());
+        }
+
+        let mut too_many_aliases = pack();
+        let mut prototype = item_prototype("test:aliases");
+        prototype.aliases = (0..=MAX_ITEM_ALIASES)
+            .map(|index| format!("alias-{index}"))
+            .collect();
+        too_many_aliases.item_prototypes.push(prototype);
+        assert!(too_many_aliases.validate().is_err());
+
+        let mut reserved_transfer = pack();
+        let mut prototype = item_prototype("test:bound");
+        prototype.transfer_policy = ItemTransferPolicy::CharacterBound;
+        reserved_transfer.item_prototypes.push(prototype);
+        assert!(
+            reserved_transfer
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| error.to_string().contains("reserved for phase 3C"))
+        );
+
+        let mut too_many_prototypes = pack();
+        too_many_prototypes.item_prototypes = (0..=MAX_ITEM_PROTOTYPES)
+            .map(|index| item_prototype(&format!("test:prototype-{index}")))
+            .collect();
+        assert!(
+            too_many_prototypes
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| { matches!(error, ValidationError::TooManyItemPrototypes { .. }) })
+        );
+
+        let mut too_many_instances = pack();
+        too_many_instances
+            .item_prototypes
+            .push(item_prototype("test:shared"));
+        too_many_instances.initial_item_instances = (0..=MAX_INITIAL_ITEM_INSTANCES)
+            .map(|index| InitialItemInstance {
+                id: format!("test:instance-{index}"),
+                prototype_id: "test:shared".into(),
+                location: InitialItemLocation::Staged,
+            })
+            .collect();
+        assert!(
+            too_many_instances
+                .validate()
+                .unwrap_err()
+                .0
+                .iter()
+                .any(|error| {
+                    matches!(error, ValidationError::TooManyInitialItemInstances { .. })
+                })
         );
     }
 }

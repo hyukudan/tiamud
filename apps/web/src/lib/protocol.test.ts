@@ -32,12 +32,17 @@ const validPlayerState = () => ({
   },
   inventory: [{
     id: 'o1111111111111111', label: 'blue lantern', description: 'Cold light.',
+    rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
     actions: [{ label: 'Drop', command: 'drop o1111111111111111' }],
   }],
   equipment: [{
     id: 'o2222222222222222', slot: 'weapon', label: 'bronze sword',
+    rarity: 'common', itemLevel: 2, weightGrams: 2200,
     actions: [{ label: 'Unequip', command: 'unequip weapon' }],
   }],
+  inventoryCapacity: {
+    usedSlots: 1, maxSlots: 24, usedWeightGrams: 3000, maxWeightGrams: 30000,
+  },
   map: {
     currentRoomId: 'o3333333333333333',
     rooms: [{ id: 'o3333333333333333', title: 'Lantern Square', current: true }],
@@ -359,6 +364,9 @@ describe('protocol messages', () => {
           id: 'tiamud:blue-lantern',
           label: 'blue-glass lantern',
           description: 'Its flame is calm.',
+          rarity: 'uncommon',
+          itemLevel: 3,
+          weightGrams: 800,
           actions: [
             { label: 'Examine', command: 'examine tiamud:blue-lantern' },
             { label: 'Take', command: 'take tiamud:blue-lantern' },
@@ -479,7 +487,8 @@ describe('protocol messages', () => {
         title: 'Lantern Square', prose: [], exits: [],
         items: unsafeVisuals.map((_visual, index) => ({
           id: `o${String(index + 1).padStart(16, '0')}`,
-          label: `item ${index}`, description: 'Still usable.', actions: [],
+          label: `item ${index}`, description: 'Still usable.',
+          rarity: 'common', itemLevel: 1, weightGrams: 100, actions: [],
         })),
         npcs: [],
         presentation: {
@@ -610,6 +619,7 @@ describe('protocol messages', () => {
         viewId: 'o9999999999999999', revision: 8, kind: 'item', id: 'o8888888888888888',
         entity: {
           id: 'o8888888888888888', label: 'lantern', description: 'Still usable.', actions: [],
+          rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
           visual,
           presentation: { entities: [{ id: 'o8888888888888888', ...visual }] },
         },
@@ -639,6 +649,7 @@ describe('protocol messages', () => {
         viewId, revision: 4, kind: 'item', id: itemId,
         entity: {
           id: itemId, label: 'blue lantern', description: 'Cold light.',
+          rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
           actions: [{ label: 'Take', command: `take ${itemId}` }],
         },
       },
@@ -651,7 +662,12 @@ describe('protocol messages', () => {
     }))).toMatchObject({ type: 'vitals.update', data: { revision: 4, character: { name: 'Aria' } } });
     expect(parseServerMessage(JSON.stringify({
       v: 1, type: 'inventory.patch', seq: 13,
-      data: { revision: 4, inventory: player.inventory, equipment: player.equipment },
+      data: {
+        revision: 4,
+        inventory: player.inventory,
+        equipment: player.equipment,
+        inventoryCapacity: player.inventoryCapacity,
+      },
     }))).toMatchObject({ type: 'inventory.patch', data: { revision: 4, inventory: [{ label: 'blue lantern' }] } });
     expect(parseServerMessage(JSON.stringify({
       v: 1, type: 'map.snapshot', seq: 14,
@@ -850,6 +866,51 @@ describe('protocol messages', () => {
         inventory: Array.from({ length: 257 }, () => validPlayerState().inventory[0]),
       },
     }))).toBeUndefined();
+    for (const inventoryItem of [
+      { ...validPlayerState().inventory[0], rarity: 'mythic' },
+      { ...validPlayerState().inventory[0], itemLevel: 1_001 },
+      { ...validPlayerState().inventory[0], weightGrams: 1_000_001 },
+    ]) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1,
+        type: 'player.snapshot',
+        seq: 19,
+        data: { ...validPlayerState(), inventory: [inventoryItem] },
+      }))).toBeUndefined();
+    }
+    expect(parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'player.snapshot',
+      seq: 20,
+      data: {
+        ...validPlayerState(),
+        inventoryCapacity: {
+          usedSlots: 25, maxSlots: 24, usedWeightGrams: 0, maxWeightGrams: 30_000,
+        },
+      },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'player.snapshot',
+      seq: 21,
+      data: {
+        ...validPlayerState(),
+        inventoryCapacity: {
+          usedSlots: 0, maxSlots: 1_000, usedWeightGrams: 0, maxWeightGrams: 0,
+        },
+      },
+    }))).toBeDefined();
+    for (const inventoryCapacity of [
+      { usedSlots: 0, maxSlots: 1_001, usedWeightGrams: 0, maxWeightGrams: 1 },
+      { usedSlots: 0, maxSlots: 1, usedWeightGrams: 0, maxWeightGrams: 1_000_001 },
+    ]) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1,
+        type: 'player.snapshot',
+        seq: 22,
+        data: { ...validPlayerState(), inventoryCapacity },
+      }))).toBeUndefined();
+    }
   });
 
   it('parses clean v3 origins, class evolution, talents, promotions, and abilities', () => {
