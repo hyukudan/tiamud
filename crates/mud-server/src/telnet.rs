@@ -777,11 +777,7 @@ async fn choose_character(
         let Some(name) = read_required_line(connection, input).await? else {
             return Ok(None);
         };
-        return world
-            .create_authenticated_character(token.to_owned(), name)
-            .await
-            .map(Some)
-            .map_err(io::Error::other);
+        return create_character_with_archetype(connection, world, input, token, name).await;
     }
 
     connection.write_all(b"Characters:\r\n").await?;
@@ -801,8 +797,67 @@ async fn choose_character(
     {
         return Ok(Some(character.clone()));
     }
+    create_character_with_archetype(connection, world, input, token, selection).await
+}
+
+async fn create_character_with_archetype(
+    connection: &mut TelnetConnection,
+    world: &WorldHandle,
+    input: &mut TelnetInput,
+    token: &str,
+    name: String,
+) -> io::Result<Option<CharacterSnapshot>> {
+    let catalog = world.archetype_catalog();
+    let archetype_id = if catalog.len() <= 1 {
+        None
+    } else {
+        connection.write_all(b"Archetypes:\r\n").await?;
+        for (index, archetype) in catalog.iter().enumerate() {
+            connection
+                .write_all(
+                    format!(
+                        "  {}. {} -- {}{}\r\n",
+                        index + 1,
+                        archetype.label,
+                        archetype.description,
+                        if archetype.id == world.default_archetype_id() {
+                            " [default]"
+                        } else {
+                            ""
+                        }
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+        }
+        loop {
+            connection
+                .write_all(b"Choose a number or archetype id (default for the suggested choice): ")
+                .await?;
+            let Some(selection) = read_required_line(connection, input).await? else {
+                return Ok(None);
+            };
+            if selection.eq_ignore_ascii_case("default") {
+                break None;
+            }
+            if let Ok(index) = selection.parse::<usize>()
+                && let Some(archetype) = index.checked_sub(1).and_then(|index| catalog.get(index))
+            {
+                break Some(archetype.id.clone());
+            }
+            if let Some(archetype) = catalog
+                .iter()
+                .find(|archetype| archetype.id.eq_ignore_ascii_case(&selection))
+            {
+                break Some(archetype.id.clone());
+            }
+            connection
+                .write_all(b"That archetype is not available.\r\n")
+                .await?;
+        }
+    };
     world
-        .create_authenticated_character(token.to_owned(), selection)
+        .create_authenticated_character_with_archetype(token.to_owned(), name, archetype_id)
         .await
         .map(Some)
         .map_err(io::Error::other)
@@ -827,11 +882,18 @@ fn public_error(error: &GameError) -> String {
         GameError::World(
             error @ (tiamud_core::WorldError::NoExit
             | tiamud_core::WorldError::ItemNotFound(_)
-            | tiamud_core::WorldError::AmbiguousItem { .. }),
+            | tiamud_core::WorldError::AmbiguousItem { .. }
+            | tiamud_core::WorldError::AbilityNotKnown
+            | tiamud_core::WorldError::AbilityUnavailable
+            | tiamud_core::WorldError::InsufficientResource
+            | tiamud_core::WorldError::InvalidAbilityTarget),
         ) => error.to_string(),
         GameError::Persistence(
             StoreError::InvalidSession | StoreError::SessionExpired | StoreError::SessionRevoked,
         ) => "Your account session is no longer valid.".to_owned(),
+        GameError::CharacterContentIncompatible => {
+            "This character needs a content migration; contact the server operator.".to_owned()
+        }
         _ => "The world is temporarily unavailable.".to_owned(),
     }
 }
@@ -1812,6 +1874,16 @@ impl TelnetSession {
             return Vec::new();
         }
         let mut output = Vec::new();
+        if self.gmcp.supports("tiamud.character") {
+            append_gmcp(
+                &mut output,
+                "Tiamud.Character",
+                &json!({
+                    "character": player.character,
+                    "revision": player.revision,
+                }),
+            );
+        }
         if self.gmcp.supports("char.vitals") {
             append_gmcp(
                 &mut output,
@@ -2025,6 +2097,7 @@ const GMCP_PACKAGES: &[&str] = &[
     "Char.Vitals 1",
     "Char.Items 1",
     "Tiamud.Scene 1",
+    "Tiamud.Character 1",
     "Tiamud.Assets 1",
     "Tiamud.CellFrame 1",
     "Tiamud.Client 1",
@@ -3131,7 +3204,7 @@ mod tests {
     }
 
     #[test]
-    fn gmcp_player_snapshot_emits_standard_vitals_items_and_group_views() {
+    fn gmcp_player_snapshot_emits_character_vitals_items_and_group_views() {
         let mut session = TelnetSession::default();
         session.begin_initial_negotiation();
         session.handle(vec![TelnetEvent::Negotiation {
@@ -3140,7 +3213,7 @@ mod tests {
         }]);
         session.handle(vec![TelnetEvent::Subnegotiation {
             option: OPT_GMCP,
-            data: br#"Core.Supports.Set ["Char.Vitals 1","Char.Items 1","Group 1"]"#.to_vec(),
+            data: br#"Core.Supports.Set ["Tiamud.Character 1","Char.Vitals 1","Char.Items 1","Group 1"]"#.to_vec(),
         }]);
 
         let mut world = tiamud_core::World::demo();
@@ -3160,6 +3233,10 @@ mod tests {
         let player = world.player_state_view(session_id).unwrap();
         let payloads = gmcp_payloads(&session.player_gmcp(&player));
 
+        assert!(payloads.iter().any(|payload| {
+            payload.starts_with(b"Tiamud.Character ")
+                && String::from_utf8_lossy(payload).contains("\"character\"")
+        }));
         assert!(payloads.iter().any(|payload| {
             payload.starts_with(b"Char.Vitals ")
                 && String::from_utf8_lossy(payload).contains("\"maxhp\"")
@@ -3625,7 +3702,9 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let world = WorldHandle::spawn(tiamud_core::World::demo(), store);
+        let world = WorldHandle::spawn(tiamud_core::World::demo(), store)
+            .await
+            .unwrap();
         let auth = Arc::new(AuthRateLimiter::per_minute(10, 5));
         let sessions = Arc::new(ActiveSessionLimiter::new(4, 16));
         let metrics = Arc::new(RuntimeMetrics::default());
@@ -3659,7 +3738,9 @@ mod tests {
             store,
             crate::world_actor::WorldSchedulerConfig::default(),
             content,
-        );
+        )
+        .await
+        .unwrap();
         let entered = world.enter("Cancelled Telnet".into()).await.unwrap();
         let session = entered.session_id;
         assert!(

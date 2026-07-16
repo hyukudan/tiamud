@@ -1,6 +1,6 @@
 //! Portable, versioned world data produced by importers and authoring tools.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -25,6 +25,22 @@ pub use composition::{
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const MAX_ARCHETYPES: usize = 32;
+pub const MAX_ABILITIES: usize = 512;
+pub const MAX_NPC_ABILITY_SETS: usize = 512;
+pub const MAX_PROGRESSION_LEVEL: u32 = 100;
+pub const MAX_STATS_PER_ARCHETYPE: usize = 64;
+pub const MAX_RESOURCES_PER_ARCHETYPE: usize = 16;
+pub const MAX_ABILITIES_PER_ACTOR: usize = 64;
+pub const MAX_ABILITY_RESOURCE_COSTS: usize = 4;
+pub const MAX_ABILITY_STATUS_EFFECTS: usize = 8;
+pub const MAX_ABILITY_COOLDOWN_TICKS: u32 = 10_000;
+pub const MAX_ABILITY_EFFECT_DURATION_TICKS: u32 = 10_000;
+pub const MAX_ABILITY_EFFECT_MAGNITUDE: i32 = 100_000;
+pub const MAX_ABILITY_SCALING_PERCENT: u16 = 1_000;
+pub const MAX_GAMEPLAY_VALUE: u32 = 1_000_000;
+pub const MAX_SKILL_VALUE: u16 = 1_000;
+pub const MAX_RESISTANCE_PERCENT: u16 = 90;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +111,17 @@ pub struct GameplayDefinition {
     pub npc_prototypes: Vec<NpcPrototype>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_spawns: Vec<NpcSpawn>,
+    /// Archetype selected when character creation does not name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_archetype_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archetypes: Vec<ArchetypeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abilities: Vec<AbilityDefinition>,
+    /// Ability loadouts are separate from [`NpcPrototype`] so existing Rust
+    /// struct literals and WorldPack v2 JSON remain source-compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub npc_ability_sets: Vec<NpcAbilitySet>,
 }
 
 impl GameplayDefinition {
@@ -103,7 +130,179 @@ impl GameplayDefinition {
             && self.item_rules.is_empty()
             && self.npc_prototypes.is_empty()
             && self.npc_spawns.is_empty()
+            && self.default_archetype_id.is_none()
+            && self.archetypes.is_empty()
+            && self.abilities.is_empty()
+            && self.npc_ability_sets.is_empty()
     }
+}
+
+/// Data-driven class/archetype shown during character creation.
+///
+/// Attribute, skill and resource keys are bounded identifiers instead of Rust
+/// enums so world authors can extend a stat sheet without a schema migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchetypeDefinition {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub initial_attributes: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub initial_skills: BTreeMap<String, u16>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub initial_resources: BTreeMap<String, u32>,
+    /// Amount restored per world tick for each initial resource pool.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_regeneration: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub initial_resistances: BTreeMap<DamageType, u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_ability_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub level_progression: Vec<LevelProgressionDefinition>,
+}
+
+/// Complete, deterministic rule for entering one level above level 1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LevelProgressionDefinition {
+    pub level: u32,
+    /// Cumulative experience required to enter this level.
+    pub total_experience_required: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attribute_gains: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skill_gains: BTreeMap<String, u16>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_gains: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ability_unlock_ids: Vec<String>,
+}
+
+/// A single bounded action model shared by player martial techniques, spells
+/// and NPC innate actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbilityDefinition {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub category: AbilityCategory,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_costs: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub cooldown_ticks: u32,
+    pub targeting: AbilityTargeting,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage: Option<AbilityDamage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heal: Option<AbilityHeal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status_effects: Vec<AbilityStatusEffect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbilityCategory {
+    Martial,
+    Spell,
+    Innate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbilityTargeting {
+    SelfOnly,
+    SingleEnemy,
+    SingleAlly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbilityEffectTarget {
+    Caster,
+    Target,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DamageType {
+    Physical,
+    Arcane,
+    Fire,
+    Frost,
+    Lightning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbilityDamage {
+    pub target: AbilityEffectTarget,
+    pub damage_type: DamageType,
+    pub base_amount: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling_attribute: Option<String>,
+    #[serde(default)]
+    pub scaling_percent: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbilityHeal {
+    pub target: AbilityEffectTarget,
+    pub base_amount: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling_attribute: Option<String>,
+    #[serde(default)]
+    pub scaling_percent: u16,
+}
+
+/// Ongoing effects have explicit, closed semantics and hard duration/magnitude
+/// limits. The tagged representation prevents impossible field combinations.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AbilityStatusEffect {
+    AttributeModifier {
+        target: AbilityEffectTarget,
+        attribute: String,
+        magnitude: i32,
+        duration_ticks: u32,
+    },
+    Regeneration {
+        target: AbilityEffectTarget,
+        magnitude: u32,
+        duration_ticks: u32,
+    },
+    DamageOverTime {
+        target: AbilityEffectTarget,
+        damage_type: DamageType,
+        magnitude: u32,
+        duration_ticks: u32,
+    },
+    Stun {
+        target: AbilityEffectTarget,
+        duration_ticks: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NpcAbilitySet {
+    pub npc_prototype_id: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_pools: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_regeneration: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resistances: BTreeMap<DamageType, u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ability_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +650,8 @@ impl WorldPack {
             }
         }
 
+        validate_character_and_abilities(&self.gameplay, &prototypes, &mut errors);
+
         let mut spawn_ids = HashSet::new();
         let mut used_prototypes = HashSet::new();
         let mut allocated_loot = HashSet::new();
@@ -567,6 +768,759 @@ impl WorldPack {
             })
             .collect()
     }
+}
+
+fn validate_character_and_abilities(
+    gameplay: &GameplayDefinition,
+    prototypes: &HashMap<&str, &NpcPrototype>,
+    errors: &mut Vec<ValidationError>,
+) {
+    if gameplay.abilities.len() > MAX_ABILITIES {
+        invalid_gameplay(
+            errors,
+            format!(
+                "world declares {} abilities; the maximum is {MAX_ABILITIES}",
+                gameplay.abilities.len()
+            ),
+        );
+    }
+    let mut ability_by_id = HashMap::new();
+    let mut ability_names = HashSet::new();
+    for ability in &gameplay.abilities {
+        if !valid_gameplay_identifier(&ability.id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "ability id {:?} must contain 1..=128 safe bytes",
+                    ability.id
+                ),
+            );
+        }
+        if !safe_gameplay_text(&ability.name, 128)
+            || !safe_gameplay_text(&ability.description, 2_048)
+        {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "ability {:?} has an invalid name or description",
+                    ability.id
+                ),
+            );
+        }
+        if ability_by_id.insert(ability.id.as_str(), ability).is_some() {
+            invalid_gameplay(
+                errors,
+                format!("ability {:?} appears more than once", ability.id),
+            );
+        }
+        if !ability_names.insert(ability.name.to_lowercase()) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "ability name {:?} is ambiguous; names must be unique ignoring case",
+                    ability.name
+                ),
+            );
+        }
+        validate_ability(ability, errors);
+    }
+
+    if gameplay.archetypes.len() > MAX_ARCHETYPES {
+        invalid_gameplay(
+            errors,
+            format!(
+                "world declares {} archetypes; the maximum is {MAX_ARCHETYPES}",
+                gameplay.archetypes.len()
+            ),
+        );
+    }
+    if gameplay.archetypes.is_empty() {
+        if gameplay.default_archetype_id.is_some() {
+            invalid_gameplay(
+                errors,
+                "defaultArchetypeId requires at least one archetype".to_owned(),
+            );
+        }
+    } else if gameplay.default_archetype_id.is_none() {
+        invalid_gameplay(
+            errors,
+            "worlds with archetypes must declare defaultArchetypeId".to_owned(),
+        );
+    }
+
+    let mut archetype_ids = HashSet::new();
+    for archetype in &gameplay.archetypes {
+        if !valid_gameplay_identifier(&archetype.id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype id {:?} must contain 1..=128 safe bytes",
+                    archetype.id
+                ),
+            );
+        }
+        if !archetype_ids.insert(archetype.id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!("archetype {:?} appears more than once", archetype.id),
+            );
+        }
+        if !safe_gameplay_text(&archetype.name, 128)
+            || !safe_gameplay_text(&archetype.description, 2_048)
+        {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} has an invalid name or description",
+                    archetype.id
+                ),
+            );
+        }
+        validate_archetype(archetype, &ability_by_id, errors);
+    }
+    if let Some(default_id) = &gameplay.default_archetype_id
+        && !archetype_ids.contains(default_id.as_str())
+    {
+        invalid_gameplay(
+            errors,
+            format!("default archetype {default_id:?} does not exist"),
+        );
+    }
+
+    if gameplay.npc_ability_sets.len() > MAX_NPC_ABILITY_SETS {
+        invalid_gameplay(
+            errors,
+            format!(
+                "world declares {} NPC ability sets; the maximum is {MAX_NPC_ABILITY_SETS}",
+                gameplay.npc_ability_sets.len()
+            ),
+        );
+    }
+    let mut assigned_npcs = HashSet::new();
+    for set in &gameplay.npc_ability_sets {
+        if !assigned_npcs.insert(set.npc_prototype_id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "NPC prototype {:?} has more than one ability set",
+                    set.npc_prototype_id
+                ),
+            );
+        }
+        if !prototypes.contains_key(set.npc_prototype_id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "NPC ability set references missing prototype {:?}",
+                    set.npc_prototype_id
+                ),
+            );
+        }
+        validate_u32_map(
+            &set.resource_pools,
+            MAX_RESOURCES_PER_ARCHETYPE,
+            false,
+            &format!("NPC {:?} resource pools", set.npc_prototype_id),
+            errors,
+        );
+        validate_u32_map(
+            &set.resource_regeneration,
+            MAX_RESOURCES_PER_ARCHETYPE,
+            true,
+            &format!("NPC {:?} resource regeneration", set.npc_prototype_id),
+            errors,
+        );
+        for resource_id in set.resource_regeneration.keys() {
+            if !set.resource_pools.contains_key(resource_id) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "NPC {:?} regenerates missing resource {:?}",
+                        set.npc_prototype_id, resource_id
+                    ),
+                );
+            }
+        }
+        validate_resistances(
+            &set.resistances,
+            &format!("NPC {:?} resistances", set.npc_prototype_id),
+            errors,
+        );
+        validate_actor_abilities(
+            &set.ability_ids,
+            &set.resource_pools,
+            &ability_by_id,
+            &format!("NPC {:?}", set.npc_prototype_id),
+            errors,
+        );
+    }
+}
+
+fn validate_archetype(
+    archetype: &ArchetypeDefinition,
+    ability_by_id: &HashMap<&str, &AbilityDefinition>,
+    errors: &mut Vec<ValidationError>,
+) {
+    let mut projected_attribute_ids = HashSet::from(["strength", "defence"]);
+    projected_attribute_ids.extend(
+        archetype
+            .initial_attributes
+            .keys()
+            .map(String::as_str)
+            .filter(|id| *id != "max_health"),
+    );
+    let mut skill_ids = archetype
+        .initial_skills
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    validate_u32_map(
+        &archetype.initial_attributes,
+        MAX_STATS_PER_ARCHETYPE,
+        true,
+        &format!("archetype {:?} initial attributes", archetype.id),
+        errors,
+    );
+    for required in ["max_health", "strength", "defence"] {
+        if !archetype.initial_attributes.contains_key(required) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} is missing required initial attribute {required:?}",
+                    archetype.id
+                ),
+            );
+        }
+    }
+    if archetype.initial_attributes.get("max_health").copied() == Some(0) {
+        invalid_gameplay(
+            errors,
+            format!("archetype {:?} max_health must be positive", archetype.id),
+        );
+    }
+    validate_u16_map(
+        &archetype.initial_skills,
+        MAX_STATS_PER_ARCHETYPE,
+        true,
+        &format!("archetype {:?} initial skills", archetype.id),
+        errors,
+    );
+    validate_u32_map(
+        &archetype.initial_resources,
+        MAX_RESOURCES_PER_ARCHETYPE,
+        false,
+        &format!("archetype {:?} initial resources", archetype.id),
+        errors,
+    );
+    validate_u32_map(
+        &archetype.resource_regeneration,
+        MAX_RESOURCES_PER_ARCHETYPE,
+        true,
+        &format!("archetype {:?} resource regeneration", archetype.id),
+        errors,
+    );
+    for resource_id in archetype.resource_regeneration.keys() {
+        if !archetype.initial_resources.contains_key(resource_id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} regenerates missing initial resource {:?}",
+                    archetype.id, resource_id
+                ),
+            );
+        }
+    }
+    validate_resistances(
+        &archetype.initial_resistances,
+        &format!("archetype {:?} initial resistances", archetype.id),
+        errors,
+    );
+
+    let context = format!("archetype {:?} initial abilities", archetype.id);
+    validate_actor_abilities(
+        &archetype.initial_ability_ids,
+        &archetype.initial_resources,
+        ability_by_id,
+        &context,
+        errors,
+    );
+    let mut unlocked = archetype
+        .initial_ability_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut available_resources = archetype.initial_resources.clone();
+    let mut levels = BTreeMap::new();
+    for progression in &archetype.level_progression {
+        if levels.insert(progression.level, progression).is_some() {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} defines level {} more than once",
+                    archetype.id, progression.level
+                ),
+            );
+        }
+    }
+    if levels.len() > (MAX_PROGRESSION_LEVEL - 1) as usize {
+        invalid_gameplay(
+            errors,
+            format!(
+                "archetype {:?} declares too many progression levels",
+                archetype.id
+            ),
+        );
+    }
+    let mut expected_level = 2;
+    let mut previous_experience = 0;
+    for (level, progression) in levels {
+        if level != expected_level || level > MAX_PROGRESSION_LEVEL {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} progression must be contiguous from level 2 through {MAX_PROGRESSION_LEVEL}",
+                    archetype.id
+                ),
+            );
+            expected_level = level.saturating_add(1);
+        } else {
+            expected_level += 1;
+        }
+        if progression.total_experience_required <= previous_experience {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} level {level} cumulative experience must increase",
+                    archetype.id
+                ),
+            );
+        }
+        previous_experience = progression.total_experience_required;
+        validate_u32_map(
+            &progression.attribute_gains,
+            MAX_STATS_PER_ARCHETYPE,
+            false,
+            &format!("archetype {:?} level {level} attribute gains", archetype.id),
+            errors,
+        );
+        projected_attribute_ids.extend(
+            progression
+                .attribute_gains
+                .keys()
+                .map(String::as_str)
+                .filter(|id| *id != "max_health"),
+        );
+        if projected_attribute_ids.len() > MAX_STATS_PER_ARCHETYPE {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} can project more than {MAX_STATS_PER_ARCHETYPE} attributes",
+                    archetype.id
+                ),
+            );
+        }
+        validate_u16_map(
+            &progression.skill_gains,
+            MAX_STATS_PER_ARCHETYPE,
+            false,
+            &format!("archetype {:?} level {level} skill gains", archetype.id),
+            errors,
+        );
+        skill_ids.extend(progression.skill_gains.keys().map(String::as_str));
+        if skill_ids.len() > MAX_STATS_PER_ARCHETYPE {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} can learn more than {MAX_STATS_PER_ARCHETYPE} skills",
+                    archetype.id
+                ),
+            );
+        }
+        validate_u32_map(
+            &progression.resource_gains,
+            MAX_RESOURCES_PER_ARCHETYPE,
+            false,
+            &format!("archetype {:?} level {level} resource gains", archetype.id),
+            errors,
+        );
+        for (resource_id, gain) in &progression.resource_gains {
+            let pool = available_resources.entry(resource_id.clone()).or_default();
+            let Some(total) = pool.checked_add(*gain) else {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "archetype {:?} resource {:?} overflows during progression",
+                        archetype.id, resource_id
+                    ),
+                );
+                continue;
+            };
+            if total > MAX_GAMEPLAY_VALUE {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "archetype {:?} resource {:?} exceeds {MAX_GAMEPLAY_VALUE} during progression",
+                        archetype.id, resource_id
+                    ),
+                );
+            }
+            *pool = total.min(MAX_GAMEPLAY_VALUE);
+        }
+        if available_resources.len() > MAX_RESOURCES_PER_ARCHETYPE {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} can own more than {MAX_RESOURCES_PER_ARCHETYPE} resources",
+                    archetype.id
+                ),
+            );
+        }
+        if progression.ability_unlock_ids.len() > MAX_ABILITIES_PER_ACTOR {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} level {level} unlocks too many abilities",
+                    archetype.id
+                ),
+            );
+        }
+        let mut level_unlocks = HashSet::new();
+        for ability_id in &progression.ability_unlock_ids {
+            if !level_unlocks.insert(ability_id.as_str()) || !unlocked.insert(ability_id.as_str()) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "archetype {:?} unlocks ability {:?} more than once",
+                        archetype.id, ability_id
+                    ),
+                );
+                continue;
+            }
+            validate_ability_reference(
+                ability_id,
+                &available_resources,
+                ability_by_id,
+                &format!("archetype {:?} level {level}", archetype.id),
+                errors,
+            );
+        }
+        if unlocked.len() > MAX_ABILITIES_PER_ACTOR {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "archetype {:?} can unlock more than {MAX_ABILITIES_PER_ACTOR} abilities",
+                    archetype.id
+                ),
+            );
+        }
+    }
+}
+
+fn validate_ability(ability: &AbilityDefinition, errors: &mut Vec<ValidationError>) {
+    validate_u32_map(
+        &ability.resource_costs,
+        MAX_ABILITY_RESOURCE_COSTS,
+        false,
+        &format!("ability {:?} resource costs", ability.id),
+        errors,
+    );
+    if ability.cooldown_ticks > MAX_ABILITY_COOLDOWN_TICKS {
+        invalid_gameplay(
+            errors,
+            format!(
+                "ability {:?} cooldown exceeds {MAX_ABILITY_COOLDOWN_TICKS} ticks",
+                ability.id
+            ),
+        );
+    }
+    if ability.damage.is_none() && ability.heal.is_none() && ability.status_effects.is_empty() {
+        invalid_gameplay(errors, format!("ability {:?} has no effect", ability.id));
+    }
+    if ability.status_effects.len() > MAX_ABILITY_STATUS_EFFECTS {
+        invalid_gameplay(
+            errors,
+            format!(
+                "ability {:?} has {} status effects; the maximum is {MAX_ABILITY_STATUS_EFFECTS}",
+                ability.id,
+                ability.status_effects.len()
+            ),
+        );
+    }
+    if let Some(damage) = &ability.damage {
+        validate_amount_and_scaling(
+            damage.base_amount,
+            damage.scaling_attribute.as_deref(),
+            damage.scaling_percent,
+            &format!("ability {:?} damage", ability.id),
+            errors,
+        );
+        validate_effect_target(ability, damage.target, "damage", errors);
+        if damage.target == AbilityEffectTarget::Target
+            && ability.targeting == AbilityTargeting::SingleAlly
+        {
+            invalid_gameplay(
+                errors,
+                format!("ability {:?} cannot damage its selected ally", ability.id),
+            );
+        }
+    }
+    if let Some(heal) = &ability.heal {
+        validate_amount_and_scaling(
+            heal.base_amount,
+            heal.scaling_attribute.as_deref(),
+            heal.scaling_percent,
+            &format!("ability {:?} heal", ability.id),
+            errors,
+        );
+        validate_effect_target(ability, heal.target, "heal", errors);
+        if heal.target == AbilityEffectTarget::Target
+            && ability.targeting == AbilityTargeting::SingleEnemy
+        {
+            invalid_gameplay(
+                errors,
+                format!("ability {:?} cannot heal its selected enemy", ability.id),
+            );
+        }
+    }
+    for status in &ability.status_effects {
+        let (target, duration_ticks, magnitude) = match status {
+            AbilityStatusEffect::AttributeModifier {
+                target,
+                attribute,
+                magnitude,
+                duration_ticks,
+            } => {
+                if !valid_stat_identifier(attribute) || attribute == "max_health" || *magnitude == 0
+                {
+                    invalid_gameplay(
+                        errors,
+                        format!("ability {:?} has an invalid attribute modifier", ability.id),
+                    );
+                }
+                (*target, *duration_ticks, magnitude.unsigned_abs())
+            }
+            AbilityStatusEffect::Regeneration {
+                target,
+                magnitude,
+                duration_ticks,
+            }
+            | AbilityStatusEffect::DamageOverTime {
+                target,
+                magnitude,
+                duration_ticks,
+                ..
+            } => (*target, *duration_ticks, *magnitude),
+            AbilityStatusEffect::Stun {
+                target,
+                duration_ticks,
+            } => (*target, *duration_ticks, 1),
+        };
+        validate_effect_target(ability, target, "status effect", errors);
+        if duration_ticks == 0 || duration_ticks > MAX_ABILITY_EFFECT_DURATION_TICKS {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "ability {:?} status duration must be 1..={MAX_ABILITY_EFFECT_DURATION_TICKS}",
+                    ability.id
+                ),
+            );
+        }
+        if magnitude == 0 || magnitude > MAX_ABILITY_EFFECT_MAGNITUDE as u32 {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "ability {:?} status magnitude must be 1..={MAX_ABILITY_EFFECT_MAGNITUDE}",
+                    ability.id
+                ),
+            );
+        }
+    }
+}
+
+fn validate_effect_target(
+    ability: &AbilityDefinition,
+    target: AbilityEffectTarget,
+    effect: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if ability.targeting == AbilityTargeting::SelfOnly && target == AbilityEffectTarget::Target {
+        invalid_gameplay(
+            errors,
+            format!(
+                "self-only ability {:?} has target-directed {effect}",
+                ability.id
+            ),
+        );
+    }
+}
+
+fn validate_amount_and_scaling(
+    amount: u32,
+    scaling_attribute: Option<&str>,
+    scaling_percent: u16,
+    context: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if amount == 0 || amount > MAX_GAMEPLAY_VALUE {
+        invalid_gameplay(
+            errors,
+            format!("{context} base amount must be 1..={MAX_GAMEPLAY_VALUE}"),
+        );
+    }
+    if scaling_percent > MAX_ABILITY_SCALING_PERCENT
+        || scaling_attribute.is_some() != (scaling_percent > 0)
+        || scaling_attribute.is_some_and(|attribute| !valid_stat_identifier(attribute))
+    {
+        invalid_gameplay(
+            errors,
+            format!(
+                "{context} scaling requires a safe attribute and 1..={MAX_ABILITY_SCALING_PERCENT} percent"
+            ),
+        );
+    }
+}
+
+fn validate_actor_abilities(
+    ability_ids: &[String],
+    resource_pools: &BTreeMap<String, u32>,
+    ability_by_id: &HashMap<&str, &AbilityDefinition>,
+    context: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if ability_ids.len() > MAX_ABILITIES_PER_ACTOR {
+        invalid_gameplay(
+            errors,
+            format!("{context} exceeds {MAX_ABILITIES_PER_ACTOR} abilities"),
+        );
+    }
+    let mut ids = HashSet::new();
+    for ability_id in ability_ids {
+        if !ids.insert(ability_id.as_str()) {
+            invalid_gameplay(errors, format!("{context} repeats ability {ability_id:?}"));
+            continue;
+        }
+        validate_ability_reference(ability_id, resource_pools, ability_by_id, context, errors);
+    }
+}
+
+fn validate_ability_reference(
+    ability_id: &str,
+    resource_pools: &BTreeMap<String, u32>,
+    ability_by_id: &HashMap<&str, &AbilityDefinition>,
+    context: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    let Some(ability) = ability_by_id.get(ability_id) else {
+        invalid_gameplay(
+            errors,
+            format!("{context} references missing ability {ability_id:?}"),
+        );
+        return;
+    };
+    for resource_id in ability.resource_costs.keys() {
+        if !resource_pools.contains_key(resource_id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "{context} cannot use ability {ability_id:?}: resource {resource_id:?} is unavailable"
+                ),
+            );
+        }
+    }
+}
+
+fn validate_u32_map(
+    values: &BTreeMap<String, u32>,
+    maximum_entries: usize,
+    allow_zero: bool,
+    context: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if values.len() > maximum_entries {
+        invalid_gameplay(
+            errors,
+            format!("{context} has too many entries; the maximum is {maximum_entries}"),
+        );
+    }
+    for (id, value) in values {
+        if !valid_stat_identifier(id) || *value > MAX_GAMEPLAY_VALUE || (!allow_zero && *value == 0)
+        {
+            invalid_gameplay(
+                errors,
+                format!("{context} entry {id:?} must use a safe id and a value within bounds"),
+            );
+        }
+    }
+}
+
+fn validate_u16_map(
+    values: &BTreeMap<String, u16>,
+    maximum_entries: usize,
+    allow_zero: bool,
+    context: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if values.len() > maximum_entries {
+        invalid_gameplay(
+            errors,
+            format!("{context} has too many entries; the maximum is {maximum_entries}"),
+        );
+    }
+    for (id, value) in values {
+        if !valid_stat_identifier(id) || *value > MAX_SKILL_VALUE || (!allow_zero && *value == 0) {
+            invalid_gameplay(
+                errors,
+                format!("{context} entry {id:?} must use a safe id and a value within bounds"),
+            );
+        }
+    }
+}
+
+fn validate_resistances(
+    resistances: &BTreeMap<DamageType, u16>,
+    context: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    for (damage_type, percent) in resistances {
+        if *percent > MAX_RESISTANCE_PERCENT {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "{context} {damage_type:?} value {percent} exceeds {MAX_RESISTANCE_PERCENT} percent"
+                ),
+            );
+        }
+    }
+}
+
+fn valid_gameplay_identifier(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b':' | b'-' | b'_' | b'.')
+        })
+}
+
+fn valid_stat_identifier(value: &str) -> bool {
+    value.len() <= 64 && valid_gameplay_identifier(value)
+}
+
+fn safe_gameplay_text(value: &str, maximum_bytes: usize) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= maximum_bytes
+        && !trimmed
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
+
+fn invalid_gameplay(errors: &mut Vec<ValidationError>, message: String) {
+    errors.push(ValidationError::InvalidGameplay(message));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

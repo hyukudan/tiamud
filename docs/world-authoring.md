@@ -62,6 +62,9 @@ flowchart TB
     G --> IR["itemRules<br/>equipo · curación · efectos"]
     G --> NP["npcPrototypes"]
     NP --> NS["npcSpawns<br/>sala inicial"]
+    G --> AR["archetypes<br/>ficha · XP · evolución"]
+    G --> AB["abilities<br/>técnicas · magia · efectos"]
+    NP --> NA["npcAbilitySets<br/>recursos · resistencias"]
 
     A --> RM["roomMedia<br/>alt localizado · audio"]
     A --> RP["roomPerception<br/>luz · ocultación · secretos"]
@@ -86,6 +89,7 @@ WorldProjectManifest v1
 ├── name!                nombre del mundo resultante
 ├── startRoomId!         sala inicial global
 ├── rngSeed?
+├── defaultArchetypeId?
 └── areas[]!             entre 1 y 256
     ├── id!              1..=256 bytes seguros y único
     └── path!            ruta relativa y única
@@ -99,6 +103,9 @@ AreaPack v1
 ├── itemRules[]?
 ├── npcPrototypes[]?
 ├── npcSpawns[]?
+├── archetypes[]?
+├── abilities[]?
+├── npcAbilitySets[]?
 ├── roomMedia[]?
 ├── roomPerception[]?
 ├── sceneVariants[]?
@@ -180,6 +187,7 @@ destino en `dependsOn`. Esto cubre:
 - salidas y objetos colocados en salas;
 - reglas y botín de objetos;
 - prototipos y salas de apariciones NPC;
+- habilidades desbloqueadas por arquetipos y repertorios de NPC;
 - multimedia y percepción de sala, objetos o NPC ocultos;
 - variantes de escena;
 - sala de scripts y pruebas de contenido.
@@ -198,8 +206,9 @@ Invariantes de composición:
   proyecto;
 - ninguna estructura del `AreaPack` contiene campos desconocidos; una errata
   anidada falla antes de fusionar el mundo;
-- los IDs de sala, objeto, prototipo NPC, aparición NPC, variante de escena y
-  script son únicos en todo el proyecto, incluso entre clases distintas;
+- los IDs de sala, objeto, prototipo NPC, aparición NPC, arquetipo, habilidad,
+  variante de escena y script son únicos en todo el proyecto, incluso entre
+  clases distintas;
 - el WorldPack fusionado pasa después todas las validaciones globales:
   referencias, ubicación única de objetos, apariciones, variante por defecto y
   alcanzabilidad desde `startRoomId`;
@@ -277,7 +286,11 @@ WorldPackDocument
 │   ├── rngSeed?
 │   ├── itemRules[]?
 │   ├── npcPrototypes[]?
-│   └── npcSpawns[]?
+│   ├── npcSpawns[]?
+│   ├── defaultArchetypeId?
+│   ├── archetypes[]?
+│   ├── abilities[]?
+│   └── npcAbilitySets[]?
 ├── roomMedia[]?
 ├── roomPerception[]?
 ├── sceneVariants[]?
@@ -434,6 +447,126 @@ WorldPack v2 no contiene definiciones completas de tiendas, economía, grupos,
 ayudas ni misiones. El núcleo jugable sí mantiene esos estados y un script
 puede iniciar una misión por ID, pero el documento no modela su título, pasos,
 recompensas o localización editorial.
+
+### Ficha de personaje, arquetipos y evolución
+
+El catálogo de personajes es opcional para conservar compatibilidad con todo
+WorldPack v2 anterior. Si existe al menos un arquetipo, el mundo debe declarar
+un `gameplay.defaultArchetypeId` que apunte a uno de ellos. El nivel inicial es
+siempre 1; cada entrada posterior expresa el umbral acumulado de experiencia y
+todos los incrementos que se aplican al entrar en ese nivel.
+
+```text
+gameplay.archetypes[]
+├── id!, name!, description!
+├── initialAttributes!       mapa {statId: valor}
+│   └── max_health!, strength!, defence!
+├── initialSkills?           mapa {skillId: 0..=1000}
+├── initialResources?        mapa {resourceId: capacidad}
+├── resourceRegeneration?    mapa {resourceId: cantidad por tick}
+├── initialResistances?      mapa {damageType: porcentaje 0..=90}
+├── initialAbilityIds[]?
+└── levelProgression[]?      niveles contiguos desde 2
+    ├── level!               2..=100
+    ├── totalExperienceRequired!  acumulado y estrictamente creciente
+    ├── attributeGains?
+    ├── skillGains?
+    ├── resourceGains?
+    └── abilityUnlockIds[]?
+```
+
+Los IDs de estadísticas, skills y recursos admiten letras
+ASCII minúsculas, números, `:`, `-`, `_` y `.`, con 64 bytes como máximo. Son
+datos deliberadamente extensibles: `intellect`, `agility`, `mana` o cualquier
+otro concepto seguro no requiere cambiar el esquema. `max_health`, `strength`
+y `defence` forman el mínimo interoperable que el runtime puede proyectar en
+la ficha. Una regeneración solo puede referirse a un recurso inicial del mismo
+arquetipo; se omite o se escribe a cero cuando ese recurso no se regenera.
+
+El esquema no define un sistema general de entrenamiento. Los ranks iniciales
+y su progresión configurable proceden de `initialSkills` y `skillGains`; el
+runtime conserva además el incremento heredado del skill `combat` tras derrotar
+un NPC.
+
+Cada habilidad inicial o desbloqueada debe existir. Además, todos sus costes
+de recurso deben estar disponibles en ese nivel: primero se aplican los
+`resourceGains` y después los desbloqueos. Una habilidad no puede desbloquearse
+dos veces y un actor puede conocer como máximo 64.
+
+Estos IDs son identidad durable una vez publicado el contenido. La restauración
+filtra estado efímero desconocido y elimina o ignora con seguridad una habilidad
+aprendida retirada del WorldPack, pero un ID renombrado es una identidad nueva.
+No existe aún una tabla general de aliases ni una migración automática para
+renombrar arquetipos, habilidades, stats o recursos; ese cambio exige una
+migración editorial explícita o esperar a dicha capacidad futura.
+
+El mundo revisado ofrece tres ejemplos pequeños en
+`worlds/areas/square.area.json`: `tiamud:wanderer` es la opción por defecto,
+`tiamud:vanguard` evoluciona hacia una técnica de stamina y
+`tiamud:arcanist` declara `intellect`, mana, regeneración y un conjuro. Los
+valores son contenido editable, no constantes ocultas del motor.
+
+### Habilidades unificadas, daño y estados
+
+Una `AbilityDefinition` sirve igual para un ataque común, una técnica marcial,
+un hechizo o una acción innata de NPC. El tipo no decide quién puede usarla:
+lo hacen las referencias de arquetipo y `npcAbilitySets`.
+
+```text
+gameplay.abilities[]
+├── id!, name!, description!
+├── category!               martial|spell|innate
+├── resourceCosts?          hasta 4 recursos; cantidades positivas
+├── cooldownTicks?          0..=10000
+├── targeting!              self_only|single_enemy|single_ally
+├── damage?
+│   ├── target!             caster|target
+│   ├── damageType!         physical|arcane|fire|frost|lightning
+│   ├── baseAmount!         positivo y acotado
+│   ├── scalingAttribute?
+│   └── scalingPercent?     1..=1000 cuando hay atributo
+├── heal?                   mismo modelo salvo damageType
+└── statusEffects[]?        hasta 8
+    ├── attribute_modifier  magnitud con signo, atributo y duración
+    ├── regeneration        magnitud positiva y duración
+    ├── damage_over_time    tipo de daño, magnitud y duración
+    └── stun                duración
+```
+
+Toda habilidad debe producir al menos daño, curación o un estado. Las
+duraciones están entre 1 y 10 000 ticks y las magnitudes entre 1 y 100 000 en
+valor absoluto. Una habilidad `self_only` no puede dirigir efectos a `target`;
+tampoco se admite daño al aliado seleccionado ni curación al enemigo
+seleccionado. El tipo de daño es operativo: arquetipos y NPC pueden declarar
+resistencias de hasta 90 %, sin posibilidad de inmunidad accidental.
+
+```text
+gameplay.npcAbilitySets[]
+├── npcPrototypeId!         prototipo existente; un conjunto como máximo
+├── resourcePools?          capacidades iniciales del NPC
+├── resourceRegeneration?   cantidad por tick; solo pools declarados
+├── resistances?            {damageType: 0..=90}
+└── abilityIds[]?           habilidades existentes y utilizables con esos pools
+```
+
+Los mapas JSON se serializan por clave y las listas de arquetipos, niveles,
+habilidades, desbloqueos, estados y repertorios NPC se canonicalizan. El mismo
+contenido semántico produce exactamente los mismos bytes aunque el autor haya
+reordenado esas listas.
+
+Límites principales del catálogo:
+
+| Recurso | Límite |
+| --- | ---: |
+| Arquetipos | 32 |
+| Habilidades del mundo | 512 |
+| Conjuntos de habilidades NPC | 512 |
+| Nivel máximo authored | 100 |
+| Estadísticas o skills por arquetipo | 64 |
+| Recursos por actor | 16 |
+| Habilidades por actor | 64 |
+| Costes por habilidad | 4 |
+| Estados por habilidad | 8 |
 
 <a id="multimedia-percepcion-y-localizacion"></a>
 

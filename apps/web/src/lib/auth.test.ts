@@ -3,6 +3,7 @@ import {
   ACCESS_STORAGE_KEY,
   authenticate,
   createCharacter,
+  loadArchetypes,
   loadCharacters,
   readStoredAccess,
   writeStoredAccess,
@@ -36,15 +37,55 @@ describe('authentication API', () => {
 
   it('uses the bearer token for roster and character creation', async () => {
     const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ characters: [{ id: 8, account_id: 4, name: 'Lyra', room_id: 'square' }] }))
-      .mockResolvedValueOnce(jsonResponse({ character: { id: 9, account_id: 4, name: 'Orin', room_id: 'square' } }, 201));
+      .mockResolvedValueOnce(jsonResponse({ characters: [{
+        id: 8, account_id: 4, name: 'Lyra', room_id: 'square',
+        archetype: { id: 'warden', label: 'Warden' },
+      }] }))
+      .mockResolvedValueOnce(jsonResponse({
+        archetypes: [{ id: 'warden', label: 'Warden', description: 'A resilient frontier guardian.' }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({ character: {
+        id: 9, account_id: 4, name: 'Orin', room_id: 'square',
+        archetype: { id: 'warden', label: 'Warden' },
+      } }, 201));
 
     await expect(loadCharacters('token', fetcher)).resolves.toEqual([
-      { id: 8, accountId: 4, name: 'Lyra', roomId: 'square' },
+      {
+        id: 8, accountId: 4, name: 'Lyra', roomId: 'square',
+        archetype: { id: 'warden', label: 'Warden' },
+      },
     ]);
-    await expect(createCharacter('token', 'Orin', fetcher)).resolves.toMatchObject({ id: 9, name: 'Orin' });
+    await expect(loadArchetypes(fetcher)).resolves.toEqual([
+      { id: 'warden', label: 'Warden', description: 'A resilient frontier guardian.' },
+    ]);
+    await expect(createCharacter('token', 'Orin', 'warden', fetcher)).resolves.toMatchObject({
+      id: 9, name: 'Orin', archetype: { id: 'warden' },
+    });
     expect(fetcher.mock.calls[0]?.[1]?.headers).toEqual({ authorization: 'Bearer token' });
-    expect(fetcher.mock.calls[1]?.[1]?.headers).toMatchObject({ authorization: 'Bearer token' });
+    expect(fetcher.mock.calls[2]?.[1]?.headers).toMatchObject({ authorization: 'Bearer token' });
+    expect(fetcher.mock.calls[2]?.[1]?.body).toBe(JSON.stringify({ name: 'Orin', archetypeId: 'warden' }));
+  });
+
+  it('falls back cleanly when an older server has no archetype catalog', async () => {
+    const catalogFetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({}, 404));
+    await expect(loadArchetypes(catalogFetcher)).resolves.toEqual([]);
+
+    const createFetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      character: { id: 9, name: 'Orin' },
+    }, 201));
+    await expect(createCharacter('token', 'Orin', createFetcher)).resolves.toMatchObject({ id: 9, name: 'Orin' });
+    expect(createFetcher.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({ name: 'Orin' }));
+  });
+
+  it('accepts the authored archetype id and description boundaries', async () => {
+    const id = 'a'.repeat(128);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      archetypes: [{ id, label: 'Boundary', description: '' }],
+    }));
+    await expect(loadArchetypes(fetcher)).resolves.toEqual([
+      { id, label: 'Boundary', description: '' },
+    ]);
+    expect(fetcher).toHaveBeenCalledWith('/api/archetypes', {});
   });
 
   it('surfaces the public API error message', async () => {

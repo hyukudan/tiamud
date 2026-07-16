@@ -4,11 +4,13 @@
     authenticate,
     clearStoredAccess,
     createCharacter,
+    loadArchetypes,
     loadCharacters,
     logout,
     readStoredAccess,
     writeStoredAccess,
     type AuthenticatedSession,
+    type ArchetypeChoice,
     type Character,
     type CharacterSelection,
   } from '../lib/auth';
@@ -19,6 +21,8 @@
   let accountName = $state('');
   let password = $state('');
   let characterName = $state('');
+  let archetypes = $state<ArchetypeChoice[]>([]);
+  let archetypeId = $state('');
   let session = $state<AuthenticatedSession>();
   let characters = $state<Character[]>([]);
   let lastCharacterId = $state<number>();
@@ -27,9 +31,29 @@
   let error = $state<string>();
 
   const submitLabel = $derived(mode === 'login' ? 'Sign in' : 'Create account');
+  const selectedArchetype = $derived(archetypes.find((archetype) => archetype.id === archetypeId));
 
   async function refreshRoster(current: AuthenticatedSession): Promise<void> {
-    characters = await loadCharacters(current.token);
+    const [nextCharacters, archetypeResult] = await Promise.all([
+      loadCharacters(current.token),
+      loadArchetypes()
+        .then((value) => ({ value }))
+        .catch((cause: unknown) => ({ cause })),
+    ]);
+    characters = nextCharacters;
+    if ('cause' in archetypeResult) {
+      archetypes = [];
+      archetypeId = '';
+      error = archetypeResult.cause instanceof Error
+        ? archetypeResult.cause.message
+        : 'The archetype catalog is unavailable.';
+      return;
+    }
+    const nextArchetypes = archetypeResult.value;
+    archetypes = nextArchetypes;
+    archetypeId = archetypeId && nextArchetypes.some((archetype) => archetype.id === archetypeId)
+      ? archetypeId
+      : '';
   }
 
   async function restore(): Promise<void> {
@@ -74,7 +98,11 @@
     busy = true;
     error = undefined;
     try {
-      const character = await createCharacter(session.token, characterName.trim());
+      const character = await createCharacter(
+        session.token,
+        characterName.trim(),
+        archetypeId || undefined,
+      );
       characters = [...characters, character];
       characterName = '';
     } catch (cause) {
@@ -98,6 +126,8 @@
     clearStoredAccess(window.localStorage);
     session = undefined;
     characters = [];
+    archetypes = [];
+    archetypeId = '';
     lastCharacterId = undefined;
     try {
       if (token) await logout(token);
@@ -129,7 +159,7 @@
       <ul class="character-list">
         {#each characters as character (character.id)}
           <li>
-            <span>{character.name}</span>
+            <span>{character.name}{#if character.archetype}<small>{character.archetype.label}</small>{/if}</span>
             <button type="button" disabled={busy} onclick={() => selectCharacter(character)}>
               {lastCharacterId === character.id ? 'Continue' : 'Enter'}
               <span class="sr-only"> as {character.name}</span>
@@ -150,7 +180,7 @@
       }}
     >
       <label for="character-name">Create an adventurer</label>
-      <div>
+      <div class="character-name-row">
         <input
           id="character-name"
           bind:value={characterName}
@@ -159,8 +189,31 @@
           required
           placeholder="Character name"
         />
-        <button type="submit" disabled={busy || !characterName.trim()}>Create</button>
       </div>
+      {#if archetypes.length > 0}
+        <label for="character-archetype">Archetype</label>
+        <select
+          id="character-archetype"
+          bind:value={archetypeId}
+          disabled={busy}
+          aria-describedby="archetype-description"
+        >
+          <option value="">World default</option>
+          {#each archetypes as archetype (archetype.id)}
+            <option value={archetype.id}>{archetype.label}</option>
+          {/each}
+        </select>
+        {#if selectedArchetype}
+          <p id="archetype-description">{selectedArchetype.description}</p>
+        {:else}
+          <p id="archetype-description">Use the world author's suggested starting path.</p>
+        {/if}
+      {/if}
+      <button
+        class="character-create"
+        type="submit"
+        disabled={busy || !characterName.trim()}
+      >Create</button>
     </form>
   </section>
 {:else}

@@ -1,16 +1,17 @@
 # Single-host operation
 
 This runbook covers a public Tiamud installation on one Linux host. HTTPS/WSS
-terminates at Caddy and the server keeps SQLite, WorldPacks, assets, and backups
-on local storage. The public Telnet listener terminates TLS directly in the
+terminates at Caddy; the Rust server, PostgreSQL, WorldPacks, assets and backups
+remain on that host. The public Telnet listener terminates TLS directly in the
 server. Telnet credentials must not be exposed over the public Internet until
 that listener has a valid certificate; bind explicit plaintext mode only to a
 trusted network or firewall it off.
 
 This is a reviewed reference procedure, not evidence that a public production
-host has been installed. SQLite is the recommended/default profile. The
-optional PostgreSQL profile is documented separately below because its backup
-and recovery tools differ.
+host has been installed. PostgreSQL is the recommended profile for a new public
+host. SQLite remains the executable's zero-configuration fallback for local or
+legacy installations and has a separate procedure below. Tiamud selects
+exactly one; neither profile requires Kubernetes.
 
 ## Layout
 
@@ -19,16 +20,20 @@ and recovery tools differ.
 /usr/local/bin/tiamud-admin
 /etc/tiamud/tiamud.env
 /var/lib/tiamud/
-  data/tiamud.db
   worlds/lantern-square.world.json
   backups/
+
+PostgreSQL data and configuration use the distribution's protected paths.
 ```
 
 Create a dedicated `tiamud` system user, copy the reviewed
 [`deploy/tiamud.service`](../../deploy/tiamud.service) to
 `/etc/systemd/system/`, copy
 [`deploy/tiamud.env.example`](../../deploy/tiamud.env.example) to
-`/etc/tiamud/tiamud.env`, and adjust addresses and paths. Install the example
+`/etc/tiamud/tiamud.env`, provision the local role/database named by its active
+PostgreSQL URL, replace credentials, and adjust addresses and paths. To choose
+the SQLite fallback instead, comment that URL and enable exactly the documented
+`TIAMUD_DB_PATH` line. Install the example
 [`deploy/Caddyfile`](../../deploy/Caddyfile) after replacing the hostname.
 Install a separately renewed PEM certificate chain and private key at the paths
 configured by `TIAMUD_TELNET_TLS_CERT` and `TIAMUD_TELNET_TLS_KEY`; restrict the
@@ -60,7 +65,7 @@ curl --fail http://127.0.0.1:8080/health/ready
 ```
 
 `/health/live` proves that the HTTP process is responding. `/health/ready`
-performs bounded probes of both the world actor and SQLite worker and returns
+performs bounded probes of both the world actor and selected storage worker and returns
 `503` if either cannot answer. Operators must still run `tiamud-admin check`
 and the smoke workflow after an update; readiness is not a replacement for
 integrity or gameplay verification.
@@ -68,9 +73,11 @@ integrity or gameplay verification.
 The service writes structured logs to stdout/stderr. `systemd-journald` owns
 rotation and retention; configure its host-wide limits to match available disk.
 
-The SQLite environment uses `TIAMUD_DB_PATH`. `TIAMUD_DATABASE_URL` is a
-mutually exclusive alternative accepting `sqlite://...`, `postgresql://...` or
-`postgres://...`. Startup selects exactly one store and readiness reports its
+The recommended environment uses `TIAMUD_DATABASE_URL=postgresql://...`.
+`TIAMUD_DB_PATH` selects the mutually exclusive SQLite fallback; an explicit
+`sqlite://...` URL is also accepted. With neither variable the executable uses
+`data/tiamud.db`, which is useful locally but is not the new-public-host
+recommendation. Startup selects exactly one store and readiness reports its
 backend; Tiamud never dual-writes.
 
 ## Rate limits and metrics
@@ -100,8 +107,8 @@ The reviewed Caddy configuration deliberately returns `404` for public
 `/metrics` requests. The endpoint covers connections by WebSocket and Telnet
 transport, authenticated sessions, action totals/errors/latency, world-queue
 depth, authentication throttling, coalesced output and slow-client disconnects,
-dropped output and per-transport output-queue depth, SQLite transactions/
-errors/latency and queue depth, ticks/errors/latency, scripts/errors/timeouts/
+dropped output and per-transport output-queue depth, selected-database
+transactions/errors/latency and queue depth, ticks/errors/latency, scripts/errors/timeouts/
 latency, and resident process memory. Alert at minimum on readiness loss,
 database or tick errors, script timeouts, slow-client disconnect or dropped-
 output growth, a persistently full world/database/transport queue, and sustained
@@ -115,7 +122,7 @@ The reference service allows five seconds for Telnet sessions, ten seconds for
 the actor, and five seconds for persistence to drain and close before logging a
 timeout. Keep systemd's stop timeout above those internal bounds. A timeout or
 forced kill requires an integrity check before returning the instance to
-service:
+service. For SQLite, use the repository CLI:
 
 ```sh
 sudo systemctl stop tiamud
@@ -124,10 +131,15 @@ tiamud-admin check \
   --world-pack /var/lib/tiamud/worlds/lantern-square.world.json
 ```
 
-## Backup and verification
+For PostgreSQL, use the installation's native consistency/recovery procedure,
+then check Tiamud readiness and smoke behavior. `tiamud-admin check` and its
+backup subcommands are SQLite tools and are not PostgreSQL recovery evidence.
 
-Create backups on a filesystem covered by the host's normal off-machine backup
-policy. Every command refuses to overwrite an existing destination.
+## SQLite fallback: backup and verification
+
+This section applies to the SQLite local/legacy profile. Create backups on a
+filesystem covered by the host's normal off-machine backup policy. Every
+command refuses to overwrite an existing destination.
 
 ```sh
 tiamud-admin backup create \
@@ -153,6 +165,11 @@ copy them off-host, monitor free space before each backup, and periodically
 restore a selected off-host copy into a new path. A backup that has not passed
 `backup verify` and a restore exercise is not established recovery evidence.
 
+Restore character rows and the shared world snapshot from the same committed
+database point. Ability cooldowns are absolute world-tick deadlines, so copying
+characters into a different world clock or combining independently restored
+fragments is unsupported; use the verified whole-backend recovery path.
+
 ## Event retention and SQLite file size
 
 In schema v8, both SQLite and PostgreSQL record the last domain-event sequence
@@ -170,7 +187,7 @@ offline maintenance: stop Tiamud, create and verify a backup, perform the
 operator-reviewed rebuild on a separate copy or during the maintenance window,
 verify integrity and a restore, then restart the service.
 
-## Schema migration
+## SQLite schema migration
 
 Stop the server so no process holds the authoritative database, then run the
 shared migrator. A verified safety snapshot is mandatory and is created before
@@ -247,13 +264,29 @@ Check that the transaction reports `COMMIT`, verify the audit row and role,
 then restart Tiamud. Any raised exception aborts the transaction; use
 `ROLLBACK` before correcting the cause.
 
-## Optional PostgreSQL profile
+## PostgreSQL-first public profile
 
-PostgreSQL is not needed for the reference single-host installation. Before
-choosing it, run the opt-in integration test against a disposable service and
-establish ordinary PostgreSQL monitoring, `pg_dump`/restore and point-in-time
-recovery appropriate to the host. Tiamud's `backup` subcommands are SQLite
-tools and must not be represented as PostgreSQL backup coverage.
+Provision a dedicated local database and least-privilege service role using the
+host distribution's PostgreSQL procedure. Configure ordinary monitoring,
+`pg_dump`/restore and, where required, point-in-time recovery before publishing
+the service. Tiamud creates or verifies its own schema on connection, but its
+`backup` subcommands are SQLite tools and must not be represented as PostgreSQL
+backup coverage.
+
+Configure exactly one storage line:
+
+```text
+TIAMUD_DATABASE_URL=postgresql://tiamud@127.0.0.1/tiamud?sslmode=require
+# TIAMUD_DB_PATH is absent
+```
+
+The runtime PostgreSQL connector uses Rustls and the operating-system trust
+store; URL `sslmode` remains authoritative, including an explicit local
+plaintext choice. Exercise registration, login, character creation and
+selection, an authored ability, movement, combat, social state, restart and
+readiness before publishing the host.
+
+### Move an existing SQLite installation
 
 To change an existing installation, stop Tiamud, create and verify a current
 SQLite snapshot, provision an empty PostgreSQL database, then run the explicit
@@ -283,10 +316,8 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 # TIAMUD_DB_PATH is absent
 ```
 
-The runtime PostgreSQL connector uses Rustls and the operating-system trust
-store; URL `sslmode` remains authoritative, including an explicit local
-plaintext choice. Exercise registration, login, movement, combat, social state,
-restart and readiness before deleting or archiving the SQLite rollback copy.
+Exercise registration, login, movement, combat, social state, restart and
+readiness before deleting or archiving the SQLite rollback copy.
 The repository's [current PostgreSQL 18 schema-v8 acceptance
 run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
@@ -298,10 +329,12 @@ backup/restore or point-in-time recovery for a production installation.
 
 1. Verify the candidate archive checksum and OIDC-signed provenance as described
    in the [release runbook](releases.md), then extract it into staging.
-2. Create and verify a database backup.
+2. Create and verify a native PostgreSQL backup, or the `tiamud-admin` backup
+   for an SQLite installation.
 3. Save the current binary and WorldPack under a versioned rollback directory.
-4. Stop Tiamud, install the new binary and reviewed pack, and run
-   `tiamud-admin check`.
+4. Stop Tiamud, install the new binary and reviewed pack, validate the pack with
+   `tiamud-world validate`, and run the integrity procedure for the selected
+   database (`tiamud-admin check` applies only to SQLite).
 5. Start the service and exercise registration, character entry, movement, and
    inventory against the installed listener, for example:
 
@@ -314,9 +347,10 @@ backup/restore or point-in-time recovery for a production installation.
    temporary debug server and therefore is not proof of the installed service.
 
 If validation or smoke testing fails, stop the service, restore the prior
-binary and WorldPack, move the failed database aside, and restore the verified
-pre-update snapshot to the authoritative path. The restore command deliberately
-does not overwrite files, so rollback cannot silently destroy forensic data.
+binary and WorldPack, preserve the failed database for diagnosis, and follow
+the selected backend's verified recovery procedure. SQLite restore deliberately
+does not overwrite files, so that path cannot silently destroy forensic data;
+PostgreSQL recovery must provide the equivalent operator-controlled safety.
 
 This runbook covers the implemented HTTPS/WSS reverse-proxy, systemd, graceful
 shutdown, migration, backup, restore, readiness, metrics, verified release, and

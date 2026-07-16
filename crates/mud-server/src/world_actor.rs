@@ -12,13 +12,15 @@ use std::{
 };
 use thiserror::Error;
 use tiamud_core::{
-    AccountId, AccountRole, AccountSnapshot, AdventureEvent, CharacterGameplaySnapshot,
-    CharacterId, CharacterSnapshot, DomainEvent, GameplayEvent, PlayerAction, PlayerStateView,
-    SceneView, SessionId, ViewEvent, World, WorldError as CoreWorldError,
+    AccountId, AccountRole, AccountSnapshot, AdventureEvent, ArchetypeView,
+    CharacterGameplaySnapshot, CharacterId, CharacterSnapshot, DomainEvent, GameplayEvent,
+    PlayerAction, PlayerStateView, SceneView, SessionId, ViewEvent, World,
+    WorldError as CoreWorldError,
 };
 use tiamud_scripting::ScriptHook;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
+use tracing::error;
 
 const WORLD_COMMAND_QUEUE_CAPACITY: usize = 256;
 const PERSIST_TICK_SCRIPT_WALL_BUDGET: Duration = Duration::from_millis(100);
@@ -31,6 +33,10 @@ pub enum GameError {
     Persistence(#[from] StoreError),
     #[error("the world actor stopped unexpectedly")]
     ActorStopped,
+    #[error("the character references content that requires an operator migration")]
+    CharacterContentIncompatible,
+    #[error("world actor startup failed during {stage}: {reason}")]
+    Startup { stage: &'static str, reason: String },
 }
 
 #[derive(Debug)]
@@ -100,6 +106,9 @@ pub struct WorldHandle {
     tx: mpsc::Sender<Command>,
     store: Arc<dyn CharacterStore>,
     start_room_id: Arc<str>,
+    archetype_catalog: Arc<[ArchetypeView]>,
+    default_archetype_id: Arc<str>,
+    initial_gameplay: Arc<HashMap<String, CharacterGameplaySnapshot>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -117,53 +126,94 @@ impl WorldSchedulerConfig {
 
 impl WorldHandle {
     #[cfg(test)]
-    pub fn spawn(world: World, store: Arc<dyn CharacterStore>) -> Self {
-        Self::spawn_with_scheduler(world, store, WorldSchedulerConfig::default())
+    pub async fn spawn(world: World, store: Arc<dyn CharacterStore>) -> Result<Self, GameError> {
+        Self::spawn_with_scheduler(world, store, WorldSchedulerConfig::default()).await
     }
 
     #[cfg(test)]
-    pub fn spawn_with_scheduler(
+    pub async fn spawn_with_scheduler(
         world: World,
         store: Arc<dyn CharacterStore>,
         scheduler: WorldSchedulerConfig,
-    ) -> Self {
+    ) -> Result<Self, GameError> {
         Self::spawn_with_scheduler_and_content(world, store, scheduler, RuntimeContent::default())
+            .await
     }
 
-    pub fn spawn_with_scheduler_and_content(
+    pub async fn spawn_with_scheduler_and_content(
         world: World,
         store: Arc<dyn CharacterStore>,
         scheduler: WorldSchedulerConfig,
         runtime_content: RuntimeContent,
-    ) -> Self {
+    ) -> Result<Self, GameError> {
         let (tx, mut rx) = mpsc::channel(WORLD_COMMAND_QUEUE_CAPACITY);
+        let (startup_reply, startup_receive) = oneshot::channel();
         let mut social = SocialRuntime::new();
         let operational_metrics = runtime_content.operational_metrics();
         let mut actor_delivery = DeliveryRouter::new(operational_metrics.clone());
         let start_room_id: Arc<str> = Arc::from(world.start_room_id());
+        let archetype_catalog: Arc<[ArchetypeView]> = Arc::from(world.archetype_catalog().to_vec());
+        let default_archetype_id: Arc<str> = Arc::from(world.default_archetype_id());
+        let initial_gameplay = Arc::new(
+            archetype_catalog
+                .iter()
+                .map(|archetype| {
+                    let gameplay = world
+                        .initial_gameplay(Some(&archetype.id))
+                        .map_err(GameError::from)?;
+                    Ok((archetype.id.clone(), gameplay))
+                })
+                .collect::<Result<HashMap<_, _>, GameError>>()?,
+        );
         let actor_store = Arc::clone(&store);
         tokio::spawn(async move {
             let mut world = world;
             let mut next_session = 1_u64;
             let mut session_roles = HashMap::new();
 
-            match actor_store.load_runtime_snapshot().await {
+            let startup = match actor_store.load_runtime_snapshot().await {
                 Ok(Some(snapshot)) => {
-                    if world.restore_runtime_snapshot(snapshot).is_err() {
-                        return;
-                    }
+                    world
+                        .restore_runtime_snapshot(snapshot)
+                        .map_err(|error| GameError::Startup {
+                            stage: "restore_runtime_snapshot",
+                            reason: error.to_string(),
+                        })
                 }
                 Ok(None) => match actor_store.load_domain_events().await {
                     Ok(events) => {
-                        for event in events {
-                            if world.replay_persisted_event(&event).is_err() {
-                                return;
+                        for (index, event) in events.iter().enumerate() {
+                            if let Err(error) = world.replay_persisted_event(event) {
+                                return report_startup_failure(
+                                    startup_reply,
+                                    GameError::Startup {
+                                        stage: "replay_domain_events",
+                                        reason: format!("event {index}: {error}"),
+                                    },
+                                );
                             }
                         }
+                        Ok(())
                     }
-                    Err(_) => return,
+                    Err(error) => Err(GameError::Startup {
+                        stage: "load_domain_events",
+                        reason: error.to_string(),
+                    }),
                 },
-                Err(_) => return,
+                Err(error) => Err(GameError::Startup {
+                    stage: "load_runtime_snapshot",
+                    reason: error.to_string(),
+                }),
+            };
+            if let Err(error) = startup {
+                return report_startup_failure(startup_reply, error);
+            }
+            if startup_reply.send(Ok(())).is_err() {
+                error!(
+                    stage = "startup_barrier",
+                    "world actor startup caller disappeared"
+                );
+                return;
             }
 
             let mut interval = scheduler.tick_interval.map(tokio::time::interval);
@@ -318,10 +368,27 @@ impl WorldHandle {
                 }
             }
         });
-        Self {
+        let handle = Self {
             tx,
             store,
             start_room_id,
+            archetype_catalog,
+            default_archetype_id,
+            initial_gameplay,
+        };
+        match startup_receive.await {
+            Ok(Ok(())) => Ok(handle),
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                error!(
+                    stage = "startup_task",
+                    "world actor stopped before reporting startup readiness"
+                );
+                Err(GameError::Startup {
+                    stage: "startup_task",
+                    reason: "actor stopped before reporting readiness".to_owned(),
+                })
+            }
         }
     }
 
@@ -381,18 +448,52 @@ impl WorldHandle {
         authenticated_roster(self.store.as_ref(), &token).await
     }
 
+    pub fn archetype_catalog(&self) -> &[ArchetypeView] {
+        &self.archetype_catalog
+    }
+
+    pub fn default_archetype_id(&self) -> &str {
+        &self.default_archetype_id
+    }
+
+    #[cfg(test)]
     pub async fn create_authenticated_character(
         &self,
         token: String,
         name: String,
     ) -> Result<CharacterSnapshot, GameError> {
-        create_authenticated_character(
-            self.store.as_ref(),
-            &token,
-            &name,
-            self.start_room_id.as_ref(),
-        )
-        .await
+        self.create_authenticated_character_with_archetype(token, name, None)
+            .await
+    }
+
+    pub async fn create_authenticated_character_with_archetype(
+        &self,
+        token: String,
+        name: String,
+        archetype_id: Option<String>,
+    ) -> Result<CharacterSnapshot, GameError> {
+        let account = self.store.resolve_session(&token).await?;
+        let initial_gameplay = self.initial_gameplay(archetype_id.as_deref())?;
+        self.store
+            .load_or_create_character_with_gameplay(
+                account.id,
+                &name,
+                self.start_room_id.as_ref(),
+                initial_gameplay,
+            )
+            .await
+            .map_err(GameError::from)
+    }
+
+    fn initial_gameplay(
+        &self,
+        archetype_id: Option<&str>,
+    ) -> Result<CharacterGameplaySnapshot, GameError> {
+        let requested = archetype_id.unwrap_or(self.default_archetype_id.as_ref());
+        self.initial_gameplay
+            .get(requested)
+            .cloned()
+            .ok_or_else(|| GameError::World(CoreWorldError::ArchetypeNotFound))
     }
 
     pub async fn enter_authenticated_character(
@@ -468,8 +569,14 @@ impl WorldHandle {
         account_id: AccountId,
         name: String,
     ) -> Result<CharacterSnapshot, GameError> {
+        let initial_gameplay = self.initial_gameplay(None)?;
         self.store
-            .load_or_create_character(account_id, &name, self.start_room_id.as_ref())
+            .load_or_create_character_with_gameplay(
+                account_id,
+                &name,
+                self.start_room_id.as_ref(),
+                initial_gameplay,
+            )
             .await
             .map_err(GameError::from)
     }
@@ -544,6 +651,15 @@ impl WorldHandle {
     }
 }
 
+fn report_startup_failure(reply: oneshot::Sender<Result<(), GameError>>, failure: GameError) {
+    let stage = match &failure {
+        GameError::Startup { stage, .. } => *stage,
+        _ => "unknown",
+    };
+    error!(stage, error = %failure, "world actor startup failed");
+    let _ = reply.send(Err(failure));
+}
+
 fn allocate_session(next_session: &mut u64) -> SessionId {
     let session = SessionId(*next_session);
     *next_session = next_session.wrapping_add(1).max(1);
@@ -561,19 +677,6 @@ async fn authenticated_roster(
         .map_err(GameError::from)
 }
 
-async fn create_authenticated_character(
-    store: &dyn CharacterStore,
-    token: &str,
-    name: &str,
-    start_room: &str,
-) -> Result<CharacterSnapshot, GameError> {
-    let account = store.resolve_session(token).await?;
-    store
-        .load_or_create_character(account.id, name, start_room)
-        .await
-        .map_err(GameError::from)
-}
-
 async fn enter_prepared_character(
     world: &mut World,
     store: &dyn CharacterStore,
@@ -582,7 +685,17 @@ async fn enter_prepared_character(
     gameplay: CharacterGameplaySnapshot,
 ) -> Result<PreparedWorldEntry, GameError> {
     let checkpoint = world.checkpoint();
-    world.restore_character_gameplay(snapshot.id, gameplay)?;
+    if let Err(error) = world.restore_character_gameplay(snapshot.id, gameplay) {
+        world.restore_checkpoint(checkpoint);
+        if matches!(&error, CoreWorldError::InvalidGameplayDefinition) {
+            tracing::warn!(
+                character_id = snapshot.id.0,
+                "character references incompatible reviewed content"
+            );
+            return Err(GameError::CharacterContentIncompatible);
+        }
+        return Err(error.into());
+    }
     let scene = match world.connect(session, snapshot.clone()) {
         Ok(scene) => scene,
         Err(error) => {
@@ -1479,6 +1592,35 @@ mod tests {
             Ok(character)
         }
 
+        async fn load_or_create_character_with_gameplay(
+            &self,
+            account_id: AccountId,
+            name: &str,
+            start_room: &str,
+            initial_gameplay: CharacterGameplaySnapshot,
+        ) -> Result<CharacterSnapshot, StoreError> {
+            let mut state = self.state.lock().unwrap();
+            if !state.accounts.contains_key(&account_id) {
+                return Err(StoreError::AccountNotFound(account_id));
+            }
+            if let Some(character) = state.characters.values().find(|character| {
+                character.account_id == account_id && character.name.eq_ignore_ascii_case(name)
+            }) {
+                return Ok(character.clone());
+            }
+            state.next_character += 1;
+            let character = CharacterSnapshot {
+                id: CharacterId(state.next_character),
+                account_id,
+                name: name.to_owned(),
+                room_id: start_room.to_owned(),
+                item_locations: Default::default(),
+            };
+            state.characters.insert(character.id, character.clone());
+            state.gameplay.insert(character.id, initial_gameplay);
+            Ok(character)
+        }
+
         async fn load_character(
             &self,
             account_id: AccountId,
@@ -1728,9 +1870,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_runtime_snapshot_fails_the_startup_barrier() {
+        let store = Arc::new(MemoryStore::default());
+        let mut snapshot = World::demo().runtime_snapshot();
+        snapshot.snapshot_version += 1;
+        store.state.lock().unwrap().runtime = Some(snapshot);
+
+        let result = WorldHandle::spawn(World::demo(), store).await;
+
+        assert!(matches!(
+            result,
+            Err(GameError::Startup {
+                stage: "restore_runtime_snapshot",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn persistence_failure_rolls_back_a_critical_move() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store.clone());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
         let entered = world.enter("Rollback Tester".into()).await.unwrap();
         let accepted_revision = entered.scene.revision;
         let accepted_view_id = entered.scene.view_id.clone();
@@ -1753,7 +1915,9 @@ mod tests {
     #[tokio::test]
     async fn persistence_failure_rolls_back_a_shared_item_transition() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store.clone());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
         let entered = world.enter("Item Rollback Tester".into()).await.unwrap();
         assert_eq!(entered.scene.items.len(), 1);
         store.fail_saves.store(true, Ordering::SeqCst);
@@ -1779,7 +1943,7 @@ mod tests {
     #[tokio::test]
     async fn committed_domain_events_fan_out_as_observer_specific_snapshots() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store);
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
         let actor = world.enter("Actor".into()).await.unwrap();
         let mut observer = world.enter("Observer".into()).await.unwrap();
 
@@ -1812,7 +1976,9 @@ mod tests {
     #[tokio::test]
     async fn persistence_failure_rolls_back_consumption_effects_and_equipment() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(durable_gameplay_world(), store.clone());
+        let world = WorldHandle::spawn(durable_gameplay_world(), store.clone())
+            .await
+            .unwrap();
         let entered = world
             .enter("Gameplay Rollback Tester".into())
             .await
@@ -1847,7 +2013,9 @@ mod tests {
     #[tokio::test]
     async fn persistence_failure_rolls_back_party_quest_and_market_state_atomically() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store.clone());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
         let entered = world
             .enter("Adventure Rollback Tester".into())
             .await
@@ -1897,7 +2065,9 @@ mod tests {
     #[tokio::test]
     async fn shared_item_events_rebuild_the_world_after_restart() {
         let store = Arc::new(MemoryStore::default());
-        let first_world = WorldHandle::spawn(World::demo(), store.clone());
+        let first_world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
         let collector = first_world.enter("Collector".into()).await.unwrap();
         first_world
             .apply(
@@ -1915,7 +2085,7 @@ mod tests {
         for event in &persisted {
             rebuilt.replay_persisted_event(event).unwrap();
         }
-        let restarted = WorldHandle::spawn(rebuilt, store);
+        let restarted = WorldHandle::spawn(rebuilt, store).await.unwrap();
         let witness = restarted.enter("Witness".into()).await.unwrap();
         assert!(witness.scene.items.is_empty());
         restarted.leave(witness.session_id).await;
@@ -1934,7 +2104,7 @@ mod tests {
     #[tokio::test]
     async fn simultaneous_guest_sessions_have_independent_world_positions() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store);
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
         let first = world.enter("Guest-1".into()).await.unwrap();
         let second = world.enter("Guest-2".into()).await.unwrap();
         assert_ne!(first.session_id, second.session_id);
@@ -1954,7 +2124,7 @@ mod tests {
     #[tokio::test]
     async fn account_roster_and_character_selection_use_durable_ids() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store);
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
         let account = world.open_account("Player".into()).await.unwrap();
         let character = world
             .load_or_create_character(account.id, "Explorer".into())
@@ -1974,7 +2144,7 @@ mod tests {
     #[tokio::test]
     async fn character_selection_cannot_cross_account_boundaries() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store);
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
         let owner = world.open_account("Owner".into()).await.unwrap();
         let stranger = world.open_account("Stranger".into()).await.unwrap();
         let character = world
@@ -1991,7 +2161,7 @@ mod tests {
     #[tokio::test]
     async fn authenticated_roster_and_selection_derive_ownership_from_token() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store);
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
         let owner = world
             .register_account("Owner".into(), "a sufficiently long password".into())
             .await
@@ -2032,9 +2202,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_creation_persists_the_selected_archetype_sheet() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let owner = world
+            .register_account("Owner".into(), "a sufficiently long password".into())
+            .await
+            .unwrap();
+        let selected = world.archetype_catalog()[0].id.clone();
+
+        let character = world
+            .create_authenticated_character_with_archetype(
+                owner.token.as_str().to_owned(),
+                "Aria".into(),
+                Some(selected.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_character_gameplay(character.id)
+                .await
+                .unwrap()
+                .archetype_id,
+            selected
+        );
+    }
+
+    #[tokio::test]
     async fn legacy_entry_keeps_the_same_character_id_across_reconnects() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store);
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
         let first = world.enter("Guest".into()).await.unwrap();
         let account = world.open_account("guest".into()).await.unwrap();
         let first_roster = world.list_characters(account.id).await.unwrap();
@@ -2226,7 +2426,9 @@ mod tests {
             durable_gameplay_world(),
             store.clone(),
             WorldSchedulerConfig::every(Duration::from_millis(20)),
-        );
+        )
+        .await
+        .unwrap();
         let entered = first_world.enter("Durable Hero".into()).await.unwrap();
         for action in [
             PlayerAction::Quest(QuestAction::Accept("first-hunt".into())),
@@ -2298,7 +2500,9 @@ mod tests {
             durable_gameplay_world(),
             store.clone(),
             WorldSchedulerConfig::every(Duration::from_millis(20)),
-        );
+        )
+        .await
+        .unwrap();
         let account_id = store.state.lock().unwrap().characters[&character_id].account_id;
         let entered = restarted
             .enter_character(account_id, character_id)
@@ -2353,7 +2557,9 @@ mod tests {
     #[tokio::test]
     async fn party_membership_and_authority_survive_actor_restart() {
         let store = Arc::new(MemoryStore::default());
-        let first = WorldHandle::spawn(World::demo(), store.clone());
+        let first = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
         let leader = first.enter("Party Leader".into()).await.unwrap();
         let member = first.enter("Party Member".into()).await.unwrap();
         first
@@ -2386,7 +2592,7 @@ mod tests {
         };
         first.shutdown().await.unwrap();
 
-        let restarted = WorldHandle::spawn(World::demo(), store);
+        let restarted = WorldHandle::spawn(World::demo(), store).await.unwrap();
         let leader = identities
             .iter()
             .find(|identity| identity.0 == "Party Leader")
@@ -2423,7 +2629,7 @@ mod tests {
     #[tokio::test]
     async fn social_delivery_honours_ignore_and_two_way_block_without_policy_leaks() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store);
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
         let admin = world
             .register_account("Admin".into(), "correct horse battery staple".into())
             .await
@@ -2506,7 +2712,9 @@ mod tests {
     #[tokio::test]
     async fn social_roles_mute_and_chat_rate_limit_are_enforced() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store.clone());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
         let admin = world
             .register_account("Admin".into(), "correct horse battery staple".into())
             .await
@@ -2612,6 +2820,9 @@ mod tests {
             tx,
             store,
             start_room_id: Arc::from("demo:lantern-square"),
+            archetype_catalog: Arc::from(Vec::<ArchetypeView>::new()),
+            default_archetype_id: Arc::from("wanderer"),
+            initial_gameplay: Arc::new(HashMap::new()),
         };
         for _ in 0..WORLD_COMMAND_QUEUE_CAPACITY {
             let (reply, _receive) = oneshot::channel();
@@ -2636,7 +2847,9 @@ mod tests {
     #[tokio::test]
     async fn shutdown_barrier_drains_previously_accepted_actions() {
         let store = Arc::new(MemoryStore::default());
-        let world = WorldHandle::spawn(World::demo(), store.clone());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
         let entered = world.enter("Shutdown Hero".into()).await.unwrap();
         world
             .apply(entered.session_id, PlayerAction::Move(Direction::North))

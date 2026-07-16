@@ -29,3 +29,14 @@ Open-source licensing was intentionally left for a separate decision and is
 now resolved by [ADR 0004](0004-open-source-licensing.md).
 
 Implementation progress does not amend this foundation decision. The current evidence and remaining full-scope work are maintained in the [completion matrix](../project/COMPLETION_MATRIX.md).
+
+## Later amendment
+
+[ADR 0006](0006-character-progression-and-postgresql-first.md) supersedes the
+storage operating recommendation above now that both adapters are implemented:
+new public single-host installations are PostgreSQL-first, while the
+zero-configuration executable and local/legacy path remain SQLite. It does not
+change this ADR's one-process topology, exactly-one-backend rule, explicit
+offline migration or prohibition on required Kubernetes and microservices.
+The implemented adapters keep queryable data relational and store bounded,
+non-queryable application snapshots as JSON in `TEXT`, not PostgreSQL `jsonb`.

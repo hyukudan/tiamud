@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createAbilityPerform,
   createActionPerform,
   createClientHello,
   createCommandSubmit,
@@ -87,6 +88,16 @@ describe('protocol messages', () => {
       v: 1,
       type: 'client.heartbeat',
       data: { nonce: 9 },
+    });
+    expect(createAbilityPerform('ember-bolt', 'o9999999999999999', 'request-3')).toEqual({
+      v: 1,
+      type: 'action.perform',
+      data: {
+        requestId: 'request-3',
+        action: 'combat.ability',
+        abilityId: 'ember-bolt',
+        target: 'o9999999999999999',
+      },
     });
   });
 
@@ -410,6 +421,113 @@ describe('protocol messages', () => {
         ...validPlayerState(),
         inventory: Array.from({ length: 257 }, () => validPlayerState().inventory[0]),
       },
+    }))).toBeUndefined();
+  });
+
+  it('parses an additive archetype, character sheet, resources, and known abilities', () => {
+    const legacyState = validPlayerState();
+    const state = {
+      ...legacyState,
+      character: {
+      ...legacyState.character,
+      archetype: { id: 'spellblade', label: 'Spellblade', description: 'Steel guided by ember lore.' },
+      attributes: [
+        { id: 'agility', label: 'Agility', value: 8 },
+        { id: 'intellect', label: 'Intellect', value: 11 },
+      ],
+      resistances: [{ damageType: 'fire', percent: 15 }],
+      statuses: [{
+        id: 'focused', label: 'Focused', kind: 'attribute_modifier', magnitude: 2, remainingTicks: 2,
+      }],
+      resources: [{ id: 'mana', label: 'Mana', current: 12, max: 20 }],
+      abilities: [{
+        id: 'ember-bolt',
+        name: 'Ember Bolt',
+        description: 'Hurls a compact flame at a visible foe.',
+        kind: 'spell',
+        resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 4 }],
+        cooldownRemaining: 0,
+        usable: true,
+        targeting: 'explicitTarget',
+      }],
+      },
+    };
+
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'player.snapshot', seq: 19, data: state,
+    }))).toMatchObject({
+      data: { character: {
+        archetype: { id: 'spellblade', label: 'Spellblade' },
+        attributes: [{ id: 'agility', value: 8 }, { id: 'intellect', value: 11 }],
+        resistances: [{ damageType: 'fire', percent: 15 }],
+        statuses: [{ id: 'focused', kind: 'attribute_modifier', remainingTicks: 2 }],
+        resources: [{ id: 'mana', current: 12, max: 20 }],
+        abilities: [{
+          id: 'ember-bolt', kind: 'spell', resourceCosts: [{ resourceId: 'mana', amount: 4 }],
+          targeting: 'explicitTarget', usable: true,
+        }],
+      } },
+    });
+
+    state.character.abilities[0]!.resourceCosts[0]!.amount = -1;
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'player.snapshot', seq: 20, data: state,
+    }))).toBeUndefined();
+  });
+
+  it('matches the authored character-sheet boundary limits', () => {
+    const legacyState = validPlayerState();
+    const maximumId = 'a'.repeat(128);
+    const maximumStatId = 's'.repeat(64);
+    const state = {
+      ...legacyState,
+      character: {
+        ...legacyState.character,
+        archetype: { id: maximumId, label: 'Boundary', description: '' },
+        attributes: Array.from({ length: 64 }, (_, index) => ({
+          id: `stat-${index}`,
+          label: `Stat ${index}`,
+          value: 2_000_000,
+        })),
+        skills: [{ id: maximumStatId, label: 'Mastery', rank: 1_000 }],
+        resources: [],
+        abilities: [{
+          id: maximumId,
+          name: 'Boundary Ability',
+          description: '',
+          kind: 'utility',
+          resourceCosts: [],
+          cooldownRemaining: 10_000,
+          usable: false,
+          targeting: 'self',
+        }],
+        resistances: [{ damageType: 'lightning', percent: 90 }],
+        statuses: [{
+          id: maximumId,
+          label: 'Boundary Status',
+          kind: 'attribute_modifier',
+          magnitude: -100_000,
+          remainingTicks: 10_000,
+        }],
+      },
+    };
+
+    const message = parseServerMessage(JSON.stringify({
+      v: 1, type: 'player.snapshot', seq: 21, data: state,
+    }));
+    expect(message).toMatchObject({
+      type: 'player.snapshot',
+      data: { character: { archetype: { id: maximumId, description: '' } } },
+    });
+    if (message?.type !== 'player.snapshot') throw new Error('expected bounded player snapshot');
+    expect(message.data.character.attributes).toHaveLength(64);
+    expect(message.data.character.attributes.at(-1)).toMatchObject({ id: 'stat-63', value: 2_000_000 });
+    expect(message.data.character.skills).toEqual([{ id: maximumStatId, label: 'Mastery', rank: 1_000 }]);
+    expect(message.data.character.abilities[0]).toMatchObject({ id: maximumId, cooldownRemaining: 10_000 });
+
+    state.character.attributes.push({ id: 'too-many', label: 'Too many', value: 1 });
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'player.snapshot', seq: 22, data: state,
     }))).toBeUndefined();
   });
 

@@ -19,9 +19,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    ContentTest, ExitTarget, GameplayDefinition, Item, ItemRule, NpcPrototype, NpcSpawn, Room,
-    RoomMediaDefinition, RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition,
-    SourceMetadata, ValidationErrors, WorldPack, WorldPackDocument,
+    AbilityDefinition, ArchetypeDefinition, ContentTest, ExitTarget, GameplayDefinition, Item,
+    ItemRule, NpcAbilitySet, NpcPrototype, NpcSpawn, Room, RoomMediaDefinition,
+    RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition, SourceMetadata,
+    ValidationErrors, WorldPack, WorldPackDocument,
 };
 
 pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 1;
@@ -42,6 +43,8 @@ pub struct WorldProjectManifest {
     pub start_room_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rng_seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_archetype_id: Option<String>,
     pub areas: Vec<ProjectArea>,
 }
 
@@ -74,6 +77,12 @@ pub struct AreaPack {
     pub npc_prototypes: Vec<NpcPrototype>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_spawns: Vec<NpcSpawn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archetypes: Vec<ArchetypeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abilities: Vec<AbilityDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub npc_ability_sets: Vec<NpcAbilitySet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub room_media: Vec<RoomMediaDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -109,6 +118,12 @@ impl<'de> Deserialize<'de> for AreaPack {
             #[serde(default)]
             npc_spawns: Vec<NpcSpawn>,
             #[serde(default)]
+            archetypes: Vec<ArchetypeDefinition>,
+            #[serde(default)]
+            abilities: Vec<AbilityDefinition>,
+            #[serde(default)]
+            npc_ability_sets: Vec<NpcAbilitySet>,
+            #[serde(default)]
             room_media: Vec<RoomMediaDefinition>,
             #[serde(default)]
             room_perception: Vec<RoomPerceptionDefinition>,
@@ -132,6 +147,9 @@ impl<'de> Deserialize<'de> for AreaPack {
             item_rules: raw.item_rules,
             npc_prototypes: raw.npc_prototypes,
             npc_spawns: raw.npc_spawns,
+            archetypes: raw.archetypes,
+            abilities: raw.abilities,
+            npc_ability_sets: raw.npc_ability_sets,
             room_media: raw.room_media,
             room_perception: raw.room_perception,
             scene_variants: raw.scene_variants,
@@ -149,6 +167,9 @@ pub struct AreaOwnership {
     pub item_rules: Vec<String>,
     pub npc_prototypes: Vec<String>,
     pub npc_spawns: Vec<String>,
+    pub archetypes: Vec<String>,
+    pub abilities: Vec<String>,
+    pub npc_ability_sets: Vec<String>,
     pub room_media: Vec<String>,
     pub room_perception: Vec<String>,
     pub scene_variant_sets: Vec<String>,
@@ -176,6 +197,9 @@ pub enum AreaCrossReferenceKind {
     NpcLoot,
     NpcSpawnPrototype,
     NpcSpawnRoom,
+    ArchetypeAbility,
+    NpcAbilitySetPrototype,
+    NpcAbility,
     RoomMedia,
     RoomPerception,
     HiddenItem,
@@ -524,6 +548,7 @@ fn compose_loaded(
             rooms: Vec::new(),
             gameplay: GameplayDefinition {
                 rng_seed: manifest.rng_seed,
+                default_archetype_id: manifest.default_archetype_id.clone(),
                 ..GameplayDefinition::default()
             },
         },
@@ -564,6 +589,18 @@ fn compose_loaded(
         )?;
         register_entities(
             &mut global_ids,
+            "archetype",
+            &pack.id,
+            pack.archetypes.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "ability",
+            &pack.id,
+            pack.abilities.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
             "script",
             &pack.id,
             pack.scripts.iter().map(|v| &v.id),
@@ -600,6 +637,24 @@ fn compose_loaded(
                     pack.npc_spawns
                         .iter()
                         .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                archetypes: sorted(
+                    pack.archetypes
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                abilities: sorted(
+                    pack.abilities
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                npc_ability_sets: sorted(
+                    pack.npc_ability_sets
+                        .iter()
+                        .map(|value| value.npc_prototype_id.clone())
                         .collect(),
                 ),
                 room_media: sorted(
@@ -653,6 +708,21 @@ fn compose_loaded(
             .gameplay
             .npc_spawns
             .extend(pack.npc_spawns.clone());
+        document
+            .world
+            .gameplay
+            .archetypes
+            .extend(pack.archetypes.clone());
+        document
+            .world
+            .gameplay
+            .abilities
+            .extend(pack.abilities.clone());
+        document
+            .world
+            .gameplay
+            .npc_ability_sets
+            .extend(pack.npc_ability_sets.clone());
         document.room_media.extend(pack.room_media.clone());
         document
             .room_perception
@@ -767,6 +837,9 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
     let prototype_owner = owner_map(areas, |area| {
         area.npc_prototypes.iter().map(|value| value.id.as_str())
     });
+    let ability_owner = owner_map(areas, |area| {
+        area.abilities.iter().map(|value| value.id.as_str())
+    });
     let spawn_owner = owner_map(areas, |area| {
         area.npc_spawns.iter().map(|value| value.id.as_str())
     });
@@ -866,6 +939,49 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                     &spawn.id,
                     &spawn.room_id,
                 );
+            }
+        }
+        for archetype in &area.pack.archetypes {
+            for ability_id in archetype.initial_ability_ids.iter().chain(
+                archetype
+                    .level_progression
+                    .iter()
+                    .flat_map(|level| &level.ability_unlock_ids),
+            ) {
+                if let Some(owner) = ability_owner.get(ability_id.as_str()) {
+                    add_edge(
+                        &mut edges,
+                        from,
+                        owner,
+                        AreaCrossReferenceKind::ArchetypeAbility,
+                        &archetype.id,
+                        ability_id,
+                    );
+                }
+            }
+        }
+        for set in &area.pack.npc_ability_sets {
+            if let Some(owner) = prototype_owner.get(set.npc_prototype_id.as_str()) {
+                add_edge(
+                    &mut edges,
+                    from,
+                    owner,
+                    AreaCrossReferenceKind::NpcAbilitySetPrototype,
+                    &set.npc_prototype_id,
+                    &set.npc_prototype_id,
+                );
+            }
+            for ability_id in &set.ability_ids {
+                if let Some(owner) = ability_owner.get(ability_id.as_str()) {
+                    add_edge(
+                        &mut edges,
+                        from,
+                        owner,
+                        AreaCrossReferenceKind::NpcAbility,
+                        &set.npc_prototype_id,
+                        ability_id,
+                    );
+                }
             }
         }
         for media in &area.pack.room_media {
@@ -1187,6 +1303,9 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
             "itemRules",
             "npcPrototypes",
             "npcSpawns",
+            "archetypes",
+            "abilities",
+            "npcAbilitySets",
             "roomMedia",
             "roomPerception",
             "sceneVariants",
@@ -1207,6 +1326,13 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
         audit_npc_prototype,
     )?;
     audit_array(area.get("npcSpawns"), "$.npcSpawns", audit_npc_spawn)?;
+    audit_array(area.get("archetypes"), "$.archetypes", audit_archetype)?;
+    audit_array(area.get("abilities"), "$.abilities", audit_ability)?;
+    audit_array(
+        area.get("npcAbilitySets"),
+        "$.npcAbilitySets",
+        audit_npc_ability_set,
+    )?;
     audit_array(area.get("roomMedia"), "$.roomMedia", audit_room_media)?;
     audit_array(
         area.get("roomPerception"),
@@ -1327,6 +1453,128 @@ fn audit_npc_prototype(value: &serde_json::Value, path: &str) -> Result<(), Comp
             "experienceReward",
             "respawnTicks",
             "lootItemIds",
+        ],
+        path,
+    )
+    .map(|_| ())
+}
+
+fn audit_archetype(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    let Some(archetype) = audit_object(
+        value,
+        &[
+            "id",
+            "name",
+            "description",
+            "initialAttributes",
+            "initialSkills",
+            "initialResources",
+            "resourceRegeneration",
+            "initialResistances",
+            "initialAbilityIds",
+            "levelProgression",
+        ],
+        path,
+    )?
+    else {
+        return Ok(());
+    };
+    audit_array(
+        archetype.get("levelProgression"),
+        &format!("{path}.levelProgression"),
+        audit_level_progression,
+    )?;
+    Ok(())
+}
+
+fn audit_level_progression(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    audit_object(
+        value,
+        &[
+            "level",
+            "totalExperienceRequired",
+            "attributeGains",
+            "skillGains",
+            "resourceGains",
+            "abilityUnlockIds",
+        ],
+        path,
+    )
+    .map(|_| ())
+}
+
+fn audit_ability(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    let Some(ability) = audit_object(
+        value,
+        &[
+            "id",
+            "name",
+            "description",
+            "category",
+            "resourceCosts",
+            "cooldownTicks",
+            "targeting",
+            "damage",
+            "heal",
+            "statusEffects",
+        ],
+        path,
+    )?
+    else {
+        return Ok(());
+    };
+    if let Some(damage) = ability.get("damage") {
+        audit_object(
+            damage,
+            &[
+                "target",
+                "damageType",
+                "baseAmount",
+                "scalingAttribute",
+                "scalingPercent",
+            ],
+            &format!("{path}.damage"),
+        )?;
+    }
+    if let Some(heal) = ability.get("heal") {
+        audit_object(
+            heal,
+            &["target", "baseAmount", "scalingAttribute", "scalingPercent"],
+            &format!("{path}.heal"),
+        )?;
+    }
+    audit_array(
+        ability.get("statusEffects"),
+        &format!("{path}.statusEffects"),
+        audit_ability_status,
+    )?;
+    Ok(())
+}
+
+fn audit_ability_status(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    let allowed = match value.get("kind").and_then(serde_json::Value::as_str) {
+        Some("attribute_modifier") => {
+            &["kind", "target", "attribute", "magnitude", "durationTicks"][..]
+        }
+        Some("regeneration") => &["kind", "target", "magnitude", "durationTicks"][..],
+        Some("damage_over_time") => {
+            &["kind", "target", "damageType", "magnitude", "durationTicks"][..]
+        }
+        Some("stun") => &["kind", "target", "durationTicks"][..],
+        _ => &["kind"][..],
+    };
+    audit_object(value, allowed, path).map(|_| ())
+}
+
+fn audit_npc_ability_set(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    audit_object(
+        value,
+        &[
+            "npcPrototypeId",
+            "resourcePools",
+            "resourceRegeneration",
+            "resistances",
+            "abilityIds",
         ],
         path,
     )

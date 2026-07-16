@@ -8,6 +8,13 @@ export interface Character {
   accountId?: number;
   name: string;
   roomId?: string;
+  archetype?: Pick<ArchetypeChoice, 'id' | 'label'>;
+}
+
+export interface ArchetypeChoice {
+  id: string;
+  label: string;
+  description: string;
 }
 
 export interface AuthenticatedSession {
@@ -33,6 +40,11 @@ type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+const hasOnlyKeys = (value: Record<string, unknown>, allowed: readonly string[]): boolean => {
+  const keys = new Set(allowed);
+  return Object.keys(value).every((key) => keys.has(key));
+};
+
 function parseAccount(value: unknown): Account {
   if (!isRecord(value) || typeof value.id !== 'number' || typeof value.name !== 'string') {
     throw new Error('The server returned an invalid account.');
@@ -57,12 +69,43 @@ function parseCharacter(value: unknown): Character {
   }
   const accountId = value.accountId ?? value.account_id;
   const roomId = value.roomId ?? value.room_id;
+  let archetype: Character['archetype'];
+  if (isRecord(value.archetype)) {
+    const id = boundedContentId(value.archetype.id);
+    const label = boundedText(value.archetype.label, 128);
+    if (!id || !label) throw new Error('The server returned an invalid character.');
+    archetype = { id, label };
+  }
   return {
     id: value.id,
     accountId: typeof accountId === 'number' ? accountId : undefined,
     name: value.name,
     roomId: typeof roomId === 'string' ? roomId : undefined,
+    ...(archetype ? { archetype } : {}),
   };
+}
+
+const boundedText = (value: unknown, maximum: number): string | undefined =>
+  typeof value === 'string' && value.length > 0 && value.length <= maximum ? value : undefined;
+
+const boundedContentId = (value: unknown): string | undefined => {
+  const id = boundedText(value, 128);
+  return id && /^[a-z0-9](?:[a-z0-9_.:-]{0,126}[a-z0-9])?$/.test(id) ? id : undefined;
+};
+
+function parseArchetype(value: unknown): ArchetypeChoice {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['id', 'label', 'description'])) {
+    throw new Error('The server returned an invalid archetype catalog.');
+  }
+  const id = boundedContentId(value.id);
+  const label = boundedText(value.label, 128);
+  const description = typeof value.description === 'string' && value.description.length <= 2048
+    ? value.description
+    : undefined;
+  if (!id || !label || description === undefined) {
+    throw new Error('The server returned an invalid archetype catalog.');
+  }
+  return { id, label, description };
 }
 
 async function requestJson(
@@ -122,11 +165,42 @@ export async function loadCharacters(
   return body.characters.map(parseCharacter);
 }
 
+export async function loadArchetypes(
+  fetcher: FetchLike = fetch,
+): Promise<ArchetypeChoice[]> {
+  const response = await fetcher('/api/archetypes', {});
+  // Pre-archetype servers do not expose this additive catalog.
+  if (response.status === 404 || response.status === 405) return [];
+  if (!response.ok) {
+    let message = `The request failed (${response.status}).`;
+    try {
+      const body: unknown = await response.json();
+      if (isRecord(body) && typeof body.error === 'string') message = body.error;
+    } catch {
+      // Preserve the useful status if an intermediary returned non-JSON.
+    }
+    throw new Error(message);
+  }
+  const body: unknown = await response.json();
+  if (!isRecord(body) || !hasOnlyKeys(body, ['archetypes']) ||
+    !Array.isArray(body.archetypes) || body.archetypes.length > 32) {
+    throw new Error('The server returned an invalid archetype catalog.');
+  }
+  const archetypes = body.archetypes.map(parseArchetype);
+  if (new Set(archetypes.map((archetype) => archetype.id)).size !== archetypes.length) {
+    throw new Error('The server returned an invalid archetype catalog.');
+  }
+  return archetypes;
+}
+
 export async function createCharacter(
   token: string,
   name: string,
+  archetypeIdOrFetcher?: string | FetchLike,
   fetcher: FetchLike = fetch,
 ): Promise<Character> {
+  const archetypeId = typeof archetypeIdOrFetcher === 'string' ? archetypeIdOrFetcher : undefined;
+  const requestFetcher = typeof archetypeIdOrFetcher === 'function' ? archetypeIdOrFetcher : fetcher;
   const body = await requestJson(
     '/api/characters',
     {
@@ -135,9 +209,9 @@ export async function createCharacter(
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, ...(archetypeId ? { archetypeId } : {}) }),
     },
-    fetcher,
+    requestFetcher,
   );
   if (!isRecord(body)) {
     throw new Error('The server returned an invalid character.');

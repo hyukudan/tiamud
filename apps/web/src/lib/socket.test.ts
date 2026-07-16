@@ -112,6 +112,35 @@ describe('TiamudConnection', () => {
     connection.close();
   });
 
+  it('sends ability use as a structured action without changing legacy perform', () => {
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'token', characterId: 7 },
+      { onMessage: () => undefined, onStateChange: () => undefined },
+    );
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+
+    expect(connection.performAbility('ember-bolt', 'o9999999999999999', 'ability-1')).toBe(true);
+    expect(lastSent(socket)).toEqual({
+      v: 1,
+      type: 'action.perform',
+      data: {
+        requestId: 'ability-1',
+        action: 'combat.ability',
+        abilityId: 'ember-bolt',
+        target: 'o9999999999999999',
+      },
+    });
+
+    expect(connection.perform('item.take', 'o8888888888888888', 'legacy-1')).toBe(true);
+    expect(lastSent(socket)).toMatchObject({
+      data: { requestId: 'legacy-1', action: 'item.take', target: 'o8888888888888888' },
+    });
+    connection.close();
+  });
+
   it('authenticates every socket hello with the selected character', () => {
     const connection = new TiamudConnection(
       'wss://tiamud.test/ws',

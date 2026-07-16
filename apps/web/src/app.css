@@ -214,7 +214,8 @@ input:focus-visible {
 }
 
 .access-form input,
-.character-form input {
+.character-form input,
+.character-form select {
   min-width: 0;
   padding: 0.58rem 0.7rem;
   border: 1px solid #645f4d;
@@ -286,8 +287,21 @@ input:focus-visible {
   margin-left: 0.4rem;
 }
 
+.character-list li > span {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.character-list li small {
+  color: #999c91;
+  font-family: system-ui, sans-serif;
+  font-size: 0.65rem;
+}
+
 .character-form {
+  display: grid;
   margin-top: 0.9rem;
+  gap: 0.4rem;
 }
 
 .character-form > div {
@@ -296,6 +310,27 @@ input:focus-visible {
 
 .character-form input {
   flex: 1;
+}
+
+.character-form select {
+  width: 100%;
+  color: #eee7d8;
+}
+
+.character-form option {
+  background: #151812;
+}
+
+.character-form #archetype-description {
+  margin: 0;
+  color: #aaa99e;
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.character-form .character-create {
+  justify-self: start;
+  margin-top: 0.2rem;
 }
 
 .enter-button {
@@ -525,6 +560,55 @@ main {
   gap: 1.25rem;
 }
 
+.attribute-grid {
+  flex-wrap: wrap;
+}
+
+.resource-readouts {
+  display: grid;
+  margin-top: 0.8rem;
+  gap: 0.45rem;
+}
+
+.resource-readouts > div {
+  display: grid;
+  grid-template-columns: minmax(4rem, auto) minmax(5rem, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.72rem;
+}
+
+.resource-readouts meter {
+  width: 100%;
+  accent-color: #597ab0;
+}
+
+.resistance-list {
+  display: flex;
+  margin: 0.75rem 0 0;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.resistance-list div {
+  padding: 0.2rem 0.45rem;
+  border: 1px solid #434a3b;
+  border-radius: 1rem;
+  color: #b8b7ad;
+  font-size: 0.68rem;
+}
+
+.resistance-list div {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.resistance-list dt,
+.resistance-list dd {
+  margin: 0;
+  text-transform: capitalize;
+}
+
 .attributes div {
   display: flex;
   gap: 0.35rem;
@@ -651,13 +735,117 @@ main {
 .dashboard-actions button,
 .panel-body > button,
 .panel-heading-row button,
-.inline-form button {
+.inline-form button,
+.ability-list button {
   padding: 0.3rem 0.5rem;
   border: 1px solid #555e47;
   border-radius: 1rem;
   background: #262c20;
   cursor: pointer;
   font-size: 0.68rem;
+}
+
+.ability-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 0.65rem;
+  list-style: none;
+}
+
+.ability-list > li {
+  display: grid;
+  padding: 0.7rem;
+  border: 1px solid #383e32;
+  border-radius: 0.4rem;
+  gap: 0.45rem;
+  background: #1b1f19;
+}
+
+.ability-heading,
+.ability-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ability-heading {
+  justify-content: space-between;
+}
+
+.ability-heading h3 {
+  margin: 0;
+  color: #e2dac9;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.9rem;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.ability-heading > span {
+  color: #8f9388;
+  font-size: 0.65rem;
+}
+
+.ability-kind {
+  padding: 0.12rem 0.35rem;
+  border: 1px solid #555e47;
+  border-radius: 1rem;
+  color: #c9c3b4;
+  font-size: 0.58rem;
+  text-transform: uppercase;
+}
+
+.ability-kind.spell {
+  border-color: #536a88;
+  color: #aebfdd;
+}
+
+.ability-list > li > p {
+  margin: 0;
+  color: #9fa198;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.ability-meta {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  color: #d5c390;
+  font-size: 0.65rem;
+  list-style: none;
+}
+
+.ability-list label {
+  color: #aaa99e;
+  font-size: 0.68rem;
+}
+
+.ability-list select {
+  width: 100%;
+  min-width: 0;
+  padding: 0.38rem 0.5rem;
+  border: 1px solid #4c503f;
+  border-radius: 0.25rem;
+  background: #11140f;
+  color: #e2dac9;
+}
+
+.ability-list button {
+  justify-self: start;
+}
+
+.ability-list button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.ability-list .ability-unavailable {
+  color: #bd9d63;
+  font-size: 0.65rem;
 }
 
 .map-list > li {
@@ -1132,6 +1320,19 @@ kbd {
 
   .dashboard-actions {
     justify-content: flex-start;
+  }
+
+  .ability-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .resource-readouts > div {
+    grid-template-columns: minmax(4rem, auto) minmax(4rem, 1fr);
+  }
+
+  .resource-readouts strong {
+    grid-column: 2;
   }
 
   .command-form {

@@ -1382,7 +1382,9 @@ impl WorldPackDocument {
             || self.world.name != other.world.name
             || self.world.start_room_id != other.world.start_room_id
             || self.world.source != other.world.source
-            || self.world.gameplay.rng_seed != other.world.gameplay.rng_seed;
+            || self.world.gameplay.rng_seed != other.world.gameplay.rng_seed
+            || self.world.gameplay.default_archetype_id
+                != other.world.gameplay.default_archetype_id;
         Ok(WorldPackDiff {
             metadata_changed,
             room_media: diff_entities(
@@ -1445,6 +1447,45 @@ impl WorldPackDocument {
                     .iter()
                     .map(|spawn| (&spawn.id, spawn)),
             ),
+            archetypes: diff_entities(
+                self.world
+                    .gameplay
+                    .archetypes
+                    .iter()
+                    .map(|archetype| (&archetype.id, archetype)),
+                other
+                    .world
+                    .gameplay
+                    .archetypes
+                    .iter()
+                    .map(|archetype| (&archetype.id, archetype)),
+            ),
+            abilities: diff_entities(
+                self.world
+                    .gameplay
+                    .abilities
+                    .iter()
+                    .map(|ability| (&ability.id, ability)),
+                other
+                    .world
+                    .gameplay
+                    .abilities
+                    .iter()
+                    .map(|ability| (&ability.id, ability)),
+            ),
+            npc_ability_sets: diff_entities(
+                self.world
+                    .gameplay
+                    .npc_ability_sets
+                    .iter()
+                    .map(|set| (&set.npc_prototype_id, set)),
+                other
+                    .world
+                    .gameplay
+                    .npc_ability_sets
+                    .iter()
+                    .map(|set| (&set.npc_prototype_id, set)),
+            ),
             scene_variants: diff_entities(
                 self.scene_variants
                     .iter()
@@ -1492,6 +1533,36 @@ impl WorldPackDocument {
             .gameplay
             .npc_spawns
             .sort_by(|left, right| left.id.cmp(&right.id));
+        document
+            .world
+            .gameplay
+            .archetypes
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        for archetype in &mut document.world.gameplay.archetypes {
+            archetype.initial_ability_ids.sort();
+            archetype
+                .level_progression
+                .sort_by_key(|progression| progression.level);
+            for progression in &mut archetype.level_progression {
+                progression.ability_unlock_ids.sort();
+            }
+        }
+        document
+            .world
+            .gameplay
+            .abilities
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        for ability in &mut document.world.gameplay.abilities {
+            ability.status_effects.sort();
+        }
+        document
+            .world
+            .gameplay
+            .npc_ability_sets
+            .sort_by(|left, right| left.npc_prototype_id.cmp(&right.npc_prototype_id));
+        for set in &mut document.world.gameplay.npc_ability_sets {
+            set.ability_ids.sort();
+        }
         document
             .world
             .rooms
@@ -1860,6 +1931,9 @@ pub struct WorldPackDiff {
     pub item_rules: EntityDiff,
     pub npc_prototypes: EntityDiff,
     pub npc_spawns: EntityDiff,
+    pub archetypes: EntityDiff,
+    pub abilities: EntityDiff,
+    pub npc_ability_sets: EntityDiff,
     pub scene_variants: EntityDiff,
     pub scripts: EntityDiff,
     pub content_tests: EntityDiff,
@@ -1875,6 +1949,9 @@ impl WorldPackDiff {
             && self.item_rules.is_empty()
             && self.npc_prototypes.is_empty()
             && self.npc_spawns.is_empty()
+            && self.archetypes.is_empty()
+            && self.abilities.is_empty()
+            && self.npc_ability_sets.is_empty()
             && self.scene_variants.is_empty()
             && self.scripts.is_empty()
             && self.content_tests.is_empty()
@@ -1896,6 +1973,9 @@ impl fmt::Display for WorldPackDiff {
         write_entity_diff(formatter, "item rules", &self.item_rules)?;
         write_entity_diff(formatter, "NPC prototypes", &self.npc_prototypes)?;
         write_entity_diff(formatter, "NPC spawns", &self.npc_spawns)?;
+        write_entity_diff(formatter, "archetypes", &self.archetypes)?;
+        write_entity_diff(formatter, "abilities", &self.abilities)?;
+        write_entity_diff(formatter, "NPC ability sets", &self.npc_ability_sets)?;
         write_entity_diff(formatter, "scene variants", &self.scene_variants)?;
         write_entity_diff(formatter, "scripts", &self.scripts)?;
         write_entity_diff(formatter, "content tests", &self.content_tests)

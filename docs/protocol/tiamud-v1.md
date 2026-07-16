@@ -14,6 +14,7 @@ The official browser uses same-origin JSON before opening a WebSocket:
 | `POST` | `/api/auth/login` | Verify credentials and create session. |
 | `GET` | `/api/auth/session` | Resolve bearer session. |
 | `POST` | `/api/auth/logout` | Revoke bearer session (`204`). |
+| `GET` | `/api/archetypes` | List the bounded public character-archetype catalog. |
 | `GET` | `/api/characters` | List account-owned characters. |
 | `POST` | `/api/characters` | Create an account-owned character (`201`). |
 
@@ -33,8 +34,28 @@ Session response (`expiresAt` is Unix seconds):
 }
 ```
 
-Authenticated endpoints require `Authorization: Bearer <token>`.
-`POST /api/characters` accepts `{"name":"Orin"}`. Account/character names are
+`GET /api/archetypes` returns definitions players may choose during character
+creation. The implemented catalog intentionally exposes only identity, label
+and description, not the initial sheet:
+
+```json
+{
+  "archetypes": [
+    {
+      "id": "mystic",
+      "label": "Mystic",
+      "description": "A wielder of focused arcane power."
+    }
+  ]
+}
+```
+
+Authenticated endpoints require `Authorization: Bearer <token>`; the public
+archetype catalog does not. `POST /api/characters` accepts the legacy
+`{"name":"Orin"}` body and the additive
+`{"name":"Orin","archetypeId":"mystic"}` body. Omitting `archetypeId`
+uses the world's default archetype, preserving old clients. Unknown IDs and
+unknown request fields are rejected. Account/character names are
 1-64 safe bytes and passwords 8-1024 bytes. Passwords are Argon2id hashes; the
 token contains 256 random bits, only its SHA-256 digest is stored, it expires
 after 30 days and logout revokes it. Public use requires HTTPS/WSS.
@@ -47,7 +68,11 @@ do not fall back to weaker password handling.
 
 HTTP numeric account/character IDs are durable identity references used for
 ownership and selection. They are not world entity IDs and never authorize an
-action by themselves.
+action by themselves. Roster and creation responses retain the legacy
+`CharacterSnapshot` shape; the authoritative archetype and class-derived sheet
+arrive in `player.snapshot` after entry. Consequently, the current creation UI
+does not preview initial attributes, resources or abilities; adding that
+preview requires an additive catalog contract.
 
 ## WebSocket transport and envelope
 
@@ -113,6 +138,8 @@ of these stable codes:
 - `access.session_expired` or `access.session_invalid`: discard the saved
   credential and require sign-in;
 - `access.character_invalid`: the selected character is unavailable;
+- `access.character_incompatible`: the character needs an operator-managed
+  WorldPack content migration;
 - `access.character_connected`: another live connection owns its lease;
 - `access.session_limit`: an account/IP connection cap rejected entry;
 - `access.temporarily_unavailable`: a bounded dependency could not admit or
@@ -153,7 +180,7 @@ Implemented action names are:
 ```text
 look, inventory, move
 item.take, item.drop, item.examine, item.use, item.equip, item.unequip
-combat.attack
+combat.attack, combat.ability
 party.create, party.invite, party.accept, party.leave, party.status
 quest.list, quest.accept, quest.status, quest.complete
 economy.balance, economy.shop, economy.buy, economy.sell
@@ -168,6 +195,28 @@ Depending on the action, the strict payload may also contain `message`,
 `durationSeconds`, `reason` or `role` (`player`, `moderator`, `admin`). Unexpected
 fields or a missing/forbidden target are rejected. The normal authorization and
 perception checks still apply; structured actions are not trusted shortcuts.
+
+An ability use has its own additive `abilityId` field; it does not overload the
+opaque target:
+
+```json
+{
+  "v": 1,
+  "type": "action.perform",
+  "data": {
+    "requestId": "cmd-ability-1",
+    "action": "combat.ability",
+    "abilityId": "ember-bolt",
+    "target": "o51a4c0311f262a90"
+  }
+}
+```
+
+`abilityId` is required for `combat.ability` and forbidden on unrelated
+actions. A `self` ability forbids `target`; `explicitTarget` requires an opaque
+visible NPC target; `optionalTarget` may omit it and currently resolves to the
+caster. Availability, known-ability membership, recovery/stun state, resources,
+cooldown, target perception and combat engagement are rechecked by the server.
 
 `requestId` is 1-128 safe bytes. The server keeps a process-local bounded cache
 of 4096 results keyed by character/request ID. Repeating the same signature
@@ -210,7 +259,7 @@ traffic.
 | `player.snapshot` | Complete private player state. |
 | `scene.patch` | Typed changed scene scalars/weather/image/exits. |
 | `entity.upsert`, `entity.remove` | Changed visible item/NPC. |
-| `vitals.update` | Complete current character/vitals/skills/effects fragment. |
+| `vitals.update` | Complete current character sheet/vitals/resources/abilities fragment. |
 | `inventory.patch` | Complete current inventory/equipment fragment. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
@@ -284,11 +333,78 @@ opaque entity `id`.
 
 ## Player state
 
-`player.snapshot` is the complete private projection:
+`player.snapshot` is the complete private projection. Its `character` member is
+the authoritative, presentation-safe character sheet; a representative shape
+is:
+
+```json
+{
+  "name": "Aria",
+  "archetype": {
+    "id": "mystic",
+    "label": "Mystic",
+    "description": "A wielder of focused arcane power."
+  },
+  "level": 2,
+  "experience": 120,
+  "nextLevelExperience": 200,
+  "health": 21,
+  "maxHealth": 25,
+  "strength": 7,
+  "defence": 3,
+  "attributes": [
+    {"id":"strength","label":"Strength","value":7},
+    {"id":"defence","label":"Defence","value":3},
+    {"id":"intellect","label":"Intellect","value":11}
+  ],
+  "skills": [{"id":"combat","label":"Combat","rank":14}],
+  "resources": [{"id":"mana","label":"Mana","current":12,"max":20}],
+  "abilities": [
+    {
+      "id": "ember-bolt",
+      "name": "Ember Bolt",
+      "description": "Hurl a compact flame at a visible foe.",
+      "kind": "spell",
+      "resourceCosts": [{"resourceId":"mana","label":"Mana","amount":4}],
+      "cooldownRemaining": 0,
+      "usable": true,
+      "targeting": "explicitTarget"
+    }
+  ],
+  "resistances": [{"damageType":"fire","percent":10}],
+  "statuses": [
+    {
+      "id":"battle-focus",
+      "label":"Battle Focus",
+      "kind":"attribute_modifier",
+      "magnitude":2,
+      "remainingTicks":3
+    }
+  ],
+  "effects": [],
+  "recoveryInTicks": null
+}
+```
+
+Ability `kind` is `martial`, `spell` or `utility`; `targeting` is `self`,
+`explicitTarget` or `optionalTarget`. Status kinds are `attribute_modifier`,
+`regeneration`, `damage_over_time` and `stun`. Damage types are `physical`,
+`arcane`, `fire`, `frost` and `lightning`. Resistances and active statuses are
+projected; v1 does not currently project a derived character damage range.
+The authoring-to-wire mapping is explicit: `martial` and `spell` keep their
+names, authored `innate` projects as `utility`; `self_only`, `single_enemy` and
+`single_ally` project as `self`, `explicitTarget` and `optionalTarget`.
+`optionalTarget` is self-only in the current clients because the scene does not
+yet expose authorized ally target IDs; it reserves an additive future path, not
+a current ally-selection promise.
+The generic `attributes` list includes strength and defence; their scalar fields
+remain in parallel for backward compatibility. `statuses` is the extensible
+ability-status projection, while `effects` retains the older regeneration and
+strength consumable effects.
+
+The rest of the snapshot contains:
 
 - `revision`;
-- `character`: name, level, experience/next threshold, health/max health,
-  strength, defence, skills, effects and optional recovery countdown;
 - `inventory` and `equipment`, with opaque item IDs and authorized actions;
 - `map`: opaque current/known room IDs and known/unknown paths;
 - `quests`: stable public content slug, description, status/progress/actions;
@@ -299,6 +415,17 @@ opaque entity `id`.
 Quest/commodity slugs are stable public content identifiers rather than hidden
 world entity IDs. Persistence-only moderation/account state and private script
 flags are absent.
+
+Archetype, ability and status definition IDs are lowercase ASCII identifiers of
+at most 128 bytes using letters, digits, `-`, `_`, `.` and `:`; attribute,
+resource and skill IDs use the same alphabet with a 64-byte limit. Every ID
+starts and ends with a letter or digit. Character sheets contain at most 64
+attributes, 64 skills, 16 resources, 64 known abilities and 32 statuses. The
+current closed damage vocabulary allows at most five resistance entries (the
+generic runtime safety cap is 16). An ability has at most four resource costs. Skill rank is at most
+1000; resources at most 1,000,000; resistance at most 90 percent;
+cooldown/status duration at most 10,000 ticks. These are projection/parser
+limits, not policy hints for clients to bypass server validation.
 
 `vitals.update`, `inventory.patch` and `map.snapshot` replace their complete
 corresponding fragment at the stated revision. Other player changes use a new

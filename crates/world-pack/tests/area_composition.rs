@@ -101,7 +101,7 @@ fn real_three_area_project_has_no_semantic_or_canonical_drift() {
 
     assert_eq!(composed.artifact, canonical_existing);
     assert_eq!(composed.report.areas.len(), 3);
-    assert_eq!(composed.report.cross_area_references.len(), 4);
+    assert_eq!(composed.report.cross_area_references.len(), 6);
 }
 
 #[test]

@@ -1,4 +1,5 @@
 import {
+  createAbilityPerform,
   createActionPerform,
   createClientHello,
   createCommandSubmit,
@@ -203,6 +204,15 @@ export class TiamudConnection {
     }
 
     this.#socket.send(JSON.stringify(createActionPerform(action, target, requestId)));
+    return true;
+  }
+
+  performAbility(abilityId: string, target: string | undefined, requestId: string): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    this.#socket.send(JSON.stringify(createAbilityPerform(abilityId, target, requestId)));
     return true;
   }
 

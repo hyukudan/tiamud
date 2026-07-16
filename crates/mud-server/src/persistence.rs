@@ -197,11 +197,25 @@ pub trait CharacterStore: Send + Sync {
         account_id: AccountId,
     ) -> Result<Vec<CharacterSnapshot>, StoreError>;
 
+    #[cfg(test)]
     async fn load_or_create_character(
         &self,
         account_id: AccountId,
         name: &str,
         start_room: &str,
+    ) -> Result<CharacterSnapshot, StoreError>;
+
+    /// Create a character with a caller-selected initial gameplay sheet.
+    ///
+    /// Production stores insert identity and the bounded initial gameplay JSON
+    /// atomically. An existing character with the same account/name is
+    /// returned unchanged.
+    async fn load_or_create_character_with_gameplay(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        start_room: &str,
+        initial_gameplay: CharacterGameplaySnapshot,
     ) -> Result<CharacterSnapshot, StoreError>;
 
     async fn load_character(
@@ -355,6 +369,7 @@ impl CharacterStore for MeasuredCharacterStore {
         self.inner.list_characters(account_id).await
     }
 
+    #[cfg(test)]
     async fn load_or_create_character(
         &self,
         account_id: AccountId,
@@ -365,6 +380,22 @@ impl CharacterStore for MeasuredCharacterStore {
             self.inner
                 .load_or_create_character(account_id, name, start_room),
         )
+        .await
+    }
+
+    async fn load_or_create_character_with_gameplay(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        start_room: &str,
+        initial_gameplay: CharacterGameplaySnapshot,
+    ) -> Result<CharacterSnapshot, StoreError> {
+        self.transaction(self.inner.load_or_create_character_with_gameplay(
+            account_id,
+            name,
+            start_room,
+            initial_gameplay,
+        ))
         .await
     }
 
@@ -502,6 +533,7 @@ pub(super) enum Request {
         account_id: AccountId,
         name: String,
         start_room: String,
+        initial_gameplay: Box<CharacterGameplaySnapshot>,
         reply: oneshot::Sender<Result<CharacterSnapshot, StoreError>>,
     },
     LoadCharacter {
@@ -671,13 +703,15 @@ impl SqliteCharacterStore {
                             account_id,
                             name,
                             start_room,
+                            initial_gameplay,
                             reply,
                         } => {
-                            let _ = reply.send(load_or_create_character(
+                            let _ = reply.send(load_or_create_character_with_gameplay(
                                 &connection,
                                 account_id,
                                 &name,
                                 &start_room,
+                                &initial_gameplay,
                             ));
                         }
                         Request::LoadCharacter {
@@ -957,6 +991,7 @@ impl CharacterStore for SqliteCharacterStore {
             .await
     }
 
+    #[cfg(test)]
     async fn load_or_create_character(
         &self,
         account_id: AccountId,
@@ -969,6 +1004,28 @@ impl CharacterStore for SqliteCharacterStore {
                 account_id,
                 name: name.to_owned(),
                 start_room: start_room.to_owned(),
+                initial_gameplay: Box::new(CharacterGameplaySnapshot::default()),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn load_or_create_character_with_gameplay(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        start_room: &str,
+        initial_gameplay: CharacterGameplaySnapshot,
+    ) -> Result<CharacterSnapshot, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::LoadOrCreateCharacter {
+                account_id,
+                name: name.to_owned(),
+                start_room: start_room.to_owned(),
+                initial_gameplay: Box::new(initial_gameplay),
                 reply,
             },
             receive,
@@ -1917,19 +1974,41 @@ fn list_characters(
     Ok(snapshots)
 }
 
+#[cfg(test)]
 fn load_or_create_character(
     connection: &Connection,
     account_id: AccountId,
     name: &str,
     start_room: &str,
 ) -> Result<CharacterSnapshot, StoreError> {
+    load_or_create_character_with_gameplay(
+        connection,
+        account_id,
+        name,
+        start_room,
+        &CharacterGameplaySnapshot::default(),
+    )
+}
+
+fn load_or_create_character_with_gameplay(
+    connection: &Connection,
+    account_id: AccountId,
+    name: &str,
+    start_room: &str,
+    initial_gameplay: &CharacterGameplaySnapshot,
+) -> Result<CharacterSnapshot, StoreError> {
     ensure_account_exists(connection, account_id)?;
     let name = normalise_name(name, "character")?;
+    let gameplay_json = bounded_json(
+        initial_gameplay,
+        "character gameplay",
+        MAX_CHARACTER_JSON_BYTES,
+    )?;
     connection.execute(
-        "INSERT INTO characters (account_id, name, room_id)
-         VALUES (?1, ?2, ?3)
+        "INSERT INTO characters (account_id, name, room_id, gameplay_json)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(account_id, name) DO NOTHING",
-        params![account_id.0, name, start_room],
+        params![account_id.0, name, start_room, gameplay_json],
     )?;
     connection
         .query_row(
@@ -2753,6 +2832,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_initial_gameplay_is_persisted_once_without_overwriting_existing_characters() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let owner = account(&store, "Sheet Owner").await;
+        let mut selected = CharacterGameplaySnapshot::default();
+        selected.attributes.strength = 11;
+        selected.vitals.health = 27;
+        selected.vitals.max_health = 27;
+
+        let character = store
+            .load_or_create_character_with_gameplay(
+                owner.id,
+                "Aria",
+                "demo:lantern-square",
+                selected.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_character_gameplay(character.id).await.unwrap(),
+            selected
+        );
+
+        let mut replacement = CharacterGameplaySnapshot::default();
+        replacement.attributes.strength = 99;
+        let existing = store
+            .load_or_create_character_with_gameplay(owner.id, "aria", "ignored", replacement)
+            .await
+            .unwrap();
+        assert_eq!(existing, character);
+        assert_eq!(
+            store
+                .load_character_gameplay(character.id)
+                .await
+                .unwrap()
+                .attributes
+                .strength,
+            11
+        );
+    }
+
+    #[tokio::test]
     async fn character_and_shared_world_events_commit_atomically() {
         let store = SqliteCharacterStore::open(":memory:").await.unwrap();
         let owner = account(&store, "Event Owner").await;
@@ -2861,6 +2981,7 @@ mod tests {
             .unwrap();
         let defaults = CharacterGameplaySnapshot::default();
         let gameplay = CharacterGameplaySnapshot {
+            archetype_id: defaults.archetype_id,
             level: 4,
             experience: 375,
             vitals: tiamud_core::Vitals {
@@ -2868,6 +2989,13 @@ mod tests {
                 max_health: defaults.vitals.max_health,
             },
             attributes: defaults.attributes,
+            resources: defaults.resources,
+            ability_ids: defaults.ability_ids,
+            ability_cooldowns: defaults.ability_cooldowns,
+            ability_global_ready_tick: defaults.ability_global_ready_tick,
+            last_offensive_ability_tick: defaults.last_offensive_ability_tick,
+            resistances: defaults.resistances,
+            statuses: defaults.statuses,
             skills: defaults.skills,
             equipment: std::collections::BTreeMap::from([(
                 EquipmentSlot::Weapon,

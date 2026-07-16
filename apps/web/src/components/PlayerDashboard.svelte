@@ -3,14 +3,20 @@
 
   interface Props {
     value?: PlayerStateSnapshot;
+    abilityTargets?: Array<{ id: string; label: string }>;
     oncommand: (command: string) => void;
     onaction: (action: string, target: string | undefined, label: string) => void;
+    onability: (abilityId: string, target: string | undefined, label: string) => void;
   }
 
-  let { value, oncommand, onaction }: Props = $props();
+  let { value, abilityTargets = [], oncommand, onaction, onability }: Props = $props();
   let socialTarget = $state('');
   let chatText = $state('');
   let partyTarget = $state('');
+  let abilityTargetById = $state<Record<string, string>>({});
+  const additionalAttributes = $derived(
+    value?.character.attributes.filter((attribute) => attribute.id !== 'strength' && attribute.id !== 'defence') ?? [],
+  );
 
   const statusLabel = (status: PlayerStateSnapshot['quests'][number]['status']): string => ({
     available: 'Available',
@@ -60,6 +66,32 @@
     onaction('party.invite', target, `party invite ${target}`);
     partyTarget = '';
   }
+
+  const targetingLabel = (targeting: PlayerStateSnapshot['character']['abilities'][number]['targeting']): string => ({
+    self: 'Self',
+    // The current scene contract has no authorized ally target IDs. The wire
+    // value stays additive for a future client, but v1 executes it as self.
+    optionalTarget: 'Self',
+    explicitTarget: 'Choose a target',
+  })[targeting];
+
+  function resourceCostLabel(
+    cost: PlayerStateSnapshot['character']['abilities'][number]['resourceCosts'][number],
+  ): string {
+    return `${cost.amount} ${cost.label}`;
+  }
+
+  function abilityTarget(abilityId: string): string | undefined {
+    const selected = abilityTargetById[abilityId];
+    return selected && abilityTargets.some((target) => target.id === selected) ? selected : undefined;
+  }
+
+  function useAbility(ability: PlayerStateSnapshot['character']['abilities'][number]): void {
+    const target = ability.targeting === 'explicitTarget'
+      ? abilityTarget(ability.id)
+      : undefined;
+    onability(ability.id, target, `${ability.kind === 'spell' ? 'cast' : 'use'} ${ability.name}`);
+  }
 </script>
 
 <aside class="player-dashboard" aria-label="Character and world panels">
@@ -68,7 +100,10 @@
       <div>
         <p class="eyebrow">Character</p>
         <h2 id="character-state-title">{value.character.name}</h2>
-        <p>Level {value.character.level} · {value.character.experience} / {value.character.nextLevelExperience} XP</p>
+        <p>
+          {#if value.character.archetype}{value.character.archetype.label} · {/if}Level {value.character.level}
+          · {value.character.experience} / {value.character.nextLevelExperience} XP
+        </p>
       </div>
       <div class="health-readout">
         <label for="player-health">Health</label>
@@ -81,6 +116,33 @@
         <div><dt>Strength</dt><dd>{value.character.strength}</dd></div>
         <div><dt>Defence</dt><dd>{value.character.defence}</dd></div>
       </dl>
+      {#if additionalAttributes.length > 0}
+        <dl class="attributes attribute-grid" aria-label="Attributes">
+          {#each additionalAttributes as attribute (attribute.id)}
+            <div><dt>{attribute.label}</dt><dd>{attribute.value}</dd></div>
+          {/each}
+        </dl>
+      {/if}
+      {#if value.character.resources.length > 0}
+        <div class="resource-readouts" aria-label="Resources">
+          {#each value.character.resources as resource (resource.id)}
+            <div>
+              <label for={`resource-${resource.id}`}>{resource.label}</label>
+              <meter id={`resource-${resource.id}`} min="0" max={resource.max} value={resource.current}>
+                {resource.current} / {resource.max}
+              </meter>
+              <strong>{resource.current} / {resource.max}</strong>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      {#if value.character.resistances.length > 0}
+        <dl class="resistance-list" aria-label="Resistances">
+          {#each value.character.resistances as resistance (resistance.damageType)}
+            <div><dt>{resistance.damageType}</dt><dd>{resistance.percent > 0 ? '+' : ''}{resistance.percent}%</dd></div>
+          {/each}
+        </dl>
+      {/if}
       {#if value.character.skills.length > 0}
         <dl class="attributes" aria-label="Skills">
           {#each value.character.skills as skill (skill.id)}
@@ -98,7 +160,76 @@
           {/each}
         </ul>
       {/if}
+      {#if value.character.statuses.length > 0}
+        <ul class="compact-list status-list" aria-label="Active statuses">
+          {#each value.character.statuses as status}
+            <li>
+              <strong>{status.label}</strong> · {status.kind.replaceAll('_', ' ')}
+              {#if status.magnitude !== 0} · {status.magnitude > 0 ? '+' : ''}{status.magnitude}{/if}
+              · {status.remainingTicks} ticks
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </section>
+
+    {#if value.character.abilities.length > 0}
+      <details class="dashboard-panel ability-panel" open>
+        <summary>Abilities <span>{value.character.abilities.length}</span></summary>
+        <div class="panel-body">
+          <ul class="ability-list">
+            {#each value.character.abilities as ability (ability.id)}
+              <li>
+                <div class="ability-heading">
+                  <div>
+                    <span class={`ability-kind ${ability.kind}`}>{ability.kind}</span>
+                    <h3 id={`ability-${ability.id}`}>{ability.name}</h3>
+                  </div>
+                  <span>{targetingLabel(ability.targeting)}</span>
+                </div>
+                <p id={`ability-description-${ability.id}`}>{ability.description}</p>
+                <ul class="ability-meta" aria-label={`${ability.name} requirements`}>
+                  {#each ability.resourceCosts as cost (`${cost.resourceId}-${cost.amount}`)}
+                    <li>{resourceCostLabel(cost)}</li>
+                  {/each}
+                  {#if ability.cooldownRemaining > 0}<li>{ability.cooldownRemaining} ticks cooldown</li>{/if}
+                </ul>
+                {#if ability.targeting === 'explicitTarget'}
+                  <label for={`ability-target-${ability.id}`}>Target for {ability.name}</label>
+                  <select
+                    id={`ability-target-${ability.id}`}
+                    value={abilityTarget(ability.id) ?? ''}
+                    onchange={(event) => {
+                      abilityTargetById = {
+                        ...abilityTargetById,
+                        [ability.id]: event.currentTarget.value,
+                      };
+                    }}
+                  >
+                    <option value="">Choose target</option>
+                    {#each abilityTargets as target (target.id)}
+                      <option value={target.id}>{target.label}</option>
+                    {/each}
+                  </select>
+                {/if}
+                <button
+                  type="button"
+                  aria-describedby={`ability-description-${ability.id}`}
+                  disabled={!ability.usable || ability.cooldownRemaining > 0 ||
+                    (ability.targeting === 'explicitTarget' && !abilityTarget(ability.id))}
+                  onclick={() => useAbility(ability)}
+                >{ability.kind === 'spell' ? 'Cast' : 'Use'} {ability.name}</button>
+                {#if !ability.usable}
+                  <p class="ability-unavailable" role="status">Unavailable right now.</p>
+                {:else if ability.targeting === 'explicitTarget' && !abilityTarget(ability.id)}
+                  <p class="ability-unavailable">Choose a visible target to use this ability.</p>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </div>
+      </details>
+    {/if}
 
     <details class="dashboard-panel" open>
       <summary>Inventory <span>{value.inventory.length}</span></summary>

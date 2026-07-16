@@ -4,6 +4,7 @@
   "name": "Tiamud: Lantern Square",
   "startRoomId": "demo:lantern-square",
   "rngSeed": 6073466303471576068,
+  "defaultArchetypeId": "tiamud:wanderer",
   "areas": [
     {
       "id": "archive",

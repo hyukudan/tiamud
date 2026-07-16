@@ -1,5 +1,9 @@
 //! Transport-independent world model for Tiamud.
 
+mod ability;
+
+pub use ability::*;
+
 use serde::{Deserialize, Serialize};
 use slotmap::{SlotMap, new_key_type};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -79,6 +83,10 @@ pub enum PlayerAction {
     Drop(String),
     Examine(String),
     Attack(String),
+    Ability {
+        ability_id: String,
+        target: Option<String>,
+    },
     Use(String),
     Equip(String),
     Unequip(String),
@@ -365,6 +373,27 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     {
         return Ok(PlayerAction::Move(direction));
     }
+    for command in ["ability", "skill", "cast"] {
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget { command: "ability" });
+        }
+        if let Some(rest) = normalised.strip_prefix(&format!("{command} ")) {
+            let mut parts = rest.trim().splitn(2, char::is_whitespace);
+            let ability_id = parts.next().unwrap_or_default().trim();
+            if ability_id.is_empty() {
+                return Err(ParseActionError::MissingTarget { command: "ability" });
+            }
+            let target = parts
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            return Ok(PlayerAction::Ability {
+                ability_id: ability_id.to_owned(),
+                target,
+            });
+        }
+    }
     for (command, aliases, action) in [
         (
             "take",
@@ -580,6 +609,7 @@ pub struct PlayerStateView {
 #[serde(rename_all = "camelCase")]
 pub struct PlayerCharacterView {
     pub name: String,
+    pub archetype: ArchetypeView,
     pub level: u32,
     pub experience: u64,
     pub next_level_experience: u64,
@@ -587,7 +617,12 @@ pub struct PlayerCharacterView {
     pub max_health: i32,
     pub strength: i32,
     pub defence: i32,
+    pub attributes: Vec<AttributeView>,
     pub skills: Vec<SkillView>,
+    pub resources: Vec<ResourceView>,
+    pub abilities: Vec<AbilityView>,
+    pub resistances: Vec<ResistanceView>,
+    pub statuses: Vec<StatusView>,
     pub effects: Vec<ActiveEffect>,
     pub recovery_in_ticks: Option<u64>,
 }
@@ -837,15 +872,38 @@ pub struct Vitals {
 pub struct Attributes {
     pub strength: i32,
     pub defence: i32,
+    #[serde(default)]
+    pub additional: BTreeMap<String, i32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CharacterGameplaySnapshot {
+    #[serde(default = "default_archetype_id")]
+    pub archetype_id: String,
     pub level: u32,
     pub experience: u64,
     pub vitals: Vitals,
     pub attributes: Attributes,
+    #[serde(default)]
+    pub resources: BTreeMap<String, ResourcePool>,
+    #[serde(default)]
+    pub ability_ids: Vec<String>,
+    /// Absolute logical tick at which an ability becomes available again.
+    #[serde(default)]
+    pub ability_cooldowns: BTreeMap<String, u64>,
+    /// One bounded action slot per world tick prevents command spam from
+    /// bypassing deterministic combat turns.
+    #[serde(default)]
+    pub ability_global_ready_tick: u64,
+    /// Used by the combat loop to replace, rather than stack with, the normal
+    /// player attack on the following resolved turn.
+    #[serde(default)]
+    pub last_offensive_ability_tick: Option<u64>,
+    #[serde(default)]
+    pub resistances: BTreeMap<DamageType, u16>,
+    #[serde(default)]
+    pub statuses: Vec<ActiveStatusEffect>,
     #[serde(default = "default_skills")]
     pub skills: BTreeMap<String, u16>,
     pub equipment: BTreeMap<EquipmentSlot, String>,
@@ -874,6 +932,10 @@ pub struct ScheduledScriptFlag {
 
 fn default_coin_balance() -> u64 {
     40
+}
+
+fn default_archetype_id() -> String {
+    "wanderer".to_owned()
 }
 
 fn default_skills() -> BTreeMap<String, u16> {
@@ -1018,6 +1080,18 @@ pub struct NpcRuntimeSnapshot {
     pub respawn_ticks: u64,
     pub respawn_at_tick: Option<u64>,
     pub engaged_character: Option<CharacterId>,
+    #[serde(default)]
+    pub resources: BTreeMap<String, ResourcePool>,
+    #[serde(default)]
+    pub resource_regeneration: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub ability_ids: Vec<String>,
+    #[serde(default)]
+    pub ability_cooldowns: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub resistances: BTreeMap<DamageType, u16>,
+    #[serde(default)]
+    pub statuses: Vec<ActiveStatusEffect>,
 }
 
 /// Portable shared-world state. It deliberately excludes sessions and opaque
@@ -1038,6 +1112,7 @@ pub struct WorldRuntimeSnapshot {
 impl Default for CharacterGameplaySnapshot {
     fn default() -> Self {
         Self {
+            archetype_id: default_archetype_id(),
             level: 1,
             experience: 0,
             vitals: Vitals {
@@ -1047,7 +1122,15 @@ impl Default for CharacterGameplaySnapshot {
             attributes: Attributes {
                 strength: 5,
                 defence: 2,
+                additional: BTreeMap::new(),
             },
+            resources: BTreeMap::new(),
+            ability_ids: Vec::new(),
+            ability_cooldowns: BTreeMap::new(),
+            ability_global_ready_tick: 0,
+            last_offensive_ability_tick: None,
+            resistances: BTreeMap::new(),
+            statuses: Vec::new(),
             skills: default_skills(),
             equipment: BTreeMap::new(),
             effects: Vec::new(),
@@ -1235,6 +1318,12 @@ struct Npc {
     respawn_ticks: u64,
     respawn_at_tick: Option<u64>,
     engaged_character: Option<CharacterId>,
+    resources: BTreeMap<String, ResourcePool>,
+    resource_regeneration: BTreeMap<String, u32>,
+    ability_ids: Vec<String>,
+    ability_cooldowns: BTreeMap<String, u64>,
+    resistances: BTreeMap<DamageType, u16>,
+    statuses: Vec<ActiveStatusEffect>,
 }
 
 impl Npc {
@@ -1316,6 +1405,18 @@ pub enum WorldError {
     EquipmentSlotEmpty,
     #[error("Combat cannot be started right now.")]
     CombatUnavailable,
+    #[error("No character archetype matches that identifier.")]
+    ArchetypeNotFound,
+    #[error("The authored archetype or ability configuration is invalid.")]
+    InvalidAbilityDefinition,
+    #[error("That ability is unknown or has not been learned.")]
+    AbilityNotKnown,
+    #[error("That ability cannot be used right now.")]
+    AbilityUnavailable,
+    #[error("There are not enough resources to use that ability.")]
+    InsufficientResource,
+    #[error("That ability target is not valid.")]
+    InvalidAbilityTarget,
     #[error("The persisted world runtime snapshot is invalid or incompatible.")]
     InvalidRuntimeSnapshot,
     #[error("That party action is not available.")]
@@ -1417,6 +1518,24 @@ pub enum GameplayEvent {
         npc_name: String,
         room_id: String,
     },
+    AbilityUsed {
+        character_id: CharacterId,
+        character_name: String,
+        ability_id: String,
+        ability_name: String,
+        npc_id: Option<String>,
+        npc_name: Option<String>,
+        room_id: String,
+    },
+    NpcAbilityUsed {
+        npc_id: String,
+        npc_name: String,
+        character_id: CharacterId,
+        character_name: String,
+        ability_id: String,
+        ability_name: String,
+        room_id: String,
+    },
     NpcDamaged {
         character_id: CharacterId,
         character_name: String,
@@ -1468,6 +1587,12 @@ pub enum GameplayEvent {
         character_name: String,
         npc_id: String,
         npc_name: String,
+        recover_at_tick: u64,
+        room_id: String,
+    },
+    CharacterCollapsed {
+        character_id: CharacterId,
+        character_name: String,
         recover_at_tick: u64,
         room_id: String,
     },
@@ -1572,6 +1697,10 @@ pub struct World {
     hidden_npcs: HashMap<String, u16>,
     secret_exits: HashMap<(String, Direction), u16>,
     npcs: BTreeMap<String, Npc>,
+    abilities: BTreeMap<String, AbilityDefinition>,
+    archetypes: BTreeMap<String, ArchetypeDefinition>,
+    archetype_catalog: Vec<ArchetypeView>,
+    default_archetype_id: String,
     character_gameplay: HashMap<CharacterId, CharacterGameplaySnapshot>,
     sessions: HashMap<SessionId, EntityId>,
     observer_views: HashMap<SessionId, ObserverView>,
@@ -1756,6 +1885,14 @@ impl World {
             hidden_npcs: HashMap::new(),
             secret_exits: HashMap::new(),
             npcs: BTreeMap::new(),
+            abilities: BTreeMap::new(),
+            archetypes: BTreeMap::new(),
+            archetype_catalog: vec![ArchetypeView {
+                id: "wanderer".into(),
+                label: "Wanderer".into(),
+                description: "A flexible adventurer using the legacy balanced profile.".into(),
+            }],
+            default_archetype_id: "wanderer".into(),
             character_gameplay: HashMap::new(),
             sessions: HashMap::new(),
             observer_views: HashMap::new(),
@@ -1832,6 +1969,200 @@ impl World {
             ],
         })
         .expect("the built-in demo world is valid")
+    }
+
+    /// Installs reviewed, transport-independent character and ability data.
+    /// Existing worlds may omit this call and retain the legacy Wanderer
+    /// defaults, which keeps old tests, saves and imported areas playable.
+    pub fn configure_abilities(
+        &mut self,
+        default_archetype_id: String,
+        archetypes: Vec<ArchetypeDefinition>,
+        abilities: Vec<AbilityDefinition>,
+    ) -> Result<(), WorldError> {
+        if archetypes.is_empty()
+            || archetypes.len() > MAX_ARCHETYPES
+            || abilities.len() > MAX_ABILITIES
+            || !valid_definition_id(&default_archetype_id)
+        {
+            return Err(WorldError::InvalidAbilityDefinition);
+        }
+
+        let ability_count = abilities.len();
+        let unique_ability_names = abilities
+            .iter()
+            .map(|ability| ability.name.to_lowercase())
+            .collect::<BTreeSet<_>>();
+        if unique_ability_names.len() != ability_count {
+            return Err(WorldError::InvalidAbilityDefinition);
+        }
+        let ability_map = abilities
+            .into_iter()
+            .map(|ability| {
+                validate_ability_definition(&ability)?;
+                Ok((ability.id.clone(), ability))
+            })
+            .collect::<Result<BTreeMap<_, _>, WorldError>>()?;
+        if ability_map.len() != ability_count || ability_map.len() > MAX_ABILITIES {
+            return Err(WorldError::InvalidAbilityDefinition);
+        }
+
+        let archetype_count = archetypes.len();
+        let archetype_map = archetypes
+            .into_iter()
+            .map(|archetype| {
+                validate_archetype_definition(&archetype, &ability_map)?;
+                Ok((archetype.id.clone(), archetype))
+            })
+            .collect::<Result<BTreeMap<_, _>, WorldError>>()?;
+        if archetype_map.len() != archetype_count
+            || archetype_map.len() > MAX_ARCHETYPES
+            || !archetype_map.contains_key(&default_archetype_id)
+        {
+            return Err(WorldError::InvalidAbilityDefinition);
+        }
+
+        self.archetype_catalog = archetype_map
+            .values()
+            .map(|archetype| ArchetypeView {
+                id: archetype.id.clone(),
+                label: archetype.name.clone(),
+                description: archetype.description.clone(),
+            })
+            .collect();
+        self.default_archetype_id = default_archetype_id;
+        self.archetypes = archetype_map;
+        self.abilities = ability_map;
+        Ok(())
+    }
+
+    pub fn archetype_catalog(&self) -> &[ArchetypeView] {
+        &self.archetype_catalog
+    }
+
+    pub fn default_archetype_id(&self) -> &str {
+        &self.default_archetype_id
+    }
+
+    pub fn initial_gameplay(
+        &self,
+        archetype_id: Option<&str>,
+    ) -> Result<CharacterGameplaySnapshot, WorldError> {
+        let requested = archetype_id.unwrap_or(&self.default_archetype_id);
+        let Some(archetype) = self.archetypes.get(requested) else {
+            if requested == "wanderer" && self.archetypes.is_empty() {
+                return Ok(CharacterGameplaySnapshot::default());
+            }
+            return Err(WorldError::ArchetypeNotFound);
+        };
+
+        let mut snapshot = CharacterGameplaySnapshot {
+            archetype_id: archetype.id.clone(),
+            skills: archetype.initial_skills.clone(),
+            ability_ids: archetype.initial_ability_ids.clone(),
+            resistances: archetype.initial_resistances.clone(),
+            ..CharacterGameplaySnapshot::default()
+        };
+        snapshot.attributes.strength = archetype
+            .initial_attributes
+            .get("strength")
+            .copied()
+            .unwrap_or(5) as i32;
+        snapshot.attributes.defence = archetype
+            .initial_attributes
+            .get("defence")
+            .copied()
+            .unwrap_or(2) as i32;
+        snapshot.vitals.max_health = archetype
+            .initial_attributes
+            .get("max_health")
+            .copied()
+            .unwrap_or(20) as i32;
+        snapshot.vitals.health = snapshot.vitals.max_health;
+        snapshot.attributes.additional = archetype
+            .initial_attributes
+            .iter()
+            .filter(|(id, _)| !matches!(id.as_str(), "strength" | "defence" | "max_health"))
+            .map(|(id, value)| (id.clone(), *value as i32))
+            .collect();
+        snapshot.resources = archetype
+            .initial_resources
+            .iter()
+            .map(|(id, maximum)| {
+                (
+                    id.clone(),
+                    ResourcePool {
+                        current: *maximum,
+                        max: *maximum,
+                    },
+                )
+            })
+            .collect();
+        Ok(snapshot)
+    }
+
+    pub fn configure_npc_abilities(
+        &mut self,
+        definition: NpcAbilitySetDefinition,
+    ) -> Result<(), WorldError> {
+        let unique_abilities = definition
+            .ability_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == definition.ability_ids.len();
+        let abilities_usable = definition.ability_ids.iter().all(|id| {
+            self.abilities.get(id).is_some_and(|ability| {
+                ability
+                    .resource_costs
+                    .keys()
+                    .all(|resource| definition.resource_pools.contains_key(resource))
+            })
+        });
+        let npc = self
+            .npcs
+            .get_mut(&definition.npc_id)
+            .ok_or(WorldError::NpcNotFound)?;
+        if definition.resource_pools.len() > MAX_RESOURCE_POOLS
+            || definition.resource_regeneration.len() > MAX_RESOURCE_POOLS
+            || definition.resistances.len() > MAX_RESISTANCES
+            || definition.ability_ids.len() > MAX_KNOWN_ABILITIES
+            || !unique_abilities
+            || !abilities_usable
+            || definition
+                .resource_pools
+                .iter()
+                .any(|(id, value)| !valid_stat_id(id) || *value == 0 || *value > MAX_RESOURCE_VALUE)
+            || definition.resource_regeneration.iter().any(|(id, value)| {
+                !valid_stat_id(id)
+                    || !definition.resource_pools.contains_key(id)
+                    || *value > MAX_RESOURCE_VALUE
+            })
+            || definition
+                .resistances
+                .values()
+                .any(|value| *value > MAX_RESISTANCE_PERCENT)
+        {
+            return Err(WorldError::InvalidAbilityDefinition);
+        }
+        npc.resources = definition
+            .resource_pools
+            .into_iter()
+            .map(|(id, maximum)| {
+                (
+                    id,
+                    ResourcePool {
+                        current: maximum,
+                        max: maximum,
+                    },
+                )
+            })
+            .collect();
+        npc.resource_regeneration = definition.resource_regeneration;
+        npc.resistances = definition.resistances;
+        npc.ability_ids = definition.ability_ids;
+        npc.ability_cooldowns.clear();
+        Ok(())
     }
 
     pub fn start_room_id(&self) -> &str {
@@ -1931,6 +2262,12 @@ impl World {
                             respawn_ticks: npc.respawn_ticks,
                             respawn_at_tick: npc.respawn_at_tick,
                             engaged_character: npc.engaged_character,
+                            resources: npc.resources.clone(),
+                            resource_regeneration: npc.resource_regeneration.clone(),
+                            ability_ids: npc.ability_ids.clone(),
+                            ability_cooldowns: npc.ability_cooldowns.clone(),
+                            resistances: npc.resistances.clone(),
+                            statuses: npc.statuses.clone(),
                         },
                     )
                 })
@@ -1943,15 +2280,14 @@ impl World {
         &mut self,
         mut snapshot: WorldRuntimeSnapshot,
     ) -> Result<(), WorldError> {
-        let item_ids_match = snapshot.item_locations.len() == self.stable_items.len()
-            && self
-                .stable_items
-                .keys()
-                .all(|item_id| snapshot.item_locations.contains_key(item_id));
+        let item_ids_match = snapshot
+            .item_locations
+            .keys()
+            .all(|item_id| self.stable_items.contains_key(item_id));
         let npc_ids_match = snapshot
             .npcs
             .iter()
-            .all(|(npc_id, npc)| npc_id == &npc.stable_id);
+            .all(|(npc_id, npc)| npc_id == &npc.stable_id && self.npcs.contains_key(npc_id));
         let mut party_members = std::collections::HashSet::new();
         let adventure_valid = snapshot.adventure.next_party_id > 0
             && snapshot.adventure.parties.iter().all(|(party_id, party)| {
@@ -1991,91 +2327,147 @@ impl World {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
 
-        let npcs = snapshot
-            .npcs
-            .iter()
-            .map(|(npc_id, npc)| {
-                let loot_unique = npc
-                    .loot_item_ids
+        // WorldPack remains authoritative for static NPC configuration. The
+        // portable snapshot overlays only dynamic state, so adding an NPC or
+        // tuning a definition does not get undone on restart.
+        let mut npcs = self.npcs.clone();
+        for (npc_id, saved) in &snapshot.npcs {
+            let authored = self
+                .npcs
+                .get(npc_id)
+                .cloned()
+                .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+            let valid = saved.max_health > 0
+                && saved.health >= 0
+                && saved.health <= i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)
+                && saved.engaged_character.is_none_or(|id| id.0 > 0)
+                && ((saved.health == 0) == saved.respawn_at_tick.is_some())
+                && (saved.health > 0 || saved.engaged_character.is_none())
+                && saved.resources.len() <= MAX_RESOURCE_POOLS
+                && saved.resources.iter().all(|(id, pool)| {
+                    valid_stat_id(id)
+                        && pool.max > 0
+                        && pool.max <= MAX_RESOURCE_VALUE
+                        && pool.current <= pool.max
+                })
+                && saved.resource_regeneration.len() <= MAX_RESOURCE_POOLS
+                && saved
+                    .resource_regeneration
                     .iter()
-                    .collect::<std::collections::HashSet<_>>()
-                    .len()
-                    == npc.loot_item_ids.len();
-                let valid = !npc.name.trim().is_empty()
-                    && self.stable_rooms.contains_key(&npc.spawn_room_id)
-                    && npc.level > 0
-                    && npc.max_health > 0
-                    && (0..=npc.max_health).contains(&npc.health)
-                    && npc.strength > 0
-                    && npc.defence >= 0
-                    && npc.respawn_ticks > 0
-                    && loot_unique
-                    && npc
-                        .loot_item_ids
-                        .iter()
-                        .all(|item_id| self.stable_items.contains_key(item_id))
-                    && ((npc.health == 0) == npc.respawn_at_tick.is_some());
-                if !valid {
-                    return Err(WorldError::InvalidRuntimeSnapshot);
-                }
-                Ok((
-                    npc_id.clone(),
-                    Npc {
-                        stable_id: npc.stable_id.clone(),
-                        name: npc.name.clone(),
-                        description: npc.description.clone(),
-                        spawn_room_id: npc.spawn_room_id.clone(),
-                        level: npc.level,
-                        health: npc.health,
-                        max_health: npc.max_health,
-                        strength: npc.strength,
-                        defence: npc.defence,
-                        experience_reward: npc.experience_reward,
-                        loot_item_ids: npc.loot_item_ids.clone(),
-                        respawn_ticks: npc.respawn_ticks,
-                        respawn_at_tick: npc.respawn_at_tick,
-                        engaged_character: npc.engaged_character,
-                    },
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+                    .all(|(id, value)| valid_stat_id(id) && *value <= MAX_RESOURCE_VALUE)
+                && saved.ability_ids.len() <= MAX_KNOWN_ABILITIES
+                && saved.ability_ids.iter().all(|id| valid_definition_id(id))
+                && saved.ability_cooldowns.len() <= MAX_KNOWN_ABILITIES
+                && saved.ability_cooldowns.iter().all(|(id, ready_tick)| {
+                    valid_definition_id(id)
+                        && *ready_tick
+                            <= snapshot
+                                .logical_tick
+                                .saturating_add(u64::from(MAX_COOLDOWN_TICKS))
+                })
+                && saved.resistances.len() <= MAX_RESISTANCES
+                && saved
+                    .resistances
+                    .values()
+                    .all(|value| *value <= MAX_RESISTANCE_PERCENT)
+                && saved.statuses.len() <= MAX_ACTIVE_STATUSES
+                && saved.statuses.iter().all(validate_active_status_shape);
+            if !valid {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+            let legacy_additive_fields_missing = saved.resources.is_empty()
+                && saved.resource_regeneration.is_empty()
+                && saved.ability_ids.is_empty()
+                && saved.ability_cooldowns.is_empty()
+                && saved.resistances.is_empty()
+                && saved.statuses.is_empty();
+            let resources = authored
+                .resources
+                .iter()
+                .map(|(id, configured)| {
+                    let current = if legacy_additive_fields_missing {
+                        configured.max
+                    } else {
+                        saved
+                            .resources
+                            .get(id)
+                            .map(|pool| pool.current.min(configured.max))
+                            .unwrap_or(configured.max)
+                    };
+                    (
+                        id.clone(),
+                        ResourcePool {
+                            current,
+                            max: configured.max,
+                        },
+                    )
+                })
+                .collect();
+            let dynamic = npcs
+                .get_mut(npc_id)
+                .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+            dynamic.health = if saved.health == 0 {
+                0
+            } else {
+                saved.health.min(authored.max_health)
+            };
+            dynamic.respawn_at_tick = saved.respawn_at_tick;
+            dynamic.engaged_character = saved.engaged_character;
+            dynamic.resources = resources;
+            dynamic.ability_cooldowns = saved
+                .ability_cooldowns
+                .iter()
+                .filter(|(id, _)| authored.ability_ids.contains(id))
+                .map(|(id, tick)| (id.clone(), *tick))
+                .collect();
+            dynamic.statuses = saved
+                .statuses
+                .iter()
+                .filter(|status| {
+                    self.abilities.contains_key(&status.source_ability_id)
+                        && status
+                            .source_npc_id
+                            .as_ref()
+                            .is_none_or(|source| self.npcs.contains_key(source))
+                        && validate_active_status(status, &self.abilities)
+                })
+                .cloned()
+                .collect();
+        }
 
-        let item_locations = snapshot
-            .item_locations
-            .iter()
-            .map(|(item_id, location)| {
-                let location = match location {
-                    RuntimeItemLocation::Staged => SharedItemLocation::Staged,
-                    RuntimeItemLocation::Carried { character_id } => {
-                        SharedItemLocation::Carried(*character_id)
+        let mut item_locations = self.item_locations.clone();
+        for (item_id, saved_location) in &snapshot.item_locations {
+            let location = match saved_location {
+                RuntimeItemLocation::Staged => SharedItemLocation::Staged,
+                RuntimeItemLocation::Carried { character_id } => {
+                    SharedItemLocation::Carried(*character_id)
+                }
+                RuntimeItemLocation::Room { room_id } => {
+                    if !self.stable_rooms.contains_key(room_id) {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
                     }
-                    RuntimeItemLocation::Room { room_id } => {
-                        if !self.stable_rooms.contains_key(room_id) {
-                            return Err(WorldError::InvalidRuntimeSnapshot);
-                        }
-                        SharedItemLocation::Room(room_id.clone())
+                    SharedItemLocation::Room(room_id.clone())
+                }
+                RuntimeItemLocation::Equipped { character_id, slot } => {
+                    if self
+                        .item_gameplay
+                        .get(item_id)
+                        .is_none_or(|item| item.equipment_slot != Some(*slot))
+                    {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
                     }
-                    RuntimeItemLocation::Equipped { character_id, slot } => {
-                        if self
-                            .item_gameplay
-                            .get(item_id)
-                            .is_none_or(|item| item.equipment_slot != Some(*slot))
-                        {
-                            return Err(WorldError::InvalidRuntimeSnapshot);
-                        }
-                        SharedItemLocation::Equipped(*character_id, *slot)
+                    SharedItemLocation::Equipped(*character_id, *slot)
+                }
+                RuntimeItemLocation::HeldByNpc { npc_id } => {
+                    if !npcs.contains_key(npc_id) {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
                     }
-                    RuntimeItemLocation::HeldByNpc { npc_id } => {
-                        if !npcs.contains_key(npc_id) {
-                            return Err(WorldError::InvalidRuntimeSnapshot);
-                        }
-                        SharedItemLocation::HeldByNpc(npc_id.clone())
-                    }
-                    RuntimeItemLocation::Consumed => SharedItemLocation::Consumed,
-                };
-                Ok((item_id.clone(), location))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+                    SharedItemLocation::HeldByNpc(npc_id.clone())
+                }
+                RuntimeItemLocation::Consumed => SharedItemLocation::Consumed,
+            };
+            item_locations.insert(item_id.clone(), location);
+        }
 
         self.revision = snapshot.revision;
         self.logical_tick = snapshot.logical_tick;
@@ -2366,30 +2758,197 @@ impl World {
     pub fn restore_character_gameplay(
         &mut self,
         character_id: CharacterId,
-        snapshot: CharacterGameplaySnapshot,
+        mut snapshot: CharacterGameplaySnapshot,
     ) -> Result<(), WorldError> {
+        let legacy_archetype_missing = !self.archetypes.is_empty()
+            && snapshot.archetype_id == "wanderer"
+            && !self.archetypes.contains_key(&snapshot.archetype_id);
+        if !self.archetypes.is_empty() && !self.archetypes.contains_key(&snapshot.archetype_id) {
+            if legacy_archetype_missing {
+                snapshot.archetype_id = self.default_archetype_id.clone();
+            } else {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+        }
+        let additive_fields_missing = legacy_archetype_missing
+            && snapshot.resources.is_empty()
+            && snapshot.ability_ids.is_empty()
+            && snapshot.ability_cooldowns.is_empty()
+            && snapshot.resistances.is_empty()
+            && snapshot.statuses.is_empty();
+        if additive_fields_missing
+            && let Some(archetype) = self.archetypes.get(&snapshot.archetype_id)
+        {
+            for (id, value) in &archetype.initial_attributes {
+                if !matches!(id.as_str(), "strength" | "defence" | "max_health") {
+                    snapshot
+                        .attributes
+                        .additional
+                        .entry(id.clone())
+                        .or_insert(i32::try_from(*value).unwrap_or(i32::MAX));
+                }
+            }
+            for (id, rank) in &archetype.initial_skills {
+                snapshot.skills.entry(id.clone()).or_insert(*rank);
+            }
+            let mut resource_maxima = archetype.initial_resources.clone();
+            let mut abilities = archetype.initial_ability_ids.clone();
+            for milestone in archetype
+                .level_progression
+                .iter()
+                .filter(|milestone| milestone.level <= snapshot.level)
+            {
+                // Legacy snapshots already contain their historical base
+                // attributes and skills, but none of the additive authored
+                // progression. Replay every milestone reached by the saved
+                // level exactly once while migrating that legacy shape.
+                for (id, gain) in &milestone.attribute_gains {
+                    let gain = i32::try_from(*gain).unwrap_or(i32::MAX);
+                    match id.as_str() {
+                        "max_health" => {
+                            snapshot.vitals.max_health =
+                                snapshot.vitals.max_health.saturating_add(gain);
+                        }
+                        "strength" => {
+                            snapshot.attributes.strength =
+                                snapshot.attributes.strength.saturating_add(gain);
+                        }
+                        "defence" => {
+                            snapshot.attributes.defence =
+                                snapshot.attributes.defence.saturating_add(gain);
+                        }
+                        _ => {
+                            let value = snapshot
+                                .attributes
+                                .additional
+                                .entry(id.clone())
+                                .or_default();
+                            *value = value.saturating_add(gain);
+                        }
+                    }
+                }
+                for (id, gain) in &milestone.skill_gains {
+                    let rank = snapshot.skills.entry(id.clone()).or_default();
+                    *rank = rank.saturating_add(*gain).min(MAX_SKILL_VALUE);
+                }
+                for (id, gain) in &milestone.resource_gains {
+                    let maximum = resource_maxima.entry(id.clone()).or_default();
+                    *maximum = maximum.saturating_add(*gain).min(MAX_RESOURCE_VALUE);
+                }
+                abilities.extend(milestone.ability_unlock_ids.iter().cloned());
+            }
+            snapshot.resources = resource_maxima
+                .into_iter()
+                .map(|(id, max)| (id, ResourcePool { current: max, max }))
+                .collect();
+            snapshot.ability_ids = abilities;
+            snapshot.resistances = archetype.initial_resistances.clone();
+        }
+        // Authored ability IDs are content references, while cooldowns and
+        // statuses are ephemeral runtime state. A reviewed pack may retire an
+        // ability between restarts; discard only those now-unknown references
+        // so one obsolete effect cannot block character login. Malformed IDs
+        // and malformed status payloads still fail closed.
+        if !snapshot
+            .ability_ids
+            .iter()
+            .all(|id| valid_definition_id(id))
+            || !snapshot
+                .ability_cooldowns
+                .keys()
+                .all(|id| valid_definition_id(id))
+            || !snapshot.statuses.iter().all(validate_active_status_shape)
+        {
+            return Err(WorldError::InvalidGameplayDefinition);
+        }
+        snapshot
+            .ability_ids
+            .retain(|id| self.abilities.contains_key(id));
+        snapshot
+            .ability_cooldowns
+            .retain(|id, _| self.abilities.contains_key(id) && snapshot.ability_ids.contains(id));
+        snapshot.statuses.retain(|status| {
+            self.abilities.contains_key(&status.source_ability_id)
+                && status
+                    .source_npc_id
+                    .as_ref()
+                    .is_none_or(|npc_id| self.npcs.contains_key(npc_id))
+                && validate_active_status(status, &self.abilities)
+        });
         let unique_equipment = snapshot
             .equipment
             .values()
             .collect::<std::collections::HashSet<_>>()
             .len()
             == snapshot.equipment.len();
-        let valid = snapshot.level > 0
+        let unique_abilities = snapshot
+            .ability_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == snapshot.ability_ids.len();
+        let valid_archetype = if self.archetypes.is_empty() {
+            snapshot.archetype_id == "wanderer"
+        } else {
+            self.archetypes.contains_key(&snapshot.archetype_id)
+        };
+        let valid = valid_archetype
+            && snapshot.level > 0
+            && snapshot.level <= MAX_PROGRESSION_LEVEL
             && snapshot.vitals.max_health > 0
             && (0..=snapshot.vitals.max_health).contains(&snapshot.vitals.health)
-            && snapshot.attributes.strength > 0
+            && snapshot.attributes.strength >= 0
             && snapshot.attributes.defence >= 0
-            && snapshot.skills.len() <= 32
-            && snapshot.skills.iter().all(|(id, rank)| {
-                !id.is_empty()
-                    && id.len() <= 64
-                    && id.bytes().all(|byte| {
-                        byte.is_ascii_lowercase()
-                            || byte.is_ascii_digit()
-                            || matches!(byte, b'-' | b'_')
-                    })
-                    && *rank <= 100
+            && snapshot.attributes.additional.len() + 2 <= MAX_STATS
+            && snapshot.attributes.additional.iter().all(|(id, value)| {
+                valid_stat_id(id)
+                    && !matches!(id.as_str(), "strength" | "defence" | "max_health")
+                    && (0..=i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)).contains(value)
             })
+            && snapshot.resources.len() <= MAX_RESOURCE_POOLS
+            && snapshot.resources.iter().all(|(id, pool)| {
+                valid_stat_id(id)
+                    && pool.max > 0
+                    && pool.max <= MAX_RESOURCE_VALUE
+                    && pool.current <= pool.max
+            })
+            && snapshot.ability_ids.len() <= MAX_KNOWN_ABILITIES
+            && unique_abilities
+            && snapshot
+                .ability_ids
+                .iter()
+                .all(|id| self.abilities.contains_key(id))
+            && snapshot.ability_cooldowns.len() <= MAX_KNOWN_ABILITIES
+            && snapshot.ability_cooldowns.iter().all(|(id, ready_tick)| {
+                snapshot.ability_ids.contains(id)
+                    && *ready_tick
+                        <= self
+                            .logical_tick
+                            .saturating_add(u64::from(MAX_COOLDOWN_TICKS))
+            })
+            && snapshot.ability_global_ready_tick <= self.logical_tick.saturating_add(1)
+            && snapshot
+                .last_offensive_ability_tick
+                .is_none_or(|tick| tick <= self.logical_tick)
+            && snapshot.resistances.len() <= MAX_RESISTANCES
+            && snapshot
+                .resistances
+                .values()
+                .all(|value| *value <= MAX_RESISTANCE_PERCENT)
+            && snapshot.statuses.len() <= MAX_ACTIVE_STATUSES
+            && snapshot.statuses.iter().all(|status| {
+                validate_active_status(status, &self.abilities)
+                    && status
+                        .source_npc_id
+                        .as_ref()
+                        .is_none_or(|npc_id| self.npcs.contains_key(npc_id))
+            })
+            && ((snapshot.vitals.health == 0) == snapshot.recovery_at_tick.is_some())
+            && snapshot.skills.len() <= MAX_STATS
+            && snapshot
+                .skills
+                .iter()
+                .all(|(id, rank)| valid_stat_id(id) && *rank <= MAX_SKILL_VALUE)
             && unique_equipment
             && snapshot.equipment.iter().all(|(slot, item_id)| {
                 self.stable_items.contains_key(item_id)
@@ -2397,6 +2956,14 @@ impl World {
                         .item_gameplay
                         .get(item_id)
                         .is_some_and(|item| item.equipment_slot == Some(*slot))
+                    && (matches!(
+                        self.item_locations.get(item_id),
+                        Some(SharedItemLocation::Carried(owner)) if *owner == character_id
+                    ) || matches!(
+                        self.item_locations.get(item_id),
+                        Some(SharedItemLocation::Equipped(owner, equipped_slot))
+                            if *owner == character_id && *equipped_slot == *slot
+                    ))
             })
             && snapshot
                 .effects
@@ -2439,6 +3006,10 @@ impl World {
                     .equipment
                     .values()
                     .any(|item| item == previous_item)
+                    && matches!(
+                        self.item_locations.get(previous_item),
+                        Some(SharedItemLocation::Equipped(owner, _)) if *owner == character_id
+                    )
                 {
                     self.item_locations.insert(
                         previous_item.clone(),
@@ -2592,6 +3163,12 @@ impl World {
                 respawn_ticks: definition.respawn_ticks,
                 respawn_at_tick: None,
                 engaged_character: None,
+                resources: BTreeMap::new(),
+                resource_regeneration: BTreeMap::new(),
+                ability_ids: Vec::new(),
+                ability_cooldowns: BTreeMap::new(),
+                resistances: BTreeMap::new(),
+                statuses: Vec::new(),
             },
         );
         self.revision = self.revision.wrapping_add(1).max(1);
@@ -2602,12 +3179,24 @@ impl World {
     /// Advances deterministic world time by one turn and resolves effects,
     /// recovery, respawns and every active combat in stable NPC-ID order.
     pub fn advance_tick(&mut self) -> Result<Vec<DomainEvent>, WorldError> {
+        let checkpoint = self.checkpoint();
+        match self.advance_tick_inner() {
+            Ok(events) => Ok(events),
+            Err(error) => {
+                self.restore_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn advance_tick_inner(&mut self) -> Result<Vec<DomainEvent>, WorldError> {
         self.logical_tick = self.logical_tick.wrapping_add(1);
         let tick = self.logical_tick;
         let mut events = vec![DomainEvent::Gameplay {
             event: GameplayEvent::TickAdvanced { tick },
         }];
         self.resolve_character_tick(tick, &mut events)?;
+        self.resolve_npc_statuses(tick, &mut events)?;
         self.resolve_npc_respawns(tick, &mut events);
 
         let combatants = self
@@ -2618,6 +3207,11 @@ impl World {
         for (npc_id, character_id) in combatants {
             self.resolve_combat_turn(tick, &npc_id, character_id, &mut events)?;
         }
+        // Periodic effects are resolved at the start of the tick, but statuses
+        // that reach zero must remain visible through this tick's combat. This
+        // makes an authored duration of N affect exactly N logical turns while
+        // leaving statuses applied during combat untouched until the next tick.
+        self.expire_processed_effects();
         let defeated = events
             .iter()
             .filter_map(|event| match event {
@@ -2633,7 +3227,7 @@ impl World {
                 .get_mut(&character_id)
                 .and_then(|state| state.skills.get_mut("combat"))
             {
-                *rank = rank.saturating_add(1).min(100);
+                *rank = rank.saturating_add(1).min(MAX_SKILL_VALUE);
             }
             if let Some(progress) = self
                 .character_gameplay
@@ -2698,6 +3292,12 @@ impl World {
             let current_room_id = room_checked(&self.entities, character.location)?
                 .stable_id
                 .clone();
+            let resource_regeneration = self
+                .character_gameplay
+                .get(&character_id)
+                .and_then(|state| self.archetypes.get(&state.archetype_id))
+                .map(|archetype| archetype.resource_regeneration.clone())
+                .unwrap_or_default();
             let state = self
                 .character_gameplay
                 .get_mut(&character_id)
@@ -2716,6 +3316,14 @@ impl World {
                     state.script_flags.insert(flag);
                 }
             }
+            for (resource_id, amount) in &resource_regeneration {
+                if let Some(pool) = state.resources.get_mut(resource_id) {
+                    pool.current = pool.current.saturating_add(*amount).min(pool.max);
+                }
+            }
+            state
+                .ability_cooldowns
+                .retain(|_, ready_tick| *ready_tick > tick);
             let mut recovered_at_start = false;
             if state
                 .recovery_at_tick
@@ -2774,11 +3382,94 @@ impl World {
                             room_id: room_id.clone(),
                         },
                     });
-                } else {
-                    retained.push(effect);
                 }
+                retained.push(effect);
             }
             state.effects = retained;
+            let mut retained_statuses = Vec::new();
+            let mut defeating_npc_id = None;
+            for mut status in std::mem::take(&mut state.statuses) {
+                if state.vitals.health == 0 {
+                    break;
+                }
+                if state.vitals.health > 0 {
+                    match status.kind {
+                        ActiveStatusKind::Regeneration => {
+                            let previous = state.vitals.health;
+                            state.vitals.health = state
+                                .vitals
+                                .health
+                                .saturating_add(status.magnitude.max(0))
+                                .min(state.vitals.max_health);
+                            let amount = state.vitals.health - previous;
+                            if amount > 0 {
+                                events.push(DomainEvent::Gameplay {
+                                    event: GameplayEvent::CharacterHealed {
+                                        character_id,
+                                        character_name: character_name.clone(),
+                                        amount,
+                                        health: state.vitals.health,
+                                        room_id: room_id.clone(),
+                                    },
+                                });
+                            }
+                        }
+                        ActiveStatusKind::DamageOverTime => {
+                            let resistance = status
+                                .damage_type
+                                .and_then(|kind| state.resistances.get(&kind).copied())
+                                .unwrap_or(0);
+                            let amount = resisted_amount(status.magnitude.max(0), resistance);
+                            state.vitals.health = (state.vitals.health - amount).max(0);
+                            if state.vitals.health == 0 {
+                                defeating_npc_id = status.source_npc_id.clone();
+                            }
+                        }
+                        ActiveStatusKind::AttributeModifier | ActiveStatusKind::Stun => {}
+                    }
+                }
+                status.remaining_ticks -= 1;
+                if state.vitals.health > 0 {
+                    retained_statuses.push(status);
+                }
+            }
+            state.statuses = retained_statuses;
+            let collapsed = state.vitals.health == 0 && state.recovery_at_tick.is_none();
+            let recover_at_tick = tick.saturating_add(3);
+            if collapsed {
+                state.recovery_at_tick = Some(recover_at_tick);
+                state.statuses.clear();
+            }
+            if collapsed {
+                for npc in self.npcs.values_mut() {
+                    if npc.engaged_character == Some(character_id) {
+                        npc.engaged_character = None;
+                    }
+                }
+                if let Some(npc_id) = defeating_npc_id
+                    && let Some(npc) = self.npcs.get(&npc_id)
+                {
+                    events.push(DomainEvent::Gameplay {
+                        event: GameplayEvent::CharacterDefeated {
+                            character_id,
+                            character_name: character_name.clone(),
+                            npc_id,
+                            npc_name: npc.name.clone(),
+                            recover_at_tick,
+                            room_id,
+                        },
+                    });
+                } else {
+                    events.push(DomainEvent::Gameplay {
+                        event: GameplayEvent::CharacterCollapsed {
+                            character_id,
+                            character_name: character_name.clone(),
+                            recover_at_tick,
+                            room_id,
+                        },
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -2789,6 +3480,11 @@ impl World {
                 npc.respawn_at_tick = None;
                 npc.health = npc.max_health;
                 npc.engaged_character = None;
+                npc.statuses.clear();
+                npc.ability_cooldowns.clear();
+                for pool in npc.resources.values_mut() {
+                    pool.current = pool.max;
+                }
                 events.push(DomainEvent::Gameplay {
                     event: GameplayEvent::NpcRespawned {
                         npc_id: npc.stable_id.clone(),
@@ -2797,6 +3493,136 @@ impl World {
                     },
                 });
             }
+        }
+    }
+
+    fn resolve_npc_statuses(
+        &mut self,
+        tick: u64,
+        events: &mut Vec<DomainEvent>,
+    ) -> Result<(), WorldError> {
+        let mut defeated = Vec::new();
+        for (npc_id, npc) in &mut self.npcs {
+            if !npc.alive() {
+                continue;
+            }
+            for (resource_id, amount) in &npc.resource_regeneration {
+                if let Some(pool) = npc.resources.get_mut(resource_id) {
+                    pool.current = pool.current.saturating_add(*amount).min(pool.max);
+                }
+            }
+            npc.ability_cooldowns
+                .retain(|_, ready_tick| *ready_tick > tick);
+            let mut retained = Vec::new();
+            let mut defeating_source = None;
+            for mut status in std::mem::take(&mut npc.statuses) {
+                if npc.health == 0 {
+                    break;
+                }
+                match status.kind {
+                    ActiveStatusKind::Regeneration => {
+                        npc.health = npc
+                            .health
+                            .saturating_add(status.magnitude.max(0))
+                            .min(npc.max_health);
+                    }
+                    ActiveStatusKind::DamageOverTime => {
+                        let resistance = status
+                            .damage_type
+                            .and_then(|kind| npc.resistances.get(&kind).copied())
+                            .unwrap_or(0);
+                        let amount = resisted_amount(status.magnitude.max(0), resistance);
+                        npc.health = (npc.health - amount).max(0);
+                        if npc.health == 0 {
+                            defeating_source = status.source_character_id;
+                        }
+                    }
+                    ActiveStatusKind::AttributeModifier | ActiveStatusKind::Stun => {}
+                }
+                status.remaining_ticks -= 1;
+                if npc.health > 0 {
+                    retained.push(status);
+                }
+            }
+            npc.statuses = retained;
+            if npc.health == 0 {
+                defeated.push((npc_id.clone(), defeating_source));
+            }
+        }
+
+        for (npc_id, source) in defeated {
+            if let Some(character_id) = source
+                && self.character_gameplay.contains_key(&character_id)
+            {
+                let character_name = if let Some(session) = self.session_for_character(character_id)
+                {
+                    self.character(session)?.name.clone()
+                } else {
+                    "A departed adventurer".to_owned()
+                };
+                let room_id = self
+                    .npcs
+                    .get(&npc_id)
+                    .ok_or(WorldError::NpcNotFound)?
+                    .spawn_room_id
+                    .clone();
+                self.resolve_npc_defeat(
+                    tick,
+                    &npc_id,
+                    character_id,
+                    &character_name,
+                    &room_id,
+                    events,
+                )?;
+            } else if self.npcs.contains_key(&npc_id) {
+                let (npc_name, room_id, loot) = {
+                    let npc = self.npcs.get_mut(&npc_id).ok_or(WorldError::NpcNotFound)?;
+                    npc.engaged_character = None;
+                    npc.statuses.clear();
+                    npc.ability_cooldowns.clear();
+                    npc.respawn_at_tick = Some(tick.saturating_add(npc.respawn_ticks));
+                    (
+                        npc.name.clone(),
+                        npc.spawn_room_id.clone(),
+                        npc.loot_item_ids.clone(),
+                    )
+                };
+                for item_id in loot {
+                    if matches!(
+                        self.item_locations.get(&item_id),
+                        Some(SharedItemLocation::HeldByNpc(owner)) if owner == &npc_id
+                    ) {
+                        self.item_locations
+                            .insert(item_id.clone(), SharedItemLocation::Room(room_id.clone()));
+                        let item_name = self
+                            .stable_items
+                            .get(&item_id)
+                            .ok_or(WorldError::InvalidEntity)?
+                            .name
+                            .clone();
+                        events.push(DomainEvent::Gameplay {
+                            event: GameplayEvent::LootDropped {
+                                npc_id: npc_id.clone(),
+                                npc_name: npc_name.clone(),
+                                item_id,
+                                item_name,
+                                room_id: room_id.clone(),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn expire_processed_effects(&mut self) {
+        for state in self.character_gameplay.values_mut() {
+            state.effects.retain(|effect| effect.remaining_ticks > 0);
+            state.statuses.retain(|status| status.remaining_ticks > 0);
+        }
+        for npc in self.npcs.values_mut() {
+            npc.statuses.retain(|status| status.remaining_ticks > 0);
         }
     }
 
@@ -2838,74 +3664,241 @@ impl World {
             return Ok(());
         }
 
-        let equipment_bonus = state
-            .equipment
-            .values()
-            .filter_map(|item_id| self.item_gameplay.get(item_id))
-            .map(|item| item.attack_bonus)
-            .sum::<i32>();
-        let effect_bonus = state
-            .effects
+        let replaces_normal_attack =
+            state.last_offensive_ability_tick == Some(tick.saturating_sub(1));
+        let player_stunned = state
+            .statuses
             .iter()
-            .filter(|effect| effect.kind == EffectKind::Strength)
-            .map(|effect| effect.magnitude)
-            .sum::<i32>();
-        let player_attack =
-            state.attributes.strength + state.level as i32 + equipment_bonus + effect_bonus;
-        let player_damage =
-            (player_attack - npc_snapshot.defence + self.rng.range_inclusive(0, 2)).max(1);
-        let remaining_npc_health = {
-            let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
-            npc.health = (npc.health - player_damage).max(0);
-            npc.health
-        };
-        events.push(DomainEvent::Gameplay {
-            event: GameplayEvent::NpcDamaged {
-                character_id,
-                character_name: character_name.clone(),
-                npc_id: npc_id.to_owned(),
-                npc_name: npc_snapshot.name.clone(),
-                amount: player_damage,
-                remaining_health: remaining_npc_health,
-                room_id: room_id.clone(),
-            },
-        });
-        if remaining_npc_health == 0 {
-            self.resolve_npc_defeat(
-                tick,
-                npc_id,
-                character_id,
-                &character_name,
-                &room_id,
-                events,
-            )?;
-            return Ok(());
+            .any(|status| status.kind == ActiveStatusKind::Stun);
+        if !replaces_normal_attack && !player_stunned {
+            let equipment_bonus = state
+                .equipment
+                .values()
+                .filter_map(|item_id| self.item_gameplay.get(item_id))
+                .map(|item| item.attack_bonus)
+                .sum::<i32>();
+            let effect_bonus = state
+                .effects
+                .iter()
+                .filter(|effect| effect.kind == EffectKind::Strength)
+                .map(|effect| effect.magnitude)
+                .sum::<i32>();
+            let player_attack = effective_gameplay_attribute(&state, "strength")
+                + state.level as i32
+                + equipment_bonus
+                + effect_bonus;
+            let player_damage = resisted_amount(
+                (player_attack - effective_npc_attribute(&npc_snapshot, "defence")
+                    + self.rng.range_inclusive(0, 2))
+                .max(1),
+                npc_snapshot
+                    .resistances
+                    .get(&DamageType::Physical)
+                    .copied()
+                    .unwrap_or(0),
+            );
+            let remaining_npc_health = {
+                let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
+                npc.health = (npc.health - player_damage).max(0);
+                npc.health
+            };
+            events.push(DomainEvent::Gameplay {
+                event: GameplayEvent::NpcDamaged {
+                    character_id,
+                    character_name: character_name.clone(),
+                    npc_id: npc_id.to_owned(),
+                    npc_name: npc_snapshot.name.clone(),
+                    amount: player_damage,
+                    remaining_health: remaining_npc_health,
+                    room_id: room_id.clone(),
+                },
+            });
+            if remaining_npc_health == 0 {
+                self.resolve_npc_defeat(
+                    tick,
+                    npc_id,
+                    character_id,
+                    &character_name,
+                    &room_id,
+                    events,
+                )?;
+                return Ok(());
+            }
         }
 
-        let npc_damage = (npc_snapshot.strength + npc_snapshot.level as i32
-            - state.attributes.defence
-            + self.rng.range_inclusive(0, 2))
-        .max(1);
+        let acting_npc = self
+            .npcs
+            .get(npc_id)
+            .cloned()
+            .ok_or(WorldError::NpcNotFound)?;
+        if acting_npc
+            .statuses
+            .iter()
+            .any(|status| status.kind == ActiveStatusKind::Stun)
+        {
+            return Ok(());
+        }
+        let npc_ability = acting_npc
+            .ability_ids
+            .iter()
+            .filter_map(|id| self.abilities.get(id))
+            .filter(|ability| {
+                acting_npc
+                    .ability_cooldowns
+                    .get(&ability.id)
+                    .is_none_or(|ready| *ready <= tick)
+                    && ability.resource_costs.iter().all(|(id, cost)| {
+                        acting_npc
+                            .resources
+                            .get(id)
+                            .is_some_and(|pool| pool.current >= *cost)
+                    })
+                    && state.statuses.len() + npc_enemy_status_count(ability) <= MAX_ACTIVE_STATUSES
+                    && acting_npc.statuses.len() + npc_self_status_count(ability)
+                        <= MAX_ACTIVE_STATUSES
+                    && npc_ability_score(ability, &acting_npc) > 0
+            })
+            .max_by(|left, right| {
+                npc_ability_score(left, &acting_npc)
+                    .cmp(&npc_ability_score(right, &acting_npc))
+                    .then_with(|| right.id.cmp(&left.id))
+            })
+            .cloned();
+        let mut player_damage = None;
+        if let Some(ability) = &npc_ability {
+            let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
+            for (resource_id, cost) in &ability.resource_costs {
+                npc.resources
+                    .get_mut(resource_id)
+                    .ok_or(WorldError::InsufficientResource)?
+                    .current -= *cost;
+            }
+            if ability.cooldown_ticks > 0 {
+                npc.ability_cooldowns.insert(
+                    ability.id.clone(),
+                    tick.saturating_add(u64::from(ability.cooldown_ticks)),
+                );
+            }
+            events.push(DomainEvent::Gameplay {
+                event: GameplayEvent::NpcAbilityUsed {
+                    npc_id: npc_id.to_owned(),
+                    npc_name: npc_snapshot.name.clone(),
+                    character_id,
+                    character_name: character_name.clone(),
+                    ability_id: ability.id.clone(),
+                    ability_name: ability.name.clone(),
+                    room_id: room_id.clone(),
+                },
+            });
+
+            if let Some(damage) = &ability.damage {
+                let amount = ability_scaled_amount_npc(
+                    damage.base_amount,
+                    damage.scaling_attribute.as_deref(),
+                    damage.scaling_percent,
+                    &acting_npc,
+                );
+                if npc_effect_targets_enemy(ability, damage.target) {
+                    player_damage = Some((amount, damage.damage_type));
+                } else {
+                    let resistance = self.npcs[npc_id]
+                        .resistances
+                        .get(&damage.damage_type)
+                        .copied()
+                        .unwrap_or(0);
+                    let amount = resisted_amount(amount, resistance);
+                    let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
+                    npc.health = (npc.health - amount).max(0);
+                }
+            }
+            if let Some(heal) = &ability.heal
+                && !npc_effect_targets_enemy(ability, heal.target)
+            {
+                let amount = ability_scaled_amount_npc(
+                    heal.base_amount,
+                    heal.scaling_attribute.as_deref(),
+                    heal.scaling_percent,
+                    &acting_npc,
+                );
+                let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
+                npc.health = npc.health.saturating_add(amount).min(npc.max_health);
+            }
+            if self.npcs.get(npc_id).is_some_and(|npc| npc.health > 0) {
+                for status in &ability.status_effects {
+                    if !npc_effect_targets_enemy(ability, status_target(status)) {
+                        self.npcs
+                            .get_mut(npc_id)
+                            .ok_or(WorldError::NpcNotFound)?
+                            .statuses
+                            .push(active_status(&ability.id, None, Some(npc_id), status));
+                    }
+                }
+            }
+            if self.npcs.get(npc_id).is_some_and(|npc| npc.health == 0) {
+                self.resolve_npc_defeat(
+                    tick,
+                    npc_id,
+                    character_id,
+                    &character_name,
+                    &room_id,
+                    events,
+                )?;
+                return Ok(());
+            }
+        } else {
+            player_damage = Some((
+                (effective_npc_attribute(&npc_snapshot, "strength") + npc_snapshot.level as i32
+                    - effective_gameplay_attribute(&state, "defence")
+                    + self.rng.range_inclusive(0, 2))
+                .max(1),
+                DamageType::Physical,
+            ));
+        }
+        let npc_damage = player_damage.map(|(amount, damage_type)| {
+            resisted_amount(
+                amount,
+                state.resistances.get(&damage_type).copied().unwrap_or(0),
+            )
+        });
         let player_state = self
             .character_gameplay
             .get_mut(&character_id)
             .ok_or(WorldError::InvalidEntity)?;
-        player_state.vitals.health = (player_state.vitals.health - npc_damage).max(0);
+        if let Some(npc_damage) = npc_damage {
+            player_state.vitals.health = (player_state.vitals.health - npc_damage).max(0);
+        }
+        if player_state.vitals.health > 0
+            && let Some(ability) = &npc_ability
+        {
+            for status in &ability.status_effects {
+                if npc_effect_targets_enemy(ability, status_target(status)) {
+                    player_state.statuses.push(active_status(
+                        &ability.id,
+                        None,
+                        Some(npc_id),
+                        status,
+                    ));
+                }
+            }
+        }
         let remaining_health = player_state.vitals.health;
-        events.push(DomainEvent::Gameplay {
-            event: GameplayEvent::CharacterDamaged {
-                character_id,
-                character_name: character_name.clone(),
-                npc_id: npc_id.to_owned(),
-                npc_name: npc_snapshot.name.clone(),
-                amount: npc_damage,
-                remaining_health,
-                room_id: room_id.clone(),
-            },
-        });
+        if let Some(npc_damage) = npc_damage {
+            events.push(DomainEvent::Gameplay {
+                event: GameplayEvent::CharacterDamaged {
+                    character_id,
+                    character_name: character_name.clone(),
+                    npc_id: npc_id.to_owned(),
+                    npc_name: npc_snapshot.name.clone(),
+                    amount: npc_damage,
+                    remaining_health,
+                    room_id: room_id.clone(),
+                },
+            });
+        }
         if remaining_health == 0 {
             let recover_at_tick = tick.saturating_add(3);
             player_state.recovery_at_tick = Some(recover_at_tick);
+            player_state.statuses.clear();
             if let Some(npc) = self.npcs.get_mut(npc_id) {
                 npc.engaged_character = None;
             }
@@ -2935,6 +3928,8 @@ impl World {
         let (npc_name, reward, respawn_at_tick, loot) = {
             let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
             npc.engaged_character = None;
+            npc.statuses.clear();
+            npc.ability_cooldowns.clear();
             let respawn_at_tick = tick.saturating_add(npc.respawn_ticks);
             npc.respawn_at_tick = Some(respawn_at_tick);
             (
@@ -2979,26 +3974,111 @@ impl World {
                 });
             }
         }
-        let state = self
-            .character_gameplay
-            .get_mut(&character_id)
-            .ok_or(WorldError::InvalidEntity)?;
-        state.experience = state.experience.saturating_add(reward);
+        let total = {
+            let state = self
+                .character_gameplay
+                .get_mut(&character_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            state.experience = state.experience.saturating_add(reward);
+            state.experience
+        };
         events.push(DomainEvent::Gameplay {
             event: GameplayEvent::ExperienceGained {
                 character_id,
                 character_name: character_name.to_owned(),
                 amount: reward,
-                total: state.experience,
+                total,
                 room_id: room_id.to_owned(),
             },
         });
-        while state.experience >= u64::from(state.level) * 100 {
-            state.level += 1;
-            state.vitals.max_health += 5;
+        self.advance_character_progression(character_id, character_name, room_id, events)?;
+        Ok(())
+    }
+
+    fn advance_character_progression(
+        &mut self,
+        character_id: CharacterId,
+        character_name: &str,
+        room_id: &str,
+        events: &mut Vec<DomainEvent>,
+    ) -> Result<(), WorldError> {
+        let archetype = self
+            .character_gameplay
+            .get(&character_id)
+            .and_then(|state| self.archetypes.get(&state.archetype_id))
+            .cloned();
+        let state = self
+            .character_gameplay
+            .get_mut(&character_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        loop {
+            let milestone = archetype.as_ref().and_then(|archetype| {
+                archetype
+                    .level_progression
+                    .iter()
+                    .find(|milestone| milestone.level == state.level + 1)
+            });
+            let legacy_ready = archetype.is_none()
+                && state.level < MAX_PROGRESSION_LEVEL
+                && state.experience >= u64::from(state.level).saturating_mul(100);
+            if milestone.is_none() && !legacy_ready {
+                break;
+            }
+            if let Some(milestone) = milestone {
+                if state.experience < milestone.total_experience_required {
+                    break;
+                }
+                state.level = milestone.level;
+                for (attribute, gain) in &milestone.attribute_gains {
+                    let gain = i32::try_from(*gain).unwrap_or(i32::MAX);
+                    match attribute.as_str() {
+                        "max_health" => {
+                            state.vitals.max_health = state.vitals.max_health.saturating_add(gain);
+                        }
+                        "strength" => {
+                            state.attributes.strength =
+                                state.attributes.strength.saturating_add(gain);
+                        }
+                        "defence" => {
+                            state.attributes.defence =
+                                state.attributes.defence.saturating_add(gain);
+                        }
+                        _ => {
+                            let value = state
+                                .attributes
+                                .additional
+                                .entry(attribute.clone())
+                                .or_default();
+                            *value = value.saturating_add(gain);
+                        }
+                    }
+                }
+                for (skill, gain) in &milestone.skill_gains {
+                    let rank = state.skills.entry(skill.clone()).or_default();
+                    *rank = rank.saturating_add(*gain).min(MAX_SKILL_VALUE);
+                }
+                for (resource, gain) in &milestone.resource_gains {
+                    let pool = state
+                        .resources
+                        .entry(resource.clone())
+                        .or_insert(ResourcePool { current: 0, max: 0 });
+                    pool.max = pool.max.saturating_add(*gain).min(MAX_RESOURCE_VALUE);
+                    pool.current = pool.max;
+                }
+                for ability_id in &milestone.ability_unlock_ids {
+                    if state.ability_ids.len() < MAX_KNOWN_ABILITIES
+                        && !state.ability_ids.contains(ability_id)
+                    {
+                        state.ability_ids.push(ability_id.clone());
+                    }
+                }
+            } else {
+                state.level += 1;
+                state.vitals.max_health += 5;
+                state.attributes.strength += 2;
+                state.attributes.defence += 1;
+            }
             state.vitals.health = state.vitals.max_health;
-            state.attributes.strength += 2;
-            state.attributes.defence += 1;
             events.push(DomainEvent::Gameplay {
                 event: GameplayEvent::CharacterLeveled {
                     character_id,
@@ -3179,6 +4259,27 @@ impl World {
     pub fn disconnect(&mut self, session: SessionId) {
         self.observer_views.remove(&session);
         if let Some(character) = self.sessions.remove(&session) {
+            let disconnected_character_id =
+                self.entities
+                    .get(character)
+                    .and_then(|entity| match entity {
+                        Entity::Character(character) => Some(character.id),
+                        _ => None,
+                    });
+            if let Some(character_id) = disconnected_character_id {
+                // Combat is connection-scoped in v1: an NPC immediately stops
+                // attacking a departed character. Remove that character's
+                // pending effects as well, so damage-over-time cannot award
+                // progress only in memory after the durable character is no
+                // longer part of the tick commit.
+                for npc in self.npcs.values_mut() {
+                    if npc.engaged_character == Some(character_id) {
+                        npc.engaged_character = None;
+                    }
+                    npc.statuses
+                        .retain(|status| status.source_character_id != Some(character_id));
+                }
+            }
             self.entities.remove(character);
         }
     }
@@ -3230,10 +4331,15 @@ impl World {
         session: SessionId,
         action: PlayerAction,
     ) -> Result<ActionOutcome, WorldError> {
-        let defeated = self
+        let gameplay = self
             .character_gameplay
             .get(&self.character(session)?.id)
-            .is_some_and(|state| state.recovery_at_tick.is_some());
+            .ok_or(WorldError::InvalidEntity)?;
+        let defeated = gameplay.recovery_at_tick.is_some();
+        let stunned = gameplay
+            .statuses
+            .iter()
+            .any(|status| status.kind == ActiveStatusKind::Stun);
         if defeated
             && !matches!(
                 &action,
@@ -3243,6 +4349,18 @@ impl World {
                     | PlayerAction::Party(_)
                     | PlayerAction::Quest(_)
                     | PlayerAction::Economy(EconomyAction::Balance)
+                    | PlayerAction::Weather
+                    | PlayerAction::Time
+            )
+        {
+            return Err(WorldError::GameplayUnavailable);
+        }
+        if stunned
+            && !matches!(
+                &action,
+                PlayerAction::Look
+                    | PlayerAction::Inventory
+                    | PlayerAction::Examine(_)
                     | PlayerAction::Weather
                     | PlayerAction::Time
             )
@@ -3279,6 +4397,9 @@ impl World {
             PlayerAction::Take(query) => self.move_item(session, &query, true),
             PlayerAction::Drop(query) => self.move_item(session, &query, false),
             PlayerAction::Attack(query) => self.start_combat(session, &query),
+            PlayerAction::Ability { ability_id, target } => {
+                self.use_ability(session, &ability_id, target.as_deref())
+            }
             PlayerAction::Use(query) => self.use_item(session, &query),
             PlayerAction::Equip(query) => self.equip_item(session, &query),
             PlayerAction::Unequip(query) => self.unequip_item(session, &query),
@@ -3695,7 +4816,12 @@ impl World {
         action: QuestAction,
     ) -> Result<ActionOutcome, WorldError> {
         const QUEST_ID: &str = "first-hunt";
-        let character_id = self.character(session)?.id;
+        let character = self.character(session)?;
+        let character_id = character.id;
+        let character_name = character.name.clone();
+        let room_id = room_checked(&self.entities, character.location)?
+            .stable_id
+            .clone();
         match action {
             QuestAction::List => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
@@ -3755,36 +4881,45 @@ impl World {
                 if !quest_matches(&query) {
                     return Err(WorldError::QuestUnavailable);
                 }
-                let state = self
-                    .character_gameplay
-                    .get_mut(&character_id)
-                    .ok_or(WorldError::InvalidEntity)?;
-                let progress = state
-                    .quests
-                    .get_mut(QUEST_ID)
-                    .ok_or(WorldError::QuestUnavailable)?;
-                if progress.status != QuestStatus::ReadyToClaim {
-                    return Err(WorldError::QuestUnavailable);
-                }
-                let rewarded_coins = state
-                    .coins
-                    .checked_add(25)
-                    .ok_or(WorldError::QuestUnavailable)?;
-                let rewarded_experience = state
-                    .experience
-                    .checked_add(50)
-                    .ok_or(WorldError::QuestUnavailable)?;
-                state.coins = rewarded_coins;
-                state.experience = rewarded_experience;
-                progress.status = QuestStatus::Completed;
-                while state.experience >= u64::from(state.level) * 100 {
-                    state.level += 1;
-                    state.vitals.max_health += 5;
-                    state.vitals.health = state.vitals.max_health;
-                    state.attributes.strength += 2;
-                    state.attributes.defence += 1;
-                }
-                self.finish_adventure_action(
+                let rewarded_experience = {
+                    let state = self
+                        .character_gameplay
+                        .get_mut(&character_id)
+                        .ok_or(WorldError::InvalidEntity)?;
+                    let progress = state
+                        .quests
+                        .get_mut(QUEST_ID)
+                        .ok_or(WorldError::QuestUnavailable)?;
+                    if progress.status != QuestStatus::ReadyToClaim {
+                        return Err(WorldError::QuestUnavailable);
+                    }
+                    state.coins = state
+                        .coins
+                        .checked_add(25)
+                        .ok_or(WorldError::QuestUnavailable)?;
+                    state.experience = state
+                        .experience
+                        .checked_add(50)
+                        .ok_or(WorldError::QuestUnavailable)?;
+                    progress.status = QuestStatus::Completed;
+                    state.experience
+                };
+                let mut progression_events = vec![DomainEvent::Gameplay {
+                    event: GameplayEvent::ExperienceGained {
+                        character_id,
+                        character_name: character_name.clone(),
+                        amount: 50,
+                        total: rewarded_experience,
+                        room_id: room_id.clone(),
+                    },
+                }];
+                self.advance_character_progression(
+                    character_id,
+                    &character_name,
+                    &room_id,
+                    &mut progression_events,
+                )?;
+                let mut outcome = self.finish_adventure_action(
                     session,
                     "First Hunt complete: you receive 25 coin and 50 experience.\r\n".into(),
                     AdventureEvent::QuestChanged {
@@ -3792,7 +4927,9 @@ impl World {
                         quest_id: QUEST_ID.into(),
                         summary: "First Hunt completed and its reward claimed.".into(),
                     },
-                )
+                )?;
+                outcome.domain_events.extend(progression_events);
+                Ok(outcome)
             }
         }
     }
@@ -3972,7 +5109,13 @@ impl World {
             .character_gameplay
             .get(&character_id)
             .ok_or(WorldError::InvalidEntity)?;
-        if gameplay.vitals.health <= 0 || gameplay.recovery_at_tick.is_some() {
+        if gameplay.vitals.health <= 0
+            || gameplay.recovery_at_tick.is_some()
+            || gameplay
+                .statuses
+                .iter()
+                .any(|status| status.kind == ActiveStatusKind::Stun)
+        {
             return Err(WorldError::CombatUnavailable);
         }
         let room_id = room_checked(&self.entities, character.location)?
@@ -4004,6 +5147,331 @@ impl World {
             format!("You engage the {npc_name}.\r\n"),
             vec![event],
         )
+    }
+
+    fn use_ability(
+        &mut self,
+        session: SessionId,
+        ability_query: &str,
+        target_query: Option<&str>,
+    ) -> Result<ActionOutcome, WorldError> {
+        let checkpoint = self.checkpoint();
+        match self.use_ability_inner(session, ability_query, target_query) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.restore_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn use_ability_inner(
+        &mut self,
+        session: SessionId,
+        ability_query: &str,
+        target_query: Option<&str>,
+    ) -> Result<ActionOutcome, WorldError> {
+        if ability_query.is_empty()
+            || ability_query.len() > 128
+            || ability_query.chars().any(char::is_control)
+        {
+            return Err(WorldError::AbilityNotKnown);
+        }
+        let character = self.character(session)?;
+        let character_id = character.id;
+        let character_name = character.name.clone();
+        let room_id = room_checked(&self.entities, character.location)?
+            .stable_id
+            .clone();
+        let state = self
+            .character_gameplay
+            .get(&character_id)
+            .cloned()
+            .ok_or(WorldError::InvalidEntity)?;
+        if state.vitals.health <= 0
+            || state.recovery_at_tick.is_some()
+            || state.ability_global_ready_tick > self.logical_tick
+            || state
+                .statuses
+                .iter()
+                .any(|status| status.kind == ActiveStatusKind::Stun)
+        {
+            return Err(WorldError::AbilityUnavailable);
+        }
+        let known = state
+            .ability_ids
+            .iter()
+            .filter_map(|id| self.abilities.get(id))
+            .filter(|ability| {
+                ability.id.eq_ignore_ascii_case(ability_query)
+                    || ability.name.eq_ignore_ascii_case(ability_query)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let [ability] = known.as_slice() else {
+            return Err(WorldError::AbilityNotKnown);
+        };
+        let ability = ability.clone();
+        if state
+            .ability_cooldowns
+            .get(&ability.id)
+            .is_some_and(|ready| *ready > self.logical_tick)
+        {
+            return Err(WorldError::AbilityUnavailable);
+        }
+        if ability.resource_costs.iter().any(|(id, cost)| {
+            state
+                .resources
+                .get(id)
+                .is_none_or(|pool| pool.current < *cost)
+        }) {
+            return Err(WorldError::InsufficientResource);
+        }
+
+        let npc_target = match ability.targeting {
+            AbilityTargeting::SelfOnly => {
+                if target_query.is_some() {
+                    return Err(WorldError::InvalidAbilityTarget);
+                }
+                None
+            }
+            AbilityTargeting::SingleEnemy => {
+                let target = target_query.ok_or(WorldError::InvalidAbilityTarget)?;
+                let npc_id = self.resolve_visible_npc(session, target)?;
+                let npc = self.npcs.get(&npc_id).ok_or(WorldError::NpcNotFound)?;
+                if !npc.alive()
+                    || npc.spawn_room_id != room_id
+                    || npc
+                        .engaged_character
+                        .is_some_and(|engaged| engaged != character_id)
+                {
+                    return Err(WorldError::InvalidAbilityTarget);
+                }
+                Some(npc_id)
+            }
+            AbilityTargeting::SingleAlly => {
+                if target_query.is_some_and(|target| {
+                    !target.eq_ignore_ascii_case("self")
+                        && !target.eq_ignore_ascii_case(&character_name)
+                }) {
+                    return Err(WorldError::InvalidAbilityTarget);
+                }
+                None
+            }
+        };
+
+        let caster_statuses = ability
+            .status_effects
+            .iter()
+            .filter(|status| status_target(status) == AbilityEffectTarget::Caster)
+            .count()
+            + if npc_target.is_none() {
+                ability
+                    .status_effects
+                    .iter()
+                    .filter(|status| status_target(status) == AbilityEffectTarget::Target)
+                    .count()
+            } else {
+                0
+            };
+        if state.statuses.len() + caster_statuses > MAX_ACTIVE_STATUSES {
+            return Err(WorldError::AbilityUnavailable);
+        }
+        if let Some(npc_id) = &npc_target {
+            let target_statuses = ability
+                .status_effects
+                .iter()
+                .filter(|status| status_target(status) == AbilityEffectTarget::Target)
+                .count();
+            if self.npcs[npc_id].statuses.len() + target_statuses > MAX_ACTIVE_STATUSES {
+                return Err(WorldError::AbilityUnavailable);
+            }
+        }
+
+        let npc_name = npc_target
+            .as_ref()
+            .and_then(|id| self.npcs.get(id).map(|npc| npc.name.clone()));
+        let mut events = vec![DomainEvent::Gameplay {
+            event: GameplayEvent::AbilityUsed {
+                character_id,
+                character_name: character_name.clone(),
+                ability_id: ability.id.clone(),
+                ability_name: ability.name.clone(),
+                npc_id: npc_target.clone(),
+                npc_name,
+                room_id: room_id.clone(),
+            },
+        }];
+
+        {
+            let state = self
+                .character_gameplay
+                .get_mut(&character_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            for (resource_id, cost) in &ability.resource_costs {
+                let pool = state
+                    .resources
+                    .get_mut(resource_id)
+                    .ok_or(WorldError::InsufficientResource)?;
+                pool.current -= *cost;
+            }
+            if ability.cooldown_ticks > 0 {
+                state.ability_cooldowns.insert(
+                    ability.id.clone(),
+                    self.logical_tick
+                        .saturating_add(u64::from(ability.cooldown_ticks)),
+                );
+            }
+            state.ability_global_ready_tick = self.logical_tick.saturating_add(1);
+            if npc_target.is_some() {
+                state.last_offensive_ability_tick = Some(self.logical_tick);
+            }
+        }
+
+        if let Some(npc_id) = &npc_target {
+            self.npcs
+                .get_mut(npc_id)
+                .ok_or(WorldError::NpcNotFound)?
+                .engaged_character = Some(character_id);
+        }
+
+        if let Some(damage) = &ability.damage {
+            let amount = ability_scaled_amount(
+                damage.base_amount,
+                damage.scaling_attribute.as_deref(),
+                damage.scaling_percent,
+                &state,
+            );
+            match (damage.target, npc_target.as_deref()) {
+                (AbilityEffectTarget::Target, Some(npc_id)) => {
+                    let resistance = self.npcs[npc_id]
+                        .resistances
+                        .get(&damage.damage_type)
+                        .copied()
+                        .unwrap_or(0);
+                    let amount = resisted_amount(amount, resistance);
+                    let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
+                    npc.health = (npc.health - amount).max(0);
+                    let remaining_health = npc.health;
+                    let npc_name = npc.name.clone();
+                    events.push(DomainEvent::Gameplay {
+                        event: GameplayEvent::NpcDamaged {
+                            character_id,
+                            character_name: character_name.clone(),
+                            npc_id: npc_id.to_owned(),
+                            npc_name: npc_name.clone(),
+                            amount,
+                            remaining_health,
+                            room_id: room_id.clone(),
+                        },
+                    });
+                    if remaining_health == 0 {
+                        self.resolve_npc_defeat(
+                            self.logical_tick,
+                            npc_id,
+                            character_id,
+                            &character_name,
+                            &room_id,
+                            &mut events,
+                        )?;
+                    }
+                }
+                (AbilityEffectTarget::Caster, _) | (AbilityEffectTarget::Target, None) => {
+                    let resistance = state
+                        .resistances
+                        .get(&damage.damage_type)
+                        .copied()
+                        .unwrap_or(0);
+                    let amount = resisted_amount(amount, resistance);
+                    let state = self
+                        .character_gameplay
+                        .get_mut(&character_id)
+                        .ok_or(WorldError::InvalidEntity)?;
+                    state.vitals.health = (state.vitals.health - amount).max(0);
+                }
+            }
+        }
+
+        if let Some(heal) = &ability.heal {
+            // Ally targeting is intentionally self-only in the first version;
+            // PvP/group target authority is a later protocol milestone.
+            if heal.target == AbilityEffectTarget::Target && npc_target.is_some() {
+                return Err(WorldError::InvalidAbilityTarget);
+            }
+            let amount = ability_scaled_amount(
+                heal.base_amount,
+                heal.scaling_attribute.as_deref(),
+                heal.scaling_percent,
+                &state,
+            );
+            let state = self
+                .character_gameplay
+                .get_mut(&character_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            let previous = state.vitals.health;
+            state.vitals.health = (state.vitals.health + amount).min(state.vitals.max_health);
+            let healed = state.vitals.health - previous;
+            if healed > 0 {
+                events.push(DomainEvent::Gameplay {
+                    event: GameplayEvent::CharacterHealed {
+                        character_id,
+                        character_name: character_name.clone(),
+                        amount: healed,
+                        health: state.vitals.health,
+                        room_id: room_id.clone(),
+                    },
+                });
+            }
+        }
+
+        for status in &ability.status_effects {
+            let active = active_status(&ability.id, Some(character_id), None, status);
+            if status_target(status) == AbilityEffectTarget::Target
+                && let Some(npc_id) = &npc_target
+            {
+                let npc = self.npcs.get_mut(npc_id).ok_or(WorldError::NpcNotFound)?;
+                if npc.alive() {
+                    npc.statuses.push(active);
+                }
+            } else {
+                self.character_gameplay
+                    .get_mut(&character_id)
+                    .ok_or(WorldError::InvalidEntity)?
+                    .statuses
+                    .push(active);
+            }
+        }
+
+        let collapsed = {
+            let state = self
+                .character_gameplay
+                .get_mut(&character_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            if state.vitals.health == 0 && state.recovery_at_tick.is_none() {
+                state.recovery_at_tick = Some(self.logical_tick.saturating_add(3));
+                state.statuses.clear();
+                true
+            } else {
+                false
+            }
+        };
+        if collapsed {
+            for npc in self.npcs.values_mut() {
+                if npc.engaged_character == Some(character_id) {
+                    npc.engaged_character = None;
+                }
+            }
+            events.push(DomainEvent::Gameplay {
+                event: GameplayEvent::CharacterCollapsed {
+                    character_id,
+                    character_name: character_name.clone(),
+                    recover_at_tick: self.logical_tick.saturating_add(3),
+                    room_id: room_id.clone(),
+                },
+            });
+        }
+
+        self.finish_gameplay_action(session, format!("You use {}.\r\n", ability.name), events)
     }
 
     fn use_item(&mut self, session: SessionId, query: &str) -> Result<ActionOutcome, WorldError> {
@@ -4786,13 +6254,65 @@ impl World {
             revision: observer.revision,
             character: PlayerCharacterView {
                 name: character.name.clone(),
+                archetype: self
+                    .archetypes
+                    .get(&gameplay.archetype_id)
+                    .map(|archetype| ArchetypeView {
+                        id: archetype.id.clone(),
+                        label: archetype.name.clone(),
+                        description: archetype.description.clone(),
+                    })
+                    .unwrap_or_else(|| ArchetypeView {
+                        id: gameplay.archetype_id.clone(),
+                        label: humanize_id(&gameplay.archetype_id),
+                        description: "A character created before authored archetypes were enabled."
+                            .into(),
+                    }),
                 level: gameplay.level,
                 experience: gameplay.experience,
-                next_level_experience: u64::from(gameplay.level) * 100,
+                next_level_experience: self.archetypes.get(&gameplay.archetype_id).map_or_else(
+                    || {
+                        if gameplay.level < MAX_PROGRESSION_LEVEL {
+                            u64::from(gameplay.level) * 100
+                        } else {
+                            gameplay.experience
+                        }
+                    },
+                    |archetype| {
+                        archetype
+                            .level_progression
+                            .iter()
+                            .find(|milestone| milestone.level == gameplay.level + 1)
+                            .map(|milestone| milestone.total_experience_required)
+                            .unwrap_or(gameplay.experience)
+                    },
+                ),
                 health: gameplay.vitals.health,
                 max_health: gameplay.vitals.max_health,
                 strength: gameplay.attributes.strength,
                 defence: gameplay.attributes.defence,
+                attributes: std::iter::once(AttributeView {
+                    id: "strength".into(),
+                    label: "Strength".into(),
+                    value: gameplay.attributes.strength,
+                })
+                .chain(std::iter::once(AttributeView {
+                    id: "defence".into(),
+                    label: "Defence".into(),
+                    value: gameplay.attributes.defence,
+                }))
+                .chain(
+                    gameplay
+                        .attributes
+                        .additional
+                        .iter()
+                        .map(|(id, value)| AttributeView {
+                            id: id.clone(),
+                            label: humanize_id(id),
+                            value: *value,
+                        }),
+                )
+                .collect(),
                 skills: gameplay
                     .skills
                     .iter()
@@ -4800,6 +6320,87 @@ impl World {
                         id: id.clone(),
                         label: skill_label(id),
                         rank: *rank,
+                    })
+                    .collect(),
+                resources: gameplay
+                    .resources
+                    .iter()
+                    .map(|(id, pool)| ResourceView {
+                        id: id.clone(),
+                        label: humanize_id(id),
+                        current: pool.current,
+                        max: pool.max,
+                    })
+                    .collect(),
+                abilities: gameplay
+                    .ability_ids
+                    .iter()
+                    .filter_map(|id| self.abilities.get(id))
+                    .map(|ability| {
+                        let cooldown_remaining = gameplay
+                            .ability_cooldowns
+                            .get(&ability.id)
+                            .copied()
+                            .unwrap_or(0)
+                            .saturating_sub(self.logical_tick)
+                            .max(
+                                gameplay
+                                    .ability_global_ready_tick
+                                    .saturating_sub(self.logical_tick),
+                            );
+                        let has_resources = ability.resource_costs.iter().all(|(id, cost)| {
+                            gameplay
+                                .resources
+                                .get(id)
+                                .is_some_and(|pool| pool.current >= *cost)
+                        });
+                        AbilityView {
+                            id: ability.id.clone(),
+                            name: ability.name.clone(),
+                            description: ability.description.clone(),
+                            kind: ability.category.as_str().into(),
+                            resource_costs: ability
+                                .resource_costs
+                                .iter()
+                                .map(|(id, amount)| AbilityResourceCostView {
+                                    resource_id: id.clone(),
+                                    label: humanize_id(id),
+                                    amount: *amount,
+                                })
+                                .collect(),
+                            cooldown_remaining,
+                            usable: cooldown_remaining == 0
+                                && has_resources
+                                && gameplay.recovery_at_tick.is_none()
+                                && !gameplay
+                                    .statuses
+                                    .iter()
+                                    .any(|status| status.kind == ActiveStatusKind::Stun),
+                            targeting: ability.targeting.as_str().into(),
+                        }
+                    })
+                    .collect(),
+                resistances: gameplay
+                    .resistances
+                    .iter()
+                    .map(|(damage_type, percent)| ResistanceView {
+                        damage_type: *damage_type,
+                        percent: *percent,
+                    })
+                    .collect(),
+                statuses: gameplay
+                    .statuses
+                    .iter()
+                    .map(|status| StatusView {
+                        id: status.source_ability_id.clone(),
+                        label: self
+                            .abilities
+                            .get(&status.source_ability_id)
+                            .map(|ability| ability.name.clone())
+                            .unwrap_or_else(|| humanize_id(&status.source_ability_id)),
+                        kind: status.kind,
+                        magnitude: status.magnitude,
+                        remaining_ticks: status.remaining_ticks,
                     })
                     .collect(),
                 effects: gameplay.effects.clone(),
@@ -5241,6 +6842,552 @@ fn skill_label(id: &str) -> String {
         .join(" ")
 }
 
+fn validate_ability_definition(ability: &AbilityDefinition) -> Result<(), WorldError> {
+    let scaling_valid = |attribute: &Option<String>, percent: u16| {
+        percent <= 1_000
+            && attribute.is_some() == (percent > 0)
+            && attribute.as_deref().is_none_or(valid_stat_id)
+    };
+    let status_valid = |status: &AbilityStatusEffectDefinition| match status {
+        AbilityStatusEffectDefinition::AttributeModifier {
+            attribute,
+            magnitude,
+            duration_ticks,
+            ..
+        } => {
+            valid_stat_id(attribute)
+                && attribute != "max_health"
+                && *magnitude != 0
+                && magnitude.unsigned_abs() <= MAX_STATUS_MAGNITUDE as u32
+                && (1..=MAX_STATUS_TICKS).contains(duration_ticks)
+        }
+        AbilityStatusEffectDefinition::Regeneration {
+            magnitude,
+            duration_ticks,
+            ..
+        }
+        | AbilityStatusEffectDefinition::DamageOverTime {
+            magnitude,
+            duration_ticks,
+            ..
+        } => {
+            (1..=MAX_STATUS_MAGNITUDE as u32).contains(magnitude)
+                && (1..=MAX_STATUS_TICKS).contains(duration_ticks)
+        }
+        AbilityStatusEffectDefinition::Stun { duration_ticks, .. } => {
+            (1..=MAX_STATUS_TICKS).contains(duration_ticks)
+        }
+    };
+    let effect_target_valid = |target: AbilityEffectTarget| {
+        !(ability.targeting == AbilityTargeting::SelfOnly && target == AbilityEffectTarget::Target)
+    };
+    let target_semantics_valid = ability.damage.as_ref().is_none_or(|damage| {
+        effect_target_valid(damage.target)
+            && !(damage.target == AbilityEffectTarget::Target
+                && ability.targeting == AbilityTargeting::SingleAlly)
+    }) && ability.heal.as_ref().is_none_or(|heal| {
+        effect_target_valid(heal.target)
+            && !(heal.target == AbilityEffectTarget::Target
+                && ability.targeting == AbilityTargeting::SingleEnemy)
+    }) && ability
+        .status_effects
+        .iter()
+        .all(|status| effect_target_valid(status_target(status)));
+    let valid = valid_definition_id(&ability.id)
+        && safe_definition_text(&ability.name, 128)
+        && safe_definition_text(&ability.description, 2_048)
+        && ability.resource_costs.len() <= MAX_ABILITY_RESOURCE_COSTS
+        && ability
+            .resource_costs
+            .iter()
+            .all(|(id, amount)| valid_stat_id(id) && *amount > 0 && *amount <= MAX_RESOURCE_VALUE)
+        && ability.cooldown_ticks <= MAX_COOLDOWN_TICKS
+        && ability.status_effects.len() <= MAX_ABILITY_EFFECTS
+        && target_semantics_valid
+        && (ability.damage.is_some()
+            || ability.heal.is_some()
+            || !ability.status_effects.is_empty())
+        && ability.damage.as_ref().is_none_or(|damage| {
+            (1..=1_000_000).contains(&damage.base_amount)
+                && scaling_valid(&damage.scaling_attribute, damage.scaling_percent)
+        })
+        && ability.heal.as_ref().is_none_or(|heal| {
+            (1..=1_000_000).contains(&heal.base_amount)
+                && scaling_valid(&heal.scaling_attribute, heal.scaling_percent)
+        })
+        && ability.status_effects.iter().all(status_valid);
+    valid
+        .then_some(())
+        .ok_or(WorldError::InvalidAbilityDefinition)
+}
+
+fn safe_definition_text(value: &str, maximum_bytes: usize) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= maximum_bytes
+        && !trimmed
+            .chars()
+            .any(|character| character.is_control() || character == '\u{7f}')
+}
+
+fn validate_active_status(
+    status: &ActiveStatusEffect,
+    abilities: &BTreeMap<String, AbilityDefinition>,
+) -> bool {
+    validate_active_status_shape(status)
+        && abilities
+            .get(&status.source_ability_id)
+            .is_some_and(|ability| {
+                ability
+                    .status_effects
+                    .iter()
+                    .any(|effect| active_status_matches_definition(status, effect))
+            })
+}
+
+fn validate_active_status_shape(status: &ActiveStatusEffect) -> bool {
+    let attributed = status.source_character_id.is_some() ^ status.source_npc_id.is_some();
+    let valid_source = valid_definition_id(&status.source_ability_id)
+        && status.source_character_id.is_none_or(|id| id.0 > 0)
+        && status
+            .source_npc_id
+            .as_deref()
+            .is_none_or(valid_definition_id);
+    let valid_shape = match status.kind {
+        ActiveStatusKind::AttributeModifier => {
+            status.magnitude != 0
+                && status.magnitude.unsigned_abs() <= MAX_STATUS_MAGNITUDE as u32
+                && status.attribute.as_deref().is_some_and(valid_stat_id)
+                && status.damage_type.is_none()
+        }
+        ActiveStatusKind::Regeneration => {
+            (1..=MAX_STATUS_MAGNITUDE).contains(&status.magnitude)
+                && status.attribute.is_none()
+                && status.damage_type.is_none()
+        }
+        ActiveStatusKind::DamageOverTime => {
+            (1..=MAX_STATUS_MAGNITUDE).contains(&status.magnitude)
+                && status.attribute.is_none()
+                && status.damage_type.is_some()
+        }
+        ActiveStatusKind::Stun => {
+            status.magnitude == 0 && status.attribute.is_none() && status.damage_type.is_none()
+        }
+    };
+    attributed
+        && valid_source
+        && valid_shape
+        && (1..=MAX_STATUS_TICKS).contains(&status.remaining_ticks)
+}
+
+fn active_status_matches_definition(
+    status: &ActiveStatusEffect,
+    definition: &AbilityStatusEffectDefinition,
+) -> bool {
+    match definition {
+        AbilityStatusEffectDefinition::AttributeModifier {
+            attribute,
+            magnitude,
+            duration_ticks,
+            ..
+        } => {
+            status.kind == ActiveStatusKind::AttributeModifier
+                && status.magnitude == *magnitude
+                && status.attribute.as_deref() == Some(attribute.as_str())
+                && status.damage_type.is_none()
+                && status.remaining_ticks <= *duration_ticks
+        }
+        AbilityStatusEffectDefinition::Regeneration {
+            magnitude,
+            duration_ticks,
+            ..
+        } => {
+            status.kind == ActiveStatusKind::Regeneration
+                && status.magnitude == i32::try_from(*magnitude).unwrap_or(i32::MAX)
+                && status.attribute.is_none()
+                && status.damage_type.is_none()
+                && status.remaining_ticks <= *duration_ticks
+        }
+        AbilityStatusEffectDefinition::DamageOverTime {
+            damage_type,
+            magnitude,
+            duration_ticks,
+            ..
+        } => {
+            status.kind == ActiveStatusKind::DamageOverTime
+                && status.magnitude == i32::try_from(*magnitude).unwrap_or(i32::MAX)
+                && status.attribute.is_none()
+                && status.damage_type == Some(*damage_type)
+                && status.remaining_ticks <= *duration_ticks
+        }
+        AbilityStatusEffectDefinition::Stun { duration_ticks, .. } => {
+            status.kind == ActiveStatusKind::Stun
+                && status.magnitude == 0
+                && status.attribute.is_none()
+                && status.damage_type.is_none()
+                && status.remaining_ticks <= *duration_ticks
+        }
+    }
+}
+
+fn status_target(status: &AbilityStatusEffectDefinition) -> AbilityEffectTarget {
+    match status {
+        AbilityStatusEffectDefinition::AttributeModifier { target, .. }
+        | AbilityStatusEffectDefinition::Regeneration { target, .. }
+        | AbilityStatusEffectDefinition::DamageOverTime { target, .. }
+        | AbilityStatusEffectDefinition::Stun { target, .. } => *target,
+    }
+}
+
+fn npc_effect_targets_enemy(ability: &AbilityDefinition, target: AbilityEffectTarget) -> bool {
+    ability.targeting == AbilityTargeting::SingleEnemy && target == AbilityEffectTarget::Target
+}
+
+fn npc_enemy_status_count(ability: &AbilityDefinition) -> usize {
+    ability
+        .status_effects
+        .iter()
+        .filter(|status| npc_effect_targets_enemy(ability, status_target(status)))
+        .count()
+}
+
+fn npc_self_status_count(ability: &AbilityDefinition) -> usize {
+    ability.status_effects.len() - npc_enemy_status_count(ability)
+}
+
+fn npc_ability_score(ability: &AbilityDefinition, npc: &Npc) -> i64 {
+    let mut score = 0_i64;
+    if let Some(damage) = &ability.damage
+        && npc_effect_targets_enemy(ability, damage.target)
+    {
+        score =
+            score
+                .saturating_add(1_000_000)
+                .saturating_add(i64::from(ability_scaled_amount_npc(
+                    damage.base_amount,
+                    damage.scaling_attribute.as_deref(),
+                    damage.scaling_percent,
+                    npc,
+                )));
+    }
+    if let Some(heal) = &ability.heal
+        && !npc_effect_targets_enemy(ability, heal.target)
+        && npc.health < npc.max_health
+    {
+        let amount = ability_scaled_amount_npc(
+            heal.base_amount,
+            heal.scaling_attribute.as_deref(),
+            heal.scaling_percent,
+            npc,
+        );
+        score = score
+            .saturating_add(500_000)
+            .saturating_add(i64::from(amount.min(npc.max_health - npc.health)));
+    }
+    for status in &ability.status_effects {
+        if npc_effect_targets_enemy(ability, status_target(status)) {
+            let value = match status {
+                AbilityStatusEffectDefinition::AttributeModifier {
+                    magnitude,
+                    duration_ticks,
+                    ..
+                } => i64::from(magnitude.unsigned_abs()) * i64::from(*duration_ticks),
+                AbilityStatusEffectDefinition::Regeneration {
+                    magnitude,
+                    duration_ticks,
+                    ..
+                }
+                | AbilityStatusEffectDefinition::DamageOverTime {
+                    magnitude,
+                    duration_ticks,
+                    ..
+                } => i64::from(*magnitude) * i64::from(*duration_ticks),
+                AbilityStatusEffectDefinition::Stun { duration_ticks, .. } => {
+                    100_000 * i64::from(*duration_ticks)
+                }
+            };
+            score = score.saturating_add(250_000).saturating_add(value);
+        } else if !npc
+            .statuses
+            .iter()
+            .any(|active| active.source_ability_id == ability.id)
+        {
+            score = score.saturating_add(100_000);
+        }
+    }
+    score
+}
+
+fn active_status(
+    source_ability_id: &str,
+    source_character_id: Option<CharacterId>,
+    source_npc_id: Option<&str>,
+    status: &AbilityStatusEffectDefinition,
+) -> ActiveStatusEffect {
+    let (kind, magnitude, remaining_ticks, attribute, damage_type) = match status {
+        AbilityStatusEffectDefinition::AttributeModifier {
+            attribute,
+            magnitude,
+            duration_ticks,
+            ..
+        } => (
+            ActiveStatusKind::AttributeModifier,
+            *magnitude,
+            *duration_ticks,
+            Some(attribute.clone()),
+            None,
+        ),
+        AbilityStatusEffectDefinition::Regeneration {
+            magnitude,
+            duration_ticks,
+            ..
+        } => (
+            ActiveStatusKind::Regeneration,
+            i32::try_from(*magnitude).unwrap_or(i32::MAX),
+            *duration_ticks,
+            None,
+            None,
+        ),
+        AbilityStatusEffectDefinition::DamageOverTime {
+            damage_type,
+            magnitude,
+            duration_ticks,
+            ..
+        } => (
+            ActiveStatusKind::DamageOverTime,
+            i32::try_from(*magnitude).unwrap_or(i32::MAX),
+            *duration_ticks,
+            None,
+            Some(*damage_type),
+        ),
+        AbilityStatusEffectDefinition::Stun { duration_ticks, .. } => {
+            (ActiveStatusKind::Stun, 0, *duration_ticks, None, None)
+        }
+    };
+    ActiveStatusEffect {
+        source_ability_id: source_ability_id.to_owned(),
+        source_character_id,
+        source_npc_id: source_npc_id.map(str::to_owned),
+        kind,
+        magnitude,
+        remaining_ticks,
+        attribute,
+        damage_type,
+    }
+}
+
+fn attribute_value(attributes: &Attributes, id: &str) -> i32 {
+    match id {
+        "strength" => attributes.strength,
+        "defence" => attributes.defence,
+        _ => attributes.additional.get(id).copied().unwrap_or(0),
+    }
+}
+
+fn ability_scaled_amount(
+    base: u32,
+    scaling_attribute: Option<&str>,
+    scaling_percent: u16,
+    gameplay: &CharacterGameplaySnapshot,
+) -> i32 {
+    let scaling = scaling_attribute
+        .map(|id| {
+            let value = if id == "max_health" {
+                gameplay.vitals.max_health
+            } else {
+                effective_gameplay_attribute(gameplay, id)
+            };
+            i64::from(value.max(0))
+        })
+        .unwrap_or(0)
+        .saturating_mul(i64::from(scaling_percent))
+        / 100;
+    i64::from(base)
+        .saturating_add(scaling)
+        .clamp(0, i64::from(i32::MAX)) as i32
+}
+
+fn ability_scaled_amount_npc(
+    base: u32,
+    scaling_attribute: Option<&str>,
+    scaling_percent: u16,
+    npc: &Npc,
+) -> i32 {
+    let scaling = scaling_attribute
+        .map(|id| {
+            let value = if id == "max_health" {
+                npc.max_health
+            } else {
+                effective_npc_attribute(npc, id)
+            };
+            i64::from(value.max(0))
+        })
+        .unwrap_or(0)
+        .saturating_mul(i64::from(scaling_percent))
+        / 100;
+    i64::from(base)
+        .saturating_add(scaling)
+        .clamp(0, i64::from(i32::MAX)) as i32
+}
+
+fn effective_gameplay_attribute(gameplay: &CharacterGameplaySnapshot, id: &str) -> i32 {
+    gameplay
+        .statuses
+        .iter()
+        .filter(|status| {
+            status.kind == ActiveStatusKind::AttributeModifier
+                && status.attribute.as_deref() == Some(id)
+        })
+        .fold(
+            attribute_value(&gameplay.attributes, id),
+            |value, status| value.saturating_add(status.magnitude),
+        )
+}
+
+fn effective_npc_attribute(npc: &Npc, id: &str) -> i32 {
+    let base = match id {
+        "strength" => npc.strength,
+        "defence" => npc.defence,
+        _ => 0,
+    };
+    npc.statuses
+        .iter()
+        .filter(|status| {
+            status.kind == ActiveStatusKind::AttributeModifier
+                && status.attribute.as_deref() == Some(id)
+        })
+        .fold(base, |value, status| value.saturating_add(status.magnitude))
+}
+
+fn resisted_amount(amount: i32, resistance: u16) -> i32 {
+    if amount <= 0 {
+        return 0;
+    }
+    let retained = 100_i64.saturating_sub(i64::from(resistance));
+    (i64::from(amount).saturating_mul(retained) / 100).clamp(1, i64::from(i32::MAX)) as i32
+}
+
+fn validate_archetype_definition(
+    archetype: &ArchetypeDefinition,
+    abilities: &BTreeMap<String, AbilityDefinition>,
+) -> Result<(), WorldError> {
+    let mut previous_level = 1;
+    let mut previous_experience = 0;
+    let mut attribute_ids = std::collections::HashSet::from(["strength", "defence"]);
+    attribute_ids.extend(
+        archetype
+            .initial_attributes
+            .keys()
+            .map(String::as_str)
+            .filter(|id| *id != "max_health"),
+    );
+    let mut skill_ids = archetype
+        .initial_skills
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let mut resource_values = archetype
+        .initial_resources
+        .iter()
+        .map(|(id, value)| (id.as_str(), *value))
+        .collect::<HashMap<_, _>>();
+    let mut unlocked_abilities = std::collections::HashSet::new();
+    let initial_abilities_valid = archetype.initial_ability_ids.iter().all(|id| {
+        unlocked_abilities.insert(id.as_str())
+            && abilities.get(id).is_some_and(|ability| {
+                ability
+                    .resource_costs
+                    .keys()
+                    .all(|resource| resource_values.contains_key(resource.as_str()))
+            })
+    });
+    let valid = valid_definition_id(&archetype.id)
+        && safe_definition_text(&archetype.name, 128)
+        && safe_definition_text(&archetype.description, 2_048)
+        && archetype.initial_attributes.len() <= MAX_STATS
+        && attribute_ids.len() <= MAX_STATS
+        && archetype.initial_attributes.contains_key("max_health")
+        && archetype.initial_attributes.contains_key("strength")
+        && archetype.initial_attributes.contains_key("defence")
+        && archetype.initial_attributes.iter().all(|(id, value)| {
+            valid_stat_id(id) && *value <= MAX_STAT_VALUE && (id != "max_health" || *value > 0)
+        })
+        && archetype.initial_skills.len() <= MAX_STATS
+        && archetype
+            .initial_skills
+            .iter()
+            .all(|(id, value)| valid_stat_id(id) && *value <= MAX_SKILL_VALUE)
+        && archetype.initial_resources.len() <= MAX_RESOURCE_POOLS
+        && archetype
+            .initial_resources
+            .iter()
+            .all(|(id, value)| valid_stat_id(id) && (1..=MAX_RESOURCE_VALUE).contains(value))
+        && archetype.resource_regeneration.iter().all(|(id, value)| {
+            valid_stat_id(id)
+                && archetype.initial_resources.contains_key(id)
+                && *value <= MAX_RESOURCE_VALUE
+        })
+        && archetype.initial_resistances.len() <= MAX_RESISTANCES
+        && archetype
+            .initial_resistances
+            .values()
+            .all(|value| *value <= MAX_RESISTANCE_PERCENT)
+        && archetype.initial_ability_ids.len() <= MAX_KNOWN_ABILITIES
+        && initial_abilities_valid
+        && archetype.level_progression.len() <= MAX_LEVEL_MILESTONES
+        && archetype.level_progression.iter().all(|milestone| {
+            let ordered = milestone.level == previous_level + 1
+                && milestone.total_experience_required > previous_experience;
+            previous_level = milestone.level;
+            previous_experience = milestone.total_experience_required;
+            let attributes_valid = milestone.attribute_gains.iter().all(|(id, value)| {
+                if id != "max_health" {
+                    attribute_ids.insert(id.as_str());
+                }
+                valid_stat_id(id) && *value > 0 && *value <= MAX_STAT_VALUE
+            }) && attribute_ids.len() <= MAX_STATS;
+            let skills_valid = milestone.skill_gains.iter().all(|(id, value)| {
+                skill_ids.insert(id.as_str());
+                valid_stat_id(id) && *value > 0 && *value <= MAX_SKILL_VALUE
+            }) && skill_ids.len() <= MAX_STATS;
+            let resources_valid = milestone.resource_gains.iter().all(|(id, value)| {
+                let total = resource_values
+                    .get(id.as_str())
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(*value);
+                if let Some(total) = total {
+                    resource_values.insert(id.as_str(), total);
+                }
+                valid_stat_id(id)
+                    && *value > 0
+                    && total.is_some_and(|total| total <= MAX_RESOURCE_VALUE)
+            }) && resource_values.len() <= MAX_RESOURCE_POOLS;
+            let unlocks_valid = milestone.ability_unlock_ids.iter().all(|id| {
+                unlocked_abilities.insert(id.as_str())
+                    && abilities.get(id).is_some_and(|ability| {
+                        ability
+                            .resource_costs
+                            .keys()
+                            .all(|resource| resource_values.contains_key(resource.as_str()))
+                    })
+            }) && unlocked_abilities.len() <= MAX_KNOWN_ABILITIES;
+            ordered
+                && milestone.level <= MAX_PROGRESSION_LEVEL
+                && milestone.attribute_gains.len() <= MAX_STATS
+                && attributes_valid
+                && milestone.skill_gains.len() <= MAX_STATS
+                && skills_valid
+                && milestone.resource_gains.len() <= MAX_RESOURCE_POOLS
+                && resources_valid
+                && milestone.ability_unlock_ids.len() <= MAX_KNOWN_ABILITIES
+                && unlocks_valid
+        });
+    valid
+        .then_some(())
+        .ok_or(WorldError::InvalidAbilityDefinition)
+}
+
 fn resolve_item_query<'a>(
     items: &HashMap<String, Item>,
     candidates: impl Iterator<Item = &'a str>,
@@ -5312,6 +7459,8 @@ fn gameplay_event_room(event: &GameplayEvent) -> Option<&str> {
         GameplayEvent::TickAdvanced { .. } => None,
         GameplayEvent::NpcSpawned { room_id, .. }
         | GameplayEvent::CombatStarted { room_id, .. }
+        | GameplayEvent::AbilityUsed { room_id, .. }
+        | GameplayEvent::NpcAbilityUsed { room_id, .. }
         | GameplayEvent::NpcDamaged { room_id, .. }
         | GameplayEvent::CharacterDamaged { room_id, .. }
         | GameplayEvent::NpcDefeated { room_id, .. }
@@ -5319,6 +7468,7 @@ fn gameplay_event_room(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::ExperienceGained { room_id, .. }
         | GameplayEvent::CharacterLeveled { room_id, .. }
         | GameplayEvent::CharacterDefeated { room_id, .. }
+        | GameplayEvent::CharacterCollapsed { room_id, .. }
         | GameplayEvent::CharacterRecovered { room_id, .. }
         | GameplayEvent::NpcRespawned { room_id, .. }
         | GameplayEvent::ItemEquipped { room_id, .. }
@@ -5333,12 +7483,15 @@ fn gameplay_event_room(event: &GameplayEvent) -> Option<&str> {
 fn gameplay_event_character(event: &GameplayEvent) -> Option<CharacterId> {
     match event {
         GameplayEvent::CombatStarted { character_id, .. }
+        | GameplayEvent::AbilityUsed { character_id, .. }
+        | GameplayEvent::NpcAbilityUsed { character_id, .. }
         | GameplayEvent::NpcDamaged { character_id, .. }
         | GameplayEvent::CharacterDamaged { character_id, .. }
         | GameplayEvent::NpcDefeated { character_id, .. }
         | GameplayEvent::ExperienceGained { character_id, .. }
         | GameplayEvent::CharacterLeveled { character_id, .. }
         | GameplayEvent::CharacterDefeated { character_id, .. }
+        | GameplayEvent::CharacterCollapsed { character_id, .. }
         | GameplayEvent::CharacterRecovered { character_id, .. }
         | GameplayEvent::ItemEquipped { character_id, .. }
         | GameplayEvent::ItemUnequipped { character_id, .. }
@@ -5355,7 +7508,9 @@ fn gameplay_event_character(event: &GameplayEvent) -> Option<CharacterId> {
 
 fn gameplay_event_npc(event: &GameplayEvent) -> Option<&str> {
     match event {
+        GameplayEvent::AbilityUsed { npc_id, .. } => npc_id.as_deref(),
         GameplayEvent::NpcSpawned { npc_id, .. }
+        | GameplayEvent::NpcAbilityUsed { npc_id, .. }
         | GameplayEvent::CombatStarted { npc_id, .. }
         | GameplayEvent::NpcDamaged { npc_id, .. }
         | GameplayEvent::CharacterDamaged { npc_id, .. }
@@ -5366,6 +7521,7 @@ fn gameplay_event_npc(event: &GameplayEvent) -> Option<&str> {
         GameplayEvent::TickAdvanced { .. }
         | GameplayEvent::ExperienceGained { .. }
         | GameplayEvent::CharacterLeveled { .. }
+        | GameplayEvent::CharacterCollapsed { .. }
         | GameplayEvent::CharacterRecovered { .. }
         | GameplayEvent::ItemEquipped { .. }
         | GameplayEvent::ItemUnequipped { .. }
@@ -5385,12 +7541,15 @@ fn gameplay_event_item(event: &GameplayEvent) -> Option<&str> {
         GameplayEvent::TickAdvanced { .. }
         | GameplayEvent::NpcSpawned { .. }
         | GameplayEvent::CombatStarted { .. }
+        | GameplayEvent::AbilityUsed { .. }
+        | GameplayEvent::NpcAbilityUsed { .. }
         | GameplayEvent::NpcDamaged { .. }
         | GameplayEvent::CharacterDamaged { .. }
         | GameplayEvent::NpcDefeated { .. }
         | GameplayEvent::ExperienceGained { .. }
         | GameplayEvent::CharacterLeveled { .. }
         | GameplayEvent::CharacterDefeated { .. }
+        | GameplayEvent::CharacterCollapsed { .. }
         | GameplayEvent::CharacterRecovered { .. }
         | GameplayEvent::NpcRespawned { .. }
         | GameplayEvent::CharacterHealed { .. }
@@ -5437,6 +7596,43 @@ fn project_gameplay_event(
                 format!("You engage {npc_name}.")
             } else {
                 format!("{character_name} engages {npc_name}.")
+            },
+            None,
+        ),
+        GameplayEvent::AbilityUsed {
+            character_id: character,
+            character_name,
+            ability_name,
+            npc_id: npc,
+            npc_name,
+            ..
+        } => (
+            character_id(*character),
+            npc.as_deref().map(npc_id),
+            match (viewer_id == *character, npc_name) {
+                (true, Some(target)) => format!("You use {ability_name} on {target}."),
+                (true, None) => format!("You use {ability_name}."),
+                (false, Some(target)) => {
+                    format!("{character_name} uses {ability_name} on {target}.")
+                }
+                (false, None) => format!("{character_name} uses {ability_name}."),
+            },
+            None,
+        ),
+        GameplayEvent::NpcAbilityUsed {
+            npc_id: npc,
+            npc_name,
+            character_id: character,
+            character_name,
+            ability_name,
+            ..
+        } => (
+            npc_id(npc),
+            Some(character_id(*character)),
+            if viewer_id == *character {
+                format!("{npc_name} uses {ability_name} on you.")
+            } else {
+                format!("{npc_name} uses {ability_name} on {character_name}.")
             },
             None,
         ),
@@ -5547,6 +7743,20 @@ fn project_gameplay_event(
                 format!("{npc_name} defeats you.")
             } else {
                 format!("{npc_name} defeats {character_name}.")
+            },
+            None,
+        ),
+        GameplayEvent::CharacterCollapsed {
+            character_id: character,
+            character_name,
+            ..
+        } => (
+            character_id(*character),
+            None,
+            if viewer_id == *character {
+                "You collapse and lose consciousness.".into()
+            } else {
+                format!("{character_name} collapses.")
             },
             None,
         ),

@@ -32,16 +32,22 @@ compatible with the TypeScript 7 CommonJS export shape.
 ## User-facing implementation
 
 Before connecting, the client provides registration/login, durable session
-restoration/revocation, roster loading, character creation/selection and a
-text-complete welcome screen. After selection it exposes:
+restoration/revocation, roster loading, optional archetype-aware character
+creation/selection and a text-complete welcome screen. After selection it
+exposes:
 
 - atmospheric scene prose, localized alternative text, exits, items, NPCs and
   weather;
 - 500-entry feed/command scrollback that preserves a reader's position and
   offers an explicit jump-to-latest control, plus structured contextual actions
   and free-text commands;
-- vitals, skills, effects, inventory/equipment, discovered map, quests,
-  parties, economy, chat, who and ignore controls;
+- a complete character sheet with archetype, level/XP threshold, legacy and
+  authored attributes, vitals, resource meters, skills, resistances and active
+  statuses;
+- known abilities with kind, description, bounded resource costs, cooldown,
+  availability and targeting, plus keyboard-native target selection and use;
+- inventory/equipment, discovered map, quests, parties, economy, chat, who and
+  ignore controls;
 - persistent validated command history (100 entries), suggestions and
   up/down keyboard recall;
 - responsive panels and a fixed reachable command form on narrow screens;
@@ -56,6 +62,51 @@ requested. Motion preferences combine the system setting and the manual mode.
 The production Service Worker caches at most 32 same-origin shell entries. It
 does not cache API, WebSocket, image or audio traffic and deletes old cache
 versions on activation.
+
+## Archetypes and abilities
+
+After account access, the client requests the public `GET /api/archetypes`
+catalog alongside the authenticated roster. When choices are advertised, the
+creation form presents their label and description. Its initial `World default`
+choice omits `archetypeId`, allowing the authoritative authored default to win;
+an explicitly selected class sends its ID in `POST /api/characters`. A
+`404`/`405` catalog response is
+treated as a pre-archetype server: the form remains usable and sends the exact
+legacy `{name}` body. Other malformed/error responses remain visible failures
+instead of being silently trusted.
+
+The catalog deliberately does not expose initial attributes, resources or
+abilities, so creation currently previews only label and description. The
+complete authoritative sheet arrives in `player.snapshot` after entry. A richer
+initial-stat preview requires an additive catalog contract and remains pending.
+
+The WebSocket character projection is additive for old servers. Missing
+archetype, authored attributes, resources, abilities, resistances or statuses
+normalize to empty/absent presentation fields, while current servers are
+strictly bounded against the core schema. Strength and defence remain available
+as legacy scalar fields; their entries in the generic attribute list are
+de-duplicated in the rendered sheet.
+
+Ability buttons use the structured v1 action rather than synthesizing a text
+command:
+
+```json
+{
+  "v": 1,
+  "type": "action.perform",
+  "data": {
+    "requestId": "<idempotency-key>",
+    "action": "combat.ability",
+    "abilityId": "ember-bolt",
+    "target": "<optional-opaque-npc-id>"
+  }
+}
+```
+
+The client never treats projected `usable` as authorization. The server still
+validates the known ability, resource balance, cooldown, recovery/status state,
+target and combat engagement. See the wire contract for the exact character
+shape, enums and limits.
 
 ## Protocol and recovery
 
@@ -97,11 +148,12 @@ Playwright includes axe A/AA/WCAG 2.2 tags, keyboard, mobile overflow and fixed
 command checks for Chromium, Firefox and WebKit in CI.
 
 This automation is not a substitute for a real assistive-technology pass. A
-manual screen-reader audit is still pending. The current combined tree passed
-22/22 Chromium and Firefox scenarios. WebKit discovered its eleven scenarios
-but could not load on the most recent validation host because the required
-GTK/GStreamer, media and related runtime libraries were absent; this is neither
-an observed application failure nor a current WebKit pass. A retained
+manual screen-reader audit is still pending. All 26 current Chromium and
+Firefox scenarios passed together in the final combined invocation. WebKit
+discovers its thirteen scenarios but could not load
+on the most recent validation host because the required GTK/GStreamer, media
+and related runtime libraries were absent; this is neither an observed
+application failure nor a current WebKit pass. A retained
 historical log records an earlier WebKit run with a temporary user-space
 host-library setup. The authoritative current status is kept in the
 [completion matrix](../../docs/project/COMPLETION_MATRIX.md).

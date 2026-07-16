@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::File,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -8,10 +8,17 @@ use std::{
 use crate::runtime_content::{RuntimeContent, RuntimeScript};
 use thiserror::Error;
 use tiamud_core::{
-    ActiveEffect, Direction as CoreDirection, EffectKind as CoreEffectKind,
-    EquipmentSlot as CoreEquipmentSlot, ExitDefinition, ItemDefinition, ItemGameplayDefinition,
-    LightLevel as CoreLightLevel, NpcDefinition, RoomDefinition, SceneAudio, SceneImage, World,
-    WorldBuildError, WorldDefinition, WorldError,
+    AbilityCategory as CoreAbilityCategory, AbilityDamageDefinition as CoreAbilityDamageDefinition,
+    AbilityDefinition as CoreAbilityDefinition, AbilityEffectTarget as CoreAbilityEffectTarget,
+    AbilityHealDefinition as CoreAbilityHealDefinition,
+    AbilityStatusEffectDefinition as CoreAbilityStatusEffectDefinition,
+    AbilityTargeting as CoreAbilityTargeting, ActiveEffect,
+    ArchetypeDefinition as CoreArchetypeDefinition, DamageType as CoreDamageType,
+    Direction as CoreDirection, EffectKind as CoreEffectKind, EquipmentSlot as CoreEquipmentSlot,
+    ExitDefinition, ItemDefinition, ItemGameplayDefinition,
+    LevelProgressionDefinition as CoreLevelProgressionDefinition, LightLevel as CoreLightLevel,
+    NpcAbilitySetDefinition as CoreNpcAbilitySetDefinition, NpcDefinition, RoomDefinition,
+    SceneAudio, SceneImage, World, WorldBuildError, WorldDefinition, WorldError,
 };
 use world_pack::{
     AudioCue, Direction as PackDirection, EffectKind as PackEffectKind,
@@ -32,7 +39,11 @@ pub struct LoadedWorldDefinition {
     pub definition: WorldDefinition,
     pub rng_seed: Option<u64>,
     pub item_rules: Vec<ItemGameplayDefinition>,
+    pub default_archetype_id: Option<String>,
+    pub archetypes: Vec<CoreArchetypeDefinition>,
+    pub abilities: Vec<CoreAbilityDefinition>,
     pub npcs: Vec<NpcDefinition>,
+    pub npc_ability_sets: Vec<CoreNpcAbilitySetDefinition>,
     pub room_light: Vec<(String, CoreLightLevel)>,
     pub hidden_items: Vec<(String, u16)>,
     pub hidden_npcs: Vec<(String, u16)>,
@@ -76,8 +87,18 @@ pub fn build_loaded_world(
     for (room_id, direction, difficulty) in &loaded.secret_exits {
         world.configure_secret_exit(room_id, *direction, *difficulty)?;
     }
+    if let Some(default_archetype_id) = &loaded.default_archetype_id {
+        world.configure_abilities(
+            default_archetype_id.clone(),
+            loaded.archetypes.clone(),
+            loaded.abilities.clone(),
+        )?;
+    }
     for npc in &loaded.npcs {
         world.spawn_npc(npc.clone())?;
+    }
+    for npc_ability_set in &loaded.npc_ability_sets {
+        world.configure_npc_abilities(npc_ability_set.clone())?;
     }
     for (npc_id, difficulty) in &loaded.hidden_npcs {
         world.configure_hidden_npc(npc_id, *difficulty)?;
@@ -177,7 +198,16 @@ fn convert_pack(
     room_media: Vec<RoomMediaDefinition>,
     room_perception: Vec<RoomPerceptionDefinition>,
 ) -> Result<LoadedWorldDefinition, WorldLoadError> {
-    let gameplay = std::mem::take(&mut pack.gameplay);
+    let world_pack::GameplayDefinition {
+        rng_seed,
+        item_rules: pack_item_rules,
+        npc_prototypes,
+        npc_spawns,
+        default_archetype_id,
+        archetypes: pack_archetypes,
+        abilities: pack_abilities,
+        npc_ability_sets: pack_npc_ability_sets,
+    } = std::mem::take(&mut pack.gameplay);
     let start_room_id = pack.start_room_id.clone();
     let items = pack
         .items
@@ -268,8 +298,7 @@ fn convert_pack(
         items,
         rooms,
     };
-    let item_rules = gameplay
-        .item_rules
+    let item_rules = pack_item_rules
         .into_iter()
         .map(|rule| ItemGameplayDefinition {
             item_id: rule.item_id,
@@ -284,16 +313,30 @@ fn convert_pack(
             }),
         })
         .collect();
-    let prototypes = gameplay
-        .npc_prototypes
+    let archetypes = pack_archetypes.into_iter().map(map_archetype).collect();
+    let abilities = pack_abilities.into_iter().map(map_ability).collect();
+    let prototypes = npc_prototypes
         .into_iter()
         .map(|prototype| (prototype.id.clone(), prototype))
         .collect::<HashMap<_, _>>();
-    let npcs = gameplay
-        .npc_spawns
+    let npc_ability_sets_by_prototype = pack_npc_ability_sets
+        .into_iter()
+        .map(|definition| (definition.npc_prototype_id.clone(), definition))
+        .collect::<HashMap<_, _>>();
+    let mut npc_ability_sets = Vec::new();
+    let npcs = npc_spawns
         .into_iter()
         .filter_map(|spawn| {
             let prototype = prototypes.get(&spawn.prototype_id)?;
+            if let Some(definition) = npc_ability_sets_by_prototype.get(&spawn.prototype_id) {
+                npc_ability_sets.push(CoreNpcAbilitySetDefinition {
+                    npc_id: spawn.id.clone(),
+                    resource_pools: definition.resource_pools.clone(),
+                    resource_regeneration: definition.resource_regeneration.clone(),
+                    resistances: map_resistances(definition.resistances.clone()),
+                    ability_ids: definition.ability_ids.clone(),
+                });
+            }
             Some(NpcDefinition {
                 stable_id: spawn.id,
                 name: prototype.name.clone(),
@@ -332,15 +375,168 @@ fn convert_pack(
     }
     Ok(LoadedWorldDefinition {
         definition,
-        rng_seed: gameplay.rng_seed,
+        rng_seed,
         item_rules,
+        default_archetype_id,
+        archetypes,
+        abilities,
         npcs,
+        npc_ability_sets,
         room_light,
         hidden_items,
         hidden_npcs,
         secret_exits,
         runtime_content: RuntimeContent::default(),
     })
+}
+
+fn map_archetype(definition: world_pack::ArchetypeDefinition) -> CoreArchetypeDefinition {
+    CoreArchetypeDefinition {
+        id: definition.id,
+        name: definition.name,
+        description: definition.description,
+        initial_attributes: definition.initial_attributes,
+        initial_skills: definition.initial_skills,
+        initial_resources: definition.initial_resources,
+        resource_regeneration: definition.resource_regeneration,
+        initial_resistances: map_resistances(definition.initial_resistances),
+        initial_ability_ids: definition.initial_ability_ids,
+        level_progression: definition
+            .level_progression
+            .into_iter()
+            .map(map_level_progression)
+            .collect(),
+    }
+}
+
+fn map_level_progression(
+    definition: world_pack::LevelProgressionDefinition,
+) -> CoreLevelProgressionDefinition {
+    CoreLevelProgressionDefinition {
+        level: definition.level,
+        total_experience_required: definition.total_experience_required,
+        attribute_gains: definition.attribute_gains,
+        skill_gains: definition.skill_gains,
+        resource_gains: definition.resource_gains,
+        ability_unlock_ids: definition.ability_unlock_ids,
+    }
+}
+
+fn map_ability(definition: world_pack::AbilityDefinition) -> CoreAbilityDefinition {
+    CoreAbilityDefinition {
+        id: definition.id,
+        name: definition.name,
+        description: definition.description,
+        category: map_ability_category(definition.category),
+        resource_costs: definition.resource_costs,
+        cooldown_ticks: definition.cooldown_ticks,
+        targeting: map_ability_targeting(definition.targeting),
+        damage: definition.damage.map(|damage| CoreAbilityDamageDefinition {
+            target: map_ability_effect_target(damage.target),
+            damage_type: map_damage_type(damage.damage_type),
+            base_amount: damage.base_amount,
+            scaling_attribute: damage.scaling_attribute,
+            scaling_percent: damage.scaling_percent,
+        }),
+        heal: definition.heal.map(|heal| CoreAbilityHealDefinition {
+            target: map_ability_effect_target(heal.target),
+            base_amount: heal.base_amount,
+            scaling_attribute: heal.scaling_attribute,
+            scaling_percent: heal.scaling_percent,
+        }),
+        status_effects: definition
+            .status_effects
+            .into_iter()
+            .map(map_ability_status_effect)
+            .collect(),
+    }
+}
+
+fn map_ability_category(category: world_pack::AbilityCategory) -> CoreAbilityCategory {
+    match category {
+        world_pack::AbilityCategory::Martial => CoreAbilityCategory::Martial,
+        world_pack::AbilityCategory::Spell => CoreAbilityCategory::Spell,
+        world_pack::AbilityCategory::Innate => CoreAbilityCategory::Innate,
+    }
+}
+
+fn map_ability_targeting(targeting: world_pack::AbilityTargeting) -> CoreAbilityTargeting {
+    match targeting {
+        world_pack::AbilityTargeting::SelfOnly => CoreAbilityTargeting::SelfOnly,
+        world_pack::AbilityTargeting::SingleEnemy => CoreAbilityTargeting::SingleEnemy,
+        world_pack::AbilityTargeting::SingleAlly => CoreAbilityTargeting::SingleAlly,
+    }
+}
+
+fn map_ability_effect_target(target: world_pack::AbilityEffectTarget) -> CoreAbilityEffectTarget {
+    match target {
+        world_pack::AbilityEffectTarget::Caster => CoreAbilityEffectTarget::Caster,
+        world_pack::AbilityEffectTarget::Target => CoreAbilityEffectTarget::Target,
+    }
+}
+
+fn map_damage_type(damage_type: world_pack::DamageType) -> CoreDamageType {
+    match damage_type {
+        world_pack::DamageType::Physical => CoreDamageType::Physical,
+        world_pack::DamageType::Arcane => CoreDamageType::Arcane,
+        world_pack::DamageType::Fire => CoreDamageType::Fire,
+        world_pack::DamageType::Frost => CoreDamageType::Frost,
+        world_pack::DamageType::Lightning => CoreDamageType::Lightning,
+    }
+}
+
+fn map_resistances(
+    resistances: BTreeMap<world_pack::DamageType, u16>,
+) -> BTreeMap<CoreDamageType, u16> {
+    resistances
+        .into_iter()
+        .map(|(damage_type, percent)| (map_damage_type(damage_type), percent))
+        .collect()
+}
+
+fn map_ability_status_effect(
+    status: world_pack::AbilityStatusEffect,
+) -> CoreAbilityStatusEffectDefinition {
+    match status {
+        world_pack::AbilityStatusEffect::AttributeModifier {
+            target,
+            attribute,
+            magnitude,
+            duration_ticks,
+        } => CoreAbilityStatusEffectDefinition::AttributeModifier {
+            target: map_ability_effect_target(target),
+            attribute,
+            magnitude,
+            duration_ticks,
+        },
+        world_pack::AbilityStatusEffect::Regeneration {
+            target,
+            magnitude,
+            duration_ticks,
+        } => CoreAbilityStatusEffectDefinition::Regeneration {
+            target: map_ability_effect_target(target),
+            magnitude,
+            duration_ticks,
+        },
+        world_pack::AbilityStatusEffect::DamageOverTime {
+            target,
+            damage_type,
+            magnitude,
+            duration_ticks,
+        } => CoreAbilityStatusEffectDefinition::DamageOverTime {
+            target: map_ability_effect_target(target),
+            damage_type: map_damage_type(damage_type),
+            magnitude,
+            duration_ticks,
+        },
+        world_pack::AbilityStatusEffect::Stun {
+            target,
+            duration_ticks,
+        } => CoreAbilityStatusEffectDefinition::Stun {
+            target: map_ability_effect_target(target),
+            duration_ticks,
+        },
+    }
 }
 
 fn map_light(light: PackLightLevel) -> CoreLightLevel {
@@ -464,10 +660,15 @@ mod tests {
 
         assert_eq!(definition.start_room_id, "demo:lantern-square");
         assert_eq!(definition.rooms.len(), 3);
-        assert_eq!(definition.rooms[0].prose.len(), 2);
-        assert_eq!(definition.rooms[0].exits.len(), 2);
+        let start = definition
+            .rooms
+            .iter()
+            .find(|room| room.stable_id == definition.start_room_id)
+            .unwrap();
+        assert_eq!(start.prose.len(), 2);
+        assert_eq!(start.exits.len(), 2);
         assert_eq!(
-            definition.rooms[0]
+            start
                 .image
                 .as_ref()
                 .and_then(|image| image.manifest.as_deref()),
@@ -476,16 +677,13 @@ mod tests {
             )
         );
         assert_eq!(
-            definition.rooms[0]
-                .image
-                .as_ref()
-                .map(|image| image.alt.as_str()),
+            start.image.as_ref().map(|image| image.alt.as_str()),
             Some(
                 "Lantern Square after rain, its dark stones lit by a blue-glass lantern beneath the clock tower."
             )
         );
         assert_eq!(
-            definition.rooms[0]
+            start
                 .image
                 .as_ref()
                 .and_then(|image| image.localized_alt.get("es"))
@@ -508,7 +706,14 @@ mod tests {
     fn reviewed_pack_loads_item_rules_and_an_npc_spawn() {
         let loaded = default_loaded_world().unwrap();
         assert_eq!(loaded.item_rules.len(), 3);
+        assert_eq!(
+            loaded.default_archetype_id.as_deref(),
+            Some("tiamud:wanderer")
+        );
+        assert_eq!(loaded.archetypes.len(), 3);
+        assert_eq!(loaded.abilities.len(), 3);
         assert_eq!(loaded.npcs.len(), 1);
+        assert_eq!(loaded.npc_ability_sets.len(), 1);
         assert_eq!(loaded.npcs[0].stable_id, "tiamud:gate-stalker-1");
         assert_eq!(loaded.npcs[0].loot_item_ids, ["tiamud:wolf-clasp"]);
         assert_eq!(loaded.rng_seed, Some(6_073_466_303_471_576_068));
@@ -523,6 +728,89 @@ mod tests {
             loaded.secret_exits,
             [("demo:lantern-square".into(), CoreDirection::Down, 8)]
         );
+    }
+
+    #[test]
+    fn reviewed_pack_builds_the_archetype_catalog_and_initial_gameplay() {
+        let loaded = default_loaded_world().unwrap();
+        let world = build_loaded_world(&loaded).unwrap();
+
+        assert_eq!(world.default_archetype_id(), "tiamud:wanderer");
+        assert_eq!(world.archetype_catalog().len(), 3);
+        assert!(world.archetype_catalog().iter().any(|archetype| {
+            archetype.id == "tiamud:arcanist" && archetype.label == "Arcanist"
+        }));
+
+        let initial = world.initial_gameplay(Some("tiamud:arcanist")).unwrap();
+        assert_eq!(initial.archetype_id, "tiamud:arcanist");
+        assert_eq!(initial.vitals.health, 16);
+        assert_eq!(initial.attributes.additional.get("intellect"), Some(&8));
+        assert_eq!(initial.skills.get("perception"), Some(&12));
+        assert_eq!(
+            initial.resources.get("mana"),
+            Some(&tiamud_core::ResourcePool {
+                current: 14,
+                max: 14,
+            })
+        );
+        assert_eq!(initial.ability_ids, ["tiamud:basic-strike"]);
+        assert_eq!(initial.resistances.get(&CoreDamageType::Arcane), Some(&10));
+    }
+
+    #[test]
+    fn reviewed_pack_configures_and_executes_the_npc_ability_set() {
+        let loaded = default_loaded_world().unwrap();
+        let mut world = build_loaded_world(&loaded).unwrap();
+
+        let snapshot = world.runtime_snapshot();
+        let npc = snapshot.npcs.get("tiamud:gate-stalker-1").unwrap();
+        assert_eq!(
+            npc.resources.get("stamina"),
+            Some(&tiamud_core::ResourcePool { current: 6, max: 6 })
+        );
+        assert_eq!(npc.resource_regeneration.get("stamina"), Some(&1));
+        assert_eq!(
+            npc.ability_ids,
+            ["tiamud:basic-strike", "tiamud:lunging-strike"]
+        );
+        assert_eq!(npc.resistances.get(&CoreDamageType::Physical), Some(&5));
+
+        let session = tiamud_core::SessionId(91);
+        let character_id = tiamud_core::CharacterId(42);
+        let gameplay = world.initial_gameplay(Some("tiamud:arcanist")).unwrap();
+        world
+            .restore_character_gameplay(character_id, gameplay)
+            .unwrap();
+        world
+            .connect(
+                session,
+                tiamud_core::CharacterSnapshot {
+                    id: character_id,
+                    account_id: tiamud_core::AccountId(7),
+                    name: "Mara".into(),
+                    room_id: "demo:north-gate".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        world
+            .apply(session, tiamud_core::PlayerAction::Attack("gate".into()))
+            .unwrap();
+
+        let events = world.advance_tick().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            tiamud_core::DomainEvent::Gameplay {
+                event: tiamud_core::GameplayEvent::NpcAbilityUsed {
+                    npc_id,
+                    ability_id,
+                    ..
+                }
+            } if npc_id == "tiamud:gate-stalker-1" && ability_id == "tiamud:lunging-strike"
+        )));
+        let npc = &world.runtime_snapshot().npcs["tiamud:gate-stalker-1"];
+        assert_eq!(npc.resources["stamina"].current, 3);
+        assert!(npc.ability_cooldowns.contains_key("tiamud:lunging-strike"));
     }
 
     #[test]

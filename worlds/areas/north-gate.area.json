@@ -67,6 +67,24 @@
       "roomId": "demo:north-gate"
     }
   ],
+  "npcAbilitySets": [
+    {
+      "npcPrototypeId": "tiamud:gate-stalker",
+      "resourcePools": {
+        "stamina": 6
+      },
+      "resourceRegeneration": {
+        "stamina": 1
+      },
+      "resistances": {
+        "physical": 5
+      },
+      "abilityIds": [
+        "tiamud:basic-strike",
+        "tiamud:lunging-strike"
+      ]
+    }
+  ],
   "roomPerception": [
     {
       "roomId": "demo:north-gate",

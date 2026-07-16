@@ -406,6 +406,12 @@
     recordSubmission(label, id, sent);
   }
 
+  function submitAbility(abilityId: string, target: string | undefined, label: string): void {
+    const id = createRequestId();
+    const sent = connection?.performAbility(abilityId, target, id) ?? false;
+    recordSubmission(label, id, sent);
+  }
+
   function recordSubmission(submitted: string, id: string, sent: boolean): void {
 
     replaceHistory([
@@ -703,7 +709,13 @@
     </section>
 
     <div class="side-stack">
-      <PlayerDashboard value={player} oncommand={submitCommand} onaction={submitAction} />
+      <PlayerDashboard
+        value={player}
+        abilityTargets={scene?.npcs ?? []}
+        oncommand={submitCommand}
+        onaction={submitAction}
+        onability={submitAbility}
+      />
 
       <section class="console" aria-labelledby="console-title">
       <div class="console-heading">

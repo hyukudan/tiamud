@@ -71,6 +71,210 @@
       }
     }
   ],
+  "archetypes": [
+    {
+      "id": "tiamud:wanderer",
+      "name": "Wanderer",
+      "description": "A resilient traveller with balanced combat, perception and survival training.",
+      "initialAttributes": {
+        "agility": 4,
+        "defence": 2,
+        "max_health": 20,
+        "strength": 5
+      },
+      "initialSkills": {
+        "combat": 10,
+        "perception": 10,
+        "survival": 10
+      },
+      "initialResources": {
+        "stamina": 8
+      },
+      "resourceRegeneration": {
+        "stamina": 1
+      },
+      "initialResistances": {
+        "physical": 5
+      },
+      "initialAbilityIds": [
+        "tiamud:basic-strike"
+      ],
+      "levelProgression": [
+        {
+          "level": 2,
+          "totalExperienceRequired": 100,
+          "attributeGains": {
+            "defence": 1,
+            "max_health": 5,
+            "strength": 1
+          },
+          "skillGains": {
+            "combat": 2,
+            "survival": 1
+          },
+          "resourceGains": {
+            "stamina": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "tiamud:vanguard",
+      "name": "Vanguard",
+      "description": "A disciplined front-line fighter who turns stamina into forceful martial techniques.",
+      "initialAttributes": {
+        "agility": 2,
+        "defence": 4,
+        "max_health": 26,
+        "strength": 7
+      },
+      "initialSkills": {
+        "combat": 14,
+        "perception": 7,
+        "survival": 8
+      },
+      "initialResources": {
+        "stamina": 12
+      },
+      "resourceRegeneration": {
+        "stamina": 2
+      },
+      "initialResistances": {
+        "physical": 10
+      },
+      "initialAbilityIds": [
+        "tiamud:basic-strike"
+      ],
+      "levelProgression": [
+        {
+          "level": 2,
+          "totalExperienceRequired": 100,
+          "attributeGains": {
+            "defence": 2,
+            "max_health": 7,
+            "strength": 2
+          },
+          "skillGains": {
+            "combat": 3
+          },
+          "resourceGains": {
+            "stamina": 3
+          },
+          "abilityUnlockIds": [
+            "tiamud:lunging-strike"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tiamud:arcanist",
+      "name": "Arcanist",
+      "description": "A fragile scholar who shapes mana through intellect into precise arcane attacks.",
+      "initialAttributes": {
+        "defence": 1,
+        "intellect": 8,
+        "max_health": 16,
+        "strength": 3
+      },
+      "initialSkills": {
+        "combat": 6,
+        "perception": 12,
+        "survival": 7
+      },
+      "initialResources": {
+        "mana": 14
+      },
+      "resourceRegeneration": {
+        "mana": 2
+      },
+      "initialResistances": {
+        "arcane": 10
+      },
+      "initialAbilityIds": [
+        "tiamud:basic-strike"
+      ],
+      "levelProgression": [
+        {
+          "level": 2,
+          "totalExperienceRequired": 100,
+          "attributeGains": {
+            "intellect": 2,
+            "max_health": 3
+          },
+          "skillGains": {
+            "perception": 2
+          },
+          "resourceGains": {
+            "mana": 4
+          },
+          "abilityUnlockIds": [
+            "tiamud:arcane-bolt"
+          ]
+        }
+      ]
+    }
+  ],
+  "abilities": [
+    {
+      "id": "tiamud:basic-strike",
+      "name": "Basic Strike",
+      "description": "A dependable weapon or unarmed attack with no resource cost.",
+      "category": "martial",
+      "targeting": "single_enemy",
+      "damage": {
+        "target": "target",
+        "damageType": "physical",
+        "baseAmount": 2,
+        "scalingAttribute": "strength",
+        "scalingPercent": 100
+      }
+    },
+    {
+      "id": "tiamud:lunging-strike",
+      "name": "Lunging Strike",
+      "description": "Spend stamina on a driving attack that briefly weakens the target's defence.",
+      "category": "martial",
+      "resourceCosts": {
+        "stamina": 3
+      },
+      "cooldownTicks": 2,
+      "targeting": "single_enemy",
+      "damage": {
+        "target": "target",
+        "damageType": "physical",
+        "baseAmount": 5,
+        "scalingAttribute": "strength",
+        "scalingPercent": 120
+      },
+      "statusEffects": [
+        {
+          "kind": "attribute_modifier",
+          "target": "target",
+          "attribute": "defence",
+          "magnitude": -1,
+          "durationTicks": 2
+        }
+      ]
+    },
+    {
+      "id": "tiamud:arcane-bolt",
+      "name": "Arcane Bolt",
+      "description": "Shape mana into a focused bolt whose force scales with intellect.",
+      "category": "spell",
+      "resourceCosts": {
+        "mana": 4
+      },
+      "cooldownTicks": 1,
+      "targeting": "single_enemy",
+      "damage": {
+        "target": "target",
+        "damageType": "arcane",
+        "baseAmount": 6,
+        "scalingAttribute": "intellect",
+        "scalingPercent": 125
+      }
+    }
+  ],
   "roomMedia": [
     {
       "roomId": "demo:lantern-square",

@@ -21,18 +21,21 @@ available as text and a basic Telnet client remains a first-class way to
 play.
 
 It exists to pair a modern, illustrated, accessible browser experience with
-the operational simplicity of a classic single-process server. The server,
-the reviewed Lantern Square world, the browser client and SQLite storage fit
-in one process on one ordinary host; Kubernetes, Redis, object storage and
-microservices are deliberately not dependencies
-([ADR 0001](docs/decisions/0001-project-foundation.md)). PostgreSQL, richer
-terminal clients, media processing and editorial AI are optional additions
-rather than runtime requirements.
+the operational simplicity of a classic single-host server. The Rust server,
+reviewed Lantern Square world and browser client run in one process on an
+ordinary host. PostgreSQL is the recommended persistence profile for a new
+public installation on that same host; the zero-service, zero-configuration
+SQLite path remains implemented for local play and legacy installations.
+Tiamud opens exactly one backend and never dual-writes. Kubernetes, Redis,
+object storage and microservices are deliberately not requirements
+([ADR 0001](docs/decisions/0001-project-foundation.md),
+[ADR 0006](docs/decisions/0006-character-progression-and-postgresql-first.md)).
 
 **Contents:** [What is included](#what-is-included) ·
 [Choose a surface and store](#choose-a-surface-and-store) ·
 [Quick start](#quick-start) · [Runtime configuration](#runtime-configuration) ·
 [Storage](#storage-one-backend-chosen-at-startup) ·
+[Characters](#data-driven-characters-progression-and-abilities) ·
 [Media](#media-that-degrades-safely) · [Accessibility](#accessibility) ·
 [Security](#security-and-operating-model) ·
 [Author and operator tools](#author-and-operator-tools) ·
@@ -48,6 +51,11 @@ rather than runtime requirements.
   logical time and weather survive clean restarts. The bundled Lantern Square
   world is deliberately small — three reviewed rooms — because it is
   reference content for the engine, not a finished game.
+- **Characters that can evolve without engine forks.** WorldPacks define
+  archetypes, initial character sheets, cumulative XP milestones, attribute,
+  skill and resource growth, ability unlocks, damage types, resistances,
+  cooldowns and statuses. The reviewed world includes three deliberately small
+  examples; their values are content, not hard-coded class logic.
 - **One game, multiple clients.** Browser and Telnet gameplay inputs parse
   into the same transport-neutral `PlayerAction` values with shared
   authorization. Observer-specific perception is applied before either
@@ -70,8 +78,8 @@ rather than runtime requirements.
 - **Operator-facing safety.** Argon2id credentials, revocable sessions,
   a bounded password-work service, authorization and rate limits, bounded
   queues, health and Prometheus endpoints, graceful shutdown, schema-v8 event
-  watermarks/compaction, verified SQLite backup/restore, an explicit
-  PostgreSQL mover and reproducible release tooling.
+  watermarks/compaction, PostgreSQL and SQLite adapters, verified SQLite
+  backup/restore, an explicit offline mover and reproducible release tooling.
 
 ![Authenticated Tiamud browser session in Lantern Square, showing atmospheric artwork, complete prose, exits, reachable objects, character status and command history.](docs/images/tiamud-gameplay.webp)
 
@@ -93,8 +101,8 @@ flowchart LR
     Projection --> Web
     Projection --> TN
 
-    Actor <--> Store[(SQLite by default<br/>or PostgreSQL)]
-    Pack[Reviewed WorldPack<br/>bounded Lua hooks] --> Actor
+    Actor <--> Store[(PostgreSQL public profile<br/>or SQLite local/legacy)]
+    Pack[Reviewed WorldPack<br/>progression + abilities + bounded Lua] --> Actor
 ```
 
 Stable world identifiers and hidden variants stay behind the projection
@@ -107,11 +115,11 @@ before its first public compatibility milestone.
 
 ## Choose a surface and store
 
-| Layer | Local/default | Public/alternative | Important property |
+| Layer | Local/private | New public single-host profile | Important property |
 | --- | --- | --- | --- |
 | Play | Browser over HTTP locally | HTTPS/WSS behind Caddy | Illustrated, responsive and keyboard accessible |
 | Terminal | Explicit plaintext on trusted localhost/LAN | Direct Telnet TLS | Complete clean-text fallback; rich features require consent |
-| Persistence | Embedded SQLite | PostgreSQL via an explicit offline transfer | Exactly one backend; Tiamud never dual-writes |
+| Persistence | Zero-config SQLite | PostgreSQL on the same host | Exactly one backend; explicit offline transfer, never dual-write |
 | World | Embedded Lantern Square WorldPack | Reviewed external WorldPack | Deterministic validation and digest-based rollback |
 
 ## Quick start
@@ -144,13 +152,17 @@ Then open <http://127.0.0.1:8080> or connect a Telnet client to
 > Never expose that listener to the public Internet. The default mode is TLS
 > and startup fails closed without a valid certificate and private key.
 
-The default SQLite database is created at `data/tiamud.db` on first run.
+This zero-service quick start creates the SQLite fallback at `data/tiamud.db`.
+For a new public installation, configure PostgreSQL as described under
+[Storage](#storage-one-backend-chosen-at-startup) and in the
+[single-host runbook](docs/operations/single-host.md).
 Try:
 
 ```text
 look                       north / east / south / west
 inventory                  take / drop / examine / use <target>
 equip / unequip <target>   attack <target>
+ability <id> [target]      cast <id> [target]
 weather                    time
 quest ...                  party ...
 balance / shop / buy ...   say / tell / who / help ...
@@ -170,8 +182,8 @@ The most useful settings are:
 | `TIAMUD_TELNET_ADDR` | `127.0.0.1:4000` | Direct Telnet listener |
 | `TIAMUD_TELNET_MODE` | `tls` | Exactly `tls` or explicit `plaintext` |
 | `TIAMUD_TELNET_TLS_CERT` / `TIAMUD_TELNET_TLS_KEY` | — | PEM identity required by Telnet TLS |
-| `TIAMUD_DB_PATH` | `data/tiamud.db` | Default SQLite database; must not be set with `TIAMUD_DATABASE_URL` |
-| `TIAMUD_DATABASE_URL` | — | Alternative `sqlite://`, `postgresql://` or `postgres://` URL; mutually exclusive with `TIAMUD_DB_PATH` |
+| `TIAMUD_DB_PATH` | `data/tiamud.db` when neither storage variable is set | SQLite local/legacy path; mutually exclusive with `TIAMUD_DATABASE_URL` |
+| `TIAMUD_DATABASE_URL` | — | Selected PostgreSQL profile, or an explicit `sqlite://` URL; mutually exclusive with `TIAMUD_DB_PATH` |
 | `TIAMUD_WORLD_PACK` | embedded pack | Path to a reviewed external WorldPack |
 | `TIAMUD_TICK_MILLIS` | `1000` | Logical world tick interval |
 | `RUST_LOG` | `tiamud_server=info,tower_http=info` | Structured application log filter |
@@ -193,14 +205,18 @@ Health and metrics:
 ## Storage: one backend, chosen at startup
 
 Tiamud opens exactly one persistence backend per process and never
-dual-writes; startup rejects a configuration that names both.
+dual-writes; startup rejects a configuration that names both. The operating
+recommendation and the executable fallback are intentionally distinct:
 
-- **SQLite is the default.** With nothing configured, the server uses
-  `data/tiamud.db`. The `tiamud-admin` CLI provides integrity checks, safe
-  schema migration and verified backup create/verify/restore for this
-  profile.
-- **PostgreSQL is an explicit alternative, not a replica.** It is selected
-  only by `TIAMUD_DATABASE_URL=postgres://…`. The offline
+- **PostgreSQL-first for new public installations.** Select it with
+  `TIAMUD_DATABASE_URL=postgresql://…` and use ordinary PostgreSQL monitoring,
+  backup and recovery on the same host. This recommendation does not introduce
+  a distributed architecture or a Kubernetes requirement.
+- **SQLite remains the no-service fallback and legacy path.** With neither
+  storage variable configured, the executable uses `data/tiamud.db`. The
+  `tiamud-admin` CLI provides integrity checks, safe schema migration and
+  verified backup create/verify/restore for this profile.
+- **Migration is explicit and offline.** The
   `tiamud-migrate-postgres` tool copies one current SQLite snapshot into an
   empty PostgreSQL schema and requires `--confirm-offline`.
 - Both backends share schema version 8, including event watermarks and
@@ -208,12 +224,60 @@ dual-writes; startup rejects a configuration that names both.
   SQLite tools; PostgreSQL installations use native PostgreSQL backup
   procedures, as the [single-host runbook](docs/operations/single-host.md)
   spells out.
+- Queryable account, ownership and social data remains relational. Bounded
+  character and world snapshots are opaque application payloads stored as
+  JSON text in `TEXT` columns on both backends; PostgreSQL does not use `jsonb`
+  for state the server never queries ad hoc.
 
 PostgreSQL integration tests are opt-in (`TIAMUD_TEST_POSTGRES_URL`) against
 a disposable database. A complete local acceptance run against PostgreSQL
 18.4 — opt-in suites, verified SQLite backup/restore digest, the offline mover
 and a mixed WebSocket/Telnet runtime — is recorded in the
 [completion matrix](docs/project/COMPLETION_MATRIX.md) and project log.
+
+## Data-driven characters, progression and abilities
+
+Character creation can list a WorldPack's public archetypes in the browser and
+Telnet; choosing “World default” in the browser leaves the authoritative pack
+default in control. The web client tolerates older servers that do not expose
+the catalog, and older WorldPacks without the new records still use the
+existing character creation and progression path. The creation catalog exposes
+only each archetype's label and description; the complete initial sheet is
+projected after the character enters the world. A pre-creation stat preview is
+future UI work, not a current feature.
+
+The current WorldPack model keeps the system small and editable:
+
+- an archetype defines initial attributes, skills, resource pools,
+  per-tick resource regeneration, resistances and known abilities;
+- cumulative XP milestones from level 2 through 100 can grant attributes,
+  skill ranks, resource capacity and ability unlocks;
+- one ability model covers weapon techniques, martial skills, spells and NPC
+  actions with authored costs, targeting, cooldowns, scaling damage or healing,
+  and bounded timed statuses;
+- damage types and resistance percentages affect both direct and periodic
+  damage; regeneration, attribute modifiers, damage-over-time and stun are
+  implemented status kinds;
+- player abilities have a one-logical-tick global ability cooldown in addition
+  to their authored cooldown. NPCs make one deterministic, rule-scored combat
+  choice per turn and fall back to their basic attack when no authored ability
+  is usable.
+
+The authoritative actor checks ownership, target, resources, cooldowns,
+recovery and status limits before mutating state. XP, levels, the full sheet,
+resource balances, unlocks, cooldown deadlines, resistances and active statuses
+are persisted. Browser players get a complete sheet and native ability/target
+controls; text clients can use `ability`, `skill` or `cast`. The existing
+`Tiamud.Character` GMCP package projects the expanded sheet to supporting
+terminal clients; this feature did not introduce a second character package.
+Exact fields and authoring bounds live in the
+[world-authoring guide](docs/world-authoring.md) and the browser contract in
+[`tiamud.v1`](docs/protocol/tiamud-v1.md).
+
+Treat published archetype, ability, stat and resource IDs as stable content
+identity. Restore filters unknown ephemeral state and safely ignores or drops a
+learned ability removed from the active pack, but a functional rename still
+needs explicit alias/migration support; that migration facility is future work.
 
 ## Media that degrades safely
 
@@ -246,12 +310,13 @@ text-size, contrast, reduced-motion and screen-reader preferences.
 
 The Playwright suite is configured to run axe WCAG 2.2 A/AA, keyboard,
 mobile-overflow and reader-mode checks across Chromium, Firefox and WebKit in
-CI. The current combined tree passed 22/22 Chromium and Firefox scenarios;
-WebKit discovered its eleven scenarios but could not load on the latest
-validation host because its GTK/GStreamer runtime libraries were absent. That
-automation is deliberately not oversold: a current WebKit pass and a manual
-pass with real screen-reader software remain open acceptance items, tracked in
-the [completion matrix](docs/project/COMPLETION_MATRIX.md).
+CI. All 26 current Chromium and Firefox scenarios passed together in the final
+combined invocation. WebKit discovered its thirteen scenarios but could not
+load on the latest validation host because its
+GTK/GStreamer runtime libraries were absent. That automation is deliberately
+not oversold: a current WebKit pass and a manual pass with real screen-reader
+software remain open acceptance items, tracked in the
+[completion matrix](docs/project/COMPLETION_MATRIX.md).
 
 ## Security and operating model
 
@@ -393,6 +458,13 @@ configured and must use HTTPS. The feature-gated `tiamud-world ai-draft` and
 `ai-review` commands only produce drafts and review notes that flow through
 the same validation and human review as any other authored change.
 
+AI assistance is also used transparently in parts of the repository's
+development and editorial workflow. It can propose code, tests, prose and
+visual drafts, but those outputs are not authority: contributors review the
+changes, the same validators and automated gates apply, and retained project
+logs record material AI-assisted deliveries and their evidence. No development
+assistant or model is required to build, run or play Tiamud.
+
 ## Verification
 
 Representative local gates are shown below. The workflows pin their
@@ -445,7 +517,8 @@ authoritative whenever this summary and retained evidence differ.
 
 **Implemented with focused automated coverage:** the engine, the default
 world, the browser and Telnet paths, the SQLite and PostgreSQL adapters, the
-authoring and operator tooling, and the automated browser harnesses.
+data-driven character/progression/ability system, the authoring and operator
+tooling, and the automated browser harnesses.
 
 **Locally validated evidence:** release archives have reproduced
 byte-for-byte across isolated local builds; a complete opt-in PostgreSQL 18.4
@@ -522,7 +595,8 @@ Spanish documents are marked.
   [ADR 0003 Tiamud product identity](docs/decisions/0003-tiamud-product-identity.md) ·
   [ADR 0004 open-source licensing](docs/decisions/0004-open-source-licensing.md) ·
   [ADR 0005 hot area lifecycle](docs/decisions/0005-hot-area-lifecycle.md)
-  (Spanish; future architecture)
+  (Spanish; future architecture) ·
+  [ADR 0006 character progression and PostgreSQL-first operations](docs/decisions/0006-character-progression-and-postgresql-first.md)
 - **Status:** [completion matrix](docs/project/COMPLETION_MATRIX.md)
   (authoritative) · [historical v0.2 specification](docs/spec-v0.2.md)
   (Spanish) · [name/domain pre-check](docs/project/NAME_DOMAIN_PRECHECK.md)

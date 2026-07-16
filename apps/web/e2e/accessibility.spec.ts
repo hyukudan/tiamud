@@ -11,13 +11,18 @@ async function installMockWorld(
       body: JSON.stringify({ characters: [{ id: 7, name: 'Aria' }] }),
     });
   });
+  await page.route('**/api/archetypes', async (route) => {
+    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' });
+  });
   await page.addInitScript((initialSceneImage: Record<string, unknown> | null) => {
     const mockState = window as Window & {
       mockHellos?: unknown[];
+      mockActions?: unknown[];
       mockSocketCount?: number;
       emitMockEvents?: (count: number) => void;
     };
     mockState.mockHellos = [];
+    mockState.mockActions = [];
     mockState.mockSocketCount = 0;
     let activeSocket: MockWebSocket | undefined;
     let serverSequence = 3;
@@ -47,6 +52,10 @@ async function installMockWorld(
 
       send(raw: string): void {
         const message = JSON.parse(raw) as { type?: string; data?: unknown };
+        if (message.type === 'action.perform') {
+          mockState.mockActions?.push(message);
+          return;
+        }
         if (message.type !== 'client.hello') return;
         mockState.mockHellos?.push(message);
         serverSequence = 3;
@@ -55,7 +64,12 @@ async function installMockWorld(
           {
             v: 1, type: 'scene.snapshot', seq: 2, data: {
               viewId: 'o1111111111111111', revision: 1, title: 'Lantern Square',
-              prose: ['Rain shines on the stones.'], exits: [], items: [], npcs: [],
+              prose: ['Rain shines on the stones.'], exits: [], items: [],
+              npcs: [{
+                id: 'opaque-wolf', label: 'rain wolf', description: 'It watches the lanterns.',
+                health: 12, maxHealth: 12,
+                actions: [{ label: 'Attack', command: 'attack opaque-wolf' }],
+              }],
               weather: { condition: 'rainy', day: 1, hour: 2, nextChangeInTicks: 3 },
               ...(initialSceneImage ? { image: initialSceneImage } : {}),
             },
@@ -66,6 +80,16 @@ async function installMockWorld(
               character: {
                 name: 'Aria', level: 1, experience: 0, nextLevelExperience: 100,
                 health: 20, maxHealth: 20, strength: 5, defence: 2,
+                archetype: { id: 'mystic', label: 'Mystic', description: 'A wielder of arcane power.' },
+                attributes: [{ id: 'intellect', label: 'Intellect', value: 9 }],
+                resources: [{ id: 'mana', label: 'Mana', current: 12, max: 20 }],
+                abilities: [{
+                  id: 'ember-bolt', name: 'Ember Bolt', description: 'Hurl a compact flame.', kind: 'spell',
+                  resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 4 }],
+                  cooldownRemaining: 0, usable: true, targeting: 'explicitTarget',
+                }],
+                resistances: [{ damageType: 'fire', percent: 10 }],
+                statuses: [],
                 effects: [], recoveryInTicks: null,
               },
               inventory: [{
@@ -131,6 +155,9 @@ async function installRejectedWorld(page: import('@playwright/test').Page): Prom
       contentType: 'application/json',
       body: JSON.stringify({ characters: [{ id: 7, name: 'Aria' }] }),
     });
+  });
+  await page.route('**/api/archetypes', async (route) => {
+    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' });
   });
   await page.addInitScript(() => {
     localStorage.setItem('tiamud.access.v1', JSON.stringify({
@@ -200,6 +227,70 @@ test('welcome remains usable when every artwork rendition fails', async ({ page 
   await expect(page.getByRole('heading', { level: 1, name: 'Tiamud' })).toBeVisible();
   await expect(page.locator('picture.welcome-art')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Return to your story' })).toBeVisible();
+});
+
+test('character creation offers advertised archetypes and submits the selected id', async ({ page }) => {
+  const creationBodies: unknown[] = [];
+  await page.route('**/api/auth/login', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        account: { id: 1, name: 'player' },
+        token: 'test-token',
+        expiresAt: Date.now() + 3_600_000,
+      }),
+    });
+  });
+  await page.route('**/api/archetypes', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        archetypes: [
+          { id: 'vanguard', label: 'Vanguard', description: 'A resilient front-line guardian.' },
+          { id: 'mystic', label: 'Mystic', description: 'A wielder of focused arcane power.' },
+        ],
+      }),
+    });
+  });
+  await page.route('**/api/characters', async (route) => {
+    if (route.request().method() === 'POST') {
+      const request = route.request().postDataJSON() as { name: string; archetypeId?: string };
+      creationBodies.push(request);
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({ character: {
+          id: 6 + creationBodies.length,
+          name: request.name,
+        } }),
+      });
+      return;
+    }
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ characters: [] }) });
+  });
+
+  await page.goto('/');
+  await page.getByLabel('Account name').fill('player');
+  await page.getByLabel('Password').fill('long password');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+
+  await expect(page.getByLabel('Archetype')).toBeVisible();
+  await expect(page.getByLabel('Archetype')).toHaveValue('');
+  await expect(page.getByText("Use the world author's suggested starting path.")).toBeVisible();
+  await page.getByLabel('Create an adventurer').fill('Wren');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Enter as Wren' })).toBeVisible();
+
+  await page.getByLabel('Archetype').selectOption('mystic');
+  await expect(page.getByText('A wielder of focused arcane power.')).toBeVisible();
+  await page.getByLabel('Create an adventurer').fill('Lyra');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+
+  await expect(page.getByRole('button', { name: 'Enter as Lyra' })).toBeVisible();
+  expect(creationBodies).toEqual([
+    { name: 'Wren' },
+    { name: 'Lyra', archetypeId: 'mystic' },
+  ]);
 });
 
 test('welcome falls through to a raster fallback when AVIF alone fails', async ({ page }) => {
@@ -366,6 +457,25 @@ test('authenticated mobile play exposes complete accessible panels and a fixed c
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
     .analyze();
   expect(results.violations).toEqual([]);
+});
+
+test('ability panel chooses a visible target and sends a structured ability action', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+  await expect(page.getByRole('heading', { name: 'Aria' })).toBeVisible();
+
+  await page.getByLabel('Target for Ember Bolt').selectOption({ label: 'rain wolf' });
+  await page.getByRole('button', { name: 'Cast Ember Bolt' }).click();
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toMatchObject({
+    action: 'combat.ability',
+    abilityId: 'ember-bolt',
+    target: 'opaque-wolf',
+  });
 });
 
 test('presentation preferences reconnect with a fresh capability hello', async ({ page }) => {

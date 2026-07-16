@@ -145,13 +145,15 @@ impl PostgresCharacterStore {
                             account_id,
                             name,
                             start_room,
+                            initial_gameplay,
                             reply,
                         } => {
-                            let _ = reply.send(load_or_create_character(
+                            let _ = reply.send(load_or_create_character_with_gameplay(
                                 &mut connection,
                                 account_id,
                                 &name,
                                 &start_room,
+                                &initial_gameplay,
                             ));
                         }
                         Request::LoadCharacter {
@@ -438,6 +440,7 @@ impl CharacterStore for PostgresCharacterStore {
             .await
     }
 
+    #[cfg(test)]
     async fn load_or_create_character(
         &self,
         account_id: AccountId,
@@ -450,6 +453,28 @@ impl CharacterStore for PostgresCharacterStore {
                 account_id,
                 name: name.to_owned(),
                 start_room: start_room.to_owned(),
+                initial_gameplay: Box::new(CharacterGameplaySnapshot::default()),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn load_or_create_character_with_gameplay(
+        &self,
+        account_id: AccountId,
+        name: &str,
+        start_room: &str,
+        initial_gameplay: CharacterGameplaySnapshot,
+    ) -> Result<CharacterSnapshot, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::LoadOrCreateCharacter {
+                account_id,
+                name: name.to_owned(),
+                start_room: start_room.to_owned(),
+                initial_gameplay: Box::new(initial_gameplay),
                 reply,
             },
             receive,
@@ -937,18 +962,24 @@ fn list_characters<C: GenericClient>(
         .collect()
 }
 
-fn load_or_create_character<C: GenericClient>(
+fn load_or_create_character_with_gameplay<C: GenericClient>(
     connection: &mut C,
     account_id: AccountId,
     name: &str,
     start_room: &str,
+    initial_gameplay: &CharacterGameplaySnapshot,
 ) -> Result<CharacterSnapshot, StoreError> {
     ensure_account_exists(connection, account_id)?;
     let name = normalise_name(name, "character")?;
+    let gameplay_json = bounded_json(
+        initial_gameplay,
+        "character gameplay",
+        MAX_CHARACTER_JSON_BYTES,
+    )?;
     connection.execute(
-        "INSERT INTO characters (account_id, name, room_id)
-         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        &[&account_id.0, &name, &start_room],
+        "INSERT INTO characters (account_id, name, room_id, gameplay_json)
+         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+        &[&account_id.0, &name, &start_room, &gameplay_json],
     )?;
     connection
         .query_opt(
@@ -1686,10 +1717,24 @@ mod tests {
             .load_or_create_character(keeper.account.id, "Aster", "room:start")
             .await
             .unwrap();
+        let mut selected_gameplay = CharacterGameplaySnapshot::default();
+        selected_gameplay.attributes.defence = 9;
         let player_character = store
-            .load_or_create_character(player.account.id, "Bryn", "room:start")
+            .load_or_create_character_with_gameplay(
+                player.account.id,
+                "Bryn",
+                "room:start",
+                selected_gameplay.clone(),
+            )
             .await
             .unwrap();
+        assert_eq!(
+            store
+                .load_character_gameplay(player_character.id)
+                .await
+                .unwrap(),
+            selected_gameplay
+        );
         assert_eq!(
             store.list_characters(keeper.account.id).await.unwrap(),
             vec![keeper_character.clone()]

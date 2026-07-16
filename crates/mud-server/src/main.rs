@@ -84,7 +84,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         store.clone(),
         WorldSchedulerConfig::every(Duration::from_millis(u64::from(tick_millis))),
         runtime_content,
-    );
+    )
+    .await?;
     let auth_attempts_per_minute = env_u32("TIAMUD_AUTH_ATTEMPTS_PER_MINUTE", 10)?;
     let auth_burst = env_u32("TIAMUD_AUTH_BURST", 5)?;
     let command_rate_per_second = env_u32("TIAMUD_COMMANDS_PER_SECOND", 12)?;
@@ -125,6 +126,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             "/api/characters",
             get(web::characters).post(web::create_character),
         )
+        .route("/api/archetypes", get(web::archetypes))
         .route("/ws", get(web::ws_handler))
         .fallback(web::static_asset)
         .with_state(state)

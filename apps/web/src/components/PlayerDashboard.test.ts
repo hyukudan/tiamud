@@ -14,6 +14,24 @@ const player: PlayerStateSnapshot = {
     maxHealth: 25,
     strength: 7,
     defence: 3,
+    archetype: { id: 'spellblade', label: 'Spellblade', description: 'Steel guided by ember lore.' },
+    attributes: [
+      { id: 'agility', label: 'Agility', value: 8 },
+      { id: 'intellect', label: 'Intellect', value: 11 },
+    ],
+    resistances: [{ damageType: 'fire', percent: 15 }],
+    statuses: [{
+      id: 'focused', label: 'Focused', kind: 'attribute_modifier', magnitude: 2, remainingTicks: 2,
+    }],
+    resources: [{ id: 'mana', label: 'Mana', current: 12, max: 20 }],
+    abilities: [{
+      id: 'ember-bolt', name: 'Ember Bolt', description: 'Hurls a compact flame.', kind: 'spell',
+      resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 4 }], cooldownRemaining: 0, usable: true,
+      targeting: 'explicitTarget',
+    }, {
+      id: 'mending-light', name: 'Mending Light', description: 'Restores the caster.', kind: 'spell',
+      resourceCosts: [], cooldownRemaining: 0, usable: true, targeting: 'optionalTarget',
+    }],
     skills: [{ id: 'combat', label: 'Combat', rank: 14 }],
     effects: [],
   },
@@ -69,18 +87,29 @@ const player: PlayerStateSnapshot = {
 describe('PlayerDashboard', () => {
   it('renders every playable panel with labelled, keyboard-native controls', () => {
     const { body } = render(PlayerDashboard, {
-      props: { value: player, oncommand: () => undefined, onaction: () => undefined },
+      props: {
+        value: player,
+        abilityTargets: [{ id: 'owolf000000000001', label: 'rain wolf' }],
+        oncommand: () => undefined,
+        onaction: () => undefined,
+        onability: () => undefined,
+      },
     });
 
     for (const label of [
       'Health', 'Inventory', 'Discovered map', 'Quests', 'Party', 'Coin and market',
-      'Chat and adventurers', 'Manage ignore list',
+      'Chat and adventurers', 'Manage ignore list', 'Abilities', 'Mana', 'Agility', 'Resistances',
     ]) {
       expect(body).toContain(label);
     }
     expect(body).toContain('blue lantern');
     expect(body).toContain('First Hunt');
     expect(body).toContain('Lantern Market');
+    expect(body).toContain('Spellblade');
+    expect(body).toContain('Ember Bolt');
+    expect(body).toContain('Target for Ember Bolt');
+    expect(body).toContain('rain wolf');
+    expect(body).not.toContain('optional ally');
     expect(body).toContain('<button');
     expect(body).not.toContain('accountId');
     expect(body).not.toContain('characterId');

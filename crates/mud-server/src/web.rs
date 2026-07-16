@@ -44,6 +44,8 @@ const MAX_COMMAND_BYTES: usize = 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_PROTOCOL_ERRORS: u8 = 3;
 const MAX_ACTION_TARGET_BYTES: usize = 256;
+const MAX_ABILITY_ID_BYTES: usize = 128;
+const MAX_ARCHETYPE_ID_BYTES: usize = 128;
 const MAX_JSON_DEPTH: usize = 16;
 const GLOBAL_REQUEST_CACHE_CAPACITY: usize = 4_096;
 const WS_INBOUND_CAPACITY: usize = 32;
@@ -77,9 +79,11 @@ pub struct CredentialsRequest {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateCharacterRequest {
     name: String,
+    #[serde(default)]
+    archetype_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -159,6 +163,8 @@ struct CommandSubmitData {
 struct ActionPerformData {
     request_id: String,
     action: String,
+    #[serde(default)]
+    ability_id: Option<String>,
     #[serde(default)]
     target: Option<String>,
     #[serde(default)]
@@ -654,6 +660,10 @@ pub async fn characters(State(state): State<AppState>, headers: HeaderMap) -> Re
     }
 }
 
+pub async fn archetypes(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({"archetypes": state.world.archetype_catalog()}))
+}
+
 pub async fn create_character(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -663,9 +673,23 @@ pub async fn create_character(
         Ok(token) => token,
         Err(status) => return bearer_error(status),
     };
+    if request.archetype_id.as_deref().is_some_and(|id| {
+        !valid_definition_id(id, MAX_ARCHETYPE_ID_BYTES)
+            || !state
+                .world
+                .archetype_catalog()
+                .iter()
+                .any(|archetype| archetype.id == id)
+    }) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Unknown character archetype."})),
+        )
+            .into_response();
+    }
     match state
         .world
-        .create_authenticated_character(token, request.name)
+        .create_authenticated_character_with_archetype(token, request.name, request.archetype_id)
         .await
     {
         Ok(character) => {
@@ -1664,6 +1688,9 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 || data.action.is_empty()
                 || data.action.len() > 64
                 || data.action.chars().any(char::is_control)
+                || data.ability_id.as_deref().is_some_and(|ability_id| {
+                    !valid_definition_id(ability_id, MAX_ABILITY_ID_BYTES)
+                })
                 || data.target.as_deref().is_some_and(|target| {
                     target.is_empty()
                         || target.len() > MAX_ACTION_TARGET_BYTES
@@ -1683,8 +1710,9 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 return Err(ClientMessageError::InvalidEnvelope);
             }
             let signature = format!(
-                "action:{}\0{}\0{}\0{:?}\0{}\0{:?}",
+                "action:{}\0{}\0{}\0{}\0{:?}\0{}\0{:?}",
                 data.action,
+                data.ability_id.as_deref().unwrap_or_default(),
                 data.target.as_deref().unwrap_or_default(),
                 data.message.as_deref().unwrap_or_default(),
                 data.duration_seconds,
@@ -1756,6 +1784,19 @@ fn valid_request_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_REQUEST_ID_BYTES && !value.chars().any(char::is_control)
 }
 
+fn valid_definition_id(value: &str, maximum: usize) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= maximum
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+        })
+}
+
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
     let target = data.target.as_deref();
@@ -1771,7 +1812,8 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             .ok_or_else(|| format!("Action {action:?} requires a target."))
     };
     let no_social_extras = || {
-        (data.message.is_none()
+        (data.ability_id.is_none()
+            && data.message.is_none()
             && data.duration_seconds.is_none()
             && data.reason.is_none()
             && data.role.is_none())
@@ -1807,6 +1849,23 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "item.drop" => gameplay_target().map(PlayerAction::Drop),
         "item.examine" => gameplay_target().map(PlayerAction::Examine),
         "combat.attack" => gameplay_target().map(PlayerAction::Attack),
+        "combat.ability" => {
+            if data.message.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
+                return Err("Combat ability has unexpected fields.".to_owned());
+            }
+            let ability_id = data
+                .ability_id
+                .clone()
+                .ok_or_else(|| "Combat ability requires abilityId.".to_owned())?;
+            Ok(PlayerAction::Ability {
+                ability_id,
+                target: data.target.clone(),
+            })
+        }
         "item.use" => gameplay_target().map(PlayerAction::Use),
         "item.equip" => gameplay_target().map(PlayerAction::Equip),
         "item.unequip" => gameplay_target().map(PlayerAction::Unequip),
@@ -1841,7 +1900,11 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "world.time" => exact_no_fields().map(|()| PlayerAction::Time),
         "social.say" => {
             no_target()?;
-            if data.duration_seconds.is_some() || data.reason.is_some() || data.role.is_some() {
+            if data.ability_id.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
                 return Err("Social say has unexpected fields.".to_owned());
             }
             data.message
@@ -1852,7 +1915,11 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "social.tell" => {
             let target = social_target()?;
-            if data.duration_seconds.is_some() || data.reason.is_some() || data.role.is_some() {
+            if data.ability_id.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
                 return Err("Social tell has unexpected fields.".to_owned());
             }
             data.message
@@ -1863,7 +1930,8 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "social.who" => exact_no_fields().map(|()| PlayerAction::Social(SocialAction::Who)),
         "social.help" => {
-            if data.message.is_some()
+            if data.ability_id.is_some()
+                || data.message.is_some()
                 || data.duration_seconds.is_some()
                 || data.reason.is_some()
                 || data.role.is_some()
@@ -1887,7 +1955,11 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "social.report" => {
             let target = social_target()?;
-            if data.message.is_some() || data.duration_seconds.is_some() || data.role.is_some() {
+            if data.ability_id.is_some()
+                || data.message.is_some()
+                || data.duration_seconds.is_some()
+                || data.role.is_some()
+            {
                 return Err("Social report has unexpected fields.".to_owned());
             }
             let reason = data
@@ -1901,7 +1973,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "moderation.mute" | "moderation.ban" => {
             let target = social_target()?;
-            if data.message.is_some() || data.role.is_some() {
+            if data.ability_id.is_some() || data.message.is_some() || data.role.is_some() {
                 return Err("Moderation action has unexpected fields.".to_owned());
             }
             let reason = data
@@ -1937,7 +2009,11 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "moderation.role" => {
             let target = social_target()?;
-            if data.message.is_some() || data.duration_seconds.is_some() || data.reason.is_some() {
+            if data.ability_id.is_some()
+                || data.message.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+            {
                 return Err("Role action has unexpected fields.".to_owned());
             }
             let role = data
@@ -1955,7 +2031,11 @@ fn public_game_error(error: &GameError) -> String {
         GameError::World(WorldError::ItemNotFound(_))
         | GameError::World(WorldError::AmbiguousItem { .. })
         | GameError::World(WorldError::CharacterAlreadyConnected)
-        | GameError::World(WorldError::GameplayUnavailable) => error.to_string(),
+        | GameError::World(WorldError::GameplayUnavailable)
+        | GameError::World(WorldError::AbilityNotKnown)
+        | GameError::World(WorldError::AbilityUnavailable)
+        | GameError::World(WorldError::InsufficientResource)
+        | GameError::World(WorldError::InvalidAbilityTarget) => error.to_string(),
         GameError::World(
             WorldError::PartyUnavailable
             | WorldError::PartyForbidden
@@ -2000,6 +2080,9 @@ fn public_game_error(error: &GameError) -> String {
         GameError::Persistence(StoreError::CharacterNotFound { .. }) => {
             "The selected character is no longer available.".to_owned()
         }
+        GameError::CharacterContentIncompatible => {
+            "This character needs a content migration; contact the server operator.".to_owned()
+        }
         _ => "The world is temporarily unavailable.".to_owned(),
     }
 }
@@ -2012,6 +2095,7 @@ fn access_rejection_code(error: &GameError) -> &'static str {
         }
         GameError::Persistence(StoreError::CharacterNotFound { .. }) => "access.character_invalid",
         GameError::World(WorldError::CharacterAlreadyConnected) => "access.character_connected",
+        GameError::CharacterContentIncompatible => "access.character_incompatible",
         _ => "access.temporarily_unavailable",
     }
 }
@@ -2134,6 +2218,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn character_creation_keeps_the_legacy_shape_and_accepts_only_camel_case_archetype_ids() {
+        let legacy: CreateCharacterRequest = serde_json::from_str(r#"{"name":"Aria"}"#).unwrap();
+        assert_eq!(legacy.name, "Aria");
+        assert_eq!(legacy.archetype_id, None);
+
+        let selected: CreateCharacterRequest =
+            serde_json::from_str(r#"{"name":"Aria","archetypeId":"vanguard"}"#).unwrap();
+        assert_eq!(selected.archetype_id.as_deref(), Some("vanguard"));
+        assert!(
+            serde_json::from_str::<CreateCharacterRequest>(
+                r#"{"name":"Aria","archetype_id":"vanguard"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn readiness_reports_the_selected_storage_backend() {
         assert_eq!(
             readiness_body(StatusCode::OK, true, true, "postgresql"),
@@ -2217,6 +2318,10 @@ mod tests {
             public_game_error(&GameError::World(WorldError::NoExit)),
             "There is no exit in that direction."
         );
+        assert_eq!(
+            public_game_error(&GameError::World(WorldError::InsufficientResource)),
+            "There are not enough resources to use that ability."
+        );
     }
 
     #[test]
@@ -2232,6 +2337,14 @@ mod tests {
         assert_eq!(
             access_rejection_code(&GameError::World(WorldError::CharacterAlreadyConnected)),
             "access.character_connected"
+        );
+        assert_eq!(
+            access_rejection_code(&GameError::CharacterContentIncompatible),
+            "access.character_incompatible"
+        );
+        assert_eq!(
+            public_game_error(&GameError::CharacterContentIncompatible),
+            "This character needs a content migration; contact the server operator."
         );
         assert_eq!(
             access_rejection_code(&GameError::ActorStopped),
@@ -2285,6 +2398,55 @@ mod tests {
         assert_eq!(
             action.action,
             Ok(PlayerAction::Take("blue lantern".to_owned()))
+        );
+
+        let ClientMessage::Action(ability) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-ability","action":"combat.ability","abilityId":"ember-bolt","target":"guardian"}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("structured combat ability must parse");
+        };
+        assert_eq!(
+            ability.action,
+            Ok(PlayerAction::Ability {
+                ability_id: "ember-bolt".into(),
+                target: Some("guardian".into()),
+            })
+        );
+
+        let ClientMessage::Action(missing_ability) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-ability-missing","action":"combat.ability","target":"guardian"}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("invalid structured ability must remain an action result");
+        };
+        assert!(missing_ability.action.is_err());
+
+        let ClientMessage::Action(unexpected_ability) = parse_client_message(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"request-ability-extra","action":"look","abilityId":"ember-bolt"}}"#,
+        )
+        .unwrap()
+        else {
+            panic!("unexpected abilityId must remain an action result");
+        };
+        assert!(unexpected_ability.action.is_err());
+
+        let oversized_ability = format!(
+            r#"{{"v":1,"type":"action.perform","data":{{"requestId":"request-ability-long","action":"combat.ability","abilityId":"{}"}}}}"#,
+            "a".repeat(MAX_ABILITY_ID_BYTES + 1)
+        );
+        assert_eq!(
+            parse_client_message(&oversized_ability).unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
+        assert_eq!(
+            parse_client_message(
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"request-ability-invalid","action":"combat.ability","abilityId":"Ember Bolt"}}"#
+            )
+            .unwrap_err(),
+            ClientMessageError::InvalidEnvelope
         );
 
         let ClientMessage::Action(social) = parse_client_message(

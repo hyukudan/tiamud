@@ -4,8 +4,8 @@
 
 ## Especificación técnica propuesta v0.2
 
-- Estado: borrador para revisión.
-- Fecha: 2026-07-15.
+- Estado: especificación histórica con estado implementado actualizado.
+- Fecha original: 2026-07-15; actualización de implementación: 2026-07-16.
 - Prioridad: ejecutable en un único equipo sin infraestructura externa.
 - Alcance: Tiamud es un motor nuevo inspirado por EnvyMUD, Merc y otros MUD de su época, no una traducción de su código.
 
@@ -41,7 +41,9 @@ La experiencia oficial dará prioridad al navegador, pero el juego seguirá sien
 ### 2.2 Objetivos técnicos
 
 - Arrancar localmente con un solo ejecutable y un directorio de datos.
-- No requerir Docker, Kubernetes, Redis, PostgreSQL, S3 ni servicios de IA.
+- No requerir Docker, Kubernetes, Redis, S3 ni servicios de IA. PostgreSQL es
+  el perfil recomendado para un servidor público nuevo en un solo equipo; el
+  arranque local sin servicios conserva SQLite.
 - Mantener un núcleo autoritativo independiente de cualquier cliente.
 - Usar colas y límites acotados; ningún cliente lento debe agotar el servidor.
 - Mantener imágenes y transformaciones fuera del bucle de simulación.
@@ -92,12 +94,11 @@ Licencia recomendada para el motor: MPL-2.0 si se desea que las modificaciones a
 ```text
 tiamud-server
   ├── HTTP + WebSocket en 127.0.0.1:8080
-  ├── Telnet en 127.0.0.1:4000
-  ├── cliente web embebido en el ejecutable
+  ├── Telnet plaintext expreso en 127.0.0.1:4000, o TLS
+  ├── cliente web y WorldPack revisado embebidos en el ejecutable
   ├── SQLite en data/tiamud.db
-  ├── mundos compilados en data/worlds/
-  ├── recursos publicados en data/assets/
-  └── registros en data/logs/
+  ├── WorldPack externo opcional mediante TIAMUD_WORLD_PACK
+  └── registros estructurados en stdout/stderr
 ```
 
 Requisitos externos: ninguno.
@@ -108,18 +109,25 @@ Requisitos externos: ninguno.
 Internet
   │
   ├── HTTPS/WSS ──► Caddy opcional ──► tiamud-server
-  ├── Telnet TLS ─────────────────────► tiamud-server
-  └── Telnet clásico opcional ────────► tiamud-server
+  └── Telnet TLS ─────────────────────► tiamud-server
 
 data/
-  ├── tiamud.db
   ├── assets/
-  ├── worlds/
-  ├── backups/
-  └── logs/
+  └── worlds/
+
+systemd-journald
+  └── captura stdout/stderr y aplica retención
+
+PostgreSQL en el mismo equipo
+  ├── base autoritativa
+  └── backup, monitorización y recuperación nativos
 ```
 
 Caddy o un servidor intermediario inverso equivalente simplifica HTTPS y certificados, pero no forma parte del motor ni es necesario para jugar en local.
+
+El modo Telnet sin cifrar no forma parte de la superficie pública: solo se
+habilita expresamente en loopback o una LAN confiable. Toda credencial Telnet
+expuesta a Internet requiere el listener TLS directo.
 
 El proyecto proporcionará:
 
@@ -131,9 +139,14 @@ El proyecto proporcionará:
 
 ### 5.3 Perfil C: crecimiento futuro
 
+> **Estado implementado posterior.** PostgreSQL ya no pertenece a este perfil
+> futuro: el adaptador schema-v8, la selección exclusiva de backend y el
+> traslado offline desde SQLite están implementados. Es el perfil recomendado
+> para instalaciones públicas nuevas en un solo equipo. SQLite sigue siendo el
+> fallback sin servicios y la ruta heredada; no existe doble escritura.
+
 Solo se implementará si las métricas lo justifican:
 
-- PostgreSQL en lugar de SQLite.
 - Almacenamiento de objetos o CDN en lugar del sistema de archivos.
 - Pasarela de conexiones separada del proceso de mundo.
 - Varias instancias o mundos en procesos distintos.
@@ -163,8 +176,8 @@ La posibilidad de este perfil influye en las interfaces internas, pero no añade
 │              Eventos web      Texto/GMCP                      │
 │                                                               │
 │  ┌────────────────┐  ┌─────────────────┐  ┌────────────────┐ │
-│  │ SQLite         │  │ Registro mundo  │  │ Recursos estát.│ │
-│  │ persistencia   │  │ guiones/paquetes│  │ y cliente web  │ │
+│  │ PostgreSQL o   │  │ Registro mundo  │  │ Recursos estát.│ │
+│  │ SQLite (uno)   │  │ guiones/paquetes│  │ y cliente web  │ │
 │  └────────────────┘  └─────────────────┘  └────────────────┘ │
 └───────────────────────────────────────────────────────────────┘
 ```
@@ -275,6 +288,7 @@ Al aplicar presión:
 - rustls para TLS directo cuando se configure.
 - serde para serialización.
 - rusqlite con una conexión poseída por una tarea dedicada.
+- Adaptador PostgreSQL schema-v8 con conexión TLS seleccionable.
 - tracing para registros y trazas.
 - clap para la interfaz de línea de comandos.
 
@@ -293,7 +307,15 @@ Si el equipo no dispone de experiencia suficiente en Rust, Go es la alternativa 
 
 ## 10. Persistencia local
 
-SQLite será la base de datos predeterminada y la única obligatoria en v1.
+> **Estado implementado posterior.** El perfil recomendado para una instalación
+> pública nueva en un solo equipo es PostgreSQL. El ejecutable sigue arrancando
+> sin variables con SQLite en `data/tiamud.db`, que conserva el desarrollo sin
+> servicios y la compatibilidad de instalaciones anteriores. Ambos adaptadores
+> comparten schema v8; el proceso abre exactamente uno. Esta recomendación
+> operativa no añade Kubernetes ni cambia el actor autoritativo.
+
+SQLite fue la base de datos predeterminada de la propuesta original y sigue
+siendo la única opción que no necesita un servicio de base de datos separado.
 
 Configuración:
 
@@ -321,7 +343,7 @@ Datos que pueden agruparse o reconstruirse:
 - Precargas.
 - Métricas agregadas.
 
-Comandos operativos:
+Comandos operativos del perfil SQLite local/heredado:
 
 ```text
 tiamud-admin migrate --database <db> --backup <safety-backup>
@@ -331,7 +353,19 @@ tiamud-admin backup verify --backup <backup>
 tiamud-admin backup restore --backup <backup> --database <new-db>
 ```
 
-No se harán escrituras dobles ni replicación artesanal entre SQLite y PostgreSQL. Se mantendrá una interfaz de repositorios estrecha para añadir PostgreSQL como sistema de persistencia alternativo seleccionable cuando exista una necesidad medida. Cada instalación tendrá un único sistema de persistencia autoritativo y dispondrá de una migración explícita si cambia de SQLite a PostgreSQL. JSONB podrá utilizarse en ese adaptador para metadatos flexibles, pero el modelo jugable transportable seguirá siendo relacional.
+Estos subcomandos de `tiamud-admin` no implementan respaldo PostgreSQL. El
+perfil PostgreSQL usa `pg_dump`/restore o el procedimiento nativo de respaldo
+físico y recuperación elegido por el operador, con ejercicios periódicos de
+restauración.
+
+No se hacen escrituras dobles ni replicación artesanal entre SQLite y
+PostgreSQL. La interfaz estrecha de persistencia y el adaptador PostgreSQL ya
+están implementados. Cada instalación tiene un único sistema autoritativo; el
+comando `tiamud-migrate-postgres` copia offline una instantánea SQLite actual a
+un destino PostgreSQL vacío. Los datos que el servidor consulta siguen siendo
+relacionales. Las instantáneas de personaje y mundo, que se cargan como una
+unidad y no se consultan ad hoc, son JSON acotado almacenado en columnas `TEXT`
+en ambos adaptadores; PostgreSQL no usa `jsonb` para ellas.
 
 ## 11. Cliente web
 
@@ -518,12 +552,20 @@ Se reutilizarán paquetes conocidos cuando encajen:
 - `Group`.
 - `Client.Media`.
 
+La implementación ya anuncia `Tiamud.Character 1` para proyectar de forma
+aditiva la ficha autorizada. La ficha ampliada reutiliza ese paquete existente;
+no crea un segundo paquete GMCP de personaje.
+
 El espacio de nombres propio se limitará inicialmente a:
 
 ```text
 Tiamud.Scene 1
 Tiamud.Assets 1
 ```
+
+La lista anterior conserva el alcance multimedia de la propuesta original; no
+pretende excluir el paquete `Tiamud.Character 1` ya implementado para estado
+jugable.
 
 MTTS será la fuente para ANSI, UTF-8, 256 colores, color verdadero y lector de pantalla. Solo capacidades no cubiertas, como un panel multimedia específico, necesitarán negociación propia.
 
@@ -682,6 +724,61 @@ El importador produce un informe de:
 - Codificaciones dudosas.
 - MOBPROG o guiones no compatibles.
 - Referencias a contenido cuya licencia no está declarada.
+
+### 16.1 Ficha, arquetipos, evolución y habilidades implementados
+
+El `gameplay` del WorldPack v2 admite de forma opcional un catálogo acotado de
+arquetipos, habilidades y repertorios de NPC. Que sean opcionales conserva los
+WorldPacks y personajes anteriores: cuando no existen, el runtime mantiene la
+ficha y la fórmula de nivel heredadas en vez de rechazar el mundo.
+
+Un arquetipo declara en datos:
+
+- atributos iniciales —con `max_health`, `strength` y `defence` como mínimo
+  interoperable— y estadísticas adicionales extensibles;
+- ranks iniciales de skills, pools de recursos, regeneración por tick y
+  resistencias;
+- habilidades iniciales; y
+- hitos contiguos de nivel 2 a 100 con umbral acumulado de XP, aumentos de
+  atributo, skill y capacidad de recurso, y desbloqueos.
+
+Una única definición de habilidad representa ataques, técnicas marciales,
+magia y acciones innatas de NPC. Declara costes, objetivo, cooldown, daño o
+curación escalable y estados temporales acotados. El dominio implementa daño
+`physical`, `arcane`, `fire`, `frost` y `lightning`, resistencia de 0 a 90 %,
+modificadores de atributo, regeneración, daño periódico y stun. La habilidad
+del jugador aplica además un cooldown global de un tick lógico.
+
+Los NPC reciben pools, regeneración, resistencias y una lista de habilidades
+desde WorldPack. En cada turno de combate eligen de forma determinista una
+opción utilizable mediante reglas acotadas y recurren al ataque básico cuando
+ninguna sirve. Esta “IA” de combate no usa un modelo generativo ni un servicio
+externo.
+
+El actor valida aprendizaje, objetivo, recursos, cooldowns, recuperación y
+capacidad de estados antes de confirmar. XP, nivel, ficha, recursos,
+habilidades, cooldowns, resistencias y estados activos forman parte del estado
+durable. Navegador y Telnet comparten esta ruta de dominio; el navegador ofrece
+ficha y controles accesibles, y el texto acepta `ability`, `skill` y `cast`.
+La [guía de autoría](world-authoring.md) contiene el esquema y los límites
+exactos; el contrato de navegador se conserva en
+[`tiamud.v1`](protocol/tiamud-v1.md).
+
+No existe todavía un sistema general de entrenamiento de skills. Su progresión
+configurable procede de los hitos authored; además, la victoria en combate
+conserva el incremento heredado actual del rank `combat`.
+
+Durante la creación web, el catálogo público muestra solo label y descripción
+del arquetipo. La ficha inicial completa se proyecta después de entrar. Una
+previsualización de atributos, recursos y habilidades antes de crear requiere
+ampliar el contrato y queda pendiente.
+
+Los IDs publicados de arquetipo, habilidad, recurso y estadística son identidad
+durable de contenido. Al restaurar, el runtime filtra estado efímero desconocido
+y elimina o ignora con seguridad habilidades aprendidas que ya no existen en el
+pack activo. Eliminar contenido falla así de forma segura, pero renombrarlo no
+es transparente: aliases y migraciones explícitas de esos IDs siguen siendo
+trabajo futuro.
 
 <a id="17-scripting"></a>
 
@@ -876,6 +973,15 @@ No forma parte del MVP. Si se experimenta posteriormente:
 
 Un fallo del proveedor de IA no puede ralentizar movimiento, combate, conversación ni guardado.
 
+### 19.4 Desarrollo asistido de forma transparente
+
+El proyecto utiliza asistencia de IA en algunas tareas de desarrollo,
+documentación, revisión editorial y creación visual. Esa asistencia se declara
+en los registros de entrega o procedencia cuando es material. Una propuesta de
+un modelo no constituye evidencia ni autoridad: una persona revisa el cambio y
+se aplican los mismos validadores, pruebas y criterios de aceptación. Ningún
+asistente de desarrollo es necesario para compilar, ejecutar o jugar Tiamud.
+
 ## 20. Audio y animación
 
 - Audio desactivado por defecto hasta que el usuario lo habilite.
@@ -895,8 +1001,9 @@ Un fallo del proveedor de IA no puede ralentizar movimiento, combate, conversaci
 - Autorización en cada acción.
 - Argon2id para contraseñas.
 - Claves de acceso como mejora futura.
-- Telnet TLS para credenciales en clientes compatibles.
-- Telnet sin cifrar sólo mediante activación expresa y con advertencia.
+- Telnet TLS directo para cualquier listener público con credenciales.
+- Telnet sin cifrar sólo mediante activación expresa, con advertencia y
+  enlazado a loopback o una LAN confiable; nunca como endpoint público.
 
 ### 21.2 Límites
 
@@ -968,7 +1075,9 @@ Apagado ordenado:
 
 No se implementará `copyover` tradicional.
 
-## 23. Repositorio propuesto
+## 23. Repositorio: propuesta histórica y realidad implementada
+
+El borrador inicial proponía esta separación conceptual:
 
 ```text
 apps/
@@ -1002,6 +1111,25 @@ docs/
 ```
 
 Podrá entregarse como un único comando `tiamud-server`; la separación del repositorio es modularidad de desarrollo, no microservicios.
+
+La disposición real consolidó esas fronteras en menos paquetes:
+
+```text
+apps/web/                    cliente Svelte
+crates/mud-core/             dominio y percepción
+crates/mud-server/           actor, adaptadores y servidor embebido
+crates/telnet-codec/         parser Telnet sans-I/O
+crates/persistence-*/        adaptadores SQLite y PostgreSQL
+crates/world-pack/           modelo y herramientas de mundo
+crates/{scripting,asset-pipeline,cell-frame,editorial-ai}/
+crates/tiamud-admin/         operación SQLite
+tools/envy-import/           importador histórico offline
+worlds/                      fuente y pack revisado de ejemplo
+```
+
+El binario de producción incluye el build web y el WorldPack revisado; un pack
+externo es opcional. Los registros estructurados salen por `stdout`/`stderr`
+para que el supervisor aplique rotación y retención, no a `data/logs/`.
 
 ## 24. Pruebas
 
@@ -1087,6 +1215,11 @@ Criterio:
 
 ### Fase 2 — Bucle jugable (6–8 semanas)
 
+> **Estado implementado posterior.** Este bucle incluye ahora arquetipos,
+> ficha, XP e hitos de nivel, recursos, técnicas y magia unificadas, cooldowns,
+> tipos de daño, resistencias, estados y selección determinista de habilidades
+> de NPC, además del fallback para contenido heredado.
+
 - Inventario y equipo.
 - Combate.
 - Habilidades y efectos.
@@ -1139,7 +1272,9 @@ Criterio:
 - Mejoras de incorporación de nuevos jugadores.
 - Refuerzo de seguridad.
 - Documentación para creadores y operadores.
-- Decisión basada en métricas sobre PostgreSQL, almacenamiento de objetos o separación de procesos.
+- PostgreSQL ya implementado y recomendado para servidores públicos nuevos en
+  un solo equipo; almacenamiento de objetos o separación de procesos siguen
+  sujetos a métricas.
 
 ## 26. Criterios globales de aceptación
 
@@ -1196,6 +1331,12 @@ El objetivo no es construir infraestructura para un MMO hipotético, sino hacer 
 
 Estas decisiones sustituyen cualquier alternativa contradictoria que permanezca en borradores anteriores:
 
+> La decisión 5 conserva el punto de partida histórico. El
+> [ADR 0006](decisions/0006-character-progression-and-postgresql-first.md) la
+> actualiza después de implementar y probar el adaptador PostgreSQL: PostgreSQL
+> pasa a ser la recomendación para servidores públicos nuevos, aunque SQLite
+> continúa como comportamiento sin configuración y fallback local/heredado.
+
 1. Se construirá Tiamud como motor nuevo en Rust, inspirado por EnvyMUD, Merc y otros MUD de su época, pero sin copiar sus implementaciones históricas.
 2. El producto dará prioridad al navegador y será completo mediante texto. WebSocket será el transporte principal del navegador; Telnet textual seguirá siendo jugable.
 3. El despliegue de referencia será un único proceso en un equipo corriente. Docker será opcional y Kubernetes, Redis, S3 y microservicios no formarán parte de v1.
@@ -1208,3 +1349,43 @@ Estas decisiones sustituyen cualquier alternativa contradictoria que permanezca 
 10. Las áreas históricas EnvyMUD/Merc legalmente utilizables servirán para ayudar a migrar contenido mediante el importador independiente sin conexión `envy-import`. WorldPack seguirá siendo el formato canónico de Tiamud.
 11. La reconexión pedirá una instantánea autoritativa; v1 no implementará reproducción general de comandos ni eventos.
 12. Las decisiones permanentes y el estado de implementación se conservarán dentro del repositorio, junto con esta especificación histórica versionada.
+
+## 30. Decisiones cerradas el 16 de julio de 2026
+
+1. La ficha de personaje, los arquetipos, la XP, los hitos de nivel, los pools
+   de recursos y los desbloqueos se expresan como WorldPack opcional y acotado;
+   los mundos antiguos conservan el comportamiento heredado.
+2. Técnicas marciales, magia y acciones innatas de NPC comparten una definición
+   de habilidad con costes, cooldown, objetivo, daño o curación y estados. Los
+   jugadores tienen un cooldown global de un tick lógico.
+3. Los tipos de daño y resistencias son reglas de dominio; los NPC eligen de
+   forma determinista entre habilidades utilizables y recurren al ataque básico.
+4. PostgreSQL es el perfil recomendado para una instalación pública nueva en un
+   solo equipo. SQLite sigue siendo el arranque sin servicios y la ruta
+   heredada. Solo se abre un backend y el cambio es offline, sin doble escritura.
+5. El despliegue continúa siendo un monolito modular Rust en un host corriente;
+   Kubernetes no es un requisito ni una capacidad que se dé por probada.
+6. AVIF continúa como formato preferente, con WebP y JPEG de respaldo. El texto
+   conserva toda información jugable cuando falla la multimedia.
+7. La IA editorial es ligera, opcional y fuera del juego. La asistencia de IA
+   durante el desarrollo se declara cuando es material y no sustituye revisión
+   humana, validación ni pruebas.
+8. PostgreSQL y SQLite son backends mutuamente exclusivos, sin doble escritura.
+   Los datos consultables son relacionales; las instantáneas JSON acotadas se
+   almacenan como `TEXT`, no `jsonb`. `tiamud-admin` respalda SQLite y PostgreSQL
+   usa sus herramientas nativas.
+9. La superficie Telnet pública requiere TLS directo. Plaintext solo se admite
+   mediante activación expresa en loopback o una LAN confiable.
+10. El catálogo web de creación muestra label y descripción; la ficha completa
+    llega tras entrar y la previsualización de stats iniciales queda pendiente.
+    `Tiamud.Character 1` es el paquete GMCP existente que proyecta la ficha
+    ampliada.
+11. Los IDs de contenido publicados son estables. La restauración filtra estado
+    efímero desconocido y habilidades retiradas, pero los renombres funcionales
+    aún necesitan aliases o una migración futura explícita.
+12. El actor no publica un handle listo hasta restaurar y reproducir su estado;
+    un snapshot inválido produce log estructurado y aborta el arranque antes de
+    abrir HTTP o Telnet.
+13. El checkpoint/rollback y la instantánea autoritativa de reconexión se
+    conservan. El dirty tracking de personajes y los deltas de tick quedan como
+    optimización single-host posterior, sin añadir otra autoridad ni servicios.

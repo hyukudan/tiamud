@@ -196,6 +196,47 @@ export interface PlayerCharacterSnapshot {
     remainingTicks: number;
   }>;
   recoveryInTicks?: number;
+  archetype?: {
+    id: string;
+    label: string;
+    description: string;
+  };
+  attributes: Array<{
+    id: string;
+    label: string;
+    value: number;
+  }>;
+  resistances: Array<{
+    damageType: 'physical' | 'arcane' | 'fire' | 'frost' | 'lightning';
+    percent: number;
+  }>;
+  statuses: Array<{
+    id: string;
+    label: string;
+    kind: 'attribute_modifier' | 'regeneration' | 'damage_over_time' | 'stun';
+    magnitude: number;
+    remainingTicks: number;
+  }>;
+  resources: Array<{
+    id: string;
+    label: string;
+    current: number;
+    max: number;
+  }>;
+  abilities: Array<{
+    id: string;
+    name: string;
+    description: string;
+    kind: 'martial' | 'spell' | 'utility';
+    resourceCosts: Array<{
+      resourceId: string;
+      label: string;
+      amount: number;
+    }>;
+    cooldownRemaining: number;
+    usable: boolean;
+    targeting: 'self' | 'optionalTarget' | 'explicitTarget';
+  }>;
 }
 
 export interface PlayerItemSnapshot {
@@ -309,6 +350,7 @@ export type ActionPerform = Envelope<
     requestId: string;
     action: string;
     target?: string;
+    abilityId?: string;
   }
 >;
 
@@ -341,6 +383,9 @@ const boundedString = (value: unknown, maximum: number): string | undefined => {
   return text && text.length <= maximum ? text : undefined;
 };
 
+const boundedPossiblyEmptyString = (value: unknown, maximum: number): string | undefined =>
+  typeof value === 'string' && value.length <= maximum ? value : undefined;
+
 const opaqueId = (value: unknown): string | undefined => {
   const id = stringOrUndefined(value);
   return id && /^o[0-9a-f]{16}$/.test(id) ? id : undefined;
@@ -349,6 +394,16 @@ const opaqueId = (value: unknown): string | undefined => {
 const contentId = (value: unknown): string | undefined => {
   const id = stringOrUndefined(value);
   return id && /^[a-z0-9][a-z0-9-]{0,63}$/.test(id) ? id : undefined;
+};
+
+const definitionId = (value: unknown): string | undefined => {
+  const id = stringOrUndefined(value);
+  return id && /^[a-z0-9](?:[a-z0-9_.:-]{0,126}[a-z0-9])?$/.test(id) ? id : undefined;
+};
+
+const statId = (value: unknown): string | undefined => {
+  const id = stringOrUndefined(value);
+  return id && /^[a-z0-9](?:[a-z0-9_.:-]{0,62}[a-z0-9])?$/.test(id) ? id : undefined;
 };
 
 const parseActions = (value: unknown): SceneAction[] | undefined => {
@@ -362,6 +417,147 @@ const parseActions = (value: unknown): SceneAction[] | undefined => {
     actions.push({ label, command });
   }
   return actions;
+};
+
+const parseCharacterProgression = (
+  character: Record<string, unknown>,
+): Pick<
+  PlayerCharacterSnapshot,
+  'archetype' | 'attributes' | 'resistances' | 'statuses' | 'resources' | 'abilities'
+> | undefined => {
+  let archetype: PlayerCharacterSnapshot['archetype'];
+  if (character.archetype !== undefined && character.archetype !== null) {
+    if (!isRecord(character.archetype) || !hasOnlyKeys(character.archetype, ['id', 'label', 'description'])) {
+      return undefined;
+    }
+    const id = definitionId(character.archetype.id);
+    const label = boundedString(character.archetype.label, 128);
+    const description = boundedPossiblyEmptyString(character.archetype.description, 2048);
+    if (!id || !label || description === undefined) return undefined;
+    archetype = { id, label, description };
+  }
+
+  const attributes: PlayerCharacterSnapshot['attributes'] = [];
+  const attributeIds = new Set<string>();
+  if (character.attributes !== undefined) {
+    if (!Array.isArray(character.attributes) || character.attributes.length > 64) return undefined;
+    for (const entry of character.attributes) {
+      if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'value'])) return undefined;
+      const id = statId(entry.id);
+      const label = boundedString(entry.label, 128);
+      const value = numberOrUndefined(entry.value);
+      if (!id || attributeIds.has(id) || !label || value === undefined || !Number.isSafeInteger(value) ||
+        value < -2_147_483_648 || value > 2_147_483_647) return undefined;
+      attributeIds.add(id);
+      attributes.push({ id, label, value });
+    }
+  }
+
+  const resistances: PlayerCharacterSnapshot['resistances'] = [];
+  const resistanceTypes = new Set<string>();
+  if (character.resistances !== undefined) {
+    if (!Array.isArray(character.resistances) || character.resistances.length > 16) return undefined;
+    for (const entry of character.resistances) {
+      if (!isRecord(entry) || !hasOnlyKeys(entry, ['damageType', 'percent'])) return undefined;
+      const damageType = definitionId(entry.damageType);
+      const percent = numberOrUndefined(entry.percent);
+      if (resistanceTypes.has(damageType ?? '') ||
+        (damageType !== 'physical' && damageType !== 'arcane' && damageType !== 'fire' &&
+        damageType !== 'frost' && damageType !== 'lightning') ||
+        percent === undefined || !Number.isSafeInteger(percent) || percent < 0 || percent > 90) return undefined;
+      resistanceTypes.add(damageType);
+      resistances.push({ damageType, percent });
+    }
+  }
+
+  const statuses: PlayerCharacterSnapshot['statuses'] = [];
+  if (character.statuses !== undefined) {
+    if (!Array.isArray(character.statuses) || character.statuses.length > 32) return undefined;
+    for (const entry of character.statuses) {
+      if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'kind', 'magnitude', 'remainingTicks'])) {
+        return undefined;
+      }
+      const id = definitionId(entry.id);
+      const label = boundedString(entry.label, 128);
+      const kind = entry.kind;
+      const magnitude = numberOrUndefined(entry.magnitude);
+      const remainingTicks = positiveIntegerOrUndefined(entry.remainingTicks);
+      if (!id || !label ||
+        (kind !== 'attribute_modifier' && kind !== 'regeneration' &&
+          kind !== 'damage_over_time' && kind !== 'stun') ||
+        magnitude === undefined || !Number.isSafeInteger(magnitude) || magnitude < -100_000 || magnitude > 100_000 ||
+        remainingTicks === undefined || remainingTicks > 10_000 ||
+        (kind === 'attribute_modifier' && magnitude === 0) ||
+        ((kind === 'regeneration' || kind === 'damage_over_time') && magnitude <= 0) ||
+        (kind === 'stun' && magnitude !== 0)) return undefined;
+      statuses.push({ id, label, kind, magnitude, remainingTicks });
+    }
+  }
+
+  const resources: PlayerCharacterSnapshot['resources'] = [];
+  const resourceIds = new Set<string>();
+  if (character.resources !== undefined) {
+    if (!Array.isArray(character.resources) || character.resources.length > 16) return undefined;
+    for (const entry of character.resources) {
+      if (!isRecord(entry) || !hasOnlyKeys(entry, ['id', 'label', 'current', 'max'])) return undefined;
+      const id = statId(entry.id);
+      const label = boundedString(entry.label, 128);
+      const current = nonNegativeIntegerOrUndefined(entry.current);
+      const max = positiveIntegerOrUndefined(entry.max);
+      if (!id || resourceIds.has(id) || !label || current === undefined || max === undefined ||
+        current > max || max > 1_000_000) return undefined;
+      resourceIds.add(id);
+      resources.push({ id, label, current, max });
+    }
+  }
+
+  const abilities: PlayerCharacterSnapshot['abilities'] = [];
+  const abilityIds = new Set<string>();
+  if (character.abilities !== undefined) {
+    if (!Array.isArray(character.abilities) || character.abilities.length > 64) return undefined;
+    for (const entry of character.abilities) {
+      if (!isRecord(entry) || !hasOnlyKeys(entry, [
+        'id', 'name', 'description', 'kind', 'resourceCosts',
+        'cooldownRemaining', 'usable', 'targeting',
+      ])) return undefined;
+      const id = definitionId(entry.id);
+      const name = boundedString(entry.name, 128);
+      const description = typeof entry.description === 'string' && entry.description.length <= 2048
+        ? entry.description
+        : undefined;
+      const kind = entry.kind;
+      const cooldownRemaining = nonNegativeIntegerOrUndefined(entry.cooldownRemaining);
+      const targeting = entry.targeting;
+      const rawCosts = entry.resourceCosts;
+      if (!Array.isArray(rawCosts) || rawCosts.length > 4) return undefined;
+      const resourceCosts: PlayerCharacterSnapshot['abilities'][number]['resourceCosts'] = [];
+      const costResourceIds = new Set<string>();
+      for (const rawCost of rawCosts) {
+        if (!isRecord(rawCost) || !hasOnlyKeys(rawCost, ['resourceId', 'label', 'amount'])) return undefined;
+        const resourceId = statId(rawCost.resourceId);
+        const label = boundedString(rawCost.label, 128);
+        const amount = positiveIntegerOrUndefined(rawCost.amount);
+        if (!resourceId || costResourceIds.has(resourceId) || !resourceIds.has(resourceId) || !label ||
+          amount === undefined || amount > 1_000_000) return undefined;
+        costResourceIds.add(resourceId);
+        resourceCosts.push({ resourceId, label, amount });
+      }
+      if (
+        !id || abilityIds.has(id) || !name || description === undefined ||
+        (kind !== 'martial' && kind !== 'spell' && kind !== 'utility') ||
+        cooldownRemaining === undefined || cooldownRemaining > 10_000 || typeof entry.usable !== 'boolean' ||
+        (targeting !== 'self' && targeting !== 'optionalTarget' && targeting !== 'explicitTarget')
+      ) return undefined;
+      abilityIds.add(id);
+      abilities.push({
+        id, name, description, kind, resourceCosts, cooldownRemaining, usable: entry.usable, targeting,
+      });
+    }
+  }
+
+  return {
+    ...(archetype ? { archetype } : {}), attributes, resistances, statuses, resources, abilities,
+  };
 };
 
 export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefined {
@@ -381,6 +577,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     !hasOnlyKeys(character, [
       'name', 'level', 'experience', 'nextLevelExperience', 'health', 'maxHealth',
       'strength', 'defence', 'skills', 'effects', 'recoveryInTicks',
+      'archetype', 'attributes', 'resistances', 'statuses', 'resources', 'abilities',
     ])
   ) return undefined;
   const name = boundedString(character.name, 64);
@@ -414,17 +611,21 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     effects.push({ kind, magnitude, remainingTicks });
   }
   const skills: PlayerCharacterSnapshot['skills'] = [];
+  const skillIds = new Set<string>();
   if (character.skills !== undefined) {
-    if (!Array.isArray(character.skills) || character.skills.length > 32) return undefined;
+    if (!Array.isArray(character.skills) || character.skills.length > 64) return undefined;
     for (const skill of character.skills) {
       if (!isRecord(skill) || !hasOnlyKeys(skill, ['id', 'label', 'rank'])) return undefined;
-      const id = contentId(skill.id);
+      const id = statId(skill.id);
       const label = boundedString(skill.label, 128);
       const rank = nonNegativeIntegerOrUndefined(skill.rank);
-      if (!id || !label || rank === undefined || rank > 100) return undefined;
+      if (!id || skillIds.has(id) || !label || rank === undefined || rank > 1_000) return undefined;
+      skillIds.add(id);
       skills.push({ id, label, rank });
     }
   }
+  const progression = parseCharacterProgression(character);
+  if (!progression) return undefined;
 
   if (!Array.isArray(value.inventory) || value.inventory.length > 256) return undefined;
   const inventory: PlayerItemSnapshot[] = [];
@@ -589,6 +790,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     character: {
       name, level, experience, nextLevelExperience, health, maxHealth, strength, defence, skills, effects,
       ...(recovery === undefined ? {} : { recoveryInTicks: recovery }),
+      ...progression,
     },
     inventory,
     equipment,
@@ -1188,6 +1390,23 @@ export function createActionPerform(
     v: PROTOCOL_VERSION,
     type: 'action.perform',
     data: { requestId, action, ...(target === undefined ? {} : { target }) },
+  };
+}
+
+export function createAbilityPerform(
+  abilityId: string,
+  target: string | undefined,
+  requestId: string,
+): ActionPerform {
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'action.perform',
+    data: {
+      requestId,
+      action: 'combat.ability',
+      abilityId,
+      ...(target === undefined ? {} : { target }),
+    },
   };
 }
 
