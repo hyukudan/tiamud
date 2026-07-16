@@ -142,6 +142,37 @@ sample-world policy debt. They do not bypass the bounded progression model,
 but should move to authored signals/rewards before the first stable content
 contract.
 
+## Social, parties, staff and loot
+
+The implemented social surface is deliberately small. `say` is room-local;
+`tell` reaches one connected character; `who`, `help`, ignore, block, reports,
+mute/ban and role assignment use the same bounded server policy across browser
+and Telnet. There is no party/global channel, `reply`, offline mail or authored
+telepathy.
+
+Parties persist create/invite/accept/leave/status state for at most six
+members and transfer leadership when the leader leaves. They do not yet
+implement party chat, kick/disband, follow/assist/rescue, general ally
+targeting, shared XP/quest credit or loot distribution.
+
+Account authority is independent from the character sheet. The current closed
+roles are Player, Moderator and Admin; they are explicitly assigned and can
+never be earned through XP, level, class or talents. Moderation commands and
+role changes are durable and audited. Lore ranks such as Angel, Demigod or God
+and general wizard commands are not implemented. Any future rank labels must
+remain presentation over granular capabilities, not the authorization model.
+
+Current item IDs describe unique durable objects with one authoritative
+location. NPCs own validated fixed loot IDs and transfer them on defeat. The
+engine has no reusable item-prototype/instance split, stacks, capacity/weight,
+containers, give/trade, rarity/item level, affixes or weighted loot tables.
+Repeatable rewards require durable instance identity and explicit loot rights
+before random selection is added. Paid loot boxes and premium-currency random
+rolls are outside the baseline.
+
+The audited continuation model and phased acceptance rules are in the Spanish
+[social, staff and loot roadmap](design/social-staff-and-loot-roadmap.md).
+
 ## Semantic scenes and media
 
 A scene is a perception-safe semantic projection. Prose and structured

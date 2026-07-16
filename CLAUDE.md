@@ -41,6 +41,13 @@ architectural decisions. `docs/spec-v0.2.md` is historical Spanish context;
   base/advanced class, global XP/level, class history, talent graphs, point
   pools, atomic promotion, abilities, resources, cooldowns, resistances and
   statuses across authoring, runtime, persistence, browser and Telnet.
+- Social gameplay is deliberately narrower than the word `chat`: room-local
+  `say`, online `tell`, basic six-member parties and durable moderation exist;
+  party chat, general channels, telepathy, immortal ranks/commands, item rarity
+  and random loot tables do not.
+- Account roles (`Player`, `Moderator`, `Admin`) are assigned authority, not
+  character progression. Future lore ranks must remain optional presentation
+  over auditable capabilities and never be earned through XP.
 - Optional sprite composition is technically wired end to end and
   perception-safe, including NPC attack/hit/defeat cues. The bundled world has
   no reviewed sample sprite set; player sprites, server heal cues and defeat
@@ -90,6 +97,9 @@ the badge because account billing can stop a GitHub job before any step runs.
   socket/recovery tests and relevant Playwright/Telnet/GMCP coverage.
 - For media changes, use the asset pipeline and content-addressed reviewed
   manifests. Missing or disabled media must leave gameplay unchanged.
+- For repeatable/random loot, introduce durable item instances and explicit
+  loot rights before tables or rarity. Do not add paid loot-box mechanics to
+  the baseline.
 
 ## Minimum verification menu
 

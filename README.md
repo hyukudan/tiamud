@@ -35,8 +35,9 @@ not part of the baseline.
 ## What works today
 
 - **Persistent multiplayer world:** accounts, characters, rooms, objects,
-  NPCs, equipment, combat, quests, parties, economy, chat, moderation, logical
-  time and weather.
+  NPCs, equipment, combat, quests, basic parties, economy, room-local `say`,
+  online `tell`, moderation, logical time and weather. Fixed NPC loot is
+  implemented; random loot tables are not.
 - **Data-driven characters:** WorldPack v3 defines lineages, optional
   backgrounds, base and advanced classes, one global XP curve, ranked talent
   graphs and atomic promotions. Attributes, skills, resources, resistances,
@@ -86,12 +87,14 @@ Four boundaries keep the engine flexible:
    not trusted shortcuts around gameplay rules.
 2. **One writer owns the world.** Bounded queues and durable checkpoints keep
    state ordering explicit; failed persistence restores the in-memory
-   checkpoint.
+   checkpoint. One bounded 256-entry mailbox per live session routes projected
+   updates directly by `SessionId`, avoiding broadcast receiver amplification
+   while preserving O(S) observer work.
 3. **Perception comes before protocol.** Hidden variants and stable world IDs
    remain server-side. Clients receive session-opaque view IDs and only what
    their character can perceive.
 4. **Presentation is replaceable.** Text is authoritative; browser imagery,
-   terminal colour and future scene composition are optional renderers over
+   terminal colour and optional bounded entity composition are renderers over
    the same semantic state.
 
 The browser contract is documented as experimental in
@@ -156,6 +159,7 @@ examples live in [`deploy/`](deploy/).
 | `TIAMUD_DB_PATH` | `data/tiamud.db` | SQLite path when no database URL is set |
 | `TIAMUD_DATABASE_URL` | — | PostgreSQL profile, or explicit `sqlite://` URL |
 | `TIAMUD_WORLD_PACK` | embedded pack | Reviewed external WorldPack |
+| `TIAMUD_TICK_MILLIS` | `1000` | Logical tick cadence for timers, cooldowns and statuses |
 | `RUST_LOG` | `tiamud_server=info,tower_http=info` | Structured log filter |
 
 `TIAMUD_DB_PATH` and `TIAMUD_DATABASE_URL` are mutually exclusive. The server
@@ -163,6 +167,7 @@ opens one persistence backend; moving a SQLite installation to PostgreSQL is
 an explicit offline operation, not replication. PostgreSQL keeps relational
 account, ownership and social data relational. Bounded application snapshots
 remain opaque JSON text because the server does not query their fields ad hoc.
+Both adapters currently use schema v8.
 
 Health is exposed as `/health/live` and `/health/ready`; `/metrics` provides
 Prometheus output on the same loopback-bound listener. The reference Caddy
@@ -210,14 +215,68 @@ final balance:
 | Advanced classes | Pathfinder, Bastion, Stormcaller, Spellblade |
 
 This avoids a hard-coded lineage × class matrix and keeps published content
-reviewable. WorldPack v2 and Envy/Merc inputs normalize at explicit offline
-boundaries; `archetype` is not a second runtime character identity. Stable
-published IDs remain the content-migration boundary for future releases.
+reviewable. WorldPack v2, AreaPack v1 and Envy/Merc inputs normalize at
+explicit offline boundaries; `archetype` is not a second runtime character
+identity. Stable published IDs remain the content-migration boundary for
+future releases.
 
 The detailed curve, requirements, grants and invariants live in
 [character progression v3](docs/design/character-progression-v3.md). The
 [WorldPack v3 authoring hub](docs/authoring/README.md) covers the current
 content workflow; the Spanish v2 guide is retained only for migration history.
+
+Skills do not train through general use. Permanent growth comes from authored
+creation, level, talent and promotion grants; the remaining combat-skill
+increment on NPC defeat is sample-world policy debt, not a general training
+system.
+
+## Social, staff and loot coverage
+
+Classic MUD names often conceal materially different systems. This table
+states the current boundary instead of using `chat`, `party`, `admin` or
+`loot` as blanket claims.
+
+| System | Available now | Not implemented yet | Direction |
+| --- | --- | --- | --- |
+| Conversation | Room-local `say`; private `tell` to a connected character; `who`, `help`, ignore, block and report; bounded direct delivery. | Party chat, `reply`, global/gossip/newbie/OOC/staff channels, spatial shout/yell, subscriptions, history and offline mail. `tell` is not an authored telepathy ability. | Add party chat and reply first, then opt-in moderated channels. Route every mode through the same bounded social policy and per-session mailboxes. |
+| Parties | Durable create, invite, accept, leave and status; at most six members; leader transfer on departure. | Kick/disband, invitation revocation, follow, assist/rescue, ally targeting, shared XP/quest credit, loot eligibility and distribution. | Complete party communication and leadership before adding group rewards. Make reward and loot policy deterministic and explicit. |
+| Staff authority | Separate account roles `Player`, `Moderator` and `Admin`; in-game report, mute/unmute, ban/unban and Admin-only role assignment with durable audit state. Roles are assigned, never earned through character XP. | Angel/demigod/god-style presentation ranks, fine-grained capabilities and safe world commands such as inspect, travel, transfer, restore or announce. Broad legacy commands such as `force` and `snoop` are deliberately not claimed. | Keep authorization capability-based and separate from progression. A world may present appointed ranks as Angel, Demigod, God or other lore without hard-coding those names into engine authority. Require reasons and immutable audit for actions affecting others. |
+| Items and inventory | Durable unique items, take/drop/use, three equipment slots, consumables and bounded effects. | Repeatable item instances, stacks, weight/capacity, containers, give/trade, durability, affixes, item level and rarity tiers. | Split authored item prototypes from durable instances before expanding inventory or generating rewards. Expose rarity textually, never by colour alone. |
+| Loot | An NPC owns a validated fixed list of unique item IDs and transfers those items on defeat. The persistent RNG is restart-safe. | Weighted loot tables, quantities, rarity rolls, ownership windows, party distribution, duplicate protection and random reward containers. | Add validated integer-weight tables only after instance identity and loot rights exist. Record every roll and creation atomically with the defeat. |
+| Community systems | Basic parties, social safety controls, quests, shops and coin. | Emotes/social verbs, guilds/clans, bulletin boards, player mail, auctions, crafting, housing, pets/mounts, duels/PvP and online world building. | Treat these as product candidates, not automatic requirements. Prioritize measured player and operator needs while preserving text completeness and one authoritative writer. |
+
+Future staff presentation must remain independent from ordinary advancement:
+
+```mermaid
+flowchart LR
+    accTitle: Separation between character progression and appointed staff authority
+    accDescr: Experience advances a playable character through levels, talents and classes. An administrator separately assigns bounded staff capabilities and an optional lore title; staff actions are audited and cannot be earned through play.
+
+    XP[Gameplay XP] --> Level[Character level]
+    Level --> Talents[Talents and class promotion]
+    Talents --> Play[Playable character power]
+
+    Appointment[Explicit admin appointment] --> Capabilities[Bounded staff capabilities]
+    Appointment --> Title[Optional lore title<br/>Angel, Demigod, God...]
+    Capabilities --> Actions[Authorized staff actions]
+    Actions --> Audit[(Durable audit record)]
+```
+
+Telepathy should therefore be an authored ability or communication mode with
+cost, range/perception and status rules—not a cosmetic alias that silently
+changes `tell`. It must still honor ignore, block, mute, rate limits and
+observer-safe delivery.
+
+Random treasure earned through play can fit Tiamud once item instances,
+ownership and transparent authored odds exist. Paid loot boxes, paid keys and
+premium-currency random rolls are outside the current Tiamud product baseline
+and would require a separate ethical, legal and product decision. This is a
+product boundary, not a restriction added by the open-source licenses.
+Fixed-price known cosmetics are a safer monetization boundary.
+
+The detailed Spanish audit, target data models, safety rules, Mermaid diagrams
+and phased acceptance criteria are in
+[the social, staff and loot roadmap](docs/design/social-staff-and-loot-roadmap.md).
 
 ## Scenes and media
 
@@ -263,8 +322,8 @@ cue and accessibility contract, and the
 
 ![Technical illustration of the three-room Lantern Square WorldPack, surrounded by media, perception, variant, script and content-test modules.](docs/images/tiamud-worldpack.webp)
 
-The runtime consumes one canonical versioned WorldPack. Authors may split a
-project into bounded `AreaPack` modules and compose them offline with declared
+The runtime consumes one canonical WorldPack v3. Authors may split a project
+into strict AreaPack v2 modules and compose them offline with declared
 dependencies, ownership and deterministic source/artifact digests.
 
 ```sh
@@ -358,6 +417,16 @@ bounded Telnet parser fuzzing. PostgreSQL integration tests require an explicit
 disposable database. Short load tests are not substitutes for the documented
 long soak profile; see [soak testing](docs/operations/soak-testing.md).
 
+The retained 2026-07-16 tree passed 409 locked Rust workspace tests, including
+158 focused server tests; 96 web unit tests in 16 files; and 28 combined
+Chromium/Firefox scenarios. Separate retained evidence covers a disposable
+[PostgreSQL 18.4 schema-v8 runtime and restart](docs/project/log/2026-07-16-postgresql-v8-acceptance.md),
+the official 30-second mixed WebSocket/real-Telnet profile and a pinned
+[3,081,428-execution production Telnet-parser fuzz campaign](docs/project/log/2026-07-16-fable-hardening-and-performance.md#continued-local-gate-evidence).
+These results bind the recorded tree; changes must rerun relevant gates.
+Current WebKit cannot launch on this host because its GTK/GStreamer/media
+libraries are absent, so no current WebKit pass is claimed.
+
 ## Project status
 
 Tiamud is a private, pre-release `0.1.0` project. The codebase implements the
@@ -369,7 +438,8 @@ The [completion matrix](docs/project/COMPLETION_MATRIX.md) is authoritative
 for acceptance evidence. Remaining external gates include:
 
 - a retained, verified 24-hour soak for the exact release candidate;
-- a manual pass with real screen-reader software;
+- a current WebKit pass on a supported host and a manual pass with real
+  screen-reader software;
 - a tagged release with independently verified OIDC provenance; and
 - trademark and domain review.
 
@@ -384,6 +454,15 @@ requirements (Spanish). Current design decisions live in
 
 ### Direction after the current baseline
 
+- Complete social parity: party chat, `reply`, opt-in moderated channels and
+  the missing party leadership/reward rules.
+- Introduce appointed, capability-based staff profiles and a deliberately
+  small audited command surface; keep character XP and staff authority
+  independent.
+- Split item prototypes from durable instances, then add bounded inventory
+  capacity, containers/trade, rarity and deterministic authored loot tables.
+- Add emotes, mail/boards, guilds, crafting, auctions or housing only after
+  their persistence, moderation and economy boundaries are designed.
 - Tune and expand the bundled lineage, class, talent and promotion catalog
   through playtests and stronger balance previews.
 - Publish a reviewed demonstration sprite set; consider player-avatar
@@ -391,8 +470,8 @@ requirements (Spanish). Current design decisions live in
   content justifies them.
 - Add content-ID aliases/migrations, pre-creation character previews and
   stronger progression/balance preview tooling.
-- Continue the designed hot-area lifecycle, ally targeting and party XP work
-  only after the simpler compatibility paths are stable.
+- Continue the designed hot-area lifecycle only after the simpler
+  compatibility paths and measured single-host scaling work are stable.
 - Publish the first explicit `tiamud.v1` compatibility milestone.
 
 ## Repository map
@@ -427,6 +506,7 @@ deploy/                      Caddy, systemd and environment examples
 - **Authoring:** [WorldPack v3 hub](docs/authoring/README.md) ·
   [character progression v3](docs/design/character-progression-v3.md) ·
   [scene compositor](docs/design/scene-compositor-v1.md) ·
+  [social/staff/loot roadmap](docs/design/social-staff-and-loot-roadmap.md) (Spanish) ·
   [assets](crates/asset-pipeline/README.md) ·
   [Lua](crates/scripting/README.md) ·
   [editorial AI](crates/editorial-ai/README.md) ·

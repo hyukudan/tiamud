@@ -101,9 +101,18 @@ ADR and update the matrix, memory and user-facing documentation together.
   abilities also observe the one-logical-tick global cooldown.
 - NPC ability choice is deterministic and rule based with a basic-attack
   fallback. Runtime generative AI is absent.
-- Items/equipment, combat, defeat/recovery, loot, logical time, weather,
-  quests, parties, economy, chat and moderation are persistent across both
-  backends.
+- Items/equipment, combat, defeat/recovery, fixed NPC loot, logical time,
+  weather, quests, basic parties, economy, room-local `say`, online `tell` and
+  moderation are persistent across both backends. Do not broaden those claims:
+  there is no party chat, channel system, telepathy ability, item rarity or
+  random loot table.
+- Parties currently support create/invite/accept/leave/status with at most six
+  members. They do not yet provide kick/disband, follow/assist/rescue, shared
+  XP/quest credit, loot rights or distribution.
+- Account authority is separate from character progression and currently has
+  only `Player`, `Moderator` and `Admin`. Moderation and Admin role assignment
+  are available in game and durable; there is no immortal rank ladder,
+  capability matrix or general wizard command surface.
 - General use-based training is not implemented. The remaining legacy
   post-defeat `combat` skill increment is sample-world policy debt, not a
   general training system.
@@ -217,10 +226,16 @@ Preserve all of these unless an accepted superseding ADR says otherwise:
    progression scripts, remote media and prose-derived gameplay are forbidden.
 8. Treat published content IDs as durable identity. Renames after a public v3
    release require explicit aliases/tombstones/migrations.
-9. Optimize only from evidence. The next known scaling path is dirty-character
+9. Keep future staff authority independent from XP, level, class and talents.
+   Prefer auditable capabilities with optional world-authored display titles;
+   do not encode Angel/Demigod/God labels as the authorization mechanism.
+10. Before repeatable or random loot, split authored item prototypes from
+    durable item instances and define atomic loot ownership/distribution. Paid
+    loot boxes, keys or premium-currency random rolls are outside the baseline.
+11. Optimize only from evidence. The next known scaling path is dirty-character
    tracking and additive tick deltas/coalescing, while preserving the current
    atomic runtime snapshot boundary.
-10. Do not claim current hot areas, public production, current WebKit coverage,
+12. Do not claim current hot areas, public production, current WebKit coverage,
     a manual screen-reader pass, a successful 24-hour soak, a public/tagged
     release or independently verified OIDC provenance.
 
@@ -387,6 +402,10 @@ Keep these visible in reviews, hand-offs and user-facing claims:
   tagged release or independently verified provenance bundle;
 - no general use-based training, content-ID migration framework, multiclassing,
   player scene sprite, server heal cue or defeat tombstone;
+- no party chat, reply/global channels, offline mail or authored telepathy;
+- no immortal rank/capability ladder or world-manipulation staff commands;
+- no item rarity/tier, repeatable instances, stacks/containers/trade or random
+  loot tables;
 - PostgreSQL production backup/TLS/monitoring/recovery remain operator-specific;
 - trademark/domain clearance and third-party redistribution review remain
   external legal work.
