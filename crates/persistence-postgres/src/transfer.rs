@@ -400,7 +400,9 @@ fn validate_runtime_snapshot(
     }
     let runtime_version =
         u32::try_from(snapshot_version).map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
-    tiamud_core::decode_world_runtime_snapshot(runtime_version, snapshot_json)
+    let snapshot = tiamud_core::decode_world_runtime_snapshot(runtime_version, snapshot_json)
+        .map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
+    tiamud_core::validate_world_runtime_snapshot_semantics(&snapshot)
         .map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
     Ok(())
 }
@@ -809,8 +811,49 @@ mod tests {
             Err(TransferError::InvalidRuntimeSnapshot)
         ));
 
+        let mut zero_next_trade = tiamud_core::World::demo().runtime_snapshot();
+        zero_next_trade.next_trade_id = tiamud_core::TradeId(0);
+        let json = serde_json::to_string(&zero_next_trade).unwrap();
+        serde_json::from_str::<tiamud_core::WorldRuntimeSnapshot>(&json).unwrap();
+        assert!(matches!(
+            validate_runtime_snapshot(5, &json),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+
+        let mut invalid_offer = tiamud_core::World::demo().runtime_snapshot();
+        let trade_id = tiamud_core::TradeId(1);
+        let requester = tiamud_core::CharacterId(71);
+        invalid_offer.next_trade_id = tiamud_core::TradeId(2);
+        invalid_offer.trades.insert(
+            trade_id,
+            tiamud_core::TradeSnapshot {
+                id: trade_id,
+                requester,
+                recipient: tiamud_core::CharacterId(72),
+                room_id: "demo:lantern-square".into(),
+                phase: tiamud_core::TradePhase::Requested,
+                created_tick: invalid_offer.logical_tick,
+                opened_tick: None,
+                expires_at_tick: invalid_offer.logical_tick + tiamud_core::TRADE_REQUEST_TICKS,
+                state_revision: 1,
+                offers: std::collections::BTreeMap::from([(
+                    requester,
+                    tiamud_core::TradeOffer::default(),
+                )]),
+                confirmations: std::collections::BTreeMap::new(),
+            },
+        );
+        let json = serde_json::to_string(&invalid_offer).unwrap();
+        serde_json::from_str::<tiamud_core::WorldRuntimeSnapshot>(&json).unwrap();
+        assert!(matches!(
+            validate_runtime_snapshot(5, &json),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+
         let mut v3 = serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
         v3["snapshotVersion"] = serde_json::json!(3);
+        v3.as_object_mut().unwrap().remove("nextTradeId");
+        v3.as_object_mut().unwrap().remove("trades");
         for item in v3["itemInstances"].as_object_mut().unwrap().values_mut() {
             item.as_object_mut().unwrap().remove("binding");
         }
@@ -818,6 +861,17 @@ mod tests {
         validate_runtime_snapshot(3, &v3_json).unwrap();
         assert!(matches!(
             validate_runtime_snapshot(4, &v3_json),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+
+        let mut v4 = serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
+        v4["snapshotVersion"] = serde_json::json!(4);
+        v4.as_object_mut().unwrap().remove("nextTradeId");
+        v4.as_object_mut().unwrap().remove("trades");
+        validate_runtime_snapshot(4, &v4.to_string()).unwrap();
+        v4["trades"] = serde_json::json!({});
+        assert!(matches!(
+            validate_runtime_snapshot(4, &v4.to_string()),
             Err(TransferError::InvalidRuntimeSnapshot)
         ));
 

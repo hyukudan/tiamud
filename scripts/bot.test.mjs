@@ -83,6 +83,9 @@ function inventoryPatch(overrides = {}) {
       revision: 2,
       inventory: [sceneItem({
         canGive: true,
+        availableQuantity: 1,
+        reservedForTrade: 0,
+        canTrade: true,
         actions: [{ label: 'Drop', command: `drop ${OPAQUE_ITEM}` }],
       })],
       equipment: [{
@@ -159,7 +162,10 @@ function playerSnapshot(characterOverrides = {}) {
       },
       quests: [],
       partyInvites: [],
-      economy: { coins: 0, commodities: [], shopAvailable: false, shop: [] },
+      economy: {
+        coins: 0, reservedCoins: 0, spendableCoins: 0,
+        commodities: [], shopAvailable: false, shop: [],
+      },
       social: { online: [] },
     },
   };
@@ -206,6 +212,36 @@ test('strict bot accepts opaque itemGiven projections without durable ownership'
     ...event,
     ownerCharacterId: 42,
   }));
+});
+
+test('strict bot accepts exactly the four camelCase trade ViewEvent kinds', () => {
+  for (const [index, kind] of [
+    'tradeRequested',
+    'tradeChanged',
+    'tradeCompleted',
+    'tradeCancelled',
+  ].entries()) {
+    assert.equal(parseEnvelope('message.append', {
+      revision: 20 + index,
+      kind,
+      text: `Perception-safe ${kind} event.`,
+      actorId: OPAQUE_ACTOR,
+      targetId: OPAQUE_TARGET,
+    }).data.kind, kind);
+  }
+  for (const kind of [
+    'TradeRequested',
+    'trade_requested',
+    'tradeComplete',
+    'tradeUnknown',
+  ]) {
+    assert.throws(() => parseEnvelope('message.append', {
+      revision: 30,
+      kind,
+      text: 'Unknown trade event.',
+      actorId: OPAQUE_ACTOR,
+    }), /Unknown message\.append kind/);
+  }
 });
 
 test('strict bot accepts bounded entity presentation and scene audio without weakening secrecy', () => {
@@ -416,6 +452,9 @@ test('strict bot validates paginated container summaries without durable ids or 
     items: [sceneItem({
       description: undefined,
       canGive: false,
+      availableQuantity: 3,
+      reservedForTrade: 0,
+      canTrade: false,
       quantity: 3,
       totalWeightGrams: 2_400,
       actions: [{
@@ -441,6 +480,63 @@ test('strict bot validates paginated container summaries without durable ids or 
     ...data,
     prototypeId: 'tiamud:archive-satchel',
   }), /unknown keys: prototypeId/);
+});
+
+test('strict bot validates private confirmed-trade state and paginated offered contents', () => {
+  const player = playerSnapshot();
+  player.data.economy = {
+    ...player.data.economy,
+    coins: 20,
+    reservedCoins: 4,
+    spendableCoins: 16,
+  };
+  player.data.trade = {
+    id: 'o0000000000000030',
+    phase: 'negotiating',
+    counterparty: OPAQUE_TARGET,
+    expiresInTicks: 90,
+    stateRevision: 3,
+    ownConfirmed: false,
+    counterpartyConfirmed: true,
+    ownOffer: { coins: 4, lines: [] },
+    counterpartyOffer: {
+      coins: 0,
+      lines: [{ target: OPAQUE_ITEM, label: 'blue lantern', quantity: 1, container: false }],
+    },
+    canAccept: false,
+    canConfirm: true,
+  };
+  assert.equal(parseServerMessage(JSON.stringify(player)).data.trade.stateRevision, 3);
+  assert.throws(() => parseServerMessage(JSON.stringify({
+    ...player,
+    data: { ...player.data, trade: { ...player.data.trade, basisSha256: 'secret' } },
+  })), /unknown keys: basisSha256/);
+  assert.throws(() => parseServerMessage(JSON.stringify({
+    ...player,
+    data: {
+      ...player.data,
+      economy: { ...player.data.economy, spendableCoins: 17 },
+    },
+  })));
+
+  const item = sceneItem({
+    description: undefined,
+    canGive: false,
+    availableQuantity: 0,
+    reservedForTrade: 1,
+    canTrade: false,
+    actions: [],
+  });
+  const contents = {
+    tradeId: player.data.trade.id,
+    container: OPAQUE_EQUIPMENT,
+    items: [item],
+    page: 1,
+    totalPages: 1,
+    capacity: { usedSlots: 1, maxSlots: 8, usedWeightGrams: 800, maxWeightGrams: 5_000 },
+  };
+  assert.equal(parseEnvelope('trade.contents', contents).data.tradeId, player.data.trade.id);
+  assert.throws(() => parseEnvelope('trade.contents', { ...contents, ownerId: 42 }));
 });
 
 test('strict bot accepts the current v3 character projection and fails closed', () => {

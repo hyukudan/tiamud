@@ -7,11 +7,13 @@
     PlayerItemSnapshot,
     PlayerStateSnapshot,
     SceneAction,
+    TradeContentsData,
   } from '../lib/protocol';
 
   interface Props {
     value?: PlayerStateSnapshot;
     containerContents?: ContainerContentsData;
+    tradeContents?: TradeContentsData;
     abilityTargets?: Array<{ id: string; label: string }>;
     oncommand: (command: string) => void;
     onaction: (action: string, fields: ActionPerformFields | undefined, label: string) => void;
@@ -21,7 +23,8 @@
   }
 
   let {
-    value, containerContents, abilityTargets = [], oncommand, onaction, onability, onpromote, ontalent,
+    value, containerContents, tradeContents, abilityTargets = [],
+    oncommand, onaction, onability, onpromote, ontalent,
   }: Props = $props();
   let socialTarget = $state('');
   let chatText = $state('');
@@ -34,12 +37,25 @@
   let itemQuantity = $state(1);
   let destinationContainer = $state('');
   let giveRecipient = $state('');
+  let tradeRecipient = $state('');
+  let tradeCoins = $state(0);
+  let tradeOfferQuantity = $state(1);
+  let lastTradeRevision = $state(0);
   const carriedContainers = $derived(value?.inventory.filter((item) => item.containerCapacity) ?? []);
   const nearbyRecipients = $derived(
     value?.social.online.filter((character) => character.nearby && !character.selfCharacter) ?? [],
   );
   const giveRecipientIsNearby = $derived(
     nearbyRecipients.some((character) => character.id === giveRecipient),
+  );
+  const tradeRecipientIsNearby = $derived(
+    nearbyRecipients.some((character) => character.id === tradeRecipient),
+  );
+  const tradeCounterpartyName = $derived(
+    value?.trade
+      ? (value.social.online.find((character) => character.id === value?.trade?.counterparty)?.name ??
+        'Nearby adventurer')
+      : '',
   );
   const additionalAttributes = $derived(
     value?.character.attributes.filter((attribute) => attribute.id !== 'strength' && attribute.id !== 'defence') ?? [],
@@ -98,6 +114,83 @@
 
   function boundedItemQuantity(maximum: number): number {
     return Math.max(1, Math.min(256, maximum, Math.trunc(itemQuantity) || 1));
+  }
+
+  function boundedTradeQuantity(maximum: number): number {
+    return Math.max(1, Math.min(128, maximum, Math.trunc(tradeOfferQuantity) || 1));
+  }
+
+  $effect(() => {
+    const trade = value?.trade;
+    if (trade && trade.stateRevision !== lastTradeRevision) {
+      lastTradeRevision = trade.stateRevision;
+      tradeCoins = trade.ownOffer.coins;
+    } else if (!trade) {
+      lastTradeRevision = 0;
+      tradeCoins = 0;
+    }
+  });
+
+  function requestTrade(): void {
+    if (!tradeRecipientIsNearby) return;
+    const recipient = nearbyRecipients.find((character) => character.id === tradeRecipient);
+    if (!recipient) return;
+    onaction('trade.request', { recipient: recipient.id }, `trade request ${recipient.name}`);
+  }
+
+  function tradeAction(action: 'accept' | 'decline' | 'status' | 'cancel'): void {
+    const trade = value?.trade;
+    if (!trade) return;
+    onaction(`trade.${action}`, { tradeId: trade.id }, `trade ${action}`);
+  }
+
+  function setTradeCoins(): void {
+    const trade = value?.trade;
+    if (!trade) return;
+    const coins = Math.max(0, Math.min(
+      1_000_000_000,
+      value?.economy.coins ?? 0,
+      Math.trunc(tradeCoins) || 0,
+    ));
+    tradeCoins = coins;
+    onaction('trade.coins.set', { tradeId: trade.id, coins }, `offer ${coins} coins`);
+  }
+
+  function offerTradeItem(item: PlayerItemSnapshot): void {
+    const trade = value?.trade;
+    if (!trade || !item.canTrade || item.availableQuantity === 0) return;
+    const quantity = boundedTradeQuantity(item.availableQuantity);
+    onaction(
+      'trade.item.set',
+      { tradeId: trade.id, target: item.id, quantity },
+      `offer ${quantity} ${item.label}`,
+    );
+  }
+
+  function removeTradeItem(target: string, label: string): void {
+    const trade = value?.trade;
+    if (!trade) return;
+    onaction('trade.item.remove', { tradeId: trade.id, target }, `remove ${label} from trade`);
+  }
+
+  function inspectTradeContainer(target: string, page = 1): void {
+    const trade = value?.trade;
+    if (!trade) return;
+    onaction(
+      'trade.contents',
+      { tradeId: trade.id, target, page },
+      `trade contents page ${page}`,
+    );
+  }
+
+  function confirmTrade(): void {
+    const trade = value?.trade;
+    if (!trade || !trade.canConfirm) return;
+    onaction(
+      'trade.confirm',
+      { tradeId: trade.id, stateRevision: trade.stateRevision },
+      `trade confirm revision ${trade.stateRevision}`,
+    );
   }
 
   function putItem(item: PlayerItemSnapshot): void {
@@ -498,6 +591,12 @@
             Quantity (maximum 256)
             <input type="number" min="1" max="256" step="1" bind:value={itemQuantity} />
           </label>
+          {#if value.trade?.phase === 'negotiating'}
+            <label>
+              Trade quantity (maximum 128)
+              <input type="number" min="1" max="128" step="1" bind:value={tradeOfferQuantity} />
+            </label>
+          {/if}
           {#if carriedContainers.length > 0}
             <label>
               Destination container
@@ -532,6 +631,9 @@
                 <div>
                   <strong>{item.label} ×{item.quantity}</strong>
                   <p>
+                    Available {item.availableQuantity} · reserved for trade {item.reservedForTrade}
+                  </p>
+                  <p>
                     {item.rarity} · level {item.itemLevel} ·
                     {transferPolicyLabel(item)} ·
                     {(item.weightGrams / 1000).toFixed(1)} kg each ·
@@ -557,6 +659,9 @@
                       disabled={!giveRecipientIsNearby}
                       onclick={() => giveItem(item)}
                     >Give</button>
+                  {/if}
+                  {#if value.trade?.phase === 'negotiating' && item.canTrade}
+                    <button type="button" onclick={() => offerTradeItem(item)}>Offer in trade</button>
                   {/if}
                   {#if item.containerCapacity && !item.actions.some((action) => action.command.startsWith('contents '))}
                     <button type="button" onclick={() => openContainer(item.id)}>Contents</button>
@@ -650,6 +755,185 @@
               >Next</button>
             </div>
           </section>
+        {/if}
+      </div>
+    </details>
+
+    <details class="dashboard-panel" open={Boolean(value.trade)}>
+      <summary>
+        Confirmed trade
+        <span>{value.trade ? `${value.trade.expiresInTicks} ticks left` : 'No active trade'}</span>
+      </summary>
+      <div class="panel-body">
+        {#if !value.trade}
+          <p class="empty-copy">
+            Start a private exchange with one nearby adventurer. Nothing moves until both sides
+            confirm the same revision.
+          </p>
+          {#if nearbyRecipients.length > 0}
+            <label for="trade-recipient">Nearby adventurer</label>
+            <select id="trade-recipient" bind:value={tradeRecipient}>
+              <option value="">Choose a character</option>
+              {#each nearbyRecipients as character (character.id)}
+                <option value={character.id}>{character.name}</option>
+              {/each}
+            </select>
+            <button type="button" disabled={!tradeRecipientIsNearby} onclick={requestTrade}>
+              Request trade
+            </button>
+          {:else}
+            <p>No other connected character is nearby.</p>
+          {/if}
+        {:else if value.trade.phase === 'requested'}
+          <h3>Trade request with {tradeCounterpartyName}</h3>
+          <p role="status">This request expires in {value.trade.expiresInTicks} world ticks.</p>
+          <div class="dashboard-actions">
+            {#if value.trade.canAccept}
+              <button type="button" onclick={() => tradeAction('accept')}>Accept and negotiate</button>
+              <button type="button" onclick={() => tradeAction('decline')}>Decline</button>
+            {:else}
+              <button type="button" onclick={() => tradeAction('cancel')}>Cancel request</button>
+            {/if}
+            <button type="button" onclick={() => tradeAction('status')}>Refresh status</button>
+          </div>
+        {:else}
+          <div class="panel-heading-row">
+            <div>
+              <h3>Exchange with {tradeCounterpartyName}</h3>
+              <p>
+                Revision {value.trade.stateRevision} · {value.trade.expiresInTicks} ticks left
+              </p>
+            </div>
+            <button type="button" onclick={() => tradeAction('status')}>Refresh status</button>
+          </div>
+
+          <div class="field-grid">
+            <section aria-labelledby="own-trade-offer">
+              <h4 id="own-trade-offer">Your offer</h4>
+              <p>
+                {value.trade.ownOffer.coins} coins ·
+                {value.trade.ownConfirmed ? 'confirmed' : 'not confirmed'}
+              </p>
+              {#if value.trade.ownOffer.lines.length === 0}
+                <p class="empty-copy">No items offered.</p>
+              {:else}
+                <ul class="dashboard-list">
+                  {#each value.trade.ownOffer.lines as line (line.target)}
+                    <li>
+                      <span><strong>{line.label}</strong> ×{line.quantity}</span>
+                      <div class="dashboard-actions">
+                        {#if line.container}
+                          <button type="button" onclick={() => inspectTradeContainer(line.target)}>
+                            Inspect contents
+                          </button>
+                        {/if}
+                        <button type="button" onclick={() => removeTradeItem(line.target, line.label)}>
+                          Remove
+                        </button>
+                      </div>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </section>
+            <section aria-labelledby="counterparty-trade-offer">
+              <h4 id="counterparty-trade-offer">{tradeCounterpartyName}'s offer</h4>
+              <p>
+                {value.trade.counterpartyOffer.coins} coins ·
+                {value.trade.counterpartyConfirmed ? 'confirmed' : 'not confirmed'}
+              </p>
+              {#if value.trade.counterpartyOffer.lines.length === 0}
+                <p class="empty-copy">No items offered.</p>
+              {:else}
+                <ul class="dashboard-list">
+                  {#each value.trade.counterpartyOffer.lines as line (line.target)}
+                    <li>
+                      <span><strong>{line.label}</strong> ×{line.quantity}</span>
+                      {#if line.container}
+                        <div class="dashboard-actions">
+                          <button type="button" onclick={() => inspectTradeContainer(line.target)}>
+                            Inspect offered contents
+                          </button>
+                        </div>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </section>
+          </div>
+
+          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); setTradeCoins(); }}>
+            <label for="trade-coins">
+              Coins to offer (spendable now: {value.economy.spendableCoins})
+            </label>
+            <div>
+              <input
+                id="trade-coins"
+                type="number"
+                min="0"
+                max={Math.min(1_000_000_000, value.economy.coins)}
+                step="1"
+                bind:value={tradeCoins}
+              />
+              <button type="submit">Set coin offer</button>
+            </div>
+          </form>
+
+          <aside class="notice" aria-labelledby="trade-confirmation-warning">
+            <h4 id="trade-confirmation-warning">Review before confirming</h4>
+            <p>
+              Confirming approves revision {value.trade.stateRevision} only. Any change to items,
+              coins, inventory or capacity clears both confirmations. The exchange completes only
+              after the other participant confirms that same revision.
+            </p>
+          </aside>
+          <div class="dashboard-actions">
+            <button
+              type="button"
+              disabled={!value.trade.canConfirm || value.trade.ownConfirmed}
+              onclick={confirmTrade}
+            >Confirm revision {value.trade.stateRevision}</button>
+            <button type="button" onclick={() => tradeAction('cancel')}>Cancel trade</button>
+          </div>
+
+          {#if tradeContents && tradeContents.tradeId === value.trade.id}
+            <section aria-labelledby="trade-contents-title">
+              <h4 id="trade-contents-title">Offered container contents</h4>
+              <p>
+                Page {tradeContents.page} of {tradeContents.totalPages} ·
+                {tradeContents.capacity.usedSlots}/{tradeContents.capacity.maxSlots} slots ·
+                {(tradeContents.capacity.usedWeightGrams / 1000).toFixed(1)}/
+                {(tradeContents.capacity.maxWeightGrams / 1000).toFixed(1)} kg
+              </p>
+              {#if tradeContents.items.length === 0}
+                <p class="empty-copy">This offered container is empty.</p>
+              {:else}
+                <ul class="dashboard-list">
+                  {#each tradeContents.items as item (item.id)}
+                    <li>
+                      <span>
+                        <strong>{item.label}</strong> ×{item.quantity} · {item.rarity} ·
+                        {(item.totalWeightGrams / 1000).toFixed(1)} kg total
+                      </span>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              <div class="dashboard-actions" aria-label="Offered container pages">
+                <button
+                  type="button"
+                  disabled={tradeContents.page <= 1}
+                  onclick={() => inspectTradeContainer(tradeContents.container, tradeContents.page - 1)}
+                >Previous</button>
+                <button
+                  type="button"
+                  disabled={tradeContents.page >= tradeContents.totalPages}
+                  onclick={() => inspectTradeContainer(tradeContents.container, tradeContents.page + 1)}
+                >Next</button>
+              </div>
+            </section>
+          {/if}
         {/if}
       </div>
     </details>
@@ -752,9 +1036,13 @@
     </details>
 
     <details class="dashboard-panel">
-      <summary>Coin and market <span>{value.economy.coins} coin</span></summary>
+      <summary>Coin and market <span>{value.economy.spendableCoins} spendable</span></summary>
       <div class="panel-body">
-        <p class="balance"><strong>{value.economy.coins}</strong> coin</p>
+        <p class="balance"><strong>{value.economy.coins}</strong> coin total</p>
+        <p>
+          {value.economy.reservedCoins} reserved for trade ·
+          {value.economy.spendableCoins} spendable
+        </p>
         {#if value.economy.commodities.length > 0}
           <ul class="compact-list" aria-label="Owned market goods">
             {#each value.economy.commodities as commodity (commodity.id)}

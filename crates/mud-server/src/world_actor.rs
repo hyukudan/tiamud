@@ -1,13 +1,16 @@
 use crate::{
     auth::AuthenticatedSession,
     delivery::{DeliveryInbox, DeliveryRouter},
-    persistence::{CharacterStore, DurableCharacterGameplay, StaffAccess, StoreError},
+    persistence::{
+        CharacterStore, DurableCharacterGameplay, StaffAccess, StartupGameplayLoadLimits,
+        StoreError,
+    },
     runtime_content::{RuntimeContent, ScenePresentation},
     social::{SocialChannel, SocialMessage, SocialRuntime, apply_social},
     staff::{apply_staff, derived_role},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -16,7 +19,8 @@ use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, AdventureEvent, BackgroundSelection,
     CharacterCreationCatalogView, CharacterGameplaySnapshot, CharacterId, CharacterSnapshot,
     ContainerContentsView, DomainEvent, GameplayEvent, PlayerAction, PlayerStateView, SceneView,
-    SessionId, ViewEvent, World, WorldError as CoreWorldError,
+    SessionId, TradeAction, TradeCancellationReason, TradeContentsView, ViewEvent, World,
+    WorldCheckpoint, WorldError as CoreWorldError,
 };
 use tiamud_scripting::ScriptHook;
 use tokio::sync::{mpsc, oneshot};
@@ -38,6 +42,8 @@ pub enum GameError {
     CharacterContentIncompatible,
     #[error("that item transfer is not available")]
     GiveUnavailable,
+    #[error("that trade is not available")]
+    TradeUnavailable,
     #[error("world actor startup failed during {stage}: {reason}")]
     Startup { stage: &'static str, reason: String },
 }
@@ -67,6 +73,7 @@ pub struct AppliedAction {
     pub player: PlayerStateView,
     pub output: Option<String>,
     pub container_contents: Option<ContainerContentsView>,
+    pub trade_contents: Option<TradeContentsView>,
     pub events: Vec<ProjectedViewEvent>,
 }
 
@@ -259,12 +266,17 @@ impl WorldHandle {
             if let Err(error) = startup {
                 return report_startup_failure(startup_reply, error);
             }
-            let runtime_owner_ids = world
-                .runtime_item_owner_ids()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let durable_gameplay = match actor_store
-                .load_character_gameplay_batch(runtime_owner_ids)
+            let runtime_owner_ids = world.runtime_item_owner_ids();
+            let trade_participant_ids = world.trade_participants();
+            let extra_trade_participant_ids = trade_participant_ids
+                .difference(&runtime_owner_ids)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let durable_owner_gameplay = match actor_store
+                .load_character_gameplay_batch(
+                    runtime_owner_ids.iter().copied().collect(),
+                    StartupGameplayLoadLimits::ITEM_OWNERS,
+                )
                 .await
             {
                 Ok(aggregates) => aggregates,
@@ -278,7 +290,29 @@ impl WorldHandle {
                     );
                 }
             };
-            if let Err(error) = validate_startup_character_aggregates(&world, durable_gameplay) {
+            let durable_trade_gameplay = match actor_store
+                .load_character_gameplay_batch(
+                    extra_trade_participant_ids.iter().copied().collect(),
+                    StartupGameplayLoadLimits::TRADE_PARTICIPANTS,
+                )
+                .await
+            {
+                Ok(aggregates) => aggregates,
+                Err(error) => {
+                    return report_startup_failure(
+                        startup_reply,
+                        GameError::Startup {
+                            stage: "load_trade_participant_aggregates",
+                            reason: error.to_string(),
+                        },
+                    );
+                }
+            };
+            if let Err(error) = validate_startup_character_aggregates(
+                &world,
+                &runtime_owner_ids,
+                &durable_owner_gameplay,
+            ) {
                 return report_startup_failure(
                     startup_reply,
                     GameError::Startup {
@@ -287,6 +321,85 @@ impl WorldHandle {
                     },
                 );
             }
+            if let Err(error) = validate_startup_character_aggregates(
+                &world,
+                &extra_trade_participant_ids,
+                &durable_trade_gameplay,
+            ) {
+                return report_startup_failure(
+                    startup_reply,
+                    GameError::Startup {
+                        stage: "validate_trade_participant_aggregates",
+                        reason: error.to_string(),
+                    },
+                );
+            }
+            let startup_gameplay = durable_owner_gameplay
+                .iter()
+                .chain(&durable_trade_gameplay)
+                .map(|aggregate| (aggregate.character_id, aggregate.gameplay.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let trade_gameplay = trade_participant_ids
+                .iter()
+                .filter_map(|character_id| {
+                    startup_gameplay
+                        .get(character_id)
+                        .cloned()
+                        .map(|gameplay| (*character_id, gameplay))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let trade_validation = if trade_gameplay.len() != trade_participant_ids.len() {
+                Err("one or more trade participant aggregates are absent".to_owned())
+            } else {
+                world
+                    .validate_trade_participant_gameplay(&trade_gameplay)
+                    .map_err(|error| error.to_string())
+            };
+            if let Err(reason) = trade_validation {
+                return report_startup_failure(
+                    startup_reply,
+                    GameError::Startup {
+                        stage: "validate_restored_trades",
+                        reason,
+                    },
+                );
+            }
+            if !trade_participant_ids.is_empty() {
+                let checkpoint = world.checkpoint();
+                let events = match world.cancel_all_trades(TradeCancellationReason::Restart) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        world.restore_checkpoint(checkpoint);
+                        return report_startup_failure(
+                            startup_reply,
+                            GameError::Startup {
+                                stage: "cancel_restored_trades",
+                                reason: error.to_string(),
+                            },
+                        );
+                    }
+                };
+                if let Err(error) = actor_store
+                    .commit_action(Vec::new(), world.runtime_snapshot(), events)
+                    .await
+                {
+                    world.restore_checkpoint(checkpoint);
+                    return report_startup_failure(
+                        startup_reply,
+                        GameError::Startup {
+                            stage: "commit_restored_trade_cleanup",
+                            reason: error.to_string(),
+                        },
+                    );
+                }
+            }
+            drop(trade_gameplay);
+            drop(startup_gameplay);
+            drop(durable_trade_gameplay);
+            drop(durable_owner_gameplay);
+            drop(extra_trade_participant_ids);
+            drop(trade_participant_ids);
+            drop(runtime_owner_ids);
             if startup_reply.send(Ok(())).is_err() {
                 error!(
                     stage = "startup_barrier",
@@ -388,6 +501,47 @@ impl WorldHandle {
                             deliveries: actor_delivery.register(session),
                         });
                         if let Err(Ok(entered)) = reply.send(result) {
+                            let checkpoint = world.checkpoint();
+                            let cancellation = world
+                                .character_snapshot(entered.session_id)
+                                .map_err(GameError::from)
+                                .and_then(|character| {
+                                    world
+                                        .cancel_trade_for_character(
+                                            character.id,
+                                            TradeCancellationReason::ParticipantDisconnected,
+                                        )
+                                        .map_err(GameError::from)
+                                });
+                            let committed = if let Ok(mut cancellation_events) = cancellation {
+                                match reconcile_world_trades(
+                                    &mut world,
+                                    actor_store.as_ref(),
+                                    &checkpoint,
+                                )
+                                .await
+                                {
+                                    Ok(events) => {
+                                        cancellation_events.extend(events);
+                                        cancellation_events.is_empty()
+                                            || actor_store
+                                                .commit_action(
+                                                    durable_connected_characters(&world)
+                                                        .unwrap_or_default(),
+                                                    world.runtime_snapshot(),
+                                                    cancellation_events,
+                                                )
+                                                .await
+                                                .is_ok()
+                                    }
+                                    Err(_) => false,
+                                }
+                            } else {
+                                false
+                            };
+                            if !committed {
+                                world.restore_checkpoint(checkpoint);
+                            }
                             session_roles.remove(&entered.session_id);
                             session_staff_accesses.remove(&entered.session_id);
                             if let Ok(character) = world.character_snapshot(entered.session_id) {
@@ -429,30 +583,58 @@ impl WorldHandle {
                             .unwrap_or(AccountRole::Player);
                         session_staff_accesses.remove(&session);
                         let checkpoint = world.checkpoint();
+                        let leaving_character = world
+                            .character_snapshot(session)
+                            .ok()
+                            .map(|character| character.id);
+                        let (mut committed_events, mutation_failed) =
+                            if let Some(character_id) = leaving_character {
+                                match world.cancel_trade_for_character(
+                                    character_id,
+                                    TradeCancellationReason::ParticipantDisconnected,
+                                ) {
+                                    Ok(events) => (events, false),
+                                    Err(_) => (Vec::new(), true),
+                                }
+                            } else {
+                                (Vec::new(), false)
+                            };
                         let hook = runtime_content.run_hook(
                             &mut world,
                             session,
                             role,
                             ScriptHook::OnLeave,
                         );
-                        if (hook.changed || !hook.domain_events.is_empty())
-                            && actor_store
-                                .commit_action(
-                                    durable_connected_characters(&world).unwrap_or_default(),
-                                    world.runtime_snapshot(),
-                                    hook.domain_events.clone(),
-                                )
-                                .await
-                                .is_err()
-                        {
+                        committed_events.extend(hook.domain_events.clone());
+                        let reconciled =
+                            reconcile_world_trades(&mut world, actor_store.as_ref(), &checkpoint)
+                                .await;
+                        let persistence_failed = mutation_failed
+                            || match reconciled {
+                                Ok(events) => {
+                                    committed_events.extend(events);
+                                    (hook.changed || !committed_events.is_empty())
+                                        && actor_store
+                                            .commit_action(
+                                                durable_connected_characters(&world)
+                                                    .unwrap_or_default(),
+                                                world.runtime_snapshot(),
+                                                committed_events.clone(),
+                                            )
+                                            .await
+                                            .is_err()
+                                }
+                                Err(_) => true,
+                            };
+                        if persistence_failed {
                             world.restore_checkpoint(checkpoint);
-                        } else if hook.changed || !hook.domain_events.is_empty() {
+                        } else if hook.changed || !committed_events.is_empty() {
                             broadcast_world_deliveries(
                                 &world,
                                 &runtime_content,
                                 &session_roles,
                                 Some(session),
-                                &hook.domain_events,
+                                &committed_events,
                                 &mut actor_delivery,
                             );
                         }
@@ -769,13 +951,13 @@ impl WorldHandle {
 
 fn validate_startup_character_aggregates(
     world: &World,
-    aggregates: Vec<DurableCharacterGameplay>,
+    expected_characters: &BTreeSet<CharacterId>,
+    aggregates: &[DurableCharacterGameplay],
 ) -> Result<(), CoreWorldError> {
-    let expected_owners = world.runtime_item_owner_ids();
     let mut durable_characters = std::collections::BTreeSet::new();
     if aggregates.iter().any(|aggregate| {
         aggregate.character_id.0 <= 0 || !durable_characters.insert(aggregate.character_id)
-    }) || durable_characters != expected_owners
+    }) || &durable_characters != expected_characters
     {
         return Err(CoreWorldError::InvalidRuntimeSnapshot);
     }
@@ -848,6 +1030,36 @@ async fn enter_prepared_character(
         return Err(error.into());
     }
 
+    let mut trade_events = match world.cancel_trade_for_character(
+        resolved.id,
+        TradeCancellationReason::ParticipantDisconnected,
+    ) {
+        Ok(events) => events,
+        Err(error) => {
+            world.restore_checkpoint(checkpoint);
+            return Err(error.into());
+        }
+    };
+    match reconcile_world_trades(world, store, &checkpoint).await {
+        Ok(events) => trade_events.extend(events),
+        Err(error) => {
+            world.restore_checkpoint(checkpoint);
+            return Err(error);
+        }
+    }
+    if !trade_events.is_empty()
+        && let Err(error) = store
+            .commit_action(
+                durable_connected_characters(world)?,
+                world.runtime_snapshot(),
+                trade_events,
+            )
+            .await
+    {
+        world.restore_checkpoint(checkpoint);
+        return Err(error.into());
+    }
+
     let player = world.player_state_view(session)?;
     Ok(PreparedWorldEntry {
         session_id: session,
@@ -884,12 +1096,21 @@ async fn finish_enter(
     world.set_observer_role(entered.session_id, role)?;
     let checkpoint = world.checkpoint();
     let hook = runtime_content.run_hook(world, entered.session_id, role, ScriptHook::OnEnter);
-    if (hook.changed || !hook.domain_events.is_empty())
+    let mut committed_events = hook.domain_events.clone();
+    match reconcile_world_trades(world, store, &checkpoint).await {
+        Ok(events) => committed_events.extend(events),
+        Err(error) => {
+            world.restore_checkpoint(checkpoint);
+            world.disconnect(entered.session_id);
+            return Err(error);
+        }
+    }
+    if (hook.changed || !committed_events.is_empty())
         && let Err(error) = store
             .commit_action(
                 durable_connected_characters(world)?,
                 world.runtime_snapshot(),
-                hook.domain_events.clone(),
+                committed_events.clone(),
             )
             .await
     {
@@ -897,13 +1118,13 @@ async fn finish_enter(
         world.disconnect(entered.session_id);
         return Err(error.into());
     }
-    if hook.changed || !hook.domain_events.is_empty() {
+    if hook.changed || !committed_events.is_empty() {
         broadcast_world_deliveries(
             world,
             runtime_content,
             session_roles,
             Some(entered.session_id),
-            &hook.domain_events,
+            &committed_events,
             delivery,
         );
     }
@@ -952,6 +1173,9 @@ async fn apply(
             // mutation, revision bump, script hook or durable commit.
             return Err(GameError::GiveUnavailable);
         }
+    }
+    if let PlayerAction::Trade(trade_action) = &action {
+        ensure_trade_social_preflight(world, store, session, trade_action).await?;
     }
     let checkpoint = world.checkpoint();
     let action = match action {
@@ -1002,6 +1226,7 @@ async fn apply(
                 player: world.player_state_view(session)?,
                 output: Some(applied.output),
                 container_contents: None,
+                trade_contents: None,
                 events,
             });
         }
@@ -1030,21 +1255,69 @@ async fn apply(
             action,
         )
         .await?;
+        let planned_disconnects = applied.disconnects.clone();
         let hook = if talks {
             runtime_content.run_hook(world, session, role, ScriptHook::OnTalk)
         } else {
             crate::runtime_content::ScriptBatchOutcome::default()
         };
-        if (hook.changed || !hook.domain_events.is_empty())
+        let mut committed_events = hook.domain_events.clone();
+        let disconnected_trades = planned_disconnects
+            .iter()
+            .filter_map(|(_, character_id)| world.trade_for_character(*character_id))
+            .map(|trade| trade.id)
+            .collect::<BTreeSet<_>>();
+        match world.cancel_trades(
+            &disconnected_trades,
+            TradeCancellationReason::ParticipantDisconnected,
+        ) {
+            Ok(events) => committed_events.extend(events),
+            Err(error) => {
+                world.restore_checkpoint(checkpoint);
+                disconnect_planned_sessions(
+                    world,
+                    social,
+                    session_roles,
+                    session_staff_accesses,
+                    delivery,
+                    &planned_disconnects,
+                );
+                return Err(error.into());
+            }
+        }
+        match reconcile_world_trades(world, store, &checkpoint).await {
+            Ok(events) => committed_events.extend(events),
+            Err(error) => {
+                world.restore_checkpoint(checkpoint);
+                disconnect_planned_sessions(
+                    world,
+                    social,
+                    session_roles,
+                    session_staff_accesses,
+                    delivery,
+                    &planned_disconnects,
+                );
+                return Err(error);
+            }
+        }
+        if (hook.changed || !committed_events.is_empty())
             && let Err(error) = store
                 .commit_action(
                     durable_connected_characters(world)?,
                     world.runtime_snapshot(),
-                    hook.domain_events.clone(),
+                    committed_events.clone(),
                 )
                 .await
         {
             world.restore_checkpoint(checkpoint);
+            disconnect_planned_sessions(
+                world,
+                social,
+                session_roles,
+                session_staff_accesses,
+                delivery,
+                &planned_disconnects,
+            );
             return Err(error.into());
         }
         for planned in applied.deliveries {
@@ -1064,20 +1337,28 @@ async fn apply(
             )
             .await?;
         }
+        disconnect_planned_sessions(
+            world,
+            social,
+            session_roles,
+            session_staff_accesses,
+            delivery,
+            &planned_disconnects,
+        );
         let mut scene = world.current_scene(session)?;
         let current_role = session_roles
             .get(&session)
             .copied()
             .unwrap_or(AccountRole::Player);
         runtime_content.resolve_scene(world, session, current_role, &mut scene);
-        let events = project_view_events(world, session, &hook.domain_events)?;
-        if hook.changed || !hook.domain_events.is_empty() {
+        let events = project_view_events(world, session, &committed_events)?;
+        if hook.changed || !committed_events.is_empty() {
             broadcast_world_deliveries(
                 world,
                 runtime_content,
                 session_roles,
                 Some(session),
-                &hook.domain_events,
+                &committed_events,
                 delivery,
             );
         }
@@ -1087,6 +1368,7 @@ async fn apply(
             player: world.player_state_view(session)?,
             output: combine_output(Some(applied.outcome.output), hook.narration),
             container_contents: None,
+            trade_contents: None,
             events,
         });
     }
@@ -1161,6 +1443,13 @@ async fn apply(
 
     let mut committed_events = outcome.domain_events.clone();
     committed_events.extend(script_domain_events);
+    match reconcile_world_trades(world, store, &checkpoint).await {
+        Ok(events) => committed_events.extend(events),
+        Err(error) => {
+            world.restore_checkpoint(checkpoint);
+            return Err(error);
+        }
+    }
     if (outcome.changed_character.is_some() || !committed_events.is_empty() || script_changed)
         && let Err(error) = store
             .commit_action(
@@ -1192,8 +1481,108 @@ async fn apply(
         player: world.player_state_view(session)?,
         output: combine_output(outcome.output, narration),
         container_contents: outcome.container_contents,
+        trade_contents: outcome.trade_contents,
         events,
     })
+}
+
+fn disconnect_planned_sessions(
+    world: &mut World,
+    social: &mut SocialRuntime,
+    session_roles: &mut HashMap<SessionId, AccountRole>,
+    session_staff_accesses: &mut HashMap<SessionId, StaffAccess>,
+    delivery: &mut DeliveryRouter,
+    disconnects: &[(SessionId, CharacterId)],
+) {
+    for (session, character) in disconnects {
+        social.disconnected(*character);
+        session_roles.remove(session);
+        session_staff_accesses.remove(session);
+        world.disconnect(*session);
+        delivery.unregister(*session);
+    }
+}
+
+async fn ensure_trade_social_preflight(
+    world: &World,
+    store: &dyn CharacterStore,
+    session: SessionId,
+    action: &TradeAction,
+) -> Result<(), GameError> {
+    let requires_policy = matches!(
+        action,
+        TradeAction::Request(_)
+            | TradeAction::Accept
+            | TradeAction::OfferItem(_)
+            | TradeAction::RemoveItem(_)
+            | TradeAction::OfferCoins(_)
+            | TradeAction::Contents { .. }
+            | TradeAction::Confirm { .. }
+    );
+    if !requires_policy {
+        return Ok(());
+    }
+    let actor = world.character_snapshot(session)?.id;
+    let counterpart = match action {
+        TradeAction::Request(target) => {
+            world
+                .resolve_trade_recipient(session, target)
+                .map_err(|_| GameError::TradeUnavailable)?
+                .character_id
+        }
+        _ => {
+            let Some(trade) = world.trade_for_character(actor) else {
+                return Ok(());
+            };
+            trade
+                .counterpart(actor)
+                .ok_or(GameError::TradeUnavailable)?
+        }
+    };
+    let forward = store.social_delivery_allowed(actor, counterpart).await?;
+    let reverse = store.social_delivery_allowed(counterpart, actor).await?;
+    if !forward || !reverse {
+        return Err(GameError::TradeUnavailable);
+    }
+    Ok(())
+}
+
+pub(crate) async fn reconcile_world_trades(
+    world: &mut World,
+    store: &dyn CharacterStore,
+    before: &WorldCheckpoint,
+) -> Result<Vec<DomainEvent>, GameError> {
+    let trades = world
+        .trade_participants()
+        .into_iter()
+        .filter_map(|participant| world.trade_for_character(participant).cloned())
+        .map(|trade| (trade.id, trade))
+        .collect::<BTreeMap<_, _>>()
+        .into_values();
+    let mut socially_invalid = BTreeSet::new();
+    for trade in trades {
+        if world
+            .trade_for_character(trade.requester)
+            .is_none_or(|current| current.id != trade.id)
+        {
+            continue;
+        }
+        let forward = store
+            .social_delivery_allowed(trade.requester, trade.recipient)
+            .await?;
+        let reverse = store
+            .social_delivery_allowed(trade.recipient, trade.requester)
+            .await?;
+        if !forward || !reverse {
+            socially_invalid.insert(trade.id);
+        }
+    }
+    let mut events = world.cancel_trades(
+        &socially_invalid,
+        TradeCancellationReason::SocialPolicyChanged,
+    )?;
+    events.extend(world.reconcile_trades(before)?);
+    Ok(events)
 }
 
 async fn refresh_session_authority(
@@ -1429,6 +1818,13 @@ fn durable_connected_characters(
         .collect()
 }
 
+fn advance_tick_with_expiry_barrier(world: &mut World) -> Result<Vec<DomainEvent>, CoreWorldError> {
+    world.begin_tick()?;
+    let mut events = world.cancel_expired_trades()?;
+    events.extend(world.resolve_tick_after_expiry()?);
+    Ok(events)
+}
+
 async fn persist_tick(
     world: &mut World,
     runtime_content: &RuntimeContent,
@@ -1459,7 +1855,11 @@ async fn persist_tick_with_script_budget(
     let scripting_started = Instant::now();
     let mut targeted_narration = Vec::new();
     let mut scripting_budget_exhausted = false;
-    let result = world.advance_tick().and_then(|mut events| {
+    let Ok(mut events) = advance_tick_with_expiry_barrier(world) else {
+        world.restore_checkpoint(checkpoint);
+        return false;
+    };
+    let result = (|| {
         for session in world.connected_sessions() {
             let role = session_roles
                 .get(&session)
@@ -1515,8 +1915,8 @@ async fn persist_tick_with_script_budget(
             }
         }
         let characters = durable_connected_characters(world)?;
-        Ok((characters, world.runtime_snapshot(), events))
-    });
+        Ok::<_, CoreWorldError>((characters, events))
+    })();
     if scripting_budget_exhausted {
         world.restore_checkpoint(checkpoint.clone());
         tracing::warn!(
@@ -1524,14 +1924,22 @@ async fn persist_tick_with_script_budget(
             "persist_tick scripting budget exhausted; retrying the base tick without scripts"
         );
         targeted_narration.clear();
-        let base_tick = world.advance_tick().and_then(|events| {
-            let characters = durable_connected_characters(world)?;
-            Ok((characters, world.runtime_snapshot(), events))
-        });
-        let Ok((characters, runtime, events)) = base_tick else {
+        let Ok(mut events) = advance_tick_with_expiry_barrier(world) else {
             world.restore_checkpoint(checkpoint);
             return false;
         };
+        match reconcile_world_trades(world, store, &checkpoint).await {
+            Ok(trade_events) => events.extend(trade_events),
+            Err(_) => {
+                world.restore_checkpoint(checkpoint);
+                return false;
+            }
+        }
+        let Ok(characters) = durable_connected_characters(world) else {
+            world.restore_checkpoint(checkpoint);
+            return false;
+        };
+        let runtime = world.runtime_snapshot();
         let persisted_events = events
             .iter()
             .filter(|event| !is_internal_tick_event(event))
@@ -1555,10 +1963,18 @@ async fn persist_tick_with_script_budget(
         );
         return true;
     }
-    let Ok((characters, runtime, events)) = result else {
+    let Ok((characters, mut events)) = result else {
         world.restore_checkpoint(checkpoint);
         return false;
     };
+    match reconcile_world_trades(world, store, &checkpoint).await {
+        Ok(trade_events) => events.extend(trade_events),
+        Err(_) => {
+            world.restore_checkpoint(checkpoint);
+            return false;
+        }
+    }
+    let runtime = world.runtime_snapshot();
     let persisted_events = events
         .iter()
         .filter(|event| !is_internal_tick_event(event))
@@ -1677,6 +2093,7 @@ mod tests {
     struct MemoryStore {
         state: Mutex<MemoryState>,
         fail_saves: AtomicBool,
+        fail_social_reads: AtomicBool,
     }
 
     fn durable_gameplay_world() -> World {
@@ -2181,9 +2598,11 @@ mod tests {
         async fn load_character_gameplay_batch(
             &self,
             character_ids: Vec<CharacterId>,
+            limits: crate::persistence::StartupGameplayLoadLimits,
         ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
             let state = self.state.lock().unwrap();
-            let character_ids = crate::persistence::normalise_startup_owner_ids(character_ids)?;
+            let character_ids =
+                crate::persistence::normalise_startup_character_ids(character_ids, limits)?;
             let mut total_json_bytes = 0_usize;
             character_ids
                 .into_iter()
@@ -2196,10 +2615,11 @@ mod tests {
                         .get(&character_id)
                         .ok_or(StoreError::CharacterGameplayNotFound(character_id))?;
                     let json = serde_json::to_string(gameplay)?;
-                    crate::persistence::decode_startup_owner_gameplay(
+                    crate::persistence::decode_startup_gameplay(
                         character_id,
                         &json,
                         &mut total_json_bytes,
+                        limits,
                     )
                 })
                 .collect()
@@ -2243,6 +2663,9 @@ mod tests {
             sender: CharacterId,
             recipient: CharacterId,
         ) -> Result<bool, StoreError> {
+            if self.fail_social_reads.load(Ordering::SeqCst) {
+                return Err(StoreError::WorkerStopped);
+            }
             let state = self.state.lock().unwrap();
             memory_social_profile(&state, sender)?;
             memory_social_profile(&state, recipient)?;
@@ -2718,6 +3141,585 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn startup_loads_trade_participants_and_cancels_reservations_before_readiness() {
+        let store = Arc::new(MemoryStore::default());
+        let first = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let requester = first.enter("Restart Requester".into()).await.unwrap();
+        let recipient = first.enter("Restart Recipient".into()).await.unwrap();
+        first
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request(
+                    "Restart Recipient".into(),
+                )),
+            )
+            .await
+            .unwrap();
+        first
+            .apply(
+                recipient.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .runtime
+                .as_ref()
+                .unwrap()
+                .trades
+                .len(),
+            1
+        );
+        first.shutdown().await.unwrap();
+        drop(first);
+
+        let restarted = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        {
+            let state = store.state.lock().unwrap();
+            assert!(state.runtime.as_ref().unwrap().trades.is_empty());
+            assert!(state.domain_events.iter().any(|event| matches!(
+                event,
+                DomainEvent::TradeCancelled {
+                    reason: TradeCancellationReason::Restart,
+                    ..
+                }
+            )));
+        }
+        restarted.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_startup_trade_cleanup_never_opens_readiness() {
+        let store = Arc::new(MemoryStore::default());
+        let first = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let requester = first.enter("Failed Restart A".into()).await.unwrap();
+        let recipient = first.enter("Failed Restart B".into()).await.unwrap();
+        first
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request("Failed Restart B".into())),
+            )
+            .await
+            .unwrap();
+        first
+            .apply(
+                recipient.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .await
+            .unwrap();
+        first.shutdown().await.unwrap();
+        drop(first);
+
+        store.fail_saves.store(true, Ordering::SeqCst);
+        let restarted = WorldHandle::spawn(World::demo(), store.clone()).await;
+        assert!(matches!(
+            restarted,
+            Err(GameError::Startup {
+                stage: "commit_restored_trade_cleanup",
+                ..
+            })
+        ));
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .runtime
+                .as_ref()
+                .unwrap()
+                .trades
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_a_missing_offline_trade_participant() {
+        let store = Arc::new(MemoryStore::default());
+        let first = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let requester = first.enter("Missing Trade A".into()).await.unwrap();
+        let recipient = first.enter("Missing Trade B".into()).await.unwrap();
+        first
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request("Missing Trade B".into())),
+            )
+            .await
+            .unwrap();
+        first
+            .apply(
+                recipient.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .await
+            .unwrap();
+        first.shutdown().await.unwrap();
+        drop(first);
+        let recipient_id = store
+            .state
+            .lock()
+            .unwrap()
+            .characters
+            .values()
+            .find(|character| character.name == "Missing Trade B")
+            .unwrap()
+            .id;
+        store.state.lock().unwrap().gameplay.remove(&recipient_id);
+
+        let restarted = WorldHandle::spawn(World::demo(), store).await;
+        assert!(matches!(
+            restarted,
+            Err(GameError::Startup {
+                stage: "load_trade_participant_aggregates",
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn trade_preflight_is_bilateral_and_generic() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store).await.unwrap();
+        let requester = world.enter("Policy Requester".into()).await.unwrap();
+        let recipient = world.enter("Policy Recipient".into()).await.unwrap();
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Social(SocialAction::Ignore("Policy Requester".into())),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            world
+                .apply(
+                    requester.session_id,
+                    PlayerAction::Trade(tiamud_core::TradeAction::Request(
+                        "Policy Recipient".into(),
+                    )),
+                )
+                .await,
+            Err(GameError::TradeUnavailable)
+        ));
+        assert!(
+            world
+                .current_state(requester.session_id)
+                .await
+                .unwrap()
+                .2
+                .trade
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_trade_commit_restores_the_exact_checkpoint() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let requester = world.enter("Rollback Requester".into()).await.unwrap();
+        world.enter("Rollback Recipient".into()).await.unwrap();
+        store.fail_saves.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            world
+                .apply(
+                    requester.session_id,
+                    PlayerAction::Trade(tiamud_core::TradeAction::Request(
+                        "Rollback Recipient".into(),
+                    )),
+                )
+                .await,
+            Err(GameError::Persistence(_))
+        ));
+        assert!(
+            world
+                .current_state(requester.session_id)
+                .await
+                .unwrap()
+                .2
+                .trade
+                .is_none()
+        );
+        assert!(
+            !store
+                .state
+                .lock()
+                .unwrap()
+                .domain_events
+                .iter()
+                .any(|event| { matches!(event, DomainEvent::TradeRequested { .. }) })
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_trade_reconfirms_after_mutation_and_settles_durably_for_both_sessions() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(durable_gameplay_world(), store.clone())
+            .await
+            .unwrap();
+        let requester = world.enter("Settlement A".into()).await.unwrap();
+        let recipient = world.enter("Settlement B".into()).await.unwrap();
+        world
+            .apply(
+                requester.session_id,
+                PlayerAction::Take(tiamud_core::ItemSelection::one("sword")),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request("Settlement B".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::OfferItem(
+                    tiamud_core::ItemSelection::one("sword"),
+                )),
+            )
+            .await
+            .unwrap();
+        let offered_revision = world
+            .current_state(requester.session_id)
+            .await
+            .unwrap()
+            .2
+            .trade
+            .unwrap()
+            .state_revision;
+        world
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Confirm {
+                    state_revision: offered_revision,
+                }),
+            )
+            .await
+            .unwrap();
+
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Take(tiamud_core::ItemSelection::one("potion")),
+            )
+            .await
+            .unwrap();
+        let invalidated = world
+            .current_state(requester.session_id)
+            .await
+            .unwrap()
+            .2
+            .trade
+            .unwrap();
+        assert_eq!(invalidated.state_revision, offered_revision + 1);
+        assert!(!invalidated.own_confirmed);
+        assert!(!invalidated.counterparty_confirmed);
+
+        for session in [requester.session_id, recipient.session_id] {
+            world
+                .apply(
+                    session,
+                    PlayerAction::Trade(tiamud_core::TradeAction::Confirm {
+                        state_revision: invalidated.state_revision,
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        let requester_player = world.current_state(requester.session_id).await.unwrap().2;
+        let recipient_player = world.current_state(recipient.session_id).await.unwrap().2;
+        assert!(requester_player.trade.is_none());
+        assert!(recipient_player.trade.is_none());
+        assert!(
+            requester_player.inventory.iter().all(
+                |item| item.reserved_for_trade == 0 && item.available_quantity == item.quantity
+            )
+        );
+        assert!(
+            recipient_player.inventory.iter().all(
+                |item| item.reserved_for_trade == 0 && item.available_quantity == item.quantity
+            )
+        );
+        assert!(
+            !requester_player
+                .inventory
+                .iter()
+                .any(|item| item.label == "bronze sword")
+        );
+        assert!(
+            recipient_player
+                .inventory
+                .iter()
+                .any(|item| item.label == "bronze sword")
+        );
+        let state = store.state.lock().unwrap();
+        assert!(state.runtime.as_ref().unwrap().trades.is_empty());
+        assert!(
+            state
+                .domain_events
+                .iter()
+                .any(|event| matches!(event, DomainEvent::TradeCompleted { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_leave_cleanup_keeps_the_reservation_and_delivers_nothing() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let mut requester = world.enter("Leave Failure A".into()).await.unwrap();
+        let mut recipient = world.enter("Leave Failure B".into()).await.unwrap();
+        world
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request("Leave Failure B".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .await
+            .unwrap();
+        drain_deliveries(&mut requester.deliveries);
+        drain_deliveries(&mut recipient.deliveries);
+        store.fail_saves.store(true, Ordering::SeqCst);
+
+        world.leave(requester.session_id).await;
+        let recipient_state = world.current_state(recipient.session_id).await.unwrap();
+
+        assert!(recipient_state.2.trade.is_some());
+        assert!(recipient.deliveries.try_recv().is_err());
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .runtime
+                .as_ref()
+                .unwrap()
+                .trades
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn social_policy_change_cancels_an_existing_trade_in_the_same_world_commit() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let requester = world.enter("Policy Change A".into()).await.unwrap();
+        let recipient = world.enter("Policy Change B".into()).await.unwrap();
+        world
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request("Policy Change B".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .await
+            .unwrap();
+
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Social(SocialAction::Ignore("Policy Change A".into())),
+            )
+            .await
+            .unwrap();
+
+        for session in [requester.session_id, recipient.session_id] {
+            assert!(
+                world
+                    .current_state(session)
+                    .await
+                    .unwrap()
+                    .2
+                    .trade
+                    .is_none()
+            );
+        }
+        let state = store.state.lock().unwrap();
+        assert!(state.runtime.as_ref().unwrap().trades.is_empty());
+        assert!(state.domain_events.iter().any(|event| matches!(
+            event,
+            DomainEvent::TradeCancelled {
+                reason: TradeCancellationReason::SocialPolicyChanged,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn failed_social_cleanup_is_fail_closed_and_retried() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let requester = world.enter("Policy Retry A".into()).await.unwrap();
+        let recipient = world.enter("Policy Retry B".into()).await.unwrap();
+        world
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request("Policy Retry B".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .await
+            .unwrap();
+        store.fail_saves.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            world
+                .apply(
+                    recipient.session_id,
+                    PlayerAction::Social(SocialAction::Ignore("Policy Retry A".into())),
+                )
+                .await,
+            Err(GameError::Persistence(_))
+        ));
+        assert!(
+            world
+                .current_state(requester.session_id)
+                .await
+                .unwrap()
+                .2
+                .trade
+                .is_some()
+        );
+        assert!(matches!(
+            world
+                .apply(
+                    requester.session_id,
+                    PlayerAction::Trade(tiamud_core::TradeAction::OfferCoins(1)),
+                )
+                .await,
+            Err(GameError::TradeUnavailable)
+        ));
+
+        store.fail_saves.store(false, Ordering::SeqCst);
+        world
+            .apply(requester.session_id, PlayerAction::Look)
+            .await
+            .unwrap();
+        assert!(
+            world
+                .current_state(requester.session_id)
+                .await
+                .unwrap()
+                .2
+                .trade
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_social_policy_read_preserves_the_trade_and_retries_cleanup() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let requester = world.enter("Policy Store A".into()).await.unwrap();
+        let recipient = world.enter("Policy Store B".into()).await.unwrap();
+        world
+            .apply(
+                requester.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request("Policy Store B".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .await
+            .unwrap();
+        store.fail_social_reads.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            world
+                .apply(
+                    recipient.session_id,
+                    PlayerAction::Social(SocialAction::Ignore("Policy Store A".into())),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::WorkerStopped))
+        ));
+        assert!(
+            world
+                .current_state(requester.session_id)
+                .await
+                .unwrap()
+                .2
+                .trade
+                .is_some()
+        );
+
+        store.fail_social_reads.store(false, Ordering::SeqCst);
+        world
+            .apply(requester.session_id, PlayerAction::Look)
+            .await
+            .unwrap();
+        assert!(
+            world
+                .current_state(requester.session_id)
+                .await
+                .unwrap()
+                .2
+                .trade
+                .is_none()
+        );
+        assert!(matches!(
+            store.state.lock().unwrap().domain_events.last(),
+            Some(DomainEvent::TradeCancelled {
+                reason: TradeCancellationReason::SocialPolicyChanged,
+                ..
+            })
+        ));
+    }
+
     fn seed_offline_character(
         store: &MemoryStore,
         character_id: CharacterId,
@@ -2921,7 +3923,8 @@ mod tests {
 
         validate_startup_character_aggregates(
             &world,
-            vec![DurableCharacterGameplay {
+            &BTreeSet::from([character_id]),
+            &[DurableCharacterGameplay {
                 character_id,
                 gameplay,
             }],
@@ -3886,6 +4889,332 @@ mod tests {
         }
     }
 
+    fn seed_trade_expiring_on_next_tick(
+        world: &mut World,
+        requester: SessionId,
+        recipient_name: &str,
+    ) {
+        world
+            .apply(
+                requester,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request(recipient_name.into())),
+            )
+            .unwrap();
+        for _ in 1..tiamud_core::TRADE_REQUEST_TICKS {
+            world.advance_tick().unwrap();
+        }
+        let requester_id = world
+            .authorized_runtime_context(requester)
+            .unwrap()
+            .character_id;
+        let trade = world.trade_for_character(requester_id).unwrap();
+        assert_eq!(
+            world.runtime_snapshot().logical_tick + 1,
+            trade.expires_at_tick
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_cancels_expired_trades_before_timer_hooks_in_normal_and_fallback_paths() {
+        for script_budget in [Duration::from_secs(1), Duration::ZERO] {
+            let store = MemoryStore::default();
+            let mut world = World::demo();
+            let requester = SessionId(61);
+            let recipient = SessionId(62);
+            connect_tick_character(
+                &mut world,
+                &store,
+                requester,
+                CharacterId(61),
+                "demo:lantern-square",
+                "Expiry Requester",
+            );
+            connect_tick_character(
+                &mut world,
+                &store,
+                recipient,
+                CharacterId(62),
+                "demo:lantern-square",
+                "Expiry Recipient",
+            );
+            seed_trade_expiring_on_next_tick(&mut world, requester, "Expiry Recipient");
+            let content = timer_narration_content(None);
+            let roles = HashMap::from([
+                (requester, AccountRole::Player),
+                (recipient, AccountRole::Player),
+            ]);
+            let mut delivery = DeliveryRouter::new(None);
+
+            assert!(
+                persist_tick_with_script_budget(
+                    &mut world,
+                    &content,
+                    &roles,
+                    &store,
+                    &mut delivery,
+                    script_budget,
+                )
+                .await
+            );
+
+            assert!(world.runtime_snapshot().trades.is_empty());
+            assert!(matches!(
+                store.state.lock().unwrap().domain_events.first(),
+                Some(DomainEvent::TradeCancelled {
+                    reason: TradeCancellationReason::Expired,
+                    ..
+                })
+            ));
+            let timer_ran = world
+                .character_gameplay_snapshot(requester)
+                .unwrap()
+                .script_flags
+                .contains("timer-ran");
+            assert_eq!(timer_ran, !script_budget.is_zero());
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_expiry_precedes_combat_and_needs_no_social_policy_read() {
+        let store = MemoryStore::default();
+        let mut world = durable_gameplay_world();
+        let requester = SessionId(67);
+        let recipient = SessionId(68);
+        let requester_id = CharacterId(67);
+        let recipient_id = CharacterId(68);
+        connect_tick_character(
+            &mut world,
+            &store,
+            requester,
+            requester_id,
+            "test:arena",
+            "Collision A",
+        );
+        connect_tick_character(
+            &mut world,
+            &store,
+            recipient,
+            recipient_id,
+            "test:arena",
+            "Collision B",
+        );
+        seed_trade_expiring_on_next_tick(&mut world, requester, "Collision B");
+        let mut runtime = world.runtime_snapshot();
+        runtime
+            .npcs
+            .get_mut("test:guardian")
+            .unwrap()
+            .engaged_character = Some(requester_id);
+        world.restore_runtime_snapshot(runtime).unwrap();
+        {
+            let mut state = store.state.lock().unwrap();
+            state.ignores.insert((recipient_id, requester_id));
+        }
+        store.fail_social_reads.store(true, Ordering::SeqCst);
+        let roles = HashMap::from([
+            (requester, AccountRole::Player),
+            (recipient, AccountRole::Player),
+        ]);
+        let mut delivery = DeliveryRouter::new(None);
+
+        assert!(
+            persist_tick(
+                &mut world,
+                &RuntimeContent::default(),
+                &roles,
+                &store,
+                &mut delivery,
+            )
+            .await
+        );
+
+        let state = store.state.lock().unwrap();
+        let expired = state
+            .domain_events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    DomainEvent::TradeCancelled {
+                        reason: TradeCancellationReason::Expired,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let combat = state
+            .domain_events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    DomainEvent::Gameplay {
+                        event: GameplayEvent::CharacterDamaged { .. }
+                            | GameplayEvent::NpcDefeated { .. }
+                    }
+                )
+            })
+            .unwrap();
+        assert!(expired < combat);
+        assert!(state.runtime.as_ref().unwrap().trades.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_reconciles_script_changes_once_after_timer_hooks() {
+        let store = MemoryStore::default();
+        let mut world = World::demo();
+        let requester = SessionId(65);
+        let recipient = SessionId(66);
+        let requester_id = CharacterId(65);
+        connect_tick_character(
+            &mut world,
+            &store,
+            requester,
+            requester_id,
+            "demo:lantern-square",
+            "Timer Basis A",
+        );
+        connect_tick_character(
+            &mut world,
+            &store,
+            recipient,
+            CharacterId(66),
+            "demo:lantern-square",
+            "Timer Basis B",
+        );
+        let requester_gameplay = CharacterGameplaySnapshot {
+            coins: 10,
+            ..CharacterGameplaySnapshot::default()
+        };
+        world
+            .restore_character_gameplay(requester_id, requester_gameplay.clone())
+            .unwrap();
+        store
+            .state
+            .lock()
+            .unwrap()
+            .gameplay
+            .insert(requester_id, requester_gameplay);
+        world
+            .apply(
+                requester,
+                PlayerAction::Trade(tiamud_core::TradeAction::Request("Timer Basis B".into())),
+            )
+            .unwrap();
+        world
+            .apply(
+                recipient,
+                PlayerAction::Trade(tiamud_core::TradeAction::Accept),
+            )
+            .unwrap();
+        world
+            .apply(
+                requester,
+                PlayerAction::Trade(tiamud_core::TradeAction::OfferCoins(1)),
+            )
+            .unwrap();
+        let state_revision = world
+            .trade_for_character(requester_id)
+            .unwrap()
+            .state_revision;
+        world
+            .apply(
+                requester,
+                PlayerAction::Trade(tiamud_core::TradeAction::Confirm { state_revision }),
+            )
+            .unwrap();
+        assert_eq!(
+            world
+                .trade_for_character(requester_id)
+                .unwrap()
+                .confirmations
+                .len(),
+            1
+        );
+        let roles = HashMap::from([
+            (requester, AccountRole::Player),
+            (recipient, AccountRole::Player),
+        ]);
+        let mut delivery = DeliveryRouter::new(None);
+
+        assert!(
+            persist_tick(
+                &mut world,
+                &timer_narration_content(None),
+                &roles,
+                &store,
+                &mut delivery,
+            )
+            .await
+        );
+
+        let trade = world.trade_for_character(requester_id).unwrap();
+        assert_eq!(trade.state_revision, state_revision + 1);
+        assert!(trade.confirmations.is_empty());
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .domain_events
+                .iter()
+                .filter(|event| matches!(event, DomainEvent::TradeInvalidated { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_tick_fallback_cleanup_restores_trade_and_publishes_no_delivery() {
+        let store = MemoryStore::default();
+        let mut world = World::demo();
+        let requester = SessionId(63);
+        let recipient = SessionId(64);
+        connect_tick_character(
+            &mut world,
+            &store,
+            requester,
+            CharacterId(63),
+            "demo:lantern-square",
+            "Failed Tick Requester",
+        );
+        connect_tick_character(
+            &mut world,
+            &store,
+            recipient,
+            CharacterId(64),
+            "demo:lantern-square",
+            "Failed Tick Recipient",
+        );
+        seed_trade_expiring_on_next_tick(&mut world, requester, "Failed Tick Recipient");
+        let before = world.runtime_snapshot();
+        let roles = HashMap::from([
+            (requester, AccountRole::Player),
+            (recipient, AccountRole::Player),
+        ]);
+        let mut delivery = DeliveryRouter::new(None);
+        let mut requester_inbox = delivery.register(requester);
+        let mut recipient_inbox = delivery.register(recipient);
+        store.fail_saves.store(true, Ordering::SeqCst);
+
+        assert!(
+            !persist_tick_with_script_budget(
+                &mut world,
+                &timer_narration_content(None),
+                &roles,
+                &store,
+                &mut delivery,
+                Duration::ZERO,
+            )
+            .await
+        );
+
+        assert_eq!(world.runtime_snapshot(), before);
+        assert!(requester_inbox.try_recv().is_err());
+        assert!(recipient_inbox.try_recv().is_err());
+        assert!(store.state.lock().unwrap().domain_events.is_empty());
+    }
+
     #[tokio::test]
     async fn timer_script_narration_is_delivered_only_to_its_authorized_session() {
         let store = MemoryStore::default();
@@ -4435,11 +5764,11 @@ mod tests {
             .create_authenticated_character(player.token.as_str().into(), "Bryn".into())
             .await
             .unwrap();
-        let admin_entered = world
+        let mut admin_entered = world
             .enter_authenticated_character(admin.token.as_str().into(), admin_character.id)
             .await
             .unwrap();
-        let player_entered = world
+        let mut player_entered = world
             .enter_authenticated_character(player.token.as_str().into(), player_character.id)
             .await
             .unwrap();
@@ -4456,6 +5785,8 @@ mod tests {
             .unwrap()
             .0;
         let audit_before = store.state.lock().unwrap().staff_audit.len();
+        drain_deliveries(&mut admin_entered.deliveries);
+        drain_deliveries(&mut player_entered.deliveries);
         store.fail_saves.store(true, Ordering::SeqCst);
 
         assert!(matches!(
@@ -4477,6 +5808,8 @@ mod tests {
             .0;
         assert_eq!(after.title, before.title);
         assert_eq!(store.state.lock().unwrap().staff_audit.len(), audit_before);
+        assert!(admin_entered.deliveries.try_recv().is_err());
+        assert!(player_entered.deliveries.try_recv().is_err());
     }
 
     #[tokio::test]

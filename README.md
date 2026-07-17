@@ -38,8 +38,9 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   combate, misiones, grupos, economía, tiempo lógico y clima. Los objetos
   separan prototipos reutilizables e instancias durables, con capacidad por
   slots/peso, pilas fungibles derivadas, contenedores acotados y botín fijo;
-  `give` atómico y las políticas de transferencia ya funcionan. El intercambio
-  confirmado y las tablas aleatorias aún no.
+  `give`, políticas de transferencia e intercambio bilateral confirmado con
+  objetos y moneda ya funcionan. Los derechos de botín y las tablas aleatorias
+  aún no.
 - **Personajes definidos por datos:** el modelo de personaje v3 modela linajes, trasfondo
   opcional, clases base y avanzadas, una curva global de XP, talentos con rango
   y promociones atómicas. Atributos, habilidades, recursos, resistencias,
@@ -132,6 +133,10 @@ Comandos representativos:
 look                       north / east / south / west
 inventory                  take / drop [cantidad] <objeto>
 give [cantidad] <objeto> to <personaje>
+trade request <personaje>  trade accept / decline / status / cancel
+trade offer item [cantidad] <objeto>   trade remove item <objeto>
+trade offer coins <cantidad>  trade contents <contenedor-ofrecido> [página]
+trade confirm <revisión>
 contents <contenedor> [página]
 put [cantidad] <objeto> in <contenedor>
 get [cantidad] <objeto> from <contenedor>
@@ -277,8 +282,24 @@ implementado de la hoja de ruta.
 | Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos, elegibilidad y reparto de botín. |
 | Canales | Suscripción persistente en SQLite/PostgreSQL v10; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
 | Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
-| Inventario | WorldPack v5 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo y vínculo; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` solo mueve raíces portadas y subárboles completamente transferibles a otro personaje conectado en la misma sala, con capacidad bilateral e ignore/block. Web, Telnet y GMCP proyectan política, estado ligado, disponibilidad de entrega e IDs opacos, nunca el dueño durable. | Intercambio bilateral confirmado, durabilidad, afijos, procedencia y derechos/reparto de botín. |
+| Inventario | WorldPack v5 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo y vínculo; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` es unilateral; `trade` negocia hasta 128 raíces transferibles y moneda mediante reservas durables, revisión exacta y dos confirmaciones, y liquida ambos lados en un solo commit. Ambos participantes deben seguir conectados, en la misma sala, fuera de combate y permitidos por ignore/block. Web, Telnet y GMCP proyectan política, cantidades disponibles/reservadas, saldo gastable e IDs opacos, nunca dueños ni identidades durables. | Durabilidad, afijos, procedencia y derechos/reparto de botín; trade remoto/offline, subastas y mercado offline. |
 | Botín | El botín fijo es una instancia inicial cuya ubicación es `npc_spawn`; se transfiere al derrotar al NPC y conserva identidad. Varias unidades fungibles se agrupan solo al proyectarlas. El RNG general y el snapshot del mundo son seguros ante reinicio; todavía no existe RNG específico de tablas de botín. | Derechos y reparto de grupo, tablas ponderadas, tiradas/cantidades aleatorias, procedencia de drops repetibles y contenedores aleatorios. |
+
+```mermaid
+stateDiagram-v2
+    accTitle: Ciclo de un intercambio confirmado
+    accDescr: Los activos permanecen reservados con sus dueños. Cambiar la base borra confirmaciones; solo dos confirmaciones de la misma revisión permiten una liquidación simultánea.
+
+    [*] --> Solicitado: trade request
+    Solicitado --> Negociando: aceptar
+    Solicitado --> [*]: rechazar o expirar
+    Negociando --> Negociando: cambiar oferta\nborra confirmaciones
+    Negociando --> UnaConfirmacion: confirmar revisión
+    UnaConfirmacion --> Negociando: cambia inventario o saldo\nborra confirmaciones
+    UnaConfirmacion --> [*]: cambia la política\ncancelación
+    UnaConfirmacion --> [*]: confirma la contraparte\ncommit simultáneo
+    Negociando --> [*]: cancelar, separarse,\ncombatir o desconectar
+```
 
 `reply` no persiste el destinatario: conserva en memoria el ID interno del
 último remitente cuyo `tell` se entregó. Al desconectar o reiniciar no se
@@ -388,10 +409,14 @@ iniciales del WorldPack y superpone las ubicaciones durables, sin resucitar
 instancias runtime ausentes. Antes de abrir listeners valida también
 propietarios desconectados, equipo, capacidad y todos los IDs ligados, incluso
 si el objeto ya fue consumido, mediante lecturas acotadas que descarta después;
-no convierte esas fichas en personajes activos. El snapshot vigente es v4 y
-exige un vínculo cerrado por instancia. El decoder separa explícitamente las
-formas v1, v2, v3 y v4; v1-v3 migran a `unbound` y un payload antiguo que
-inyecta `binding` se rechaza. SQLite y PostgreSQL continúan en esquema v10.
+no convierte esas fichas en personajes activos. El snapshot vigente es v5:
+añade `nextTradeId` y las reservas de trade al nivel superior, y exige un
+vínculo cerrado por instancia. El decoder separa explícitamente las formas v1,
+v2, v3, v4 y v5; v1-v3 migran a `unbound`, v4 crea un estado de trades vacío y
+un payload antiguo que inyecta campos posteriores se rechaza. Al reiniciar se
+validan los participantes adicionales con presupuesto separado y se cancelan
+las reservas antes de abrir listeners. SQLite y PostgreSQL continúan en
+esquema v10, sin tabla de escrow ni doble escritura.
 
 El mundo revisado compone tres áreas en 9 prototipos y 10 instancias iniciales:
 49.603 bytes con SHA-256
@@ -534,6 +559,20 @@ readiness y 131 acciones, sin errores ni crecimiento continuo sospechoso. No
 se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24 horas. Consulta el
 [registro de fase 3C](docs/project/log/2026-07-16-atomic-give-and-transfer-policies-phase-3c.md).
 
+La fase 3D añade trade bilateral confirmado sin custodiar objetos ni monedas en
+otra autoridad. Las ofertas permanecen reservadas en sus propietarios, cada
+cambio material invalida confirmaciones mediante una revisión y un digest
+canónico, y la segunda confirmación liquida ambos inventarios y saldos de forma
+simultánea. `WorldRuntimeSnapshot` v5 sobre los mismos esquemas SQL v10 permite
+validar y cancelar de forma cerrada las reservas tras reinicio. Web, texto
+Telnet, `Char.Trade 1` GMCP y el bot estricto comparten acciones, proyecciones y
+límites. El árbol integrado pasa formato, clippy, 550 pruebas Rust, check/build,
+107 Vitest, 83 Node/bot, licencias, avisos, humo, carga de 16 usuarios y soak
+corto. El pase Playwright final completa 36/36 escenarios, 18 Chromium y 18
+Firefox. No se ejecutaron
+PostgreSQL real v10, WebKit local ni soak de 24 horas. Consulta el
+[registro de fase 3D](docs/project/log/2026-07-16-confirmed-trade-reservations-phase-3d.md).
+
 Una prueba corta de carga no sustituye al soak de 24 horas. WebKit no arranca
 en el host local actual por bibliotecas GTK/GStreamer/medios ausentes; eso no
 es un pase ni un fallo de aplicación.
@@ -557,9 +596,7 @@ Siguientes líneas técnicas y de producto:
 - añadir correo/historial/emotes solo con retención y moderación explícitas;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
-- añadir intercambio bilateral confirmado y escrow sobre las transferencias y
-  políticas ya implementadas;
-- definir después derechos/reparto de grupo, procedencia y tablas de botín
+- definir derechos/reparto de grupo, procedencia y tablas de botín
   enteras restart-safe;
 - mantener fuera del baseline las cajas de botín pagadas;
 - publicar sprites de demostración revisados;
@@ -618,7 +655,7 @@ deploy/                      ejemplos Caddy, systemd y entorno
   [prototipos, instancias y capacidad](docs/decisions/0009-item-prototypes-instances-and-capacity.md) ·
   [pilas derivadas y contenedores](docs/decisions/0010-derived-stacks-and-bounded-containers.md) ·
   [entrega atómica y políticas](docs/decisions/0011-atomic-give-and-item-transfer-policies.md) ·
-  [propuesta de trade confirmado](docs/decisions/0012-confirmed-trade-reservations.md).
+  [trade confirmado](docs/decisions/0012-confirmed-trade-reservations.md).
 - **Estado:** [matriz](docs/project/COMPLETION_MATRIX.md) ·
   [especificación v0.3](docs/spec-v0.3.md) ·
   [memoria](docs/project/PROJECT_MEMORY.md) ·

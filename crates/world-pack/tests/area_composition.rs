@@ -343,6 +343,75 @@ fn normalized_area_item_ids_match_the_runtime_identifier_contract() {
 }
 
 #[test]
+fn native_area_instance_ids_share_the_runtime_identifier_contract() {
+    let compose_with_id = |instance_id: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        write_json(
+            &temp.path().join("a.json"),
+            &json!({
+                "schemaVersion": 4,
+                "id": "a",
+                "itemPrototypes": [{
+                    "id": "a:lantern",
+                    "name": "Lantern",
+                    "description": "A native modular lantern.",
+                    "weightGrams": 100,
+                    "slotCost": 1,
+                    "rarity": "common",
+                    "itemLevel": 1,
+                    "stackPolicy": "unique",
+                    "maxStackUnits": 1,
+                    "transferPolicy": "transferable"
+                }],
+                "initialItemInstances": [{
+                    "id": instance_id,
+                    "prototypeId": "a:lantern",
+                    "location": {"kind": "staged"}
+                }],
+                "rooms": [room("a:start", None)]
+            }),
+        );
+        let manifest = temp.path().join("world.project.json");
+        write_json(
+            &manifest,
+            &json!({
+                "schemaVersion": 2,
+                "id": "demo",
+                "name": "Demo",
+                "startRoomId": "a:start",
+                "areas": [{"id": "a", "path": "a.json"}]
+            }),
+        );
+        compose_world_project(manifest)
+    };
+
+    for valid_id in ["runtime:1".to_owned(), format!("i{}", "a".repeat(127))] {
+        compose_with_id(&valid_id).unwrap();
+    }
+
+    for invalid_id in [
+        "runtime:".to_owned(),
+        "runtime:0".to_owned(),
+        "runtime:01".to_owned(),
+        "runtime:-1".to_owned(),
+        "runtime:+1".to_owned(),
+        "runtime:18446744073709551616".to_owned(),
+        format!("i{}", "a".repeat(128)),
+    ] {
+        let error = compose_with_id(&invalid_id).unwrap_err();
+        let CompositionError::InvalidWorld(errors) = error else {
+            panic!("unexpected AreaPack error for {invalid_id:?}: {error}");
+        };
+        assert!(
+            errors
+                .0
+                .iter()
+                .any(|error| { error.to_string().contains("canonical runtime id") })
+        );
+    }
+}
+
+#[test]
 fn duplicate_area_ids_and_paths_fail_closed() {
     let duplicate_id = tempfile::tempdir().unwrap();
     let manifest = duplicate_id.path().join("world.project.json");

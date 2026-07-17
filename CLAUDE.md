@@ -38,11 +38,12 @@ describe el baseline vigente de personajes, inventario y medios.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
-- La fase de inventario 3C separa `itemPrototypes` de instancias durables y
-  persiste `WorldRuntimeSnapshot` v4 con DTO exactos v1/v2/v3/v4. v1-v3 se
+- La fase de inventario 3D separa `itemPrototypes` de instancias durables y
+  persiste `WorldRuntimeSnapshot` v5 con DTO exactos v1/v2/v3/v4/v5. v1-v3 se
   convierten a vínculo `unbound`; schema-smuggling, vínculos y políticas
-  incoherentes fallan cerrados. SQLite/PostgreSQL conservan el snapshot único en
-  esquema v10, sin tabla espejo ni esquema v11. Restore conserva nuevas
+  incoherentes fallan cerrados; v4 normaliza a contador inicial y trades vacíos.
+  SQLite/PostgreSQL conservan el snapshot único en esquema v10, sin tabla
+  espejo, custodia SQL ni esquema v11. Restore conserva nuevas
   instancias iniciales del WorldPack y superpone el snapshot sin resucitar
   instancias runtime ausentes.
 - Las pilas fungibles se derivan por ubicación/prototipo/vínculo y no persisten
@@ -60,8 +61,11 @@ describe el baseline vigente de personajes, inventario y medios.
   1..=256 raíces portadas a un receptor distinto, conectado y en la misma sala,
   con capacidad bilateral, ignore/block, commit y proyección atómicos. El
   arranque valida propietarios raíz y ligados, incluidos consumidos y
-  desconectados. Trade/escrow, derechos/reparto, procedencia y tablas aleatorias
-  siguen pendientes.
+  desconectados. `trade` reserva hasta 128 raíces transferibles y moneda entre
+  dos personajes conectados de la misma sala, con revisión/digest, doble
+  confirmación, liquidación simultánea y cancelación restart-safe. Web, Telnet
+  y `Char.Trade 1` GMCP comparten dominio y proyección. Derechos/reparto,
+  procedencia y tablas aleatorias siguen pendientes.
 - La fase social 1 está implementada: `say`, `tell`, `reply` online, grupos de
   seis miembros con chat y liderazgo, y suscripciones durables a `general`,
   `newbie`, `staff`. `staff` exige perfil `moderator`, `administrator` o
@@ -100,22 +104,31 @@ veredictos en `pass`. No se ejecutaron PostgreSQL real v10, WebKit local ni soak
 de 24 horas. Esa evidencia operacional procede de un árbol dirty precommit: es
 diagnóstico local, no evidencia publicable ni de CI.
 
-La evidencia histórica de integración 3B pasa formato/check/clippy y 499/499
+La evidencia histórica de integración 3B pasó formato/check/clippy y 499/499
 pruebas Rust: 88 core, 93
-WorldPack, 28 importador, 202 servidor y 88 restantes. También pasan
+WorldPack, 28 importador, 202 servidor y 88 restantes. También pasaron
 `svelte-check` 0/0, 103/103 web, build, 30/30 Playwright Chromium/Firefox,
 80/80 Node, humo, carga CI con 16 usuarios, soak corto de 66 rondas/10
 readiness, `cargo-deny`, licencias y avisos 307 Rust/76 web. PostgreSQL real
 v10, WebKit local y soak de 24 horas no se ejecutaron.
 
-La integración actual 3C usa un WorldPack canónico con 9 prototipos, 10
+La integración histórica de 3C usó un WorldPack canónico con 9 prototipos, 10
 instancias iniciales, 49.603 bytes y SHA-256
 `f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
-Pasan 513/513 pruebas Rust: 93 core, 95 WorldPack, 28 importador, 207 servidor y
-90 restantes; `svelte-check` 0/0, 103/103 web, 81/81 Node y 32/32 Playwright
-soportados, 16 Chromium y 16 Firefox. WebKit no arranca en este host por
-bibliotecas GTK/GStreamer. No se ejecutaron PostgreSQL real v10 ni soak de 24
+En aquel árbol pasaron 513/513 pruebas Rust: 93 core, 95 WorldPack, 28
+importador, 207 servidor y 90 restantes; `svelte-check` 0/0, 103/103 web, 81/81
+Node y 32/32 Playwright soportados, 16 Chromium y 16 Firefox. WebKit no arrancó
+en aquel gate por bibliotecas GTK/GStreamer. No se ejecutaron PostgreSQL real
+v10 ni soak de 24
 horas; es evidencia local de un árbol dirty, no de CI, release o producción.
+
+La integración actual 3D añade snapshot v5 y reservas durables de trade. La
+evidencia integrada pasa 550 pruebas Rust: 102 core (80+3+14+5), 97 WorldPack,
+28 importador, 231 servidor y 92 restantes —incluidas 23 admin—; también 107
+Vitest y 83 Node/bot.
+El pase Playwright final completa 36/36 escenarios, 18 Chromium y 18 Firefox.
+No se ejecutaron
+PostgreSQL real v10, WebKit local ni soak de 24 horas.
 
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
@@ -144,9 +157,9 @@ por facturación antes de ejecutar.
   paridad Telnet/GMCP.
 - Medios pasan por pipeline y manifiesto revisado; perderlos no cambia juego.
 - La identidad durable prototype/instance, las pilas derivadas y los
-  contenedores acotados, `give` y las políticas de transferencia ya existen.
-  Antes de botín repetible/aleatorio, implementa trade confirmado y después
-  propiedad, procedencia y derechos de reparto atómicos. No añadas cajas de
+  contenedores acotados, `give`, las políticas y el trade confirmado mediante
+  reservas ya existen. Antes de botín repetible/aleatorio define propiedad,
+  elegibilidad, procedencia y derechos de reparto atómicos. No añadas cajas de
   botín pagadas al baseline.
 - Las acciones staff que tocan el mundo resuelven un personaje conectado y
   comprueban una capacidad concreta. Conserva la sintaxis textual con `|` para

@@ -92,7 +92,10 @@ const validPlayerState = () => ({
     actions: [{ label: 'Accept', command: 'quest accept first-hunt' }],
   }],
   partyInvites: [],
-  economy: { coins: 40, commodities: [], shopAvailable: false, shop: [] },
+  economy: {
+    coins: 40, reservedCoins: 0, spendableCoins: 40,
+    commodities: [], shopAvailable: false, shop: [],
+  },
   social: {
     online: [{ id: 'o2222222222222222', name: 'Aria', selfCharacter: true, nearby: true }],
   },

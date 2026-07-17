@@ -20,7 +20,8 @@ use std::{
 };
 use tiamud_cell_frame::{AnsiProfile, Cell, CellAttributes, CellFrame, NativeProtocol, RgbColor};
 use tiamud_core::{
-    CharacterSnapshot, ContainerContentsView, PlayerStateView, SceneAudio, SceneView, parse_action,
+    CharacterSnapshot, ContainerContentsView, PlayerStateView, SceneAudio, SceneView,
+    TradeContentsView, parse_action,
 };
 use tiamud_telnet_codec::{DO, DONT, IAC, SB, SE, TelnetEvent, TelnetParser, WILL, WONT};
 use tokio::{
@@ -983,6 +984,13 @@ async fn write_auth_error(connection: &mut TelnetConnection, error: &GameError) 
 fn public_error(error: &GameError) -> String {
     match error {
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
+        GameError::TradeUnavailable
+        | GameError::World(
+            tiamud_core::WorldError::TradeUnavailable
+            | tiamud_core::WorldError::TradeTargetUnavailable
+            | tiamud_core::WorldError::ItemReservedForTrade
+            | tiamud_core::WorldError::StaleTradeRevision,
+        ) => "That trade is not available.".to_owned(),
         GameError::World(
             error @ (tiamud_core::WorldError::NoExit
             | tiamud_core::WorldError::ItemNotFound(_)
@@ -1214,6 +1222,15 @@ async fn serve_entered(
                                     }
                                     if let Some(contents) = &outcome.container_contents {
                                         let gmcp = input.negotiation.container_gmcp(
+                                            contents,
+                                            outcome.player.revision,
+                                        );
+                                        if !gmcp.is_empty() {
+                                            output_queue_bytes(output, gmcp)?;
+                                        }
+                                    }
+                                    if let Some(contents) = &outcome.trade_contents {
+                                        let gmcp = input.negotiation.trade_contents_gmcp(
                                             contents,
                                             outcome.player.revision,
                                         );
@@ -2135,11 +2152,14 @@ impl TelnetSession {
                         "itemLevel": item.item_level,
                         "weightGrams": item.weight_grams,
                         "quantity": item.quantity,
+                        "availableQuantity": item.available_quantity,
+                        "reservedForTrade": item.reserved_for_trade,
                         "stackSlots": item.stack_slots,
                         "totalWeightGrams": item.total_weight_grams,
                         "transferPolicy": item.transfer_policy,
                         "boundToYou": item.bound_to_you,
                         "canGive": item.can_give,
+                        "canTrade": item.can_trade,
                     });
                     if let Some(capacity) = &item.container_capacity {
                         value["containerCapacity"] = json!(capacity);
@@ -2210,6 +2230,65 @@ impl TelnetSession {
                 "Group.Info",
                 &json!({"members": members, "revision": player.revision}),
             );
+        }
+        if self.gmcp.supports("char.trade") {
+            let full = json!({
+                "revision": player.revision,
+                "coins": player.economy.coins,
+                "reservedCoins": player.economy.reserved_coins,
+                "spendableCoins": player.economy.spendable_coins,
+                "trade": player.trade,
+            });
+            if !append_gmcp(&mut output, "Char.Trade", &full) {
+                let trade = player.trade.as_ref().map(|trade| {
+                    let offer = |offer: &tiamud_core::TradeOfferView| {
+                        json!({
+                            "coins": offer.coins,
+                            "lines": offer.lines.iter().map(|line| {
+                                let (label, label_truncated) = bounded_utf8_prefix(
+                                    &line.label,
+                                    MAX_GMCP_CONTAINER_FALLBACK_LABEL_BYTES,
+                                );
+                                json!({
+                                    "target": line.target,
+                                    "label": label,
+                                    "labelTruncated": label_truncated,
+                                    "quantity": line.quantity,
+                                    "container": line.container,
+                                })
+                            }).collect::<Vec<_>>(),
+                        })
+                    };
+                    json!({
+                        "id": trade.id,
+                        "phase": trade.phase,
+                        "counterparty": trade.counterparty,
+                        "expiresInTicks": trade.expires_in_ticks,
+                        "stateRevision": trade.state_revision,
+                        "ownConfirmed": trade.own_confirmed,
+                        "counterpartyConfirmed": trade.counterparty_confirmed,
+                        "ownOffer": offer(&trade.own_offer),
+                        "counterpartyOffer": offer(&trade.counterparty_offer),
+                        "canAccept": trade.can_accept,
+                        "canConfirm": trade.can_confirm,
+                    })
+                });
+                let fallback = json!({
+                    "revision": player.revision,
+                    "coins": player.economy.coins,
+                    "reservedCoins": player.economy.reserved_coins,
+                    "spendableCoins": player.economy.spendable_coins,
+                    "trade": trade,
+                    "truncated": true,
+                    "overflow": {
+                        "reason": "messageTooLarge",
+                        "maximumBytes": MAX_GMCP_BYTES,
+                    },
+                });
+                if !append_gmcp(&mut output, "Char.Trade", &fallback) {
+                    warn!("failed to encode bounded Char.Trade overflow fallback");
+                }
+            }
         }
         output
     }
@@ -2300,6 +2379,78 @@ impl TelnetSession {
         });
         if !append_gmcp(&mut output, "Char.Items.List", &fallback) {
             warn!("failed to encode bounded Char.Items.List overflow fallback");
+        }
+        output
+    }
+
+    fn trade_contents_gmcp(&self, contents: &TradeContentsView, revision: u64) -> Vec<u8> {
+        if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("char.trade") {
+            return Vec::new();
+        }
+        let project_items = |label_limit: Option<usize>| {
+            contents
+                .items
+                .iter()
+                .map(|item| {
+                    let (name, label_truncated) = label_limit.map_or_else(
+                        || (item.label.clone(), false),
+                        |limit| bounded_utf8_prefix(&item.label, limit),
+                    );
+                    let mut value = json!({
+                        "id": item.id,
+                        "name": name,
+                        "rarity": item.rarity,
+                        "itemLevel": item.item_level,
+                        "weightGrams": item.weight_grams,
+                        "quantity": item.quantity,
+                        "availableQuantity": item.available_quantity,
+                        "reservedForTrade": item.reserved_for_trade,
+                        "stackSlots": item.stack_slots,
+                        "totalWeightGrams": item.total_weight_grams,
+                        "transferPolicy": item.transfer_policy,
+                        "boundToYou": item.bound_to_you,
+                        "canGive": item.can_give,
+                        "canTrade": item.can_trade,
+                    });
+                    if label_limit.is_some() {
+                        value["labelTruncated"] = json!(label_truncated);
+                    }
+                    if let Some(capacity) = &item.container_capacity {
+                        value["containerCapacity"] = json!(capacity);
+                    }
+                    value
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut output = Vec::new();
+        let full = json!({
+            "tradeId": contents.trade_id,
+            "container": contents.container,
+            "items": project_items(None),
+            "page": contents.page,
+            "totalPages": contents.total_pages,
+            "capacity": contents.capacity,
+            "revision": revision,
+        });
+        if append_gmcp(&mut output, "Char.Trade.Contents", &full) {
+            return output;
+        }
+        let fallback = json!({
+            "tradeId": contents.trade_id,
+            "container": contents.container,
+            "items": project_items(Some(MAX_GMCP_CONTAINER_FALLBACK_LABEL_BYTES)),
+            "page": contents.page,
+            "totalPages": contents.total_pages,
+            "capacity": contents.capacity,
+            "revision": revision,
+            "truncated": true,
+            "overflow": {
+                "reason": "messageTooLarge",
+                "maximumBytes": MAX_GMCP_BYTES,
+            },
+        });
+        if !append_gmcp(&mut output, "Char.Trade.Contents", &fallback) {
+            warn!("failed to encode bounded Char.Trade.Contents overflow fallback");
         }
         output
     }
@@ -2442,6 +2593,7 @@ const GMCP_PACKAGES: &[&str] = &[
     "Client.Media 1",
     "Char.Vitals 1",
     "Char.Items 1",
+    "Char.Trade 1",
     "Tiamud.Scene 1",
     "Tiamud.Character 1",
     "Tiamud.Assets 1",
@@ -3164,6 +3316,12 @@ mod tests {
             public_error(&GameError::GiveUnavailable),
             "That item transfer is not available."
         );
+        assert_eq!(
+            public_error(&GameError::World(
+                tiamud_core::WorldError::StaleTradeRevision
+            )),
+            "That trade is not available."
+        );
     }
 
     #[test]
@@ -3787,7 +3945,7 @@ mod tests {
         }]);
         session.handle(vec![TelnetEvent::Subnegotiation {
             option: OPT_GMCP,
-            data: br#"Core.Supports.Set ["Tiamud.Character 1","Char.Vitals 1","Char.Items 1","Group 1"]"#.to_vec(),
+            data: br#"Core.Supports.Set ["Tiamud.Character 1","Char.Vitals 1","Char.Items 1","Char.Trade 1","Group 1"]"#.to_vec(),
         }]);
 
         let mut world = tiamud_core::World::demo();
@@ -3834,6 +3992,16 @@ mod tests {
             payload.starts_with(b"Group.Info ")
                 && String::from_utf8_lossy(payload).contains("\"revision\"")
         }));
+        let trade: Value = serde_json::from_slice(
+            payloads
+                .iter()
+                .find_map(|payload| payload.strip_prefix(b"Char.Trade "))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(trade["trade"].is_null());
+        assert_eq!(trade["reservedCoins"], 0);
+        assert_eq!(trade["spendableCoins"], trade["coins"]);
         let wire = String::from_utf8_lossy(
             &payloads
                 .iter()
@@ -3850,6 +4018,9 @@ mod tests {
         assert!(wire.contains("\"transferPolicy\":\"transferable\""));
         assert!(wire.contains("\"boundToYou\":false"));
         assert!(wire.contains("\"canGive\":true"));
+        assert!(wire.contains("\"availableQuantity\":1"));
+        assert!(wire.contains("\"reservedForTrade\":0"));
+        assert!(wire.contains("\"canTrade\":true"));
         assert!(!wire.contains("demo:lantern-square"));
         assert!(!wire.contains("prototypeId"));
         assert!(!wire.contains("characterId"));
@@ -3894,6 +4065,183 @@ mod tests {
     }
 
     #[test]
+    fn gmcp_trade_projection_preserves_opaque_state_and_has_bounded_fallbacks() {
+        let mut session = TelnetSession::default();
+        session.begin_initial_negotiation();
+        session.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        session.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Char.Trade 1"]"#.to_vec(),
+        }]);
+
+        let mut world = tiamud_core::World::demo();
+        let session_id = tiamud_core::SessionId(71);
+        world
+            .connect(
+                session_id,
+                tiamud_core::CharacterSnapshot {
+                    id: tiamud_core::CharacterId(72),
+                    account_id: tiamud_core::AccountId(73),
+                    name: "Trade projection".into(),
+                    room_id: world.start_room_id().to_owned(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let mut player = world.player_state_view(session_id).unwrap();
+        player.economy.coins = 100;
+        player.economy.reserved_coins = 25;
+        player.economy.spendable_coins = 75;
+        player.trade = Some(tiamud_core::TradeView {
+            id: "o1111111111111111".into(),
+            phase: tiamud_core::TradePhase::Negotiating,
+            counterparty: "o2222222222222222".into(),
+            expires_in_ticks: 90,
+            state_revision: 7,
+            own_confirmed: false,
+            counterparty_confirmed: true,
+            own_offer: tiamud_core::TradeOfferView {
+                coins: 25,
+                lines: vec![tiamud_core::TradeOfferLineView {
+                    target: "o3333333333333333".into(),
+                    label: "field satchel".into(),
+                    quantity: 1,
+                    container: true,
+                }],
+            },
+            counterparty_offer: tiamud_core::TradeOfferView {
+                coins: 3,
+                lines: vec![tiamud_core::TradeOfferLineView {
+                    target: "o4444444444444444".into(),
+                    label: "blue lantern".into(),
+                    quantity: 1,
+                    container: false,
+                }],
+            },
+            can_accept: false,
+            can_confirm: true,
+        });
+
+        let payloads = gmcp_payloads(&session.player_gmcp(&player));
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].len() <= MAX_GMCP_BYTES);
+        let trade: Value =
+            serde_json::from_slice(payloads[0].strip_prefix(b"Char.Trade ").unwrap()).unwrap();
+        assert_eq!(trade["trade"]["id"], "o1111111111111111");
+        assert_eq!(trade["trade"]["stateRevision"], 7);
+        assert_eq!(
+            trade["trade"]["counterpartyOffer"]["lines"][0]["target"],
+            "o4444444444444444"
+        );
+        assert_eq!(trade["reservedCoins"], 25);
+        assert_eq!(trade["spendableCoins"], 75);
+        assert!(trade.get("truncated").is_none());
+
+        let pathological_lines = (0..8)
+            .map(|index| tiamud_core::TradeOfferLineView {
+                target: format!("o{index:016x}"),
+                label: "é".repeat(1_024),
+                quantity: 128,
+                container: index % 2 == 0,
+            })
+            .collect::<Vec<_>>();
+        let active = player.trade.as_mut().unwrap();
+        active.own_offer.lines = pathological_lines.clone();
+        active.counterparty_offer.lines = pathological_lines;
+        let fallback_payloads = gmcp_payloads(&session.player_gmcp(&player));
+        assert_eq!(fallback_payloads.len(), 1);
+        assert!(fallback_payloads[0].len() <= MAX_GMCP_BYTES);
+        let fallback: Value =
+            serde_json::from_slice(fallback_payloads[0].strip_prefix(b"Char.Trade ").unwrap())
+                .unwrap();
+        assert_eq!(fallback["truncated"], true);
+        assert_eq!(fallback["overflow"]["maximumBytes"], MAX_GMCP_BYTES);
+        assert_eq!(
+            fallback["trade"]["ownOffer"]["lines"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert_eq!(
+            fallback["trade"]["ownOffer"]["lines"][0]["target"],
+            "o0000000000000000"
+        );
+        assert_eq!(
+            fallback["trade"]["ownOffer"]["lines"][0]["labelTruncated"],
+            true
+        );
+    }
+
+    #[test]
+    fn gmcp_trade_contents_is_private_actionable_and_bounded() {
+        let mut session = TelnetSession::default();
+        session.begin_initial_negotiation();
+        session.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        session.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Char.Trade 1"]"#.to_vec(),
+        }]);
+        let contents = tiamud_core::TradeContentsView {
+            trade_id: "o1111111111111111".into(),
+            container: "o2222222222222222".into(),
+            items: (0..20)
+                .map(|index| tiamud_core::PlayerItemView {
+                    id: format!("o{index:016x}"),
+                    label: "é".repeat(256),
+                    description: "private prose stays in Telnet text".into(),
+                    rarity: "legendary".into(),
+                    item_level: 1_000,
+                    weight_grams: 1_000_000,
+                    quantity: 1,
+                    available_quantity: 1,
+                    reserved_for_trade: 0,
+                    stack_slots: 1,
+                    total_weight_grams: 1_000_000,
+                    transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+                    bound_to_you: false,
+                    can_give: false,
+                    can_trade: false,
+                    container_capacity: None,
+                    actions: vec![tiamud_core::SceneAction {
+                        label: "Get".into(),
+                        command: "unsafe client command".into(),
+                    }],
+                })
+                .collect(),
+            page: 1,
+            total_pages: 2,
+            capacity: tiamud_core::InventoryCapacityView {
+                used_slots: 20,
+                max_slots: 32,
+                used_weight_grams: 20_000_000,
+                max_weight_grams: 30_000_000,
+            },
+        };
+
+        let payloads = gmcp_payloads(&session.trade_contents_gmcp(&contents, 9));
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].len() <= MAX_GMCP_BYTES);
+        let payload: Value =
+            serde_json::from_slice(payloads[0].strip_prefix(b"Char.Trade.Contents ").unwrap())
+                .unwrap();
+        assert_eq!(payload["tradeId"], "o1111111111111111");
+        assert_eq!(payload["container"], "o2222222222222222");
+        assert_eq!(payload["revision"], 9);
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(payload["items"].as_array().unwrap().len(), 20);
+        assert!(payload["items"][0].get("description").is_none());
+        assert!(payload["items"][0].get("actions").is_none());
+        assert_eq!(payload["items"][0]["id"], "o0000000000000000");
+    }
+
+    #[test]
     fn oversized_container_gmcp_keeps_a_bounded_actionable_fallback() {
         let mut session = TelnetSession::default();
         session.begin_initial_negotiation();
@@ -3916,11 +4264,14 @@ mod tests {
                     item_level: 1_000,
                     weight_grams: 1_000_000,
                     quantity: 1,
+                    available_quantity: 1,
+                    reserved_for_trade: 0,
                     stack_slots: 100,
                     total_weight_grams: 1_000_000,
                     transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                     bound_to_you: false,
                     can_give: false,
+                    can_trade: true,
                     container_capacity: Some(tiamud_core::InventoryCapacityView {
                         used_slots: 0,
                         max_slots: 1_000,

@@ -14,6 +14,7 @@
     ServerNoticeData,
     SocialMessageData,
     SyncRecoveryData,
+    TradeContentsData,
   } from './lib/protocol';
   import { localizedImageAlt } from './lib/protocol';
   import {
@@ -88,6 +89,7 @@
   let scene = $state<SceneSnapshot>();
   let player = $state<PlayerStateSnapshot>();
   let containerContents = $state<ContainerContentsData>();
+  let tradeContents = $state<TradeContentsData>();
   let manifestImage = $state<SceneSnapshot['image']>();
   let activeAssetKey: string | undefined;
   let failedImageUrls = $state<string[]>([]);
@@ -465,6 +467,16 @@
         }
         break;
       case 'player.snapshot':
+        if (
+          !message.data.trade
+          || tradeContents?.tradeId !== message.data.trade.id
+          || (
+            player?.trade?.stateRevision !== undefined
+            && player.trade.stateRevision !== message.data.trade.stateRevision
+          )
+        ) {
+          tradeContents = undefined;
+        }
         player = message.data;
         break;
       case 'vitals.update':
@@ -482,10 +494,14 @@
             inventoryCapacity: message.data.inventoryCapacity,
           };
           containerContents = undefined;
+          tradeContents = undefined;
         }
         break;
       case 'container.contents':
         containerContents = message.data;
+        break;
+      case 'trade.contents':
+        tradeContents = message.data;
         break;
       case 'map.snapshot':
         if (player && player.revision <= message.data.revision) {
@@ -543,6 +559,7 @@
     scene = recovery.scene;
     player = recovery.player;
     containerContents = undefined;
+    tradeContents = undefined;
   }
 
   function submitCommand(value = command): void {
@@ -564,6 +581,9 @@
       'item.use', 'item.equip', 'item.unequip',
     ].includes(action)) {
       containerContents = undefined;
+    }
+    if (sent && action.startsWith('trade.') && action !== 'trade.contents') {
+      tradeContents = undefined;
     }
     recordSubmission(label, id, sent);
   }
@@ -634,6 +654,7 @@
       return;
     }
     containerContents = undefined;
+    tradeContents = undefined;
     accessError = undefined;
     selectedAccess = selection;
     if (!connection) {
@@ -653,6 +674,7 @@
               markPendingInterrupted();
               cancelVisualCues();
               containerContents = undefined;
+              tradeContents = undefined;
             }
           },
           onProtocolError: () => {
@@ -682,6 +704,7 @@
     resetVisualPresentation();
     player = undefined;
     containerContents = undefined;
+    tradeContents = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -960,6 +983,7 @@
       <PlayerDashboard
         value={player}
         {containerContents}
+        {tradeContents}
         abilityTargets={scene?.npcs ?? []}
         oncommand={submitCommand}
         onaction={submitAction}

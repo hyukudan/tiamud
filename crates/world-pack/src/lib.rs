@@ -743,10 +743,11 @@ impl WorldPack {
         }
         let mut item_instance_ids = HashSet::new();
         for instance in &self.initial_item_instances {
-            if instance.id.trim().is_empty() {
-                errors.push(ValidationError::InvalidGameplay(
-                    "initial item instance id must not be empty".to_owned(),
-                ));
+            if !valid_item_instance_identifier(&instance.id) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "initial item instance id {:?} must be a canonical runtime id or contain 1..=128 lowercase namespaced identifier bytes",
+                    instance.id
+                )));
             } else if !item_instance_ids.insert(instance.id.as_str()) {
                 errors.push(ValidationError::InvalidGameplay(format!(
                     "initial item instance id {:?} appears more than once",
@@ -1867,6 +1868,23 @@ fn valid_gameplay_identifier(value: &str) -> bool {
         })
 }
 
+fn valid_item_instance_identifier(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 128 {
+        return false;
+    }
+    let Some(sequence) = value.strip_prefix("runtime:") else {
+        return valid_gameplay_identifier(value);
+    };
+    !sequence.is_empty()
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        && !(sequence.len() > 1 && sequence.starts_with('0'))
+        && sequence
+            .parse::<u64>()
+            .ok()
+            .is_some_and(|sequence| sequence > 0)
+}
+
 fn valid_stat_identifier(value: &str) -> bool {
     value.len() <= 64 && valid_gameplay_identifier(value)
 }
@@ -2768,6 +2786,56 @@ mod tests {
                     .to_string()
                     .contains("lowercase namespaced identifier")
             }));
+        }
+    }
+
+    #[test]
+    fn item_instance_ids_share_the_runtime_identifier_contract() {
+        let prototype_id = "test:bounded-instance";
+        for valid_id in [
+            format!("i{}", "a".repeat(127)),
+            "runtime:1".into(),
+            "runtime:18446744073709551615".into(),
+        ] {
+            let mut candidate = pack();
+            candidate.item_prototypes.push(item_prototype(prototype_id));
+            candidate.initial_item_instances.push(InitialItemInstance {
+                id: valid_id,
+                prototype_id: prototype_id.into(),
+                location: InitialItemLocation::Room {
+                    room_id: "test:1".into(),
+                },
+            });
+            candidate.validate().unwrap();
+        }
+
+        for invalid_id in [
+            format!("i{}", "a".repeat(128)),
+            "runtime:".into(),
+            "runtime:0".into(),
+            "runtime:01".into(),
+            "runtime:-1".into(),
+            "runtime:+1".into(),
+            "runtime:18446744073709551616".into(),
+        ] {
+            let mut candidate = pack();
+            candidate.item_prototypes.push(item_prototype(prototype_id));
+            candidate.initial_item_instances.push(InitialItemInstance {
+                id: invalid_id,
+                prototype_id: prototype_id.into(),
+                location: InitialItemLocation::Room {
+                    room_id: "test:1".into(),
+                },
+            });
+            let messages = candidate
+                .validate()
+                .unwrap_err()
+                .0
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(messages.contains("canonical runtime id"), "{messages}");
         }
     }
 

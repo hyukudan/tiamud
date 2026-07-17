@@ -525,6 +525,9 @@ export function parseServerMessage(raw) {
     case 'container.contents':
       validateContainerContents(message.data);
       break;
+    case 'trade.contents':
+      validateTradeContents(message.data);
+      break;
     case 'map.snapshot':
       validateMapSnapshot(message.data);
       break;
@@ -700,8 +703,8 @@ function validateContainerContents(data) {
       item,
       [
         'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
-        'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou', 'canGive',
-        'actions',
+        'availableQuantity', 'reservedForTrade', 'totalWeightGrams', 'containerCapacity',
+        'transferPolicy', 'boundToYou', 'canGive', 'canTrade', 'actions',
       ],
       'container contents item',
     );
@@ -712,9 +715,27 @@ function validateContainerContents(data) {
     validateItemMetadata(item, 'container contents item');
     assertBoolean(item.canGive, 'container contents item give availability');
     if (item.canGive) throw new Error('Container contents item cannot be given directly.');
+    validateItemTradeAvailability(item, 'container contents item');
     validateActions(item.actions, 'container contents item actions');
   }
   validateCapacityShape(data.capacity, 'container contents capacity');
+}
+
+function validateTradeContents(data) {
+  assertRecord(data, 'trade.contents.data');
+  assertOnlyKeys(
+    data,
+    ['tradeId', 'container', 'items', 'page', 'totalPages', 'capacity'],
+    'trade.contents.data',
+  );
+  assertOpaqueId(data.tradeId, 'trade contents trade id');
+  validateContainerContents({
+    container: data.container,
+    items: data.items,
+    page: data.page,
+    totalPages: data.totalPages,
+    capacity: data.capacity,
+  });
 }
 
 function validateMapSnapshot(data) {
@@ -1023,7 +1044,7 @@ function validatePlayerState(player) {
     player,
     [
       'revision', 'character', 'inventory', 'equipment', 'inventoryCapacity', 'map', 'quests', 'party',
-      'partyInvites', 'economy', 'social',
+      'partyInvites', 'economy', 'social', 'trade',
     ],
     'player',
   );
@@ -1124,8 +1145,18 @@ function validatePlayerState(player) {
 
   const economy = player.economy;
   assertRecord(economy, 'player economy');
-  assertOnlyKeys(economy, ['coins', 'commodities', 'shopAvailable', 'shop'], 'player economy');
+  assertOnlyKeys(
+    economy,
+    ['coins', 'reservedCoins', 'spendableCoins', 'commodities', 'shopAvailable', 'shop'],
+    'player economy',
+  );
   assertNonNegativeInteger(economy.coins, 'player coins');
+  assertNonNegativeInteger(economy.reservedCoins, 'player reserved coins');
+  assertNonNegativeInteger(economy.spendableCoins, 'player spendable coins');
+  if (economy.reservedCoins > economy.coins ||
+      economy.spendableCoins !== economy.coins - economy.reservedCoins) {
+    throw new Error('Player trade coin reservations are inconsistent.');
+  }
   assertBoolean(economy.shopAvailable, 'player shop availability');
   assertArrayMax(economy.commodities, 32, 'player commodities');
   for (const commodity of economy.commodities) {
@@ -1170,6 +1201,67 @@ function validatePlayerState(player) {
     assertBoolean(online.nearby, 'player online character proximity marker');
   }
 
+  if (player.trade !== undefined && player.trade !== null) validateTrade(player.trade);
+
+}
+
+function validateTradeOffer(offer, label) {
+  assertRecord(offer, label);
+  assertOnlyKeys(offer, ['coins', 'lines'], label);
+  assertNonNegativeInteger(offer.coins, `${label} coins`);
+  if (offer.coins > 1_000_000_000) throw new Error(`${label} coins exceed the trade bound.`);
+  assertArrayMax(offer.lines, 8, `${label} lines`);
+  const targets = new Set();
+  let roots = 0;
+  for (const line of offer.lines) {
+    assertRecord(line, `${label} line`);
+    assertOnlyKeys(line, ['target', 'label', 'quantity', 'container'], `${label} line`);
+    assertOpaqueId(line.target, `${label} line target`);
+    assertBoundedString(line.label, 256, `${label} line label`);
+    assertPositiveInteger(line.quantity, `${label} line quantity`);
+    assertBoolean(line.container, `${label} line container marker`);
+    if (line.quantity > 128 || (line.container && line.quantity !== 1) ||
+        targets.has(line.target)) throw new Error(`${label} has an invalid line.`);
+    targets.add(line.target);
+    roots += line.quantity;
+    if (roots > 128) throw new Error(`${label} exceeds the trade root bound.`);
+  }
+  return roots;
+}
+
+function validateTrade(trade) {
+  assertRecord(trade, 'player trade');
+  assertOnlyKeys(
+    trade,
+    [
+      'id', 'phase', 'counterparty', 'expiresInTicks', 'stateRevision', 'ownConfirmed',
+      'counterpartyConfirmed', 'ownOffer', 'counterpartyOffer', 'canAccept', 'canConfirm',
+    ],
+    'player trade',
+  );
+  assertOpaqueId(trade.id, 'player trade id');
+  assertOpaqueId(trade.counterparty, 'player trade counterparty');
+  if (!['requested', 'negotiating'].includes(trade.phase)) {
+    throw new Error('Player trade phase is invalid.');
+  }
+  assertNonNegativeInteger(trade.expiresInTicks, 'player trade expiry');
+  assertPositiveInteger(trade.stateRevision, 'player trade state revision');
+  assertBoolean(trade.ownConfirmed, 'player trade own confirmation');
+  assertBoolean(trade.counterpartyConfirmed, 'player trade counterparty confirmation');
+  assertBoolean(trade.canAccept, 'player trade accept availability');
+  assertBoolean(trade.canConfirm, 'player trade confirmation availability');
+  const roots = validateTradeOffer(trade.ownOffer, 'player own trade offer') +
+    validateTradeOffer(trade.counterpartyOffer, 'player counterparty trade offer');
+  if (roots > 128) throw new Error('Player trade exceeds the shared root bound.');
+  if (trade.phase === 'requested' &&
+      (trade.ownOffer.coins !== 0 || trade.counterpartyOffer.coins !== 0 ||
+        trade.ownOffer.lines.length > 0 || trade.counterpartyOffer.lines.length > 0 ||
+        trade.ownConfirmed || trade.counterpartyConfirmed || trade.canConfirm)) {
+    throw new Error('Requested trade has negotiating state.');
+  }
+  if (trade.phase === 'negotiating' && trade.canAccept) {
+    throw new Error('Negotiating trade cannot be accepted again.');
+  }
 }
 
 function validatePlayerCharacter(character) {
@@ -1474,8 +1566,8 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
       item,
       [
         'id', 'label', 'description', 'rarity', 'itemLevel', 'weightGrams', 'quantity',
-        'stackSlots', 'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou',
-        'canGive', 'actions',
+        'availableQuantity', 'reservedForTrade', 'stackSlots', 'totalWeightGrams',
+        'containerCapacity', 'transferPolicy', 'boundToYou', 'canGive', 'canTrade', 'actions',
       ],
       itemLabel,
     );
@@ -1490,6 +1582,7 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
     if (item.canGive && item.transferPolicy !== 'transferable') {
       throw new Error(`${itemLabel} cannot be given under its transfer policy.`);
     }
+    validateItemTradeAvailability(item, itemLabel);
     validateActions(item.actions, `${itemLabel} actions`);
     if (instanceIds.has(item.id)) throw new Error(`${label} inventory contains a duplicate item id.`);
     instanceIds.add(item.id);
@@ -1523,6 +1616,17 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
   }
 
   validateInventoryCapacity(capacity, inventory, equipment, label);
+}
+
+function validateItemTradeAvailability(item, label) {
+  assertNonNegativeInteger(item.availableQuantity, `${label} available quantity`);
+  assertNonNegativeInteger(item.reservedForTrade, `${label} reserved quantity`);
+  assertBoolean(item.canTrade, `${label} trade availability`);
+  if (item.availableQuantity + item.reservedForTrade !== item.quantity ||
+      (item.canTrade &&
+        (item.availableQuantity === 0 || item.transferPolicy !== 'transferable'))) {
+    throw new Error(`${label} has inconsistent trade availability.`);
+  }
 }
 
 function validateItemMetadata(item, label) {
@@ -1618,7 +1722,18 @@ function validateViewEvent(event) {
     'message.append.data',
   );
   assertPositiveInteger(event.revision, 'message revision');
-  if (!['characterMoved', 'itemTaken', 'itemDropped', 'itemGiven', 'gameplay', 'adventure'].includes(event.kind)) {
+  if (![
+    'characterMoved',
+    'itemTaken',
+    'itemDropped',
+    'itemGiven',
+    'tradeRequested',
+    'tradeChanged',
+    'tradeCompleted',
+    'tradeCancelled',
+    'gameplay',
+    'adventure',
+  ].includes(event.kind)) {
     throw new Error(`Unknown message.append kind ${event.kind}.`);
   }
   requiredString(event.text, 'message text');

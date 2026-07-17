@@ -1,8 +1,8 @@
 # ADR 0012: Intercambio confirmado mediante reservas durables
 
-- Estado: propuesta; no aceptada ni implementada
+- Estado: aceptada e implementada
 - Fecha: 2026-07-16
-- Alcance propuesto: inventario fase 3D
+- Alcance: inventario fase 3D
 - Continúa: [ADR 0011](0011-atomic-give-and-item-transfer-policies.md)
 
 ## Contexto
@@ -20,12 +20,13 @@ política, saldo o persistencia. Tampoco debe añadir una tabla SQL autoritativa
 paralela al actor ni trasladar temporalmente objetos a una ubicación que
 obligue a devolver propiedad a personajes desconectados.
 
-Esta propuesta describe el contrato de fase 3D para su revisión. No constituye
-evidencia de implementación y no cambia todavía ninguna versión o formato.
+Esta decisión define el contrato implementado de fase 3D. La evidencia y los
+límites de su entrega se conservan en el
+[registro de fase](../project/log/2026-07-16-confirmed-trade-reservations-phase-3d.md).
 
-## Decisión propuesta
+## Decisión
 
-El escrow será una **reserva durable**, no custodia en otra ubicación:
+El escrow es una **reserva durable**, no custodia en otra ubicación:
 
 - los objetos ofrecidos permanecen en `Carried(propietario)`;
 - las monedas ofrecidas permanecen en `CharacterGameplaySnapshot.coins`;
@@ -34,7 +35,7 @@ El escrow será una **reserva durable**, no custodia en otra ubicación:
 - la segunda confirmación aplica los dos lotes y las dos variaciones de moneda
   en una única mutación prospectiva.
 
-No se añadirá `RuntimeItemLocation::Escrow`. Cancelar, expirar, desconectar o
+No se añade `RuntimeItemLocation::Escrow`. Cancelar, expirar, desconectar o
 recuperar tras un reinicio elimina reservas sin ejecutar reembolsos sobre
 agregados offline. La reserva forma parte del mismo estado de mundo que las
 instancias; no es una segunda autoridad.
@@ -54,7 +55,7 @@ stateDiagram-v2
     Completado --> [*]
 ```
 
-## Modelo durable propuesto
+## Modelo durable
 
 El modelo conceptual es:
 
@@ -122,7 +123,7 @@ Todo `ItemInstanceId`, tanto authored como creado en runtime, ocupa
 `1..=128` bytes. Un ID authored usa la gramática ASCII minúscula cerrada de los
 identificadores gameplay; uno creado en runtime es exactamente
 `runtime:<u64-no-cero-canónico>`. WorldPack v5, AreaPack v4, normalizadores,
-composición, loader, creación runtime, DTO v1-v5, restore y replay deberán validar esa
+composición, loader, creación runtime, DTO v1-v5, restore y replay validan esa
 misma cota antes de construir o aceptar un `ItemInstanceId`. Una referencia a
 contenedor cumple la misma regla por referenciar una instancia validada. Así,
 un snapshot o evento no puede introducir un ID largo que el WorldPack no
@@ -272,7 +273,7 @@ directamente. Cada raíz y todos sus descendientes deben tener política
 `transferable`. Un contenedor exterior transferible con un descendiente
 `character_bound` o `non_transferable` no es elegible.
 
-Se construirá una vez por estado un índice de raíces y subárboles reservados.
+Se construye una vez por estado un índice de raíces y subárboles reservados.
 Es una vista derivada de `trades`, nunca una tabla, columna o campo persistido,
 y se reconstruye o invalida al cambiar la revisión del mundo. La restauración
 rechaza raíces duplicadas, una raíz y su descendiente reservados a la vez,
@@ -354,7 +355,7 @@ aborta la transición y restaura el checkpoint; el reintento repite las
 consultas, nunca reutiliza un permiso social anterior ni convierte un fallo en
 autorización.
 
-## Límites propuestos
+## Límites
 
 | Recurso | Límite |
 | --- | ---: |
@@ -498,7 +499,7 @@ el commit tenga éxito. Un fallo restaura el checkpoint exacto.
 
 ## Eventos, replay y rollback
 
-El vocabulario durable propuesto incluye:
+El vocabulario durable incluye:
 
 - `TradeRequested { trade }`;
 - `TradeOpened { previous, current }`;
@@ -538,7 +539,7 @@ lote completo.
 
 ### Telnet
 
-El parser común incorporaría:
+El parser común incorpora:
 
 ```text
 trade request <personaje>
@@ -559,7 +560,7 @@ describe todos los hechos y acciones sin depender de GMCP.
 
 ### Web
 
-Las formas cerradas propuestas son:
+Las formas cerradas son:
 
 | Acción | Campos exactos adicionales |
 | --- | --- |
@@ -594,7 +595,7 @@ confirmación de la misma identidad nunca sustituye a la contraparte.
 
 ## Percepción y presentación
 
-`PlayerStateView` añadiría una vista privada opcional de un solo trade:
+`PlayerStateView` añade una vista privada opcional de un solo trade:
 
 - fase, contraparte con ID opaco, expiración y revisión de estado;
 - confirmación propia y de la contraparte;
@@ -602,7 +603,7 @@ confirmación de la misma identidad nunca sustituye a la contraparte.
 - `canConfirm` y acciones autorizadas; y
 - monedas totales, reservadas y gastables.
 
-`PlayerItemView` distinguiría `availableQuantity`, `reservedForTrade` y
+`PlayerItemView` distingue `availableQuantity`, `reservedForTrade` y
 `canTrade`. Los selectores de trade, personaje y objeto se derivan de la sal de
 cada sesión. No se proyectan `TradeId`, `CharacterId`, `ItemInstanceId`,
 prototipos ni vínculos durables.
@@ -613,21 +614,19 @@ los observadores de la sala reciben únicamente una narración genérica sin
 objetos, monedas ni selectores. Un observador remoto no recibe el evento.
 
 Web recibe la vista dentro de `player.snapshot`/`inventory.patch` y una página
-separada `trade.contents`. Telnet recibe texto equivalente. GMCP añadiría
-`Char.Trade 1` y regeneraría por separado cada payload con la sal de su sesión.
-El bot estricto validaría las mismas formas y límites.
+separada `trade.contents`. Telnet recibe texto equivalente. GMCP añade
+`Char.Trade 1` y regenera por separado cada payload con la sal de su sesión.
+El bot estricto valida las mismas formas y límites.
 
 ## Versiones y persistencia
 
-Si se acepta e implementa esta propuesta:
-
-- `WorldRuntimeSnapshot` pasaría a v5;
-- se conservaría un DTO v4 exacto sin campos de trade;
-- v4 -> v5 produciría `nextTradeId: 1` y `trades: {}`;
-- SQLite y PostgreSQL permanecerían en esquema v10;
-- WorldPack v5, AreaPack v4 y WorldProject v2 no cambiarían; y
-- `tiamud.v1`, todavía experimental, podría mantenerse si servidor, cliente y
-  parsers estrictos se actualizan juntos.
+- `WorldRuntimeSnapshot` pasa a v5;
+- se conserva un DTO v4 exacto sin campos de trade;
+- v4 -> v5 produce `nextTradeId: 1` y `trades: {}`;
+- SQLite y PostgreSQL permanecen en esquema v10;
+- WorldPack v5, AreaPack v4 y WorldProject v2 no cambian; y
+- `tiamud.v1`, todavía experimental, se mantiene porque servidor, cliente y
+  parsers estrictos se actualizan juntos antes del primer hito estable.
 
 El DTO v5 exige `nextTradeId` y `trades`; no les aplica `default`. Sus mapas,
 ofertas, líneas y confirmaciones rechazan campos desconocidos. El DTO v4 exacto
@@ -640,7 +639,7 @@ dentro de `AdventureRuntimeSnapshot`. Así el espejo existente
 columnas de escrow ni doble escritura. La columna SQL continúa comparando su
 versión con la versión original del payload antes de normalizar.
 
-## Superficies de implementación previstas
+## Superficies de implementación
 
 Dominio y snapshot:
 
@@ -663,7 +662,7 @@ Actor, recuperación y persistencia:
 - `crates/persistence-postgres/src/transfer.rs`; y
 - `crates/tiamud-admin/src/lib.rs`.
 
-No deberían cambiar los esquemas SQL definidos en
+No cambian los esquemas SQL definidos en
 `crates/persistence-sqlite/src/lib.rs` y
 `crates/persistence-postgres/src/lib.rs`, salvo pruebas que demuestren que
 siguen en v10.
@@ -679,9 +678,9 @@ Transportes y clientes:
 - `scripts/bot.mjs`, `scripts/bot.test.mjs` y el escenario de dos usuarios del
   harness de carga cuando corresponda.
 
-## Evidencia necesaria para aceptar la implementación
+## Evidencia de aceptación
 
-Las pruebas deberán cubrir como mínimo:
+Las pruebas enfocadas cubren como mínimo:
 
 1. parser común, campos Web sobrantes, cantidades, monedas y revisión de estado
    obsoleta;
@@ -724,9 +723,18 @@ Las pruebas deberán cubrir como mínimo:
 21. flujo Playwright de dos participantes con cambio de oferta y de base entre
     confirmaciones.
 
+La verificación integrada de esta entrega pasa 550 pruebas Rust: 102 de core
+(80 unidad, 3 parser, 14 habilidades y 5 propiedades), 97 WorldPack, 28
+importador, 231 servidor y 92 restantes, incluidas 23 admin. También pasan 107
+Vitest y 83 Node/bot.
+El pase Playwright final completa 36/36 escenarios, 18 Chromium y 18 Firefox.
+PostgreSQL real
+v10, WebKit local y el soak de 24 horas no se deducen de estas cifras; la
+evidencia completa pertenece al registro de entrega.
+
 ## Fuera de alcance
 
-Esta propuesta no incluye:
+Esta decisión no incluye:
 
 - botín aleatorio o repetible;
 - derechos o reparto de botín de grupo;
@@ -741,16 +749,15 @@ Esta propuesta no incluye:
 Botín aleatorio continúa bloqueado hasta definir por separado elegibilidad,
 propiedad, procedencia, reparto y creación/asignación transaccional.
 
-## Consecuencias previstas
+## Consecuencias
 
 La reserva mantiene propiedad y moneda en sus autoridades actuales y hace que
 cancelación y recuperación sean operaciones pequeñas. A cambio, todas las
 mutaciones de inventario y economía deben respetar el índice de reservas y una
 reconciliación central debe invalidar confirmaciones obsoletas.
 
-El snapshot v5 propuesto añade estado durable suficiente para recuperación,
+El snapshot v5 añade estado durable suficiente para recuperación,
 validación de replay compartido y auditoría sin imponer schema v11 ni una tabla
 paralela. No convierte el sufijo de eventos en event sourcing general ni
-reemplaza los documentos de personaje. La propuesta debe aceptarse
-explícitamente antes de implementar o documentar el trade como funcionalidad
-disponible.
+reemplaza los documentos de personaje. La fase 4 debe definir por separado
+propiedad, elegibilidad, procedencia y reparto antes de añadir botín aleatorio.

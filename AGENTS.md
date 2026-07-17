@@ -71,13 +71,16 @@ matriz, memoria y documentación pública a la vez.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
-- `WorldRuntimeSnapshot` v4 es la única autoridad durable de las instancias de
-  objeto. SQLite y PostgreSQL la confirman con personajes/eventos en su
+- `WorldRuntimeSnapshot` v5 es la única autoridad durable del grafo de
+  instancias de objeto y de las reservas de trade. SQLite y PostgreSQL la
+  confirman con personajes/eventos en su
   transacción existente; ambos adaptadores continúan en esquema v10 y no hay
-  esquema v11 ni tabla espejo. DTO exactos v1, v2, v3 y v4 se seleccionan por
+  esquema v11, tabla espejo ni custodia SQL de trade. DTO exactos v1, v2, v3,
+  v4 y v5 se seleccionan por
   `snapshotVersion`; v1-v3 se convierten a vínculo `unbound` y un campo
-  `binding` inyectado en v3 se rechaza. La lectura falla cerrada ante campos de
-  otra versión, referencias, grafo, vínculo, política o contador inválidos. Al
+  `binding` inyectado en v3 se rechaza; v4 crea `nextTradeId: 1` y `trades`
+  vacío. La lectura falla cerrada ante campos de otra versión, referencias,
+  grafo, vínculo, trade, reserva, política o contador inválidos. Al
   restaurar un snapshot anterior se conservan las nuevas instancias iniciales
   del WorldPack y se superponen las ubicaciones durables; una instancia creada
   en runtime que no esté en el snapshot no reaparece.
@@ -140,8 +143,18 @@ matriz, memoria y documentación pública a la vez.
   personaje conectado de la misma sala. Acepta selector opaco o nombre exacto,
   rechaza al propio emisor, prevalida capacidad de ambos agregados, respeta
   ignore del receptor y block bilateral y confirma un único `ItemsGiven` antes
-  de proyectar. No hay trade/escrow, entrega offline/remota, reparto de grupo ni
-  tablas de botín aleatorias.
+  de proyectar. La entrega offline/remota, el reparto de grupo y las tablas de
+  botín aleatorias siguen ausentes.
+- `trade` implementa intercambio bilateral confirmado entre dos personajes
+  conectados, en la misma sala, fuera de combate y permitidos por la política
+  social. El escrow es una reserva durable: objetos y monedas no cambian de
+  autoridad hasta que dos identidades confirman la misma revisión y digest.
+  Hay como máximo 64 trades, uno por personaje, 8 líneas por participante y
+  128 raíces transferibles entre ambos; solicitud y negociación caducan a 20 y
+  120 ticks. Cualquier cambio material invalida ambas confirmaciones. La
+  liquidación prospectiva mueve ambos lotes y saldos simultáneamente en un
+  único commit, y un reinicio valida participantes y cancela reservas antes de
+  readiness. Web, Telnet y `Char.Trade 1` GMCP comparten este dominio.
 - El arranque enumera de forma acotada la unión de personajes que poseen raíces
   y todos los `CharacterId` ligados, incluso en instancias consumidas. Carga
   temporalmente sus agregados y valida existencia, vínculo, equipo, grafo y
@@ -235,7 +248,7 @@ matriz, memoria y documentación pública a la vez.
   proveedor predeterminado; endpoints locales usan loopback y remotos HTTPS.
   Ningún borrador se publica sin validación y revisión humana.
 
-### Evidencia retenida de inventario 3A–3C
+### Evidencia retenida de inventario 3A–3D
 
 La evidencia histórica de inventario 3A supera formato, pruebas bloqueadas del
 workspace y clippy estricto. Las suites enfocadas pasan 77 pruebas de core, 80
@@ -252,26 +265,36 @@ diagnóstico local, no evidencia publicable ni de CI.
 
 La entrega histórica de fase 3B implementó WorldPack v5,
 AreaPack v4, snapshot v3, pilas derivadas, contenedores acotados y paridad de
-acciones/proyecciones. El árbol integrado pasa formato/check/clippy, 499/499
+acciones/proyecciones. Aquel árbol integrado pasó formato/check/clippy, 499/499
 pruebas Rust (88 core, 93 WorldPack, 28 importador, 202 servidor y 88
 restantes), 103/103 web, 30/30 Playwright Chromium/Firefox, 80/80 Node, humo,
-carga CI 16 usuarios y soak corto de 66 rondas/10 readiness. También pasan
+carga CI 16 usuarios y soak corto de 66 rondas/10 readiness. También pasaron
 `cargo-deny`, licencias y avisos 307 Rust/76 web. No hubo PostgreSQL real v10,
 WebKit local ni soak de 24 horas; no conviertas este pase local precommit en
 evidencia de CI o producción.
 
-La fase 3C está implementada en el árbol actual mediante snapshot v4, vínculo
+La fase 3C quedó implementada en su árbol integrado mediante snapshot v4, vínculo
 durable, tres políticas de transferencia y `give` atómico en Web, Telnet y
 GMCP. Lantern Square contiene 9 prototipos y 10 instancias iniciales; su
 WorldPack canónico ocupa 49.603 bytes y tiene SHA-256
 `f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
-En este árbol pasan 513/513 pruebas Rust: 93 core, 95 WorldPack, 28 importador,
-207 servidor y 90 restantes. También pasan `svelte-check` con 0 errores y 0
+En aquel árbol pasaron 513/513 pruebas Rust: 93 core, 95 WorldPack, 28 importador,
+207 servidor y 90 restantes. También pasaron `svelte-check` con 0 errores y 0
 avisos, 103/103 pruebas web, 81/81 Node y 32/32 escenarios Playwright
-soportados, 16 Chromium y 16 Firefox. WebKit no arranca en este host por
+soportados, 16 Chromium y 16 Firefox. WebKit no arrancó en aquel gate por
 bibliotecas GTK/GStreamer ausentes. No se ejecutaron PostgreSQL real v10 ni
 soak de 24 horas; esta comprobación local sobre un árbol dirty no es evidencia
 de CI, release o producción.
+
+La fase 3D está implementada en el árbol actual mediante snapshot v5 y
+reservas durables de objetos/moneda, revisión y digest canónicos, doble
+confirmación, liquidación simultánea y recuperación restart-safe. La evidencia
+integrada pasa 550 pruebas Rust: 102 core (80+3+14+5), 97 WorldPack, 28
+importador, 231 servidor y 92 restantes —incluidas 23 admin—; también 107
+Vitest y 83 Node/bot.
+El pase Playwright final completa 36/36 escenarios, 18 Chromium y 18 Firefox.
+No convierte
+PostgreSQL real v10, WebKit local ni el soak de 24 horas en ejecutados.
 
 ### Evidencia histórica retenida
 
@@ -315,10 +338,10 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 9. Autoridad de staff separada de XP, nivel, clase y talentos. Usa la capacidad
    concreta y auditoría append-only; perfiles y títulos son asignación/presentación,
    no autorización implícita.
-10. La fase 3C ya separa prototipo/instancia, deriva pilas, aplica capacidad
-    recursiva de contenedores y ejecuta `give` con políticas de transferencia.
-    Antes de botín repetible/aleatorio, implementa trade confirmado y después
-    define propiedad, procedencia y reparto atómicos.
+10. Las fases 3A–3D ya separan prototipo/instancia, derivan pilas, aplican
+    capacidad recursiva, ejecutan `give` con políticas y trade confirmado por
+    reservas. Antes de botín repetible/aleatorio define propiedad, elegibilidad,
+    procedencia y reparto atómicos.
     Cajas, llaves y tiradas pagadas quedan fuera.
 11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
     conservando snapshot atómico.
@@ -465,10 +488,10 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - fase social 1 implementada, pero sin correo/historial, shout/yell o telepatía;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
-- fase 3C de inventario implementada: prototipos/instancias, creación durable,
+- fase 3D de inventario implementada: prototipos/instancias, creación durable,
   pilas derivadas, contenedores con capacidad/profundidad acotadas, cantidades,
-  paginación, rareza, `itemLevel`, vínculo, políticas y `give`; sin trade
-  confirmado, derechos/reparto, procedencia ni botín aleatorio;
+  paginación, rareza, `itemLevel`, vínculo, políticas, `give` y trade confirmado
+  mediante reservas; sin derechos/reparto, procedencia ni botín aleatorio;
 - backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;
 - marca/dominios y derechos de terceros siguen siendo trabajo legal externo.
 

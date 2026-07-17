@@ -68,11 +68,14 @@ const player: PlayerStateSnapshot = {
     itemLevel: 3,
     weightGrams: 800,
     quantity: 2,
+    availableQuantity: 2,
+    reservedForTrade: 0,
     stackSlots: 1,
     totalWeightGrams: 1600,
     transferPolicy: 'transferable',
     boundToYou: false,
     canGive: true,
+    canTrade: true,
     actions: [{ label: 'Drop', command: 'drop o1111111111111111' }],
   }, {
     id: 'o6666666666666666',
@@ -82,11 +85,14 @@ const player: PlayerStateSnapshot = {
     itemLevel: 1,
     weightGrams: 400,
     quantity: 1,
+    availableQuantity: 1,
+    reservedForTrade: 0,
     stackSlots: 1,
     totalWeightGrams: 650,
     transferPolicy: 'character_bound',
     boundToYou: true,
     canGive: false,
+    canTrade: false,
     containerCapacity: {
       usedSlots: 1, maxSlots: 8, usedWeightGrams: 250, maxWeightGrams: 5000,
     },
@@ -137,6 +143,8 @@ const player: PlayerStateSnapshot = {
   partyInvites: [],
   economy: {
     coins: 40,
+    reservedCoins: 0,
+    spendableCoins: 40,
     commodities: [],
     shopAvailable: true,
     shop: [{
@@ -162,8 +170,9 @@ describe('PlayerDashboard', () => {
           items: [{
             id: 'o7777777777777777', label: 'healing tonic', rarity: 'uncommon',
             itemLevel: 2, weightGrams: 250, quantity: 3, stackSlots: 1,
+            availableQuantity: 3, reservedForTrade: 0,
             totalWeightGrams: 750, transferPolicy: 'transferable', boundToYou: false,
-            canGive: false, actions: [],
+            canGive: false, canTrade: false, actions: [],
           }],
           page: 1,
           totalPages: 2,
@@ -182,6 +191,7 @@ describe('PlayerDashboard', () => {
       'Health', 'Inventory', 'Discovered map', 'Quests', 'Party', 'Coin and market',
       'Chat and adventurers', 'Manage ignore list', 'Abilities', 'Mana', 'Agility', 'Resistances',
       'Progression', 'Class evolution', 'Advanced classes', 'Talent paths',
+      'Confirmed trade', 'Request trade',
       'Invite or manage an adventurer', 'Revoke invitation', 'Remove from party',
       'Transfer leadership', 'Disband party', 'Message to party',
       'Reply to your latest direct message', 'World channels', 'Channel',
@@ -238,5 +248,61 @@ describe('PlayerDashboard', () => {
     expect(dashboardSource).toContain('recipient: recipient.id');
     expect(dashboardSource).toContain('<option value="staff">');
     expect(dashboardSource).not.toContain('<option value="announcement">');
+  });
+
+  it('renders private offers, reservations, and revision-bound double confirmation', () => {
+    const tradingPlayer: PlayerStateSnapshot = {
+      ...player,
+      inventory: [{
+        ...player.inventory[0],
+        availableQuantity: 1,
+        reservedForTrade: 1,
+        canGive: false,
+      }],
+      economy: { ...player.economy, reservedCoins: 5, spendableCoins: 35 },
+      trade: {
+        id: 'o8888888888888888',
+        phase: 'negotiating',
+        counterparty: 'o5555555555555555',
+        expiresInTicks: 80,
+        stateRevision: 6,
+        ownConfirmed: false,
+        counterpartyConfirmed: true,
+        ownOffer: {
+          coins: 5,
+          lines: [{
+            target: 'o1111111111111111', label: 'blue lantern', quantity: 1, container: false,
+          }],
+        },
+        counterpartyOffer: {
+          coins: 3,
+          lines: [{
+            target: 'o9999999999999999', label: 'field satchel', quantity: 1, container: true,
+          }],
+        },
+        canAccept: false,
+        canConfirm: true,
+      },
+    };
+    const { body } = render(PlayerDashboard, {
+      props: {
+        value: tradingPlayer,
+        oncommand: () => undefined,
+        onaction: () => undefined,
+        onability: () => undefined,
+        onpromote: () => undefined,
+        ontalent: () => undefined,
+      },
+    });
+    for (const label of [
+      'Exchange with Bram', 'Revision 6', 'Your offer', "Bram's offer", '5 coins',
+      '3 coins', 'reserved for trade 1', 'Review before confirming', 'Confirm revision 6',
+      'Inspect offered contents', 'Cancel trade',
+    ]) expect(body).toContain(label);
+    for (const action of [
+      'trade.request', 'trade.item.set', 'trade.item.remove', 'trade.coins.set',
+      'trade.contents', 'trade.confirm',
+    ]) expect(dashboardSource).toContain(action);
+    expect(dashboardSource).toContain('`trade.${action}`');
   });
 });

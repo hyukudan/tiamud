@@ -3,7 +3,7 @@ use crate::{
         CharacterStore, MAX_SOCIAL_REASON_BYTES, StaffAccess, StaffAuditEntry, StaffAuditRecord,
         StaffReport, StoreError,
     },
-    world_actor::GameError,
+    world_actor::{GameError, reconcile_world_trades},
 };
 use serde_json::{Value, json};
 use tiamud_core::{
@@ -349,6 +349,14 @@ where
             return Err(error.into());
         }
     };
+    let mut events = outcome.domain_events;
+    match reconcile_world_trades(world, store, &checkpoint).await {
+        Ok(trade_events) => events.extend(trade_events),
+        Err(error) => {
+            world.restore_checkpoint(checkpoint);
+            return Err(error);
+        }
+    }
     let characters = match durable_connected_characters(world) {
         Ok(characters) => characters,
         Err(error) => {
@@ -356,7 +364,6 @@ where
             return Err(error.into());
         }
     };
-    let events = outcome.domain_events;
     let audit = audit_record(
         actor_access,
         Some(target.account_id),

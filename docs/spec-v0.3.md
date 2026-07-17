@@ -65,7 +65,7 @@ Propiedades obligatorias:
 Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
 
-### Objetos e inventario 3A–3C
+### Objetos e inventario 3A–3D
 
 WorldPack v5 separa `itemPrototypes`, que contienen contenido y reglas
 reutilizables, de `initialItemInstances`, que asignan cada unidad durable a una
@@ -139,16 +139,38 @@ give [cantidad] <objeto> to <personaje>
 la misma sala. Acepta un selector opaco o un nombre exacto no ambiguo, valida
 capacidad de emisor y receptor, y respeta ignore del receptor y block bilateral.
 La ubicación de todas las raíces y el evento `ItemsGiven` se confirman como una
-sola mutación antes de proyectar salida. No es un intercambio: escrow, oferta y
-doble aceptación pertenecen a la fase 3D.
+sola mutación antes de proyectar salida. No es un intercambio: `trade` usa una
+negociación bilateral distinta.
+
+El escrow de trade es una reserva durable, no otra ubicación o saldo. Objetos
+y moneda permanecen con su propietario; el índice derivado bloquea raíz,
+descendientes y gasto reservado. Cada personaje participa como máximo en un
+trade, hay hasta 64 globales, 8 líneas por participante y 128 raíces entre
+ambos. Solicitud y negociación caducan a 20 y 120 ticks respectivamente.
+
+Dos personajes conectados, en la misma sala, fuera de combate/derrota y
+permitidos por ignore/block pueden negociar. Todo cambio material incrementa
+una revisión, recalcula la base canónica y borra confirmaciones. Dos identidades
+distintas deben confirmar la misma revisión y digest; entonces el actor valida
+prospectivamente ambos grafos, capacidades y saldos y publica los dos lotes, los
+dos agregados, la eliminación del trade y su evento en un solo commit. No hay
+movimiento parcial ni reembolso al cancelar.
+
+Separación, combate, derrota, desconexión, ban, cambio social, expiración o
+reserva inválida cancelan de forma cerrada. Tras reinicio se cargan y validan
+los participantes adicionales con presupuesto acotado, se cancelan todos los
+trades restaurados y se confirma el snapshot limpio antes de readiness. Web,
+texto Telnet, `Char.Trade 1` GMCP y el bot estricto usan selectores privados
+opacos, cantidad disponible/reservada y saldo total/reservado/gastable.
 
 Rareza, nivel, peso unitario/total, cantidad, slots y capacidad aparecen como
 texto en escena, inventario, equipo y contenidos. El color nunca es la única
 señal. Web usa `container.contents`; Telnet ofrece texto equivalente y GMCP
 proyecta `Char.Items.List` con ubicación `container`.
 
-`WorldRuntimeSnapshot` v4 conserva `itemInstances`, su grafo de ubicaciones,
-el vínculo obligatorio por instancia y el siguiente contador. El vínculo tiene
+`WorldRuntimeSnapshot` v5 conserva `itemInstances`, su grafo de ubicaciones,
+el vínculo obligatorio por instancia, el siguiente contador de instancia,
+`nextTradeId` y las reservas vivas. El vínculo tiene
 exactamente una de estas formas:
 
 ```json
@@ -156,16 +178,18 @@ exactamente una de estas formas:
 {"kind":"character","characterId":42}
 ```
 
-El decoder lee primero `snapshotVersion` y usa DTO explícitos v1, v2, v3 y v4;
-v1-v3 se convierten a `unbound`. Campos `binding` inyectados en v3, referencias
-huérfanas, ciclos, profundidad, política/vínculo o contadores inválidos bloquean
-el arranque. La restauración conserva instancias iniciales nuevas del WorldPack
-y superpone el estado durable, sin resucitar instancias runtime ausentes. Antes
+El decoder lee primero `snapshotVersion` y usa DTO explícitos v1, v2, v3, v4 y
+v5; v1-v3 se convierten a `unbound` y v4 produce contador de trade inicial y
+mapa vacío. Campos posteriores inyectados en una versión antigua, referencias
+huérfanas, ciclos, profundidad, política/vínculo, trades, reservas o contadores
+inválidos bloquean el arranque. La restauración conserva instancias iniciales
+nuevas del WorldPack y superpone el estado durable, sin resucitar instancias
+runtime ausentes. Antes
 de abrir listeners se valida por lotes la unión de propietarios raíz y todos los
 `CharacterId` ligados, incluso si la instancia está consumida, junto con
 equipo, grafo y capacidad; después se descartan esos agregados. SQLite y
 PostgreSQL confirman el snapshot como única autoridad en su transacción de
-esquema v10; no hay tabla espejo ni esquema v11.
+esquema v10; no hay tabla espejo, tabla de escrow ni esquema v11.
 
 Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
 WorldPack, 65.536 instancias runtime, 1 MiB para el snapshot y 1 MiB agregado
@@ -173,8 +197,8 @@ para las fichas de propietarios inspeccionadas al arrancar; cada ficha tiene un
 máximo de 64 KiB. Lantern Square contiene 9 prototipos y 10 instancias
 iniciales; el WorldPack canónico ocupa 49.603 bytes y tiene SHA-256
 `f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
-Trade confirmado, derechos/reparto, procedencia y tablas de botín aleatorias
-pertenecen a fases posteriores.
+Los derechos/reparto, procedencia y tablas de botín aleatorias pertenecen a
+fases posteriores.
 
 ## Modelo de personaje
 
@@ -317,10 +341,11 @@ Los objetos separan prototipo reutilizable e instancia durable con ubicación y
 vínculo autoritarios. Los NPC poseen instancias de botín fijo validadas y las
 transfieren al morir. Capacidad por slots/peso, rareza textual, `itemLevel`,
 pilas fungibles derivadas, contenedores acotados, cantidades, consulta paginada,
-tres políticas de transferencia y `give` atómico están implementados. Faltan
-trade confirmado, afijos, propiedad y reparto de grupo, procedencia de drops
-repetibles y tablas ponderadas. Cajas de botín pagadas o tiradas con moneda
-prémium quedan fuera del baseline.
+tres políticas de transferencia y `give` atómico están implementados. También
+lo está el trade confirmado mediante reservas durables, revisión/digest y
+liquidación simultánea. Faltan afijos, propiedad y reparto de grupo,
+procedencia de drops repetibles y tablas ponderadas. Cajas de botín pagadas o
+tiradas con moneda prémium quedan fuera del baseline.
 
 Consulta la [hoja de ruta social/staff/botín](design/social-staff-and-loot-roadmap.md).
 
@@ -412,6 +437,7 @@ secuencia ni se infieren de prosa. Referencia:
 | Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3C | Snapshot v4 con vínculo durable y migración v1-v3, tres políticas, `give` atómico, opacidad y paridad Web/Telnet/GMCP implementados; puertas locales soportadas superadas |
+| Inventario fase 3D | Snapshot v5 migrado desde v4, reservas durables, doble confirmación y liquidación simultánea de objetos/moneda en Web/Telnet/GMCP; puertas integradas y Playwright final 36/36 superados |
 | Protocolo atómico de delta denso | Pendiente |
 
 En la evidencia histórica integrada de fase 3A pasan formato, pruebas bloqueadas del workspace
@@ -422,19 +448,28 @@ avisos generados para 307 dependencias Rust y 76 web. No se ejecutaron
 PostgreSQL real v10, WebKit local ni soak de 24 horas. Estas puertas locales no
 demuestran por sí solas publicación o CI.
 
-La evidencia histórica integrada de 3B pasa formato/check/clippy, 499/499
+La evidencia histórica integrada de 3B pasó formato/check/clippy, 499/499
 pruebas Rust, 103/103 web, 30/30 Playwright Chromium/Firefox, 80/80 Node, humo,
-carga CI y soak corto. También pasan `cargo-deny`, licencias y avisos 307
+carga CI y soak corto. También pasaron `cargo-deny`, licencias y avisos 307
 Rust/76 web. No se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24
 horas; las puertas locales no demuestran por sí solas publicación o CI.
 
-En el árbol actual de fase 3C pasan 513/513 pruebas Rust: 93 core, 95
-WorldPack, 28 importador, 207 servidor y 90 restantes. También pasan
+En el árbol integrado de fase 3C pasaron 513/513 pruebas Rust: 93 core, 95
+WorldPack, 28 importador, 207 servidor y 90 restantes. También pasaron
 `svelte-check` con 0 errores y 0 avisos, 103/103 pruebas web, 81/81 Node y
 32/32 escenarios Playwright soportados, 16 Chromium y 16 Firefox. WebKit no
-arranca en este host por bibliotecas GTK/GStreamer ausentes. No se ejecutaron
+arrancó en aquel gate por bibliotecas GTK/GStreamer ausentes. No se ejecutaron
 PostgreSQL real v10 ni soak de 24 horas; estas comprobaciones locales sobre un
 árbol dirty no demuestran CI, publicación o producción.
+
+En el árbol integrado de fase 3D pasan formato, clippy estricto y 550 pruebas
+Rust: 102 core, 97 WorldPack, 28 importador, 231 servidor y 92 restantes del
+workspace, incluidas 23 admin. También pasan `svelte-check`, build, 107 Vitest
+y 83 Node/bot. El pase Playwright final completa 36/36 escenarios, 18 Chromium
+y 18 Firefox. Pasan licencias, avisos, humo, carga de 16 usuarios/32
+rondas sin errores y soak corto de 30 s con 44 rondas, 97 acciones y 8/8
+readiness. No se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24
+horas; estas puertas locales no demuestran CI, publicación o producción.
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
 cuando las puertas de integración cambien.
@@ -489,6 +524,23 @@ Inventario 3C:
    opacos propios, el observador local solo narración y el remoto nada.
 7. Web, texto Telnet, GMCP, SQLite, PostgreSQL, admin y mover comparten decoder,
    autorización y semántica.
+
+Inventario 3D:
+
+1. Snapshot v5 exige forma canónica, IDs y reservas acotadas; v4 solo migra a
+   contador inicial y mapa vacío, sin schema-smuggling.
+2. Cada raíz y subárbol reservado queda bloqueado, y el saldo gastable excluye
+   toda moneda ofrecida sin crear otra autoridad.
+3. Una mutación material incrementa una revisión y elimina confirmaciones; dos
+   identidades distintas confirman la misma revisión y digest.
+4. La liquidación simultánea valida ambos inventarios y saldos finales antes de
+   confirmar personajes, snapshot y evento en una transacción.
+5. Sala, conexión, combate/derrota, ignore/block, política, capacidad,
+   expiración y desconexión se vuelven a comprobar de forma cerrada.
+6. Reinicio carga participantes adicionales con presupuesto acotado, valida y
+   cancela reservas antes de readiness; replay no reaplica monedas.
+7. Web, texto Telnet, `Char.Trade 1`, páginas GMCP, bot, SQLite, PostgreSQL,
+   admin y mover comparten acciones, límites, decoder y opacidad por sesión.
 
 ## Trabajo aplazado o rechazado
 

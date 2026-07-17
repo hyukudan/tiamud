@@ -25,6 +25,8 @@ async function installMockWorld(
       mockActions?: unknown[];
       mockSocketCount?: number;
       emitMockEvents?: (count: number) => void;
+      emitMockTrade?: () => void;
+      emitMockTradeStep?: (step: 'initial' | 'changed' | 'settled') => void;
     };
     mockState.mockHellos = [];
     mockState.mockActions = [];
@@ -120,9 +122,10 @@ async function installMockWorld(
               inventory: [{
                 id: 'o2222222222222222', label: 'blue lantern', description: 'Cold blue light.',
                 rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
-                quantity: 1, stackSlots: 1, totalWeightGrams: 800,
+                quantity: 1, availableQuantity: 1, reservedForTrade: 0,
+                stackSlots: 1, totalWeightGrams: 800,
                 transferPolicy: 'transferable', boundToYou: false,
-                canGive: true,
+                canGive: true, canTrade: true,
                 actions: [{ label: 'Drop', command: 'drop o2222222222222222' }],
               }],
               equipment: [],
@@ -148,7 +151,10 @@ async function installMockWorld(
                 actions: [],
               },
               partyInvites: [],
-              economy: { coins: 40, commodities: [], shopAvailable: false, shop: [] },
+              economy: {
+                coins: 40, reservedCoins: 0, spendableCoins: 40,
+                commodities: [], shopAvailable: false, shop: [],
+              },
               social: {
                 online: [
                   { id: 'o3333333333333333', name: 'Aria', selfCharacter: true, nearby: true },
@@ -159,6 +165,94 @@ async function installMockWorld(
             },
           },
         ];
+        const playerData = frames[2]?.data as Record<string, unknown>;
+        const tradeInventory = (playerData.inventory as Array<Record<string, unknown>>).map((item) => ({
+          ...item,
+          availableQuantity: 0,
+          reservedForTrade: 1,
+          canGive: false,
+          canTrade: false,
+        }));
+        const emitPlayer = (data: Record<string, unknown>) => {
+          serverSequence += 1;
+          activeSocket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+            v: 1,
+            type: 'player.snapshot',
+            seq: serverSequence,
+            data,
+          }) }));
+        };
+        mockState.emitMockTradeStep = (step) => {
+          if (step === 'settled') {
+            emitPlayer({
+              ...playerData,
+              revision: 4,
+              inventory: [{
+                id: 'o8888888888888888', label: 'field satchel', description: 'A received satchel.',
+                rarity: 'rare', itemLevel: 4, weightGrams: 500,
+                quantity: 1, availableQuantity: 1, reservedForTrade: 0,
+                stackSlots: 1, totalWeightGrams: 500,
+                transferPolicy: 'transferable', boundToYou: false,
+                canGive: true, canTrade: true,
+                containerCapacity: {
+                  usedSlots: 0, maxSlots: 8, usedWeightGrams: 0, maxWeightGrams: 5000,
+                },
+                actions: [{ label: 'Drop', command: 'drop o8888888888888888' }],
+              }],
+              inventoryCapacity: {
+                usedSlots: 1, maxSlots: 24, usedWeightGrams: 500, maxWeightGrams: 29000,
+              },
+              economy: {
+                ...(playerData.economy as Record<string, unknown>),
+                coins: 39,
+                reservedCoins: 0,
+                spendableCoins: 39,
+              },
+            });
+            return;
+          }
+          const changed = step === 'changed';
+          emitPlayer({
+            ...playerData,
+            revision: changed ? 3 : 2,
+            inventory: tradeInventory,
+            inventoryCapacity: {
+              ...(playerData.inventoryCapacity as Record<string, unknown>),
+              maxWeightGrams: changed ? 29000 : 30000,
+            },
+            economy: {
+              ...(playerData.economy as Record<string, unknown>),
+              reservedCoins: 5,
+              spendableCoins: 35,
+            },
+            trade: {
+              id: 'o6666666666666666',
+              phase: 'negotiating',
+              counterparty: 'o4444444444444444',
+              expiresInTicks: changed ? 75 : 80,
+              stateRevision: changed ? 7 : 6,
+              ownConfirmed: false,
+              counterpartyConfirmed: changed,
+              ownOffer: {
+                coins: 5,
+                lines: [{
+                  target: 'o2222222222222222', label: 'blue lantern', quantity: 1,
+                  container: false,
+                }],
+              },
+              counterpartyOffer: {
+                coins: changed ? 4 : 3,
+                lines: [{
+                  target: 'o7777777777777777', label: 'field satchel', quantity: 1,
+                  container: true,
+                }],
+              },
+              canAccept: false,
+              canConfirm: true,
+            },
+          });
+        };
+        mockState.emitMockTrade = () => mockState.emitMockTradeStep?.('initial');
         for (const frame of frames) {
           this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }));
         }
@@ -523,6 +617,85 @@ test('authenticated mobile play exposes complete accessible panels and a fixed c
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
     .analyze();
   expect(results.violations).toEqual([]);
+});
+
+test('mocked confirmed-trade UI binds every mutation to opaque selectors and the reviewed revision', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+  await page.evaluate(() => {
+    (window as Window & { emitMockTrade?: () => void }).emitMockTrade?.();
+  });
+
+  await expect(page.getByRole('heading', { name: 'Exchange with Bram' })).toBeVisible();
+  await expect(page.getByText('Revision 6 · 80 ticks left', { exact: true })).toBeVisible();
+  await expect(page.getByText('Review before confirming')).toBeVisible();
+  await page.getByRole('button', { name: 'Inspect offered contents' }).click();
+  await page.getByRole('button', { name: 'Confirm revision 6' }).click();
+  await page.getByLabel(/Coins to offer/).fill('7');
+  await page.getByRole('button', { name: 'Set coin offer' }).click();
+
+  const actions = await page.evaluate(() =>
+    (window as Window & { mockActions?: Array<{ data?: Record<string, unknown> }> }).mockActions ?? [],
+  );
+  expect(actions.map((action) => action.data)).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      action: 'trade.contents', tradeId: 'o6666666666666666',
+      target: 'o7777777777777777', page: 1,
+    }),
+    expect.objectContaining({
+      action: 'trade.confirm', tradeId: 'o6666666666666666', stateRevision: 6,
+    }),
+    expect.objectContaining({
+      action: 'trade.coins.set', tradeId: 'o6666666666666666', coins: 7,
+    }),
+  ]));
+
+  const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test('mocked two-participant projections invalidate an old confirmation and settle after reconfirmation', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+  const emitStep = (step: 'initial' | 'changed' | 'settled') => page.evaluate((next) => {
+    (window as Window & {
+      emitMockTradeStep?: (value: 'initial' | 'changed' | 'settled') => void;
+    }).emitMockTradeStep?.(next);
+  }, step);
+
+  await emitStep('initial');
+  await expect(page.getByText('Revision 6 · 80 ticks left', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm revision 6' }).click();
+
+  // Bram changes his offer and confirms the new base. Aria's previous
+  // confirmation must disappear and cannot approve revision 7 implicitly.
+  await emitStep('changed');
+  await expect(page.getByText('Revision 7 · 75 ticks left', { exact: true })).toBeVisible();
+  await expect(page.getByText('5 coins · not confirmed', { exact: true })).toBeVisible();
+  await expect(page.getByText('4 coins · confirmed', { exact: true })).toBeVisible();
+  await expect(page.getByText(/0\.8\/\s*29\.0 kg/)).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm revision 7' }).click();
+
+  const confirmations = await page.evaluate(() =>
+    ((window as Window & { mockActions?: Array<{ data?: Record<string, unknown> }> }).mockActions ?? [])
+      .map((action) => action.data)
+      .filter((data) => data?.action === 'trade.confirm'),
+  );
+  expect(confirmations).toEqual([
+    expect.objectContaining({ tradeId: 'o6666666666666666', stateRevision: 6 }),
+    expect.objectContaining({ tradeId: 'o6666666666666666', stateRevision: 7 }),
+  ]);
+
+  await emitStep('settled');
+  await expect(page.getByText('No active trade', { exact: true })).toBeVisible();
+  await expect(page.getByText('field satchel ×1', { exact: true })).toBeVisible();
+  await page.locator('summary').filter({ hasText: 'Coin and market' }).click();
+  await expect(page.getByText('39 coin total', { exact: true })).toBeVisible();
+  await expect(page.getByText('0 reserved for trade · 39 spendable', { exact: true })).toBeVisible();
 });
 
 test('ability panel chooses a visible target and sends a structured ability action', async ({ page }) => {

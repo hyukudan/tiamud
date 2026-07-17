@@ -33,7 +33,7 @@ use tiamud_core::{
     AccountRole, CharacterId, CharacterSnapshot, ContainerContentsView, EconomyAction,
     ItemSelection, PartyAction, PlayerAction, PlayerStateView, QuestAction, SceneView, SessionId,
     SocialAction, SocialChannelName, StaffAction, StaffCapability, StaffProfileKey,
-    StaffReportResolution, WorldError, parse_action,
+    StaffReportResolution, TradeAction, TradeContentsView, WorldError, parse_action,
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
@@ -43,6 +43,7 @@ use tokio::{
 use tracing::warn;
 
 const MAX_WS_MESSAGE_BYTES: usize = 16 * 1024;
+const TRADE_LABEL_FALLBACK_BYTES: [usize; 4] = [128, 64, 32, 16];
 const MAX_COMMAND_BYTES: usize = 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_PROTOCOL_ERRORS: u8 = 3;
@@ -207,6 +208,12 @@ struct ActionPerformData {
     quantity: Option<u16>,
     #[serde(default)]
     page: Option<u16>,
+    #[serde(default)]
+    trade_id: Option<String>,
+    #[serde(default)]
+    coins: Option<u64>,
+    #[serde(default)]
+    state_revision: Option<u64>,
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
@@ -507,6 +514,7 @@ struct CachedActionResult {
     ok: bool,
     message: Option<String>,
     container_contents: Option<ContainerContentsView>,
+    trade_contents: Option<TradeContentsView>,
     projection_session: SessionId,
 }
 
@@ -526,6 +534,12 @@ impl CachedActionResult {
         } else {
             self.message.clone()
         }
+    }
+
+    fn trade_contents_for(&self, session: SessionId) -> Option<&TradeContentsView> {
+        (self.projection_session == session)
+            .then_some(self.trade_contents.as_ref())
+            .flatten()
     }
 }
 
@@ -575,6 +589,7 @@ struct RequestedAction {
     request_id: String,
     signature: String,
     action: Result<PlayerAction, String>,
+    trade_selector: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1175,6 +1190,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 cached.message_for(entered.session_id),
                             ) || cached.container_contents_for(entered.session_id).is_some_and(|contents| {
                                 !queue_container_contents(&outbound, &mut sequence, contents)
+                            }) || cached.trade_contents_for(entered.session_id).is_some_and(|contents| {
+                                !queue_trade_contents(&outbound, &mut sequence, contents)
                             }) || !queue_scene(
                                 &outbound,
                                 &mut sequence,
@@ -1207,7 +1224,20 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         let previous_scene = last_scene.clone();
                         let previous_presentation = last_presentation.clone();
                         let previous_player = last_player.clone();
-                        let (ok, message, events, container_contents) = match requested.action {
+                        let trade_selector_matches = requested.trade_selector.as_ref().is_none_or(
+                            |selector| last_player.trade.as_ref().is_some_and(|trade| &trade.id == selector),
+                        );
+                        let (ok, message, events, container_contents, trade_contents) = match requested.action {
+                            Ok(_) if !trade_selector_matches => {
+                                state.metrics.action_finished(action_started.elapsed(), false);
+                                (
+                                    false,
+                                    Some("That trade is not available.".to_owned()),
+                                    Vec::new(),
+                                    None,
+                                    None,
+                                )
+                            }
                             Ok(action) => match state.world.apply(entered.session_id, action).await {
                                 Ok(outcome) => {
                                     state.metrics.action_finished(action_started.elapsed(), true);
@@ -1219,17 +1249,18 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                         outcome.output,
                                         outcome.events,
                                         outcome.container_contents,
+                                        outcome.trade_contents,
                                     )
                                 }
                                 Err(error) => {
                                     state.metrics.action_finished(action_started.elapsed(), false);
                                     warn!(%error, "game action failed");
-                                    (false, Some(public_game_error(&error)), Vec::new(), None)
+                                    (false, Some(public_game_error(&error)), Vec::new(), None, None)
                                 }
                             },
                             Err(error) => {
                                 state.metrics.action_finished(action_started.elapsed(), false);
-                                (false, Some(error), Vec::new(), None)
+                                (false, Some(error), Vec::new(), None, None)
                             }
                         };
                         state
@@ -1243,6 +1274,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                     ok,
                                     message: message.clone(),
                                     container_contents: container_contents.clone(),
+                                    trade_contents: trade_contents.clone(),
                                     projection_session: entered.session_id,
                                 },
                             );
@@ -1257,6 +1289,11 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         }
                         if let Some(contents) = &container_contents
                             && !queue_container_contents(&outbound, &mut sequence, contents)
+                        {
+                            break;
+                        }
+                        if let Some(contents) = &trade_contents
+                            && !queue_trade_contents(&outbound, &mut sequence, contents)
                         {
                             break;
                         }
@@ -1469,14 +1506,77 @@ fn queue_scene(
 }
 
 fn queue_player(outbound: &OutboundHandle, sequence: &mut u64, player: &PlayerStateView) -> bool {
+    let data = bounded_player_projection(player, |data| {
+        let candidate = json!({"v": 1, "type": "player.snapshot", "seq": *sequence, "data": data});
+        serde_json::to_vec(&candidate).is_ok_and(|bytes| bytes.len() <= MAX_WS_MESSAGE_BYTES)
+    });
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::State,
         Some(CoalesceKey::Player),
         "player.snapshot",
-        json!(player),
+        data,
     )
+}
+
+/// Keeps the semantic and actionable trade projection intact while shedding
+/// only bounded display labels if a maximal 16-line offer would otherwise
+/// push a player frame over the protocol budget. If even the shortest safe
+/// labels do not fit, the unchanged outbound budget guard disconnects rather
+/// than emitting a partial or oversized state.
+fn bounded_player_projection(player: &PlayerStateView, fits: impl Fn(&Value) -> bool) -> Value {
+    let mut projection = json!(player);
+    if fits(&projection) {
+        return projection;
+    }
+    for maximum in TRADE_LABEL_FALLBACK_BYTES {
+        truncate_trade_offer_labels(&mut projection, maximum);
+        if fits(&projection) {
+            return projection;
+        }
+    }
+    projection
+}
+
+fn truncate_trade_offer_labels(player: &mut Value, maximum_bytes: usize) {
+    let Some(trade) = player.get_mut("trade").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for offer_name in ["ownOffer", "counterpartyOffer"] {
+        let Some(lines) = trade
+            .get_mut(offer_name)
+            .and_then(Value::as_object_mut)
+            .and_then(|offer| offer.get_mut("lines"))
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for line in lines {
+            let Some(label) = line
+                .as_object()
+                .and_then(|line| line.get("label"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if label.len() <= maximum_bytes {
+                continue;
+            }
+            let mut end = 0;
+            for (index, character) in label.char_indices() {
+                let next = index + character.len_utf8();
+                if next > maximum_bytes {
+                    break;
+                }
+                end = next;
+            }
+            let shortened = label[..end].to_owned();
+            line.as_object_mut()
+                .expect("trade lines serialize as objects")
+                .insert("label".into(), Value::String(shortened));
+        }
+    }
 }
 
 /// Emits gap recovery as two independently budgeted, correlated frames.
@@ -1516,6 +1616,20 @@ fn queue_sync_recovery(
         }
         presentation.entities.pop();
     };
+    let player = bounded_player_projection(player, |player| {
+        let candidate = json!({
+            "v": 1,
+            "type": "sync.player",
+            "seq": *sequence,
+            "data": {
+                "syncId": sync_id,
+                "afterSeq": after_seq,
+                "player": player,
+                "complete": true,
+            },
+        });
+        serde_json::to_vec(&candidate).is_ok_and(|bytes| bytes.len() <= MAX_WS_MESSAGE_BYTES)
+    });
     scene_queued
         && queue_sequenced(
             outbound,
@@ -1746,7 +1860,8 @@ fn queue_semantic_updates(
         || previous_player.party != player.party
         || previous_player.party_invites != player.party_invites
         || previous_player.economy != player.economy
-        || previous_player.social != player.social;
+        || previous_player.social != player.social
+        || previous_player.trade != player.trade;
     !other_player_state_changed || queue_player(outbound, sequence, player)
 }
 
@@ -1810,6 +1925,44 @@ fn queue_container_contents(
         "container.contents",
         json!({
             "container": contents.selector,
+            "items": items,
+            "page": contents.page,
+            "totalPages": contents.total_pages,
+            "capacity": contents.capacity,
+        }),
+    )
+}
+
+fn queue_trade_contents(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    contents: &TradeContentsView,
+) -> bool {
+    // Offered-container inspection is private to the two participants. Keep
+    // the independently paged frame below the ordinary 16 KiB budget by
+    // omitting prose exactly like `container.contents`; selectors, quantities,
+    // reservation state, policy and capacity remain complete and actionable.
+    let items = contents
+        .items
+        .iter()
+        .map(|item| {
+            let mut summary = json!(item);
+            summary
+                .as_object_mut()
+                .expect("player item views serialize as objects")
+                .remove("description");
+            summary
+        })
+        .collect::<Vec<_>>();
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        "trade.contents",
+        json!({
+            "tradeId": contents.trade_id,
+            "container": contents.container,
             "items": items,
             "page": contents.page,
             "totalPages": contents.total_pages,
@@ -2000,9 +2153,13 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 request_id: data.request_id,
                 signature: format!("command:{}", data.command),
                 action: parse_action(&data.command).map_err(|error| error.to_string()),
+                trade_selector: None,
             }))
         }
         "action.perform" => {
+            if trade_action_contains_null(&envelope.data) {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
             let data = serde_json::from_value::<ActionPerformData>(envelope.data)
                 .map_err(|_| ClientMessageError::InvalidEnvelope)?;
             if !valid_request_id(&data.request_id)
@@ -2041,6 +2198,24 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                     .quantity
                     .is_some_and(|quantity| quantity == 0 || quantity > 256)
                 || data.page == Some(0)
+                || data
+                    .trade_id
+                    .as_deref()
+                    .is_some_and(|trade_id| !valid_opaque_selector(trade_id))
+                || data.coins.is_some_and(|coins| coins > 1_000_000_000)
+                || data.state_revision == Some(0)
+                || (data.action == "trade.request"
+                    && data
+                        .recipient
+                        .as_deref()
+                        .is_none_or(|recipient| !valid_opaque_selector(recipient)))
+                || (matches!(
+                    data.action.as_str(),
+                    "trade.item.set" | "trade.item.remove" | "trade.contents"
+                ) && data
+                    .target
+                    .as_deref()
+                    .is_none_or(|target| !valid_opaque_selector(target)))
                 || data.message.as_deref().is_some_and(|message| {
                     message.is_empty()
                         || message.len() > MAX_CHAT_MESSAGE_BYTES
@@ -2075,15 +2250,20 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         &data.container,
                         data.quantity,
                         data.page,
-                        &data.message,
                     ),
                     (
+                        &data.trade_id,
+                        data.coins,
+                        data.state_revision,
+                        &data.message,
                         data.channel,
                         data.duration_seconds,
                         &data.reason,
                         data.role,
                         data.report_id,
                         data.resolution,
+                    ),
+                    (
                         &data.profile,
                         &data.lore_title,
                         data.capability,
@@ -2092,10 +2272,12 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 )
             );
             let action = structured_action(&data);
+            let trade_selector = data.trade_id.clone();
             Ok(ClientMessage::Action(RequestedAction {
                 request_id: data.request_id,
                 signature,
                 action,
+                trade_selector,
             }))
         }
         "sync.request" => {
@@ -2156,6 +2338,25 @@ fn valid_request_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_REQUEST_ID_BYTES && !value.chars().any(char::is_control)
 }
 
+fn valid_opaque_selector(value: &str) -> bool {
+    value.len() == 17
+        && value.as_bytes().first() == Some(&b'o')
+        && value.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn trade_action_contains_null(data: &Value) -> bool {
+    let Some(fields) = data.as_object() else {
+        return false;
+    };
+    fields
+        .get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|action| action.starts_with("trade."))
+        && fields.values().any(Value::is_null)
+}
+
 fn valid_definition_id(value: &str, maximum: usize) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
@@ -2171,14 +2372,27 @@ fn valid_definition_id(value: &str, maximum: usize) -> bool {
 
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
-    if action != "item.give" && data.recipient.is_some() {
+    let trade_action = action.starts_with("trade.");
+    if action != "item.give" && action != "trade.request" && data.recipient.is_some() {
+        return Err(format!("Action {action:?} has unexpected fields."));
+    }
+    if !trade_action
+        && (data.trade_id.is_some() || data.coins.is_some() || data.state_revision.is_some())
+    {
         return Err(format!("Action {action:?} has unexpected fields."));
     }
     let has_item_fields =
         data.container.is_some() || data.quantity.is_some() || data.page.is_some();
     if !matches!(
         action,
-        "item.take" | "item.drop" | "item.put" | "item.get" | "item.contents" | "item.give"
+        "item.take"
+            | "item.drop"
+            | "item.put"
+            | "item.get"
+            | "item.contents"
+            | "item.give"
+            | "trade.item.set"
+            | "trade.contents"
     ) && has_item_fields
     {
         return Err(format!("Action {action:?} has unexpected fields."));
@@ -2333,6 +2547,40 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         Ok(reason)
     };
+    let trade_fields_exact = |target: bool,
+                              recipient: bool,
+                              quantity: bool,
+                              page: bool,
+                              coins: bool,
+                              state_revision: bool,
+                              trade_id: bool| {
+        let exact = data.ability_id.is_none()
+            && data.class_id.is_none()
+            && data.graph_id.is_none()
+            && data.node_id.is_none()
+            && data.container.is_none()
+            && (target == data.target.is_some())
+            && (recipient == data.recipient.is_some())
+            && (quantity == data.quantity.is_some())
+            && (page == data.page.is_some())
+            && (coins == data.coins.is_some())
+            && (state_revision == data.state_revision.is_some())
+            && (trade_id == data.trade_id.is_some())
+            && data.message.is_none()
+            && data.channel.is_none()
+            && data.duration_seconds.is_none()
+            && data.reason.is_none()
+            && data.role.is_none()
+            && data.report_id.is_none()
+            && data.resolution.is_none()
+            && matches!(data.profile, NullableField::Missing)
+            && matches!(data.lore_title, NullableField::Missing)
+            && data.capability.is_none()
+            && data.enabled.is_none();
+        exact
+            .then_some(())
+            .ok_or_else(|| format!("Action {action:?} has unexpected or missing fields."))
+    };
     match action {
         "look" => exact_no_fields().map(|()| PlayerAction::Look),
         "inventory" => exact_no_fields().map(|()| PlayerAction::Inventory),
@@ -2471,6 +2719,64 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "item.use" => gameplay_target().map(PlayerAction::Use),
         "item.equip" => gameplay_target().map(PlayerAction::Equip),
         "item.unequip" => gameplay_target().map(PlayerAction::Unequip),
+        "trade.request" => {
+            trade_fields_exact(false, true, false, false, false, false, false)?;
+            Ok(PlayerAction::Trade(TradeAction::Request(
+                data.recipient.clone().expect("validated recipient"),
+            )))
+        }
+        "trade.accept" => {
+            trade_fields_exact(false, false, false, false, false, false, true)?;
+            Ok(PlayerAction::Trade(TradeAction::Accept))
+        }
+        "trade.decline" => {
+            trade_fields_exact(false, false, false, false, false, false, true)?;
+            Ok(PlayerAction::Trade(TradeAction::Decline))
+        }
+        "trade.item.set" => {
+            trade_fields_exact(true, false, true, false, false, false, true)?;
+            let quantity = data.quantity.expect("validated quantity");
+            if quantity > 128 {
+                return Err("Trade item quantity must be between 1 and 128.".to_owned());
+            }
+            Ok(PlayerAction::Trade(TradeAction::OfferItem(ItemSelection {
+                query: data.target.clone().expect("validated target"),
+                quantity,
+            })))
+        }
+        "trade.item.remove" => {
+            trade_fields_exact(true, false, false, false, false, false, true)?;
+            Ok(PlayerAction::Trade(TradeAction::RemoveItem(
+                data.target.clone().expect("validated target"),
+            )))
+        }
+        "trade.coins.set" => {
+            trade_fields_exact(false, false, false, false, true, false, true)?;
+            Ok(PlayerAction::Trade(TradeAction::OfferCoins(
+                data.coins.expect("validated coins"),
+            )))
+        }
+        "trade.contents" => {
+            trade_fields_exact(true, false, false, true, false, false, true)?;
+            Ok(PlayerAction::Trade(TradeAction::Contents {
+                container: data.target.clone().expect("validated target"),
+                page: data.page.expect("validated page"),
+            }))
+        }
+        "trade.confirm" => {
+            trade_fields_exact(false, false, false, false, false, true, true)?;
+            Ok(PlayerAction::Trade(TradeAction::Confirm {
+                state_revision: data.state_revision.expect("validated revision"),
+            }))
+        }
+        "trade.status" => {
+            trade_fields_exact(false, false, false, false, false, false, true)?;
+            Ok(PlayerAction::Trade(TradeAction::Status))
+        }
+        "trade.cancel" => {
+            trade_fields_exact(false, false, false, false, false, false, true)?;
+            Ok(PlayerAction::Trade(TradeAction::Cancel))
+        }
         "party.create" => exact_no_fields().map(|()| PlayerAction::Party(PartyAction::Create)),
         "party.disband" => exact_no_fields().map(|()| PlayerAction::Party(PartyAction::Disband)),
         "party.leave" => exact_no_fields().map(|()| PlayerAction::Party(PartyAction::Leave)),
@@ -2894,6 +3200,13 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
 fn public_game_error(error: &GameError) -> String {
     match error {
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
+        GameError::TradeUnavailable
+        | GameError::World(
+            WorldError::TradeUnavailable
+            | WorldError::TradeTargetUnavailable
+            | WorldError::ItemReservedForTrade
+            | WorldError::StaleTradeRevision,
+        ) => "That trade is not available.".to_owned(),
         GameError::World(WorldError::NoExit) => error.to_string(),
         GameError::World(WorldError::ItemNotFound(_))
         | GameError::World(WorldError::AmbiguousItem { .. })
@@ -3349,6 +3662,10 @@ mod tests {
             public_game_error(&GameError::GiveUnavailable),
             "That item transfer is not available."
         );
+        assert_eq!(
+            public_game_error(&GameError::World(WorldError::StaleTradeRevision)),
+            "That trade is not available."
+        );
     }
 
     #[test]
@@ -3507,6 +3824,23 @@ mod tests {
         ] {
             assert_eq!(
                 parse_client_message(invalid).unwrap_err(),
+                ClientMessageError::InvalidEnvelope
+            );
+        }
+        for null_field in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.request","recipient":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.accept","tradeId":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.accept","tradeId":"o2222222222222222","page":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.item.set","tradeId":"o2222222222222222","target":null,"quantity":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.item.set","tradeId":"o2222222222222222","target":"o3333333333333333","quantity":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.item.remove","tradeId":"o2222222222222222","target":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.coins.set","tradeId":"o2222222222222222","coins":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.contents","tradeId":"o2222222222222222","target":"o3333333333333333","page":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.confirm","tradeId":"o2222222222222222","stateRevision":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null","action":"trade.status","tradeId":"o2222222222222222","message":null}}"#,
+        ] {
+            assert_eq!(
+                parse_client_message(null_field).unwrap_err(),
                 ClientMessageError::InvalidEnvelope
             );
         }
@@ -4022,6 +4356,143 @@ mod tests {
     }
 
     #[test]
+    fn trade_actions_have_closed_forms_complete_signatures_and_reject_present_nulls() {
+        let cases = [
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"trade-request","action":"trade.request","recipient":"o1111111111111111"}}"#,
+                PlayerAction::Trade(TradeAction::Request("o1111111111111111".into())),
+                None,
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"trade-accept","action":"trade.accept","tradeId":"o2222222222222222"}}"#,
+                PlayerAction::Trade(TradeAction::Accept),
+                Some("o2222222222222222"),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"trade-item","action":"trade.item.set","tradeId":"o2222222222222222","target":"o3333333333333333","quantity":128}}"#,
+                PlayerAction::Trade(TradeAction::OfferItem(ItemSelection {
+                    query: "o3333333333333333".into(),
+                    quantity: 128,
+                })),
+                Some("o2222222222222222"),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"trade-coins","action":"trade.coins.set","tradeId":"o2222222222222222","coins":1000000000}}"#,
+                PlayerAction::Trade(TradeAction::OfferCoins(1_000_000_000)),
+                Some("o2222222222222222"),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"trade-contents","action":"trade.contents","tradeId":"o2222222222222222","target":"o3333333333333333","page":2}}"#,
+                PlayerAction::Trade(TradeAction::Contents {
+                    container: "o3333333333333333".into(),
+                    page: 2,
+                }),
+                Some("o2222222222222222"),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"trade-confirm","action":"trade.confirm","tradeId":"o2222222222222222","stateRevision":9}}"#,
+                PlayerAction::Trade(TradeAction::Confirm { state_revision: 9 }),
+                Some("o2222222222222222"),
+            ),
+        ];
+        for (raw, expected, selector) in cases {
+            let ClientMessage::Action(parsed) = parse_client_message(raw).unwrap() else {
+                panic!("trade action must parse");
+            };
+            assert_eq!(parsed.action, Ok(expected));
+            assert_eq!(parsed.trade_selector.as_deref(), selector);
+        }
+
+        let signatures = [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"trade.item.set","tradeId":"o2222222222222222","target":"o3333333333333333","quantity":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"trade.item.set","tradeId":"o2222222222222222","target":"o3333333333333333","quantity":2}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"trade.item.set","tradeId":"o2222222222222222","target":"o4444444444444444","quantity":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"trade.confirm","tradeId":"o2222222222222222","stateRevision":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"trade.confirm","tradeId":"o2222222222222222","stateRevision":2}}"#,
+        ]
+        .map(|raw| match parse_client_message(raw).unwrap() {
+            ClientMessage::Action(action) => action.signature,
+            _ => panic!("trade action must parse"),
+        });
+        assert_eq!(
+            signatures
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            signatures.len()
+        );
+
+        for invalid in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.accept","tradeId":"trade-1"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.coins.set","tradeId":"o2222222222222222","coins":1000000001}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.confirm","tradeId":"o2222222222222222","stateRevision":0}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.request","recipient":"Aria"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.item.set","tradeId":"o2222222222222222","target":"blue lantern","quantity":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.item.remove","tradeId":"o2222222222222222","target":"blue lantern"}}"#,
+        ] {
+            assert_eq!(
+                parse_client_message(invalid).unwrap_err(),
+                ClientMessageError::InvalidEnvelope
+            );
+        }
+        for invalid_fields in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.accept","tradeId":"o2222222222222222","page":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.item.set","tradeId":"o2222222222222222","target":"o3333333333333333","quantity":129}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad","action":"trade.request","recipient":"o1111111111111111","tradeId":"o2222222222222222"}}"#,
+        ] {
+            let ClientMessage::Action(action) = parse_client_message(invalid_fields).unwrap()
+            else {
+                panic!("well-formed closed trade error must return an action result");
+            };
+            assert!(action.action.is_err());
+        }
+    }
+
+    #[test]
+    fn trade_json_rejects_every_present_null_before_option_deserialization() {
+        for field in [
+            "abilityId",
+            "classId",
+            "graphId",
+            "nodeId",
+            "target",
+            "recipient",
+            "container",
+            "quantity",
+            "page",
+            "tradeId",
+            "coins",
+            "stateRevision",
+            "message",
+            "channel",
+            "durationSeconds",
+            "reason",
+            "role",
+            "reportId",
+            "resolution",
+            "profile",
+            "loreTitle",
+            "capability",
+            "enabled",
+        ] {
+            let mut data = json!({
+                "requestId": format!("null-{field}"),
+                "action": "trade.status",
+                "tradeId": "o2222222222222222",
+            });
+            data.as_object_mut()
+                .unwrap()
+                .insert(field.into(), Value::Null);
+            let raw = json!({"v": 1, "type": "action.perform", "data": data}).to_string();
+            assert_eq!(
+                parse_client_message(&raw).unwrap_err(),
+                ClientMessageError::InvalidEnvelope,
+                "field {field:?} must not collapse from present null to absent",
+            );
+        }
+    }
+
+    #[test]
     fn json_depth_limit_ignores_brackets_in_strings_and_rejects_nesting_bombs() {
         assert!(json_depth_within(
             r#"{"text":"escaped \" [ { still text","value":[1]}"#,
@@ -4045,6 +4516,7 @@ mod tests {
             ok: true,
             message: Some("Done.".to_owned()),
             container_contents: None,
+            trade_contents: None,
             projection_session: SessionId(1),
         };
         cache.insert("request-1".to_owned(), result("look"));
@@ -4066,6 +4538,7 @@ mod tests {
             ok: true,
             message: None,
             container_contents: None,
+            trade_contents: None,
             projection_session: SessionId(11),
         };
         shared.lock().unwrap().insert(first.clone(), cached.clone());
@@ -4094,6 +4567,7 @@ mod tests {
             ok: true,
             message: Some("It is empty.".into()),
             container_contents: Some(contents.clone()),
+            trade_contents: None,
             projection_session: SessionId(11),
         };
 
@@ -4112,12 +4586,45 @@ mod tests {
     }
 
     #[test]
+    fn cached_trade_projection_never_crosses_session_salts() {
+        let contents = TradeContentsView {
+            trade_id: "o1111111111111111".into(),
+            container: "o2222222222222222".into(),
+            items: Vec::new(),
+            page: 1,
+            total_pages: 1,
+            capacity: tiamud_core::InventoryCapacityView {
+                used_slots: 0,
+                max_slots: 8,
+                used_weight_grams: 0,
+                max_weight_grams: 5_000,
+            },
+        };
+        let cached = CachedActionResult {
+            signature: "trade.contents".into(),
+            ok: true,
+            message: Some("That offered container is empty.".into()),
+            container_contents: None,
+            trade_contents: Some(contents.clone()),
+            projection_session: SessionId(11),
+        };
+
+        assert_eq!(cached.trade_contents_for(SessionId(11)), Some(&contents));
+        assert!(cached.trade_contents_for(SessionId(12)).is_none());
+        let foreign_message = cached.message_for(SessionId(12)).unwrap();
+        assert!(foreign_message.contains("previous connection"));
+        assert!(!foreign_message.contains("o1111111111111111"));
+        assert!(!foreign_message.contains("o2222222222222222"));
+    }
+
+    #[test]
     fn cached_inventory_text_never_crosses_session_salts() {
         let cached = CachedActionResult {
             signature: "inventory".into(),
             ok: true,
             message: Some("You are carrying a lantern [ref o1111111111111111].\r\n".into()),
             container_contents: None,
+            trade_contents: None,
             projection_session: SessionId(21),
         };
 
@@ -4563,11 +5070,14 @@ mod tests {
                 item_level: 1,
                 weight_grams: 1,
                 quantity: 1,
+                available_quantity: 1,
+                reserved_for_trade: 0,
                 stack_slots: 1,
                 total_weight_grams: 1,
                 transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                 bound_to_you: false,
                 can_give: true,
+                can_trade: true,
                 container_capacity: None,
                 actions: Vec::new(),
             })
@@ -4738,11 +5248,14 @@ mod tests {
                 item_level: 1,
                 weight_grams: 1,
                 quantity: 1,
+                available_quantity: 1,
+                reserved_for_trade: 0,
                 stack_slots: 1,
                 total_weight_grams: 1,
                 transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                 bound_to_you: false,
                 can_give: true,
+                can_trade: true,
                 container_capacity: None,
                 actions: Vec::new(),
             })
@@ -4776,6 +5289,129 @@ mod tests {
     }
 
     #[test]
+    fn maximal_trade_player_snapshot_stays_bounded_without_losing_actionable_terms() {
+        let offer = |start: u64| tiamud_core::TradeOfferView {
+            coins: 1_000_000_000,
+            lines: (start..start + 8)
+                .map(|index| tiamud_core::TradeOfferLineView {
+                    target: format!("o{index:016x}"),
+                    label: "l".repeat(256),
+                    quantity: 8,
+                    container: false,
+                })
+                .collect(),
+        };
+        let mut player = test_player_state();
+        player.economy.coins = 1_000_000_000;
+        player.economy.reserved_coins = 1_000_000_000;
+        player.economy.spendable_coins = 0;
+        player.trade = Some(tiamud_core::TradeView {
+            id: "o1000000000000000".into(),
+            phase: tiamud_core::TradePhase::Negotiating,
+            counterparty: "o2000000000000000".into(),
+            expires_in_ticks: 120,
+            state_revision: 17,
+            own_confirmed: false,
+            counterparty_confirmed: false,
+            own_offer: offer(1),
+            counterparty_offer: offer(9),
+            can_accept: false,
+            can_confirm: true,
+        });
+        player.inventory.push(tiamud_core::PlayerItemView {
+            id: "o3000000000000000".into(),
+            label: "padding-safe carried item".into(),
+            description: String::new(),
+            rarity: "common".into(),
+            item_level: 1,
+            weight_grams: 0,
+            quantity: 1,
+            available_quantity: 1,
+            reserved_for_trade: 0,
+            stack_slots: 1,
+            total_weight_grams: 0,
+            transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+            bound_to_you: false,
+            can_give: true,
+            can_trade: true,
+            container_capacity: None,
+            actions: Vec::new(),
+        });
+        player.inventory_capacity.used_slots += 1;
+
+        let frame_len = |player: &PlayerStateView| {
+            serde_json::to_vec(&json!({
+                "v": 1,
+                "type": "player.snapshot",
+                "seq": 1,
+                "data": player,
+            }))
+            .unwrap()
+            .len()
+        };
+        // Put an otherwise valid player projection just over the frame limit.
+        // The maximal trade labels are the only optional presentation data the
+        // bounded projection may reduce.
+        let desired = MAX_WS_MESSAGE_BYTES + 256;
+        let mut remaining = desired.saturating_sub(frame_len(&player));
+        let mut pad = |description: &mut String| {
+            let added = remaining.min(2_048_usize.saturating_sub(description.len()));
+            description.push_str(&"p".repeat(added));
+            remaining -= added;
+        };
+        pad(&mut player.character.lineage.description);
+        pad(&mut player.character.base_class.description);
+        pad(&mut player.character.active_class.description);
+        for class in &mut player.character.class_history {
+            pad(&mut class.description);
+        }
+        if let Some(background) = &mut player.character.background {
+            pad(&mut background.description);
+        }
+        for graph in &mut player.character.talents {
+            pad(&mut graph.description);
+            for node in &mut graph.nodes {
+                pad(&mut node.description);
+            }
+        }
+        for promotion in &mut player.character.promotions {
+            pad(&mut promotion.class.description);
+        }
+        for ability in &mut player.character.abilities {
+            pad(&mut ability.description);
+        }
+        if remaining > 0 {
+            let description = &mut player.inventory[0].description;
+            let added = remaining.min(4_096_usize.saturating_sub(description.len()));
+            description.push_str(&"p".repeat(added));
+            remaining -= added;
+        }
+        assert_eq!(
+            remaining, 0,
+            "test player must provide enough bounded prose"
+        );
+        assert!(frame_len(&player) > MAX_WS_MESSAGE_BYTES);
+
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_player(&outbound, &mut sequence, &player));
+        let frame = outbound.pop().unwrap();
+        let encoded = serde_json::to_vec(&frame.value).unwrap();
+        assert!(encoded.len() <= MAX_WS_MESSAGE_BYTES);
+        assert!(outbound.take_disconnect_reason().is_none());
+        let trade = &frame.value["data"]["trade"];
+        let own = trade["ownOffer"]["lines"].as_array().unwrap();
+        let counterparty = trade["counterpartyOffer"]["lines"].as_array().unwrap();
+        assert_eq!(own.len() + counterparty.len(), 16);
+        for line in own.iter().chain(counterparty) {
+            assert!(line["target"].as_str().unwrap().starts_with('o'));
+            assert_eq!(line["quantity"], 8);
+            assert!(!line["label"].as_str().unwrap().is_empty());
+            assert!(line["label"].as_str().unwrap().len() < 256);
+        }
+    }
+
+    #[test]
     fn container_pages_shed_prose_and_stay_inside_the_websocket_frame_budget() {
         let contents = ContainerContentsView {
             selector: "o9999999999999999".into(),
@@ -4788,11 +5424,14 @@ mod tests {
                     item_level: 1,
                     weight_grams: 1,
                     quantity: 1,
+                    available_quantity: 1,
+                    reserved_for_trade: 0,
                     stack_slots: 1,
                     total_weight_grams: 1,
                     transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                     bound_to_you: false,
                     can_give: false,
+                    can_trade: true,
                     container_capacity: None,
                     actions: vec![tiamud_core::SceneAction {
                         label: "Get".into(),
@@ -4818,6 +5457,30 @@ mod tests {
             &contents
         ));
         let frame = outbound.pop().unwrap();
+        let encoded = serde_json::to_vec(&frame.value).unwrap();
+        assert!(encoded.len() <= MAX_WS_MESSAGE_BYTES);
+        assert!(
+            !String::from_utf8(encoded)
+                .unwrap()
+                .contains(&"p".repeat(256))
+        );
+
+        let trade_contents = TradeContentsView {
+            trade_id: "o1111111111111111".into(),
+            container: contents.selector.clone(),
+            items: contents.items.clone(),
+            page: contents.page,
+            total_pages: contents.total_pages,
+            capacity: contents.capacity.clone(),
+        };
+        assert!(queue_trade_contents(
+            &outbound,
+            &mut sequence,
+            &trade_contents
+        ));
+        let frame = outbound.pop().unwrap();
+        assert_eq!(frame.value["type"], "trade.contents");
+        assert_eq!(frame.value["data"]["tradeId"], "o1111111111111111");
         let encoded = serde_json::to_vec(&frame.value).unwrap();
         assert!(encoded.len() <= MAX_WS_MESSAGE_BYTES);
         assert!(

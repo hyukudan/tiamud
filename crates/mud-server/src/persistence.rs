@@ -49,12 +49,48 @@ const STAFF_LIST_LIMIT: i64 = 10;
 const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
 const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Startup only reads characters referenced as runtime item owners. Their IDs
-/// are bounded by the runtime item graph, while their combined serialized
-/// gameplay cannot exceed the runtime snapshot's own persistence budget.
+/// Startup first reads characters referenced as runtime item owners under the
+/// runtime snapshot budget, then the bounded set of extra trade participants
+/// under its separate exact aggregate budget.
 pub(super) const MAX_STARTUP_ITEM_OWNERS: usize = MAX_ITEM_INSTANCES;
 pub(super) const MAX_STARTUP_OWNER_GAMEPLAY_BYTES: usize = MAX_RUNTIME_JSON_BYTES;
+pub(super) const MAX_STARTUP_TRADE_PARTICIPANTS: usize = 128;
+pub(super) const MAX_STARTUP_TRADE_GAMEPLAY_BYTES: usize =
+    MAX_STARTUP_TRADE_PARTICIPANTS * MAX_CHARACTER_JSON_BYTES;
 const SQLITE_CHARACTER_BATCH_SIZE: usize = 900;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupGameplayLoadLimits {
+    maximum_characters: usize,
+    maximum_bytes: usize,
+    kind: &'static str,
+}
+
+impl StartupGameplayLoadLimits {
+    pub const ITEM_OWNERS: Self = Self {
+        maximum_characters: MAX_STARTUP_ITEM_OWNERS,
+        maximum_bytes: MAX_STARTUP_OWNER_GAMEPLAY_BYTES,
+        kind: "startup owner gameplay",
+    };
+
+    pub const TRADE_PARTICIPANTS: Self = Self {
+        maximum_characters: MAX_STARTUP_TRADE_PARTICIPANTS,
+        maximum_bytes: MAX_STARTUP_TRADE_GAMEPLAY_BYTES,
+        kind: "startup trade participant gameplay",
+    };
+
+    pub const fn maximum_characters(self) -> usize {
+        self.maximum_characters
+    }
+
+    pub const fn maximum_bytes(self) -> usize {
+        self.maximum_bytes
+    }
+
+    pub const fn kind(self) -> &'static str {
+        self.kind
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableCharacterGameplay {
@@ -315,10 +351,12 @@ pub trait CharacterStore: Send + Sync {
     ) -> Result<CharacterGameplaySnapshot, StoreError>;
 
     /// Load only the durable gameplay aggregates requested by the restored
-    /// runtime, using set-based batches rather than one query per owner.
+    /// runtime, using set-based batches and the closed startup scope rather
+    /// than one query per character.
     async fn load_character_gameplay_batch(
         &self,
         character_ids: Vec<CharacterId>,
+        limits: StartupGameplayLoadLimits,
     ) -> Result<Vec<DurableCharacterGameplay>, StoreError>;
 
     async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError>;
@@ -647,9 +685,10 @@ impl CharacterStore for MeasuredCharacterStore {
     async fn load_character_gameplay_batch(
         &self,
         character_ids: Vec<CharacterId>,
+        limits: StartupGameplayLoadLimits,
     ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
         self.inner
-            .load_character_gameplay_batch(character_ids)
+            .load_character_gameplay_batch(character_ids, limits)
             .await
     }
 
@@ -828,6 +867,7 @@ pub(super) enum Request {
     },
     LoadCharacterGameplayBatch {
         character_ids: Vec<CharacterId>,
+        limits: StartupGameplayLoadLimits,
         reply: oneshot::Sender<Result<Vec<DurableCharacterGameplay>, StoreError>>,
     },
     LoadRuntimeSnapshot {
@@ -1072,10 +1112,14 @@ impl SqliteCharacterStore {
                         }
                         Request::LoadCharacterGameplayBatch {
                             character_ids,
+                            limits,
                             reply,
                         } => {
-                            let _ = reply
-                                .send(load_character_gameplay_batch(&connection, character_ids));
+                            let _ = reply.send(load_character_gameplay_batch(
+                                &connection,
+                                character_ids,
+                                limits,
+                            ));
                         }
                         Request::LoadRuntimeSnapshot { reply } => {
                             let _ = reply.send(load_runtime_snapshot(&connection));
@@ -1532,11 +1576,13 @@ impl CharacterStore for SqliteCharacterStore {
     async fn load_character_gameplay_batch(
         &self,
         character_ids: Vec<CharacterId>,
+        limits: StartupGameplayLoadLimits,
     ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
         let (reply, receive) = oneshot::channel();
         self.request(
             Request::LoadCharacterGameplayBatch {
                 character_ids,
+                limits,
                 reply,
             },
             receive,
@@ -3377,8 +3423,9 @@ fn load_character_gameplay(
 fn load_character_gameplay_batch(
     connection: &Connection,
     character_ids: Vec<CharacterId>,
+    limits: StartupGameplayLoadLimits,
 ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
-    let character_ids = normalise_startup_owner_ids(character_ids)?;
+    let character_ids = normalise_startup_character_ids(character_ids, limits)?;
     let mut aggregates = Vec::new();
     let mut total_json_bytes = 0_usize;
     for batch in character_ids.chunks(SQLITE_CHARACTER_BATCH_SIZE) {
@@ -3393,25 +3440,27 @@ fn load_character_gameplay_batch(
         while let Some(row) = rows.next()? {
             let character_id = CharacterId(row.get(0)?);
             let json: String = row.get(1)?;
-            aggregates.push(decode_startup_owner_gameplay(
+            aggregates.push(decode_startup_gameplay(
                 character_id,
                 &json,
                 &mut total_json_bytes,
+                limits,
             )?);
         }
     }
-    ensure_all_startup_owners_loaded(&character_ids, &aggregates)?;
+    ensure_all_startup_characters_loaded(&character_ids, &aggregates)?;
     Ok(aggregates)
 }
 
-pub(super) fn normalise_startup_owner_ids(
+pub(super) fn normalise_startup_character_ids(
     mut character_ids: Vec<CharacterId>,
+    limits: StartupGameplayLoadLimits,
 ) -> Result<Vec<CharacterId>, StoreError> {
     character_ids.sort_unstable();
     character_ids.dedup();
-    if character_ids.len() > MAX_STARTUP_ITEM_OWNERS {
+    if character_ids.len() > limits.maximum_characters() {
         return Err(StoreError::TooManyCharacterAggregates {
-            maximum: MAX_STARTUP_ITEM_OWNERS,
+            maximum: limits.maximum_characters(),
         });
     }
     if let Some(invalid) = character_ids.iter().find(|id| id.0 <= 0) {
@@ -3420,10 +3469,11 @@ pub(super) fn normalise_startup_owner_ids(
     Ok(character_ids)
 }
 
-pub(super) fn decode_startup_owner_gameplay(
+pub(super) fn decode_startup_gameplay(
     character_id: CharacterId,
     json: &str,
     total_json_bytes: &mut usize,
+    limits: StartupGameplayLoadLimits,
 ) -> Result<DurableCharacterGameplay, StoreError> {
     if json.len() > MAX_CHARACTER_JSON_BYTES {
         return Err(StoreError::SnapshotTooLarge {
@@ -3435,13 +3485,13 @@ pub(super) fn decode_startup_owner_gameplay(
         total_json_bytes
             .checked_add(json.len())
             .ok_or(StoreError::SnapshotTooLarge {
-                kind: "startup owner gameplay",
-                maximum: MAX_STARTUP_OWNER_GAMEPLAY_BYTES,
+                kind: limits.kind(),
+                maximum: limits.maximum_bytes(),
             })?;
-    if *total_json_bytes > MAX_STARTUP_OWNER_GAMEPLAY_BYTES {
+    if *total_json_bytes > limits.maximum_bytes() {
         return Err(StoreError::SnapshotTooLarge {
-            kind: "startup owner gameplay",
-            maximum: MAX_STARTUP_OWNER_GAMEPLAY_BYTES,
+            kind: limits.kind(),
+            maximum: limits.maximum_bytes(),
         });
     }
     Ok(DurableCharacterGameplay {
@@ -3450,14 +3500,24 @@ pub(super) fn decode_startup_owner_gameplay(
     })
 }
 
-pub(super) fn ensure_all_startup_owners_loaded(
+pub(super) fn ensure_all_startup_characters_loaded(
     requested: &[CharacterId],
     aggregates: &[DurableCharacterGameplay],
 ) -> Result<(), StoreError> {
-    let loaded = aggregates
-        .iter()
-        .map(|aggregate| aggregate.character_id)
-        .collect::<BTreeSet<_>>();
+    let mut loaded = BTreeSet::new();
+    for aggregate in aggregates {
+        if aggregate.character_id.0 <= 0 || !loaded.insert(aggregate.character_id) {
+            return Err(StoreError::InvalidRuntimeSnapshot);
+        }
+    }
+    if loaded.len() != requested.len() {
+        return requested
+            .iter()
+            .find(|character_id| !loaded.contains(character_id))
+            .map_or(Err(StoreError::InvalidRuntimeSnapshot), |missing| {
+                Err(StoreError::CharacterGameplayNotFound(*missing))
+            });
+    }
     requested
         .iter()
         .find(|character_id| !loaded.contains(character_id))
@@ -4551,6 +4611,44 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_runtime_loader_upgrades_strict_v4_and_rejects_trade_smuggling() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let mut legacy = serde_json::to_value(World::demo().runtime_snapshot()).unwrap();
+        legacy["snapshotVersion"] = serde_json::json!(4);
+        legacy.as_object_mut().unwrap().remove("nextTradeId");
+        legacy.as_object_mut().unwrap().remove("trades");
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 4, ?1, unixepoch())",
+                [legacy.to_string()],
+            )
+            .unwrap();
+
+        let upgraded = load_runtime_snapshot(&connection).unwrap().unwrap();
+        assert_eq!(
+            upgraded.snapshot_version,
+            tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION
+        );
+        assert_eq!(upgraded.next_trade_id, tiamud_core::TradeId(1));
+        assert!(upgraded.trades.is_empty());
+
+        legacy["trades"] = serde_json::json!({});
+        connection
+            .execute(
+                "UPDATE world_runtime SET snapshot_json = ?1 WHERE singleton = 1",
+                [legacy.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            load_runtime_snapshot(&connection),
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
     fn sqlite_runtime_loader_rejects_an_unsupported_snapshot_version() {
         let mut connection = Connection::open_in_memory().unwrap();
         migrate(&mut connection).unwrap();
@@ -4629,11 +4727,69 @@ mod tests {
         let mut total = MAX_STARTUP_OWNER_GAMEPLAY_BYTES - json.len() + 1;
 
         assert!(matches!(
-            decode_startup_owner_gameplay(CharacterId(1), &json, &mut total),
+            decode_startup_gameplay(
+                CharacterId(1),
+                &json,
+                &mut total,
+                StartupGameplayLoadLimits::ITEM_OWNERS,
+            ),
             Err(StoreError::SnapshotTooLarge {
                 kind: "startup owner gameplay",
                 maximum: MAX_STARTUP_OWNER_GAMEPLAY_BYTES
             })
+        ));
+    }
+
+    #[test]
+    fn startup_trade_gameplay_uses_its_separate_exact_budget() {
+        let json = serde_json::to_string(&CharacterGameplaySnapshot::default()).unwrap();
+        let mut total = MAX_STARTUP_TRADE_GAMEPLAY_BYTES - json.len();
+        decode_startup_gameplay(
+            CharacterId(1),
+            &json,
+            &mut total,
+            StartupGameplayLoadLimits::TRADE_PARTICIPANTS,
+        )
+        .unwrap();
+        assert_eq!(total, MAX_STARTUP_TRADE_GAMEPLAY_BYTES);
+
+        let mut overflowing_total = MAX_STARTUP_TRADE_GAMEPLAY_BYTES - json.len() + 1;
+        assert!(matches!(
+            decode_startup_gameplay(
+                CharacterId(2),
+                &json,
+                &mut overflowing_total,
+                StartupGameplayLoadLimits::TRADE_PARTICIPANTS,
+            ),
+            Err(StoreError::SnapshotTooLarge {
+                kind: "startup trade participant gameplay",
+                maximum: MAX_STARTUP_TRADE_GAMEPLAY_BYTES,
+            })
+        ));
+    }
+
+    #[test]
+    fn startup_trade_batch_rejects_excess_and_duplicate_results() {
+        let ids = (1..=MAX_STARTUP_TRADE_PARTICIPANTS + 1)
+            .map(|id| CharacterId(i64::try_from(id).unwrap()))
+            .collect();
+        assert!(matches!(
+            normalise_startup_character_ids(ids, StartupGameplayLoadLimits::TRADE_PARTICIPANTS),
+            Err(StoreError::TooManyCharacterAggregates {
+                maximum: MAX_STARTUP_TRADE_PARTICIPANTS,
+            })
+        ));
+
+        let aggregate = DurableCharacterGameplay {
+            character_id: CharacterId(1),
+            gameplay: CharacterGameplaySnapshot::default(),
+        };
+        assert!(matches!(
+            ensure_all_startup_characters_loaded(
+                &[CharacterId(1)],
+                &[aggregate.clone(), aggregate],
+            ),
+            Err(StoreError::InvalidRuntimeSnapshot)
         ));
     }
 
@@ -4717,7 +4873,10 @@ mod tests {
         );
         assert_eq!(
             store
-                .load_character_gameplay_batch(vec![character.id])
+                .load_character_gameplay_batch(
+                    vec![character.id],
+                    StartupGameplayLoadLimits::ITEM_OWNERS,
+                )
                 .await
                 .unwrap(),
             vec![DurableCharacterGameplay {

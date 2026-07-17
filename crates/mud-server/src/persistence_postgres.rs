@@ -31,9 +31,9 @@ use crate::{
     persistence::{
         CharacterStore, DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, ModerationAction,
         PreparedLogin, Request, SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry,
-        StaffAuditRecord, StaffReport, StoreError, decode_runtime_snapshot,
-        decode_startup_owner_gameplay, ensure_all_startup_owners_loaded,
-        normalise_startup_owner_ids,
+        StaffAuditRecord, StaffReport, StartupGameplayLoadLimits, StoreError,
+        decode_runtime_snapshot, decode_startup_gameplay, ensure_all_startup_characters_loaded,
+        normalise_startup_character_ids,
     },
 };
 
@@ -188,11 +188,13 @@ impl PostgresCharacterStore {
                         }
                         Request::LoadCharacterGameplayBatch {
                             character_ids,
+                            limits,
                             reply,
                         } => {
                             let _ = reply.send(load_character_gameplay_batch(
                                 &mut connection,
                                 character_ids,
+                                limits,
                             ));
                         }
                         Request::LoadRuntimeSnapshot { reply } => {
@@ -654,11 +656,13 @@ impl CharacterStore for PostgresCharacterStore {
     async fn load_character_gameplay_batch(
         &self,
         character_ids: Vec<CharacterId>,
+        limits: StartupGameplayLoadLimits,
     ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
         let (reply, receive) = oneshot::channel();
         self.request(
             Request::LoadCharacterGameplayBatch {
                 character_ids,
+                limits,
                 reply,
             },
             receive,
@@ -1404,15 +1408,16 @@ fn load_character_gameplay<C: GenericClient>(
 fn load_character_gameplay_batch<C: GenericClient>(
     connection: &mut C,
     character_ids: Vec<CharacterId>,
+    limits: StartupGameplayLoadLimits,
 ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
-    let character_ids = normalise_startup_owner_ids(character_ids)?;
+    let character_ids = normalise_startup_character_ids(character_ids, limits)?;
     let mut total_json_bytes = 0_usize;
     let mut aggregates = Vec::new();
     for batch in character_ids.chunks(POSTGRES_CHARACTER_BATCH_SIZE) {
         let database_ids = batch.iter().map(|id| id.0).collect::<Vec<_>>();
-        // `query` materializes one batch. At 16 rows times the existing 64 KiB
-        // document cap, allocation remains within the 1 MiB aggregate budget
-        // before decoding can reject and stop subsequent batches.
+        // `query` materializes one batch. At 16 rows times the 64 KiB document
+        // cap, each allocation remains at most 1 MiB even when the caller's
+        // explicit aggregate scope is the 8 MiB trade-participant budget.
         let rows = connection.query(
             "SELECT id, gameplay_json FROM characters WHERE id = ANY($1) ORDER BY id",
             &[&database_ids],
@@ -1420,14 +1425,15 @@ fn load_character_gameplay_batch<C: GenericClient>(
         for row in rows {
             let character_id = CharacterId(row.get(0));
             let json: String = row.get(1);
-            aggregates.push(decode_startup_owner_gameplay(
+            aggregates.push(decode_startup_gameplay(
                 character_id,
                 &json,
                 &mut total_json_bytes,
+                limits,
             )?);
         }
     }
-    ensure_all_startup_owners_loaded(&character_ids, &aggregates)?;
+    ensure_all_startup_characters_loaded(&character_ids, &aggregates)?;
     Ok(aggregates)
 }
 
@@ -2661,7 +2667,7 @@ mod tests {
     };
 
     #[test]
-    fn postgres_runtime_decoder_accepts_v4_binding_and_upgrades_strict_v3() {
+    fn postgres_runtime_decoder_accepts_v5_and_upgrades_strict_v3_v4() {
         let mut current = World::demo().runtime_snapshot();
         let item_id = current.item_instances.keys().next().unwrap().clone();
         let item = current.item_instances.get_mut(&item_id).unwrap();
@@ -2719,6 +2725,14 @@ mod tests {
         smuggled["itemInstances"]["legacy:item"]["binding"] =
             serde_json::json!({"kind":"character", "characterId":77});
         assert!(decode_runtime_snapshot(3, &smuggled.to_string()).is_err());
+
+        let mut v4 = current_json;
+        v4["snapshotVersion"] = serde_json::json!(4);
+        v4.as_object_mut().unwrap().remove("nextTradeId");
+        v4.as_object_mut().unwrap().remove("trades");
+        decode_runtime_snapshot(4, &v4.to_string()).unwrap();
+        v4["trades"] = serde_json::json!({});
+        assert!(decode_runtime_snapshot(4, &v4.to_string()).is_err());
     }
 
     fn scoped_url(base: &str, schema: &str) -> String {
@@ -2837,7 +2851,10 @@ mod tests {
             selected_gameplay
         );
         let all_gameplay = store
-            .load_character_gameplay_batch(vec![player_character.id, keeper_character.id])
+            .load_character_gameplay_batch(
+                vec![player_character.id, keeper_character.id],
+                StartupGameplayLoadLimits::ITEM_OWNERS,
+            )
             .await
             .unwrap();
         assert_eq!(all_gameplay.len(), 2);
@@ -2883,6 +2900,8 @@ mod tests {
             npcs: BTreeMap::new(),
             adventure: AdventureRuntimeSnapshot::default(),
             progression_flags: Default::default(),
+            next_trade_id: tiamud_core::TradeId(1),
+            trades: BTreeMap::new(),
         };
         let event = DomainEvent::CharacterMoved {
             actor_id: keeper_character.id,

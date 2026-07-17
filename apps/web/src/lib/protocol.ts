@@ -147,7 +147,17 @@ export interface ServerNoticeData {
 
 export interface MessageAppendData {
   revision: number;
-  kind: 'characterMoved' | 'itemTaken' | 'itemDropped' | 'itemGiven' | 'gameplay' | 'adventure';
+  kind:
+    | 'characterMoved'
+    | 'itemTaken'
+    | 'itemDropped'
+    | 'itemGiven'
+    | 'tradeRequested'
+    | 'tradeChanged'
+    | 'tradeCompleted'
+    | 'tradeCancelled'
+    | 'gameplay'
+    | 'adventure';
   text: string;
   actorId: string;
   targetId?: string;
@@ -222,6 +232,15 @@ export interface InventoryPatchData {
   inventory: PlayerItemSnapshot[];
   equipment: EquippedItemSnapshot[];
   inventoryCapacity: InventoryCapacitySnapshot;
+}
+
+export interface TradeContentsData {
+  tradeId: string;
+  container: string;
+  items: ContainerItemSnapshot[];
+  page: number;
+  totalPages: number;
+  capacity: InventoryCapacitySnapshot;
 }
 
 export interface MapSnapshotData {
@@ -396,11 +415,14 @@ export interface PlayerItemSnapshot {
   itemLevel: number;
   weightGrams: number;
   quantity: number;
+  availableQuantity: number;
+  reservedForTrade: number;
   stackSlots: number;
   totalWeightGrams: number;
   transferPolicy: ItemTransferPolicy;
   boundToYou: boolean;
   canGive: boolean;
+  canTrade: boolean;
   containerCapacity?: InventoryCapacitySnapshot;
   actions: SceneAction[];
 }
@@ -473,6 +495,8 @@ export interface PlayerStateSnapshot {
   }>;
   economy: {
     coins: number;
+    reservedCoins: number;
+    spendableCoins: number;
     commodities: Array<{ id: string; label: string; quantity: number }>;
     shopAvailable: boolean;
     shop: Array<{
@@ -488,6 +512,35 @@ export interface PlayerStateSnapshot {
   social: {
     online: Array<{ id: string; name: string; selfCharacter: boolean; nearby: boolean }>;
   };
+  trade?: TradeSnapshot;
+}
+
+export type TradePhase = 'requested' | 'negotiating';
+
+export interface TradeOfferLineSnapshot {
+  target: string;
+  label: string;
+  quantity: number;
+  container: boolean;
+}
+
+export interface TradeOfferSnapshot {
+  coins: number;
+  lines: TradeOfferLineSnapshot[];
+}
+
+export interface TradeSnapshot {
+  id: string;
+  phase: TradePhase;
+  counterparty: string;
+  expiresInTicks: number;
+  stateRevision: number;
+  ownConfirmed: boolean;
+  counterpartyConfirmed: boolean;
+  ownOffer: TradeOfferSnapshot;
+  counterpartyOffer: TradeOfferSnapshot;
+  canAccept: boolean;
+  canConfirm: boolean;
 }
 
 export type ServerMessage =
@@ -500,6 +553,7 @@ export type ServerMessage =
   | Envelope<'vitals.update', VitalsUpdateData>
   | Envelope<'inventory.patch', InventoryPatchData>
   | Envelope<'container.contents', ContainerContentsData>
+  | Envelope<'trade.contents', TradeContentsData>
   | Envelope<'map.snapshot', MapSnapshotData>
   | Envelope<'action.result', ActionResultData>
   | Envelope<'server.notice', ServerNoticeData>
@@ -546,6 +600,9 @@ export interface ActionPerformFields {
   container?: string;
   quantity?: number;
   page?: number;
+  tradeId?: string;
+  coins?: number;
+  stateRevision?: number;
   message?: string;
   channel?: CommunityChannel;
   reason?: string;
@@ -629,6 +686,26 @@ interface ItemStackProjection {
   containerCapacity?: InventoryCapacitySnapshot;
 }
 
+interface ItemTradeProjection {
+  availableQuantity: number;
+  reservedForTrade: number;
+  canTrade: boolean;
+}
+
+const parseItemTradeProjection = (
+  value: Record<string, unknown>,
+  quantity: number,
+  transferPolicy: ItemTransferPolicy,
+): ItemTradeProjection | undefined => {
+  const availableQuantity = nonNegativeIntegerOrUndefined(value.availableQuantity);
+  const reservedForTrade = nonNegativeIntegerOrUndefined(value.reservedForTrade);
+  const canTrade = typeof value.canTrade === 'boolean' ? value.canTrade : undefined;
+  if (availableQuantity === undefined || reservedForTrade === undefined || canTrade === undefined ||
+    availableQuantity + reservedForTrade !== quantity ||
+    (canTrade && (availableQuantity === 0 || transferPolicy !== 'transferable'))) return undefined;
+  return { availableQuantity, reservedForTrade, canTrade };
+};
+
 const parseItemStackProjection = (value: Record<string, unknown>): ItemStackProjection | undefined => {
   const quantity = positiveIntegerOrUndefined(value.quantity);
   const stackSlots = positiveIntegerOrUndefined(value.stackSlots);
@@ -711,8 +788,9 @@ const parseContainerContents = (value: unknown): ContainerContentsData | undefin
   const items: ContainerItemSnapshot[] = [];
   for (const entry of value.items) {
     if (!isRecord(entry) || !hasOnlyKeys(entry, [
-      'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
-      'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou', 'canGive', 'actions',
+      'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'availableQuantity',
+      'reservedForTrade', 'stackSlots', 'totalWeightGrams', 'containerCapacity', 'transferPolicy',
+      'boundToYou', 'canGive', 'canTrade', 'actions',
     ]) || (entry.containerCapacity !== undefined &&
       (!isRecord(entry.containerCapacity) || !hasOnlyKeys(entry.containerCapacity, [
         'usedSlots', 'maxSlots', 'usedWeightGrams', 'maxWeightGrams',
@@ -726,6 +804,7 @@ const parseContainerContents = (value: unknown): ContainerContentsData | undefin
     const stack = parseItemStackProjection(entry);
     const transfer = parseItemTransfer(entry);
     const canGive = typeof entry.canGive === 'boolean' ? entry.canGive : undefined;
+    const canTrade = typeof entry.canTrade === 'boolean' ? entry.canTrade : undefined;
     const actions = parseActions(entry.actions);
     if (!id || ids.has(id) || !label || !rarity || itemLevel === undefined || itemLevel > 1_000 ||
       weightGrams === undefined || weightGrams > 1_000_000 || !stack || !transfer ||
@@ -734,10 +813,94 @@ const parseContainerContents = (value: unknown): ContainerContentsData | undefin
         ? stack.quantity !== 1 || stack.totalWeightGrams !==
           weightGrams + stack.containerCapacity.usedWeightGrams
         : stack.totalWeightGrams !== weightGrams * stack.quantity) || !actions) return undefined;
+    const trade = parseItemTradeProjection(entry, stack.quantity, transfer.transferPolicy);
+    if (!trade) return undefined;
     ids.add(id);
-    items.push({ id, label, rarity, itemLevel, weightGrams, ...stack, ...transfer, canGive, actions });
+    items.push({
+      id, label, rarity, itemLevel, weightGrams, ...stack, ...trade, ...transfer, canGive, actions,
+    });
   }
   return { container, items, page, totalPages, capacity };
+};
+
+const parseTradeContents = (value: unknown): TradeContentsData | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'tradeId', 'container', 'items', 'page', 'totalPages', 'capacity',
+  ])) return undefined;
+  const tradeId = opaqueId(value.tradeId);
+  const contents = parseContainerContents({
+    container: value.container,
+    items: value.items,
+    page: value.page,
+    totalPages: value.totalPages,
+    capacity: value.capacity,
+  });
+  return tradeId && contents ? { tradeId, ...contents } : undefined;
+};
+
+const parseTradeOffer = (value: unknown): TradeOfferSnapshot | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['coins', 'lines']) ||
+    !Array.isArray(value.lines) || value.lines.length > 8) return undefined;
+  const coins = nonNegativeIntegerOrUndefined(value.coins);
+  if (coins === undefined || coins > 1_000_000_000) return undefined;
+  const targets = new Set<string>();
+  let roots = 0;
+  const lines: TradeOfferLineSnapshot[] = [];
+  for (const entry of value.lines) {
+    if (!isRecord(entry) || !hasOnlyKeys(entry, [
+      'target', 'label', 'quantity', 'container',
+    ])) return undefined;
+    const target = opaqueId(entry.target);
+    const label = boundedString(entry.label, 256);
+    const quantity = positiveIntegerOrUndefined(entry.quantity);
+    if (!target || targets.has(target) || !label || quantity === undefined || quantity > 128 ||
+      typeof entry.container !== 'boolean' || (entry.container && quantity !== 1)) {
+      return undefined;
+    }
+    targets.add(target);
+    roots += quantity;
+    if (roots > 128) return undefined;
+    lines.push({ target, label, quantity, container: entry.container });
+  }
+  return { coins, lines };
+};
+
+const parseTrade = (value: unknown): TradeSnapshot | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'id', 'phase', 'counterparty', 'expiresInTicks', 'stateRevision', 'ownConfirmed',
+    'counterpartyConfirmed', 'ownOffer', 'counterpartyOffer', 'canAccept', 'canConfirm',
+  ])) return undefined;
+  const id = opaqueId(value.id);
+  const counterparty = opaqueId(value.counterparty);
+  const phase = value.phase;
+  const expiresInTicks = nonNegativeIntegerOrUndefined(value.expiresInTicks);
+  const stateRevision = positiveIntegerOrUndefined(value.stateRevision);
+  const ownOffer = parseTradeOffer(value.ownOffer);
+  const counterpartyOffer = parseTradeOffer(value.counterpartyOffer);
+  if (!id || !counterparty || (phase !== 'requested' && phase !== 'negotiating') ||
+    expiresInTicks === undefined || stateRevision === undefined ||
+    typeof value.ownConfirmed !== 'boolean' || typeof value.counterpartyConfirmed !== 'boolean' ||
+    typeof value.canAccept !== 'boolean' || typeof value.canConfirm !== 'boolean' ||
+    !ownOffer || !counterpartyOffer ||
+    ownOffer.lines.reduce((sum, line) => sum + line.quantity, 0) +
+      counterpartyOffer.lines.reduce((sum, line) => sum + line.quantity, 0) > 128) return undefined;
+  if (phase === 'requested' && (ownOffer.lines.length > 0 || counterpartyOffer.lines.length > 0 ||
+    ownOffer.coins !== 0 || counterpartyOffer.coins !== 0 || value.ownConfirmed ||
+    value.counterpartyConfirmed || value.canConfirm)) return undefined;
+  if (phase === 'negotiating' && value.canAccept) return undefined;
+  return {
+    id,
+    phase,
+    counterparty,
+    expiresInTicks,
+    stateRevision,
+    ownConfirmed: value.ownConfirmed,
+    counterpartyConfirmed: value.counterpartyConfirmed,
+    ownOffer,
+    counterpartyOffer,
+    canAccept: value.canAccept,
+    canConfirm: value.canConfirm,
+  };
 };
 
 type ProgressionOption = PlayerCharacterSnapshot['lineage'];
@@ -1071,19 +1234,24 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const stack = parseItemStackProjection(entry);
     const transfer = parseItemTransfer(entry);
     const canGive = typeof entry.canGive === 'boolean' ? entry.canGive : undefined;
+    const canTrade = typeof entry.canTrade === 'boolean' ? entry.canTrade : undefined;
     const actions = parseActions(entry.actions);
     if (!id || !label || description === undefined || !rarity || itemLevel === undefined ||
       itemLevel > 1_000 || weightGrams === undefined || weightGrams > 1_000_000 || !stack ||
       (!transfer || (transfer.transferPolicy === 'character_bound' && !transfer.boundToYou)) ||
-      canGive === undefined || (canGive && transfer.transferPolicy !== 'transferable') ||
+      canGive === undefined || canTrade === undefined ||
+      (canGive && transfer.transferPolicy !== 'transferable') ||
       (stack.containerCapacity
         ? stack.quantity !== 1 || stack.totalWeightGrams !==
           weightGrams + stack.containerCapacity.usedWeightGrams
         : stack.totalWeightGrams !== weightGrams * stack.quantity) || !actions) {
       return undefined;
     }
+    const trade = parseItemTradeProjection(entry, stack.quantity, transfer.transferPolicy);
+    if (!trade || trade.canTrade !== canTrade) return undefined;
     inventory.push({
-      id, label, description, rarity, itemLevel, weightGrams, ...stack, ...transfer, canGive, actions,
+      id, label, description, rarity, itemLevel, weightGrams, ...stack, ...trade, ...transfer,
+      canGive, actions,
     });
   }
 
@@ -1198,9 +1366,17 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
   }
 
   const economy = value.economy;
+  const coins = isRecord(economy) ? nonNegativeIntegerOrUndefined(economy.coins) : undefined;
+  const reservedCoins = isRecord(economy)
+    ? nonNegativeIntegerOrUndefined(economy.reservedCoins)
+    : undefined;
+  const spendableCoins = isRecord(economy)
+    ? nonNegativeIntegerOrUndefined(economy.spendableCoins)
+    : undefined;
   if (
     !isRecord(economy) ||
-    nonNegativeIntegerOrUndefined(economy.coins) === undefined ||
+    coins === undefined || reservedCoins === undefined || spendableCoins === undefined ||
+    reservedCoins > coins || spendableCoins !== coins - reservedCoins ||
     typeof economy.shopAvailable !== 'boolean' ||
     !Array.isArray(economy.commodities) || economy.commodities.length > 32 ||
     !Array.isArray(economy.shop) || economy.shop.length > 32
@@ -1248,6 +1424,11 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     });
   }
 
+  const trade = value.trade === undefined || value.trade === null
+    ? undefined
+    : parseTrade(value.trade);
+  if (value.trade !== undefined && value.trade !== null && !trade) return undefined;
+
   return {
     revision,
     character: {
@@ -1263,12 +1444,15 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     ...(party ? { party } : {}),
     partyInvites,
     economy: {
-      coins: economy.coins as number,
+      coins,
+      reservedCoins,
+      spendableCoins,
       commodities,
       shopAvailable: economy.shopAvailable,
       shop,
     },
     social: { online },
+    ...(trade ? { trade } : {}),
   };
 }
 
@@ -1296,7 +1480,10 @@ const PLAYER_VALIDATION_SHELL = {
   },
   quests: [],
   partyInvites: [],
-  economy: { coins: 0, commodities: [], shopAvailable: false, shop: [] },
+  economy: {
+    coins: 0, reservedCoins: 0, spendableCoins: 0,
+    commodities: [], shopAvailable: false, shop: [],
+  },
   social: { online: [] },
 } as const;
 
@@ -1825,6 +2012,10 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const contents = parseContainerContents(candidate.data);
       return contents ? { ...base, type: candidate.type, data: contents } : undefined;
     }
+    case 'trade.contents': {
+      const contents = parseTradeContents(candidate.data);
+      return contents ? { ...base, type: candidate.type, data: contents } : undefined;
+    }
     case 'map.snapshot': {
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       if (revision === undefined) return undefined;
@@ -1887,6 +2078,10 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
           kind !== 'itemTaken' &&
           kind !== 'itemDropped' &&
           kind !== 'itemGiven' &&
+          kind !== 'tradeRequested' &&
+          kind !== 'tradeChanged' &&
+          kind !== 'tradeCompleted' &&
+          kind !== 'tradeCancelled' &&
           kind !== 'gameplay' &&
           kind !== 'adventure') ||
         !text ||
@@ -2047,6 +2242,7 @@ export function createActionPerform(
   fields: ActionPerformFields | undefined,
   requestId: string,
 ): ActionPerform {
+  if (action.startsWith('trade.')) validateTradeActionFields(action, fields);
   if (fields?.reportId !== undefined &&
     (!Number.isSafeInteger(fields.reportId) || fields.reportId <= 0)) {
     throw new RangeError('reportId must be a positive safe integer');
@@ -2071,11 +2267,76 @@ export function createActionPerform(
       /[\u0000-\u001f\u007f]/.test(fields.recipient))) {
     throw new RangeError('recipient must be a bounded visible selector');
   }
+  if (fields?.tradeId !== undefined && !/^o[0-9a-f]{16}$/.test(fields.tradeId)) {
+    throw new RangeError('tradeId must be an opaque selector');
+  }
+  if (fields?.coins !== undefined &&
+    (!Number.isSafeInteger(fields.coins) || fields.coins < 0 || fields.coins > 1_000_000_000)) {
+    throw new RangeError('coins must be an integer between 0 and 1000000000');
+  }
+  if (fields?.stateRevision !== undefined &&
+    (!Number.isSafeInteger(fields.stateRevision) || fields.stateRevision < 1)) {
+    throw new RangeError('stateRevision must be a positive safe integer');
+  }
   return {
     v: PROTOCOL_VERSION,
     type: 'action.perform',
     data: { requestId, action, ...fields },
   };
+}
+
+function validateTradeActionFields(
+  action: string,
+  fields: ActionPerformFields | undefined,
+): void {
+  const expectedByAction: Record<string, readonly (keyof ActionPerformFields)[]> = {
+    'trade.request': ['recipient'],
+    'trade.accept': ['tradeId'],
+    'trade.decline': ['tradeId'],
+    'trade.item.set': ['tradeId', 'target', 'quantity'],
+    'trade.item.remove': ['tradeId', 'target'],
+    'trade.coins.set': ['tradeId', 'coins'],
+    'trade.contents': ['tradeId', 'target', 'page'],
+    'trade.confirm': ['tradeId', 'stateRevision'],
+    'trade.status': ['tradeId'],
+    'trade.cancel': ['tradeId'],
+  };
+  const expected = expectedByAction[action];
+  if (!expected) throw new RangeError('unknown trade action');
+  const actual = Object.keys(fields ?? {}).toSorted();
+  const keys = [...expected].toSorted();
+  if (actual.length !== keys.length || actual.some((key, index) => key !== keys[index])) {
+    throw new RangeError(`${action} requires its exact closed field set`);
+  }
+  if (action === 'trade.request' && !opaqueId(fields?.recipient)) {
+    throw new RangeError('trade recipient must be an opaque selector');
+  }
+  if (action !== 'trade.request' && !opaqueId(fields?.tradeId)) {
+    throw new RangeError('tradeId must be an opaque selector');
+  }
+  if ((action === 'trade.item.set' || action === 'trade.item.remove' ||
+      action === 'trade.contents') && !opaqueId(fields?.target)) {
+    throw new RangeError('trade target must be an opaque selector');
+  }
+  if (action === 'trade.item.set' &&
+    (!Number.isSafeInteger(fields?.quantity) || (fields?.quantity ?? 0) < 1 ||
+      (fields?.quantity ?? 0) > 128)) {
+    throw new RangeError('trade item quantity must be an integer between 1 and 128');
+  }
+  if (action === 'trade.coins.set' &&
+    (!Number.isSafeInteger(fields?.coins) || (fields?.coins ?? -1) < 0 ||
+      (fields?.coins ?? 1_000_000_001) > 1_000_000_000)) {
+    throw new RangeError('trade coins must be an integer between 0 and 1000000000');
+  }
+  if (action === 'trade.contents' &&
+    (!Number.isSafeInteger(fields?.page) || (fields?.page ?? 0) < 1 ||
+      (fields?.page ?? 0x1_0000) > 0xffff)) {
+    throw new RangeError('trade contents page must be a positive 16-bit integer');
+  }
+  if (action === 'trade.confirm' &&
+    (!Number.isSafeInteger(fields?.stateRevision) || (fields?.stateRevision ?? 0) < 1)) {
+    throw new RangeError('trade stateRevision must be a positive safe integer');
+  }
 }
 
 export function createAbilityPerform(

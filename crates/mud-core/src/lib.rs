@@ -101,6 +101,7 @@ pub enum PlayerAction {
         selection: ItemSelection,
         recipient: String,
     },
+    Trade(TradeAction),
     Examine(String),
     Attack(String),
     Ability {
@@ -127,6 +128,32 @@ pub enum PlayerAction {
 }
 
 pub const MAX_ITEM_SELECTION_QUANTITY: u16 = 256;
+
+pub const MAX_TRADE_ITEM_QUANTITY: u16 = 128;
+pub const MAX_TRADE_COINS: u64 = 1_000_000_000;
+pub const MAX_LIVE_TRADES: usize = 64;
+pub const MAX_TRADE_LINES_PER_PARTICIPANT: usize = 8;
+pub const MAX_TRADE_ROOTS: usize = 128;
+pub const MAX_RESERVED_TRADE_ROOTS: usize = 2_048;
+pub const TRADE_REQUEST_TICKS: u64 = 20;
+pub const TRADE_NEGOTIATION_TICKS: u64 = 120;
+pub const TRADE_REQUEST_RATE_TICKS: u64 = 5;
+pub const MAX_TRADE_STATUS_INVENTORY_GROUPS: usize = 20;
+pub const MAX_TRADE_STATUS_TEXT_BYTES: usize = 16 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TradeAction {
+    Request(String),
+    Accept,
+    Decline,
+    OfferItem(ItemSelection),
+    RemoveItem(String),
+    OfferCoins(u64),
+    Status,
+    Contents { container: String, page: u16 },
+    Confirm { state_revision: u64 },
+    Cancel,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ItemSelection {
@@ -556,6 +583,76 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if normalised == "shop" {
         return Ok(PlayerAction::Economy(EconomyAction::Shop));
+    }
+    match normalised.as_str() {
+        "trade accept" => return Ok(PlayerAction::Trade(TradeAction::Accept)),
+        "trade decline" => return Ok(PlayerAction::Trade(TradeAction::Decline)),
+        "trade status" | "trade" => return Ok(PlayerAction::Trade(TradeAction::Status)),
+        "trade cancel" => return Ok(PlayerAction::Trade(TradeAction::Cancel)),
+        _ => {}
+    }
+    if let Some(target) = command_tail_phrase(input, "trade request") {
+        return Ok(PlayerAction::Trade(TradeAction::Request(target)));
+    }
+    if normalised == "trade request" {
+        return Err(ParseActionError::MissingTarget { command: "trade" });
+    }
+    if let Some(value) = command_tail_phrase(input, "trade offer item") {
+        let selection = parse_item_selection(&value, input)?;
+        if selection.quantity > MAX_TRADE_ITEM_QUANTITY {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        }
+        return Ok(PlayerAction::Trade(TradeAction::OfferItem(selection)));
+    }
+    if normalised == "trade offer item" {
+        return Err(ParseActionError::MissingTarget { command: "trade" });
+    }
+    if let Some(target) = command_tail_phrase(input, "trade remove item") {
+        return Ok(PlayerAction::Trade(TradeAction::RemoveItem(target)));
+    }
+    if normalised == "trade remove item" {
+        return Err(ParseActionError::MissingTarget { command: "trade" });
+    }
+    if let Some(value) = command_tail_phrase(input, "trade offer coins") {
+        let coins = value
+            .parse::<u64>()
+            .ok()
+            .filter(|coins| *coins <= MAX_TRADE_COINS)
+            .ok_or_else(|| ParseActionError::Unknown(input.to_owned()))?;
+        return Ok(PlayerAction::Trade(TradeAction::OfferCoins(coins)));
+    }
+    if normalised == "trade offer coins" {
+        return Err(ParseActionError::MissingTarget { command: "trade" });
+    }
+    if let Some(value) = command_tail_phrase(input, "trade confirm") {
+        let state_revision = value
+            .parse::<u64>()
+            .ok()
+            .filter(|revision| *revision > 0)
+            .ok_or_else(|| ParseActionError::Unknown(input.to_owned()))?;
+        return Ok(PlayerAction::Trade(TradeAction::Confirm { state_revision }));
+    }
+    if normalised == "trade confirm" {
+        return Err(ParseActionError::MissingTarget { command: "trade" });
+    }
+    if let Some(value) = command_tail_phrase(input, "trade contents") {
+        let mut parts = value.rsplitn(2, char::is_whitespace);
+        let last = parts.next().unwrap_or_default().trim();
+        let previous = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let (container, page) = match (previous, last.parse::<u16>().ok()) {
+            (Some(container), Some(page)) if page > 0 => (container.to_owned(), page),
+            _ => (value, 1),
+        };
+        return Ok(PlayerAction::Trade(TradeAction::Contents {
+            container,
+            page,
+        }));
+    }
+    if normalised == "trade contents" {
+        return Err(ParseActionError::MissingTarget { command: "trade" });
     }
     for (command, constructor) in [
         ("buy", EconomyAction::Buy as fn(String) -> EconomyAction),
@@ -1354,6 +1451,8 @@ pub struct PlayerStateView {
     pub party_invites: Vec<PartyInviteView>,
     pub economy: EconomyView,
     pub social: SocialView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trade: Option<TradeView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1404,11 +1503,14 @@ pub struct PlayerItemView {
     pub item_level: u16,
     pub weight_grams: u32,
     pub quantity: u16,
+    pub available_quantity: u16,
+    pub reserved_for_trade: u16,
     pub stack_slots: u32,
     pub total_weight_grams: u64,
     pub transfer_policy: ItemTransferPolicy,
     pub bound_to_you: bool,
     pub can_give: bool,
+    pub can_trade: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_capacity: Option<InventoryCapacityView>,
     pub actions: Vec<SceneAction>,
@@ -1446,6 +1548,49 @@ pub struct InventoryCapacityView {
 #[serde(rename_all = "camelCase")]
 pub struct ContainerContentsView {
     pub selector: String,
+    pub items: Vec<PlayerItemView>,
+    pub page: u16,
+    pub total_pages: u16,
+    pub capacity: InventoryCapacityView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeOfferLineView {
+    pub target: String,
+    pub label: String,
+    pub quantity: u16,
+    pub container: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeOfferView {
+    pub coins: u64,
+    pub lines: Vec<TradeOfferLineView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeView {
+    pub id: String,
+    pub phase: TradePhase,
+    pub counterparty: String,
+    pub expires_in_ticks: u64,
+    pub state_revision: u64,
+    pub own_confirmed: bool,
+    pub counterparty_confirmed: bool,
+    pub own_offer: TradeOfferView,
+    pub counterparty_offer: TradeOfferView,
+    pub can_accept: bool,
+    pub can_confirm: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeContentsView {
+    pub trade_id: String,
+    pub container: String,
     pub items: Vec<PlayerItemView>,
     pub page: u16,
     pub total_pages: u16,
@@ -1518,6 +1663,8 @@ pub struct PartyInviteView {
 #[serde(rename_all = "camelCase")]
 pub struct EconomyView {
     pub coins: u64,
+    pub reserved_coins: u64,
+    pub spendable_coins: u64,
     pub commodities: Vec<CommodityView>,
     pub shop_available: bool,
     pub shop: Vec<ShopItemView>,
@@ -1661,9 +1808,29 @@ impl Borrow<str> for ItemInstanceId {
     }
 }
 
+pub fn valid_item_instance_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_ITEM_INSTANCE_ID_BYTES {
+        return false;
+    }
+    if value.starts_with("runtime:") {
+        return runtime_item_sequence(&ItemInstanceId(value.to_owned())).is_some();
+    }
+    bytes[0].is_ascii_alphanumeric()
+        && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b':' | b'-' | b'_' | b'.')
+        })
+}
+
 fn runtime_item_sequence(item_id: &ItemInstanceId) -> Option<u64> {
     let value = item_id.as_str().strip_prefix("runtime:")?;
-    if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
         return None;
     }
     value.parse::<u64>().ok().filter(|sequence| *sequence > 0)
@@ -2074,9 +2241,101 @@ pub struct DurableCharacterSnapshot {
     pub gameplay: CharacterGameplaySnapshot,
 }
 
-pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 4;
+pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 const MAX_ACTIVE_EFFECTS: usize = 32;
 pub const MAX_ITEM_INSTANCES: usize = 65_536;
+pub const MAX_ITEM_INSTANCE_ID_BYTES: usize = 128;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct TradeId(pub u64);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradePhase {
+    Requested,
+    Negotiating,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TradeOfferKey {
+    Fungible { prototype_id: String },
+    Unique { item_id: ItemInstanceId },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TradeOfferLine {
+    pub key: TradeOfferKey,
+    pub item_ids: Vec<ItemInstanceId>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TradeOffer {
+    pub lines: Vec<TradeOfferLine>,
+    pub coins: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TradeConfirmation {
+    pub state_revision: u64,
+    pub basis_sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TradeSnapshot {
+    pub id: TradeId,
+    pub requester: CharacterId,
+    pub recipient: CharacterId,
+    pub room_id: String,
+    pub phase: TradePhase,
+    pub created_tick: u64,
+    pub opened_tick: Option<u64>,
+    pub expires_at_tick: u64,
+    pub state_revision: u64,
+    pub offers: BTreeMap<CharacterId, TradeOffer>,
+    pub confirmations: BTreeMap<CharacterId, TradeConfirmation>,
+}
+
+impl TradeSnapshot {
+    pub fn participants(&self) -> [CharacterId; 2] {
+        [self.requester, self.recipient]
+    }
+
+    pub fn includes(&self, character_id: CharacterId) -> bool {
+        self.requester == character_id || self.recipient == character_id
+    }
+
+    pub fn counterpart(&self, character_id: CharacterId) -> Option<CharacterId> {
+        if self.requester == character_id {
+            Some(self.recipient)
+        } else if self.recipient == character_id {
+            Some(self.requester)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeCancellationReason {
+    Declined,
+    CancelledByParticipant,
+    Expired,
+    ParticipantsSeparated,
+    CombatStarted,
+    ParticipantDefeated,
+    ParticipantDisconnected,
+    SocialPolicyChanged,
+    InvalidReservation,
+    CounterExhausted,
+    Restart,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -2282,6 +2541,27 @@ pub struct WorldRuntimeSnapshot {
     pub adventure: AdventureRuntimeSnapshot,
     #[serde(default)]
     pub progression_flags: BTreeSet<String>,
+    pub next_trade_id: TradeId,
+    pub trades: BTreeMap<TradeId, TradeSnapshot>,
+}
+
+/// Exact snapshot shape produced by inventory phase 3C. It intentionally has
+/// no trade fields; v4 payloads may only obtain an empty trade state through
+/// the explicit v4 -> v5 conversion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldRuntimeSnapshotV4 {
+    pub snapshot_version: u32,
+    pub revision: u64,
+    pub logical_tick: u64,
+    pub rng_state: u64,
+    pub next_item_instance_sequence: u64,
+    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshot>,
+    pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
+    #[serde(default)]
+    pub adventure: AdventureRuntimeSnapshot,
+    #[serde(default)]
+    pub progression_flags: BTreeSet<String>,
 }
 
 /// Exact snapshot shape produced by inventory phase 3B.
@@ -2375,6 +2655,8 @@ impl WorldRuntimeSnapshot {
             npcs: snapshot.npcs,
             adventure: snapshot.adventure,
             progression_flags: snapshot.progression_flags,
+            next_trade_id: TradeId(1),
+            trades: BTreeMap::new(),
         })
     }
 
@@ -2405,6 +2687,27 @@ impl WorldRuntimeSnapshot {
             npcs: snapshot.npcs,
             adventure: snapshot.adventure,
             progression_flags: snapshot.progression_flags,
+            next_trade_id: TradeId(1),
+            trades: BTreeMap::new(),
+        })
+    }
+
+    pub fn upgrade_v4(snapshot: WorldRuntimeSnapshotV4) -> Result<Self, WorldError> {
+        if snapshot.snapshot_version != 4 {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        Ok(Self {
+            snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
+            revision: snapshot.revision,
+            logical_tick: snapshot.logical_tick,
+            rng_state: snapshot.rng_state,
+            next_item_instance_sequence: snapshot.next_item_instance_sequence,
+            item_instances: snapshot.item_instances,
+            npcs: snapshot.npcs,
+            adventure: snapshot.adventure,
+            progression_flags: snapshot.progression_flags,
+            next_trade_id: TradeId(1),
+            trades: BTreeMap::new(),
         })
     }
 }
@@ -2443,7 +2746,8 @@ impl WorldRuntimeSnapshotV2 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompatibleWorldRuntimeSnapshot {
-    V4(WorldRuntimeSnapshot),
+    V5(WorldRuntimeSnapshot),
+    V4(WorldRuntimeSnapshotV4),
     V3(WorldRuntimeSnapshotV3),
     V2(WorldRuntimeSnapshotV2),
     V1(WorldRuntimeSnapshotV1),
@@ -2472,6 +2776,9 @@ impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
             4 => serde_json::from_value(value)
                 .map(Self::V4)
                 .map_err(serde::de::Error::custom),
+            5 => serde_json::from_value(value)
+                .map(Self::V5)
+                .map_err(serde::de::Error::custom),
             _ => Err(serde::de::Error::custom("unsupported snapshotVersion")),
         }
     }
@@ -2480,7 +2787,8 @@ impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
 impl CompatibleWorldRuntimeSnapshot {
     pub fn into_current(self) -> Result<WorldRuntimeSnapshot, WorldError> {
         match self {
-            Self::V4(snapshot) => Ok(snapshot),
+            Self::V5(snapshot) => Ok(snapshot),
+            Self::V4(snapshot) => WorldRuntimeSnapshot::upgrade_v4(snapshot),
             Self::V3(snapshot) => WorldRuntimeSnapshot::upgrade_v3(snapshot),
             Self::V2(snapshot) => WorldRuntimeSnapshot::upgrade_v2(snapshot),
             Self::V1(snapshot) => WorldRuntimeSnapshot::upgrade_v1(snapshot),
@@ -2498,6 +2806,7 @@ pub fn decode_world_runtime_snapshot(
     let compatible: CompatibleWorldRuntimeSnapshot =
         serde_json::from_str(json).map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
     let payload_version = match &compatible {
+        CompatibleWorldRuntimeSnapshot::V5(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V4(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V3(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V2(snapshot) => snapshot.snapshot_version,
@@ -2507,6 +2816,136 @@ pub fn decode_world_runtime_snapshot(
         return Err(WorldError::InvalidRuntimeSnapshot);
     }
     compatible.into_current()
+}
+
+/// Validates every portable invariant that can be established without a
+/// particular WorldPack. Offline movers and recovery tools use this same
+/// authority after version-directed decoding; `World::restore_runtime_snapshot`
+/// adds only the authored room/prototype/policy/capacity checks.
+pub fn validate_world_runtime_snapshot_semantics(
+    snapshot: &WorldRuntimeSnapshot,
+) -> Result<(), WorldError> {
+    if snapshot.snapshot_version != WORLD_RUNTIME_SNAPSHOT_VERSION
+        || snapshot.revision == 0
+        || snapshot.rng_state == 0
+        || snapshot.next_item_instance_sequence == 0
+        || snapshot.item_instances.len() > MAX_ITEM_INSTANCES
+        || snapshot.progression_flags.len() > 64
+        || !snapshot
+            .progression_flags
+            .iter()
+            .all(|flag| valid_definition_id(flag))
+    {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+    let runtime_sequence_valid = snapshot
+        .item_instances
+        .keys()
+        .filter_map(runtime_item_sequence)
+        .max()
+        .is_none_or(|sequence| sequence < snapshot.next_item_instance_sequence);
+    if !runtime_sequence_valid {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+
+    let mut children = BTreeMap::<ItemInstanceId, Vec<ItemInstanceId>>::new();
+    for (item_id, instance) in &snapshot.item_instances {
+        let location_valid = match &instance.location {
+            RuntimeItemLocation::Staged | RuntimeItemLocation::Consumed => true,
+            RuntimeItemLocation::Carried { character_id }
+            | RuntimeItemLocation::Equipped { character_id, .. } => character_id.0 > 0,
+            RuntimeItemLocation::Room { room_id } => valid_definition_id(room_id),
+            RuntimeItemLocation::HeldByNpc { npc_id } => valid_definition_id(npc_id),
+            RuntimeItemLocation::Contained { container_id } => {
+                if container_id == item_id
+                    || !valid_item_instance_id(container_id.as_str())
+                    || !snapshot.item_instances.contains_key(container_id)
+                {
+                    false
+                } else {
+                    children
+                        .entry(container_id.clone())
+                        .or_default()
+                        .push(item_id.clone());
+                    true
+                }
+            }
+        };
+        if !valid_item_instance_id(item_id.as_str())
+            || !valid_definition_id(&instance.prototype_id)
+            || !location_valid
+            || matches!(instance.binding, ItemBinding::Character { character_id } if character_id.0 <= 0)
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+    }
+    for item_id in snapshot.item_instances.keys() {
+        let mut current = item_id;
+        let mut visited = BTreeSet::new();
+        let mut depth = 0_usize;
+        while let Some(RuntimeItemInstanceSnapshot {
+            location: RuntimeItemLocation::Contained { container_id },
+            ..
+        }) = snapshot.item_instances.get(current)
+        {
+            if !visited.insert(current.clone()) {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+            depth = depth
+                .checked_add(1)
+                .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+            if depth > MAX_CONTAINER_DEPTH {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+            current = container_id;
+        }
+    }
+
+    let mut party_members = BTreeSet::new();
+    let adventure_valid = snapshot.adventure.next_party_id > 0
+        && snapshot.adventure.parties.iter().all(|(party_id, party)| {
+            *party_id == party.id
+                && party.id < snapshot.adventure.next_party_id
+                && !party.members.is_empty()
+                && party.members.len() <= 6
+                && party.members.iter().all(|member| member.0 > 0)
+                && party.members.contains(&party.leader)
+                && party.members.windows(2).all(|pair| pair[0] < pair[1])
+                && party
+                    .members
+                    .iter()
+                    .all(|member| party_members.insert(*member))
+                && party.invitations.len() <= 12
+                && party
+                    .invitations
+                    .keys()
+                    .all(|invitee| invitee.0 > 0 && !party.members.contains(invitee))
+        })
+        && snapshot.adventure.shop_stock.len() == commodity_specs().len()
+        && commodity_specs().iter().all(|(id, _, _, _)| {
+            snapshot
+                .adventure
+                .shop_stock
+                .get(*id)
+                .is_some_and(|stock| *stock <= 100)
+        })
+        && snapshot.adventure.next_weather_tick > 0;
+    let npc_shape_valid = snapshot.npcs.iter().all(|(npc_id, npc)| {
+        npc_id == &npc.stable_id
+            && valid_definition_id(npc_id)
+            && npc
+                .engaged_character
+                .is_none_or(|character| character.0 > 0)
+            && npc
+                .loot_item_ids
+                .iter()
+                .all(|item_id| valid_item_instance_id(item_id.as_str()))
+    });
+    if !adventure_valid || !npc_shape_valid {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+
+    validate_portable_trade_state(snapshot, &children)
 }
 
 impl Default for CharacterGameplaySnapshot {
@@ -2724,7 +3163,7 @@ struct ItemPrototype {
     transfer_policy: ItemTransferPolicy,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ItemInstance {
     prototype_id: String,
     location: SharedItemLocation,
@@ -2865,6 +3304,14 @@ pub enum WorldError {
     ItemTransferForbidden,
     #[error("That recipient is not available for an item transfer.")]
     GiveTargetUnavailable,
+    #[error("That trade action is not available.")]
+    TradeUnavailable,
+    #[error("That trade participant is not available.")]
+    TradeTargetUnavailable,
+    #[error("That item is reserved for a trade.")]
+    ItemReservedForTrade,
+    #[error("That trade confirmation refers to an obsolete revision.")]
+    StaleTradeRevision,
     #[error("Nothing is equipped in that slot.")]
     EquipmentSlotEmpty,
     #[error("Combat cannot be started right now.")]
@@ -2971,6 +3418,32 @@ pub enum DomainEvent {
         item_ids: Vec<ItemInstanceId>,
         item_name: String,
         room_id: String,
+    },
+    TradeRequested {
+        trade: TradeSnapshot,
+    },
+    TradeOpened {
+        previous: TradeSnapshot,
+        current: TradeSnapshot,
+    },
+    TradeOfferSet {
+        previous: TradeSnapshot,
+        current: TradeSnapshot,
+    },
+    TradeConfirmed {
+        participant: CharacterId,
+        confirmation: TradeConfirmation,
+    },
+    TradeInvalidated {
+        previous: TradeSnapshot,
+        current: TradeSnapshot,
+    },
+    TradeCancelled {
+        previous_trade: TradeSnapshot,
+        reason: TradeCancellationReason,
+    },
+    TradeCompleted {
+        previous_trade: TradeSnapshot,
     },
     Gameplay {
         event: GameplayEvent,
@@ -3193,6 +3666,10 @@ pub enum ViewEventKind {
     ItemTaken,
     ItemDropped,
     ItemGiven,
+    TradeRequested,
+    TradeChanged,
+    TradeCompleted,
+    TradeCancelled,
     Gameplay,
     Adventure,
 }
@@ -3216,6 +3693,8 @@ pub struct ActionOutcome {
     pub scene: SceneView,
     /// Present only for an explicit, paginated container inspection.
     pub container_contents: Option<ContainerContentsView>,
+    /// Present only for an explicit inspection of an offered container.
+    pub trade_contents: Option<TradeContentsView>,
     /// Optional transport-independent, plain-text response to the command.
     pub output: Option<String>,
     /// Present when the action changed persistent character state.
@@ -3254,6 +3733,12 @@ pub struct World {
     logical_tick: u64,
     rng: DeterministicRng,
     adventure: AdventureRuntimeSnapshot,
+    next_trade_id: TradeId,
+    trades: BTreeMap<TradeId, TradeSnapshot>,
+    /// Ephemeral abuse control. This deliberately does not enter the portable
+    /// runtime snapshot and may reset on process restart.
+    last_trade_request_ticks: HashMap<CharacterId, u64>,
+    tick_resolution_pending: bool,
 }
 
 /// Exact in-memory checkpoint used around one durable commit. Unlike the
@@ -3273,6 +3758,10 @@ pub struct WorldCheckpoint {
     rng: DeterministicRng,
     adventure: AdventureRuntimeSnapshot,
     world_progression_flags: BTreeSet<String>,
+    next_trade_id: TradeId,
+    trades: BTreeMap<TradeId, TradeSnapshot>,
+    last_trade_request_ticks: HashMap<CharacterId, u64>,
+    tick_resolution_pending: bool,
 }
 
 impl World {
@@ -3411,7 +3900,7 @@ impl World {
         let mut item_instances = BTreeMap::new();
         for instance in definition.initial_item_instances {
             let instance_id = instance.instance_id;
-            if instance_id.0.trim().is_empty() {
+            if !valid_item_instance_id(instance_id.as_str()) {
                 return Err(WorldBuildError::EmptyItemId);
             }
             if !item_prototypes.contains_key(&instance.prototype_id) {
@@ -3520,6 +4009,10 @@ impl World {
             logical_tick: 0,
             rng: DeterministicRng::new(0x5449_414d_5544),
             adventure: AdventureRuntimeSnapshot::default(),
+            next_trade_id: TradeId(1),
+            trades: BTreeMap::new(),
+            last_trade_request_ticks: HashMap::new(),
+            tick_resolution_pending: false,
         })
     }
 
@@ -3827,6 +4320,10 @@ impl World {
             rng: self.rng.clone(),
             adventure: self.adventure.clone(),
             world_progression_flags: self.world_progression_flags.clone(),
+            next_trade_id: self.next_trade_id,
+            trades: self.trades.clone(),
+            last_trade_request_ticks: self.last_trade_request_ticks.clone(),
+            tick_resolution_pending: self.tick_resolution_pending,
         }
     }
 
@@ -3843,6 +4340,10 @@ impl World {
         self.rng = checkpoint.rng;
         self.adventure = checkpoint.adventure;
         self.world_progression_flags = checkpoint.world_progression_flags;
+        self.next_trade_id = checkpoint.next_trade_id;
+        self.trades = checkpoint.trades;
+        self.last_trade_request_ticks = checkpoint.last_trade_request_ticks;
+        self.tick_resolution_pending = checkpoint.tick_resolution_pending;
     }
 
     pub fn runtime_snapshot(&self) -> WorldRuntimeSnapshot {
@@ -3923,6 +4424,8 @@ impl World {
                 .collect(),
             adventure: self.adventure.clone(),
             progression_flags: self.world_progression_flags.clone(),
+            next_trade_id: self.next_trade_id,
+            trades: self.trades.clone(),
         }
     }
 
@@ -3930,68 +4433,19 @@ impl World {
         &mut self,
         mut snapshot: WorldRuntimeSnapshot,
     ) -> Result<(), WorldError> {
+        validate_world_runtime_snapshot_semantics(&snapshot)?;
         let item_ids_match = snapshot.item_instances.iter().all(|(item_id, instance)| {
-            !item_id.0.trim().is_empty()
-                && self.item_prototypes.contains_key(&instance.prototype_id)
+            self.item_prototypes.contains_key(&instance.prototype_id)
                 && match self.initial_item_prototypes.get(item_id) {
                     Some(prototype_id) => prototype_id == &instance.prototype_id,
                     None => runtime_item_sequence(item_id).is_some(),
                 }
         });
-        let item_sequence_valid = snapshot.item_instances.len() <= MAX_ITEM_INSTANCES
-            && snapshot
-                .item_instances
-                .keys()
-                .filter_map(runtime_item_sequence)
-                .max()
-                .is_none_or(|sequence| sequence < snapshot.next_item_instance_sequence);
         let npc_ids_match = snapshot
             .npcs
             .iter()
             .all(|(npc_id, npc)| npc_id == &npc.stable_id && self.npcs.contains_key(npc_id));
-        let mut party_members = std::collections::HashSet::new();
-        let adventure_valid = snapshot.adventure.next_party_id > 0
-            && snapshot.adventure.parties.iter().all(|(party_id, party)| {
-                *party_id == party.id
-                    && party.id < snapshot.adventure.next_party_id
-                    && !party.members.is_empty()
-                    && party.members.len() <= 6
-                    && party.members.iter().all(|member| member.0 > 0)
-                    && party.members.contains(&party.leader)
-                    && party.members.windows(2).all(|pair| pair[0] < pair[1])
-                    && party
-                        .members
-                        .iter()
-                        .all(|member| party_members.insert(*member))
-                    && party.invitations.len() <= 12
-                    && party
-                        .invitations
-                        .keys()
-                        .all(|invitee| invitee.0 > 0 && !party.members.contains(invitee))
-            })
-            && snapshot.adventure.shop_stock.len() == commodity_specs().len()
-            && commodity_specs().iter().all(|(id, _, _, _)| {
-                snapshot
-                    .adventure
-                    .shop_stock
-                    .get(*id)
-                    .is_some_and(|stock| *stock <= 100)
-            })
-            && snapshot.adventure.next_weather_tick > 0;
-        if snapshot.snapshot_version != WORLD_RUNTIME_SNAPSHOT_VERSION
-            || snapshot.revision == 0
-            || snapshot.rng_state == 0
-            || snapshot.next_item_instance_sequence == 0
-            || !item_ids_match
-            || !item_sequence_valid
-            || !npc_ids_match
-            || !adventure_valid
-            || snapshot.progression_flags.len() > 64
-            || !snapshot
-                .progression_flags
-                .iter()
-                .all(|flag| valid_definition_id(flag))
-        {
+        if !item_ids_match || !npc_ids_match {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
 
@@ -4178,6 +4632,13 @@ impl World {
         {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
+        validate_trade_state(
+            snapshot.next_trade_id,
+            &snapshot.trades,
+            &item_instances,
+            &self.item_prototypes,
+            &self.stable_rooms,
+        )?;
 
         self.revision = snapshot.revision;
         self.logical_tick = snapshot.logical_tick;
@@ -4195,6 +4656,9 @@ impl World {
             .max(snapshot.logical_tick.saturating_add(1));
         self.adventure = snapshot.adventure;
         self.world_progression_flags = snapshot.progression_flags;
+        self.next_trade_id = snapshot.next_trade_id;
+        self.trades = snapshot.trades;
+        self.tick_resolution_pending = false;
         self.last_view_bump = None;
         Ok(())
     }
@@ -4848,7 +5312,13 @@ impl World {
     /// recovery, respawns and every active combat in stable NPC-ID order.
     pub fn advance_tick(&mut self) -> Result<Vec<DomainEvent>, WorldError> {
         let checkpoint = self.checkpoint();
-        match self.advance_tick_inner() {
+        let advanced = (|| {
+            self.begin_tick()?;
+            let mut events = self.cancel_expired_trades()?;
+            events.extend(self.resolve_tick_after_expiry()?);
+            Ok(events)
+        })();
+        match advanced {
             Ok(events) => Ok(events),
             Err(error) => {
                 self.restore_checkpoint(checkpoint);
@@ -4857,8 +5327,39 @@ impl World {
         }
     }
 
-    fn advance_tick_inner(&mut self) -> Result<Vec<DomainEvent>, WorldError> {
-        self.logical_tick = self.logical_tick.wrapping_add(1);
+    /// Opens a logical tick without resolving effects, respawns or combat.
+    /// The actor cancels expired trades next and then calls
+    /// `resolve_tick_after_expiry` exactly once.
+    pub fn begin_tick(&mut self) -> Result<(), WorldError> {
+        if self.tick_resolution_pending {
+            return Err(WorldError::InvalidDomainTransition);
+        }
+        let next_tick = self
+            .logical_tick
+            .checked_add(1)
+            .ok_or(WorldError::InvalidDomainTransition)?;
+        self.logical_tick = next_tick;
+        self.tick_resolution_pending = true;
+        Ok(())
+    }
+
+    /// Resolves the tick opened by `begin_tick`. Expiration must already have
+    /// been processed, so combat cannot observe an expired reservation.
+    pub fn resolve_tick_after_expiry(&mut self) -> Result<Vec<DomainEvent>, WorldError> {
+        if !self.tick_resolution_pending {
+            return Err(WorldError::InvalidDomainTransition);
+        }
+        let checkpoint = self.checkpoint();
+        match self.resolve_tick_after_expiry_inner() {
+            Ok(events) => Ok(events),
+            Err(error) => {
+                self.restore_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn resolve_tick_after_expiry_inner(&mut self) -> Result<Vec<DomainEvent>, WorldError> {
         let tick = self.logical_tick;
         let mut events = vec![DomainEvent::Gameplay {
             event: GameplayEvent::TickAdvanced { tick },
@@ -4946,8 +5447,12 @@ impl World {
                 },
             });
         }
-        self.revision = self.revision.wrapping_add(1).max(1);
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(WorldError::InvalidDomainTransition)?;
         self.bump_view_revisions_for_events(&events)?;
+        self.tick_resolution_pending = false;
         Ok(events)
     }
 
@@ -5856,6 +6361,245 @@ impl World {
                 self.revision = self.revision.wrapping_add(1).max(1);
                 Ok(())
             }
+            DomainEvent::TradeRequested { trade } => {
+                if trade.id != self.next_trade_id
+                    || self.trades.contains_key(&trade.id)
+                    || self.trade_for_character(trade.requester).is_some()
+                    || self.trade_for_character(trade.recipient).is_some()
+                {
+                    return Err(WorldError::InvalidDomainTransition);
+                }
+                let next = TradeId(
+                    trade
+                        .id
+                        .0
+                        .checked_add(1)
+                        .ok_or(WorldError::InvalidDomainTransition)?,
+                );
+                let mut candidate_trades = self.trades.clone();
+                candidate_trades.insert(trade.id, trade.clone());
+                validate_trade_state(
+                    next,
+                    &candidate_trades,
+                    &self.item_instances,
+                    &self.item_prototypes,
+                    &self.stable_rooms,
+                )?;
+                self.next_trade_id = next;
+                self.trades.insert(trade.id, trade.clone());
+                self.revision = self
+                    .revision
+                    .checked_add(1)
+                    .ok_or(WorldError::InvalidDomainTransition)?;
+                Ok(())
+            }
+            DomainEvent::TradeOpened { previous, current } => {
+                if self.trades.get(&previous.id) != Some(previous)
+                    || !valid_trade_open_transition(previous, current)
+                {
+                    return Err(WorldError::InvalidDomainTransition);
+                }
+                self.replay_trade_state_change(current)
+            }
+            DomainEvent::TradeOfferSet { previous, current } => {
+                if self.trades.get(&previous.id) != Some(previous)
+                    || !valid_trade_offer_transition(previous, current)
+                {
+                    return Err(WorldError::InvalidDomainTransition);
+                }
+                self.replay_trade_state_change(current)
+            }
+            DomainEvent::TradeInvalidated { previous, current } => {
+                if self.trades.get(&previous.id) != Some(previous)
+                    || !valid_trade_invalidation_transition(previous, current)
+                {
+                    return Err(WorldError::InvalidDomainTransition);
+                }
+                self.replay_trade_state_change(current)
+            }
+            DomainEvent::TradeConfirmed {
+                participant,
+                confirmation,
+            } => {
+                let trade = self
+                    .trade_for_character(*participant)
+                    .cloned()
+                    .ok_or(WorldError::InvalidDomainTransition)?;
+                if trade.phase != TradePhase::Negotiating
+                    || !trade_has_assets(&trade)
+                    || confirmation.state_revision != trade.state_revision
+                    || trade.confirmations.contains_key(participant)
+                    || (!trade.confirmations.is_empty())
+                    || self
+                        .trade_basis_sha256_if_participants_loaded(&trade)?
+                        .is_some_and(|basis| basis != confirmation.basis_sha256)
+                {
+                    return Err(WorldError::InvalidDomainTransition);
+                }
+                let mut current = trade;
+                current
+                    .confirmations
+                    .insert(*participant, confirmation.clone());
+                self.replay_trade_state_change(&current)
+            }
+            DomainEvent::TradeCancelled { previous_trade, .. } => {
+                if self.trades.get(&previous_trade.id) != Some(previous_trade) {
+                    return Err(WorldError::InvalidDomainTransition);
+                }
+                self.trades.remove(&previous_trade.id);
+                self.revision = self
+                    .revision
+                    .checked_add(1)
+                    .ok_or(WorldError::InvalidDomainTransition)?;
+                Ok(())
+            }
+            DomainEvent::TradeCompleted { previous_trade } => {
+                let current = self
+                    .trades
+                    .get(&previous_trade.id)
+                    .cloned()
+                    .ok_or(WorldError::InvalidDomainTransition)?;
+                let participants =
+                    BTreeSet::from([previous_trade.requester, previous_trade.recipient]);
+                let canonical_basis = self.trade_basis_sha256_if_participants_loaded(&current)?;
+                let confirmations_valid = previous_trade.confirmations.len() == 2
+                    && previous_trade
+                        .confirmations
+                        .keys()
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        == participants
+                    && previous_trade.confirmations.values().all(|confirmation| {
+                        confirmation.state_revision == previous_trade.state_revision
+                            && canonical_basis
+                                .is_none_or(|basis| confirmation.basis_sha256 == basis)
+                    })
+                    && previous_trade
+                        .confirmations
+                        .values()
+                        .map(|confirmation| confirmation.basis_sha256)
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        == 1;
+                let mut expected_current = previous_trade.clone();
+                expected_current.confirmations = current.confirmations.clone();
+                if current.phase != TradePhase::Negotiating
+                    || !trade_has_assets(previous_trade)
+                    || current.confirmations.len() != 1
+                    || current != expected_current
+                    || !confirmations_valid
+                    || current
+                        .confirmations
+                        .iter()
+                        .any(|(participant, confirmation)| {
+                            previous_trade.confirmations.get(participant) != Some(confirmation)
+                        })
+                {
+                    return Err(WorldError::InvalidDomainTransition);
+                }
+                let mut completed_candidate = self.trades.clone();
+                completed_candidate.insert(previous_trade.id, previous_trade.clone());
+                validate_trade_state(
+                    self.next_trade_id,
+                    &completed_candidate,
+                    &self.item_instances,
+                    &self.item_prototypes,
+                    &self.stable_rooms,
+                )?;
+                if let (Some(requester), Some(recipient)) = (
+                    self.character_gameplay.get(&previous_trade.requester),
+                    self.character_gameplay.get(&previous_trade.recipient),
+                ) {
+                    let requester_offer = previous_trade
+                        .offers
+                        .get(&previous_trade.requester)
+                        .ok_or(WorldError::InvalidDomainTransition)?;
+                    let recipient_offer = previous_trade
+                        .offers
+                        .get(&previous_trade.recipient)
+                        .ok_or(WorldError::InvalidDomainTransition)?;
+                    requester
+                        .coins
+                        .checked_sub(requester_offer.coins)
+                        .and_then(|coins| coins.checked_add(recipient_offer.coins))
+                        .ok_or(WorldError::InvalidDomainTransition)?;
+                    recipient
+                        .coins
+                        .checked_sub(recipient_offer.coins)
+                        .and_then(|coins| coins.checked_add(requester_offer.coins))
+                        .ok_or(WorldError::InvalidDomainTransition)?;
+                }
+                let mut prospective = self.item_instances.clone();
+                for (owner, destination) in [
+                    (previous_trade.requester, previous_trade.recipient),
+                    (previous_trade.recipient, previous_trade.requester),
+                ] {
+                    for root in previous_trade
+                        .offers
+                        .get(&owner)
+                        .into_iter()
+                        .flat_map(|offer| &offer.lines)
+                        .flat_map(|line| &line.item_ids)
+                    {
+                        let instance = prospective
+                            .get_mut(root)
+                            .ok_or(WorldError::InvalidDomainTransition)?;
+                        if instance.location != SharedItemLocation::Carried(owner) {
+                            return Err(WorldError::InvalidDomainTransition);
+                        }
+                        instance.location = SharedItemLocation::Carried(destination);
+                    }
+                }
+                let affected = [previous_trade.requester, previous_trade.recipient]
+                    .into_iter()
+                    .filter(|id| self.character_gameplay.contains_key(id))
+                    .collect::<Vec<_>>();
+                if affected.is_empty() {
+                    validate_item_graph(&prospective, &self.item_prototypes)?;
+                } else {
+                    self.validate_prospective_item_locations(&prospective, affected)?;
+                }
+                self.item_instances = prospective;
+                self.trades.remove(&previous_trade.id);
+                self.revision = self
+                    .revision
+                    .checked_add(1)
+                    .ok_or(WorldError::InvalidDomainTransition)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn replay_trade_state_change(&mut self, current: &TradeSnapshot) -> Result<(), WorldError> {
+        let mut candidate_trades = self.trades.clone();
+        candidate_trades.insert(current.id, current.clone());
+        validate_trade_state(
+            self.next_trade_id,
+            &candidate_trades,
+            &self.item_instances,
+            &self.item_prototypes,
+            &self.stable_rooms,
+        )?;
+        self.trades.insert(current.id, current.clone());
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(WorldError::InvalidDomainTransition)?;
+        Ok(())
+    }
+
+    fn trade_basis_sha256_if_participants_loaded(
+        &self,
+        trade: &TradeSnapshot,
+    ) -> Result<Option<[u8; 32]>, WorldError> {
+        if trade
+            .participants()
+            .into_iter()
+            .all(|participant| self.character_gameplay.contains_key(&participant))
+        {
+            self.trade_basis_sha256(trade).map(Some)
+        } else {
+            Ok(None)
         }
     }
 
@@ -5870,7 +6614,14 @@ impl World {
                 DomainEvent::CharacterMoved { .. }
                 | DomainEvent::CharacterRelocated { .. }
                 | DomainEvent::Gameplay { .. }
-                | DomainEvent::Adventure { .. } => {}
+                | DomainEvent::Adventure { .. }
+                | DomainEvent::TradeRequested { .. }
+                | DomainEvent::TradeOpened { .. }
+                | DomainEvent::TradeOfferSet { .. }
+                | DomainEvent::TradeConfirmed { .. }
+                | DomainEvent::TradeInvalidated { .. }
+                | DomainEvent::TradeCancelled { .. }
+                | DomainEvent::TradeCompleted { .. } => {}
                 DomainEvent::ItemTaken {
                     actor_id,
                     actor_name,
@@ -6084,6 +6835,7 @@ impl World {
                         _ => None,
                     });
             if let Some(character_id) = disconnected_character_id {
+                self.last_trade_request_ticks.remove(&character_id);
                 // Combat is connection-scoped in v1: an NPC immediately stops
                 // attacking a departed character. Remove that character's
                 // pending effects as well, so damage-over-time cannot award
@@ -6246,6 +6998,7 @@ impl World {
         Ok(ActionOutcome {
             scene: self.scene_for(response_session)?,
             container_contents: None,
+            trade_contents: None,
             output: Some(output.to_owned()),
             changed_character: Some(self.character_snapshot(moving)?),
             domain_events: vec![event],
@@ -6297,6 +7050,7 @@ impl World {
         Ok(ActionOutcome {
             scene: self.scene_for(actor)?,
             container_contents: None,
+            trade_contents: None,
             output: Some("The target has been fully restored.\r\n".to_owned()),
             changed_character: Some(self.character_snapshot(target)?),
             domain_events: vec![event],
@@ -6331,6 +7085,892 @@ impl World {
             }
             _ => Err(WorldError::InvalidEntity),
         }
+    }
+
+    fn apply_trade(
+        &mut self,
+        session: SessionId,
+        action: TradeAction,
+    ) -> Result<ActionOutcome, WorldError> {
+        let checkpoint = self.checkpoint();
+        match self.apply_trade_inner(session, action) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.restore_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_trade_inner(
+        &mut self,
+        session: SessionId,
+        action: TradeAction,
+    ) -> Result<ActionOutcome, WorldError> {
+        let character = self.character(session)?;
+        let actor_id = character.id;
+        match action {
+            TradeAction::Request(query) => {
+                if self.trades.len() >= MAX_LIVE_TRADES
+                    || self.trade_for_character(actor_id).is_some()
+                    || self
+                        .last_trade_request_ticks
+                        .get(&actor_id)
+                        .is_some_and(|last_tick| {
+                            last_tick
+                                .checked_add(TRADE_REQUEST_RATE_TICKS)
+                                .is_none_or(|next_tick| self.logical_tick < next_tick)
+                        })
+                {
+                    return Err(WorldError::TradeUnavailable);
+                }
+                let recipient = self.resolve_trade_recipient(session, &query)?;
+                if self.trade_for_character(recipient.character_id).is_some()
+                    || self.character_in_combat(actor_id)
+                    || self.character_in_combat(recipient.character_id)
+                    || self.character_defeated(actor_id)
+                    || self.character_defeated(recipient.character_id)
+                {
+                    return Err(WorldError::TradeUnavailable);
+                }
+                let room_id = room_checked(&self.entities, character.location)?
+                    .stable_id
+                    .clone();
+                let id = self.next_trade_id;
+                self.next_trade_id = TradeId(
+                    id.0.checked_add(1)
+                        .ok_or(WorldError::InvalidDomainTransition)?,
+                );
+                let trade = TradeSnapshot {
+                    id,
+                    requester: actor_id,
+                    recipient: recipient.character_id,
+                    room_id,
+                    phase: TradePhase::Requested,
+                    created_tick: self.logical_tick,
+                    opened_tick: None,
+                    expires_at_tick: self
+                        .logical_tick
+                        .checked_add(TRADE_REQUEST_TICKS)
+                        .ok_or(WorldError::InvalidDomainTransition)?,
+                    state_revision: 1,
+                    offers: BTreeMap::new(),
+                    confirmations: BTreeMap::new(),
+                };
+                self.last_trade_request_ticks
+                    .insert(actor_id, self.logical_tick);
+                self.trades.insert(id, trade.clone());
+                self.finish_trade_action(
+                    session,
+                    format!("You ask {} to trade.\r\n", recipient.name),
+                    vec![DomainEvent::TradeRequested { trade }],
+                )
+            }
+            TradeAction::Accept => {
+                let previous = self
+                    .trade_for_character(actor_id)
+                    .filter(|trade| {
+                        trade.phase == TradePhase::Requested && trade.recipient == actor_id
+                    })
+                    .cloned()
+                    .ok_or(WorldError::TradeUnavailable)?;
+                self.ensure_trade_available(&previous)?;
+                let mut current = previous.clone();
+                current.phase = TradePhase::Negotiating;
+                current.opened_tick = Some(self.logical_tick);
+                current.expires_at_tick = self
+                    .logical_tick
+                    .checked_add(TRADE_NEGOTIATION_TICKS)
+                    .ok_or(WorldError::InvalidDomainTransition)?;
+                current.state_revision = current
+                    .state_revision
+                    .checked_add(1)
+                    .ok_or(WorldError::InvalidDomainTransition)?;
+                current.offers = BTreeMap::from([
+                    (current.requester, TradeOffer::default()),
+                    (current.recipient, TradeOffer::default()),
+                ]);
+                self.trades.insert(current.id, current.clone());
+                self.finish_trade_action(
+                    session,
+                    "You accept the trade request.\r\n".into(),
+                    vec![DomainEvent::TradeOpened { previous, current }],
+                )
+            }
+            TradeAction::Decline => {
+                let trade = self
+                    .trade_for_character(actor_id)
+                    .filter(|trade| {
+                        trade.phase == TradePhase::Requested && trade.recipient == actor_id
+                    })
+                    .cloned()
+                    .ok_or(WorldError::TradeUnavailable)?;
+                self.trades.remove(&trade.id);
+                self.finish_trade_action(
+                    session,
+                    "You decline the trade request.\r\n".into(),
+                    vec![DomainEvent::TradeCancelled {
+                        previous_trade: trade,
+                        reason: TradeCancellationReason::Declined,
+                    }],
+                )
+            }
+            TradeAction::Cancel => {
+                let trade = self
+                    .trade_for_character(actor_id)
+                    .cloned()
+                    .ok_or(WorldError::TradeUnavailable)?;
+                self.trades.remove(&trade.id);
+                self.finish_trade_action(
+                    session,
+                    "You cancel the trade.\r\n".into(),
+                    vec![DomainEvent::TradeCancelled {
+                        previous_trade: trade,
+                        reason: TradeCancellationReason::CancelledByParticipant,
+                    }],
+                )
+            }
+            TradeAction::OfferCoins(coins) => {
+                if coins > MAX_TRADE_COINS
+                    || self
+                        .character_gameplay
+                        .get(&actor_id)
+                        .is_none_or(|gameplay| gameplay.coins < coins)
+                {
+                    return Err(WorldError::InsufficientFunds);
+                }
+                let previous = self.negotiating_trade(actor_id)?.clone();
+                self.ensure_trade_available(&previous)?;
+                let mut current = previous.clone();
+                let offer = current
+                    .offers
+                    .get_mut(&actor_id)
+                    .ok_or(WorldError::TradeUnavailable)?;
+                if offer.coins == coins {
+                    return self.trade_status_outcome(session);
+                }
+                offer.coins = coins;
+                self.publish_trade_offer_change(session, previous, current)
+            }
+            TradeAction::OfferItem(selection) => {
+                if selection.quantity == 0 || selection.quantity > MAX_TRADE_ITEM_QUANTITY {
+                    return Err(WorldError::TradeUnavailable);
+                }
+                let previous = self.negotiating_trade(actor_id)?.clone();
+                self.ensure_trade_available(&previous)?;
+                let mut all_carried = self.item_candidates(session, ItemScope::Carried, None)?;
+                let own_reserved = previous
+                    .offers
+                    .get(&actor_id)
+                    .into_iter()
+                    .flat_map(|offer| &offer.lines)
+                    .flat_map(|line| &line.item_ids)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let all_reserved = self.reserved_item_ids()?;
+                all_carried.retain(|id| !all_reserved.contains(id) || own_reserved.contains(id));
+                let representative = self
+                    .resolve_item_selection(
+                        session,
+                        &ItemSelection::one(&selection.query),
+                        all_carried.clone(),
+                    )?
+                    .into_iter()
+                    .next()
+                    .ok_or(WorldError::TradeUnavailable)?;
+                let instance = self
+                    .item_instances
+                    .get(&representative)
+                    .ok_or(WorldError::InvalidEntity)?;
+                let prototype = self
+                    .item_prototypes
+                    .get(&instance.prototype_id)
+                    .ok_or(WorldError::InvalidEntity)?;
+                let key = match prototype.stack_policy {
+                    ItemStackPolicy::Fungible => TradeOfferKey::Fungible {
+                        prototype_id: instance.prototype_id.clone(),
+                    },
+                    ItemStackPolicy::Unique => TradeOfferKey::Unique {
+                        item_id: representative.clone(),
+                    },
+                };
+                if prototype.stack_policy == ItemStackPolicy::Unique && selection.quantity != 1 {
+                    return Err(WorldError::TradeUnavailable);
+                }
+                let mut current = previous.clone();
+                let offer = current
+                    .offers
+                    .get_mut(&actor_id)
+                    .ok_or(WorldError::TradeUnavailable)?;
+                let line_index = offer.lines.iter().position(|line| line.key == key);
+                let mut ids = line_index
+                    .map(|index| offer.lines[index].item_ids.clone())
+                    .unwrap_or_default();
+                let desired = usize::from(selection.quantity);
+                if ids.len() < desired {
+                    let mut candidates = all_carried
+                        .into_iter()
+                        .filter(|id| {
+                            self.item_instances.get(id).is_some_and(|candidate| {
+                                candidate.prototype_id == instance.prototype_id
+                                    && !all_reserved.contains(id)
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    candidates.sort();
+                    for candidate in candidates {
+                        if ids.len() == desired {
+                            break;
+                        }
+                        if !ids.contains(&candidate) {
+                            ids.push(candidate);
+                        }
+                    }
+                } else {
+                    ids.truncate(desired);
+                }
+                ids.sort();
+                if ids.len() != desired {
+                    return Err(WorldError::TradeUnavailable);
+                }
+                let graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+                if ids.iter().any(|id| {
+                    self.item_location(id) != Some(&SharedItemLocation::Carried(actor_id))
+                        || !graph.subtree_is_transferable(id).unwrap_or(false)
+                }) {
+                    return Err(WorldError::ItemTransferForbidden);
+                }
+                let new_line = TradeOfferLine { key, item_ids: ids };
+                if let Some(index) = line_index {
+                    if offer.lines[index] == new_line {
+                        return self.trade_status_outcome(session);
+                    }
+                    offer.lines[index] = new_line;
+                } else {
+                    if offer.lines.len() >= MAX_TRADE_LINES_PER_PARTICIPANT {
+                        return Err(WorldError::TradeUnavailable);
+                    }
+                    offer.lines.push(new_line);
+                    offer.lines.sort_by(|left, right| left.key.cmp(&right.key));
+                }
+                let total_roots = current
+                    .offers
+                    .values()
+                    .flat_map(|offer| &offer.lines)
+                    .map(|line| line.item_ids.len())
+                    .sum::<usize>();
+                if total_roots > MAX_TRADE_ROOTS {
+                    return Err(WorldError::TradeUnavailable);
+                }
+                self.publish_trade_offer_change(session, previous, current)
+            }
+            TradeAction::RemoveItem(query) => {
+                let previous = self.negotiating_trade(actor_id)?.clone();
+                let observer = self.observer(session)?;
+                let mut current = previous.clone();
+                let offer = current
+                    .offers
+                    .get_mut(&actor_id)
+                    .ok_or(WorldError::TradeUnavailable)?;
+                let matches = offer
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| {
+                        let Some(first) = line.item_ids.first() else {
+                            return false;
+                        };
+                        let label_matches = self.item_prototype_for(first).is_ok_and(|prototype| {
+                            prototype.name.eq_ignore_ascii_case(query.trim())
+                        });
+                        label_matches
+                            || opaque_id(observer.salt, "item", first.as_str()) == query.trim()
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                let [index] = matches.as_slice() else {
+                    return Err(WorldError::TradeUnavailable);
+                };
+                offer.lines.remove(*index);
+                self.publish_trade_offer_change(session, previous, current)
+            }
+            TradeAction::Confirm { state_revision } => {
+                let previous = self.negotiating_trade(actor_id)?.clone();
+                self.ensure_trade_available(&previous)?;
+                if previous.state_revision != state_revision {
+                    return Err(WorldError::StaleTradeRevision);
+                }
+                if !trade_has_assets(&previous) {
+                    return Err(WorldError::TradeUnavailable);
+                }
+                let basis_sha256 = self.trade_basis_sha256(&previous)?;
+                let confirmation = TradeConfirmation {
+                    state_revision,
+                    basis_sha256,
+                };
+                if previous.confirmations.get(&actor_id) == Some(&confirmation) {
+                    return self.trade_status_outcome(session);
+                }
+                let mut current = previous.clone();
+                current.confirmations.insert(actor_id, confirmation.clone());
+                if current.confirmations.len() == 2 {
+                    if current
+                        .confirmations
+                        .values()
+                        .any(|candidate| candidate != &confirmation)
+                    {
+                        return Err(WorldError::StaleTradeRevision);
+                    }
+                    self.complete_trade(session, current)
+                } else {
+                    self.trades.insert(current.id, current);
+                    self.finish_trade_action(
+                        session,
+                        "You confirm the current trade terms.\r\n".into(),
+                        vec![DomainEvent::TradeConfirmed {
+                            participant: actor_id,
+                            confirmation,
+                        }],
+                    )
+                }
+            }
+            TradeAction::Status => self.trade_status_outcome(session),
+            TradeAction::Contents { container, page } => {
+                self.inspect_trade_container(session, &container, page)
+            }
+        }
+    }
+
+    fn negotiating_trade(&self, character_id: CharacterId) -> Result<&TradeSnapshot, WorldError> {
+        self.trade_for_character(character_id)
+            .filter(|trade| trade.phase == TradePhase::Negotiating)
+            .ok_or(WorldError::TradeUnavailable)
+    }
+
+    fn character_in_combat(&self, character_id: CharacterId) -> bool {
+        self.npcs
+            .values()
+            .any(|npc| npc.engaged_character == Some(character_id))
+    }
+
+    fn character_defeated(&self, character_id: CharacterId) -> bool {
+        self.character_gameplay
+            .get(&character_id)
+            .is_none_or(|gameplay| gameplay.recovery_at_tick.is_some())
+    }
+
+    fn ensure_trade_available(&self, trade: &TradeSnapshot) -> Result<(), WorldError> {
+        if self.logical_tick >= trade.expires_at_tick
+            || self.character_in_combat(trade.requester)
+            || self.character_in_combat(trade.recipient)
+            || self.character_defeated(trade.requester)
+            || self.character_defeated(trade.recipient)
+        {
+            return Err(WorldError::TradeUnavailable);
+        }
+        let rooms = trade
+            .participants()
+            .into_iter()
+            .map(|participant| {
+                self.session_for_character(participant)
+                    .ok_or(WorldError::TradeUnavailable)
+                    .and_then(|session| self.character(session))
+                    .and_then(|character| room_checked(&self.entities, character.location))
+                    .map(|room| room.stable_id.as_str())
+            })
+            .collect::<Result<Vec<_>, WorldError>>()?;
+        if rooms.iter().any(|room| *room != trade.room_id) {
+            return Err(WorldError::TradeUnavailable);
+        }
+        Ok(())
+    }
+
+    fn publish_trade_offer_change(
+        &mut self,
+        session: SessionId,
+        previous: TradeSnapshot,
+        mut current: TradeSnapshot,
+    ) -> Result<ActionOutcome, WorldError> {
+        current.state_revision = current
+            .state_revision
+            .checked_add(1)
+            .ok_or(WorldError::InvalidDomainTransition)?;
+        current.confirmations.clear();
+        let mut candidate_trades = self.trades.clone();
+        candidate_trades.insert(current.id, current.clone());
+        validate_trade_state(
+            self.next_trade_id,
+            &candidate_trades,
+            &self.item_instances,
+            &self.item_prototypes,
+            &self.stable_rooms,
+        )?;
+        self.trades.insert(current.id, current.clone());
+        self.finish_trade_action(
+            session,
+            "You update your trade offer.\r\n".into(),
+            vec![DomainEvent::TradeOfferSet { previous, current }],
+        )
+    }
+
+    fn complete_trade(
+        &mut self,
+        session: SessionId,
+        trade: TradeSnapshot,
+    ) -> Result<ActionOutcome, WorldError> {
+        self.ensure_trade_available(&trade)?;
+        let offer_a = trade
+            .offers
+            .get(&trade.requester)
+            .ok_or(WorldError::TradeUnavailable)?;
+        let offer_b = trade
+            .offers
+            .get(&trade.recipient)
+            .ok_or(WorldError::TradeUnavailable)?;
+        let roots_a = offer_a
+            .lines
+            .iter()
+            .flat_map(|line| &line.item_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        let roots_b = offer_b
+            .lines
+            .iter()
+            .flat_map(|line| &line.item_ids)
+            .cloned()
+            .collect::<Vec<_>>();
+        let graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        if roots_a.iter().any(|root| {
+            self.item_location(root) != Some(&SharedItemLocation::Carried(trade.requester))
+                || !graph.subtree_is_transferable(root).unwrap_or(false)
+        }) || roots_b.iter().any(|root| {
+            self.item_location(root) != Some(&SharedItemLocation::Carried(trade.recipient))
+                || !graph.subtree_is_transferable(root).unwrap_or(false)
+        }) {
+            return Err(WorldError::TradeUnavailable);
+        }
+        let mut prospective = self.item_instances.clone();
+        for root in &roots_a {
+            prospective
+                .get_mut(root)
+                .ok_or(WorldError::InvalidEntity)?
+                .location = SharedItemLocation::Carried(trade.recipient);
+        }
+        for root in &roots_b {
+            prospective
+                .get_mut(root)
+                .ok_or(WorldError::InvalidEntity)?
+                .location = SharedItemLocation::Carried(trade.requester);
+        }
+        self.validate_prospective_item_locations(&prospective, [trade.requester, trade.recipient])?;
+        let coins_a = self
+            .character_gameplay
+            .get(&trade.requester)
+            .ok_or(WorldError::InvalidEntity)?
+            .coins;
+        let coins_b = self
+            .character_gameplay
+            .get(&trade.recipient)
+            .ok_or(WorldError::InvalidEntity)?
+            .coins;
+        let final_a = coins_a
+            .checked_sub(offer_a.coins)
+            .and_then(|coins| coins.checked_add(offer_b.coins))
+            .ok_or(WorldError::InsufficientFunds)?;
+        let final_b = coins_b
+            .checked_sub(offer_b.coins)
+            .and_then(|coins| coins.checked_add(offer_a.coins))
+            .ok_or(WorldError::InsufficientFunds)?;
+        self.item_instances = prospective;
+        self.character_gameplay
+            .get_mut(&trade.requester)
+            .ok_or(WorldError::InvalidEntity)?
+            .coins = final_a;
+        self.character_gameplay
+            .get_mut(&trade.recipient)
+            .ok_or(WorldError::InvalidEntity)?
+            .coins = final_b;
+        self.trades.remove(&trade.id);
+        self.finish_trade_action(
+            session,
+            "The trade completes atomically.\r\n".into(),
+            vec![DomainEvent::TradeCompleted {
+                previous_trade: trade,
+            }],
+        )
+    }
+
+    fn finish_trade_action(
+        &mut self,
+        session: SessionId,
+        output: String,
+        events: Vec<DomainEvent>,
+    ) -> Result<ActionOutcome, WorldError> {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(WorldError::InvalidDomainTransition)?;
+        self.bump_view_revisions_for_events(&events)?;
+        Ok(ActionOutcome {
+            scene: self.scene_for(session)?,
+            container_contents: None,
+            trade_contents: None,
+            output: Some(output),
+            changed_character: None,
+            domain_events: events,
+        })
+    }
+
+    fn trade_status_outcome(&self, session: SessionId) -> Result<ActionOutcome, WorldError> {
+        let viewer = self.character(session)?;
+        let durable_trade = self
+            .trade_for_character(viewer.id)
+            .ok_or(WorldError::TradeUnavailable)?;
+        let counterparty_id = durable_trade
+            .counterpart(viewer.id)
+            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+        let counterparty_name = self
+            .connected_character_name(counterparty_id)
+            .unwrap_or_else(|| "Disconnected character".into());
+        let player = self.player_state_view(session)?;
+        let trade = player.trade.as_ref().ok_or(WorldError::TradeUnavailable)?;
+        let offer_text = |label: &str, offer: &TradeOfferView| {
+            let mut output = format!("{label}: {} coin", offer.coins);
+            if offer.lines.is_empty() {
+                output.push_str("; no items");
+            } else {
+                for line in &offer.lines {
+                    output.push_str(&format!(
+                        "; {} × {} [ref {}{}]",
+                        line.quantity,
+                        line.label,
+                        line.target,
+                        if line.container { "; container" } else { "" }
+                    ));
+                }
+            }
+            output.push_str(".\r\n");
+            output
+        };
+        let mut output = format!(
+            "Trade {} with {}: {:?}; revision {}; expires in {} ticks.\r\nYour confirmation: {}; counterpart confirmation: {}.\r\n",
+            trade.id,
+            counterparty_name,
+            trade.phase,
+            trade.state_revision,
+            trade.expires_in_ticks,
+            if trade.own_confirmed { "yes" } else { "no" },
+            if trade.counterparty_confirmed {
+                "yes"
+            } else {
+                "no"
+            },
+        );
+        output.push_str(&offer_text("Your offer", &trade.own_offer));
+        output.push_str(&offer_text("Counterpart offer", &trade.counterparty_offer));
+        output.push_str(&format!(
+            "Coins: {} total; {} reserved; {} spendable.\r\n",
+            player.economy.coins, player.economy.reserved_coins, player.economy.spendable_coins,
+        ));
+        output.push_str("Inventory available for trade:\r\n");
+        if player.inventory.is_empty() {
+            output.push_str("- none\r\n");
+        } else {
+            for item in player
+                .inventory
+                .iter()
+                .take(MAX_TRADE_STATUS_INVENTORY_GROUPS)
+            {
+                output.push_str(&format!(
+                    "- {}: {} total; {} available; {} reserved [ref {}].\r\n",
+                    item.label,
+                    item.quantity,
+                    item.available_quantity,
+                    item.reserved_for_trade,
+                    item.id,
+                ));
+            }
+            let omitted = player
+                .inventory
+                .len()
+                .saturating_sub(MAX_TRADE_STATUS_INVENTORY_GROUPS);
+            if omitted > 0 {
+                output.push_str(&format!(
+                    "- {omitted} more inventory groups omitted; use inventory to choose an opaque reference. Use trade contents <offered-container> <page> to inspect an offered container.\r\n"
+                ));
+            }
+        }
+        if output.len() > MAX_TRADE_STATUS_TEXT_BYTES {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        Ok(ActionOutcome {
+            scene: self.scene_for(session)?,
+            container_contents: None,
+            trade_contents: None,
+            output: Some(output),
+            changed_character: None,
+            domain_events: Vec::new(),
+        })
+    }
+
+    fn inspect_trade_container(
+        &self,
+        session: SessionId,
+        container: &str,
+        page: u16,
+    ) -> Result<ActionOutcome, WorldError> {
+        if page == 0 {
+            return Err(WorldError::TradeUnavailable);
+        }
+        let viewer = self.character(session)?;
+        let trade = self.negotiating_trade(viewer.id)?;
+        let observer = self.observer(session)?;
+        let query = container.trim();
+        let matches = trade
+            .offers
+            .values()
+            .flat_map(|offer| &offer.lines)
+            .flat_map(|line| &line.item_ids)
+            .filter(|item_id| {
+                self.item_prototype_for(item_id).is_ok_and(|prototype| {
+                    prototype.container.is_some()
+                        && (prototype.name.eq_ignore_ascii_case(query)
+                            || opaque_id(observer.salt, "item", item_id.as_str()) == query)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let [container_id] = matches.as_slice() else {
+            return Err(WorldError::TradeUnavailable);
+        };
+        let graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        let direct_ids = self
+            .item_instances
+            .iter()
+            .filter_map(|(item_id, instance)| {
+                matches!(&instance.location, SharedItemLocation::Contained(parent) if parent == container_id)
+                    .then_some(item_id)
+            })
+            .collect::<Vec<_>>();
+        let groups = derive_stack_groups(
+            &self.item_instances,
+            &self.item_prototypes,
+            direct_ids.into_iter(),
+        )?;
+        let total_pages = groups.len().max(1).div_ceil(CONTAINER_PAGE_SIZE);
+        let page_index = usize::from(page - 1);
+        if page_index >= total_pages {
+            return Err(WorldError::TradeUnavailable);
+        }
+        let items = groups
+            .into_iter()
+            .skip(page_index * CONTAINER_PAGE_SIZE)
+            .take(CONTAINER_PAGE_SIZE)
+            .map(|group| {
+                let first = group
+                    .members
+                    .first()
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                let prototype = self.item_prototype_for(first)?;
+                let quantity = u16::try_from(group.members.len())
+                    .map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
+                Ok(PlayerItemView {
+                    id: opaque_id(observer.salt, "item", first.as_str()),
+                    label: prototype.name.clone(),
+                    description: prototype.description.clone(),
+                    rarity: prototype.rarity.as_str().into(),
+                    item_level: prototype.item_level,
+                    weight_grams: prototype.weight_grams,
+                    quantity,
+                    available_quantity: 0,
+                    reserved_for_trade: quantity,
+                    stack_slots: stack_slots(prototype, group.members.len())?,
+                    total_weight_grams: group.members.iter().try_fold(
+                        0_u64,
+                        |total, item_id| {
+                            total
+                                .checked_add(graph.subtree_weight(item_id)?)
+                                .ok_or(WorldError::InvalidEntity)
+                        },
+                    )?,
+                    transfer_policy: prototype.transfer_policy,
+                    bound_to_you: false,
+                    can_give: false,
+                    can_trade: false,
+                    container_capacity: prototype
+                        .container
+                        .as_ref()
+                        .map(|_| {
+                            container_usage(
+                                first,
+                                &self.item_instances,
+                                &self.item_prototypes,
+                                &graph,
+                            )
+                        })
+                        .transpose()?,
+                    actions: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, WorldError>>()?;
+        let capacity = container_usage(
+            container_id,
+            &self.item_instances,
+            &self.item_prototypes,
+            &graph,
+        )?;
+        let total_pages =
+            u16::try_from(total_pages).map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
+        let mut output = format!(
+            "Offered container contents, page {page}/{total_pages}: {}/{} slots; {}/{} g.\r\n",
+            capacity.used_slots,
+            capacity.max_slots,
+            capacity.used_weight_grams,
+            capacity.max_weight_grams
+        );
+        if items.is_empty() {
+            output.push_str("- empty\r\n");
+        } else {
+            for item in &items {
+                output.push_str(&format!(
+                    "- {} × {} [{}; level {}; {} g total; ref {}].\r\n",
+                    item.quantity,
+                    item.label,
+                    item.rarity,
+                    item.item_level,
+                    item.total_weight_grams,
+                    item.id,
+                ));
+            }
+        }
+        Ok(ActionOutcome {
+            scene: self.scene_for(session)?,
+            container_contents: None,
+            trade_contents: Some(TradeContentsView {
+                trade_id: opaque_id(observer.salt, "trade", &trade.id.0.to_string()),
+                container: opaque_id(observer.salt, "item", container_id.as_str()),
+                items,
+                page,
+                total_pages,
+                capacity: capacity.clone(),
+            }),
+            output: Some(output),
+            changed_character: None,
+            domain_events: Vec::new(),
+        })
+    }
+
+    fn trade_basis_sha256(&self, trade: &TradeSnapshot) -> Result<[u8; 32], WorldError> {
+        let mut digest = Sha256::new();
+        digest.update(b"tiamud.trade.basis.v1\0");
+        canonical_u64(&mut digest, trade.id.0);
+        canonical_i64(&mut digest, trade.requester.0);
+        canonical_i64(&mut digest, trade.recipient.0);
+        canonical_str(&mut digest, &trade.room_id)?;
+        canonical_u64(&mut digest, trade.state_revision);
+        let graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        for participant in trade.participants() {
+            canonical_i64(&mut digest, participant.0);
+            let owned_items = self
+                .item_instances
+                .iter()
+                .filter_map(|(item_id, instance)| {
+                    item_effective_owner(&self.item_instances, item_id)
+                        .map(|owner| (owner == Some(participant)).then_some((item_id, instance)))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, WorldError>>()?;
+            canonical_u64(
+                &mut digest,
+                u64::try_from(owned_items.len()).map_err(|_| WorldError::InvalidRuntimeSnapshot)?,
+            );
+            for (item_id, instance) in owned_items {
+                let prototype = self
+                    .item_prototypes
+                    .get(&instance.prototype_id)
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                canonical_str(&mut digest, item_id.as_str())?;
+                canonical_str(&mut digest, &instance.prototype_id)?;
+                canonical_item_location(&mut digest, &instance.location)?;
+                canonical_item_binding(&mut digest, instance.binding);
+                digest.update([match prototype.transfer_policy {
+                    ItemTransferPolicy::Transferable => 0,
+                    ItemTransferPolicy::CharacterBound => 1,
+                    ItemTransferPolicy::NonTransferable => 2,
+                }]);
+                digest.update([match prototype.stack_policy {
+                    ItemStackPolicy::Unique => 0,
+                    ItemStackPolicy::Fungible => 1,
+                }]);
+                canonical_u64(&mut digest, u64::from(prototype.weight_grams));
+                canonical_u64(&mut digest, u64::from(prototype.slot_cost));
+                match &prototype.container {
+                    Some(capacity) => {
+                        digest.update([1]);
+                        canonical_u64(&mut digest, u64::from(capacity.max_slots));
+                        canonical_u64(&mut digest, u64::from(capacity.max_weight_grams));
+                    }
+                    None => digest.update([0]),
+                }
+            }
+            let offer = trade
+                .offers
+                .get(&participant)
+                .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+            canonical_u64(&mut digest, offer.coins);
+            canonical_u64(
+                &mut digest,
+                u64::try_from(offer.lines.len()).map_err(|_| WorldError::InvalidRuntimeSnapshot)?,
+            );
+            for line in &offer.lines {
+                canonical_trade_key(&mut digest, &line.key)?;
+                canonical_u64(
+                    &mut digest,
+                    u64::try_from(line.item_ids.len())
+                        .map_err(|_| WorldError::InvalidRuntimeSnapshot)?,
+                );
+                for root in &line.item_ids {
+                    for item_id in graph.subtree_ids(root)? {
+                        let instance = self
+                            .item_instances
+                            .get(&item_id)
+                            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                        let prototype = self
+                            .item_prototypes
+                            .get(&instance.prototype_id)
+                            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                        canonical_str(&mut digest, item_id.as_str())?;
+                        canonical_str(&mut digest, &instance.prototype_id)?;
+                        digest.update([prototype.transfer_policy as u8]);
+                        canonical_item_binding(&mut digest, instance.binding);
+                        canonical_item_location(&mut digest, &instance.location)?;
+                    }
+                }
+            }
+            let gameplay = self
+                .character_gameplay
+                .get(&participant)
+                .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+            canonical_u64(&mut digest, gameplay.coins);
+            canonical_u64(
+                &mut digest,
+                u64::from(gameplay.inventory_capacity.max_slots),
+            );
+            canonical_u64(
+                &mut digest,
+                u64::from(gameplay.inventory_capacity.max_weight_grams),
+            );
+            canonical_u64(
+                &mut digest,
+                u64::try_from(gameplay.equipment.len())
+                    .map_err(|_| WorldError::InvalidRuntimeSnapshot)?,
+            );
+            for (slot, item_id) in &gameplay.equipment {
+                digest.update([*slot as u8]);
+                canonical_str(&mut digest, item_id.as_str())?;
+            }
+        }
+        Ok(digest.finalize().into())
     }
 
     pub fn apply(
@@ -6380,6 +8020,7 @@ impl World {
             PlayerAction::Look => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
                 container_contents: None,
+                trade_contents: None,
                 output: None,
                 changed_character: None,
                 domain_events: Vec::new(),
@@ -6387,6 +8028,7 @@ impl World {
             PlayerAction::Inventory => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
                 container_contents: None,
+                trade_contents: None,
                 output: Some(self.inventory_as_plain_text(session)?),
                 changed_character: None,
                 domain_events: Vec::new(),
@@ -6398,6 +8040,7 @@ impl World {
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
                     container_contents: None,
+                    trade_contents: None,
                     output: Some(format!("{}\r\n", item.description)),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -6420,6 +8063,7 @@ impl World {
                 selection,
                 recipient,
             } => self.give_item(session, &selection, &recipient),
+            PlayerAction::Trade(action) => self.apply_trade(session, action),
             PlayerAction::Attack(query) => self.start_combat(session, &query),
             PlayerAction::Ability { ability_id, target } => {
                 self.use_ability(session, &ability_id, target.as_deref())
@@ -6437,6 +8081,7 @@ impl World {
             PlayerAction::Weather => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
                 container_contents: None,
+                trade_contents: None,
                 output: Some(format!(
                     "The weather is {}.\r\n",
                     weather_label(self.adventure.weather)
@@ -6447,6 +8092,7 @@ impl World {
             PlayerAction::Time => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
                 container_contents: None,
+                trade_contents: None,
                 output: Some(format!(
                     "It is hour {} of day {} (world tick {}).\r\n",
                     self.logical_tick % 24,
@@ -6502,6 +8148,7 @@ impl World {
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
                     container_contents: None,
+                    trade_contents: None,
                     output: None,
                     changed_character: Some(self.character_snapshot(session)?),
                     domain_events: vec![event],
@@ -7387,6 +9034,7 @@ impl World {
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
                     container_contents: None,
+                    trade_contents: None,
                     output: Some(output),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -7411,6 +9059,7 @@ impl World {
             QuestAction::List => Ok(ActionOutcome {
                 scene: self.scene_for(session)?,
                 container_contents: None,
+                trade_contents: None,
                 output: Some("Available quest: first-hunt — defeat one hostile creature; reward 25 coin and 50 experience.\r\n".into()),
                 changed_character: None,
                 domain_events: Vec::new(),
@@ -7430,6 +9079,7 @@ impl World {
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
                     container_contents: None,
+                    trade_contents: None,
                     output: Some(output),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -7540,7 +9190,12 @@ impl World {
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
                     container_contents: None,
-                    output: Some(format!("You have {coins} coin.\r\n")),
+                    trade_contents: None,
+                    output: Some(format!(
+                        "You have {coins} coin; {} reserved and {} spendable.\r\n",
+                        self.reserved_coins(character_id),
+                        self.spendable_coins(character_id)?
+                    )),
                     changed_character: None,
                     domain_events: Vec::new(),
                 })
@@ -7559,6 +9214,7 @@ impl World {
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
                     container_contents: None,
+                    trade_contents: None,
                     output: Some(format!("Lantern Market:\r\n{output}")),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -7569,6 +9225,9 @@ impl World {
                     return Err(WorldError::ShopUnavailable);
                 }
                 let (commodity_id, label, price, _) = resolve_commodity(&query)?;
+                if self.spendable_coins(character_id)? < price {
+                    return Err(WorldError::InsufficientFunds);
+                }
                 let stock = self
                     .adventure
                     .shop_stock
@@ -7653,6 +9312,7 @@ impl World {
         Ok(ActionOutcome {
             scene: self.scene_for(session)?,
             container_contents: None,
+            trade_contents: None,
             output: Some(output),
             changed_character: None,
             domain_events: vec![event],
@@ -8103,6 +9763,7 @@ impl World {
 
     fn use_item(&mut self, session: SessionId, query: &str) -> Result<ActionOutcome, WorldError> {
         let item_id = self.resolve_accessible_item(session, query, ItemScope::Carried)?;
+        self.ensure_items_unreserved(std::iter::once(&item_id))?;
         let definition = self
             .item_gameplay_for(&item_id)
             .cloned()
@@ -8180,6 +9841,7 @@ impl World {
 
     fn equip_item(&mut self, session: SessionId, query: &str) -> Result<ActionOutcome, WorldError> {
         let item_id = self.resolve_accessible_item(session, query, ItemScope::Carried)?;
+        self.ensure_items_unreserved(std::iter::once(&item_id))?;
         let definition = self.item_gameplay_for(&item_id)?;
         let slot = definition
             .equipment_slot
@@ -8310,6 +9972,7 @@ impl World {
         Ok(ActionOutcome {
             scene: self.scene_for(session)?,
             container_contents: None,
+            trade_contents: None,
             output: Some(output),
             changed_character: None,
             domain_events: events,
@@ -8499,6 +10162,7 @@ impl World {
         };
         let candidates = self.item_candidates(session, scope, None)?;
         let item_ids = self.resolve_item_selection(session, selection, candidates)?;
+        self.ensure_items_unreserved(&item_ids)?;
         let first_item_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
         let item = self.item_prototype_for(first_item_id)?;
         let item_name = item.name.clone();
@@ -8562,6 +10226,7 @@ impl World {
         Ok(ActionOutcome {
             scene: self.scene_for(session)?,
             container_contents: None,
+            trade_contents: None,
             output: Some(match (take, selection.quantity) {
                 (true, 1) => format!("You take the {item_name}.\r\n"),
                 (false, 1) => format!("You drop the {item_name}.\r\n"),
@@ -8588,6 +10253,7 @@ impl World {
             .clone();
         let candidates = self.item_candidates(session, ItemScope::Carried, None)?;
         let item_ids = self.resolve_item_selection(session, selection, candidates)?;
+        self.ensure_items_unreserved(&item_ids)?;
         let first_item_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
         let item_name = self.item_prototype_for(first_item_id)?.name.clone();
         let mut prospective = self.item_instances.clone();
@@ -8614,6 +10280,7 @@ impl World {
         Ok(ActionOutcome {
             scene: self.scene_for(session)?,
             container_contents: None,
+            trade_contents: None,
             output: Some(if selection.quantity == 1 {
                 format!("You give the {item_name} to {}.\r\n", recipient.name)
             } else {
@@ -8839,6 +10506,8 @@ impl World {
         let observer = self.observer(session)?;
         let character_id = self.character(session)?.id;
         let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        let reserved_item_ids = reserved_item_ids_with_graph(&self.trades, &item_graph)?;
+        let container_reserved = reserved_item_ids.contains(&container_id);
         let selector = opaque_id(observer.salt, "item", container_id.as_str());
         let direct_ids =
             self.item_candidates(session, ItemScope::Accessible, Some(&container_id))?;
@@ -8866,12 +10535,29 @@ impl World {
                     .ok_or(WorldError::InvalidEntity)?;
                 let first = group.members.first().ok_or(WorldError::InvalidEntity)?;
                 let item_selector = opaque_id(observer.salt, "item", first.as_str());
+                let quantity =
+                    u16::try_from(group.members.len()).map_err(|_| WorldError::InvalidEntity)?;
+                let reserved_for_trade = container_reserved
+                    || group
+                        .members
+                        .iter()
+                        .any(|item_id| reserved_item_ids.contains(item_id));
                 let total_weight_grams =
                     group.members.iter().try_fold(0_u64, |total, item_id| {
                         total
                             .checked_add(item_graph.subtree_weight(item_id)?)
                             .ok_or(WorldError::InvalidEntity)
                     })?;
+                let mut actions = vec![SceneAction {
+                    label: "Examine".into(),
+                    command: format!("examine {item_selector}"),
+                }];
+                if !reserved_for_trade {
+                    actions.push(SceneAction {
+                        label: "Get".into(),
+                        command: format!("get {item_selector} from {selector}"),
+                    });
+                }
                 Ok(PlayerItemView {
                     id: item_selector.clone(),
                     label: prototype.name.clone(),
@@ -8879,8 +10565,9 @@ impl World {
                     rarity: prototype.rarity.as_str().into(),
                     item_level: prototype.item_level,
                     weight_grams: prototype.weight_grams,
-                    quantity: u16::try_from(group.members.len())
-                        .map_err(|_| WorldError::InvalidEntity)?,
+                    quantity,
+                    available_quantity: if reserved_for_trade { 0 } else { quantity },
+                    reserved_for_trade: if reserved_for_trade { quantity } else { 0 },
                     stack_slots: stack_slots(prototype, group.members.len())?,
                     total_weight_grams,
                     transfer_policy: prototype.transfer_policy,
@@ -8891,6 +10578,7 @@ impl World {
                         } if owner == character_id
                     ),
                     can_give: false,
+                    can_trade: false,
                     container_capacity: prototype
                         .container
                         .as_ref()
@@ -8903,16 +10591,7 @@ impl World {
                             )
                         })
                         .transpose()?,
-                    actions: vec![
-                        SceneAction {
-                            label: "Examine".into(),
-                            command: format!("examine {item_selector}"),
-                        },
-                        SceneAction {
-                            label: "Get".into(),
-                            command: format!("get {item_selector} from {selector}"),
-                        },
-                    ],
+                    actions,
                 })
             })
             .collect::<Result<Vec<_>, WorldError>>()?;
@@ -8951,8 +10630,16 @@ impl World {
                                 capacity.max_weight_grams,
                             )
                         });
+                let reservation = if item.reserved_for_trade == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        "; {} reserved for trade; {} available",
+                        item.reserved_for_trade, item.available_quantity
+                    )
+                };
                 output.push_str(&format!(
-                    "- {} × {} [{}; level {}; {} g each; {} {stack_slots}; {} g total; policy {}{}{container}; ref {}]\r\n",
+                    "- {} × {} [{}; level {}; {} g each; {} {stack_slots}; {} g total; policy {}{}{}{container}; ref {}]\r\n",
                     item.quantity,
                     item.label,
                     item.rarity,
@@ -8962,6 +10649,7 @@ impl World {
                     item.total_weight_grams,
                     item.transfer_policy.as_str(),
                     if item.bound_to_you { "; bound to you" } else { "" },
+                    reservation,
                     item.id,
                 ));
             }
@@ -8975,6 +10663,7 @@ impl World {
                 total_pages,
                 capacity,
             }),
+            trade_contents: None,
             output: Some(output),
             changed_character: None,
             domain_events: Vec::new(),
@@ -8989,12 +10678,14 @@ impl World {
         put: bool,
     ) -> Result<ActionOutcome, WorldError> {
         let container_id = self.resolve_accessible_container(session, container_query)?;
+        self.ensure_items_unreserved(std::iter::once(&container_id))?;
         let candidates = if put {
             self.item_candidates(session, ItemScope::Carried, None)?
         } else {
             self.item_candidates(session, ItemScope::Accessible, Some(&container_id))?
         };
         let item_ids = self.resolve_item_selection(session, selection, candidates)?;
+        self.ensure_items_unreserved(&item_ids)?;
         let first_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
         let item_name = self.item_prototype_for(first_id)?.name.clone();
         let character = self.character(session)?;
@@ -9036,6 +10727,7 @@ impl World {
         Ok(ActionOutcome {
             scene: self.scene_for(session)?,
             container_contents: None,
+            trade_contents: None,
             output: Some(if put {
                 format!(
                     "You put {} × {item_name} in the container.\r\n",
@@ -9342,6 +11034,295 @@ impl World {
         Ok(recipient)
     }
 
+    pub fn resolve_trade_recipient(
+        &self,
+        session: SessionId,
+        query: &str,
+    ) -> Result<ConnectedCharacter, WorldError> {
+        self.resolve_give_recipient(session, query)
+            .map_err(|_| WorldError::TradeTargetUnavailable)
+    }
+
+    pub fn trade_for_character(&self, character_id: CharacterId) -> Option<&TradeSnapshot> {
+        self.trades
+            .values()
+            .find(|trade| trade.includes(character_id))
+    }
+
+    pub fn trade_participants(&self) -> BTreeSet<CharacterId> {
+        self.trades
+            .values()
+            .flat_map(|trade| trade.participants())
+            .collect()
+    }
+
+    pub fn reserved_item_ids(&self) -> Result<BTreeSet<ItemInstanceId>, WorldError> {
+        let graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        reserved_item_ids_with_graph(&self.trades, &graph)
+    }
+
+    pub fn item_reserved_for_trade(&self, item_id: &ItemInstanceId) -> Result<bool, WorldError> {
+        Ok(self.reserved_item_ids()?.contains(item_id))
+    }
+
+    fn ensure_items_unreserved<'a>(
+        &self,
+        item_ids: impl IntoIterator<Item = &'a ItemInstanceId>,
+    ) -> Result<(), WorldError> {
+        let reserved = self.reserved_item_ids()?;
+        if item_ids
+            .into_iter()
+            .any(|item_id| reserved.contains(item_id))
+        {
+            Err(WorldError::ItemReservedForTrade)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn reserved_coins(&self, character_id: CharacterId) -> u64 {
+        self.trade_for_character(character_id)
+            .and_then(|trade| trade.offers.get(&character_id))
+            .map_or(0, |offer| offer.coins)
+    }
+
+    pub fn spendable_coins(&self, character_id: CharacterId) -> Result<u64, WorldError> {
+        self.character_gameplay
+            .get(&character_id)
+            .ok_or(WorldError::InvalidEntity)?
+            .coins
+            .checked_sub(self.reserved_coins(character_id))
+            .ok_or(WorldError::InvalidRuntimeSnapshot)
+    }
+
+    pub fn cancel_trade_for_character(
+        &mut self,
+        character_id: CharacterId,
+        reason: TradeCancellationReason,
+    ) -> Result<Vec<DomainEvent>, WorldError> {
+        let Some(trade) = self.trade_for_character(character_id).cloned() else {
+            return Ok(Vec::new());
+        };
+        self.trades.remove(&trade.id);
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(WorldError::InvalidDomainTransition)?;
+        Ok(vec![DomainEvent::TradeCancelled {
+            previous_trade: trade,
+            reason,
+        }])
+    }
+
+    /// Removes every trade whose logical deadline has been reached. The actor
+    /// calls this before timer/combat/script hooks so an expired reservation
+    /// can never survive into another tick's mutations. This deliberately does
+    /// not run basis invalidation; the post-hook reconciliation owns that
+    /// separate comparison.
+    pub fn cancel_expired_trades(&mut self) -> Result<Vec<DomainEvent>, WorldError> {
+        let expired = self
+            .trades
+            .iter()
+            .filter(|(_, trade)| self.logical_tick >= trade.expires_at_tick)
+            .map(|(trade_id, trade)| (*trade_id, trade.clone()))
+            .collect::<Vec<_>>();
+        if expired.is_empty() {
+            return Ok(Vec::new());
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(WorldError::InvalidDomainTransition)?;
+        for (trade_id, _) in &expired {
+            self.trades.remove(trade_id);
+        }
+        self.revision = revision;
+        Ok(expired
+            .into_iter()
+            .map(|(_, previous_trade)| DomainEvent::TradeCancelled {
+                previous_trade,
+                reason: TradeCancellationReason::Expired,
+            })
+            .collect())
+    }
+
+    pub fn cancel_trades(
+        &mut self,
+        trade_ids: &BTreeSet<TradeId>,
+        reason: TradeCancellationReason,
+    ) -> Result<Vec<DomainEvent>, WorldError> {
+        let mut events = Vec::new();
+        for trade_id in trade_ids {
+            if let Some(previous_trade) = self.trades.remove(trade_id) {
+                events.push(DomainEvent::TradeCancelled {
+                    previous_trade,
+                    reason,
+                });
+            }
+        }
+        if !events.is_empty() {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(WorldError::InvalidDomainTransition)?;
+        }
+        Ok(events)
+    }
+
+    pub fn cancel_all_trades(
+        &mut self,
+        reason: TradeCancellationReason,
+    ) -> Result<Vec<DomainEvent>, WorldError> {
+        let trades = std::mem::take(&mut self.trades);
+        if trades.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(WorldError::InvalidDomainTransition)?;
+        Ok(trades
+            .into_values()
+            .map(|previous_trade| DomainEvent::TradeCancelled {
+                previous_trade,
+                reason,
+            })
+            .collect())
+    }
+
+    pub fn validate_trade_participant_gameplay(
+        &self,
+        participants: &BTreeMap<CharacterId, CharacterGameplaySnapshot>,
+    ) -> Result<(), WorldError> {
+        for character_id in self.trade_participants() {
+            let gameplay = participants
+                .get(&character_id)
+                .or_else(|| self.character_gameplay.get(&character_id))
+                .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+            if gameplay.coins < self.reserved_coins(character_id) {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+            self.validate_character_gameplay_snapshot(character_id, gameplay)
+                .map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
+        }
+        Ok(())
+    }
+
+    pub fn reconcile_trades(
+        &mut self,
+        before: &WorldCheckpoint,
+    ) -> Result<Vec<DomainEvent>, WorldError> {
+        let mut events = Vec::new();
+        let mut cancelled = BTreeSet::new();
+        let mut invalidated = false;
+        let graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        let before_items_by_owner = items_by_effective_owner(&before.item_instances)?;
+        let current_items_by_owner = items_by_effective_owner(&self.item_instances)?;
+        let trade_ids = self.trades.keys().copied().collect::<Vec<_>>();
+        for trade_id in trade_ids {
+            let Some(trade) = self.trades.get(&trade_id).cloned() else {
+                continue;
+            };
+            let requester_session = self.session_for_character(trade.requester);
+            let recipient_session = self.session_for_character(trade.recipient);
+            let disconnected = requester_session.is_none() || recipient_session.is_none();
+            let room_for = |world: &Self, character_id| {
+                world
+                    .session_for_character(character_id)
+                    .and_then(|session| world.character(session).ok())
+                    .and_then(|character| room_checked(&world.entities, character.location).ok())
+                    .map(|room| room.stable_id.clone())
+            };
+            let separated = !disconnected
+                && (room_for(self, trade.requester) != Some(trade.room_id.clone())
+                    || room_for(self, trade.recipient) != Some(trade.room_id.clone()));
+            let defeated = trade.participants().into_iter().any(|participant| {
+                self.character_gameplay
+                    .get(&participant)
+                    .is_some_and(|gameplay| gameplay.recovery_at_tick.is_some())
+            });
+            let combat = self.npcs.values().any(|npc| {
+                npc.engaged_character
+                    .is_some_and(|participant| trade.includes(participant))
+            });
+            let reservation_valid = validate_trade_state_with_graph(
+                self.next_trade_id,
+                &BTreeMap::from([(trade.id, trade.clone())]),
+                &self.item_instances,
+                &self.item_prototypes,
+                &self.stable_rooms,
+                &graph,
+            )
+            .is_ok()
+                && trade.participants().into_iter().all(|participant| {
+                    self.character_gameplay
+                        .get(&participant)
+                        .is_some_and(|gameplay| gameplay.coins >= self.reserved_coins(participant))
+                });
+            let reason = if self.logical_tick >= trade.expires_at_tick {
+                Some(TradeCancellationReason::Expired)
+            } else if disconnected {
+                Some(TradeCancellationReason::ParticipantDisconnected)
+            } else if separated {
+                Some(TradeCancellationReason::ParticipantsSeparated)
+            } else if defeated {
+                Some(TradeCancellationReason::ParticipantDefeated)
+            } else if combat {
+                Some(TradeCancellationReason::CombatStarted)
+            } else if !reservation_valid {
+                Some(TradeCancellationReason::InvalidReservation)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                self.trades.remove(&trade.id);
+                events.push(DomainEvent::TradeCancelled {
+                    previous_trade: trade,
+                    reason,
+                });
+                cancelled.insert(trade_id);
+                continue;
+            }
+
+            // A trade command publishes its own single state revision. For any
+            // other mutation, compare the material authorities retained in the
+            // checkpoint and invalidate confirmations exactly once.
+            if before.trades.get(&trade_id) == Some(&trade) {
+                let participant_gameplay_changed = trade.participants().into_iter().any(|id| {
+                    before.character_gameplay.get(&id) != self.character_gameplay.get(&id)
+                });
+                let participant_location_changed = trade.participants().into_iter().any(|id| {
+                    character_room_id(&before.entities, id) != character_room_id(&self.entities, id)
+                });
+                if participant_gameplay_changed
+                    || participant_location_changed
+                    || trade.participants().into_iter().any(|participant| {
+                        before_items_by_owner.get(&participant)
+                            != current_items_by_owner.get(&participant)
+                    })
+                {
+                    let previous = trade.clone();
+                    let mut current = trade;
+                    current.state_revision = current
+                        .state_revision
+                        .checked_add(1)
+                        .ok_or(WorldError::InvalidDomainTransition)?;
+                    current.confirmations.clear();
+                    self.trades.insert(trade_id, current.clone());
+                    events.push(DomainEvent::TradeInvalidated { previous, current });
+                    invalidated = true;
+                }
+            }
+        }
+        if !cancelled.is_empty() || invalidated {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(WorldError::InvalidDomainTransition)?;
+        }
+        Ok(events)
+    }
+
     /// Server-internal connected members of the caller's durable party. The
     /// result includes the caller and never exposes party IDs to transports.
     pub fn connected_party_members(
@@ -9389,89 +11370,131 @@ impl World {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let mut inventory = derive_stack_groups(
+        let reserved_items = self.reserved_item_ids()?;
+        let groups = derive_stack_groups(
             &self.item_instances,
             &self.item_prototypes,
             carried_item_ids.iter(),
-        )?
-        .into_iter()
-        .map(|group| {
-            let item = self
-                .item_prototypes
-                .get(&group.prototype_id)
-                .ok_or(WorldError::InvalidEntity)?;
-            let selector = group.members.first().ok_or(WorldError::InvalidEntity)?;
-            let id = opaque_id(observer.salt, "item", selector.as_str());
-            let mut actions = vec![SceneAction {
-                label: "Examine".into(),
-                command: format!("examine {id}"),
-            }];
-            let transferable = group
+        )?;
+        let mut split_groups = Vec::new();
+        for group in groups {
+            let (reserved, available): (Vec<_>, Vec<_>) = group
                 .members
-                .iter()
-                .map(|item_id| item_graph.subtree_is_transferable(item_id))
-                .collect::<Result<Vec<_>, WorldError>>()?
                 .into_iter()
-                .all(|allowed| allowed);
-            if transferable {
-                actions.push(SceneAction {
-                    label: "Drop".into(),
-                    command: format!("drop {id}"),
-                });
+                .partition(|item_id| reserved_items.contains(item_id));
+            if !available.is_empty() {
+                split_groups.push((
+                    ItemStackGroup {
+                        prototype_id: group.prototype_id.clone(),
+                        binding: group.binding,
+                        members: available,
+                    },
+                    false,
+                ));
             }
-            {
-                if item.heal_amount != 0 || item.effect.is_some() {
+            if !reserved.is_empty() {
+                split_groups.push((
+                    ItemStackGroup {
+                        prototype_id: group.prototype_id,
+                        binding: group.binding,
+                        members: reserved,
+                    },
+                    true,
+                ));
+            }
+        }
+        let mut inventory = split_groups
+            .into_iter()
+            .map(|(group, reserved_group)| {
+                let item = self
+                    .item_prototypes
+                    .get(&group.prototype_id)
+                    .ok_or(WorldError::InvalidEntity)?;
+                let selector = group.members.first().ok_or(WorldError::InvalidEntity)?;
+                let id = opaque_id(observer.salt, "item", selector.as_str());
+                let mut actions = vec![SceneAction {
+                    label: "Examine".into(),
+                    command: format!("examine {id}"),
+                }];
+                let transferable = group
+                    .members
+                    .iter()
+                    .map(|item_id| item_graph.subtree_is_transferable(item_id))
+                    .collect::<Result<Vec<_>, WorldError>>()?
+                    .into_iter()
+                    .all(|allowed| allowed);
+                let (available_quantity, reserved_for_trade) = if reserved_group {
+                    (0, group.members.len())
+                } else {
+                    (group.members.len(), 0)
+                };
+                if transferable && !reserved_group {
                     actions.push(SceneAction {
-                        label: "Use".into(),
-                        command: format!("use {id}"),
+                        label: "Drop".into(),
+                        command: format!("drop {id}"),
                     });
                 }
-                if item.equipment_slot.is_some() {
-                    actions.push(SceneAction {
-                        label: "Equip".into(),
-                        command: format!("equip {id}"),
-                    });
+                {
+                    if !reserved_group && (item.heal_amount != 0 || item.effect.is_some()) {
+                        actions.push(SceneAction {
+                            label: "Use".into(),
+                            command: format!("use {id}"),
+                        });
+                    }
+                    if !reserved_group && item.equipment_slot.is_some() {
+                        actions.push(SceneAction {
+                            label: "Equip".into(),
+                            command: format!("equip {id}"),
+                        });
+                    }
                 }
-            }
-            Ok(PlayerItemView {
-                id,
-                label: item.name.clone(),
-                description: item.description.clone(),
-                rarity: item.rarity.as_str().into(),
-                item_level: item.item_level,
-                weight_grams: item.weight_grams,
-                quantity: u16::try_from(group.members.len())
-                    .map_err(|_| WorldError::InvalidEntity)?,
-                stack_slots: stack_slots(item, group.members.len())?,
-                total_weight_grams: group.members.iter().try_fold(0_u64, |total, item_id| {
-                    total
-                        .checked_add(item_graph.subtree_weight(item_id)?)
-                        .ok_or(WorldError::InvalidEntity)
-                })?,
-                transfer_policy: item.transfer_policy,
-                bound_to_you: matches!(
-                    group.binding,
-                    ItemBinding::Character {
-                        character_id: owner
-                    } if owner == character.id
-                ),
-                can_give: transferable,
-                container_capacity: item
-                    .container
-                    .as_ref()
-                    .map(|_| {
-                        container_usage(
-                            selector,
-                            &self.item_instances,
-                            &self.item_prototypes,
-                            &item_graph,
-                        )
-                    })
-                    .transpose()?,
-                actions,
+                Ok(PlayerItemView {
+                    id,
+                    label: item.name.clone(),
+                    description: item.description.clone(),
+                    rarity: item.rarity.as_str().into(),
+                    item_level: item.item_level,
+                    weight_grams: item.weight_grams,
+                    quantity: u16::try_from(group.members.len())
+                        .map_err(|_| WorldError::InvalidEntity)?,
+                    available_quantity: u16::try_from(available_quantity)
+                        .map_err(|_| WorldError::InvalidEntity)?,
+                    reserved_for_trade: u16::try_from(reserved_for_trade)
+                        .map_err(|_| WorldError::InvalidEntity)?,
+                    stack_slots: stack_slots(item, group.members.len())?,
+                    total_weight_grams: group.members.iter().try_fold(
+                        0_u64,
+                        |total, item_id| {
+                            total
+                                .checked_add(item_graph.subtree_weight(item_id)?)
+                                .ok_or(WorldError::InvalidEntity)
+                        },
+                    )?,
+                    transfer_policy: item.transfer_policy,
+                    bound_to_you: matches!(
+                        group.binding,
+                        ItemBinding::Character {
+                            character_id: owner
+                        } if owner == character.id
+                    ),
+                    can_give: transferable && reserved_for_trade == 0,
+                    can_trade: transferable && !reserved_group,
+                    container_capacity: item
+                        .container
+                        .as_ref()
+                        .map(|_| {
+                            container_usage(
+                                selector,
+                                &self.item_instances,
+                                &self.item_prototypes,
+                                &item_graph,
+                            )
+                        })
+                        .transpose()?,
+                    actions,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, WorldError>>()?;
+            .collect::<Result<Vec<_>, WorldError>>()?;
         inventory.sort_by(|left, right| left.label.cmp(&right.label));
 
         let equipment = gameplay
@@ -9666,6 +11689,7 @@ impl World {
             })
             .collect();
         let shop_available = current_room.stable_id == self.start_room_stable_id;
+        let spendable_coins = self.spendable_coins(character.id)?;
         let shop = if shop_available {
             commodity_specs()
                 .iter()
@@ -9673,7 +11697,7 @@ impl World {
                     let stock = self.adventure.shop_stock.get(*id).copied().unwrap_or(0);
                     let owned = gameplay.commodities.get(*id).copied().unwrap_or(0);
                     let mut actions = Vec::new();
-                    if stock > 0 && gameplay.coins >= *buy_price && owned < 99 {
+                    if stock > 0 && spendable_coins >= *buy_price && owned < 99 {
                         actions.push(SceneAction {
                             label: "Buy".into(),
                             command: format!("buy {id}"),
@@ -9880,12 +11904,69 @@ impl World {
             party_invites,
             economy: EconomyView {
                 coins: gameplay.coins,
+                reserved_coins: self.reserved_coins(character.id),
+                spendable_coins: self.spendable_coins(character.id)?,
                 commodities,
                 shop_available,
                 shop,
             },
             social: SocialView { online },
+            trade: self.trade_view_for(session)?,
         })
+    }
+
+    fn trade_view_for(&self, session: SessionId) -> Result<Option<TradeView>, WorldError> {
+        let viewer = self.character(session)?;
+        let Some(trade) = self.trade_for_character(viewer.id) else {
+            return Ok(None);
+        };
+        let observer = self.observer(session)?;
+        let counterpart = trade
+            .counterpart(viewer.id)
+            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+        let counterparty = opaque_id(observer.salt, "character", &counterpart.0.to_string());
+        let offer_view = |participant: CharacterId| -> Result<TradeOfferView, WorldError> {
+            let offer = trade.offers.get(&participant).cloned().unwrap_or_default();
+            let lines = offer
+                .lines
+                .iter()
+                .map(|line| {
+                    let first = line
+                        .item_ids
+                        .first()
+                        .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                    let prototype = self.item_prototype_for(first)?;
+                    Ok(TradeOfferLineView {
+                        target: opaque_id(observer.salt, "item", first.as_str()),
+                        label: prototype.name.clone(),
+                        quantity: u16::try_from(line.item_ids.len())
+                            .map_err(|_| WorldError::InvalidRuntimeSnapshot)?,
+                        container: prototype.container.is_some(),
+                    })
+                })
+                .collect::<Result<Vec<_>, WorldError>>()?;
+            Ok(TradeOfferView {
+                coins: offer.coins,
+                lines,
+            })
+        };
+        let empty = trade
+            .offers
+            .values()
+            .all(|offer| offer.coins == 0 && offer.lines.is_empty());
+        Ok(Some(TradeView {
+            id: opaque_id(observer.salt, "trade", &trade.id.0.to_string()),
+            phase: trade.phase,
+            counterparty,
+            expires_in_ticks: trade.expires_at_tick.saturating_sub(self.logical_tick),
+            state_revision: trade.state_revision,
+            own_confirmed: trade.confirmations.contains_key(&viewer.id),
+            counterparty_confirmed: trade.confirmations.contains_key(&counterpart),
+            own_offer: offer_view(viewer.id)?,
+            counterparty_offer: offer_view(counterpart)?,
+            can_accept: trade.phase == TradePhase::Requested && trade.recipient == viewer.id,
+            can_confirm: trade.phase == TradePhase::Negotiating && !empty,
+        }))
     }
 
     /// Projects an authoritative event according to one observer's current
@@ -10094,6 +12175,79 @@ impl World {
                     }),
                 )
             }
+            DomainEvent::TradeRequested { trade } => (
+                ViewEventKind::TradeRequested,
+                opaque_id(observer.salt, "character", &trade.requester.0.to_string()),
+                Some(opaque_id(
+                    observer.salt,
+                    "character",
+                    &trade.recipient.0.to_string(),
+                )),
+                if viewer.id == trade.recipient {
+                    "You receive a trade request.".into()
+                } else {
+                    "Your trade request is pending.".into()
+                },
+                None,
+            ),
+            DomainEvent::TradeOpened { current, .. }
+            | DomainEvent::TradeOfferSet { current, .. }
+            | DomainEvent::TradeInvalidated { current, .. } => (
+                ViewEventKind::TradeChanged,
+                opaque_id(observer.salt, "character", &current.requester.0.to_string()),
+                Some(opaque_id(
+                    observer.salt,
+                    "character",
+                    &current.recipient.0.to_string(),
+                )),
+                "The private trade terms change.".into(),
+                None,
+            ),
+            DomainEvent::TradeConfirmed { participant, .. } => (
+                ViewEventKind::TradeChanged,
+                opaque_id(observer.salt, "character", &participant.0.to_string()),
+                None,
+                if viewer.id == *participant {
+                    "You confirm the current trade terms.".into()
+                } else {
+                    "The other participant confirms the current trade terms.".into()
+                },
+                None,
+            ),
+            DomainEvent::TradeCancelled { previous_trade, .. } => (
+                ViewEventKind::TradeCancelled,
+                opaque_id(
+                    observer.salt,
+                    "character",
+                    &previous_trade.requester.0.to_string(),
+                ),
+                Some(opaque_id(
+                    observer.salt,
+                    "character",
+                    &previous_trade.recipient.0.to_string(),
+                )),
+                "The trade is cancelled.".into(),
+                None,
+            ),
+            DomainEvent::TradeCompleted { previous_trade } => (
+                ViewEventKind::TradeCompleted,
+                opaque_id(
+                    observer.salt,
+                    "character",
+                    &previous_trade.requester.0.to_string(),
+                ),
+                Some(opaque_id(
+                    observer.salt,
+                    "character",
+                    &previous_trade.recipient.0.to_string(),
+                )),
+                if previous_trade.includes(viewer.id) {
+                    "Your trade completes atomically.".into()
+                } else {
+                    "Two characters complete a trade.".into()
+                },
+                None,
+            ),
             DomainEvent::Gameplay { event } => {
                 let (actor_id, target_id, text, item_id) =
                     project_gameplay_event(observer.salt, viewer.id, event);
@@ -10511,6 +12665,19 @@ impl World {
                 room_id,
                 ..
             } => viewer.id == *giver_id || viewer.id == *recipient_id || viewer_room == room_id,
+            DomainEvent::TradeRequested { trade } => trade.includes(viewer.id),
+            DomainEvent::TradeOpened { current, .. }
+            | DomainEvent::TradeOfferSet { current, .. }
+            | DomainEvent::TradeInvalidated { current, .. } => current.includes(viewer.id),
+            DomainEvent::TradeConfirmed { participant, .. } => self
+                .trade_for_character(*participant)
+                .is_some_and(|trade| trade.includes(viewer.id)),
+            DomainEvent::TradeCancelled { previous_trade, .. } => {
+                previous_trade.includes(viewer.id)
+            }
+            DomainEvent::TradeCompleted { previous_trade } => {
+                previous_trade.includes(viewer.id) || viewer_room == previous_trade.room_id
+            }
             DomainEvent::Gameplay { event } => {
                 let base = matches!(event, GameplayEvent::TickAdvanced { .. })
                     || (gameplay_event_character(event).is_some_and(|id| id == viewer.id)
@@ -10917,6 +13084,125 @@ fn item_effective_owner(
     Err(WorldError::InvalidEntity)
 }
 
+fn items_by_effective_owner(
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+) -> Result<BTreeMap<CharacterId, BTreeMap<ItemInstanceId, ItemInstance>>, WorldError> {
+    let mut by_owner = BTreeMap::<CharacterId, BTreeMap<ItemInstanceId, ItemInstance>>::new();
+    for (item_id, instance) in instances {
+        if let Some(owner) = item_effective_owner(instances, item_id)? {
+            by_owner
+                .entry(owner)
+                .or_default()
+                .insert(item_id.clone(), instance.clone());
+        }
+    }
+    Ok(by_owner)
+}
+
+fn reserved_item_ids_with_graph(
+    trades: &BTreeMap<TradeId, TradeSnapshot>,
+    graph: &ItemGraphIndex,
+) -> Result<BTreeSet<ItemInstanceId>, WorldError> {
+    let mut reserved = BTreeSet::new();
+    for root in trades
+        .values()
+        .flat_map(|trade| trade.offers.values())
+        .flat_map(|offer| &offer.lines)
+        .flat_map(|line| &line.item_ids)
+    {
+        for item_id in graph.subtree_ids(root)? {
+            if !reserved.insert(item_id) {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+        }
+    }
+    Ok(reserved)
+}
+
+fn character_room_id(
+    entities: &SlotMap<EntityId, Entity>,
+    character_id: CharacterId,
+) -> Option<&str> {
+    entities.values().find_map(|entity| match entity {
+        Entity::Character(character) if character.id == character_id => entities
+            .get(character.location)
+            .and_then(|room| match room {
+                Entity::Room(room) => Some(room.stable_id.as_str()),
+                Entity::Character(_) => None,
+            }),
+        _ => None,
+    })
+}
+
+fn canonical_u64(digest: &mut Sha256, value: u64) {
+    digest.update(value.to_be_bytes());
+}
+
+fn canonical_i64(digest: &mut Sha256, value: i64) {
+    digest.update(value.to_be_bytes());
+}
+
+fn canonical_str(digest: &mut Sha256, value: &str) -> Result<(), WorldError> {
+    let length = u32::try_from(value.len()).map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
+    digest.update(length.to_be_bytes());
+    digest.update(value.as_bytes());
+    Ok(())
+}
+
+fn canonical_trade_key(digest: &mut Sha256, key: &TradeOfferKey) -> Result<(), WorldError> {
+    match key {
+        TradeOfferKey::Fungible { prototype_id } => {
+            digest.update([0]);
+            canonical_str(digest, prototype_id)
+        }
+        TradeOfferKey::Unique { item_id } => {
+            digest.update([1]);
+            canonical_str(digest, item_id.as_str())
+        }
+    }
+}
+
+fn canonical_item_binding(digest: &mut Sha256, binding: ItemBinding) {
+    match binding {
+        ItemBinding::Unbound => digest.update([0]),
+        ItemBinding::Character { character_id } => {
+            digest.update([1]);
+            canonical_i64(digest, character_id.0);
+        }
+    }
+}
+
+fn canonical_item_location(
+    digest: &mut Sha256,
+    location: &SharedItemLocation,
+) -> Result<(), WorldError> {
+    match location {
+        SharedItemLocation::Staged => digest.update([0]),
+        SharedItemLocation::Carried(character_id) => {
+            digest.update([1]);
+            canonical_i64(digest, character_id.0);
+        }
+        SharedItemLocation::Room(room_id) => {
+            digest.update([2]);
+            canonical_str(digest, room_id)?;
+        }
+        SharedItemLocation::Equipped(character_id, slot) => {
+            digest.update([3, *slot as u8]);
+            canonical_i64(digest, character_id.0);
+        }
+        SharedItemLocation::HeldByNpc(npc_id) => {
+            digest.update([4]);
+            canonical_str(digest, npc_id)?;
+        }
+        SharedItemLocation::Contained(container_id) => {
+            digest.update([5]);
+            canonical_str(digest, container_id.as_str())?;
+        }
+        SharedItemLocation::Consumed => digest.update([6]),
+    }
+    Ok(())
+}
+
 fn validate_item_bindings(
     instances: &BTreeMap<ItemInstanceId, ItemInstance>,
     prototypes: &HashMap<String, ItemPrototype>,
@@ -10949,6 +13235,454 @@ fn validate_item_bindings(
         if !valid {
             return Err(WorldError::InvalidEntity);
         }
+    }
+    Ok(())
+}
+
+fn same_trade_identity_and_lifetime(left: &TradeSnapshot, right: &TradeSnapshot) -> bool {
+    left.id == right.id
+        && left.requester == right.requester
+        && left.recipient == right.recipient
+        && left.room_id == right.room_id
+        && left.created_tick == right.created_tick
+        && left.opened_tick == right.opened_tick
+        && left.expires_at_tick == right.expires_at_tick
+}
+
+fn next_trade_revision(previous: &TradeSnapshot) -> Option<u64> {
+    previous.state_revision.checked_add(1)
+}
+
+fn valid_trade_open_transition(previous: &TradeSnapshot, current: &TradeSnapshot) -> bool {
+    let expected_offers = BTreeMap::from([
+        (previous.requester, TradeOffer::default()),
+        (previous.recipient, TradeOffer::default()),
+    ]);
+    previous.phase == TradePhase::Requested
+        && previous.opened_tick.is_none()
+        && previous.offers.is_empty()
+        && previous.confirmations.is_empty()
+        && current.id == previous.id
+        && current.requester == previous.requester
+        && current.recipient == previous.recipient
+        && current.room_id == previous.room_id
+        && current.created_tick == previous.created_tick
+        && current.phase == TradePhase::Negotiating
+        && current
+            .opened_tick
+            .is_some_and(|opened_tick| opened_tick < previous.expires_at_tick)
+        && current.state_revision == next_trade_revision(previous).unwrap_or(0)
+        && current.offers == expected_offers
+        && current.confirmations.is_empty()
+}
+
+fn trade_has_assets(trade: &TradeSnapshot) -> bool {
+    trade
+        .offers
+        .values()
+        .any(|offer| offer.coins > 0 || !offer.lines.is_empty())
+}
+
+fn one_offer_assignment_changed(previous: &TradeOffer, current: &TradeOffer) -> bool {
+    if previous.coins != current.coins {
+        return previous.lines == current.lines;
+    }
+    if previous.lines == current.lines {
+        return false;
+    }
+    let previous_by_key = previous
+        .lines
+        .iter()
+        .map(|line| (&line.key, line))
+        .collect::<BTreeMap<_, _>>();
+    let current_by_key = current
+        .lines
+        .iter()
+        .map(|line| (&line.key, line))
+        .collect::<BTreeMap<_, _>>();
+    let changed_keys = previous_by_key
+        .keys()
+        .chain(current_by_key.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|key| previous_by_key.get(**key) != current_by_key.get(**key))
+        .collect::<Vec<_>>();
+    let [key] = changed_keys.as_slice() else {
+        return false;
+    };
+    match (previous_by_key.get(**key), current_by_key.get(**key)) {
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(previous_line), Some(current_line)) => {
+            previous_line.key == current_line.key
+                && ((previous_line.item_ids.len() < current_line.item_ids.len()
+                    && previous_line
+                        .item_ids
+                        .iter()
+                        .all(|item_id| current_line.item_ids.contains(item_id)))
+                    || (current_line.item_ids.len() < previous_line.item_ids.len()
+                        && current_line.item_ids
+                            == previous_line.item_ids[..current_line.item_ids.len()]))
+        }
+        (None, None) => false,
+    }
+}
+
+fn valid_trade_offer_transition(previous: &TradeSnapshot, current: &TradeSnapshot) -> bool {
+    if previous.phase != TradePhase::Negotiating
+        || current.phase != TradePhase::Negotiating
+        || !same_trade_identity_and_lifetime(previous, current)
+        || current.state_revision != next_trade_revision(previous).unwrap_or(0)
+        || !current.confirmations.is_empty()
+    {
+        return false;
+    }
+    let changed = previous
+        .participants()
+        .into_iter()
+        .filter(|participant| previous.offers.get(participant) != current.offers.get(participant))
+        .collect::<Vec<_>>();
+    let [participant] = changed.as_slice() else {
+        return false;
+    };
+    previous
+        .offers
+        .get(participant)
+        .zip(current.offers.get(participant))
+        .is_some_and(|(before, after)| one_offer_assignment_changed(before, after))
+}
+
+fn valid_trade_invalidation_transition(previous: &TradeSnapshot, current: &TradeSnapshot) -> bool {
+    let Some(next_revision) = next_trade_revision(previous) else {
+        return false;
+    };
+    let mut expected = previous.clone();
+    expected.state_revision = next_revision;
+    expected.confirmations.clear();
+    current == &expected
+}
+
+fn portable_subtree_ids(
+    root: &ItemInstanceId,
+    children: &BTreeMap<ItemInstanceId, Vec<ItemInstanceId>>,
+) -> Result<Vec<ItemInstanceId>, WorldError> {
+    let mut result = Vec::new();
+    let mut pending = vec![root.clone()];
+    while let Some(item_id) = pending.pop() {
+        if result.len() >= MAX_ITEM_INSTANCES {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        if let Some(direct) = children.get(&item_id) {
+            pending.extend(direct.iter().rev().cloned());
+        }
+        result.push(item_id);
+    }
+    Ok(result)
+}
+
+fn validate_portable_trade_state(
+    snapshot: &WorldRuntimeSnapshot,
+    children: &BTreeMap<ItemInstanceId, Vec<ItemInstanceId>>,
+) -> Result<(), WorldError> {
+    if snapshot.next_trade_id.0 == 0 || snapshot.trades.len() > MAX_LIVE_TRADES {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+    let mut participants = BTreeSet::new();
+    let mut reserved_roots = BTreeSet::new();
+    let mut reserved_subtrees = BTreeSet::new();
+    for (trade_id, trade) in &snapshot.trades {
+        if *trade_id != trade.id
+            || trade_id.0 == 0
+            || trade_id.0 >= snapshot.next_trade_id.0
+            || trade.requester.0 <= 0
+            || trade.recipient.0 <= 0
+            || trade.requester == trade.recipient
+            || !valid_definition_id(&trade.room_id)
+            || trade.state_revision == 0
+            || trade.created_tick >= trade.expires_at_tick
+            || !participants.insert(trade.requester)
+            || !participants.insert(trade.recipient)
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        match trade.phase {
+            TradePhase::Requested => {
+                if trade.opened_tick.is_some()
+                    || !trade.offers.is_empty()
+                    || !trade.confirmations.is_empty()
+                    || trade.expires_at_tick
+                        != trade
+                            .created_tick
+                            .checked_add(TRADE_REQUEST_TICKS)
+                            .ok_or(WorldError::InvalidRuntimeSnapshot)?
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+            TradePhase::Negotiating => {
+                let opened = trade
+                    .opened_tick
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                if opened < trade.created_tick
+                    || trade.expires_at_tick
+                        != opened
+                            .checked_add(TRADE_NEGOTIATION_TICKS)
+                            .ok_or(WorldError::InvalidRuntimeSnapshot)?
+                    || trade.offers.len() != 2
+                    || !trade.offers.contains_key(&trade.requester)
+                    || !trade.offers.contains_key(&trade.recipient)
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+        }
+        if trade.confirmations.keys().any(|participant| {
+            !trade.includes(*participant)
+                || trade
+                    .confirmations
+                    .get(participant)
+                    .is_none_or(|confirmation| confirmation.state_revision != trade.state_revision)
+        }) || (trade.confirmations.len() == 2
+            && trade
+                .confirmations
+                .values()
+                .map(|confirmation| confirmation.basis_sha256)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != 1)
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        let mut trade_roots = 0_usize;
+        for (owner, offer) in &trade.offers {
+            if !trade.includes(*owner)
+                || offer.coins > MAX_TRADE_COINS
+                || offer.lines.len() > MAX_TRADE_LINES_PER_PARTICIPANT
+                || !offer.lines.windows(2).all(|pair| pair[0].key < pair[1].key)
+            {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+            for line in &offer.lines {
+                if line.item_ids.is_empty()
+                    || line.item_ids.len() > usize::from(MAX_TRADE_ITEM_QUANTITY)
+                    || !line.item_ids.windows(2).all(|pair| pair[0] < pair[1])
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+                trade_roots = trade_roots
+                    .checked_add(line.item_ids.len())
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                for root in &line.item_ids {
+                    if !valid_item_instance_id(root.as_str())
+                        || !reserved_roots.insert(root.clone())
+                    {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
+                    }
+                    let instance = snapshot
+                        .item_instances
+                        .get(root)
+                        .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                    if instance.location
+                        != (RuntimeItemLocation::Carried {
+                            character_id: *owner,
+                        })
+                    {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
+                    }
+                    let key_valid = match &line.key {
+                        TradeOfferKey::Fungible { prototype_id } => {
+                            valid_definition_id(prototype_id)
+                                && &instance.prototype_id == prototype_id
+                        }
+                        TradeOfferKey::Unique { item_id } => {
+                            item_id == root && line.item_ids.len() == 1
+                        }
+                    };
+                    if !key_valid {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
+                    }
+                    for member in portable_subtree_ids(root, children)? {
+                        if !reserved_subtrees.insert(member) {
+                            return Err(WorldError::InvalidRuntimeSnapshot);
+                        }
+                    }
+                }
+            }
+        }
+        if trade_roots > MAX_TRADE_ROOTS {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+    }
+    if reserved_roots.len() > MAX_RESERVED_TRADE_ROOTS {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+    Ok(())
+}
+
+fn validate_trade_state(
+    next_trade_id: TradeId,
+    trades: &BTreeMap<TradeId, TradeSnapshot>,
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+    room_ids: &HashMap<String, EntityId>,
+) -> Result<(), WorldError> {
+    let graph = build_item_graph_index(instances, prototypes)
+        .map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
+    validate_trade_state_with_graph(
+        next_trade_id,
+        trades,
+        instances,
+        prototypes,
+        room_ids,
+        &graph,
+    )
+}
+
+fn validate_trade_state_with_graph(
+    next_trade_id: TradeId,
+    trades: &BTreeMap<TradeId, TradeSnapshot>,
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+    room_ids: &HashMap<String, EntityId>,
+    graph: &ItemGraphIndex,
+) -> Result<(), WorldError> {
+    if next_trade_id.0 == 0 || trades.len() > MAX_LIVE_TRADES {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+    let mut participants = BTreeSet::new();
+    let mut reserved_roots = BTreeSet::new();
+    let mut reserved_subtrees = BTreeSet::new();
+    for (id, trade) in trades {
+        if *id != trade.id
+            || id.0 == 0
+            || id.0 >= next_trade_id.0
+            || trade.requester.0 <= 0
+            || trade.recipient.0 <= 0
+            || trade.requester == trade.recipient
+            || !room_ids.contains_key(&trade.room_id)
+            || trade.state_revision == 0
+            || trade.created_tick >= trade.expires_at_tick
+            || !participants.insert(trade.requester)
+            || !participants.insert(trade.recipient)
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        match trade.phase {
+            TradePhase::Requested => {
+                if trade.opened_tick.is_some()
+                    || !trade.offers.is_empty()
+                    || !trade.confirmations.is_empty()
+                    || trade.expires_at_tick
+                        != trade
+                            .created_tick
+                            .checked_add(TRADE_REQUEST_TICKS)
+                            .ok_or(WorldError::InvalidRuntimeSnapshot)?
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+            TradePhase::Negotiating => {
+                let opened = trade
+                    .opened_tick
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                if opened < trade.created_tick
+                    || trade.expires_at_tick
+                        != opened
+                            .checked_add(TRADE_NEGOTIATION_TICKS)
+                            .ok_or(WorldError::InvalidRuntimeSnapshot)?
+                    || trade.offers.len() != 2
+                    || !trade.offers.contains_key(&trade.requester)
+                    || !trade.offers.contains_key(&trade.recipient)
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+        }
+        if trade.confirmations.keys().any(|participant| {
+            !trade.includes(*participant)
+                || trade
+                    .confirmations
+                    .get(participant)
+                    .is_none_or(|confirmation| confirmation.state_revision != trade.state_revision)
+        }) || (trade.confirmations.len() == 2
+            && trade
+                .confirmations
+                .values()
+                .map(|confirmation| confirmation.basis_sha256)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != 1)
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        let mut trade_roots = 0usize;
+        for (owner, offer) in &trade.offers {
+            if !trade.includes(*owner)
+                || offer.coins > MAX_TRADE_COINS
+                || offer.lines.len() > MAX_TRADE_LINES_PER_PARTICIPANT
+                || !offer.lines.windows(2).all(|pair| pair[0].key < pair[1].key)
+            {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+            for line in &offer.lines {
+                if line.item_ids.is_empty()
+                    || line.item_ids.len() > usize::from(MAX_TRADE_ITEM_QUANTITY)
+                    || !line.item_ids.windows(2).all(|pair| pair[0] < pair[1])
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+                trade_roots = trade_roots
+                    .checked_add(line.item_ids.len())
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                for root in &line.item_ids {
+                    if !valid_item_instance_id(root.as_str())
+                        || !reserved_roots.insert(root.clone())
+                    {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
+                    }
+                    let instance = instances
+                        .get(root)
+                        .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                    let prototype = prototypes
+                        .get(&instance.prototype_id)
+                        .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                    if instance.location != SharedItemLocation::Carried(*owner)
+                        || !graph
+                            .subtree_is_transferable(root)
+                            .map_err(|_| WorldError::InvalidRuntimeSnapshot)?
+                    {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
+                    }
+                    let key_valid = match &line.key {
+                        TradeOfferKey::Fungible { prototype_id } => {
+                            prototype.stack_policy == ItemStackPolicy::Fungible
+                                && &instance.prototype_id == prototype_id
+                        }
+                        TradeOfferKey::Unique { item_id } => {
+                            prototype.stack_policy == ItemStackPolicy::Unique
+                                && item_id == root
+                                && line.item_ids.len() == 1
+                        }
+                    };
+                    if !key_valid {
+                        return Err(WorldError::InvalidRuntimeSnapshot);
+                    }
+                    for member in graph
+                        .subtree_ids(root)
+                        .map_err(|_| WorldError::InvalidRuntimeSnapshot)?
+                    {
+                        if !reserved_subtrees.insert(member) {
+                            return Err(WorldError::InvalidRuntimeSnapshot);
+                        }
+                    }
+                }
+            }
+        }
+        if trade_roots > MAX_TRADE_ROOTS {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+    }
+    if reserved_roots.len() > MAX_RESERVED_TRADE_ROOTS {
+        return Err(WorldError::InvalidRuntimeSnapshot);
     }
     Ok(())
 }
@@ -12113,6 +14847,11 @@ mod tests {
     ) -> serde_json::Value {
         let mut value = serde_json::to_value(snapshot).unwrap();
         value["snapshotVersion"] = serde_json::json!(version);
+        if version <= 4 {
+            let root = value.as_object_mut().unwrap();
+            root.remove("nextTradeId");
+            root.remove("trades");
+        }
         match version {
             1 => {
                 let instances = value
@@ -12135,8 +14874,8 @@ mod tests {
                     instance.as_object_mut().unwrap().remove("binding");
                 }
             }
-            4 => {}
-            _ => panic!("test helper only supports runtime snapshot v1-v4"),
+            4 | 5 => {}
+            _ => panic!("test helper only supports runtime snapshot v1-v5"),
         }
         value
     }
@@ -15232,10 +17971,35 @@ mod tests {
                 recipient: "Aria".into(),
             }
         );
+        assert_eq!(
+            parse_action("trade offer item 12 Moon Tonic").unwrap(),
+            PlayerAction::Trade(TradeAction::OfferItem(ItemSelection {
+                query: "Moon Tonic".into(),
+                quantity: 12,
+            }))
+        );
+        assert_eq!(
+            parse_action("trade offer coins 1000000000").unwrap(),
+            PlayerAction::Trade(TradeAction::OfferCoins(1_000_000_000))
+        );
+        assert_eq!(
+            parse_action("trade confirm 42").unwrap(),
+            PlayerAction::Trade(TradeAction::Confirm { state_revision: 42 })
+        );
+        assert_eq!(
+            parse_action("trade contents offered bag 3").unwrap(),
+            PlayerAction::Trade(TradeAction::Contents {
+                container: "offered bag".into(),
+                page: 3,
+            })
+        );
         assert!(parse_action("take 257 tonic").is_err());
         assert!(parse_action("take 0 tonic").is_err());
         assert!(parse_action("give tonic").is_err());
         assert!(parse_action("give 257 tonic to Aria").is_err());
+        assert!(parse_action("trade offer item 129 tonic").is_err());
+        assert!(parse_action("trade offer coins 1000000001").is_err());
+        assert!(parse_action("trade confirm 0").is_err());
     }
 
     #[test]
@@ -15650,27 +18414,19 @@ mod tests {
         let (world, _) = connected_world();
         let json = serde_json::to_string(&world.runtime_snapshot()).unwrap();
         assert_eq!(
-            decode_world_runtime_snapshot(4, &json)
+            decode_world_runtime_snapshot(5, &json)
                 .unwrap()
                 .snapshot_version,
-            4
+            5
         );
-        assert!(decode_world_runtime_snapshot(3, &json).is_err());
-        let mut legacy_v3: serde_json::Value = serde_json::from_str(&json).unwrap();
-        legacy_v3["snapshotVersion"] = serde_json::json!(3);
-        for instance in legacy_v3["itemInstances"]
-            .as_object_mut()
-            .unwrap()
-            .values_mut()
-        {
-            instance.as_object_mut().unwrap().remove("binding");
-        }
+        assert!(decode_world_runtime_snapshot(4, &json).is_err());
+        let legacy_v3 = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 3);
         let legacy_v3_json = serde_json::to_string(&legacy_v3).unwrap();
         assert_eq!(
             decode_world_runtime_snapshot(3, &legacy_v3_json)
                 .unwrap()
                 .snapshot_version,
-            4
+            5
         );
         let mut v3_binding_smuggling = legacy_v3;
         v3_binding_smuggling["itemInstances"]
@@ -15704,7 +18460,7 @@ mod tests {
         let mut unknown_root: serde_json::Value = serde_json::from_str(&json).unwrap();
         unknown_root["quantity"] = serde_json::json!(1);
         assert!(
-            decode_world_runtime_snapshot(4, &serde_json::to_string(&unknown_root).unwrap())
+            decode_world_runtime_snapshot(5, &serde_json::to_string(&unknown_root).unwrap())
                 .is_err()
         );
 
@@ -15717,7 +18473,7 @@ mod tests {
             .unwrap();
         instance["quantity"] = serde_json::json!(1);
         assert!(
-            decode_world_runtime_snapshot(4, &serde_json::to_string(&unknown_instance).unwrap())
+            decode_world_runtime_snapshot(5, &serde_json::to_string(&unknown_instance).unwrap())
                 .is_err()
         );
 
@@ -15730,9 +18486,75 @@ mod tests {
             .unwrap()["location"];
         location["containerId"] = serde_json::json!("demo:blue-lantern");
         assert!(
-            decode_world_runtime_snapshot(4, &serde_json::to_string(&unknown_location).unwrap())
+            decode_world_runtime_snapshot(5, &serde_json::to_string(&unknown_location).unwrap())
                 .is_err()
         );
+
+        let legacy_v4 = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 4);
+        let upgraded =
+            decode_world_runtime_snapshot(4, &serde_json::to_string(&legacy_v4).unwrap()).unwrap();
+        assert_eq!(upgraded.snapshot_version, 5);
+        assert_eq!(upgraded.next_trade_id, TradeId(1));
+        assert!(upgraded.trades.is_empty());
+        let mut smuggled_v4 = legacy_v4;
+        smuggled_v4["trades"] = serde_json::json!({});
+        assert!(
+            decode_world_runtime_snapshot(4, &serde_json::to_string(&smuggled_v4).unwrap())
+                .is_err()
+        );
+
+        let mut missing_trade_fields: serde_json::Value = serde_json::from_str(&json).unwrap();
+        missing_trade_fields
+            .as_object_mut()
+            .unwrap()
+            .remove("trades");
+        assert!(
+            decode_world_runtime_snapshot(
+                5,
+                &serde_json::to_string(&missing_trade_fields).unwrap()
+            )
+            .is_err()
+        );
+        let mut nested_trade: serde_json::Value = serde_json::from_str(&json).unwrap();
+        nested_trade["nextTradeId"] = serde_json::json!(2);
+        nested_trade["trades"]["1"] = serde_json::to_value(TradeSnapshot {
+            id: TradeId(1),
+            requester: CharacterId(101),
+            recipient: CharacterId(102),
+            room_id: world.start_room_id().into(),
+            phase: TradePhase::Requested,
+            created_tick: 0,
+            opened_tick: None,
+            expires_at_tick: TRADE_REQUEST_TICKS,
+            state_revision: 1,
+            offers: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+        })
+        .unwrap();
+        assert!(
+            decode_world_runtime_snapshot(5, &serde_json::to_string(&nested_trade).unwrap())
+                .is_ok()
+        );
+        nested_trade["trades"]["1"]["futureTradeField"] = serde_json::json!(true);
+        assert!(
+            decode_world_runtime_snapshot(5, &serde_json::to_string(&nested_trade).unwrap())
+                .is_err()
+        );
+
+        assert!(valid_item_instance_id("runtime:1"));
+        assert!(valid_item_instance_id("runtime:18446744073709551615"));
+        assert!(valid_item_instance_id(&"i".repeat(128)));
+        for invalid_id in [
+            "runtime:",
+            "runtime:0",
+            "runtime:01",
+            "runtime:-1",
+            "runtime:+1",
+            "runtime:18446744073709551616",
+            &"i".repeat(129),
+        ] {
+            assert!(!valid_item_instance_id(invalid_id), "{invalid_id}");
+        }
     }
 
     #[test]
@@ -16620,6 +19442,1276 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_trade_reserves_invalidates_and_settles_both_sides_atomically() {
+        let mut definition = give_definition();
+        let mut bag = item_prototype(
+            "give:bag",
+            "trade satchel",
+            "A container offered with visible contents.",
+            &["satchel"],
+        );
+        bag.container = Some(ItemContainerDefinition {
+            max_slots: 4,
+            max_weight_grams: 2_000,
+        });
+        let pebble = item_prototype(
+            "give:pebble",
+            "moon pebble",
+            "A small transferable stone.",
+            &["pebble"],
+        );
+        definition.item_prototypes.extend([bag, pebble]);
+        definition.initial_item_instances.extend([
+            item_instance(
+                "give:bag-instance",
+                "give:bag",
+                InitialItemLocation::Room("give:start".into()),
+            ),
+            item_instance(
+                "give:pebble-instance",
+                "give:pebble",
+                InitialItemLocation::Container("give:bag-instance".into()),
+            ),
+        ]);
+        let mut world = World::from_definition(definition.clone()).unwrap();
+        let connect = |world: &mut World, session, id, name: &str| {
+            world
+                .connect(
+                    session,
+                    CharacterSnapshot {
+                        id,
+                        account_id: AccountId(id.0),
+                        name: name.into(),
+                        room_id: "give:start".into(),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        };
+        let a = SessionId(801);
+        let b = SessionId(802);
+        connect(&mut world, a, CharacterId(801), "Aster");
+        connect(&mut world, b, CharacterId(802), "Bryn");
+        let take = world
+            .apply(
+                a,
+                PlayerAction::Take(ItemSelection {
+                    query: "token".into(),
+                    quantity: 2,
+                }),
+            )
+            .unwrap();
+        let take_bag = world
+            .apply(a, PlayerAction::Take(ItemSelection::one("satchel")))
+            .unwrap();
+
+        let requested = world
+            .apply(a, PlayerAction::Trade(TradeAction::Request("Bryn".into())))
+            .unwrap();
+        assert!(matches!(
+            requested.domain_events.as_slice(),
+            [DomainEvent::TradeRequested { trade }] if trade.state_revision == 1
+        ));
+        assert_eq!(world.runtime_snapshot().snapshot_version, 5);
+        assert_eq!(world.runtime_snapshot().next_trade_id, TradeId(2));
+        let mut replay_events = requested.domain_events.clone();
+        let opened = world
+            .apply(b, PlayerAction::Trade(TradeAction::Accept))
+            .unwrap();
+        replay_events.extend(opened.domain_events);
+        let item_offer = world
+            .apply(
+                a,
+                PlayerAction::Trade(TradeAction::OfferItem(ItemSelection::one("token"))),
+            )
+            .unwrap();
+        replay_events.extend(item_offer.domain_events);
+        let coin_offer = world
+            .apply(b, PlayerAction::Trade(TradeAction::OfferCoins(5)))
+            .unwrap();
+        replay_events.extend(coin_offer.domain_events);
+        let bag_offer = world
+            .apply(
+                a,
+                PlayerAction::Trade(TradeAction::OfferItem(ItemSelection::one("satchel"))),
+            )
+            .unwrap();
+        replay_events.extend(bag_offer.domain_events);
+
+        let a_view = world.player_state_view(a).unwrap();
+        assert_eq!(
+            a_view
+                .inventory
+                .iter()
+                .map(|item| item.quantity)
+                .sum::<u16>(),
+            3
+        );
+        let available = a_view
+            .inventory
+            .iter()
+            .find(|item| item.available_quantity == 1)
+            .unwrap();
+        let reserved = a_view
+            .inventory
+            .iter()
+            .find(|item| item.reserved_for_trade == 1)
+            .unwrap();
+        assert!(available.can_trade);
+        assert!(!reserved.can_trade);
+        assert_ne!(available.id, reserved.id);
+        let trade_view = a_view.trade.as_ref().unwrap();
+        assert_eq!(trade_view.state_revision, 5);
+        assert!(trade_view.counterparty.starts_with('o'));
+        assert!(!trade_view.counterparty.contains("Bryn"));
+        assert_ne!(
+            trade_view.counterparty,
+            world
+                .player_state_view(b)
+                .unwrap()
+                .trade
+                .unwrap()
+                .counterparty
+        );
+        assert_eq!(world.reserved_coins(CharacterId(802)), 5);
+        assert_eq!(world.spendable_coins(CharacterId(802)).unwrap(), 35);
+        let status = world
+            .apply(a, PlayerAction::Trade(TradeAction::Status))
+            .unwrap()
+            .output
+            .unwrap();
+        assert!(status.contains("Trade o"));
+        assert!(status.contains("with Bryn"));
+        assert!(status.contains("Your offer"));
+        assert!(status.contains("Counterpart offer: 5 coin"));
+        assert!(status.contains("reserved"));
+        assert!(status.contains("spendable"));
+        assert!(status.contains("ref o"));
+        assert!(!status.contains("give:token"));
+        assert!(!status.contains("give:bag"));
+        let bag_target = trade_view
+            .own_offer
+            .lines
+            .iter()
+            .find(|line| line.container)
+            .unwrap()
+            .target
+            .clone();
+        let contents = world
+            .apply(
+                a,
+                PlayerAction::Trade(TradeAction::Contents {
+                    container: bag_target,
+                    page: 1,
+                }),
+            )
+            .unwrap()
+            .output
+            .unwrap();
+        assert!(contents.contains("Offered container contents, page 1/1"));
+        assert!(contents.contains("moon pebble"));
+        assert!(contents.contains("ref o"));
+        assert!(!contents.contains("give:pebble-instance"));
+        assert!(matches!(
+            world.apply(
+                a,
+                PlayerAction::Drop(ItemSelection::one(reserved.id.clone()))
+            ),
+            Err(WorldError::ItemReservedForTrade)
+        ));
+        assert!(matches!(
+            world.apply(
+                a,
+                PlayerAction::Trade(TradeAction::Confirm { state_revision: 3 })
+            ),
+            Err(WorldError::StaleTradeRevision)
+        ));
+
+        let first_confirmation = world
+            .apply(
+                a,
+                PlayerAction::Trade(TradeAction::Confirm { state_revision: 5 }),
+            )
+            .unwrap();
+        replay_events.extend(first_confirmation.domain_events);
+        let checkpoint = world.checkpoint();
+        let completed = world
+            .apply(
+                b,
+                PlayerAction::Trade(TradeAction::Confirm { state_revision: 5 }),
+            )
+            .unwrap();
+        assert!(matches!(
+            completed.domain_events.as_slice(),
+            [DomainEvent::TradeCompleted { .. }]
+        ));
+        replay_events.extend(completed.domain_events.clone());
+        assert!(world.trades.is_empty());
+        assert_eq!(
+            world
+                .character_gameplay
+                .get(&CharacterId(801))
+                .unwrap()
+                .coins,
+            45
+        );
+        assert_eq!(
+            world
+                .character_gameplay
+                .get(&CharacterId(802))
+                .unwrap()
+                .coins,
+            35
+        );
+        assert_eq!(
+            world
+                .runtime_snapshot()
+                .item_instances
+                .values()
+                .filter(|instance| instance.location
+                    == RuntimeItemLocation::Carried {
+                        character_id: CharacterId(802)
+                    })
+                .count(),
+            2
+        );
+
+        let mut replay = World::from_definition(definition).unwrap();
+        replay
+            .replay_persisted_event(&take.domain_events[0])
+            .unwrap();
+        replay
+            .replay_persisted_event(&take_bag.domain_events[0])
+            .unwrap();
+        for event in &replay_events {
+            replay.replay_persisted_event(event).unwrap();
+        }
+        assert!(replay.runtime_snapshot().trades.is_empty());
+        assert_eq!(
+            replay
+                .runtime_snapshot()
+                .item_instances
+                .values()
+                .filter(|instance| instance.location
+                    == RuntimeItemLocation::Carried {
+                        character_id: CharacterId(802)
+                    })
+                .count(),
+            2
+        );
+
+        world.restore_checkpoint(checkpoint);
+        assert_eq!(world.trades.len(), 1);
+        assert_eq!(
+            world
+                .character_gameplay
+                .get(&CharacterId(801))
+                .unwrap()
+                .coins,
+            40
+        );
+        assert_eq!(
+            world
+                .character_gameplay
+                .get(&CharacterId(802))
+                .unwrap()
+                .coins,
+            40
+        );
+    }
+
+    #[test]
+    fn trade_candidate_enforces_the_global_reservation_cap_and_portable_semantics() {
+        let mut prototype = item_prototype(
+            "cap:item",
+            "capacity token",
+            "A token used to exercise the global reservation boundary.",
+            &["token"],
+        );
+        prototype.stack_policy = ItemStackPolicy::Fungible;
+        prototype.max_stack_units = 256;
+        let item_ids = (0..=MAX_RESERVED_TRADE_ROOTS)
+            .map(|index| ItemInstanceId(format!("cap:item-{index:04}")))
+            .collect::<Vec<_>>();
+        let mut world = World::from_definition(WorldDefinition {
+            start_room_id: "cap:start".into(),
+            item_prototypes: vec![prototype],
+            initial_item_instances: item_ids
+                .iter()
+                .map(|item_id| {
+                    item_instance(
+                        item_id.as_str(),
+                        "cap:item",
+                        InitialItemLocation::Room("cap:start".into()),
+                    )
+                })
+                .collect(),
+            rooms: vec![RoomDefinition {
+                stable_id: "cap:start".into(),
+                title: "Capacity".into(),
+                prose: vec!["A bounded reservation fixture.".into()],
+                image: None,
+                audio: None,
+                exits: Vec::new(),
+                item_ids: Vec::new(),
+            }],
+        })
+        .unwrap();
+        let make_trade = |id: u64, roots: Vec<ItemInstanceId>| {
+            let requester = CharacterId(10_000 + i64::try_from(id).unwrap() * 2);
+            let recipient = CharacterId(requester.0 + 1);
+            let lines = (!roots.is_empty())
+                .then(|| TradeOfferLine {
+                    key: TradeOfferKey::Fungible {
+                        prototype_id: "cap:item".into(),
+                    },
+                    item_ids: roots,
+                })
+                .into_iter()
+                .collect();
+            TradeSnapshot {
+                id: TradeId(id),
+                requester,
+                recipient,
+                room_id: "cap:start".into(),
+                phase: TradePhase::Negotiating,
+                created_tick: 0,
+                opened_tick: Some(0),
+                expires_at_tick: TRADE_NEGOTIATION_TICKS,
+                state_revision: 2,
+                offers: BTreeMap::from([
+                    (requester, TradeOffer { lines, coins: 0 }),
+                    (recipient, TradeOffer::default()),
+                ]),
+                confirmations: BTreeMap::new(),
+            }
+        };
+        for trade_index in 0..16_usize {
+            let start = trade_index * usize::from(MAX_TRADE_ITEM_QUANTITY);
+            let end = start + usize::from(MAX_TRADE_ITEM_QUANTITY);
+            let roots = item_ids[start..end].to_vec();
+            let trade = make_trade(u64::try_from(trade_index + 1).unwrap(), roots.clone());
+            for root in roots {
+                world.item_instances.get_mut(&root).unwrap().location =
+                    SharedItemLocation::Carried(trade.requester);
+            }
+            world.trades.insert(trade.id, trade);
+        }
+        let previous = make_trade(17, Vec::new());
+        world.trades.insert(previous.id, previous.clone());
+        world.next_trade_id = TradeId(18);
+        validate_trade_state(
+            world.next_trade_id,
+            &world.trades,
+            &world.item_instances,
+            &world.item_prototypes,
+            &world.stable_rooms,
+        )
+        .unwrap();
+        validate_world_runtime_snapshot_semantics(&world.runtime_snapshot()).unwrap();
+
+        let overflow_root = item_ids[MAX_RESERVED_TRADE_ROOTS].clone();
+        world
+            .item_instances
+            .get_mut(&overflow_root)
+            .unwrap()
+            .location = SharedItemLocation::Carried(previous.requester);
+        let current = make_trade(17, vec![overflow_root]);
+        let revision = world.revision;
+        assert!(matches!(
+            world.publish_trade_offer_change(SessionId(99_999), previous.clone(), current.clone()),
+            Err(WorldError::InvalidRuntimeSnapshot)
+        ));
+        assert_eq!(world.trades.get(&TradeId(17)), Some(&previous));
+        assert_eq!(world.revision, revision);
+
+        let mut overflow_snapshot = world.runtime_snapshot();
+        overflow_snapshot.trades.insert(TradeId(17), current);
+        assert!(matches!(
+            validate_world_runtime_snapshot_semantics(&overflow_snapshot),
+            Err(WorldError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
+    fn trade_replay_rejects_id_reuse_and_forged_transitions_or_confirmations() {
+        let requested = TradeSnapshot {
+            id: TradeId(1),
+            requester: CharacterId(901),
+            recipient: CharacterId(902),
+            room_id: "give:start".into(),
+            phase: TradePhase::Requested,
+            created_tick: 0,
+            opened_tick: None,
+            expires_at_tick: TRADE_REQUEST_TICKS,
+            state_revision: 1,
+            offers: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+        };
+        let mut anti_reuse = World::from_definition(give_definition()).unwrap();
+        anti_reuse
+            .replay_persisted_event(&DomainEvent::TradeRequested {
+                trade: requested.clone(),
+            })
+            .unwrap();
+        anti_reuse
+            .replay_persisted_event(&DomainEvent::TradeCancelled {
+                previous_trade: requested.clone(),
+                reason: TradeCancellationReason::CancelledByParticipant,
+            })
+            .unwrap();
+        assert!(matches!(
+            anti_reuse.replay_persisted_event(&DomainEvent::TradeRequested {
+                trade: requested.clone(),
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+
+        let mut replay = World::from_definition(give_definition()).unwrap();
+        for (session, character_id, name) in [
+            (SessionId(901), CharacterId(901), "Aster"),
+            (SessionId(902), CharacterId(902), "Bryn"),
+        ] {
+            replay
+                .connect(
+                    session,
+                    CharacterSnapshot {
+                        id: character_id,
+                        account_id: AccountId(character_id.0),
+                        name: name.into(),
+                        room_id: "give:start".into(),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+        replay
+            .replay_persisted_event(&DomainEvent::TradeRequested {
+                trade: requested.clone(),
+            })
+            .unwrap();
+        let mut opened = requested.clone();
+        opened.phase = TradePhase::Negotiating;
+        opened.opened_tick = Some(0);
+        opened.expires_at_tick = TRADE_NEGOTIATION_TICKS;
+        opened.state_revision = 2;
+        opened.offers = BTreeMap::from([
+            (opened.requester, TradeOffer::default()),
+            (opened.recipient, TradeOffer::default()),
+        ]);
+        let mut opened_after_expiry = opened.clone();
+        opened_after_expiry.opened_tick = Some(TRADE_REQUEST_TICKS);
+        opened_after_expiry.expires_at_tick = TRADE_REQUEST_TICKS + TRADE_NEGOTIATION_TICKS;
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeOpened {
+                previous: requested.clone(),
+                current: opened_after_expiry,
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        let mut forged_open = opened.clone();
+        forged_open.room_id = "give:remote".into();
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeOpened {
+                previous: requested.clone(),
+                current: forged_open,
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        replay
+            .replay_persisted_event(&DomainEvent::TradeOpened {
+                previous: requested,
+                current: opened.clone(),
+            })
+            .unwrap();
+
+        let mut offered = opened.clone();
+        offered.state_revision = 3;
+        offered.offers.get_mut(&offered.requester).unwrap().coins = 1;
+        let mut forged_offer = offered.clone();
+        forged_offer
+            .offers
+            .get_mut(&forged_offer.recipient)
+            .unwrap()
+            .coins = 1;
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeOfferSet {
+                previous: opened.clone(),
+                current: forged_offer,
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        replay
+            .replay_persisted_event(&DomainEvent::TradeOfferSet {
+                previous: opened,
+                current: offered.clone(),
+            })
+            .unwrap();
+
+        let mut forged_invalidation = offered.clone();
+        forged_invalidation.state_revision = 4;
+        forged_invalidation
+            .offers
+            .get_mut(&forged_invalidation.requester)
+            .unwrap()
+            .coins = 2;
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeInvalidated {
+                previous: offered.clone(),
+                current: forged_invalidation,
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+
+        let basis = replay.trade_basis_sha256(&offered).unwrap();
+        let confirmation = TradeConfirmation {
+            state_revision: offered.state_revision,
+            basis_sha256: basis,
+        };
+        let mut forged_confirmation = confirmation.clone();
+        forged_confirmation.basis_sha256 = [0x5a; 32];
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeConfirmed {
+                participant: offered.requester,
+                confirmation: forged_confirmation,
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        replay
+            .replay_persisted_event(&DomainEvent::TradeConfirmed {
+                participant: offered.requester,
+                confirmation: confirmation.clone(),
+            })
+            .unwrap();
+
+        let mut completed = offered;
+        completed
+            .confirmations
+            .insert(completed.requester, confirmation.clone());
+        completed
+            .confirmations
+            .insert(completed.recipient, confirmation.clone());
+        let mut outsider = completed.clone();
+        outsider.confirmations.remove(&outsider.recipient);
+        outsider
+            .confirmations
+            .insert(CharacterId(999), confirmation.clone());
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeCompleted {
+                previous_trade: outsider,
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        let mut bad_digest = completed.clone();
+        bad_digest
+            .confirmations
+            .get_mut(&bad_digest.recipient)
+            .unwrap()
+            .basis_sha256 = [0xa5; 32];
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeCompleted {
+                previous_trade: bad_digest,
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        replay
+            .replay_persisted_event(&DomainEvent::TradeCompleted {
+                previous_trade: completed,
+            })
+            .unwrap();
+        assert!(replay.trades.is_empty());
+    }
+
+    #[test]
+    fn cold_trade_replay_rejects_assetless_arbitrary_confirmations() {
+        let requested = TradeSnapshot {
+            id: TradeId(1),
+            requester: CharacterId(961),
+            recipient: CharacterId(962),
+            room_id: "give:start".into(),
+            phase: TradePhase::Requested,
+            created_tick: 0,
+            opened_tick: None,
+            expires_at_tick: TRADE_REQUEST_TICKS,
+            state_revision: 1,
+            offers: BTreeMap::new(),
+            confirmations: BTreeMap::new(),
+        };
+        let mut opened = requested.clone();
+        opened.phase = TradePhase::Negotiating;
+        opened.opened_tick = Some(0);
+        opened.expires_at_tick = TRADE_NEGOTIATION_TICKS;
+        opened.state_revision = 2;
+        opened.offers = BTreeMap::from([
+            (opened.requester, TradeOffer::default()),
+            (opened.recipient, TradeOffer::default()),
+        ]);
+        let mut replay = World::from_definition(give_definition()).unwrap();
+        replay
+            .replay_persisted_event(&DomainEvent::TradeRequested {
+                trade: requested.clone(),
+            })
+            .unwrap();
+        replay
+            .replay_persisted_event(&DomainEvent::TradeOpened {
+                previous: requested,
+                current: opened.clone(),
+            })
+            .unwrap();
+        assert!(replay.character_gameplay.is_empty());
+        let arbitrary = TradeConfirmation {
+            state_revision: opened.state_revision,
+            basis_sha256: [0x42; 32],
+        };
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeConfirmed {
+                participant: opened.requester,
+                confirmation: arbitrary.clone(),
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+
+        let mut one_confirmation = opened.clone();
+        one_confirmation
+            .confirmations
+            .insert(opened.requester, arbitrary.clone());
+        replay.trades.insert(opened.id, one_confirmation);
+        let mut completed = opened;
+        completed
+            .confirmations
+            .insert(completed.requester, arbitrary.clone());
+        completed
+            .confirmations
+            .insert(completed.recipient, arbitrary);
+        assert!(matches!(
+            replay.replay_persisted_event(&DomainEvent::TradeCompleted {
+                previous_trade: completed,
+            }),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        assert_eq!(replay.trades.len(), 1);
+    }
+
+    #[test]
+    fn trade_rate_expiry_and_tick_counters_fail_closed() {
+        let mut world = World::from_definition(give_definition()).unwrap();
+        for (session, character_id, name) in [
+            (SessionId(911), CharacterId(911), "Aster"),
+            (SessionId(912), CharacterId(912), "Bryn"),
+        ] {
+            world
+                .connect(
+                    session,
+                    CharacterSnapshot {
+                        id: character_id,
+                        account_id: AccountId(character_id.0),
+                        name: name.into(),
+                        room_id: "give:start".into(),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+        world
+            .apply(
+                SessionId(911),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+            )
+            .unwrap();
+        world
+            .apply(SessionId(911), PlayerAction::Trade(TradeAction::Cancel))
+            .unwrap();
+        let rate_checkpoint = world.checkpoint();
+        assert!(matches!(
+            world.apply(
+                SessionId(911),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into()))
+            ),
+            Err(WorldError::TradeUnavailable)
+        ));
+        for _ in 0..TRADE_REQUEST_RATE_TICKS {
+            world.advance_tick().unwrap();
+        }
+        world.restore_checkpoint(rate_checkpoint);
+        assert!(matches!(
+            world.apply(
+                SessionId(911),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into()))
+            ),
+            Err(WorldError::TradeUnavailable)
+        ));
+        for _ in 0..TRADE_REQUEST_RATE_TICKS {
+            world.advance_tick().unwrap();
+        }
+        world
+            .apply(
+                SessionId(911),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+            )
+            .unwrap();
+
+        world.logical_tick = TRADE_REQUEST_RATE_TICKS + TRADE_REQUEST_TICKS;
+        world.revision = u64::MAX;
+        let live_trade = world.trades.values().next().unwrap().clone();
+        assert!(matches!(
+            world.cancel_expired_trades(),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        assert_eq!(world.trades.get(&live_trade.id), Some(&live_trade));
+        world.revision = 1;
+        let events = world.cancel_expired_trades().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [DomainEvent::TradeCancelled {
+                reason: TradeCancellationReason::Expired,
+                ..
+            }]
+        ));
+        assert!(world.trades.is_empty());
+
+        let mut overflow_tick = World::from_definition(give_definition()).unwrap();
+        overflow_tick.logical_tick = u64::MAX;
+        let before = overflow_tick.runtime_snapshot();
+        assert!(matches!(
+            overflow_tick.advance_tick(),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        assert_eq!(overflow_tick.runtime_snapshot(), before);
+    }
+
+    #[test]
+    fn trade_status_is_text_bounded_and_keeps_opaque_actionable_inventory() {
+        let prototypes = (0..1_000)
+            .map(|index| {
+                let mut prototype = item_prototype(
+                    &format!("status:item-{index:04}"),
+                    &format!("status item {index:04}"),
+                    "A unique item used to bound trade status output.",
+                    &[],
+                );
+                prototype.weight_grams = 1;
+                prototype
+            })
+            .collect::<Vec<_>>();
+        let instances = (0..1_000)
+            .map(|index| {
+                item_instance(
+                    &format!("status:instance-{index:04}"),
+                    &format!("status:item-{index:04}"),
+                    InitialItemLocation::Room("status:start".into()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut world = World::from_definition(WorldDefinition {
+            start_room_id: "status:start".into(),
+            item_prototypes: prototypes,
+            initial_item_instances: instances,
+            rooms: vec![RoomDefinition {
+                stable_id: "status:start".into(),
+                title: "Status".into(),
+                prose: vec!["A bounded text fixture.".into()],
+                image: None,
+                audio: None,
+                exits: Vec::new(),
+                item_ids: Vec::new(),
+            }],
+        })
+        .unwrap();
+        for (session, character_id, name) in [
+            (SessionId(921), CharacterId(921), "Aster"),
+            (SessionId(922), CharacterId(922), "Bryn"),
+        ] {
+            world
+                .connect(
+                    session,
+                    CharacterSnapshot {
+                        id: character_id,
+                        account_id: AccountId(character_id.0),
+                        name: name.into(),
+                        room_id: "status:start".into(),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+        for instance in world.item_instances.values_mut() {
+            instance.location = SharedItemLocation::Carried(CharacterId(921));
+        }
+        world
+            .character_gameplay
+            .get_mut(&CharacterId(921))
+            .unwrap()
+            .inventory_capacity = InventoryCapacity {
+            max_slots: 1_000,
+            max_weight_grams: 1_000_000,
+        };
+        world
+            .apply(
+                SessionId(921),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+            )
+            .unwrap();
+        let snapshot = world.player_state_view(SessionId(921)).unwrap();
+        let counterparty = &snapshot.trade.as_ref().unwrap().counterparty;
+        assert!(counterparty.starts_with('o'));
+        assert!(!counterparty.contains("Bryn"));
+        let status = world
+            .apply(SessionId(921), PlayerAction::Trade(TradeAction::Status))
+            .unwrap()
+            .output
+            .unwrap();
+        assert!(status.len() <= MAX_TRADE_STATUS_TEXT_BYTES);
+        assert!(status.contains("with Bryn"));
+        assert!(status.contains("980 more inventory groups omitted"));
+        assert!(status.contains("trade contents <offered-container> <page>"));
+        assert!(status.contains("ref o"));
+        assert!(!status.contains("status:instance-"));
+    }
+
+    #[test]
+    fn trade_settlement_uses_net_capacity_and_reserved_subtrees_block_every_item_bypass() {
+        let swap_definition = || WorldDefinition {
+            start_room_id: "swap:start".into(),
+            item_prototypes: vec![
+                item_prototype(
+                    "swap:amber",
+                    "amber token",
+                    "A unique amber token.",
+                    &["amber"],
+                ),
+                item_prototype(
+                    "swap:azure",
+                    "azure token",
+                    "A unique azure token.",
+                    &["azure"],
+                ),
+            ],
+            initial_item_instances: vec![
+                item_instance(
+                    "swap:amber-instance",
+                    "swap:amber",
+                    InitialItemLocation::Room("swap:start".into()),
+                ),
+                item_instance(
+                    "swap:azure-instance",
+                    "swap:azure",
+                    InitialItemLocation::Room("swap:start".into()),
+                ),
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "swap:start".into(),
+                title: "Swap".into(),
+                prose: vec!["A net-capacity fixture.".into()],
+                image: None,
+                audio: None,
+                exits: Vec::new(),
+                item_ids: Vec::new(),
+            }],
+        };
+        let connect_swap = |world: &mut World| {
+            for (session, character_id, name) in [
+                (SessionId(931), CharacterId(931), "Aster"),
+                (SessionId(932), CharacterId(932), "Bryn"),
+            ] {
+                world
+                    .connect(
+                        session,
+                        CharacterSnapshot {
+                            id: character_id,
+                            account_id: AccountId(character_id.0),
+                            name: name.into(),
+                            room_id: "swap:start".into(),
+                            item_locations: BTreeMap::new(),
+                        },
+                    )
+                    .unwrap();
+                world
+                    .character_gameplay
+                    .get_mut(&character_id)
+                    .unwrap()
+                    .inventory_capacity = InventoryCapacity {
+                    max_slots: 1,
+                    max_weight_grams: 2_000,
+                };
+            }
+            world
+                .apply(
+                    SessionId(931),
+                    PlayerAction::Take(ItemSelection::one("amber")),
+                )
+                .unwrap();
+            world
+                .apply(
+                    SessionId(932),
+                    PlayerAction::Take(ItemSelection::one("azure")),
+                )
+                .unwrap();
+        };
+        let mut swap = World::from_definition(swap_definition()).unwrap();
+        connect_swap(&mut swap);
+        swap.apply(
+            SessionId(931),
+            PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+        )
+        .unwrap();
+        swap.apply(SessionId(932), PlayerAction::Trade(TradeAction::Accept))
+            .unwrap();
+        swap.apply(
+            SessionId(931),
+            PlayerAction::Trade(TradeAction::OfferItem(ItemSelection::one("amber"))),
+        )
+        .unwrap();
+        swap.apply(
+            SessionId(932),
+            PlayerAction::Trade(TradeAction::OfferItem(ItemSelection::one("azure"))),
+        )
+        .unwrap();
+        swap.apply(
+            SessionId(931),
+            PlayerAction::Trade(TradeAction::Confirm { state_revision: 4 }),
+        )
+        .unwrap();
+        swap.apply(
+            SessionId(932),
+            PlayerAction::Trade(TradeAction::Confirm { state_revision: 4 }),
+        )
+        .unwrap();
+        assert_eq!(
+            swap.item_location(&ItemInstanceId("swap:amber-instance".into())),
+            Some(&SharedItemLocation::Carried(CharacterId(932)))
+        );
+        assert_eq!(
+            swap.item_location(&ItemInstanceId("swap:azure-instance".into())),
+            Some(&SharedItemLocation::Carried(CharacterId(931)))
+        );
+
+        let mut over_capacity = World::from_definition(swap_definition()).unwrap();
+        connect_swap(&mut over_capacity);
+        over_capacity
+            .apply(
+                SessionId(931),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+            )
+            .unwrap();
+        over_capacity
+            .apply(SessionId(932), PlayerAction::Trade(TradeAction::Accept))
+            .unwrap();
+        over_capacity
+            .apply(
+                SessionId(931),
+                PlayerAction::Trade(TradeAction::OfferItem(ItemSelection::one("amber"))),
+            )
+            .unwrap();
+        over_capacity
+            .apply(
+                SessionId(931),
+                PlayerAction::Trade(TradeAction::Confirm { state_revision: 3 }),
+            )
+            .unwrap();
+        assert!(matches!(
+            over_capacity.apply(
+                SessionId(932),
+                PlayerAction::Trade(TradeAction::Confirm { state_revision: 3 })
+            ),
+            Err(WorldError::InventoryCapacityExceeded)
+        ));
+        assert_eq!(over_capacity.trades.len(), 1);
+
+        let mut bag = item_prototype(
+            "reserved:bag",
+            "trade satchel",
+            "A reserved container.",
+            &["satchel"],
+        );
+        bag.container = Some(ItemContainerDefinition {
+            max_slots: 4,
+            max_weight_grams: 4_000,
+        });
+        let mut herb = item_prototype(
+            "reserved:herb",
+            "healing herb",
+            "A herb inside the reserved container.",
+            &["herb"],
+        );
+        herb.heal_amount = 1;
+        herb.consumable = true;
+        let spare = item_prototype(
+            "reserved:spare",
+            "spare stone",
+            "A free item that must not enter a reserved container.",
+            &["spare"],
+        );
+        let mut reserved = World::from_definition(WorldDefinition {
+            start_room_id: "reserved:start".into(),
+            item_prototypes: vec![bag, herb, spare],
+            initial_item_instances: vec![
+                item_instance(
+                    "reserved:bag-instance",
+                    "reserved:bag",
+                    InitialItemLocation::Room("reserved:start".into()),
+                ),
+                item_instance(
+                    "reserved:herb-instance",
+                    "reserved:herb",
+                    InitialItemLocation::Container("reserved:bag-instance".into()),
+                ),
+                item_instance(
+                    "reserved:spare-instance",
+                    "reserved:spare",
+                    InitialItemLocation::Room("reserved:start".into()),
+                ),
+            ],
+            rooms: vec![RoomDefinition {
+                stable_id: "reserved:start".into(),
+                title: "Reserved".into(),
+                prose: vec!["A reservation bypass fixture.".into()],
+                image: None,
+                audio: None,
+                exits: Vec::new(),
+                item_ids: Vec::new(),
+            }],
+        })
+        .unwrap();
+        for (session, character_id, name) in [
+            (SessionId(941), CharacterId(941), "Aster"),
+            (SessionId(942), CharacterId(942), "Bryn"),
+        ] {
+            reserved
+                .connect(
+                    session,
+                    CharacterSnapshot {
+                        id: character_id,
+                        account_id: AccountId(character_id.0),
+                        name: name.into(),
+                        room_id: "reserved:start".into(),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+        reserved
+            .apply(
+                SessionId(941),
+                PlayerAction::Take(ItemSelection::one("satchel")),
+            )
+            .unwrap();
+        reserved
+            .apply(
+                SessionId(941),
+                PlayerAction::Take(ItemSelection::one("spare")),
+            )
+            .unwrap();
+        reserved
+            .apply(
+                SessionId(941),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+            )
+            .unwrap();
+        reserved
+            .apply(SessionId(942), PlayerAction::Trade(TradeAction::Accept))
+            .unwrap();
+        reserved
+            .apply(
+                SessionId(941),
+                PlayerAction::Trade(TradeAction::OfferItem(ItemSelection::one("satchel"))),
+            )
+            .unwrap();
+        let bag_id = ItemInstanceId("reserved:bag-instance".into());
+        let herb_id = ItemInstanceId("reserved:herb-instance".into());
+        assert!(reserved.item_reserved_for_trade(&bag_id).unwrap());
+        assert!(reserved.item_reserved_for_trade(&herb_id).unwrap());
+        let contents = reserved
+            .apply(
+                SessionId(941),
+                PlayerAction::Contents {
+                    container: "satchel".into(),
+                    page: 1,
+                },
+            )
+            .unwrap();
+        let contents_view = contents.container_contents.as_ref().unwrap();
+        let herb_view = contents_view
+            .items
+            .iter()
+            .find(|item| item.label == "healing herb")
+            .unwrap();
+        assert_eq!(herb_view.quantity, 1);
+        assert_eq!(herb_view.available_quantity, 0);
+        assert_eq!(herb_view.reserved_for_trade, 1);
+        assert!(!herb_view.can_trade);
+        assert!(
+            herb_view
+                .actions
+                .iter()
+                .all(|action| action.label != "Get" && !action.command.starts_with("get "))
+        );
+        assert!(
+            contents
+                .output
+                .as_deref()
+                .unwrap()
+                .contains("1 reserved for trade; 0 available")
+        );
+        let blocked = [
+            PlayerAction::Drop(ItemSelection::one("satchel")),
+            PlayerAction::Give {
+                selection: ItemSelection::one("satchel"),
+                recipient: "Bryn".into(),
+            },
+            PlayerAction::Put {
+                selection: ItemSelection::one("spare"),
+                container: "satchel".into(),
+            },
+            PlayerAction::Get {
+                selection: ItemSelection::one("herb"),
+                container: "satchel".into(),
+            },
+            PlayerAction::Use("satchel".into()),
+            PlayerAction::Equip("satchel".into()),
+        ];
+        for action in blocked {
+            assert!(matches!(
+                reserved.apply(SessionId(941), action),
+                Err(WorldError::ItemReservedForTrade)
+            ));
+        }
+    }
+
+    #[test]
+    fn trade_revision_id_and_coin_overflows_are_atomic_and_shop_uses_spendable_coins() {
+        let connect_pair = |world: &mut World| {
+            for (session, character_id, name) in [
+                (SessionId(951), CharacterId(951), "Aster"),
+                (SessionId(952), CharacterId(952), "Bryn"),
+            ] {
+                world
+                    .connect(
+                        session,
+                        CharacterSnapshot {
+                            id: character_id,
+                            account_id: AccountId(character_id.0),
+                            name: name.into(),
+                            room_id: "give:start".into(),
+                            item_locations: BTreeMap::new(),
+                        },
+                    )
+                    .unwrap();
+            }
+        };
+        let mut revision_overflow = World::from_definition(give_definition()).unwrap();
+        connect_pair(&mut revision_overflow);
+        revision_overflow
+            .apply(
+                SessionId(951),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+            )
+            .unwrap();
+        revision_overflow
+            .apply(SessionId(952), PlayerAction::Trade(TradeAction::Accept))
+            .unwrap();
+        revision_overflow
+            .trades
+            .get_mut(&TradeId(1))
+            .unwrap()
+            .state_revision = u64::MAX;
+        let before = revision_overflow.runtime_snapshot();
+        assert!(matches!(
+            revision_overflow.apply(
+                SessionId(951),
+                PlayerAction::Trade(TradeAction::OfferCoins(1))
+            ),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        assert_eq!(revision_overflow.runtime_snapshot(), before);
+
+        let mut id_overflow = World::from_definition(give_definition()).unwrap();
+        connect_pair(&mut id_overflow);
+        id_overflow.next_trade_id = TradeId(u64::MAX);
+        assert!(matches!(
+            id_overflow.apply(
+                SessionId(951),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into()))
+            ),
+            Err(WorldError::InvalidDomainTransition)
+        ));
+        assert!(id_overflow.trades.is_empty());
+        assert_eq!(id_overflow.next_trade_id, TradeId(u64::MAX));
+
+        let mut coin_overflow = World::from_definition(give_definition()).unwrap();
+        connect_pair(&mut coin_overflow);
+        coin_overflow
+            .character_gameplay
+            .get_mut(&CharacterId(951))
+            .unwrap()
+            .coins = u64::MAX;
+        coin_overflow
+            .apply(
+                SessionId(951),
+                PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+            )
+            .unwrap();
+        coin_overflow
+            .apply(SessionId(952), PlayerAction::Trade(TradeAction::Accept))
+            .unwrap();
+        coin_overflow
+            .apply(
+                SessionId(952),
+                PlayerAction::Trade(TradeAction::OfferCoins(1)),
+            )
+            .unwrap();
+        coin_overflow
+            .apply(
+                SessionId(951),
+                PlayerAction::Trade(TradeAction::Confirm { state_revision: 3 }),
+            )
+            .unwrap();
+        assert!(matches!(
+            coin_overflow.apply(
+                SessionId(952),
+                PlayerAction::Trade(TradeAction::Confirm { state_revision: 3 })
+            ),
+            Err(WorldError::InsufficientFunds)
+        ));
+        assert_eq!(coin_overflow.trades.len(), 1);
+
+        let mut shop = World::from_definition(give_definition()).unwrap();
+        connect_pair(&mut shop);
+        shop.apply(
+            SessionId(951),
+            PlayerAction::Trade(TradeAction::Request("Bryn".into())),
+        )
+        .unwrap();
+        shop.apply(SessionId(952), PlayerAction::Trade(TradeAction::Accept))
+            .unwrap();
+        shop.apply(
+            SessionId(951),
+            PlayerAction::Trade(TradeAction::OfferCoins(35)),
+        )
+        .unwrap();
+        let tonic = shop
+            .player_state_view(SessionId(951))
+            .unwrap()
+            .economy
+            .shop
+            .into_iter()
+            .find(|item| item.id == "tonic")
+            .unwrap();
+        assert!(
+            !tonic
+                .actions
+                .iter()
+                .any(|action| action.command == "buy tonic")
+        );
+        assert!(matches!(
+            shop.apply(
+                SessionId(951),
+                PlayerAction::Economy(EconomyAction::Buy("tonic".into()))
+            ),
+            Err(WorldError::InsufficientFunds)
+        ));
+    }
+
+    #[test]
     fn snapshot_v4_requires_valid_binding_and_rejects_policy_drift() {
         let (mut world, actor) = connect_definition(policy_definition());
         world
@@ -16627,7 +20719,7 @@ mod tests {
             .unwrap();
         let snapshot = world.runtime_snapshot();
         let encoded = serde_json::to_string(&snapshot).unwrap();
-        assert!(encoded.contains("\"snapshotVersion\":4"));
+        assert!(encoded.contains("\"snapshotVersion\":5"));
         assert!(encoded.contains("\"binding\":{\"kind\":\"character\",\"characterId\":701}"));
         let mut restored = World::from_definition(policy_definition()).unwrap();
         restored.restore_runtime_snapshot(snapshot.clone()).unwrap();

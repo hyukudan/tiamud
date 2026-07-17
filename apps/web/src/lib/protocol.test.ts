@@ -33,9 +33,10 @@ const validPlayerState = () => ({
   inventory: [{
     id: 'o1111111111111111', label: 'blue lantern', description: 'Cold light.',
     rarity: 'uncommon', itemLevel: 3, weightGrams: 800,
-    quantity: 1, stackSlots: 1, totalWeightGrams: 800,
+    quantity: 1, availableQuantity: 1, reservedForTrade: 0,
+    stackSlots: 1, totalWeightGrams: 800,
     transferPolicy: 'transferable', boundToYou: false,
-    canGive: true,
+    canGive: true, canTrade: true,
     actions: [{ label: 'Drop', command: 'drop o1111111111111111' }],
   }],
   equipment: [{
@@ -60,6 +61,8 @@ const validPlayerState = () => ({
   partyInvites: [],
   economy: {
     coins: 40,
+    reservedCoins: 0,
+    spendableCoins: 40,
     commodities: [],
     shopAvailable: true,
     shop: [{
@@ -179,6 +182,68 @@ describe('protocol messages', () => {
     expect(() => createActionPerform(
       'item.give', { target: 'tonic', recipient: 'x'.repeat(65) }, 'bad',
     )).toThrow(RangeError);
+  });
+
+  it('creates only the exact closed trade action forms', () => {
+    const tradeId = 'oaaaaaaaaaaaaaaaa';
+    const itemId = 'obbbbbbbbbbbbbbbb';
+    const recipient = 'occcccccccccccccc';
+    const cases: Array<[string, ActionPerformFields]> = [
+      ['trade.request', { recipient }],
+      ['trade.accept', { tradeId }],
+      ['trade.decline', { tradeId }],
+      ['trade.item.set', { tradeId, target: itemId, quantity: 128 }],
+      ['trade.item.remove', { tradeId, target: itemId }],
+      ['trade.coins.set', { tradeId, coins: 1_000_000_000 }],
+      ['trade.contents', { tradeId, target: itemId, page: 2 }],
+      ['trade.confirm', { tradeId, stateRevision: 7 }],
+      ['trade.status', { tradeId }],
+      ['trade.cancel', { tradeId }],
+    ];
+    for (const [action, fields] of cases) {
+      expect(createActionPerform(action, fields, `request-${action}`).data).toEqual({
+        requestId: `request-${action}`, action, ...fields,
+      });
+    }
+    expect(() => createActionPerform('trade.accept', { tradeId, page: 1 }, 'extra'))
+      .toThrow('exact closed field set');
+    expect(() => createActionPerform('trade.item.set', {
+      tradeId, target: itemId, quantity: 129,
+    }, 'quantity')).toThrow('between 1 and 128');
+    expect(() => createActionPerform('trade.request', { recipient: 'Aria' }, 'recipient'))
+      .toThrow('opaque selector');
+    expect(() => createActionPerform('trade.confirm', {
+      tradeId, stateRevision: 0,
+    }, 'revision')).toThrow('positive safe integer');
+    for (const [action, fields] of [
+      ['trade.request', { recipient: undefined }],
+      ['trade.accept', { tradeId: undefined }],
+      ['trade.item.set', { tradeId, target: undefined, quantity: 1 }],
+      ['trade.item.set', { tradeId, target: itemId, quantity: undefined }],
+      ['trade.coins.set', { tradeId, coins: undefined }],
+      ['trade.contents', { tradeId, target: itemId, page: undefined }],
+      ['trade.confirm', { tradeId, stateRevision: undefined }],
+    ] as Array<[string, ActionPerformFields]>) {
+      expect(() => createActionPerform(action, fields, `undefined-${action}`))
+        .toThrow(RangeError);
+    }
+    expect(() => createActionPerform(
+      'trade.accept',
+      Object.create({ tradeId }) as ActionPerformFields,
+      'inherited-trade-id',
+    )).toThrow('exact closed field set');
+    for (const [action, fields] of [
+      ['trade.accept', { tradeId: 7 }],
+      ['trade.coins.set', { tradeId, coins: '1' }],
+      ['trade.contents', { tradeId, target: itemId, page: '1' }],
+      ['trade.confirm', { tradeId, stateRevision: '7' }],
+    ] as Array<[string, unknown]>) {
+      expect(() => createActionPerform(
+        action,
+        fields as unknown as ActionPerformFields,
+        `wrong-type-${action}`,
+      )).toThrow(RangeError);
+    }
   });
 
   it('creates the exact structured staff phase-2 payloads', () => {
@@ -732,9 +797,10 @@ describe('protocol messages', () => {
   it('validates bounded paginated container summaries', () => {
     const item = {
       id: 'o1111111111111111', label: 'healing tonic', rarity: 'uncommon', itemLevel: 2,
-      weightGrams: 250, quantity: 12, stackSlots: 1, totalWeightGrams: 3000,
+      weightGrams: 250, quantity: 12, availableQuantity: 12, reservedForTrade: 0,
+      stackSlots: 1, totalWeightGrams: 3000,
       transferPolicy: 'transferable', boundToYou: false,
-      canGive: false,
+      canGive: false, canTrade: false,
       actions: [{ label: 'Get', command: 'get 12 o1111111111111111 from o2222222222222222' }],
     };
     const envelope = (overrides: Record<string, unknown> = {}) => ({
@@ -773,6 +839,73 @@ describe('protocol messages', () => {
         durableContainerId: 'tiamud:satchel',
       },
     })))).toBeUndefined();
+  });
+
+  it('parses private trade state, reservations, and offered container pages', () => {
+    const state = validPlayerState();
+    const item = state.inventory[0];
+    state.inventory = [{
+      ...item,
+      availableQuantity: 0,
+      reservedForTrade: 1,
+      canGive: false,
+      canTrade: false,
+    }];
+    state.economy = {
+      ...state.economy,
+      reservedCoins: 10,
+      spendableCoins: 30,
+    };
+    const trade = {
+      id: 'oaaaaaaaaaaaaaaaa',
+      phase: 'negotiating',
+      counterparty: 'obbbbbbbbbbbbbbbb',
+      expiresInTicks: 80,
+      stateRevision: 4,
+      ownConfirmed: false,
+      counterpartyConfirmed: true,
+      ownOffer: {
+        coins: 10,
+        lines: [{ target: item.id, label: item.label, quantity: 1, container: false }],
+      },
+      counterpartyOffer: { coins: 5, lines: [] },
+      canAccept: false,
+      canConfirm: true,
+    };
+    const parsed = parseServerMessage(JSON.stringify({
+      v: 1, type: 'player.snapshot', seq: 31, data: { ...state, trade },
+    }));
+    expect(parsed).toMatchObject({
+      type: 'player.snapshot',
+      data: {
+        economy: { coins: 40, reservedCoins: 10, spendableCoins: 30 },
+        inventory: [{ availableQuantity: 0, reservedForTrade: 1, canTrade: false }],
+        trade: { id: trade.id, stateRevision: 4, counterpartyConfirmed: true },
+      },
+    });
+
+    const { description: _description, ...summary } = state.inventory[0];
+    const contents = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'trade.contents',
+      seq: 32,
+      data: {
+        tradeId: trade.id,
+        container: item.id,
+        items: [{ ...summary, canGive: false, canTrade: false }],
+        page: 1,
+        totalPages: 1,
+        capacity: { usedSlots: 1, maxSlots: 8, usedWeightGrams: 800, maxWeightGrams: 5_000 },
+      },
+    }));
+    expect(contents).toMatchObject({
+      type: 'trade.contents',
+      data: { tradeId: trade.id, container: item.id, page: 1 },
+    });
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'trade.contents', seq: 33,
+      data: { ...(contents?.data ?? {}), hiddenOwner: 7 },
+    }))).toBeUndefined();
   });
 
   it('preserves a manifest-only atmospheric image reference', () => {
@@ -960,6 +1093,49 @@ describe('protocol messages', () => {
       id: undefined,
       data: { nonce: 2, timeoutMs: 45_000 },
     });
+  });
+
+  it('accepts exactly the four camelCase trade ViewEvent kinds', () => {
+    for (const [index, kind] of [
+      'tradeRequested',
+      'tradeChanged',
+      'tradeCompleted',
+      'tradeCancelled',
+    ].entries()) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1,
+        type: 'message.append',
+        seq: 60 + index,
+        data: {
+          revision: 20 + index,
+          kind,
+          text: `Perception-safe ${kind} event.`,
+          actorId: 'o1111111111111111',
+          targetId: 'o2222222222222222',
+        },
+      }))).toMatchObject({
+        type: 'message.append',
+        data: { kind },
+      });
+    }
+    for (const kind of [
+      'TradeRequested',
+      'trade_requested',
+      'tradeComplete',
+      'tradeUnknown',
+    ]) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1,
+        type: 'message.append',
+        seq: 70,
+        data: {
+          revision: 30,
+          kind,
+          text: 'Unknown trade event.',
+          actorId: 'o1111111111111111',
+        },
+      }))).toBeUndefined();
+    }
   });
 
   it('accepts bounded player projections and ignores fields it does not project', () => {

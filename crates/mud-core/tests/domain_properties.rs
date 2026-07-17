@@ -4,8 +4,8 @@ use tiamud_core::{
     AccountId, ActiveEffect, CharacterId, CharacterSnapshot, Direction, EconomyAction, EffectKind,
     EquipmentSlot, InitialItemInstanceDefinition, InitialItemLocation, ItemBinding,
     ItemGameplayDefinition, ItemInstanceId, ItemPrototypeDefinition, ItemRarity, ItemStackPolicy,
-    ItemTransferPolicy, PlayerAction, RoomDefinition, RuntimeItemLocation, SessionId, World,
-    WorldDefinition,
+    ItemTransferPolicy, PlayerAction, RoomDefinition, RuntimeItemLocation, SessionId, TradeAction,
+    World, WorldDefinition,
 };
 
 const ITEM_COUNT: usize = 3;
@@ -283,6 +283,94 @@ fn generated_give_sequences_preserve_single_ownership_and_unbound_transferables(
                     .runtime_item_owner_ids()
                     .iter()
                     .all(|owner| matches!(owner, CharacterId(1) | CharacterId(2)))
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_trade_sequences_preserve_reservations_and_single_settlement() {
+    for case in 1..=32_u64 {
+        let (mut world, first) = property_world();
+        let second = SessionId(2);
+        world
+            .connect(
+                second,
+                CharacterSnapshot {
+                    id: CharacterId(2),
+                    account_id: AccountId(2),
+                    name: "Receiver".into(),
+                    room_id: "property:market".into(),
+                    item_locations: Default::default(),
+                },
+            )
+            .unwrap();
+        let _ = world.apply(first, PlayerAction::Take("sword".into()));
+        let mut seed = case.wrapping_mul(0xa076_1d64_78bd_642f);
+        for _step in 0..96 {
+            let session = if next_random(&mut seed).is_multiple_of(2) {
+                first
+            } else {
+                second
+            };
+            let action = match next_random(&mut seed) % 9 {
+                0 => PlayerAction::Trade(TradeAction::Request(if session == first {
+                    "Receiver".into()
+                } else {
+                    "Invariant".into()
+                })),
+                1 => PlayerAction::Trade(TradeAction::Accept),
+                2 => PlayerAction::Trade(TradeAction::OfferItem("sword".into())),
+                3 => PlayerAction::Trade(TradeAction::Cancel),
+                4 => PlayerAction::Drop("sword".into()),
+                5 => PlayerAction::Take("sword".into()),
+                6 => PlayerAction::Give {
+                    selection: "sword".into(),
+                    recipient: if session == first {
+                        "Receiver".into()
+                    } else {
+                        "Invariant".into()
+                    },
+                },
+                7 => PlayerAction::Trade(TradeAction::Status),
+                _ => {
+                    let revision = world
+                        .player_state_view(session)
+                        .ok()
+                        .and_then(|view| view.trade.map(|trade| trade.state_revision))
+                        .unwrap_or(1);
+                    PlayerAction::Trade(TradeAction::Confirm {
+                        state_revision: revision,
+                    })
+                }
+            };
+            let _ = world.apply(session, action);
+
+            let runtime = world.runtime_snapshot();
+            assert!(runtime.trades.len() <= 1);
+            assert!(runtime.next_trade_id.0 > 0);
+            let reserved = world.reserved_item_ids().unwrap();
+            for item_id in reserved {
+                assert!(matches!(
+                    runtime
+                        .item_instances
+                        .get(&item_id)
+                        .map(|item| &item.location),
+                    Some(RuntimeItemLocation::Carried { .. })
+                        | Some(RuntimeItemLocation::Contained { .. })
+                ));
+            }
+            for (id, connected) in [(CharacterId(1), first), (CharacterId(2), second)] {
+                assert!(
+                    world.spendable_coins(id).unwrap()
+                        <= world.character_gameplay_snapshot(connected).unwrap().coins
+                );
+            }
+            assert!(
+                runtime
+                    .item_instances
+                    .values()
+                    .all(|instance| instance.binding == ItemBinding::Unbound)
             );
         }
     }

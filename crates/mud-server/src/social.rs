@@ -85,6 +85,7 @@ pub struct AppliedSocial {
     pub outcome: SocialOutcome,
     pub deliveries: Vec<PlannedSocialDelivery>,
     pub authority_update: Option<AccountId>,
+    pub disconnects: Vec<(SessionId, CharacterId)>,
 }
 
 impl SocialRuntime {
@@ -137,6 +138,7 @@ pub async fn apply_social(
     let actor = world.character_snapshot(session)?;
     let mut deliveries = Vec::new();
     let mut authority_update = None;
+    let mut disconnects = Vec::new();
     let outcome = match action {
         SocialAction::Say(message) => {
             let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
@@ -408,7 +410,6 @@ pub async fn apply_social(
             reason,
         } => {
             apply_moderation(
-                runtime,
                 world,
                 store,
                 actor.id,
@@ -417,6 +418,7 @@ pub async fn apply_social(
                 duration_seconds,
                 reason,
                 false,
+                &mut disconnects,
             )
             .await
         }
@@ -426,7 +428,6 @@ pub async fn apply_social(
             reason,
         } => {
             apply_moderation(
-                runtime,
                 world,
                 store,
                 actor.id,
@@ -435,6 +436,7 @@ pub async fn apply_social(
                 duration_seconds,
                 reason,
                 true,
+                &mut disconnects,
             )
             .await
         }
@@ -475,6 +477,7 @@ pub async fn apply_social(
         outcome,
         deliveries,
         authority_update,
+        disconnects,
     })
 }
 
@@ -497,7 +500,6 @@ async fn change_relation(
 
 #[allow(clippy::too_many_arguments)]
 async fn apply_moderation(
-    runtime: &mut SocialRuntime,
     world: &mut World,
     store: &dyn CharacterStore,
     actor: CharacterId,
@@ -506,6 +508,7 @@ async fn apply_moderation(
     duration_seconds: Option<u64>,
     reason: String,
     is_ban: bool,
+    disconnects: &mut Vec<(SessionId, CharacterId)>,
 ) -> Result<SocialOutcome, GameError> {
     let reason = normalise_text(&reason, MAX_SOCIAL_REASON_BYTES)?;
     let expires_at = moderation_expiry(duration_seconds)?;
@@ -527,8 +530,7 @@ async fn apply_moderation(
     if is_ban {
         for connected in world.connected_characters()? {
             if connected.account_id == target.account_id {
-                runtime.disconnected(connected.character_id);
-                world.disconnect(connected.session_id);
+                disconnects.push((connected.session_id, connected.character_id));
             }
         }
     }
@@ -732,12 +734,21 @@ fn help_text(topic: Option<&str>) -> String {
             "Safety: ignore/unignore, block/unblock and report <name> <reason>.\r\n"
         )
         .to_owned(),
-        Some(_) => "No help entry matches that topic. Try: help social.\r\n".to_owned(),
+        Some(topic) if topic.eq_ignore_ascii_case("trade") => concat!(
+            "Trade: trade request <name>, trade accept, trade decline, trade status or trade cancel.\r\n",
+            "Offer: trade offer item [quantity] <item>, trade remove item <item>, ",
+            "trade offer coins <amount>.\r\n",
+            "Review offered containers with trade contents <container> [page], then ",
+            "trade confirm <state-revision>. Both participants must confirm the same revision.\r\n"
+        )
+        .to_owned(),
+        Some(_) => "No help entry matches that topic. Try: help social or help trade.\r\n".to_owned(),
         None => concat!(
             "Movement: north/east/south/west/up/down, look.\r\n",
-            "Items: inventory, take/drop [quantity], contents, put/get [quantity], examine, use, equip, unequip.\r\n",
+            "Items: inventory, take/drop/give [quantity], contents, put/get [quantity], examine, use, equip, unequip.\r\n",
+            "Trade: request, offer, review and double-confirm a same-room exchange; help trade.\r\n",
             "Social: say, tell, reply, party say, channels, who, ignore, block, report.\r\n",
-            "More: help social.\r\n"
+            "More: help social, help trade.\r\n"
         )
         .to_owned(),
     }
@@ -793,6 +804,21 @@ mod tests {
         assert!(moderation_expiry(Some(60)).unwrap().is_some());
         assert!(moderation_expiry(Some(MAX_MODERATION_DURATION_SECONDS + 1)).is_err());
         assert_eq!(moderation_expiry(None).unwrap(), None);
+    }
+
+    #[test]
+    fn trade_help_is_text_complete() {
+        let help = help_text(Some("trade"));
+        for command in [
+            "trade request",
+            "trade offer item",
+            "trade offer coins",
+            "trade contents",
+            "trade confirm",
+            "trade cancel",
+        ] {
+            assert!(help.contains(command), "missing {command:?} from {help:?}");
+        }
     }
 
     #[test]

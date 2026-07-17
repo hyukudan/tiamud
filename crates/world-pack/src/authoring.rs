@@ -1269,9 +1269,9 @@ pub(crate) fn normalize_legacy_items(value: &mut serde_json::Value) -> Result<()
     let mut item_prototypes = Vec::with_capacity(legacy_items.len());
     let mut initial_instances = Vec::with_capacity(legacy_items.len());
     for item in legacy_items {
-        if !crate::valid_gameplay_identifier(&item.id) {
+        if !crate::valid_item_instance_identifier(&item.id) {
             return Err(format!(
-                "legacy item id {:?} must contain 1..=128 lowercase namespaced identifier bytes",
+                "legacy item id {:?} must be a canonical runtime id or contain 1..=128 lowercase namespaced identifier bytes",
                 item.id
             ));
         }

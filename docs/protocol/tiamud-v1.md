@@ -139,10 +139,10 @@ cannot displace an accepted command result.
 ### Additive v1 rollout policy
 
 `tiamud.v1` aún no ha alcanzado su primer hito de compatibilidad ni se ha usado
-en producción pública. Durante este intervalo de prelanzamiento, la fase 3C
+en producción pública. Durante este intervalo de prelanzamiento, la fase 3D
 sustituye deliberadamente el contrato fuente de forma incompatible: el servidor
 y el cliente oficial deben proceder del mismo checkout. No existe una capacidad
-negociada que haga compatible un cliente anterior con los campos o enums de 3C,
+negociada que haga compatible un cliente anterior con los campos o enums de 3D,
 y no debe afirmarse esa compatibilidad.
 
 La política aditiva siguiente será vinculante a partir del primer hito explícito
@@ -277,6 +277,8 @@ moderation.role
 staff.status, staff.reports, staff.report.resolve,
 staff.inspect, staff.where, staff.goto, staff.transfer, staff.restore,
 staff.announce, staff.audit, staff.profile.set, staff.capability.set
+trade.request, trade.accept, trade.decline, trade.item.set, trade.item.remove,
+trade.coins.set, trade.contents, trade.confirm, trade.status, trade.cancel
 ```
 
 Según la acción, el payload estricto también puede contener `message`,
@@ -339,6 +341,34 @@ reejecutar; cambiar cualquiera de esos valores con el mismo ID es un error de
 protocolo. Los selectores opacos pertenecen a la sesión que los creó; la caché
 continúa indexada por personaje/`requestId` y solo puede reproducir la misma
 firma exacta según las reglas generales descritas más abajo.
+
+El intercambio confirmado usa estas formas cerradas; todo selector es opaco y
+pertenece a la sesión que lo proyectó:
+
+| Acción | Campos exactos adicionales |
+| --- | --- |
+| `trade.request` | `recipient` |
+| `trade.accept` | `tradeId` |
+| `trade.decline` | `tradeId` |
+| `trade.item.set` | `tradeId`, `target`, `quantity` |
+| `trade.item.remove` | `tradeId`, `target` |
+| `trade.coins.set` | `tradeId`, `coins` |
+| `trade.contents` | `tradeId`, `target`, `page` |
+| `trade.confirm` | `tradeId`, `stateRevision` |
+| `trade.status` | `tradeId` |
+| `trade.cancel` | `tradeId` |
+
+`quantity` vale `1..=128`, `coins` `0..=1.000.000.000`, `page` es positivo y
+`stateRevision` debe ser la revisión positiva exacta vista. La solicitud exige
+un receptor opaco conectado y cercano; las demás acciones exigen el trade
+opaco privado. Todos los campos forman parte de la firma de deduplicación.
+Repetir una asignación idéntica o una confirmación ya registrada por la misma
+identidad es un no-op; cambiar la firma bajo el mismo `requestId` se rechaza.
+
+Los comandos equivalentes son `trade request`, `trade accept|decline|status|cancel`,
+`trade offer item [cantidad]`, `trade remove item`, `trade offer coins`,
+`trade contents` y `trade confirm <revisión>`. El texto describe el estado sin
+depender de Web ni GMCP.
 
 Los equivalentes de texto usan `party say` (`gsay`/`gtell`), `party revoke`,
 `party kick`, `party transfer`, `party disband`, `reply`, `channel(s)`,
@@ -451,6 +481,7 @@ traffic.
 | `vitals.update` | Complete current character sheet/vitals/resources/abilities fragment. |
 | `inventory.patch` | Complete current inventory/equipment fragment. |
 | `container.contents` | Página autorizada de hasta 20 grupos hijos directos, con capacidad del contenedor. |
+| `trade.contents` | Página privada autorizada de hasta 20 grupos hijos directos de un contenedor ofrecido. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
 | `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `party`, `general`, `newbie` o `staff`. |
@@ -765,7 +796,11 @@ The rest of the snapshot contains:
 - `map`: opaque current/known room IDs and known/unknown paths;
 - `quests`: stable public content slug, description, status/progress/actions;
 - optional `party` and `partyInvites`, with opaque character IDs;
-- `economy`: coin, commodity slugs/quantities and available shop stock/actions;
+- `economy`: `coins`, `reservedCoins`, `spendableCoins`, commodity
+  slugs/quantities and available shop stock/actions;
+- optional `trade`: one private requested/negotiating trade with opaque ID and
+  counterparty, ticks remaining, revision, both confirmation flags, both
+  bounded offers and `canAccept`/`canConfirm`;
 - `social.online`: ID opaco, nombre visible y booleanos `selfCharacter` y
   `nearby`. `nearby` solo ayuda a construir selectores de receptor; el servidor
   vuelve a comprobar conexión y sala al ejecutar.
@@ -800,6 +835,14 @@ ubicación o miembros. `container.contents` contiene `container`, `page`,
 `totalPages`, `capacity` e `items`; cada página incluye como máximo veinte
 grupos y debe caber en el límite normal de 16 KiB.
 
+En inventario, `availableQuantity` y `reservedForTrade` separan unidades
+mutables de las reservadas y `canTrade` solo propone raíces completamente
+transferibles no bloqueadas. La oferta proyecta líneas agrupadas con selector,
+etiqueta, cantidad y marca de contenedor, sin `ItemInstanceId`, prototipo ni
+participante durable. `trade.contents` contiene `tradeId`, `container`, `page`,
+`totalPages`, `capacity` e `items`. La vista y cada selector se regeneran con
+la sal de la sesión; la contraparte no recibe IDs internos ni política social.
+
 Cada objeto incluye obligatoriamente `transferPolicy`, con valor
 `transferable`, `character_bound` o `non_transferable`, y el booleano
 `boundToYou`. Este último solo puede ser verdadero para `character_bound` y
@@ -812,8 +855,11 @@ incompleta, decide si el cliente ofrece `Give`.
 
 En GMCP, `Char.Items.List` proyecta `transferPolicy` y `boundToYou` para
 `location: "inv"`, `"worn"` y `"container"`. Inventario y contenedor incluyen
-también `canGive`; en contenedor siempre es falso. Cada regeneración usa la sal
-de la sesión Telnet y no transporta vínculo o propietario durable.
+también `canGive`; inventario añade disponibilidad/reserva y `canTrade`, y en
+contenedor entrega/trade siempre son falsos. `Char.Trade 1` y
+`Char.Trade.Contents` proyectan el mismo estado privado y los mismos fallbacks
+acotados que el texto. Cada regeneración usa la sal de la sesión Telnet y no
+transporta vínculo, propietario, trade ni instancia durables.
 
 `vitals.update`, `inventory.patch` and `map.snapshot` replace their complete
 corresponding fragment at the stated revision. Other player changes use a new
@@ -823,7 +869,8 @@ keep recovery deterministic under output coalescing.
 ## Narrativa, conversación y medios
 
 `message.append.data` contiene `revision`, `kind` (`characterMoved`,
-`itemTaken`, `itemDropped`, `itemGiven`, `gameplay` o `adventure`), texto seguro,
+`itemTaken`, `itemDropped`, `itemGiven`, `tradeRequested`, `tradeChanged`,
+`tradeCompleted`, `tradeCancelled`, `gameplay` o `adventure`), texto seguro,
 `actorId` opaco y `targetId`/`itemId` opacos opcionales. Se proyecta por separado
 para cada observador; no percibir un evento de dominio significa no recibir
 mensaje.
@@ -835,6 +882,12 @@ identidad durable de pila. Otro observador de la misma sala recibe la narración
 y los personajes opacos, pero no `itemId`; un observador remoto no recibe el
 evento. El evento durable `ItemsGiven` conserva como máximo 256 IDs de raíces
 internos, nunca expuestos por este mensaje.
+
+Solicitud, cambio, confirmación y cancelación de trade solo producen narrativa
+para sus dos participantes; `tradeCompleted` añade una narración genérica para
+observadores de la misma sala. Ningún mensaje expone ofertas, cantidades,
+moneda, motivo social, `TradeId` o IDs de instancia. La ficha privada y las
+actualizaciones de inventario/economía llevan el estado autoritativo.
 
 ```json
 {"v":1,"type":"message.append","seq":52,"data":{

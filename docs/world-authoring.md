@@ -362,6 +362,8 @@ InitialItemInstance
 Invariantes:
 
 - cada instancia referencia exactamente un prototipo;
+- cada ID de instancia authored ocupa 1..=128 bytes y usa la gramática cerrada
+  de identificadores gameplay; los IDs runtime son `runtime:<u64-canónico>`;
 - cada instancia tiene una sola ubicación;
 - un prototipo no tiene ubicación;
 - dos instancias pueden compartir prototipo, nunca identidad;
@@ -453,8 +455,11 @@ receptor o block bilateral. Todo el lote de 1..=256 raíces se confirma con una
 sola mutación y commit; `canGive` y las acciones proyectadas solo ayudan a la
 interfaz, nunca sustituyen esta autorización del servidor.
 
-La fase 3C no implementa intercambio confirmado, entrega offline/remota,
-afijos, elegibilidad o reparto, procedencia de drops ni tablas aleatorias.
+La fase 3D implementa intercambio confirmado como estado runtime, no como
+autoría del WorldPack. Solo reserva raíces `Carried` cuyo subárbol completo es
+`transferable`; no añade campos de trade, escrow ni propietario a
+`ItemPrototype` o `InitialItemInstance`. Siguen ausentes entrega offline/remota,
+afijos, elegibilidad o reparto, procedencia de drops y tablas aleatorias.
 
 ## Composición, validación y digest
 
@@ -507,6 +512,7 @@ Límites principales:
 | Ruta relativa | 4096 bytes |
 | Prototipos de objeto por WorldPack | 1.024 |
 | Instancias iniciales por WorldPack | 8.192 |
+| Bytes por ID de instancia | 1..=128 |
 | Aliases por prototipo | 32 |
 | Peso de un prototipo | 0..=1.000.000 g |
 | Coste de slots de un prototipo | 1..=100 |
@@ -552,27 +558,32 @@ validación y revisión humana.
 
 ## Persistencia y evolución del formato
 
-WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v4 define dónde están
-las instancias después de jugar, su `binding` obligatorio y el siguiente
-contador de identidad. El decoder elige primero por `snapshotVersion` y
-compara esa versión original con la columna SQL; las conversiones desde v1, v2
-y v3 usan DTO explícitos, producen `binding: { kind: "unbound" }` y fallan
-cerradas ante campos cruzados. En particular, inyectar `binding` en un payload
-v3 no lo convierte en v4. También se rechazan referencias, ciclos, profundidad,
-capacidad, contador, propietario o vínculo inválidos. Al restaurar un
+WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v5 define dónde están
+las instancias después de jugar, su `binding` obligatorio, los contadores de
+identidad y las reservas de trade. El decoder elige primero por
+`snapshotVersion` y compara esa versión original con la columna SQL; las
+conversiones desde v1, v2 y v3 usan DTO explícitos y producen
+`binding: { kind: "unbound" }`; v4 produce `nextTradeId: 1` y `trades: {}`.
+Todas fallan cerradas ante campos cruzados. En particular, inyectar `binding`
+en v3 o campos de trade en v4 no adelanta su versión. También se rechazan
+referencias, ciclos, profundidad, capacidad, contador, propietario, vínculo,
+participante o reserva inválidos. Al restaurar un
 snapshot anterior, las instancias iniciales nuevas del WorldPack se conservan y
 el estado durable se superpone; una instancia creada en runtime que no figure
 en el snapshot no reaparece. Antes de abrir listeners se validan por lotes los
 propietarios de objetos siguiendo padres `Contained` hasta la raíz y todos los
 `CharacterId` ligados, incluidos los de objetos consumidos. Se comprueban sus
 fichas, equipos, el grafo, los vínculos y la capacidad, incluidos personajes
-desconectados, y esos agregados temporales no quedan en el mundo activo.
+desconectados. Los participantes de trade que no sean ya propietarios se
+cargan con un presupuesto adicional cerrado; después se validan y cancelan
+todas las reservas restauradas antes de readiness. Esos agregados temporales
+no quedan en el mundo activo.
 El runtime admite hasta 65.536 instancias; tanto el snapshot como la suma de
 fichas inspeccionadas en esa barrera están limitados a 1 MiB, y cada ficha a
 64 KiB. SQLite y
 PostgreSQL guardan ese snapshot acotado como `TEXT` opaco dentro de la
-transacción existente de esquema v10. No hay tabla espejo, doble escritura ni
-esquema v11.
+transacción existente de esquema v10. No hay tabla espejo/escrow, doble
+escritura ni esquema v11.
 
 Tras una futura release estable, renombrar un ID requerirá alias, tombstone o
 migración explícita. Nunca recicles un ID publicado para otro significado.

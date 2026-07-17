@@ -656,7 +656,9 @@ fn validate_runtime_snapshot(connection: &Connection, path: &Path) -> Result<(),
     }
     let version =
         u32::try_from(version).map_err(|_| AdminError::InvalidRuntimeSnapshot(path.to_owned()))?;
-    tiamud_core::decode_world_runtime_snapshot(version, &json)
+    let snapshot = tiamud_core::decode_world_runtime_snapshot(version, &json)
+        .map_err(|_| AdminError::InvalidRuntimeSnapshot(path.to_owned()))?;
+    tiamud_core::validate_world_runtime_snapshot_semantics(&snapshot)
         .map_err(|_| AdminError::InvalidRuntimeSnapshot(path.to_owned()))?;
     Ok(())
 }
@@ -803,8 +805,8 @@ mod tests {
     }
 
     #[test]
-    fn check_accepts_strict_v3_and_v4_runtime_snapshots() {
-        for (case, snapshot_version) in [("v3", 3_i64), ("v4", 4_i64)] {
+    fn check_accepts_strict_v3_v4_and_v5_runtime_snapshots() {
+        for (case, snapshot_version) in [("v3", 3_i64), ("v4", 4_i64), ("v5", 5_i64)] {
             let temporary = TempDir::new().unwrap();
             let database = temporary.path().join(format!("tiamud-{case}.sqlite3"));
             let world = temporary.path().join("world.json");
@@ -815,6 +817,8 @@ mod tests {
                 let mut runtime =
                     serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
                 runtime["snapshotVersion"] = serde_json::json!(3);
+                runtime.as_object_mut().unwrap().remove("nextTradeId");
+                runtime.as_object_mut().unwrap().remove("trades");
                 for item in runtime["itemInstances"]
                     .as_object_mut()
                     .unwrap()
@@ -822,6 +826,13 @@ mod tests {
                 {
                     item.as_object_mut().unwrap().remove("binding");
                 }
+                runtime.to_string()
+            } else if snapshot_version == 4 {
+                let mut runtime =
+                    serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
+                runtime["snapshotVersion"] = serde_json::json!(4);
+                runtime.as_object_mut().unwrap().remove("nextTradeId");
+                runtime.as_object_mut().unwrap().remove("trades");
                 runtime.to_string()
             } else {
                 let mut runtime = tiamud_core::World::demo().runtime_snapshot();
@@ -854,6 +865,94 @@ mod tests {
     }
 
     #[test]
+    fn check_rejects_deserializable_v5_trade_invariant_violations() {
+        let mut zero_next_trade = tiamud_core::World::demo().runtime_snapshot();
+        zero_next_trade.next_trade_id = tiamud_core::TradeId(0);
+
+        let mut invalid_offer = tiamud_core::World::demo().runtime_snapshot();
+        let trade_id = tiamud_core::TradeId(1);
+        let requester = tiamud_core::CharacterId(71);
+        let recipient = tiamud_core::CharacterId(72);
+        invalid_offer.next_trade_id = tiamud_core::TradeId(2);
+        invalid_offer.trades.insert(
+            trade_id,
+            tiamud_core::TradeSnapshot {
+                id: trade_id,
+                requester,
+                recipient,
+                room_id: "demo:lantern-square".into(),
+                phase: tiamud_core::TradePhase::Requested,
+                created_tick: invalid_offer.logical_tick,
+                opened_tick: None,
+                expires_at_tick: invalid_offer.logical_tick + tiamud_core::TRADE_REQUEST_TICKS,
+                state_revision: 1,
+                offers: std::collections::BTreeMap::from([(
+                    requester,
+                    tiamud_core::TradeOffer::default(),
+                )]),
+                confirmations: std::collections::BTreeMap::new(),
+            },
+        );
+
+        for (case, runtime) in [
+            ("zero-next-trade", zero_next_trade),
+            ("invalid-offer", invalid_offer),
+        ] {
+            let temporary = TempDir::new().unwrap();
+            let database = temporary.path().join(format!("{case}.sqlite3"));
+            let world = temporary.path().join("world.json");
+            create_database(&database);
+            let mut connection = Connection::open(&database).unwrap();
+            migrate_schema(&mut connection).unwrap();
+            let json = serde_json::to_string(&runtime).unwrap();
+            serde_json::from_str::<tiamud_core::WorldRuntimeSnapshot>(&json).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO world_runtime
+                         (singleton, snapshot_version, snapshot_json, updated_at)
+                     VALUES (1, 5, ?1, unixepoch())",
+                    [json],
+                )
+                .unwrap();
+            drop(connection);
+            create_world_pack(&world);
+
+            assert!(matches!(
+                check(&database, &world),
+                Err(AdminError::InvalidRuntimeSnapshot(path)) if path == database
+            ));
+        }
+    }
+
+    #[test]
+    fn check_rejects_trade_fields_smuggled_into_v4() {
+        let temporary = TempDir::new().unwrap();
+        let database = temporary.path().join("tiamud.sqlite3");
+        let world = temporary.path().join("world.json");
+        create_database(&database);
+        let mut connection = Connection::open(&database).unwrap();
+        migrate_schema(&mut connection).unwrap();
+        let mut runtime =
+            serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
+        runtime["snapshotVersion"] = serde_json::json!(4);
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, updated_at)
+                 VALUES (1, 4, ?1, unixepoch())",
+                [runtime.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        create_world_pack(&world);
+
+        assert!(matches!(
+            check(&database, &world),
+            Err(AdminError::InvalidRuntimeSnapshot(path)) if path == database
+        ));
+    }
+
+    #[test]
     fn check_rejects_binding_smuggled_into_v3() {
         let temporary = TempDir::new().unwrap();
         let database = temporary.path().join("tiamud.sqlite3");
@@ -864,6 +963,8 @@ mod tests {
         let mut runtime =
             serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
         runtime["snapshotVersion"] = serde_json::json!(3);
+        runtime.as_object_mut().unwrap().remove("nextTradeId");
+        runtime.as_object_mut().unwrap().remove("trades");
         let item_id = runtime["itemInstances"]
             .as_object()
             .unwrap()
