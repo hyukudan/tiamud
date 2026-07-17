@@ -1,7 +1,7 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -24,10 +24,15 @@ use tiamud_editorial_ai::{
 };
 use world_pack::{
     AreaCatalog, AreaCatalogError, CompositionError, ConditionContext, DocumentToolError,
-    MAX_AREA_COUNT, MAX_TOTAL_AREA_BYTES, PreviewFormat, TimePeriod, Weather, WorldPack,
+    LocalAreaGeneration, LocalAreaRegistryError, PreviewFormat, TimePeriod, Weather, WorldPack,
     WorldPackDiagnostic, WorldPackDocument, build_area_release, compose_world_project,
-    parse_area_catalog, parse_area_release_manifest, verify_area_release,
+    local_area_bundle_path, local_area_catalog_path, local_area_world_path,
+    parse_area_release_manifest, read_bounded_local_registry_file,
+    read_bounded_regular_file as read_bounded_local_file, verify_area_release,
+    verify_existing_registry_directory,
 };
+#[cfg(test)]
+use world_pack::{MAX_TOTAL_AREA_BYTES, parse_area_catalog};
 
 const MAX_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_AREA_RELEASE_INPUT_BYTES: usize = 256 * 1024;
@@ -1336,80 +1341,34 @@ fn load_verified_area_catalog(
     catalog_path: &Path,
     registry: &Path,
 ) -> Result<(AreaCatalog, String), CliError> {
-    let catalog_bytes = read_bounded_registry_file(
-        registry,
-        catalog_path,
-        MAX_AREA_CATALOG_INPUT_BYTES,
-        "area catalog",
-    )?;
-    let catalog_digest = sha256_hex(&catalog_bytes);
-    let catalog = parse_area_catalog(&catalog_bytes)?;
-    preflight_area_catalog_read_budget(&catalog)?;
-    let expected_catalog_path =
-        area_catalog_blob_path(registry, &catalog.world_id, &catalog_digest);
-    if catalog_path != expected_catalog_path {
-        return Err(CliError::InvalidAreaRegistry(
-            "catalog path is not its exact content-addressed registry path".into(),
-        ));
-    }
-
-    let world_path =
-        area_world_blob_path(registry, &catalog.world_id, &catalog.world_artifact_sha256);
-    let world_artifact = read_bounded_registry_file(
-        registry,
-        &world_path,
-        MAX_AREA_WORLD_INPUT_BYTES,
-        "monolithic WorldPack fallback",
-    )?;
-    let mut bundles = BTreeMap::new();
-    for entry in &catalog.entries {
-        let path = area_bundle_blob_path(
-            registry,
-            &catalog.world_id,
-            &entry.area_id,
-            &entry.bundle_sha256,
-        );
-        let bytes = read_bounded_registry_file(
-            registry,
-            &path,
-            MAX_AREA_BUNDLE_INPUT_BYTES,
-            "area bundle",
-        )?;
-        if bundles.insert(entry.area_id.clone(), bytes).is_some() {
-            return Err(CliError::InvalidAreaRegistry(format!(
-                "duplicate area {:?} in catalog",
-                entry.area_id
-            )));
-        }
-    }
-    verify_area_release(&catalog, &bundles, &world_artifact)?;
-    Ok((catalog, catalog_digest))
+    let generation = LocalAreaGeneration::open_exact(registry, catalog_path)
+        .map_err(map_local_area_registry_error)?;
+    generation
+        .verify_complete_release()
+        .map_err(map_local_area_registry_error)?;
+    Ok((
+        generation.catalog().clone(),
+        generation.generation_id().to_owned(),
+    ))
 }
 
-fn preflight_area_catalog_read_budget(catalog: &AreaCatalog) -> Result<(), CliError> {
-    if catalog.entries.is_empty() || catalog.entries.len() > MAX_AREA_COUNT {
-        return Err(CliError::InvalidAreaRegistry(format!(
-            "area catalog must contain between 1 and {MAX_AREA_COUNT} bundle entries"
-        )));
+fn map_local_area_registry_error(error: LocalAreaRegistryError) -> CliError {
+    match error {
+        LocalAreaRegistryError::Inspect { path, source } => CliError::Inspect { path, source },
+        LocalAreaRegistryError::Read { path, source } => CliError::Read { path, source },
+        LocalAreaRegistryError::TooLarge {
+            path,
+            size,
+            maximum,
+            ..
+        } => CliError::TooLarge {
+            path,
+            size,
+            maximum,
+        },
+        LocalAreaRegistryError::Invalid(reason) => CliError::InvalidAreaRegistry(reason),
+        LocalAreaRegistryError::Catalog(error) => CliError::AreaCatalog(error),
     }
-    let mut total = 0_u64;
-    for entry in &catalog.entries {
-        if entry.stored_bytes == 0 || entry.stored_bytes > MAX_AREA_BUNDLE_INPUT_BYTES as u64 {
-            return Err(CliError::InvalidAreaRegistry(format!(
-                "area bundle {:?} declares an invalid stored byte size",
-                entry.area_id
-            )));
-        }
-        total = total.checked_add(entry.stored_bytes).ok_or_else(|| {
-            CliError::InvalidAreaRegistry("area bundle byte sum overflows".into())
-        })?;
-        if total > MAX_TOTAL_AREA_BYTES {
-            return Err(CliError::InvalidAreaRegistry(format!(
-                "area bundle set declares {total} stored bytes; the limit is {MAX_TOTAL_AREA_BYTES} bytes"
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn activate_area_catalog(
@@ -1467,25 +1426,15 @@ fn activate_area_catalog(
 }
 
 fn area_catalog_blob_path(registry: &Path, world_id: &str, digest: &str) -> PathBuf {
-    registry
-        .join("area-catalogs")
-        .join(world_storage_id(world_id))
-        .join(format!("{digest}.catalog.json"))
+    local_area_catalog_path(registry, world_id, digest)
 }
 
 fn area_bundle_blob_path(registry: &Path, world_id: &str, area_id: &str, digest: &str) -> PathBuf {
-    registry
-        .join("area-bundles")
-        .join(world_storage_id(world_id))
-        .join(area_storage_id(area_id))
-        .join(format!("{digest}.area.json"))
+    local_area_bundle_path(registry, world_id, area_id, digest)
 }
 
 fn area_world_blob_path(registry: &Path, world_id: &str, digest: &str) -> PathBuf {
-    registry
-        .join("area-worlds")
-        .join(world_storage_id(world_id))
-        .join(format!("{digest}.world.json"))
+    local_area_world_path(registry, world_id, digest)
 }
 
 fn active_area_catalog_path(registry: &Path, world_id: &str) -> PathBuf {
@@ -1560,10 +1509,6 @@ fn open_area_publication_lock(registry: &Path, path: &Path) -> Result<fs::File, 
             source,
         }),
     }
-}
-
-fn area_storage_id(area_id: &str) -> String {
-    sha256_hex(area_id.as_bytes())
 }
 
 fn write_immutable_area_blob(
@@ -1694,62 +1639,12 @@ fn read_bounded_registry_file(
     maximum: usize,
     kind: &'static str,
 ) -> Result<Vec<u8>, CliError> {
-    if !path.starts_with(registry) {
-        return Err(CliError::InvalidAreaRegistry(format!(
-            "{kind} path escapes its configured registry"
-        )));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| CliError::InvalidAreaRegistry(format!("{kind} has no parent")))?;
-    ensure_existing_registry_directory(registry, parent)?;
-    read_bounded_regular_file(path, maximum, kind)
+    read_bounded_local_registry_file(registry, path, maximum, kind)
+        .map_err(map_local_area_registry_error)
 }
 
 fn ensure_existing_registry_directory(registry: &Path, directory: &Path) -> Result<(), CliError> {
-    if !directory.starts_with(registry) {
-        return Err(CliError::InvalidAreaRegistry(
-            "registry read path escapes its configured root".into(),
-        ));
-    }
-    ensure_existing_directory_without_symlink(registry)?;
-    let relative = directory.strip_prefix(registry).map_err(|_| {
-        CliError::InvalidAreaRegistry("registry read path escapes its configured root".into())
-    })?;
-    let mut current = registry.to_owned();
-    for component in relative.components() {
-        let std::path::Component::Normal(component) = component else {
-            return Err(CliError::InvalidAreaRegistry(
-                "registry read path contains a traversal component".into(),
-            ));
-        };
-        current.push(component);
-        let metadata = fs::symlink_metadata(&current).map_err(|source| CliError::Read {
-            path: current.clone(),
-            source,
-        })?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            return Err(CliError::InvalidAreaRegistry(format!(
-                "registry component {:?} is not a real directory",
-                current
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_existing_directory_without_symlink(path: &Path) -> Result<(), CliError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| CliError::Read {
-        path: path.to_owned(),
-        source,
-    })?;
-    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-        Ok(())
-    } else {
-        Err(CliError::InvalidAreaRegistry(format!(
-            "registry component {path:?} is not a real directory"
-        )))
-    }
+    verify_existing_registry_directory(registry, directory).map_err(map_local_area_registry_error)
 }
 
 fn sync_existing_registry_file(
@@ -1807,63 +1702,7 @@ fn read_bounded_regular_file(
     maximum: usize,
     kind: &'static str,
 ) -> Result<Vec<u8>, CliError> {
-    let before = fs::symlink_metadata(path).map_err(|source| CliError::Read {
-        path: path.to_owned(),
-        source,
-    })?;
-    if before.file_type().is_symlink() || !before.file_type().is_file() {
-        return Err(CliError::InvalidAreaRegistry(format!(
-            "{kind} is not a regular non-symlink file"
-        )));
-    }
-    if before.len() > maximum as u64 {
-        return Err(CliError::TooLarge {
-            path: path.to_owned(),
-            size: before.len(),
-            maximum: maximum as u64,
-        });
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|source| CliError::Read {
-            path: path.to_owned(),
-            source,
-        })?;
-    let opened = file.metadata().map_err(|source| CliError::Read {
-        path: path.to_owned(),
-        source,
-    })?;
-    if !opened.file_type().is_file() || opened.len() > maximum as u64 {
-        return Err(CliError::InvalidAreaRegistry(format!(
-            "{kind} changed while it was opened"
-        )));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if before.dev() != opened.dev() || before.ino() != opened.ino() {
-            return Err(CliError::InvalidAreaRegistry(format!(
-                "{kind} changed while it was opened"
-            )));
-        }
-    }
-    let mut bytes = Vec::with_capacity(opened.len() as usize);
-    Read::by_ref(&mut file)
-        .take((maximum + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|source| CliError::Read {
-            path: path.to_owned(),
-            source,
-        })?;
-    if bytes.len() > maximum {
-        return Err(CliError::TooLarge {
-            path: path.to_owned(),
-            size: bytes.len() as u64,
-            maximum: maximum as u64,
-        });
-    }
-    Ok(bytes)
+    read_bounded_local_file(path, maximum, kind).map_err(map_local_area_registry_error)
 }
 
 fn registry_relative_path(registry: &Path, path: &Path) -> Result<String, CliError> {

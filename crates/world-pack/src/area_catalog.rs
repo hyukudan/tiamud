@@ -446,6 +446,64 @@ pub fn verify_area_release(
     bundles: &BTreeMap<String, Vec<u8>>,
     world_artifact: &[u8],
 ) -> Result<(), AreaCatalogError> {
+    let document = verify_area_catalog_fallback(catalog, world_artifact)?;
+    if bundles.len() != catalog.entries.len() {
+        return Err(AreaCatalogError::Invalid(
+            "bundle set does not exactly match catalog entries".into(),
+        ));
+    }
+    let mut packs = Vec::with_capacity(catalog.entries.len());
+    let mut total_bundle_bytes = 0usize;
+    for entry in &catalog.entries {
+        let bytes = bundles
+            .get(&entry.area_id)
+            .ok_or_else(|| AreaCatalogError::MissingBundle(entry.area_id.clone()))?;
+        total_bundle_bytes = total_bundle_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| AreaCatalogError::Invalid("bundle byte sum overflow".into()))?;
+        if total_bundle_bytes > crate::MAX_TOTAL_AREA_BYTES as usize {
+            return Err(AreaCatalogError::TooLarge {
+                kind: "area bundle set",
+                size: total_bundle_bytes,
+                maximum: crate::MAX_TOTAL_AREA_BYTES as usize,
+            });
+        }
+        let bundle = verify_area_bundle_against_catalog(catalog, &document, entry, bytes)?;
+        packs.push(bundle.area_pack);
+    }
+    // The compiled projections prove what a future area runtime would load,
+    // but the embedded raw AreaPack is also a reviewed publication
+    // surface. Prove that every authored domain in those packs is exactly the
+    // content from which the monolithic fallback was composed. Without this
+    // check a self-consistent catalog could retain the expected compiled area
+    // while smuggling different room prose, progression, media or tests in its
+    // raw AreaPack copy.
+    verify_monolithic_content(&document, &packs)?;
+    let references = cross_area_references_for_packs(&packs);
+    validate_declared_dependencies(&packs, &references)?;
+    let mut expected_entries = catalog.entries.clone();
+    for entry in &mut expected_entries {
+        entry.hard_dependencies.clear();
+        entry.portals.clear();
+    }
+    attach_runtime_relationships(&mut expected_entries, &references, &packs)?;
+    for (actual, expected) in catalog.entries.iter().zip(expected_entries.iter()) {
+        if actual.portals != expected.portals
+            || actual.hard_dependencies != expected.hard_dependencies
+        {
+            return Err(AreaCatalogError::Invalid(format!(
+                "runtime relationship mismatch for area {:?}",
+                actual.area_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_area_catalog_fallback(
+    catalog: &AreaCatalog,
+    world_artifact: &[u8],
+) -> Result<crate::WorldPackDocument, AreaCatalogError> {
     validate_catalog_header(catalog)?;
     if world_artifact.len() as u64 != catalog.world_artifact_bytes
         || sha256_hex(world_artifact) != catalog.world_artifact_sha256
@@ -477,14 +535,96 @@ pub fn verify_area_release(
             "monolithic WorldPack identity/start room mismatch".into(),
         ));
     }
-    if bundles.len() != catalog.entries.len() {
-        return Err(AreaCatalogError::Invalid(
-            "bundle set does not exactly match catalog entries".into(),
-        ));
+    validate_catalog_structure(catalog, &document)?;
+    validate_container_materialization_closures(catalog, &document)?;
+    Ok(document)
+}
+
+fn validate_container_materialization_closures(
+    catalog: &AreaCatalog,
+    document: &crate::WorldPackDocument,
+) -> Result<(), AreaCatalogError> {
+    let owners = catalog
+        .entries
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .ownership
+                .initial_item_instances
+                .iter()
+                .map(move |item_id| (item_id.as_str(), entry.area_id.as_str()))
+        })
+        .collect::<HashMap<_, _>>();
+    let entries = catalog
+        .entries
+        .iter()
+        .map(|entry| (entry.area_id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    for item in &document.world.initial_item_instances {
+        let crate::InitialItemLocation::Container {
+            container_instance_id,
+        } = &item.location
+        else {
+            continue;
+        };
+        let child_owner = owners.get(item.id.as_str()).copied().ok_or_else(|| {
+            AreaCatalogError::Invalid("container child has no catalog owner".into())
+        })?;
+        let container_owner = owners
+            .get(container_instance_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                AreaCatalogError::Invalid("container instance has no catalog owner".into())
+            })?;
+        if child_owner == container_owner {
+            continue;
+        }
+        let child = entries[child_owner];
+        let container = entries[container_owner];
+        if !child
+            .hard_dependencies
+            .iter()
+            .any(|area| area == container_owner)
+            || !container
+                .hard_dependencies
+                .iter()
+                .any(|area| area == child_owner)
+        {
+            return Err(AreaCatalogError::Invalid(format!(
+                "cross-area container {:?} and child {:?} must share one atomic hard-dependency closure",
+                container_instance_id, item.id
+            )));
+        }
     }
-    let mut packs = Vec::with_capacity(catalog.entries.len());
+    Ok(())
+}
+
+pub(crate) fn verify_area_bundle_against_catalog(
+    catalog: &AreaCatalog,
+    document: &crate::WorldPackDocument,
+    entry: &AreaCatalogEntry,
+    bytes: &[u8],
+) -> Result<AreaBundle, AreaCatalogError> {
+    if bytes.len() as u64 != entry.stored_bytes || sha256_hex(bytes) != entry.bundle_sha256 {
+        return Err(AreaCatalogError::BundleDigest(entry.area_id.clone()));
+    }
+    let bundle = parse_area_bundle(bytes)?;
+    validate_bundle(&bundle, entry, catalog, document)?;
+    if ownership_for_area(&bundle.area_pack) != entry.ownership {
+        return Err(AreaCatalogError::Invalid(format!(
+            "ownership mismatch for area {:?}",
+            entry.area_id
+        )));
+    }
+    verify_single_area_content(document, entry, &bundle.area_pack)?;
+    Ok(bundle)
+}
+
+fn validate_catalog_structure(
+    catalog: &AreaCatalog,
+    document: &crate::WorldPackDocument,
+) -> Result<(), AreaCatalogError> {
     let mut area_ids = HashSet::new();
-    let mut total_bundle_bytes = 0usize;
     for entry in &catalog.entries {
         if !area_ids.insert(entry.area_id.as_str()) {
             return Err(AreaCatalogError::Invalid(format!(
@@ -492,60 +632,12 @@ pub fn verify_area_release(
                 entry.area_id
             )));
         }
-        let bytes = bundles
-            .get(&entry.area_id)
-            .ok_or_else(|| AreaCatalogError::MissingBundle(entry.area_id.clone()))?;
-        if bytes.len() as u64 != entry.stored_bytes || sha256_hex(bytes) != entry.bundle_sha256 {
-            return Err(AreaCatalogError::BundleDigest(entry.area_id.clone()));
-        }
-        total_bundle_bytes = total_bundle_bytes
-            .checked_add(bytes.len())
-            .ok_or_else(|| AreaCatalogError::Invalid("bundle byte sum overflow".into()))?;
-        if total_bundle_bytes > crate::MAX_TOTAL_AREA_BYTES as usize {
-            return Err(AreaCatalogError::TooLarge {
-                kind: "area bundle set",
-                size: total_bundle_bytes,
-                maximum: crate::MAX_TOTAL_AREA_BYTES as usize,
-            });
-        }
-        let bundle = parse_area_bundle(bytes)?;
-        validate_bundle(&bundle, entry, catalog, &document)?;
-        if ownership_for_area(&bundle.area_pack) != entry.ownership {
-            return Err(AreaCatalogError::Invalid(format!(
-                "ownership mismatch for area {:?}",
-                entry.area_id
-            )));
-        }
-        packs.push(bundle.area_pack);
+        validate_catalog_entry(entry)?;
+        validate_ownership_order(entry)?;
     }
-    // The compiled projections prove what a future area runtime would load,
-    // but the embedded raw AreaPack is also a reviewed publication
-    // surface. Prove that every authored domain in those packs is exactly the
-    // content from which the monolithic fallback was composed. Without this
-    // check a self-consistent catalog could retain the expected compiled area
-    // while smuggling different room prose, progression, media or tests in its
-    // raw AreaPack copy.
-    verify_monolithic_content(&document, &packs)?;
-    validate_world_coverage(&document, &catalog.entries)?;
+    validate_world_coverage(document, &catalog.entries)?;
     validate_global_ownership(&catalog.entries)?;
-    let references = cross_area_references_for_packs(&packs);
-    validate_declared_dependencies(&packs, &references)?;
-    let mut expected_entries = catalog.entries.clone();
-    for entry in &mut expected_entries {
-        entry.hard_dependencies.clear();
-        entry.portals.clear();
-    }
-    attach_runtime_relationships(&mut expected_entries, &references, &packs)?;
-    for (actual, expected) in catalog.entries.iter().zip(expected_entries.iter()) {
-        if actual.portals != expected.portals
-            || actual.hard_dependencies != expected.hard_dependencies
-        {
-            return Err(AreaCatalogError::Invalid(format!(
-                "runtime relationship mismatch for area {:?}",
-                actual.area_id
-            )));
-        }
-    }
+    validate_catalog_relationships(catalog)?;
     let owners = catalog
         .entries
         .iter()
@@ -555,6 +647,45 @@ pub fn verify_area_release(
         return Err(AreaCatalogError::Invalid(
             "start room must have exactly one area owner".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_ownership_order(entry: &AreaCatalogEntry) -> Result<(), AreaCatalogError> {
+    for ids in [
+        &entry.ownership.rooms,
+        &entry.ownership.item_prototypes,
+        &entry.ownership.initial_item_instances,
+        &entry.ownership.npc_prototypes,
+        &entry.ownership.npc_spawns,
+        &entry.ownership.loot_tables,
+        &entry.ownership.loot_sources,
+        &entry.ownership.affixes,
+        &entry.ownership.affix_pools,
+        &entry.ownership.archetypes,
+        &entry.ownership.lineages,
+        &entry.ownership.backgrounds,
+        &entry.ownership.base_classes,
+        &entry.ownership.advanced_classes,
+        &entry.ownership.talent_graphs,
+        &entry.ownership.talent_nodes,
+        &entry.ownership.abilities,
+        &entry.ownership.social_emotes,
+        &entry.ownership.npc_ability_sets,
+        &entry.ownership.room_media,
+        &entry.ownership.entity_media,
+        &entry.ownership.room_perception,
+        &entry.ownership.scene_variant_sets,
+        &entry.ownership.scene_variants,
+        &entry.ownership.scripts,
+        &entry.ownership.content_tests,
+    ] {
+        if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(AreaCatalogError::Invalid(format!(
+                "ownership for area {:?} must be strictly sorted",
+                entry.area_id
+            )));
+        }
     }
     Ok(())
 }
@@ -638,12 +769,130 @@ fn validate_catalog_header(catalog: &AreaCatalog) -> Result<(), AreaCatalogError
     Ok(())
 }
 
+fn validate_catalog_entry(entry: &AreaCatalogEntry) -> Result<(), AreaCatalogError> {
+    if !safe_identifier(&entry.area_id)
+        || entry.revision == 0
+        || entry.stored_bytes == 0
+        || entry.stored_bytes > MAX_AREA_BUNDLE_BYTES as u64
+        || entry.expanded_bytes != entry.stored_bytes
+        || entry.estimated_memory_bytes == 0
+        || entry.area_pack_schema_version != AREA_PACK_SCHEMA_VERSION
+        || entry.compatibility.world_pack_schema_version != CURRENT_SCHEMA_VERSION
+        || entry.compatibility.persistent_migration_version != 0
+        || !entry.soft_dependencies.is_empty()
+        || !bounded_text(&entry.content_license, MAX_LICENSE_BYTES)
+        || !bounded_text(&entry.script_license, MAX_LICENSE_BYTES)
+        || entry.content_license != CONTENT_LICENSE
+        || entry.script_license != SCRIPT_LICENSE
+        || !bounded_text(&entry.reviewer, MAX_REVIEWER_BYTES)
+        || !valid_reviewed_at(&entry.reviewed_at)
+        || !bounded_text(&entry.provenance, MAX_PROVENANCE_BYTES)
+        || !valid_digest(&entry.bundle_sha256)
+        || !valid_digest(&entry.source_sha256)
+        || !valid_digest(&entry.compiled_area_sha256)
+        || !strict_content_digests(&entry.asset_manifests)
+        || !strict_content_digests(&entry.lua_modules)
+    {
+        return Err(AreaCatalogError::Invalid(format!(
+            "invalid bounded catalog metadata for area {:?}",
+            entry.area_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_catalog_relationships(catalog: &AreaCatalog) -> Result<(), AreaCatalogError> {
+    let entries = catalog
+        .entries
+        .iter()
+        .map(|entry| (entry.area_id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    for entry in &catalog.entries {
+        if entry
+            .hard_dependencies
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+            || entry.portals.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(AreaCatalogError::Invalid(format!(
+                "runtime relationships for area {:?} must be strictly sorted",
+                entry.area_id
+            )));
+        }
+        for dependency in &entry.hard_dependencies {
+            if dependency == &entry.area_id || !entries.contains_key(dependency.as_str()) {
+                return Err(AreaCatalogError::Invalid(format!(
+                    "invalid hard dependency {dependency:?} for area {:?}",
+                    entry.area_id
+                )));
+            }
+        }
+        for portal in &entry.portals {
+            let Some(peer) = entries.get(portal.peer_area_id.as_str()).copied() else {
+                return Err(AreaCatalogError::Invalid(format!(
+                    "portal from area {:?} names unknown peer {:?}",
+                    entry.area_id, portal.peer_area_id
+                )));
+            };
+            if peer.area_id == entry.area_id
+                || portal.minimum_peer_revision != peer.revision
+                || !safe_identifier(&portal.source_room_id)
+                || !safe_identifier(&portal.target_room_id)
+            {
+                return Err(AreaCatalogError::Invalid(format!(
+                    "invalid portal metadata for area {:?}",
+                    entry.area_id
+                )));
+            }
+            let (source_owner, target_owner) = match portal.direction {
+                AreaPortalDirection::Outgoing => (entry, peer),
+                AreaPortalDirection::Incoming => (peer, entry),
+            };
+            if source_owner
+                .ownership
+                .rooms
+                .binary_search(&portal.source_room_id)
+                .is_err()
+                || target_owner
+                    .ownership
+                    .rooms
+                    .binary_search(&portal.target_room_id)
+                    .is_err()
+            {
+                return Err(AreaCatalogError::Invalid(format!(
+                    "portal room ownership mismatch for area {:?}",
+                    entry.area_id
+                )));
+            }
+            let reciprocal_direction = match portal.direction {
+                AreaPortalDirection::Incoming => AreaPortalDirection::Outgoing,
+                AreaPortalDirection::Outgoing => AreaPortalDirection::Incoming,
+            };
+            if !peer.portals.iter().any(|candidate| {
+                candidate.direction == reciprocal_direction
+                    && candidate.source_exit == portal.source_exit
+                    && candidate.peer_area_id == entry.area_id
+                    && candidate.source_room_id == portal.source_room_id
+                    && candidate.target_room_id == portal.target_room_id
+                    && candidate.minimum_peer_revision == entry.revision
+            }) {
+                return Err(AreaCatalogError::Invalid(format!(
+                    "portal from area {:?} has no exact reciprocal entry",
+                    entry.area_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_bundle(
     bundle: &AreaBundle,
     entry: &AreaCatalogEntry,
     catalog: &AreaCatalog,
     document: &crate::WorldPackDocument,
 ) -> Result<(), AreaCatalogError> {
+    validate_catalog_entry(entry)?;
     if bundle.schema_version != AREA_BUNDLE_SCHEMA_VERSION
         || bundle.trust_mode != catalog.trust_mode
         || bundle.area_pack_schema_version != AREA_PACK_SCHEMA_VERSION
@@ -662,7 +911,6 @@ fn validate_bundle(
         || bundle.provenance != entry.provenance
         || bundle.asset_manifests != entry.asset_manifests
         || bundle.lua_modules != entry.lua_modules
-        || !safe_identifier(&entry.area_id)
     {
         return Err(AreaCatalogError::Invalid(format!(
             "bundle metadata mismatch for area {:?}",
@@ -740,12 +988,6 @@ fn validate_bundle(
             entry.area_id
         )));
     }
-    if !entry.soft_dependencies.is_empty() {
-        return Err(AreaCatalogError::Invalid(format!(
-            "soft dependencies are not supported in catalog v1 for area {:?}",
-            entry.area_id
-        )));
-    }
     let expected_expanded = entry.stored_bytes;
     let expected_memory = (area_bytes.len() as u64).saturating_mul(2);
     if entry.expanded_bytes != expected_expanded
@@ -754,24 +996,6 @@ fn validate_bundle(
     {
         return Err(AreaCatalogError::Invalid(format!(
             "size policy mismatch for area {:?}",
-            entry.area_id
-        )));
-    }
-    if !bounded_text(&entry.content_license, MAX_LICENSE_BYTES)
-        || !bounded_text(&entry.script_license, MAX_LICENSE_BYTES)
-        || entry.content_license != CONTENT_LICENSE
-        || entry.script_license != SCRIPT_LICENSE
-        || !bounded_text(&entry.reviewer, MAX_REVIEWER_BYTES)
-        || !valid_reviewed_at(&entry.reviewed_at)
-        || !bounded_text(&entry.provenance, MAX_PROVENANCE_BYTES)
-        || !valid_digest(&entry.bundle_sha256)
-        || !valid_digest(&entry.source_sha256)
-        || !valid_digest(&entry.compiled_area_sha256)
-        || !strict_content_digests(&entry.asset_manifests)
-        || !strict_content_digests(&entry.lua_modules)
-    {
-        return Err(AreaCatalogError::Invalid(format!(
-            "invalid bounded metadata for area {:?}",
             entry.area_id
         )));
     }
@@ -799,12 +1023,18 @@ fn attach_runtime_relationships(
         let from = *indexes.get(&edge.from_area).ok_or_else(|| {
             AreaCatalogError::Invalid("hard dependency source area missing".into())
         })?;
-        if !indexes.contains_key(&edge.to_area) {
-            return Err(AreaCatalogError::Invalid(
-                "hard dependency target area missing".into(),
-            ));
-        }
+        let to = *indexes.get(&edge.to_area).ok_or_else(|| {
+            AreaCatalogError::Invalid("hard dependency target area missing".into())
+        })?;
         entries[from].hard_dependencies.push(edge.to_area.clone());
+        // Authored children must materialize atomically with their container.
+        // The ordinary child -> container edge resolves the reference; this
+        // reverse runtime edge reserves capacity before players can mutate a
+        // partially loaded container. The resulting two-area closure is
+        // intentional and cycle-safe.
+        if edge.kind == AreaCrossReferenceKind::ItemInstanceContainer {
+            entries[to].hard_dependencies.push(edge.from_area.clone());
+        }
     }
     for portal in derive_portal_edges(packs) {
         let edge = &portal.reference;
@@ -1229,10 +1459,98 @@ fn validate_world_coverage(
         "social emotes"
     );
     exact_ids!(
+        document.world.gameplay.npc_ability_sets.iter(),
+        npc_ability_sets,
+        |value: &crate::NpcAbilitySet| value.npc_prototype_id.clone(),
+        "NPC ability sets"
+    );
+    let progression = document.world.gameplay.character_progression.as_ref();
+    exact_ids!(
+        progression.into_iter().flat_map(|value| &value.lineages),
+        lineages,
+        |value: &crate::LineageDefinition| value.id.clone(),
+        "lineages"
+    );
+    exact_ids!(
+        progression.into_iter().flat_map(|value| &value.backgrounds),
+        backgrounds,
+        |value: &crate::BackgroundDefinition| value.id.clone(),
+        "backgrounds"
+    );
+    exact_ids!(
+        progression
+            .into_iter()
+            .flat_map(|value| &value.base_classes),
+        base_classes,
+        |value: &crate::BaseClassDefinition| value.id.clone(),
+        "base classes"
+    );
+    exact_ids!(
+        progression
+            .into_iter()
+            .flat_map(|value| &value.advanced_classes),
+        advanced_classes,
+        |value: &crate::AdvancedClassDefinition| value.id.clone(),
+        "advanced classes"
+    );
+    exact_ids!(
+        progression
+            .into_iter()
+            .flat_map(|value| &value.talent_graphs),
+        talent_graphs,
+        |value: &crate::TalentGraphDefinition| value.id.clone(),
+        "talent graphs"
+    );
+    exact_ids!(
+        progression
+            .into_iter()
+            .flat_map(|value| &value.talent_graphs)
+            .flat_map(|graph| &graph.nodes),
+        talent_nodes,
+        |value: &crate::TalentNodeDefinition| value.id.clone(),
+        "talent nodes"
+    );
+    exact_ids!(
+        document.room_media.iter(),
+        room_media,
+        |value: &crate::RoomMediaDefinition| value.room_id.clone(),
+        "room media"
+    );
+    exact_ids!(
+        document.entity_media.iter(),
+        entity_media,
+        |value: &crate::EntityMediaDefinition| value.key(),
+        "entity media"
+    );
+    exact_ids!(
+        document.room_perception.iter(),
+        room_perception,
+        |value: &crate::RoomPerceptionDefinition| value.room_id.clone(),
+        "room perception"
+    );
+    exact_ids!(
+        document.scene_variants.iter(),
+        scene_variant_sets,
+        |value: &crate::RoomSceneVariants| value.room_id.clone(),
+        "scene variant sets"
+    );
+    exact_ids!(
+        document.scene_variants.iter().flat_map(|set| &set.variants),
+        scene_variants,
+        |value: &crate::SceneVariant| value.id.clone(),
+        "scene variants"
+    );
+    exact_ids!(
         document.scripts.iter(),
         scripts,
         |value: &crate::ScriptDefinition| value.id.clone(),
         "scripts"
+    );
+    exact_ids!(
+        document.content_tests.iter(),
+        content_tests,
+        |value: &crate::ContentTest| value.name.clone(),
+        "content tests"
     );
     Ok(())
 }
@@ -1442,6 +1760,202 @@ fn verify_monolithic_content(
         }
     }
     Ok(())
+}
+
+fn verify_single_area_content(
+    document: &crate::WorldPackDocument,
+    entry: &AreaCatalogEntry,
+    pack: &AreaPack,
+) -> Result<(), AreaCatalogError> {
+    let owns = |ids: &[String], id: &str| {
+        ids.binary_search_by(|candidate| candidate.as_str().cmp(id))
+            .is_ok()
+    };
+    let progression = document.world.gameplay.character_progression.as_ref();
+    let owned_thresholds = pack
+        .level_thresholds
+        .iter()
+        .map(|threshold| threshold.level)
+        .collect::<HashSet<_>>();
+    let remainder = AreaPack {
+        schema_version: AREA_PACK_SCHEMA_VERSION,
+        id: "tiamud:verified-remainder".into(),
+        depends_on: Vec::new(),
+        item_prototypes: document
+            .world
+            .item_prototypes
+            .iter()
+            .filter(|value| !owns(&entry.ownership.item_prototypes, &value.id))
+            .cloned()
+            .collect(),
+        initial_item_instances: document
+            .world
+            .initial_item_instances
+            .iter()
+            .filter(|value| !owns(&entry.ownership.initial_item_instances, &value.id))
+            .cloned()
+            .collect(),
+        rooms: document
+            .world
+            .rooms
+            .iter()
+            .filter(|value| !owns(&entry.ownership.rooms, &value.id))
+            .cloned()
+            .collect(),
+        npc_prototypes: document
+            .world
+            .gameplay
+            .npc_prototypes
+            .iter()
+            .filter(|value| !owns(&entry.ownership.npc_prototypes, &value.id))
+            .cloned()
+            .collect(),
+        npc_spawns: document
+            .world
+            .gameplay
+            .npc_spawns
+            .iter()
+            .filter(|value| !owns(&entry.ownership.npc_spawns, &value.id))
+            .cloned()
+            .collect(),
+        loot_tables: document
+            .world
+            .gameplay
+            .loot_tables
+            .iter()
+            .filter(|value| !owns(&entry.ownership.loot_tables, &value.id))
+            .cloned()
+            .collect(),
+        loot_sources: document
+            .world
+            .gameplay
+            .loot_sources
+            .iter()
+            .filter(|value| !owns(&entry.ownership.loot_sources, &value.id))
+            .cloned()
+            .collect(),
+        affixes: document
+            .world
+            .gameplay
+            .affixes
+            .iter()
+            .filter(|value| !owns(&entry.ownership.affixes, &value.id))
+            .cloned()
+            .collect(),
+        affix_pools: document
+            .world
+            .gameplay
+            .affix_pools
+            .iter()
+            .filter(|value| !owns(&entry.ownership.affix_pools, &value.id))
+            .cloned()
+            .collect(),
+        archetypes: document
+            .world
+            .gameplay
+            .archetypes
+            .iter()
+            .filter(|value| !owns(&entry.ownership.archetypes, &value.id))
+            .cloned()
+            .collect(),
+        level_thresholds: progression
+            .into_iter()
+            .flat_map(|value| &value.level_thresholds)
+            .filter(|value| !owned_thresholds.contains(&value.level))
+            .cloned()
+            .collect(),
+        lineages: progression
+            .into_iter()
+            .flat_map(|value| &value.lineages)
+            .filter(|value| !owns(&entry.ownership.lineages, &value.id))
+            .cloned()
+            .collect(),
+        backgrounds: progression
+            .into_iter()
+            .flat_map(|value| &value.backgrounds)
+            .filter(|value| !owns(&entry.ownership.backgrounds, &value.id))
+            .cloned()
+            .collect(),
+        base_classes: progression
+            .into_iter()
+            .flat_map(|value| &value.base_classes)
+            .filter(|value| !owns(&entry.ownership.base_classes, &value.id))
+            .cloned()
+            .collect(),
+        advanced_classes: progression
+            .into_iter()
+            .flat_map(|value| &value.advanced_classes)
+            .filter(|value| !owns(&entry.ownership.advanced_classes, &value.id))
+            .cloned()
+            .collect(),
+        talent_graphs: progression
+            .into_iter()
+            .flat_map(|value| &value.talent_graphs)
+            .filter(|value| !owns(&entry.ownership.talent_graphs, &value.id))
+            .cloned()
+            .collect(),
+        abilities: document
+            .world
+            .gameplay
+            .abilities
+            .iter()
+            .filter(|value| !owns(&entry.ownership.abilities, &value.id))
+            .cloned()
+            .collect(),
+        social_emotes: document
+            .world
+            .gameplay
+            .social_emotes
+            .iter()
+            .filter(|value| !owns(&entry.ownership.social_emotes, &value.id))
+            .cloned()
+            .collect(),
+        npc_ability_sets: document
+            .world
+            .gameplay
+            .npc_ability_sets
+            .iter()
+            .filter(|value| !owns(&entry.ownership.npc_ability_sets, &value.npc_prototype_id))
+            .cloned()
+            .collect(),
+        room_media: document
+            .room_media
+            .iter()
+            .filter(|value| !owns(&entry.ownership.room_media, &value.room_id))
+            .cloned()
+            .collect(),
+        entity_media: document
+            .entity_media
+            .iter()
+            .filter(|value| !owns(&entry.ownership.entity_media, &value.key()))
+            .cloned()
+            .collect(),
+        room_perception: document
+            .room_perception
+            .iter()
+            .filter(|value| !owns(&entry.ownership.room_perception, &value.room_id))
+            .cloned()
+            .collect(),
+        scene_variants: document
+            .scene_variants
+            .iter()
+            .filter(|value| !owns(&entry.ownership.scene_variant_sets, &value.room_id))
+            .cloned()
+            .collect(),
+        scripts: document
+            .scripts
+            .iter()
+            .filter(|value| !owns(&entry.ownership.scripts, &value.id))
+            .cloned()
+            .collect(),
+        content_tests: document
+            .content_tests
+            .iter()
+            .filter(|value| !owns(&entry.ownership.content_tests, &value.name))
+            .cloned()
+            .collect(),
+    };
+    verify_monolithic_content(document, &[pack.clone(), remainder])
 }
 
 fn validate_global_ownership(entries: &[AreaCatalogEntry]) -> Result<(), AreaCatalogError> {
@@ -1774,6 +2288,43 @@ mod tests {
         );
         assert_eq!(square.content_license, "CC-BY-4.0");
         assert_eq!(square.script_license, "MIT OR Apache-2.0");
+    }
+
+    #[test]
+    fn cross_area_container_contents_form_one_atomic_runtime_closure() {
+        let composed = compose_world_project(project_path()).unwrap();
+        let release = release_for(&composed, 7);
+        let built = build_area_release(&composed, &release, None).unwrap();
+        let mut entries = built.catalog.entries[..2].to_vec();
+        for entry in &mut entries {
+            entry.hard_dependencies.clear();
+            entry.portals.clear();
+        }
+        let container_area = entries[0].area_id.clone();
+        let child_area = entries[1].area_id.clone();
+        attach_runtime_relationships(
+            &mut entries,
+            &[crate::AreaCrossReference {
+                from_area: child_area.clone(),
+                to_area: container_area.clone(),
+                kind: AreaCrossReferenceKind::ItemInstanceContainer,
+                source_id: "test:child".into(),
+                target_id: "test:container".into(),
+            }],
+            &[],
+        )
+        .unwrap();
+
+        let container = entries
+            .iter()
+            .find(|entry| entry.area_id == container_area)
+            .unwrap();
+        let child = entries
+            .iter()
+            .find(|entry| entry.area_id == child_area)
+            .unwrap();
+        assert_eq!(container.hard_dependencies, vec![child_area]);
+        assert_eq!(child.hard_dependencies, vec![container_area]);
     }
 
     #[test]

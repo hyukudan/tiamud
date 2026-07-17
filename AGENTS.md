@@ -100,9 +100,12 @@ matriz, memoria y documentación pública a la vez.
   WorldProject permanece en v2. WorldPack v8/v7/v6/v5/v4/v3/v2,
   AreaPack v7/v6/v5/v4/v3/v2/v1 y Envy/Merc solo entran por
   normalización/importación.
-- Se valida y carga un WorldPack completo antes de abrir listeners.
-  `TIAMUD_WORLD_PACK` selecciona uno externo revisado; si no, se usa el
-  embebido.
+- El arranque elige una fuente de mundo. `TIAMUD_WORLD_PACK` selecciona un
+  WorldPack monolítico externo revisado; sin variables de mundo se usa el
+  embebido. Como alternativa 6B, `TIAMUD_AREA_REGISTRY` y
+  `TIAMUD_AREA_CATALOG` deben aparecer juntas, son excluyentes con
+  `TIAMUD_WORLD_PACK` y fijan una generación local content-addressed antes de
+  abrir listeners.
 - `tiamud-world compose` realiza composición modular determinista sin conexión.
   La fase 6A está **implementada** y añade una ruta local separada de catálogo y
   bundles: manifiesto de release de hasta 256 KiB, catálogo de hasta 1 MiB/256
@@ -112,8 +115,8 @@ matriz, memoria y documentación pública a la vez.
   propiedad/dependencias/portales/digests, confianza
   `unsigned_local`, `contentLicense=CC-BY-4.0` para mundo/prosa/medios,
   `scriptLicense=MIT OR Apache-2.0` para Lua/software, blobs inmutables y
-  puntero atómico. No deduzcas por ello carga, activación, reemplazo, descarga
-  o LRU en runtime, red, compresión ni firma remota: siguen **sin
+  puntero atómico. No deduzcas por 6A la carga runtime: esa frontera pertenece
+  a 6B. Reemplazo, descarga, LRU, red, compresión y firma remota siguen **sin
   implementar**.
 - En 6A, `AreaPack.dependsOn` sigue siendo declaración editorial exhaustiva.
   `hardDependencies` deriva solo de referencias cruzadas no-`RoomExit`; cada
@@ -132,6 +135,27 @@ matriz, memoria y documentación pública a la vez.
   read-only. `unsigned_local` exige registro local en host confiable: el lock
   no protege frente a un proceso que lo ignore ni frente a un escritor hostil;
   esas carreras TOCTOU quedan fuera de 6A.
+- La fase 6B del [ADR 0020](docs/decisions/0020-additive-local-area-loading.md)
+  está **implementada** como carga local aditiva bajo demanda. La identidad de
+  generación es el SHA-256 de los bytes canónicos exactos del catálogo y queda
+  fijada hasta apagar; cambios posteriores de `area-active` se ignoran. Un
+  arranque sin snapshot ni ledger carga el área de `startRoomId` más su cierre
+  duro; cualquier autoridad durable previa obliga a cargar toda la generación
+  antes de restore/replay. Los portales no son dependencias duras: quedan como
+  `DeferredExit` hasta una entrada real.
+- El coordinador 6B está fuera del actor, coalesce por
+  `(catalogSha256, areaId)` y limita dos preparaciones activas, ocho pendientes,
+  cinco segundos totales y un cierre duro de 32 áreas. E/S, digest, JSON,
+  conversión y Lua se preparan fuera del actor. Este instala el lote bajo un
+  checkpoint conjunto de `World`, `RuntimeContent` y residencia, y reintenta la
+  acción original una vez. El resultado interno nunca cruza Web/Telnet/GMCP;
+  todo fallo público usa un destino no disponible genérico.
+- Una instalación 6B puramente estática no escribe snapshot. Si crea estado
+  dinámico inicial cubierto por snapshot v7, lo confirma mediante la transacción
+  durable existente antes de publicar. Las métricas no etiquetan `areaId`,
+  room ID, revisión, digest o generación. Todas las áreas incorporadas quedan
+  residentes hasta apagar: 6B **no** implementa sustitución, coexistencia de
+  generaciones, drenaje, descarga, LRU, red, compresión ni firma remota.
 - La autoría mide UTF-8 por bytes: título de sala 1..=128 y descripción
   1..=8.192; rechaza controles inseguros y normaliza entradas legacy antes de
   validar. No subas estos topes para hacer caber prosa generada.
@@ -526,6 +550,20 @@ No cambia Web, protocolo, runtime, snapshot ni SQL y no aporta una nueva puerta
 Web/PostgreSQL. Véase el
 [registro 6A](docs/project/log/2026-07-17-area-catalog-bundles-phase-6a.md).
 
+### Carga local aditiva de áreas 6B implementada
+
+[ADR 0020](docs/decisions/0020-additive-local-area-loading.md) y su código
+implementan generación fijada, bootstrap inicial/completo, `DeferredExit`,
+coordinación 2 activas + 8 pendientes/5 s/32 áreas, staging externo, instalación
+y rollback conjuntos, persistencia condicional, error público genérico y
+métricas de baja cardinalidad. Las suites enfocadas cubren core, `world-pack`,
+coordinador, rollback durable del actor y rutas SQLite de recovery. Un humo real
+con el catálogo
+`e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6`
+abre Web/Telnet y readiness, deja dos áreas residentes en arranque vacío y
+cierra limpio. La evidencia agregada exacta se conserva en el
+[registro 6B](docs/project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
+
 ### Evidencia histórica retenida
 
 La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
@@ -575,7 +613,8 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
     Cajas, llaves y tiradas pagadas quedan fuera.
 11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
     conservando snapshot atómico.
-12. No afirmes áreas calientes actuales, producción pública, WebKit actual,
+12. La carga local aditiva 6B existe, pero no la presentes como sustitución,
+    descarga o LRU caliente. Tampoco afirmes producción pública, WebKit actual,
     prueba manual de lector, soak 24 h, release pública/etiquetada ni procedencia
     OIDC verificada.
 
@@ -710,7 +749,8 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - sin soak de 24 horas retenido;
 - sin WebKit local actual ni auditoría manual con lector real;
 - sin sprites de demostración revisados, aunque el puente técnico existe;
-- sin carga/reemplazo/LRU de áreas en ejecución;
+- carga local aditiva 6B implementada; sin sustitución de revisión, drenaje,
+  descarga, LRU, red, compresión o firma remota;
 - sin despliegue/repo público, hito estable, release etiquetada o procedencia
   verificada;
 - sin entrenamiento general, migración general de IDs, multiclase, sprite de

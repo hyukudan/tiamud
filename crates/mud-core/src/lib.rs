@@ -160,6 +160,9 @@ pub const MAX_LOOT_ENCOUNTERS: usize = 2_048;
 pub const LOOT_EXCLUSIVE_TICKS: u64 = 20;
 pub const LOOT_DESPAWN_TICKS: u64 = 120;
 
+/// Maximum hard-dependency closure accepted by one additive area install.
+pub const MAX_PREPARED_AREAS_PER_BATCH: usize = 32;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LootAction {
     Status,
@@ -2487,6 +2490,106 @@ pub struct WorldDefinition {
     pub rooms: Vec<RoomDefinition>,
 }
 
+/// Content-addressed identity of the one area catalog fixed for this process.
+///
+/// The value is the lower-case SHA-256 of the exact canonical catalog bytes,
+/// not its editorial revision or filesystem path.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AreaGenerationId(String);
+
+impl AreaGenerationId {
+    pub fn from_catalog_sha256(value: impl Into<String>) -> Result<Self, WorldError> {
+        let value = value.into();
+        if !valid_digest_sha256(&value) {
+            return Err(WorldError::InvalidAreaLifecycle);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Runtime-only state used by the server's bounded area coordinator.
+///
+/// Phase 6B only transitions `Unloaded -> Loading -> Active`; no unload or
+/// draining transition is implemented by this type.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AreaResidenceState {
+    Unloaded,
+    Loading,
+    Active,
+}
+
+/// Internal demand produced when movement reaches a valid non-resident portal.
+/// Stable content identifiers in this value are operational data and must not
+/// be serialized to a player protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AreaLoadRequest {
+    pub generation_id: AreaGenerationId,
+    pub source_room_id: String,
+    pub direction: Direction,
+    pub target_room_id: String,
+    pub target_area_id: String,
+    pub minimum_target_revision: u64,
+}
+
+/// Core-owned part of one fully verified and privately prepared area.
+///
+/// Progression, player abilities, authored emotes and the RNG seed are fixed
+/// globally before listeners open and therefore deliberately absent here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedCoreArea {
+    pub area_id: String,
+    pub revision: u64,
+    pub bundle_sha256: String,
+    pub rooms: Vec<RoomDefinition>,
+    /// Additive presentation owned by this area for rooms that may be owned
+    /// by another already-resident hard dependency.
+    pub room_presentations: Vec<RoomPresentationDefinition>,
+    pub item_prototypes: Vec<ItemPrototypeDefinition>,
+    pub initial_item_instances: Vec<InitialItemInstanceDefinition>,
+    pub npcs: Vec<NpcDefinition>,
+    pub npc_ability_sets: Vec<NpcAbilitySetDefinition>,
+    pub loot_tables: Vec<LootTableDefinition>,
+    pub loot_sources: Vec<LootSourceDefinition>,
+    pub affixes: Vec<AffixDefinition>,
+    pub affix_pools: Vec<AffixPoolDefinition>,
+    pub room_light: Vec<(String, LightLevel)>,
+    pub hidden_items: Vec<(String, u16)>,
+    pub hidden_npcs: Vec<(String, u16)>,
+    pub secret_exits: Vec<(String, Direction, u16)>,
+}
+
+/// Presentation-only patch whose ownership is independent from room topology.
+///
+/// At least one medium must be present. Installation can fill an empty medium
+/// or replay the exact same value, but never replace already-published media.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoomPresentationDefinition {
+    pub room_id: String,
+    pub image: Option<SceneImage>,
+    pub audio: Option<SceneAudio>,
+}
+
+/// All-or-nothing core staging result for one bounded hard-dependency closure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedCoreAreaBatch {
+    pub generation_id: AreaGenerationId,
+    pub areas: Vec<PreparedCoreArea>,
+    /// Cross-area portals whose target may still be absent after this batch.
+    pub deferred_exits: Vec<AreaLoadRequest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreAreaInstallOutcome {
+    pub installed_areas: usize,
+    pub installed_area_ids: Vec<String>,
+    pub created_dynamic_state: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectKind {
@@ -4411,7 +4514,22 @@ struct Room {
     prose: Vec<String>,
     image: Option<SceneImage>,
     audio: Option<SceneAudio>,
-    exits: BTreeMap<Direction, EntityId>,
+    exits: BTreeMap<Direction, RoomExit>,
+}
+
+#[derive(Clone, Debug)]
+enum RoomExit {
+    Resident(EntityId),
+    Deferred(AreaLoadRequest),
+}
+
+impl RoomExit {
+    fn resident_target(&self) -> Option<EntityId> {
+        match self {
+            Self::Resident(target) => Some(*target),
+            Self::Deferred(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -4523,6 +4641,10 @@ pub enum WorldError {
     CharacterAlreadyConnected,
     #[error("There is no exit in that direction.")]
     NoExit,
+    #[error("The destination area must be loaded before movement can continue.")]
+    AreaLoadRequired(AreaLoadRequest),
+    #[error("The prepared area lifecycle transition is invalid.")]
+    InvalidAreaLifecycle,
     #[error("The world contains an invalid entity reference.")]
     InvalidEntity,
     #[error("No accessible item matches {0:?}.")]
@@ -5006,6 +5128,9 @@ pub struct ActionOutcome {
 pub struct World {
     entities: SlotMap<EntityId, Entity>,
     stable_rooms: HashMap<String, EntityId>,
+    area_generation: Option<AreaGenerationId>,
+    active_areas: BTreeMap<String, ActiveAreaRevision>,
+    room_areas: HashMap<String, String>,
     item_prototypes: HashMap<String, ItemPrototype>,
     /// Immutable authored identity mapping used to merge an older runtime
     /// snapshot with newly published initial instances without allowing a
@@ -5027,6 +5152,7 @@ pub struct World {
     hidden_items: HashMap<String, u16>,
     hidden_npcs: HashMap<String, u16>,
     secret_exits: HashMap<(String, Direction), u16>,
+    pending_npc_ability_sets: BTreeMap<String, NpcAbilitySetDefinition>,
     npcs: BTreeMap<String, Npc>,
     abilities: BTreeMap<String, AbilityDefinition>,
     social_emotes: BTreeMap<String, SocialEmoteDefinition>,
@@ -5049,6 +5175,12 @@ pub struct World {
     /// runtime snapshot and may reset on process restart.
     last_trade_request_ticks: HashMap<CharacterId, u64>,
     tick_resolution_pending: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveAreaRevision {
+    revision: u64,
+    bundle_sha256: String,
 }
 
 /// Exact in-memory checkpoint used around one durable commit. Unlike the
@@ -5078,6 +5210,32 @@ pub struct WorldCheckpoint {
     trades: BTreeMap<TradeId, TradeSnapshot>,
     last_trade_request_ticks: HashMap<CharacterId, u64>,
     tick_resolution_pending: bool,
+}
+
+/// Exact checkpoint for an actor-owned topology/content installation.
+///
+/// The ordinary [`WorldCheckpoint`] remains the cheaper durable-action
+/// boundary. This wider checkpoint additionally owns every static core index
+/// that an additive area batch may change. The server composes it with its
+/// `RuntimeContent` and residency checkpoints before publishing a batch.
+#[derive(Clone)]
+pub struct WorldLifecycleCheckpoint {
+    world: WorldCheckpoint,
+    stable_rooms: HashMap<String, EntityId>,
+    area_generation: Option<AreaGenerationId>,
+    active_areas: BTreeMap<String, ActiveAreaRevision>,
+    room_areas: HashMap<String, String>,
+    item_prototypes: HashMap<String, ItemPrototype>,
+    initial_item_prototypes: BTreeMap<ItemInstanceId, String>,
+    affixes: BTreeMap<String, AffixDefinition>,
+    affix_pools: BTreeMap<String, AffixPool>,
+    loot_tables: BTreeMap<String, LootTable>,
+    loot_sources: BTreeMap<String, LootSource>,
+    room_light: HashMap<String, LightLevel>,
+    hidden_items: HashMap<String, u16>,
+    hidden_npcs: HashMap<String, u16>,
+    secret_exits: HashMap<(String, Direction), u16>,
+    pending_npc_ability_sets: BTreeMap<String, NpcAbilitySetDefinition>,
 }
 
 impl World {
@@ -5217,7 +5375,7 @@ impl World {
                         })?;
                 let previous = room_mut(&mut entities, room_id)
                     .exits
-                    .insert(exit.direction, destination);
+                    .insert(exit.direction, RoomExit::Resident(destination));
                 if previous.is_some() {
                     return Err(WorldBuildError::DuplicateExitDirection {
                         room_id: source_id.clone(),
@@ -5328,6 +5486,9 @@ impl World {
         Ok(Self {
             entities,
             stable_rooms,
+            area_generation: None,
+            active_areas: BTreeMap::new(),
+            room_areas: HashMap::new(),
             item_prototypes,
             initial_item_prototypes,
             item_instances,
@@ -5346,6 +5507,7 @@ impl World {
             hidden_items: HashMap::new(),
             hidden_npcs: HashMap::new(),
             secret_exits: HashMap::new(),
+            pending_npc_ability_sets: BTreeMap::new(),
             npcs: BTreeMap::new(),
             abilities: BTreeMap::new(),
             social_emotes: BTreeMap::new(),
@@ -5482,10 +5644,10 @@ impl World {
             .map(|ability| {
                 validate_ability_definition(&ability)?;
                 if ability.communication.as_ref().is_some_and(|communication| {
-                    communication
-                        .blocked_room_ids
-                        .iter()
-                        .any(|room_id| !self.stable_rooms.contains_key(room_id))
+                    communication.blocked_room_ids.iter().any(|room_id| {
+                        !self.stable_rooms.contains_key(room_id)
+                            && (self.area_generation.is_none() || !valid_definition_id(room_id))
+                    })
                 }) {
                     return Err(WorldError::InvalidAbilityDefinition);
                 }
@@ -5563,6 +5725,35 @@ impl World {
         &mut self,
         definition: NpcAbilitySetDefinition,
     ) -> Result<(), WorldError> {
+        self.validate_npc_ability_set(&definition)?;
+        let npc = self
+            .npcs
+            .get_mut(&definition.npc_id)
+            .ok_or(WorldError::NpcNotFound)?;
+        npc.resources = definition
+            .resource_pools
+            .into_iter()
+            .map(|(id, maximum)| {
+                (
+                    id,
+                    ResourcePool {
+                        current: maximum,
+                        max: maximum,
+                    },
+                )
+            })
+            .collect();
+        npc.resource_regeneration = definition.resource_regeneration;
+        npc.resistances = definition.resistances;
+        npc.ability_ids = definition.ability_ids;
+        npc.ability_cooldowns.clear();
+        Ok(())
+    }
+
+    fn validate_npc_ability_set(
+        &self,
+        definition: &NpcAbilitySetDefinition,
+    ) -> Result<(), WorldError> {
         let unique_abilities = definition
             .ability_ids
             .iter()
@@ -5578,10 +5769,6 @@ impl World {
                         .all(|resource| definition.resource_pools.contains_key(resource))
             })
         });
-        let npc = self
-            .npcs
-            .get_mut(&definition.npc_id)
-            .ok_or(WorldError::NpcNotFound)?;
         if definition.resource_pools.len() > MAX_RESOURCE_POOLS
             || definition.resource_regeneration.len() > MAX_RESOURCE_POOLS
             || definition.resistances.len() > MAX_RESISTANCES
@@ -5604,23 +5791,6 @@ impl World {
         {
             return Err(WorldError::InvalidAbilityDefinition);
         }
-        npc.resources = definition
-            .resource_pools
-            .into_iter()
-            .map(|(id, maximum)| {
-                (
-                    id,
-                    ResourcePool {
-                        current: maximum,
-                        max: maximum,
-                    },
-                )
-            })
-            .collect();
-        npc.resource_regeneration = definition.resource_regeneration;
-        npc.resistances = definition.resistances;
-        npc.ability_ids = definition.ability_ids;
-        npc.ability_cooldowns.clear();
         Ok(())
     }
 
@@ -6208,6 +6378,669 @@ impl World {
         self.trades = checkpoint.trades;
         self.last_trade_request_ticks = checkpoint.last_trade_request_ticks;
         self.tick_resolution_pending = checkpoint.tick_resolution_pending;
+    }
+
+    pub fn lifecycle_checkpoint(&self) -> WorldLifecycleCheckpoint {
+        WorldLifecycleCheckpoint {
+            world: self.checkpoint(),
+            stable_rooms: self.stable_rooms.clone(),
+            area_generation: self.area_generation.clone(),
+            active_areas: self.active_areas.clone(),
+            room_areas: self.room_areas.clone(),
+            item_prototypes: self.item_prototypes.clone(),
+            initial_item_prototypes: self.initial_item_prototypes.clone(),
+            affixes: self.affixes.clone(),
+            affix_pools: self.affix_pools.clone(),
+            loot_tables: self.loot_tables.clone(),
+            loot_sources: self.loot_sources.clone(),
+            room_light: self.room_light.clone(),
+            hidden_items: self.hidden_items.clone(),
+            hidden_npcs: self.hidden_npcs.clone(),
+            secret_exits: self.secret_exits.clone(),
+            pending_npc_ability_sets: self.pending_npc_ability_sets.clone(),
+        }
+    }
+
+    pub fn restore_lifecycle_checkpoint(&mut self, checkpoint: WorldLifecycleCheckpoint) {
+        self.restore_checkpoint(checkpoint.world);
+        self.stable_rooms = checkpoint.stable_rooms;
+        self.area_generation = checkpoint.area_generation;
+        self.active_areas = checkpoint.active_areas;
+        self.room_areas = checkpoint.room_areas;
+        self.item_prototypes = checkpoint.item_prototypes;
+        self.initial_item_prototypes = checkpoint.initial_item_prototypes;
+        self.affixes = checkpoint.affixes;
+        self.affix_pools = checkpoint.affix_pools;
+        self.loot_tables = checkpoint.loot_tables;
+        self.loot_sources = checkpoint.loot_sources;
+        self.room_light = checkpoint.room_light;
+        self.hidden_items = checkpoint.hidden_items;
+        self.hidden_npcs = checkpoint.hidden_npcs;
+        self.secret_exits = checkpoint.secret_exits;
+        self.pending_npc_ability_sets = checkpoint.pending_npc_ability_sets;
+    }
+
+    /// Constructs the first resident closure of a fixed catalog generation.
+    ///
+    /// The temporary anchor never leaves this function. It exists solely so
+    /// the ordinary world invariants can stay non-empty while the same atomic
+    /// installation path used at runtime installs the initial batch.
+    pub fn from_initial_prepared_areas(
+        start_room_id: &str,
+        batch: PreparedCoreAreaBatch,
+    ) -> Result<(Self, CoreAreaInstallOutcome), WorldError> {
+        Self::from_initial_prepared_areas_with_configuration(start_room_id, batch, |_| Ok(()))
+    }
+
+    /// Initial-area constructor with a global-content configuration barrier.
+    ///
+    /// The callback runs after the generation is fixed but before any lazy NPC
+    /// ability set is installed. Servers use it to pin RNG, progression,
+    /// player abilities and social emotes from the verified monolithic
+    /// fallback. A callback or area failure publishes no world.
+    pub fn from_initial_prepared_areas_with_configuration(
+        start_room_id: &str,
+        batch: PreparedCoreAreaBatch,
+        configure_globals: impl FnOnce(&mut Self) -> Result<(), WorldError>,
+    ) -> Result<(Self, CoreAreaInstallOutcome), WorldError> {
+        const BOOTSTRAP_ROOM_ID: &str = "\0tiamud-internal-area-bootstrap";
+        if start_room_id.is_empty()
+            || batch.areas.is_empty()
+            || batch.areas.iter().any(|area| {
+                area.rooms
+                    .iter()
+                    .any(|room| room.stable_id == BOOTSTRAP_ROOM_ID)
+            })
+        {
+            return Err(WorldError::InvalidAreaLifecycle);
+        }
+        let mut world = Self::from_definition(WorldDefinition {
+            start_room_id: BOOTSTRAP_ROOM_ID.into(),
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
+            rooms: vec![RoomDefinition {
+                stable_id: BOOTSTRAP_ROOM_ID.into(),
+                title: String::new(),
+                prose: Vec::new(),
+                image: None,
+                audio: None,
+                exits: Vec::new(),
+                item_ids: Vec::new(),
+            }],
+        })
+        .map_err(|_| WorldError::InvalidAreaLifecycle)?;
+        world.area_generation = Some(batch.generation_id.clone());
+        configure_globals(&mut world)?;
+        let outcome = world.install_prepared_areas(batch)?;
+        let start_room = world
+            .stable_rooms
+            .get(start_room_id)
+            .copied()
+            .ok_or(WorldError::InvalidAreaLifecycle)?;
+        room_checked(&world.entities, start_room)?;
+        let bootstrap = world
+            .stable_rooms
+            .remove(BOOTSTRAP_ROOM_ID)
+            .ok_or(WorldError::InvalidAreaLifecycle)?;
+        world
+            .entities
+            .remove(bootstrap)
+            .ok_or(WorldError::InvalidAreaLifecycle)?;
+        world.start_room = start_room;
+        world.start_room_stable_id = start_room_id.to_owned();
+        Ok((world, outcome))
+    }
+
+    pub fn area_generation_id(&self) -> Option<&AreaGenerationId> {
+        self.area_generation.as_ref()
+    }
+
+    pub fn area_generation(&self) -> Option<&AreaGenerationId> {
+        self.area_generation.as_ref()
+    }
+
+    pub fn active_area_count(&self) -> usize {
+        self.active_areas.len()
+    }
+
+    pub fn deferred_area_exit_count(&self) -> usize {
+        self.entities
+            .values()
+            .filter_map(|entity| match entity {
+                Entity::Room(room) => Some(room),
+                Entity::Character(_) => None,
+            })
+            .map(|room| {
+                room.exits
+                    .values()
+                    .filter(|exit| matches!(exit, RoomExit::Deferred(_)))
+                    .count()
+            })
+            .sum()
+    }
+
+    pub fn area_is_active(&self, area_id: &str) -> bool {
+        self.active_areas.contains_key(area_id)
+    }
+
+    pub fn active_area_matches(&self, area_id: &str, revision: u64, bundle_sha256: &str) -> bool {
+        self.active_areas
+            .get(area_id)
+            .is_some_and(|area| area.revision == revision && area.bundle_sha256 == bundle_sha256)
+    }
+
+    /// Read-only movement preflight used before any authored `OnLeave` hook.
+    ///
+    /// `None` means the direction is not currently a visible deferred portal;
+    /// ordinary movement still owns final validation. The same check is
+    /// repeated defensively by [`World::apply`].
+    pub fn deferred_area_load_request(
+        &self,
+        session: SessionId,
+        direction: Direction,
+    ) -> Result<Option<AreaLoadRequest>, WorldError> {
+        let location = self.character(session)?.location;
+        let source_room = room_checked(&self.entities, location)?;
+        if !self.exit_visible_to(session, &source_room.stable_id, direction)? {
+            return Ok(None);
+        }
+        match source_room.exits.get(&direction) {
+            Some(RoomExit::Deferred(request)) => Ok(Some(request.clone())),
+            Some(RoomExit::Resident(target)) => {
+                room_checked(&self.entities, *target)?;
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Atomically incorporates one privately prepared additive area closure.
+    ///
+    /// This method never changes the fixed generation, emits domain events or
+    /// leaves observer revisions bumped. The caller must still compose its
+    /// returned checkpoint boundary with runtime-content/residency state and
+    /// durably confirm the snapshot when `created_dynamic_state` is true.
+    pub fn install_prepared_areas(
+        &mut self,
+        batch: PreparedCoreAreaBatch,
+    ) -> Result<CoreAreaInstallOutcome, WorldError> {
+        if self.area_generation.as_ref() != Some(&batch.generation_id)
+            || batch.areas.is_empty()
+            || batch.areas.len() > MAX_PREPARED_AREAS_PER_BATCH
+        {
+            return Err(WorldError::InvalidAreaLifecycle);
+        }
+        let checkpoint = self.lifecycle_checkpoint();
+        let observable_revision = self.revision;
+        let observable_views = self.observer_views.clone();
+        let observable_last_bump = self.last_view_bump.clone();
+        let result = (|| {
+            let mut seen_areas = BTreeSet::new();
+            let mut new_areas = Vec::new();
+            for area in batch.areas {
+                if !valid_definition_id(&area.area_id)
+                    || area.revision == 0
+                    || !valid_digest_sha256(&area.bundle_sha256)
+                    || !seen_areas.insert(area.area_id.clone())
+                {
+                    return Err(WorldError::InvalidAreaLifecycle);
+                }
+                match self.active_areas.get(&area.area_id) {
+                    Some(active)
+                        if active.revision == area.revision
+                            && active.bundle_sha256 == area.bundle_sha256 => {}
+                    Some(_) => return Err(WorldError::InvalidAreaLifecycle),
+                    None => new_areas.push(area),
+                }
+            }
+            if new_areas.is_empty() {
+                for request in &batch.deferred_exits {
+                    validate_area_load_request(request, &batch.generation_id)?;
+                    let source = self
+                        .stable_rooms
+                        .get(&request.source_room_id)
+                        .copied()
+                        .ok_or(WorldError::InvalidAreaLifecycle)?;
+                    match room_checked(&self.entities, source)?
+                        .exits
+                        .get(&request.direction)
+                    {
+                        Some(RoomExit::Deferred(existing)) if existing == request => {}
+                        Some(RoomExit::Resident(target))
+                            if room_checked(&self.entities, *target)?.stable_id
+                                == request.target_room_id
+                                && self.room_areas.get(&request.target_room_id)
+                                    == Some(&request.target_area_id)
+                                && self.active_areas.get(&request.target_area_id).is_some_and(
+                                    |area| area.revision >= request.minimum_target_revision,
+                                ) => {}
+                        _ => return Err(WorldError::InvalidAreaLifecycle),
+                    }
+                }
+                return Ok(CoreAreaInstallOutcome {
+                    installed_areas: 0,
+                    installed_area_ids: Vec::new(),
+                    created_dynamic_state: false,
+                });
+            }
+
+            let mut portal_requests = BTreeMap::new();
+            for request in batch.deferred_exits {
+                validate_area_load_request(&request, &batch.generation_id)?;
+                let key = (
+                    request.source_room_id.clone(),
+                    request.direction,
+                    request.target_room_id.clone(),
+                );
+                if portal_requests.insert(key, request).is_some() {
+                    return Err(WorldError::InvalidAreaLifecycle);
+                }
+            }
+
+            let mut created_dynamic_state = new_areas
+                .iter()
+                .any(|area| !area.initial_item_instances.is_empty() || !area.npcs.is_empty());
+            let mut new_room_ids = BTreeSet::new();
+            for area in &new_areas {
+                for definition in &area.rooms {
+                    if !valid_definition_id(&definition.stable_id)
+                        || self.stable_rooms.contains_key(&definition.stable_id)
+                        || !new_room_ids.insert(definition.stable_id.clone())
+                    {
+                        return Err(WorldError::InvalidAreaLifecycle);
+                    }
+                    let room_id = self.entities.insert(Entity::Room(Box::new(Room {
+                        stable_id: definition.stable_id.clone(),
+                        title: definition.title.clone(),
+                        prose: definition.prose.clone(),
+                        image: definition.image.clone(),
+                        audio: definition.audio.clone(),
+                        exits: BTreeMap::new(),
+                    })));
+                    self.stable_rooms
+                        .insert(definition.stable_id.clone(), room_id);
+                    self.room_areas
+                        .insert(definition.stable_id.clone(), area.area_id.clone());
+                }
+                self.active_areas.insert(
+                    area.area_id.clone(),
+                    ActiveAreaRevision {
+                        revision: area.revision,
+                        bundle_sha256: area.bundle_sha256.clone(),
+                    },
+                );
+            }
+
+            let mut presented_rooms = BTreeSet::new();
+            for area in &new_areas {
+                for presentation in &area.room_presentations {
+                    if !valid_definition_id(&presentation.room_id)
+                        || (presentation.image.is_none() && presentation.audio.is_none())
+                        || !presented_rooms.insert(presentation.room_id.clone())
+                    {
+                        return Err(WorldError::InvalidAreaLifecycle);
+                    }
+                    let room_id = self
+                        .stable_rooms
+                        .get(&presentation.room_id)
+                        .copied()
+                        .ok_or(WorldError::InvalidAreaLifecycle)?;
+                    let room = room_mut(&mut self.entities, room_id);
+                    if let Some(image) = &presentation.image {
+                        match &room.image {
+                            Some(existing) if existing != image => {
+                                return Err(WorldError::InvalidAreaLifecycle);
+                            }
+                            None => room.image = Some(image.clone()),
+                            Some(_) => {}
+                        }
+                    }
+                    if let Some(audio) = &presentation.audio {
+                        match &room.audio {
+                            Some(existing) if existing != audio => {
+                                return Err(WorldError::InvalidAreaLifecycle);
+                            }
+                            None => room.audio = Some(audio.clone()),
+                            Some(_) => {}
+                        }
+                    }
+                }
+            }
+
+            for area in &new_areas {
+                for definition in &area.rooms {
+                    let source = self
+                        .stable_rooms
+                        .get(&definition.stable_id)
+                        .copied()
+                        .ok_or(WorldError::InvalidAreaLifecycle)?;
+                    let mut seen_directions = BTreeSet::new();
+                    for exit in &definition.exits {
+                        if !seen_directions.insert(exit.direction) {
+                            return Err(WorldError::InvalidAreaLifecycle);
+                        }
+                        let room_exit = if let Some(target) =
+                            self.stable_rooms.get(&exit.target_room_id).copied()
+                        {
+                            RoomExit::Resident(target)
+                        } else {
+                            let request = portal_requests
+                                .get(&(
+                                    definition.stable_id.clone(),
+                                    exit.direction,
+                                    exit.target_room_id.clone(),
+                                ))
+                                .cloned()
+                                .ok_or(WorldError::InvalidAreaLifecycle)?;
+                            RoomExit::Deferred(request)
+                        };
+                        if room_mut(&mut self.entities, source)
+                            .exits
+                            .insert(exit.direction, room_exit)
+                            .is_some()
+                        {
+                            return Err(WorldError::InvalidAreaLifecycle);
+                        }
+                    }
+                }
+            }
+
+            // Every portal request must annotate an exit already supplied by
+            // its owning room definition (possibly in an earlier batch).
+            for request in portal_requests.values() {
+                let source = self
+                    .stable_rooms
+                    .get(&request.source_room_id)
+                    .copied()
+                    .ok_or(WorldError::InvalidAreaLifecycle)?;
+                let existing = room_checked(&self.entities, source)?
+                    .exits
+                    .get(&request.direction)
+                    .cloned();
+                match existing {
+                    Some(RoomExit::Deferred(existing)) if &existing == request => {}
+                    Some(RoomExit::Resident(target))
+                        if room_checked(&self.entities, target)?.stable_id
+                            == request.target_room_id
+                            && self.room_areas.get(&request.target_room_id)
+                                == Some(&request.target_area_id)
+                            && self.active_areas.get(&request.target_area_id).is_some_and(
+                                |area| area.revision >= request.minimum_target_revision,
+                            ) => {}
+                    Some(_) => return Err(WorldError::InvalidAreaLifecycle),
+                    None => return Err(WorldError::InvalidAreaLifecycle),
+                }
+            }
+            self.relink_resident_area_exits()?;
+
+            for area in &new_areas {
+                for definition in &area.item_prototypes {
+                    let (prototype_id, prototype) = compile_item_prototype(definition.clone())?;
+                    if self
+                        .item_prototypes
+                        .insert(prototype_id, prototype)
+                        .is_some()
+                    {
+                        return Err(WorldError::InvalidAreaLifecycle);
+                    }
+                }
+            }
+            for area in &new_areas {
+                for definition in &area.initial_item_instances {
+                    if !valid_item_instance_id(definition.instance_id.as_str())
+                        || self.item_instances.contains_key(&definition.instance_id)
+                    {
+                        return Err(WorldError::InvalidAreaLifecycle);
+                    }
+                    let prototype = self
+                        .item_prototypes
+                        .get(&definition.prototype_id)
+                        .ok_or(WorldError::InvalidAreaLifecycle)?;
+                    if prototype.sealed_loot_table_id.is_some() {
+                        return Err(WorldError::InvalidAreaLifecycle);
+                    }
+                    let location = match &definition.location {
+                        InitialItemLocation::Room(room_id) => {
+                            if !self.stable_rooms.contains_key(room_id) {
+                                return Err(WorldError::InvalidAreaLifecycle);
+                            }
+                            SharedItemLocation::Room(room_id.clone())
+                        }
+                        InitialItemLocation::NpcSpawn(npc_id) => {
+                            SharedItemLocation::HeldByNpc(npc_id.clone())
+                        }
+                        InitialItemLocation::Container(container_id) => {
+                            SharedItemLocation::Contained(container_id.clone())
+                        }
+                        InitialItemLocation::Staged => SharedItemLocation::Staged,
+                    };
+                    self.item_instances.insert(
+                        definition.instance_id.clone(),
+                        ItemInstance {
+                            prototype_id: definition.prototype_id.clone(),
+                            location,
+                            binding: ItemBinding::Unbound,
+                            item_affixes: Vec::new(),
+                        },
+                    );
+                    self.initial_item_prototypes.insert(
+                        definition.instance_id.clone(),
+                        definition.prototype_id.clone(),
+                    );
+                    self.item_provenance.insert(
+                        definition.instance_id.clone(),
+                        ItemProvenance::AuthoredInitial,
+                    );
+                    if let Some(sequence) = runtime_item_sequence(&definition.instance_id) {
+                        self.next_item_instance_sequence = self.next_item_instance_sequence.max(
+                            sequence
+                                .checked_add(1)
+                                .ok_or(WorldError::InvalidAreaLifecycle)?,
+                        );
+                    }
+                }
+            }
+            if self.item_instances.len() > MAX_ITEM_INSTANCES
+                || validate_item_graph(&self.item_instances, &self.item_prototypes).is_err()
+            {
+                return Err(WorldError::InvalidAreaLifecycle);
+            }
+
+            let mut authored_npc_items = BTreeMap::<String, Vec<ItemInstanceId>>::new();
+            for area in &new_areas {
+                for item in &area.initial_item_instances {
+                    if let InitialItemLocation::NpcSpawn(npc_id) = &item.location {
+                        authored_npc_items
+                            .entry(npc_id.clone())
+                            .or_default()
+                            .push(item.instance_id.clone());
+                    }
+                }
+            }
+            for item_ids in authored_npc_items.values_mut() {
+                item_ids.sort();
+                item_ids.dedup();
+            }
+            let resident_npc_ids = authored_npc_items
+                .keys()
+                .filter(|npc_id| self.npcs.contains_key(*npc_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            for npc_id in resident_npc_ids {
+                let item_ids = authored_npc_items
+                    .remove(&npc_id)
+                    .ok_or(WorldError::InvalidAreaLifecycle)?;
+                let npc = self
+                    .npcs
+                    .get_mut(&npc_id)
+                    .ok_or(WorldError::InvalidAreaLifecycle)?;
+                npc.loot_item_ids.extend(item_ids);
+                npc.loot_item_ids.sort();
+                npc.loot_item_ids.dedup();
+                if npc.loot_item_ids.len() > MAX_LOOT_UNITS_PER_RESOLUTION {
+                    return Err(WorldError::InvalidAreaLifecycle);
+                }
+                created_dynamic_state = true;
+            }
+
+            let mut affixes = self.affixes.values().cloned().collect::<Vec<_>>();
+            let mut affix_pools = self
+                .affix_pools
+                .values()
+                .map(|pool| AffixPoolDefinition {
+                    id: pool.id.clone(),
+                    entries: pool.entries.clone(),
+                })
+                .collect::<Vec<_>>();
+            for area in &new_areas {
+                affixes.extend(area.affixes.clone());
+                affix_pools.extend(area.affix_pools.clone());
+            }
+            self.configure_affixes(affixes, affix_pools)?;
+
+            for area in &new_areas {
+                for definition in &area.npcs {
+                    let mut npc = definition.clone();
+                    if let Some(item_ids) = authored_npc_items.remove(&npc.stable_id) {
+                        npc.loot_item_ids.extend(item_ids);
+                        npc.loot_item_ids.sort();
+                        npc.loot_item_ids.dedup();
+                    }
+                    self.spawn_npc(npc)?;
+                }
+            }
+            if !authored_npc_items.is_empty() {
+                return Err(WorldError::InvalidAreaLifecycle);
+            }
+            let spawned_npc_ids = new_areas
+                .iter()
+                .flat_map(|area| area.npcs.iter().map(|npc| npc.stable_id.clone()))
+                .collect::<Vec<_>>();
+            for npc_id in spawned_npc_ids {
+                if let Some(definition) = self.pending_npc_ability_sets.remove(&npc_id) {
+                    self.configure_npc_abilities(definition)?;
+                }
+            }
+            for area in &new_areas {
+                for item in &area.initial_item_instances {
+                    if let InitialItemLocation::NpcSpawn(npc_id) = &item.location
+                        && self
+                            .npcs
+                            .get(npc_id)
+                            .is_none_or(|npc| !npc.loot_item_ids.contains(&item.instance_id))
+                    {
+                        return Err(WorldError::InvalidAreaLifecycle);
+                    }
+                }
+            }
+            for area in &new_areas {
+                for definition in &area.npc_ability_sets {
+                    self.validate_npc_ability_set(definition)?;
+                    if self.npcs.contains_key(&definition.npc_id) {
+                        self.configure_npc_abilities(definition.clone())?;
+                        created_dynamic_state = true;
+                    } else {
+                        match self.pending_npc_ability_sets.get(&definition.npc_id) {
+                            Some(existing) if existing == definition => {}
+                            Some(_) => return Err(WorldError::InvalidAreaLifecycle),
+                            None => {
+                                self.pending_npc_ability_sets
+                                    .insert(definition.npc_id.clone(), definition.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut loot_tables = self
+                .loot_tables
+                .values()
+                .map(|table| LootTableDefinition {
+                    id: table.id.clone(),
+                    digest_sha256: table.digest_sha256.clone(),
+                    guaranteed: table.guaranteed.clone(),
+                    pools: table.pools.clone(),
+                })
+                .collect::<Vec<_>>();
+            let mut loot_sources = self
+                .loot_sources
+                .iter()
+                .map(|(npc_spawn_id, source)| LootSourceDefinition {
+                    kind: LootSourceKind::NpcSpawn,
+                    // The runtime does not retain the editorial source ID;
+                    // the globally unique NPC ID is a valid deterministic
+                    // reconstruction key for revalidating the merged catalog.
+                    id: npc_spawn_id.clone(),
+                    npc_spawn_id: npc_spawn_id.clone(),
+                    loot_table_id: source.loot_table_id.clone(),
+                    rights: source.rights,
+                })
+                .collect::<Vec<_>>();
+            for area in &new_areas {
+                loot_tables.extend(area.loot_tables.clone());
+                loot_sources.extend(area.loot_sources.clone());
+            }
+            self.configure_loot(loot_tables, loot_sources)?;
+
+            for area in &new_areas {
+                for (room_id, light) in &area.room_light {
+                    self.configure_room_light(room_id, *light)?;
+                }
+                for (item_id, difficulty) in &area.hidden_items {
+                    self.configure_hidden_item(item_id, *difficulty)?;
+                }
+                for (npc_id, difficulty) in &area.hidden_npcs {
+                    self.configure_hidden_npc(npc_id, *difficulty)?;
+                }
+                for (room_id, direction, difficulty) in &area.secret_exits {
+                    self.configure_secret_exit(room_id, *direction, *difficulty)?;
+                }
+            }
+
+            self.revision = observable_revision;
+            self.observer_views = observable_views.clone();
+            self.last_view_bump = observable_last_bump.clone();
+            Ok(CoreAreaInstallOutcome {
+                installed_areas: new_areas.len(),
+                installed_area_ids: new_areas.iter().map(|area| area.area_id.clone()).collect(),
+                created_dynamic_state,
+            })
+        })();
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.restore_lifecycle_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn relink_resident_area_exits(&mut self) -> Result<(), WorldError> {
+        let stable_rooms = self.stable_rooms.clone();
+        let room_areas = self.room_areas.clone();
+        let active_areas = self.active_areas.clone();
+        for entity in self.entities.values_mut() {
+            let Entity::Room(room) = entity else {
+                continue;
+            };
+            for room_exit in room.exits.values_mut() {
+                let RoomExit::Deferred(request) = room_exit else {
+                    continue;
+                };
+                let Some(target) = stable_rooms.get(&request.target_room_id).copied() else {
+                    continue;
+                };
+                if room_areas.get(&request.target_room_id) != Some(&request.target_area_id)
+                    || active_areas
+                        .get(&request.target_area_id)
+                        .is_none_or(|area| area.revision < request.minimum_target_revision)
+                {
+                    return Err(WorldError::InvalidAreaLifecycle);
+                }
+                *room_exit = RoomExit::Resident(target);
+            }
+        }
+        Ok(())
     }
 
     pub fn runtime_snapshot(&self) -> WorldRuntimeSnapshot {
@@ -9093,7 +9926,7 @@ impl World {
             .stable_rooms
             .get(&snapshot.room_id)
             .copied()
-            .unwrap_or(self.start_room);
+            .ok_or(WorldError::InvalidEntity)?;
         room_checked(&self.entities, location)?;
         let mut salt = [0_u8; 32];
         OsRng
@@ -11070,17 +11903,22 @@ impl World {
             | PlayerAction::Board(_)
             | PlayerAction::Staff(_) => Err(WorldError::GameplayUnavailable),
             PlayerAction::Move(direction) => {
+                if let Some(request) = self.deferred_area_load_request(session, direction)? {
+                    return Err(WorldError::AreaLoadRequired(request));
+                }
                 let location = self.character(session)?.location;
                 let source_room = room_checked(&self.entities, location)?;
                 let from_room_id = source_room.stable_id.clone();
                 if !self.exit_visible_to(session, &from_room_id, direction)? {
                     return Err(WorldError::NoExit);
                 }
-                let destination = source_room
-                    .exits
-                    .get(&direction)
-                    .copied()
-                    .ok_or(WorldError::NoExit)?;
+                let destination = match source_room.exits.get(&direction) {
+                    Some(RoomExit::Resident(destination)) => *destination,
+                    Some(RoomExit::Deferred(request)) => {
+                        return Err(WorldError::AreaLoadRequired(request.clone()));
+                    }
+                    None => return Err(WorldError::NoExit),
+                };
                 // Validate the destination before mutating character state. This
                 // turns a corrupt graph edge into a recoverable world error.
                 let to_room_id = room_checked(&self.entities, destination)?.stable_id.clone();
@@ -11155,9 +11993,19 @@ impl World {
             if !self.exit_visible_to(session, &current_room.stable_id, *direction)? {
                 continue;
             }
-            let destination = room_checked(&self.entities, *destination)?;
+            let target_view_id = match destination {
+                RoomExit::Resident(destination) => {
+                    let destination = room_checked(&self.entities, *destination)?;
+                    opaque_id(observer.salt, "room", &destination.stable_id)
+                }
+                RoomExit::Deferred(_) => opaque_id(
+                    observer.salt,
+                    "deferred-exit",
+                    &format!("{}:{}", current_room.stable_id, direction.as_str()),
+                ),
+            };
             exits.push(SceneExit {
-                id: opaque_id(observer.salt, "room", &destination.stable_id),
+                id: target_view_id,
                 label: direction.as_str().to_owned(),
                 command: direction.as_str().to_owned(),
             });
@@ -14307,12 +15155,15 @@ impl World {
                 {
                     continue;
                 }
-                room_checked(&self.entities, *target)?;
-                if reachable.insert(*target) {
+                let Some(target) = target.resident_target() else {
+                    continue;
+                };
+                room_checked(&self.entities, target)?;
+                if reachable.insert(target) {
                     if reachable.len() > MAX_SPATIAL_VOICE_ROOMS {
                         return Err(WorldError::InvalidEntity);
                     }
-                    pending.push_back((*target, hops + 1));
+                    pending.push_back((target, hops + 1));
                 }
             }
         }
@@ -15358,14 +16209,20 @@ impl World {
                 if !self.exit_visible_to(session, room_id, *direction)? {
                     continue;
                 }
-                let destination = room_checked(&self.entities, *destination)?;
+                let destination = destination
+                    .resident_target()
+                    .map(|destination| room_checked(&self.entities, destination))
+                    .transpose()?;
                 paths.push(MapPathView {
                     from: opaque_id(observer.salt, "room", room_id),
                     direction: direction.as_str().into(),
-                    to: observer
-                        .discovered_rooms
-                        .contains(&destination.stable_id)
-                        .then(|| opaque_id(observer.salt, "room", &destination.stable_id)),
+                    to: destination
+                        .filter(|destination| {
+                            observer.discovered_rooms.contains(&destination.stable_id)
+                        })
+                        .map(|destination| {
+                            opaque_id(observer.salt, "room", &destination.stable_id)
+                        }),
                 });
             }
         }
@@ -17810,6 +18667,92 @@ fn safe_definition_text(value: &str, maximum_bytes: usize) -> bool {
             .any(|character| character.is_control() || character == '\u{7f}')
 }
 
+fn validate_area_load_request(
+    request: &AreaLoadRequest,
+    generation_id: &AreaGenerationId,
+) -> Result<(), WorldError> {
+    if &request.generation_id != generation_id
+        || !valid_definition_id(&request.source_room_id)
+        || !valid_definition_id(&request.target_room_id)
+        || !valid_definition_id(&request.target_area_id)
+        || request.minimum_target_revision == 0
+    {
+        return Err(WorldError::InvalidAreaLifecycle);
+    }
+    Ok(())
+}
+
+fn compile_item_prototype(
+    item: ItemPrototypeDefinition,
+) -> Result<(String, ItemPrototype), WorldError> {
+    let stack_valid = match item.stack_policy {
+        ItemStackPolicy::Unique => item.max_stack_units == 1,
+        ItemStackPolicy::Fungible => (2..=1_000).contains(&item.max_stack_units),
+    };
+    let container_valid = item.container.as_ref().is_none_or(|container| {
+        item.stack_policy == ItemStackPolicy::Unique
+            && item.max_stack_units == 1
+            && !item.consumable
+            && (1..=1_000).contains(&container.max_slots)
+            && container.max_weight_grams <= 1_000_000
+    });
+    let presentation_valid = valid_definition_id(&item.prototype_id)
+        && safe_definition_text(&item.name, 128)
+        && safe_definition_multiline_text(&item.description, 2_048)
+        && item.aliases.len() <= 32
+        && item
+            .aliases
+            .iter()
+            .all(|alias| safe_definition_text(alias, 64));
+    let sealed_valid = item.sealed_loot_table_id.as_ref().is_none_or(|table_id| {
+        valid_definition_id(table_id)
+            && item.stack_policy == ItemStackPolicy::Unique
+            && item.max_stack_units == 1
+            && item.consumable
+            && item.container.is_none()
+            && item.equipment_slot.is_none()
+            && item.attack_bonus == 0
+            && item.heal_amount == 0
+            && item.effect.is_none()
+            && item.transfer_policy == ItemTransferPolicy::CharacterBound
+    });
+    if !presentation_valid
+        || item.weight_grams > 1_000_000
+        || item.slot_cost == 0
+        || item.slot_cost > 1_000
+        || item.item_level == 0
+        || item.item_level > 1_000
+        || !stack_valid
+        || !container_valid
+        || !sealed_valid
+    {
+        return Err(WorldError::InvalidAreaLifecycle);
+    }
+    let prototype_id = item.prototype_id;
+    Ok((
+        prototype_id,
+        ItemPrototype {
+            name: item.name,
+            description: item.description,
+            aliases: item.aliases,
+            equipment_slot: item.equipment_slot,
+            attack_bonus: item.attack_bonus,
+            heal_amount: item.heal_amount,
+            consumable: item.consumable,
+            effect: item.effect,
+            weight_grams: item.weight_grams,
+            slot_cost: item.slot_cost,
+            rarity: item.rarity,
+            item_level: item.item_level,
+            stack_policy: item.stack_policy,
+            max_stack_units: item.max_stack_units,
+            container: item.container,
+            transfer_policy: item.transfer_policy,
+            sealed_loot_table_id: item.sealed_loot_table_id,
+        },
+    ))
+}
+
 fn valid_telepathy_fields(ability_id: &str, target: &str, message: &str) -> bool {
     ability_id.len() <= MAX_TELEPATHY_ABILITY_ID_BYTES
         && valid_definition_id(ability_id)
@@ -19011,6 +19954,71 @@ mod tests {
         }
     }
 
+    fn area_generation() -> AreaGenerationId {
+        AreaGenerationId::from_catalog_sha256("1".repeat(64)).unwrap()
+    }
+
+    fn prepared_room(
+        stable_id: &str,
+        exits: impl IntoIterator<Item = (Direction, &'static str)>,
+    ) -> RoomDefinition {
+        RoomDefinition {
+            stable_id: stable_id.into(),
+            title: stable_id.into(),
+            prose: vec![format!("Area room {stable_id}.")],
+            image: None,
+            audio: None,
+            exits: exits
+                .into_iter()
+                .map(|(direction, target_room_id)| ExitDefinition {
+                    direction,
+                    target_room_id: target_room_id.into(),
+                })
+                .collect(),
+            item_ids: Vec::new(),
+        }
+    }
+
+    fn prepared_area(area_id: &str, revision: u64, rooms: Vec<RoomDefinition>) -> PreparedCoreArea {
+        PreparedCoreArea {
+            area_id: area_id.into(),
+            revision,
+            bundle_sha256: format!("{revision:064x}"),
+            rooms,
+            room_presentations: Vec::new(),
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
+            npcs: Vec::new(),
+            npc_ability_sets: Vec::new(),
+            loot_tables: Vec::new(),
+            loot_sources: Vec::new(),
+            affixes: Vec::new(),
+            affix_pools: Vec::new(),
+            room_light: Vec::new(),
+            hidden_items: Vec::new(),
+            hidden_npcs: Vec::new(),
+            secret_exits: Vec::new(),
+        }
+    }
+
+    fn deferred_portal(
+        generation_id: &AreaGenerationId,
+        source_room_id: &str,
+        direction: Direction,
+        target_room_id: &str,
+        target_area_id: &str,
+        minimum_target_revision: u64,
+    ) -> AreaLoadRequest {
+        AreaLoadRequest {
+            generation_id: generation_id.clone(),
+            source_room_id: source_room_id.into(),
+            direction,
+            target_room_id: target_room_id.into(),
+            target_area_id: target_area_id.into(),
+            minimum_target_revision,
+        }
+    }
+
     fn sealed_reward_definition() -> WorldDefinition {
         let mut seal = item_prototype(
             "reward:sealed-cache",
@@ -20006,11 +21014,507 @@ mod tests {
     }
 
     #[test]
-    fn unknown_persisted_rooms_fall_back_safely() {
+    fn deferred_portal_preflight_is_idempotent_secret_safe_and_non_mutating() {
+        let generation = area_generation();
+        let request = deferred_portal(
+            &generation,
+            "area-a:start",
+            Direction::North,
+            "area-b:start",
+            "area-b",
+            2,
+        );
+        let initial_batch = PreparedCoreAreaBatch {
+            generation_id: generation.clone(),
+            areas: vec![prepared_area(
+                "area-a",
+                1,
+                vec![prepared_room(
+                    "area-a:start",
+                    [(Direction::North, "area-b:start")],
+                )],
+            )],
+            deferred_exits: vec![request.clone()],
+        };
+        let duplicate_batch = initial_batch.clone();
+        let (mut world, installed) =
+            World::from_initial_prepared_areas("area-a:start", initial_batch).unwrap();
+        assert_eq!(installed.installed_area_ids, vec!["area-a"]);
+        assert_eq!(world.area_generation(), Some(&generation));
+        assert_eq!(world.active_area_count(), 1);
+        assert!(world.active_area_matches("area-a", 1, &format!("{:064x}", 1)));
+
+        // A coalesced duplicate completion is a strict no-op even while its
+        // outgoing portal remains deferred.
+        assert_eq!(
+            world.install_prepared_areas(duplicate_batch).unwrap(),
+            CoreAreaInstallOutcome {
+                installed_areas: 0,
+                installed_area_ids: Vec::new(),
+                created_dynamic_state: false,
+            }
+        );
+
+        let session = SessionId(71);
+        world
+            .connect(
+                session,
+                CharacterSnapshot {
+                    id: CharacterId(71),
+                    account_id: AccountId(71),
+                    name: "Portal Tester".into(),
+                    room_id: "area-a:start".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let before_character = world.character_snapshot(session).unwrap();
+        let before_revision = world.revision();
+        let before_view_revision = world.observer(session).unwrap().revision;
+        let scene = world.scene_for(session).unwrap();
+        assert_eq!(scene.exits.len(), 1);
+        assert!(!scene.exits[0].id.contains("area-b"));
+        let player = world.player_state_view(session).unwrap();
+        assert_eq!(player.map.paths.len(), 1);
+        assert_eq!(player.map.paths[0].to, None);
+        assert_eq!(
+            world
+                .deferred_area_load_request(session, Direction::North)
+                .unwrap(),
+            Some(request.clone())
+        );
+        assert!(matches!(
+            world.apply(session, PlayerAction::Move(Direction::North)),
+            Err(WorldError::AreaLoadRequired(actual)) if actual == request
+        ));
+        assert_eq!(world.character_snapshot(session).unwrap(), before_character);
+        assert_eq!(world.revision(), before_revision);
+        assert_eq!(
+            world.observer(session).unwrap().revision,
+            before_view_revision
+        );
+        assert_eq!(world.shout_audience(session).unwrap().len(), 1);
+
+        world
+            .configure_secret_exit("area-a:start", Direction::North, 100)
+            .unwrap();
+        assert!(world.scene_for(session).unwrap().exits.is_empty());
+        assert_eq!(
+            world
+                .deferred_area_load_request(session, Direction::North)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn initial_area_configuration_pins_abilities_before_lazy_npcs_install() {
+        let generation = area_generation();
+        let mut area = prepared_area("area-a", 1, vec![prepared_room("area-a:start", [])]);
+        area.npcs.push(NpcDefinition {
+            stable_id: "area-a:sentinel".into(),
+            name: "sentinel".into(),
+            description: "A sentinel with a pinned global ability.".into(),
+            room_id: "area-a:start".into(),
+            level: 1,
+            max_health: 10,
+            strength: 1,
+            defence: 0,
+            experience_reward: 0,
+            loot_item_ids: Vec::new(),
+            respawn_ticks: 10,
+        });
+        area.npc_ability_sets.push(NpcAbilitySetDefinition {
+            npc_id: "area-a:sentinel".into(),
+            resource_pools: BTreeMap::new(),
+            resource_regeneration: BTreeMap::new(),
+            resistances: BTreeMap::new(),
+            ability_ids: vec!["global:jab".into()],
+        });
+        let (world, outcome) = World::from_initial_prepared_areas_with_configuration(
+            "area-a:start",
+            PreparedCoreAreaBatch {
+                generation_id: generation,
+                areas: vec![area],
+                deferred_exits: Vec::new(),
+            },
+            |world| {
+                world.configure_progression(
+                    builtin_progression_definition(),
+                    vec![AbilityDefinition {
+                        id: "global:jab".into(),
+                        name: "Jab".into(),
+                        description: "A pinned global strike.".into(),
+                        category: AbilityCategory::Martial,
+                        resource_costs: BTreeMap::new(),
+                        cooldown_ticks: 0,
+                        targeting: AbilityTargeting::SingleEnemy,
+                        damage: Some(AbilityDamageDefinition {
+                            target: AbilityEffectTarget::Target,
+                            damage_type: DamageType::Physical,
+                            base_amount: 1,
+                            scaling_attribute: None,
+                            scaling_percent: 0,
+                        }),
+                        heal: None,
+                        status_effects: Vec::new(),
+                        communication: None,
+                    }],
+                )
+            },
+        )
+        .unwrap();
+        assert!(outcome.created_dynamic_state);
+        assert_eq!(world.revision(), 1);
+        assert_eq!(
+            world.npcs["area-a:sentinel"].ability_ids,
+            vec!["global:jab"]
+        );
+    }
+
+    #[test]
+    fn additive_cross_area_presentation_and_pending_npc_abilities_are_atomic() {
+        let generation = area_generation();
+        let mut start = prepared_area("area-a", 1, vec![prepared_room("area-a:start", [])]);
+        let image = SceneImage {
+            alt: "A verified cross-area scene.".into(),
+            localized_alt: BTreeMap::from([(
+                "es".into(),
+                "Una escena verificada entre áreas.".into(),
+            )]),
+            manifest: Some(format!("/assets/{}/manifest.json", "a".repeat(64))),
+            avif: None,
+            webp: None,
+            jpeg: None,
+            width: None,
+            height: None,
+        };
+        start.room_presentations.push(RoomPresentationDefinition {
+            room_id: "area-a:start".into(),
+            image: Some(image.clone()),
+            audio: None,
+        });
+        let mut rules = prepared_area("area-rules", 1, Vec::new());
+        rules.npc_ability_sets.push(NpcAbilitySetDefinition {
+            npc_id: "area-npcs:sentinel".into(),
+            resource_pools: BTreeMap::new(),
+            resource_regeneration: BTreeMap::new(),
+            resistances: BTreeMap::new(),
+            ability_ids: vec!["global:jab".into()],
+        });
+        let (mut world, initial) = World::from_initial_prepared_areas_with_configuration(
+            "area-a:start",
+            PreparedCoreAreaBatch {
+                generation_id: generation.clone(),
+                areas: vec![start, rules],
+                deferred_exits: Vec::new(),
+            },
+            |world| {
+                world.configure_progression(
+                    builtin_progression_definition(),
+                    vec![AbilityDefinition {
+                        id: "global:jab".into(),
+                        name: "Jab".into(),
+                        description: "A pinned global strike.".into(),
+                        category: AbilityCategory::Martial,
+                        resource_costs: BTreeMap::new(),
+                        cooldown_ticks: 0,
+                        targeting: AbilityTargeting::SingleEnemy,
+                        damage: Some(AbilityDamageDefinition {
+                            target: AbilityEffectTarget::Target,
+                            damage_type: DamageType::Physical,
+                            base_amount: 1,
+                            scaling_attribute: None,
+                            scaling_percent: 0,
+                        }),
+                        heal: None,
+                        status_effects: Vec::new(),
+                        communication: None,
+                    }],
+                )
+            },
+        )
+        .unwrap();
+        assert!(!initial.created_dynamic_state);
+        let room = room_checked(&world.entities, world.stable_rooms["area-a:start"]).unwrap();
+        assert_eq!(room.image.as_ref(), Some(&image));
+        assert!(
+            world
+                .pending_npc_ability_sets
+                .contains_key("area-npcs:sentinel")
+        );
+
+        let mut npcs = prepared_area("area-npcs", 1, Vec::new());
+        npcs.npcs.push(NpcDefinition {
+            stable_id: "area-npcs:sentinel".into(),
+            name: "sentinel".into(),
+            description: "A sentinel configured from another area.".into(),
+            room_id: "area-a:start".into(),
+            level: 1,
+            max_health: 10,
+            strength: 1,
+            defence: 0,
+            experience_reward: 0,
+            loot_item_ids: Vec::new(),
+            respawn_ticks: 10,
+        });
+        let installed = world
+            .install_prepared_areas(PreparedCoreAreaBatch {
+                generation_id: generation.clone(),
+                areas: vec![npcs],
+                deferred_exits: Vec::new(),
+            })
+            .unwrap();
+        assert!(installed.created_dynamic_state);
+        assert_eq!(
+            world.npcs["area-npcs:sentinel"].ability_ids,
+            vec!["global:jab"]
+        );
+        assert!(world.pending_npc_ability_sets.is_empty());
+
+        let mut loot = prepared_area("area-loot", 1, Vec::new());
+        loot.item_prototypes.push(item_prototype(
+            "area-loot:token",
+            "token",
+            "A cross-area NPC possession.",
+            &[],
+        ));
+        loot.initial_item_instances
+            .push(InitialItemInstanceDefinition {
+                instance_id: ItemInstanceId("area-loot:token-1".into()),
+                prototype_id: "area-loot:token".into(),
+                location: InitialItemLocation::NpcSpawn("area-npcs:sentinel".into()),
+            });
+        let installed_loot = world
+            .install_prepared_areas(PreparedCoreAreaBatch {
+                generation_id: generation.clone(),
+                areas: vec![loot],
+                deferred_exits: Vec::new(),
+            })
+            .unwrap();
+        assert!(installed_loot.created_dynamic_state);
+        assert!(
+            world.npcs["area-npcs:sentinel"]
+                .loot_item_ids
+                .contains(&ItemInstanceId("area-loot:token-1".into()))
+        );
+        assert_eq!(
+            world.item_location(&ItemInstanceId("area-loot:token-1".into())),
+            Some(&SharedItemLocation::HeldByNpc("area-npcs:sentinel".into()))
+        );
+
+        let checkpoint = world.lifecycle_checkpoint();
+        let mut conflict = prepared_area("area-conflict", 1, Vec::new());
+        let mut conflicting_image = image;
+        conflicting_image.alt = "Conflicting replacement.".into();
+        conflict
+            .room_presentations
+            .push(RoomPresentationDefinition {
+                room_id: "area-a:start".into(),
+                image: Some(conflicting_image),
+                audio: None,
+            });
+        assert!(matches!(
+            world.install_prepared_areas(PreparedCoreAreaBatch {
+                generation_id: generation,
+                areas: vec![conflict],
+                deferred_exits: Vec::new(),
+            }),
+            Err(WorldError::InvalidAreaLifecycle)
+        ));
+        let after = world.lifecycle_checkpoint();
+        assert_eq!(checkpoint.active_areas, after.active_areas);
+        assert_eq!(
+            checkpoint.pending_npc_ability_sets,
+            after.pending_npc_ability_sets
+        );
+        let room = room_checked(&world.entities, world.stable_rooms["area-a:start"]).unwrap();
+        assert_eq!(
+            room.image.as_ref().map(|image| image.alt.as_str()),
+            Some("A verified cross-area scene.")
+        );
+    }
+
+    #[test]
+    fn additive_install_relinks_portals_reports_dynamic_state_and_rolls_back_exactly() {
+        let generation = area_generation();
+        let first_request = deferred_portal(
+            &generation,
+            "area-a:start",
+            Direction::North,
+            "area-b:start",
+            "area-b",
+            2,
+        );
+        let (mut world, _) = World::from_initial_prepared_areas(
+            "area-a:start",
+            PreparedCoreAreaBatch {
+                generation_id: generation.clone(),
+                areas: vec![prepared_area(
+                    "area-a",
+                    1,
+                    vec![prepared_room(
+                        "area-a:start",
+                        [(Direction::North, "area-b:start")],
+                    )],
+                )],
+                deferred_exits: vec![first_request],
+            },
+        )
+        .unwrap();
+        let session = SessionId(72);
+        world
+            .connect(
+                session,
+                CharacterSnapshot {
+                    id: CharacterId(72),
+                    account_id: AccountId(72),
+                    name: "Lifecycle Tester".into(),
+                    room_id: "area-a:start".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let second_request = deferred_portal(
+            &generation,
+            "area-b:start",
+            Direction::East,
+            "area-c:start",
+            "area-c",
+            3,
+        );
+        let before_install_revision = world.revision();
+        let installed = world
+            .install_prepared_areas(PreparedCoreAreaBatch {
+                generation_id: generation.clone(),
+                areas: vec![prepared_area(
+                    "area-b",
+                    2,
+                    vec![prepared_room(
+                        "area-b:start",
+                        [
+                            (Direction::South, "area-a:start"),
+                            (Direction::East, "area-c:start"),
+                        ],
+                    )],
+                )],
+                deferred_exits: vec![second_request.clone()],
+            })
+            .unwrap();
+        assert_eq!(installed.installed_area_ids, vec!["area-b"]);
+        assert!(!installed.created_dynamic_state);
+        assert_eq!(world.revision(), before_install_revision);
+        assert_eq!(
+            world
+                .deferred_area_load_request(session, Direction::North)
+                .unwrap(),
+            None
+        );
+        world
+            .apply(session, PlayerAction::Move(Direction::North))
+            .unwrap();
+        assert_eq!(
+            world
+                .deferred_area_load_request(session, Direction::East)
+                .unwrap(),
+            Some(second_request)
+        );
+
+        let lifecycle_checkpoint = world.lifecycle_checkpoint();
+        let mut invalid_c = prepared_area(
+            "area-c",
+            3,
+            vec![prepared_room(
+                "area-c:start",
+                [(Direction::West, "area-b:start")],
+            )],
+        );
+        let duplicate = item_prototype("area-c:item", "area item", "An item.", &[]);
+        invalid_c.item_prototypes = vec![duplicate.clone(), duplicate];
+        assert!(matches!(
+            world.install_prepared_areas(PreparedCoreAreaBatch {
+                generation_id: generation.clone(),
+                areas: vec![invalid_c],
+                deferred_exits: Vec::new(),
+            }),
+            Err(WorldError::InvalidAreaLifecycle)
+        ));
+        assert!(!world.area_is_active("area-c"));
+        assert_eq!(
+            world
+                .deferred_area_load_request(session, Direction::East)
+                .unwrap(),
+            Some(deferred_portal(
+                &generation,
+                "area-b:start",
+                Direction::East,
+                "area-c:start",
+                "area-c",
+                3,
+            ))
+        );
+
+        let mut valid_c = prepared_area(
+            "area-c",
+            3,
+            vec![prepared_room(
+                "area-c:start",
+                [(Direction::West, "area-b:start")],
+            )],
+        );
+        valid_c.item_prototypes = vec![item_prototype(
+            "area-c:item",
+            "area item",
+            "An item installed with its area.",
+            &[],
+        )];
+        valid_c.initial_item_instances = vec![item_instance(
+            "area-c:item-instance",
+            "area-c:item",
+            InitialItemLocation::Room("area-c:start".into()),
+        )];
+        let revision_before_dynamic_install = world.revision();
+        let installed = world
+            .install_prepared_areas(PreparedCoreAreaBatch {
+                generation_id: generation,
+                areas: vec![valid_c],
+                deferred_exits: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(installed.installed_area_ids, vec!["area-c"]);
+        assert!(installed.created_dynamic_state);
+        assert_eq!(world.revision(), revision_before_dynamic_install);
+        assert_eq!(
+            world
+                .deferred_area_load_request(session, Direction::East)
+                .unwrap(),
+            None
+        );
+        let scene = world
+            .apply(session, PlayerAction::Move(Direction::East))
+            .unwrap()
+            .scene;
+        assert_eq!(scene.title, "area-c:start");
+        assert_eq!(scene.items.len(), 1);
+
+        world.restore_lifecycle_checkpoint(lifecycle_checkpoint);
+        assert!(!world.area_is_active("area-c"));
+        assert_eq!(
+            world.character_snapshot(session).unwrap().room_id,
+            "area-b:start"
+        );
+        assert!(matches!(
+            world.apply(session, PlayerAction::Move(Direction::East)),
+            Err(WorldError::AreaLoadRequired(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_persisted_rooms_fail_closed_without_relocating() {
         let mut world = World::demo();
         let session = SessionId(11);
-        let scene = world
-            .connect(
+        assert!(matches!(
+            world.connect(
                 session,
                 CharacterSnapshot {
                     id: CharacterId(102),
@@ -20019,10 +21523,11 @@ mod tests {
                     room_id: "missing:room".into(),
                     item_locations: BTreeMap::new(),
                 },
-            )
-            .unwrap();
-        assert_ne!(scene.view_id, "demo:lantern-square");
-        assert_eq!(scene.title, "Lantern Square");
+            ),
+            Err(WorldError::InvalidEntity)
+        ));
+        assert!(!world.sessions.contains_key(&session));
+        assert!(!world.character_gameplay.contains_key(&CharacterId(102)));
     }
 
     #[test]
@@ -20031,7 +21536,7 @@ mod tests {
         let character_id = world.sessions[&session];
         room_mut(&mut world.entities, world.start_room)
             .exits
-            .insert(Direction::West, character_id);
+            .insert(Direction::West, RoomExit::Resident(character_id));
 
         assert!(matches!(
             world.scene_for(session),

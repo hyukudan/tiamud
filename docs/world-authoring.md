@@ -12,33 +12,43 @@ variantes, scripts y pruebas de contenido.
 
 ## Frontera de ejecución
 
-El servidor valida y carga un único `WorldPackDocument` v9 completo antes de
-abrir sus listeners. `TIAMUD_WORLD_PACK` permite seleccionar un artefacto
-externo revisado; si no se define, se usa Lantern Square embebido.
+El servidor elige exactamente una fuente antes de abrir listeners:
 
-Un WorldPack compuesto no contiene áreas runtime. `AreaPack` es propiedad
-editorial modular: `tiamud-world compose` resuelve sus dependencias y produce
-un único artefacto plano. Por tanto:
+- modo monolítico: `TIAMUD_WORLD_PACK` selecciona un
+  `WorldPackDocument` v9 completo; sin variables de mundo se usa Lantern Square
+  embebido; o
+- modo catálogo 6B: `TIAMUD_AREA_REGISTRY` y `TIAMUD_AREA_CATALOG` deben
+  definirse juntas y señalan un registro local más el path content-addressed
+  exacto de su catálogo.
 
-- no hay composición, descarga ni resolución de dependencias durante el juego;
-- no existen salidas “entre paquetes” runtime: todo destino debe existir en el
-  WorldPack final;
-- cambiar el mundo requiere seleccionar el artefacto y reiniciar;
-- la carga/reemplazo caliente y la expulsión LRU del ADR 0005 siguen pendientes;
-- los IDs publicados son identidad durable, no títulos; y
-- perder imagen, audio o color nunca elimina prosa o acciones jugables.
+Los modos son excluyentes. Una pareja incompleta o mezclada con
+`TIAMUD_WORLD_PACK` falla cerrada; no cae al mundo embebido. `AreaPack` sigue
+siendo el módulo de autoría y 6B no compone fuentes durante el juego: consume
+el `CompiledArea` ya publicado y contrastado con el WorldPack monolítico de
+respaldo.
+
+El modo catálogo fija el SHA-256 canónico del catálogo como generación hasta
+apagar. Puede añadir áreas verificadas bajo demanda, pero nunca sustituye ni
+descarga una revisión. Cambiar `area-active` o publicar otro catálogo no afecta
+al proceso en ejecución; usar otra generación exige reiniciar. Los IDs
+publicados continúan siendo identidad durable, no títulos, y perder imagen,
+audio o color nunca elimina prosa o acciones jugables.
 
 ```mermaid
 flowchart LR
-    accTitle: Flujo vigente de autoría modular de Tiamud
-    accDescr: Las áreas se componen y validan fuera de línea para producir un solo WorldPack canónico que el servidor carga al arrancar. No existe carga caliente.
+    accTitle: Flujo vigente monolítico y aditivo local de Tiamud
+    accDescr: Las áreas se componen y validan fuera de línea. El servidor elige el WorldPack completo o una generación local fijada cuyos bundles se incorporan de forma aditiva.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
     Areas[AreaPack v8<br/>1..=256 módulos] --> Compose
     Compose --> Validate[Validación global<br/>referencias · límites · Lua]
     Validate --> Artifact[WorldPack v9 canónico]
-    Artifact --> Server[Servidor único<br/>carga al arrancar]
-    Hot[Catálogo caliente/LRU] -. futuro .-> Server
+    Artifact --> Monolithic[Servidor<br/>modo monolítico]
+    Validate --> Publish[area-publish 6A]
+    Publish --> Catalog[Catálogo + bundles<br/>locales e inmutables]
+    Catalog --> Fixed[Generación fijada 6B]
+    Fixed --> Server[Servidor<br/>carga aditiva]
+    Future[Sustitución · descarga · LRU] -. 6C+ .-> Server
 ```
 
 ## Versiones y compatibilidad
@@ -864,6 +874,91 @@ Límites principales:
 | Peso/cantidad de una entrada | 1..=1.000.000 / 1..=32 |
 | Raíces fijas + repetibles por derrota | 64 |
 
+## Publicación 6A y ejecución aditiva 6B
+
+El release revisado declara revisión, propiedad, dependencias, portales,
+procedencia y licencias de cada área. Se publica en un registro local:
+
+```sh
+cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
+  worlds/lantern-square.project.json \
+  --release worlds/lantern-square.area-release.json \
+  --registry build/area-registry
+```
+
+Stdout devuelve la ruta content-addressed exacta del catálogo. Verifícala sin
+mutar el registro:
+
+```sh
+cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
+  --catalog build/area-registry/area-catalogs/71b3f0f3493d91254d4ce1ed60c147e9f0f480ca204f62f05b3fd05d92e6e3f1/e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6.catalog.json \
+  --registry build/area-registry
+```
+
+El catálogo v1 admite hasta 256 entradas y 1 MiB. El manifiesto de release se
+acota a 256 KiB; cada bundle JSON canónico y la suma declarada se acotan a
+16 MiB. Los tres sobres limitan profundidad JSON a 16 y rechazan claves
+duplicadas recursivamente. `storedBytes == expandedBytes`: no existe compresión
+v1. `trustMode=unsigned_local` supone un host confiable y publicadores
+cooperantes; digest no demuestra autoría ni habilita redistribución.
+
+`AreaPack.dependsOn` es la declaración editorial exhaustiva. El catálogo
+deriva `hardDependencies` solo de referencias estructurales cruzadas que no son
+`RoomExit`; cada salida entre áreas se publica como `portals` con
+`sourceExit`, peer y revisión mínima. `softDependencies` queda vacío. El bundle
+incluye el AreaPack revisable y un `CompiledArea` estricto ligado por
+`compiledAreaSha256`. El WorldPack monolítico de respaldo demuestra que el
+conjunto completo conserva la misma semántica.
+
+`ItemInstanceContainer` es el caso estructural que exige materialización
+simétrica: si hijo y contenedor pertenecen a áreas distintas, el publicador
+añade dependencias duras en ambos sentidos. `open_exact` las reconstruye desde
+el WorldPack de respaldo y rechaza un catálogo que no conserve el cierre
+atómico. Así nadie puede mover, llenar o ligar el contenedor antes de que
+aparezca su contenido authored.
+
+Para ejecutar esa generación local, usa exactamente las dos variables
+siguientes y no definas `TIAMUD_WORLD_PACK`:
+
+```sh
+TIAMUD_AREA_REGISTRY=build/area-registry \
+TIAMUD_AREA_CATALOG=build/area-registry/area-catalogs/71b3f0f3493d91254d4ce1ed60c147e9f0f480ca204f62f05b3fd05d92e6e3f1/e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6.catalog.json \
+TIAMUD_TELNET_MODE=plaintext \
+cargo run --locked -p tiamud-server
+```
+
+El servidor fija el digest del catálogo antes de listeners y no vuelve a leer
+`area-active`. En persistencia vacía instala el área de `startRoomId` y el
+cierre de `hardDependencies`; con snapshot o ledger previo instala primero la
+generación completa. Un portal hacia un área no residente permanece como
+`DeferredExit`. La entrada real prepara el cierre fuera del actor, lo instala
+atómicamente y reintenta una vez, con límites de dos trabajos activos, ocho
+pendientes, cinco segundos y 32 áreas.
+
+Si desaparece el último solicitante mientras espera uno de los dos permisos,
+se notifica y cancela el trabajo en cola de inmediato. A los cinco segundos el
+solicitante recibe timeout. Un `spawn_blocking` ya iniciado no se cancela de
+forma insegura: conserva permiso y marca terminal hasta terminar y su resultado
+tardío se descarta.
+
+Una instalación estática no escribe snapshot. Instancias y NPC iniciales que
+formen parte del estado dinámico se confirman con la transacción existente
+antes de activar el lote. Fallos de bundle, dependencia, timeout, saturación o
+commit restauran mundo, contenido runtime y residencia; los clientes solo ven
+un destino no disponible genérico. Todas las áreas cargadas permanecen en
+memoria hasta apagar.
+
+Una instancia inicial `NpcSpawn` puede vivir en otra área que el NPC. La
+instalación la incorpora al botín fijo tanto si ambos llegan juntos como si el
+NPC ya residía, valida los límites y marca el lote como dinámico para confirmar
+la relación antes de publicarla.
+
+Ni 6A ni 6B permiten que un portal normal cargue transitivamente sus vecinos.
+Tampoco implementan reemplazo de revisiones, generaciones simultáneas,
+drenaje, descarga, LRU, red, compresión o firma remota. Véanse
+[ADR 0005](decisions/0005-hot-area-lifecycle.md) y
+[ADR 0020](decisions/0020-additive-local-area-loading.md).
+
 ## Flujo editorial
 
 `tiamud-world` comparte el mismo normalizador y validador en todos sus comandos:
@@ -876,9 +971,11 @@ cargo run --locked -p world-pack --bin tiamud-world -- build mundo.json --output
 cargo run --locked -p world-pack --bin tiamud-world -- diff anterior.json nuevo.json
 ```
 
-Publicación y rollback usan artefactos inmutables por digest. No equivalen a
-recarga en caliente: activar un digest prepara qué artefacto usará el proceso al
-arrancar o reiniciar.
+Publicación y rollback usan artefactos inmutables por digest. El puntero
+`area-active` es selección editorial: un proceso 6B fija la ruta explícita de
+catálogo al arrancar y no sigue el puntero. Cambiar de generación, sustituir
+una revisión o volver a otra publicación exige reiniciar; no existe reemplazo
+en vivo.
 
 Antes de publicar:
 

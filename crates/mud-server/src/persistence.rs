@@ -140,6 +140,26 @@ pub struct DurableCharacterGameplay {
     pub gameplay: CharacterGameplaySnapshot,
 }
 
+/// One atomically observed durable authority for world startup.
+///
+/// A runtime snapshot is authoritative whenever present, even if the retained
+/// diagnostic ledger is non-empty. Without a snapshot, a non-empty ledger is
+/// the recovery authority; only the absence of both permits a partial initial
+/// area load.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum StartupWorldRecovery {
+    Empty,
+    Snapshot(WorldRuntimeSnapshot),
+    Ledger(Vec<DomainEvent>),
+}
+
+impl StartupWorldRecovery {
+    pub const fn requires_full_generation(&self) -> bool {
+        !matches!(self, Self::Empty)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SocialProfile {
     pub character_id: CharacterId,
@@ -330,6 +350,8 @@ pub enum StoreError {
     CharacterState(#[from] serde_json::Error),
     #[error("the persisted world runtime snapshot is invalid or unsupported")]
     InvalidRuntimeSnapshot,
+    #[error("the persisted startup domain-event ledger is incomplete or exceeds its limit")]
+    InvalidStartupLedger,
     #[error("serialized {kind} exceeds the {maximum} byte persistence limit")]
     SnapshotTooLarge { kind: &'static str, maximum: usize },
     #[error("durable character count exceeds the {maximum} aggregate startup limit")]
@@ -504,6 +526,7 @@ pub trait CharacterStore: Send + Sync {
         character_id: CharacterId,
     ) -> Result<CharacterSnapshot, StoreError>;
 
+    #[allow(dead_code)]
     async fn save(&self, snapshot: CharacterSnapshot) -> Result<(), StoreError>;
 
     async fn load_character_gameplay(
@@ -528,12 +551,19 @@ pub trait CharacterStore: Send + Sync {
         limits: StartupGameplayLoadLimits,
     ) -> Result<Vec<DurableCharacterGameplay>, StoreError>;
 
+    #[allow(dead_code)]
     async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError>;
+
+    /// Observe the startup snapshot/ledger choice through one backend
+    /// transaction. Implementations must fail closed on an invalid snapshot
+    /// and must never fall back to the ledger when a snapshot row exists.
+    async fn load_startup_world_recovery(&self) -> Result<StartupWorldRecovery, StoreError>;
 
     /// Load the retained event suffix in durable sequence order. Before the
     /// first runtime snapshot this is the complete recovery ledger; once a
     /// snapshot exists, that snapshot is authoritative and covers the
     /// persisted `last_event_sequence` watermark.
+    #[allow(dead_code)]
     async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError>;
 
     async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError>;
@@ -940,6 +970,10 @@ impl CharacterStore for MeasuredCharacterStore {
         self.inner.load_runtime_snapshot().await
     }
 
+    async fn load_startup_world_recovery(&self) -> Result<StartupWorldRecovery, StoreError> {
+        self.inner.load_startup_world_recovery().await
+    }
+
     async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError> {
         self.inner.load_domain_events().await
     }
@@ -1207,6 +1241,7 @@ pub(super) enum Request {
         character_id: CharacterId,
         reply: oneshot::Sender<Result<CharacterSnapshot, StoreError>>,
     },
+    #[allow(dead_code)]
     Save {
         snapshot: CharacterSnapshot,
         reply: oneshot::Sender<Result<(), StoreError>>,
@@ -1224,9 +1259,14 @@ pub(super) enum Request {
         character_ids: Vec<CharacterId>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
+    #[allow(dead_code)]
     LoadRuntimeSnapshot {
         reply: oneshot::Sender<Result<Option<WorldRuntimeSnapshot>, StoreError>>,
     },
+    LoadStartupWorldRecovery {
+        reply: oneshot::Sender<Result<StartupWorldRecovery, StoreError>>,
+    },
+    #[allow(dead_code)]
     LoadDomainEvents {
         reply: oneshot::Sender<Result<Vec<DomainEvent>, StoreError>>,
     },
@@ -1549,6 +1589,9 @@ impl SqliteCharacterStore {
                         }
                         Request::LoadRuntimeSnapshot { reply } => {
                             let _ = reply.send(load_runtime_snapshot(&connection));
+                        }
+                        Request::LoadStartupWorldRecovery { reply } => {
+                            let _ = reply.send(load_startup_world_recovery(&mut connection));
                         }
                         Request::LoadDomainEvents { reply } => {
                             let _ = reply.send(load_domain_events(&connection));
@@ -2180,6 +2223,12 @@ impl CharacterStore for SqliteCharacterStore {
     async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
         let (reply, receive) = oneshot::channel();
         self.request(Request::LoadRuntimeSnapshot { reply }, receive)
+            .await
+    }
+
+    async fn load_startup_world_recovery(&self) -> Result<StartupWorldRecovery, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::LoadStartupWorldRecovery { reply }, receive)
             .await
     }
 
@@ -5385,6 +5434,61 @@ fn load_runtime_snapshot(
         .transpose()
 }
 
+fn load_startup_world_recovery(
+    connection: &mut Connection,
+) -> Result<StartupWorldRecovery, StoreError> {
+    let transaction = connection.transaction()?;
+    let recovery = match load_runtime_snapshot(&transaction)? {
+        Some(snapshot) => StartupWorldRecovery::Snapshot(snapshot),
+        None => match load_startup_domain_events(&transaction)? {
+            events if events.is_empty() => StartupWorldRecovery::Empty,
+            events => StartupWorldRecovery::Ledger(events),
+        },
+    };
+    transaction.commit()?;
+    Ok(recovery)
+}
+
+fn load_startup_domain_events(connection: &Connection) -> Result<Vec<DomainEvent>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT sequence, event_json
+         FROM domain_events
+         ORDER BY sequence
+         LIMIT ?1",
+    )?;
+    let rows = statement
+        .query_map(params![DOMAIN_EVENT_RETENTION + 1], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    decode_startup_domain_events(rows)
+}
+
+pub(super) fn decode_startup_domain_events(
+    rows: Vec<(i64, String)>,
+) -> Result<Vec<DomainEvent>, StoreError> {
+    if rows.len() > DOMAIN_EVENT_RETENTION as usize {
+        return Err(StoreError::InvalidStartupLedger);
+    }
+
+    let mut expected_sequence = 1_i64;
+    let mut events = Vec::with_capacity(rows.len());
+    for (sequence, json) in rows {
+        if sequence != expected_sequence {
+            return Err(StoreError::InvalidStartupLedger);
+        }
+        if json.len() > MAX_EVENT_JSON_BYTES {
+            return Err(StoreError::SnapshotTooLarge {
+                kind: "domain event",
+                maximum: MAX_EVENT_JSON_BYTES,
+            });
+        }
+        events.push(serde_json::from_str(&json)?);
+        expected_sequence += 1;
+    }
+    Ok(events)
+}
+
 pub(super) fn decode_runtime_snapshot(
     durable_version: i64,
     json: &str,
@@ -5931,6 +6035,162 @@ mod tests {
             to_room_id: "room:b".into(),
             direction: Direction::North,
         }
+    }
+
+    #[test]
+    fn startup_world_recovery_distinguishes_empty_and_ledger_authority() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+
+        let empty = load_startup_world_recovery(&mut connection).unwrap();
+        assert_eq!(empty, StartupWorldRecovery::Empty);
+        assert!(!empty.requires_full_generation());
+
+        let event = test_domain_event();
+        connection
+            .execute(
+                "INSERT INTO domain_events (event_json) VALUES (?1)",
+                [serde_json::to_string(&event).unwrap()],
+            )
+            .unwrap();
+        let ledger = load_startup_world_recovery(&mut connection).unwrap();
+        assert_eq!(ledger, StartupWorldRecovery::Ledger(vec![event]));
+        assert!(ledger.requires_full_generation());
+    }
+
+    #[test]
+    fn startup_world_recovery_returns_a_valid_snapshot() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let snapshot = World::demo().runtime_snapshot();
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json,
+                      last_event_sequence, updated_at)
+                 VALUES (1, ?1, ?2, 0, unixepoch())",
+                params![
+                    snapshot.snapshot_version,
+                    serde_json::to_string(&snapshot).unwrap()
+                ],
+            )
+            .unwrap();
+
+        let recovery = load_startup_world_recovery(&mut connection).unwrap();
+        assert_eq!(recovery, StartupWorldRecovery::Snapshot(snapshot));
+        assert!(recovery.requires_full_generation());
+    }
+
+    #[test]
+    fn startup_world_recovery_gives_snapshot_precedence_over_the_ledger() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let snapshot = World::demo().runtime_snapshot();
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json,
+                      last_event_sequence, updated_at)
+                 VALUES (1, ?1, ?2, 0, unixepoch())",
+                params![
+                    snapshot.snapshot_version,
+                    serde_json::to_string(&snapshot).unwrap()
+                ],
+            )
+            .unwrap();
+        // A retained diagnostic suffix is not consulted when a valid runtime
+        // snapshot exists. Make it deliberately undecodable to prove there is
+        // no hidden ledger fallback or eager parse.
+        connection
+            .execute(
+                "INSERT INTO domain_events (event_json) VALUES ('not-json')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            load_startup_world_recovery(&mut connection).unwrap(),
+            StartupWorldRecovery::Snapshot(snapshot)
+        );
+    }
+
+    #[test]
+    fn startup_world_recovery_fails_closed_on_an_invalid_snapshot() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json,
+                      last_event_sequence, updated_at)
+                 VALUES (1, ?1, '{}', 0, unixepoch())",
+                [tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO domain_events (event_json) VALUES (?1)",
+                [serde_json::to_string(&test_domain_event()).unwrap()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            load_startup_world_recovery(&mut connection),
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
+    fn startup_world_recovery_rejects_a_ledger_gap() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let event_json = serde_json::to_string(&test_domain_event()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO domain_events (sequence, event_json)
+                 VALUES (1, ?1), (3, ?1)",
+                [event_json],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            load_startup_world_recovery(&mut connection),
+            Err(StoreError::InvalidStartupLedger)
+        ));
+    }
+
+    #[test]
+    fn startup_world_recovery_rejects_more_than_the_retained_event_limit() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        seed_domain_events(&connection, DOMAIN_EVENT_RETENTION + 1);
+
+        assert!(matches!(
+            load_startup_world_recovery(&mut connection),
+            Err(StoreError::InvalidStartupLedger)
+        ));
+    }
+
+    #[test]
+    fn startup_world_recovery_checks_event_utf8_bytes_before_deserializing() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let oversized = "é".repeat(MAX_EVENT_JSON_BYTES / 2 + 1);
+        assert!(oversized.len() > MAX_EVENT_JSON_BYTES);
+        connection
+            .execute(
+                "INSERT INTO domain_events (event_json) VALUES (?1)",
+                [oversized],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            load_startup_world_recovery(&mut connection),
+            Err(StoreError::SnapshotTooLarge {
+                kind: "domain event",
+                maximum: MAX_EVENT_JSON_BYTES,
+            })
+        ));
     }
 
     fn seed_domain_events(connection: &Connection, count: i64) {

@@ -4315,6 +4315,9 @@ fn structured_mail_action(data: &ActionPerformData) -> Result<PlayerAction, Stri
 
 fn public_game_error(error: &GameError) -> String {
     match error {
+        GameError::AreaUnavailable | GameError::World(WorldError::AreaLoadRequired(_)) => {
+            "The destination is not available right now.".to_owned()
+        }
         GameError::MailRecipientUnavailable => "That mail recipient is not available.".to_owned(),
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
         GameError::World(WorldError::LootUnavailable) => "That loot is not available.".to_owned(),
@@ -4796,6 +4799,10 @@ mod tests {
 
     #[test]
     fn internal_world_errors_are_not_exposed_to_clients() {
+        assert_eq!(
+            public_game_error(&GameError::AreaUnavailable),
+            "The destination is not available right now."
+        );
         assert_eq!(
             public_game_error(&GameError::World(WorldError::InvalidEntity)),
             "The world is temporarily unavailable."

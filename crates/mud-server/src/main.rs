@@ -1,3 +1,4 @@
+mod area_runtime;
 mod auth;
 mod boards;
 mod delivery;
@@ -13,6 +14,7 @@ mod web;
 mod world_actor;
 mod world_loader;
 
+use area_runtime::AreaLoadCoordinator;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -34,7 +36,11 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use web::AppState;
 use world_actor::{WorldHandle, WorldSchedulerConfig};
-use world_loader::{build_loaded_world, default_loaded_world, load_loaded_world};
+use world_loader::{
+    LoadedWorldDefinition, PinnedWorldContent, build_loaded_world, default_loaded_world,
+    load_loaded_world, parse_pinned_world_content,
+};
+use world_pack::LocalAreaGeneration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -57,20 +63,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         optional_env("TIAMUD_DATABASE_URL")?,
         optional_env("TIAMUD_DB_PATH")?,
     )?;
-    let world_pack_path = env::var("TIAMUD_WORLD_PACK").ok();
-    if let DatabaseConfig::Sqlite(path) = &database {
-        create_database_parent(path)?;
-    }
-
-    let (loaded_world, world_pack_source) = match world_pack_path {
-        Some(path) => (load_loaded_world(&path)?, path),
-        None => (default_loaded_world()?, "embedded default".to_owned()),
-    };
-    let world = build_loaded_world(&loaded_world)?;
+    let world_source = world_source_config(
+        optional_env("TIAMUD_WORLD_PACK")?,
+        optional_env("TIAMUD_AREA_REGISTRY")?,
+        optional_env("TIAMUD_AREA_CATALOG")?,
+    )?;
+    // Catalog mode must fail before opening a backend because opening either
+    // backend may create a database or run migrations. Pin and validate the
+    // exact generation, including its verified monolithic fallback, first.
+    let prepared_world = prepare_world_before_database(&database, world_source)?;
     let metrics = Arc::new(RuntimeMetrics::default());
-    let runtime_content = loaded_world
-        .runtime_content
-        .with_operational_metrics(metrics.clone());
     // Exactly one branch is opened. Runtime startup never copies between or
     // writes to both persistence backends.
     let store: Arc<dyn CharacterStore> = match &database {
@@ -80,14 +82,52 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let store: Arc<dyn CharacterStore> =
         Arc::new(MeasuredCharacterStore::new(store, metrics.clone()));
     let store_shutdown = store.clone();
+    let recovery = store.load_startup_world_recovery().await?;
     let tick_millis = env_u32("TIAMUD_TICK_MILLIS", 1_000)?;
-    let world = WorldHandle::spawn_with_scheduler_and_content(
-        world,
-        store.clone(),
-        WorldSchedulerConfig::every(Duration::from_millis(u64::from(tick_millis))),
-        runtime_content,
-    )
-    .await?;
+    let scheduler = WorldSchedulerConfig::every(Duration::from_millis(u64::from(tick_millis)));
+    let (world, world_pack_source) = match prepared_world {
+        PreparedWorldSource::Monolithic { loaded, source } => {
+            let loaded = *loaded;
+            let world = build_loaded_world(&loaded)?;
+            let runtime_content = loaded
+                .runtime_content
+                .with_operational_metrics(metrics.clone());
+            let handle = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
+                world,
+                store.clone(),
+                scheduler,
+                runtime_content,
+                None,
+                recovery,
+                false,
+            )
+            .await?;
+            (handle, source)
+        }
+        PreparedWorldSource::AreaCatalog {
+            generation,
+            pinned,
+            source,
+        } => {
+            let coordinator = AreaLoadCoordinator::new(*generation, *pinned, Some(metrics.clone()));
+            let bootstrap = coordinator
+                .bootstrap_world(recovery.requires_full_generation())
+                .await?;
+            let confirm_initial_dynamic_state =
+                !recovery.requires_full_generation() && bootstrap.created_dynamic_state;
+            let handle = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
+                bootstrap.world,
+                store.clone(),
+                scheduler,
+                bootstrap.runtime_content,
+                Some(coordinator),
+                recovery,
+                confirm_initial_dynamic_state,
+            )
+            .await?;
+            (handle, source)
+        }
+    };
     let auth_attempts_per_minute = env_u32("TIAMUD_AUTH_ATTEMPTS_PER_MINUTE", 10)?;
     let auth_burst = env_u32("TIAMUD_AUTH_BURST", 5)?;
     let command_rate_per_second = env_u32("TIAMUD_COMMANDS_PER_SECOND", 12)?;
@@ -245,6 +285,101 @@ fn optional_env(name: &str) -> Result<Option<String>, env::VarError> {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum WorldSourceConfig {
+    Monolithic(Option<String>),
+    AreaCatalog { registry: String, catalog: String },
+}
+
+enum PreparedWorldSource {
+    Monolithic {
+        loaded: Box<LoadedWorldDefinition>,
+        source: String,
+    },
+    AreaCatalog {
+        generation: Box<LocalAreaGeneration>,
+        pinned: Box<PinnedWorldContent>,
+        source: String,
+    },
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+enum WorldSourceConfigError {
+    #[error(
+        "TIAMUD_WORLD_PACK is mutually exclusive with TIAMUD_AREA_REGISTRY/TIAMUD_AREA_CATALOG"
+    )]
+    ConflictingModes,
+    #[error("TIAMUD_AREA_REGISTRY and TIAMUD_AREA_CATALOG must be configured together")]
+    IncompleteCatalogMode,
+    #[error("world source paths must not be empty or contain surrounding whitespace")]
+    InvalidPath,
+}
+
+fn world_source_config(
+    world_pack: Option<String>,
+    area_registry: Option<String>,
+    area_catalog: Option<String>,
+) -> Result<WorldSourceConfig, WorldSourceConfigError> {
+    let valid = |value: &str| !value.is_empty() && value.trim() == value;
+    if world_pack.as_deref().is_some_and(|value| !valid(value))
+        || area_registry.as_deref().is_some_and(|value| !valid(value))
+        || area_catalog.as_deref().is_some_and(|value| !valid(value))
+    {
+        return Err(WorldSourceConfigError::InvalidPath);
+    }
+    match (world_pack, area_registry, area_catalog) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            Err(WorldSourceConfigError::ConflictingModes)
+        }
+        (Some(path), None, None) => Ok(WorldSourceConfig::Monolithic(Some(path))),
+        (None, Some(registry), Some(catalog)) => {
+            Ok(WorldSourceConfig::AreaCatalog { registry, catalog })
+        }
+        (None, None, None) => Ok(WorldSourceConfig::Monolithic(None)),
+        (None, Some(_), None) | (None, None, Some(_)) => {
+            Err(WorldSourceConfigError::IncompleteCatalogMode)
+        }
+    }
+}
+
+fn prepare_world_source(
+    source: WorldSourceConfig,
+) -> Result<PreparedWorldSource, Box<dyn Error + Send + Sync>> {
+    match source {
+        WorldSourceConfig::Monolithic(path) => {
+            let (loaded, source) = match path {
+                Some(path) => (load_loaded_world(&path)?, path),
+                None => (default_loaded_world()?, "embedded default".to_owned()),
+            };
+            Ok(PreparedWorldSource::Monolithic {
+                loaded: Box::new(loaded),
+                source,
+            })
+        }
+        WorldSourceConfig::AreaCatalog { registry, catalog } => {
+            let generation = LocalAreaGeneration::open_exact(&registry, &catalog)?;
+            let pinned = parse_pinned_world_content(generation.world_artifact())?;
+            let source = format!("area catalog {}", generation.generation_id());
+            Ok(PreparedWorldSource::AreaCatalog {
+                generation: Box::new(generation),
+                pinned: Box::new(pinned),
+                source,
+            })
+        }
+    }
+}
+
+fn prepare_world_before_database(
+    database: &DatabaseConfig,
+    source: WorldSourceConfig,
+) -> Result<PreparedWorldSource, Box<dyn Error + Send + Sync>> {
+    let prepared = prepare_world_source(source)?;
+    if let DatabaseConfig::Sqlite(path) = database {
+        create_database_parent(path)?;
+    }
+    Ok(prepared)
+}
+
 fn database_config(
     database_url: Option<String>,
     sqlite_path: Option<String>,
@@ -379,5 +514,69 @@ mod tests {
             database_config(Some(" postgresql://secret@db/tiamud".to_owned()), None).unwrap_err(),
             DatabaseConfigError::InvalidUrl
         );
+    }
+
+    #[test]
+    fn world_source_selects_exactly_one_runtime_mode() {
+        assert_eq!(
+            world_source_config(None, None, None).unwrap(),
+            WorldSourceConfig::Monolithic(None)
+        );
+        assert_eq!(
+            world_source_config(Some("world.json".into()), None, None).unwrap(),
+            WorldSourceConfig::Monolithic(Some("world.json".into()))
+        );
+        assert_eq!(
+            world_source_config(
+                None,
+                Some("registry".into()),
+                Some("registry/catalog.json".into()),
+            )
+            .unwrap(),
+            WorldSourceConfig::AreaCatalog {
+                registry: "registry".into(),
+                catalog: "registry/catalog.json".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn world_source_rejects_mixed_incomplete_or_ambiguous_configuration() {
+        assert_eq!(
+            world_source_config(
+                Some("world.json".into()),
+                Some("registry".into()),
+                Some("catalog.json".into()),
+            ),
+            Err(WorldSourceConfigError::ConflictingModes)
+        );
+        assert_eq!(
+            world_source_config(None, Some("registry".into()), None),
+            Err(WorldSourceConfigError::IncompleteCatalogMode)
+        );
+        assert_eq!(
+            world_source_config(None, None, Some("catalog.json".into())),
+            Err(WorldSourceConfigError::IncompleteCatalogMode)
+        );
+        assert_eq!(
+            world_source_config(Some(" world.json".into()), None, None),
+            Err(WorldSourceConfigError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn invalid_catalog_fails_before_creating_the_sqlite_parent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database_path = temporary.path().join("state/tiamud.db");
+        let missing_registry = temporary.path().join("missing-registry");
+        let missing_catalog = missing_registry.join("area-catalogs/missing.json");
+        let database = DatabaseConfig::Sqlite(database_path.to_string_lossy().into_owned());
+        let source = WorldSourceConfig::AreaCatalog {
+            registry: missing_registry.to_string_lossy().into_owned(),
+            catalog: missing_catalog.to_string_lossy().into_owned(),
+        };
+
+        assert!(prepare_world_before_database(&database, source).is_err());
+        assert!(!database_path.parent().unwrap().exists());
     }
 }

@@ -1,7 +1,7 @@
 # ADR 0005: ciclo de vida de áreas cargables en caliente
 
-- Estado: arquitectura objetivo aceptada; fase 6A local implementada; residencia,
-  activación y descarga en runtime pendientes.
+- Estado: arquitectura objetivo aceptada; fases 6A y 6B implementadas; sustitución,
+  drenaje, descarga y LRU pendientes.
 - Fecha: 2026-07-15.
 - Alcance: catálogo, activación, sustitución y descarga de áreas del mundo.
 
@@ -14,23 +14,30 @@ AreaPack v8 y WorldPack v9, pero conserva el mismo comportamiento relevante:
 `tiamud-world compose` valida el grafo completo sin conexión y el servidor
 consume un solo artefacto plano al arrancar.
 
-Esa composición resuelve el problema editorial inmediato: varias personas
+Esa composición resolvió el problema editorial inmediato: varias personas
 pueden poseer áreas distintas, revisar dependencias y obtener digests
-reproducibles sin mantener un JSON monolítico. No resuelve todavía la carga
-durante la partida. En la implementación actual:
+reproducibles sin mantener un JSON monolítico. La fase 6B añade ahora la carga
+local aditiva bajo demanda de una generación fijada. En la implementación
+actual:
 
-- el servidor valida y carga un WorldPack completo antes de abrir la red;
-- las salas y entidades no conservan propiedad de área en el runtime;
-- la fase 6A local de catálogo y bundles está implementada, pero el servidor no la
-  consume y no existe estado de residencia ni presupuesto LRU;
-- publicar o revertir selecciona el artefacto para un arranque posterior; y
-- cambiar el mundo exige reiniciar el proceso.
+- el servidor elige de forma excluyente el WorldPack monolítico o un catálogo
+  local exacto mediante `TIAMUD_AREA_REGISTRY` y `TIAMUD_AREA_CATALOG`;
+- en modo catálogo fija el SHA-256 canónico de la generación, conserva ownership
+  y residencia y carga el área inicial más su cierre duro o toda la generación
+  antes de recuperar autoridad durable;
+- los portales hacia áreas no residentes quedan como `DeferredExit` y una
+  entrada real coordina staging acotado fuera del actor e instalación atómica;
+- todas las áreas incorporadas permanecen residentes hasta apagar el proceso;
+  no existe aún presupuesto LRU; y
+- publicar, revertir o cambiar `area-active` solo selecciona una generación
+  para un arranque posterior: cambiar de publicación exige reiniciar.
 
-La carga caliente puede reducir memoria y permitir añadir o corregir regiones
-sin reiniciar, pero solo en mundos suficientemente grandes. En un mundo pequeño
-como Lantern Square, un catálogo, checkpoints y coordinación de revisiones
-consumirían más recursos y complejidad que mantenerlo completo en memoria. La
-optimización se activará por medición, no por el simple número de ficheros.
+La arquitectura completa de sustitución y descarga podría reducir memoria y
+permitir corregir regiones sin reiniciar, pero no está implementada y solo se
+justifica en mundos suficientemente grandes. En un mundo pequeño como Lantern
+Square, catálogo, checkpoints y coordinación de revisiones pueden consumir más
+recursos y complejidad que mantenerlo completo en memoria. Cada optimización se
+activa por medición, no por el simple número de ficheros.
 
 ## Decisión
 
@@ -39,9 +46,9 @@ Se adopta como arquitectura objetivo un modelo híbrido:
 1. La autoría seguirá dividida en `AreaPack` y conservará la composición global
    sin conexión como ruta estable, simple y reproducible.
 2. La fase 6A publica sin conexión bundles de área inmutables y direccionados
-   por contenido, acompañados por un catálogo local pequeño. Una fase 6B o
-   posterior podrá preparar su consumo en runtime y residencia, pero no forma
-   parte de 6A.
+   por contenido, acompañados por un catálogo local pequeño. La fase 6B
+   implementa su consumo local aditivo y residencia hasta apagar, sin ampliar
+   el alcance editorial de 6A.
 3. Una revisión se preparará y validará fuera del actor del mundo. Solo una
    transición explícita del actor podrá activarla.
 4. Las áreas con actividad se fijarán en memoria. Las vacías podrán descargarse
@@ -53,7 +60,7 @@ Se adopta como arquitectura objetivo un modelo híbrido:
 6. Los clientes cargarán multimedia por digest y bajo demanda. La prosa y toda
    información jugable seguirán siendo completas sin esos recursos.
 
-Esta decisión no exige otro cambio de formato ni altera el runtime actual.
+Esta decisión no exige otro cambio de formato.
 WorldPack v9/AreaPack v8 siguen siendo la frontera; catálogo y bundle usan su
 propio sobre versionado y no convierten AreaPack en un protocolo de activación.
 
@@ -132,11 +139,11 @@ observa una sola generación coherente.
 
 ```mermaid
 stateDiagram-v2
-    accTitle: Ciclo de vida objetivo de un área de Tiamud
-    accDescr: Un área descargada se prepara y valida antes de activarse. Una revisión activa solo puede descargarse después de drenar actividad y confirmar un checkpoint persistente; un fallo vuelve al estado seguro anterior.
+    accTitle: Ciclo de vida por fases de un área de Tiamud
+    accDescr: La fase 6B implementa el crecimiento Unloaded a Loading a Active. Draining, descarga, sustitución y LRU siguen siendo arquitectura futura.
 
     [*] --> Unloaded
-    Unloaded --> Loading: demanda o precarga
+    Unloaded --> Loading: demanda 6B o precarga futura
     Loading --> Active: digest, esquema, grafo, assets y scripts válidos
     Loading --> Unloaded: fallo; no cambia el mundo
     Active --> Draining: sustitución o presión LRU
@@ -145,20 +152,23 @@ stateDiagram-v2
     Active --> Active: acciones en la revisión fijada
 ```
 
-- `Unloaded`: solo reside la entrada de catálogo y el último checkpoint.
-- `Loading`: un trabajador acotado lee, verifica y prepara una revisión en una
-  arena privada. Aún no puede recibir acciones.
-- `Active`: la revisión es visible para nuevas entradas y está fijada mientras
-  tenga actividad.
-- `Draining`: no admite nuevas entradas ordinarias; termina o transfiere el
-  trabajo permitido y vuelve a `Active` si aparece un pin no cancelable.
+- `Unloaded`, `Loading` y `Active` forman la transición aditiva implementada en
+  6B. Un área `Active` no vuelve a descargarse durante ese proceso.
+- `Draining` y la vuelta a `Unloaded` describen las fases 6C y posteriores; no
+  son estados ejecutables de 6B.
 
 Solo el actor propietario del mundo publica transiciones. E/S, descompresión,
 hashing, validación y compilación Lua suceden fuera del actor y entregan un
 resultado acotado. El actor vuelve a comprobar generación y digest antes de
 instalarlo para evitar resultados obsoletos.
 
-## Preparación y activación caliente
+## Preparación y activación
+
+La fase 6B implementa esta secuencia solo para añadir una revisión ausente de
+la generación fijada. No sustituye una revisión activa, no mezcla generaciones
+y no sigue de nuevo el puntero editorial durante la ejecución. El contrato
+exacto, incluidos `DeferredExit`, coalescing, límites y rollback, está en
+[ADR 0020](0020-additive-local-area-loading.md).
 
 La instalación de una revisión sigue estas fases:
 
@@ -351,9 +361,12 @@ opcional descargada no vuelve por sí sola no-ready al proceso.
    procedencia, licencias separadas, trust `unsigned_local`, publicación
    inmutable, puntero atómico y verificador sin activación caliente. Firma y
    registro remotos no pertenecen a esta fase.
-3. **Carga aditiva bajo demanda sin descarga, fase 6B:** arenas inmutables, portales, pins,
-   compatibilidad y recuperación; mantener todas las áreas usadas residentes.
-4. **Sustitución caliente:** staging, generaciones, drenaje y rollback por lote,
+3. **Carga aditiva bajo demanda sin descarga, fase 6B implementada:** generación
+   fijada, bundles verificados, portales diferidos, staging acotado, instalación
+   atómica, compatibilidad y recuperación; todas las áreas usadas permanecen
+   residentes. Véanse [ADR 0020](0020-additive-local-area-loading.md) y el
+   [registro 6B](../project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
+4. **Sustitución caliente, fase 6C pendiente:** staging, generaciones, drenaje y rollback por lote,
    primero para áreas vacías y sin migraciones.
 5. **Checkpoint y descarga:** persistencia por área, jobs durables, LRU ponderado,
    histéresis y pruebas de caída en cada barrera.

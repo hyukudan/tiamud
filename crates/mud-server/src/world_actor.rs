@@ -1,10 +1,12 @@
 use crate::{
+    area_runtime::{AreaLoadCoordinator, PreparedAreaBatch},
     auth::AuthenticatedSession,
     boards::{BoardDescriptor, apply_board},
     delivery::{DeliveryInbox, DeliveryRouter},
+    operations::AreaLoadMetricResult,
     persistence::{
         BoardEntry, BoardPage, CharacterStore, DurableCharacterGameplay, MailMessage, MailPage,
-        StaffAccess, StartupGameplayLoadLimits, StoreError,
+        StaffAccess, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
     },
     runtime_content::{RuntimeContent, ScenePresentation},
     social::{
@@ -48,6 +50,8 @@ pub enum GameError {
     CharacterContentIncompatible,
     #[error("that item transfer is not available")]
     GiveUnavailable,
+    #[error("the destination is not available right now")]
+    AreaUnavailable,
     #[error("that trade is not available")]
     TradeUnavailable,
     #[error("that mail recipient is not available")]
@@ -180,6 +184,10 @@ enum Command {
         action: PlayerAction,
         reply: oneshot::Sender<Result<AppliedAction, GameError>>,
     },
+    InstallPreparedAreas {
+        batch: Arc<PreparedAreaBatch>,
+        reply: oneshot::Sender<Result<Vec<String>, GameError>>,
+    },
     Leave {
         session: SessionId,
     },
@@ -194,6 +202,7 @@ pub struct WorldHandle {
     store: Arc<dyn CharacterStore>,
     start_room_id: Arc<str>,
     creation_catalog: Arc<CharacterCreationCatalogView>,
+    area_coordinator: Option<AreaLoadCoordinator>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -225,11 +234,53 @@ impl WorldHandle {
             .await
     }
 
+    #[allow(dead_code)]
     pub async fn spawn_with_scheduler_and_content(
         world: World,
         store: Arc<dyn CharacterStore>,
         scheduler: WorldSchedulerConfig,
         runtime_content: RuntimeContent,
+    ) -> Result<Self, GameError> {
+        Self::spawn_with_scheduler_content_and_areas(world, store, scheduler, runtime_content, None)
+            .await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn spawn_with_scheduler_content_and_areas(
+        world: World,
+        store: Arc<dyn CharacterStore>,
+        scheduler: WorldSchedulerConfig,
+        runtime_content: RuntimeContent,
+        area_coordinator: Option<AreaLoadCoordinator>,
+    ) -> Result<Self, GameError> {
+        let recovery =
+            store
+                .load_startup_world_recovery()
+                .await
+                .map_err(|error| GameError::Startup {
+                    stage: "load_startup_world_recovery",
+                    reason: error.to_string(),
+                })?;
+        Self::spawn_with_scheduler_content_areas_and_recovery(
+            world,
+            store,
+            scheduler,
+            runtime_content,
+            area_coordinator,
+            recovery,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn spawn_with_scheduler_content_areas_and_recovery(
+        world: World,
+        store: Arc<dyn CharacterStore>,
+        scheduler: WorldSchedulerConfig,
+        runtime_content: RuntimeContent,
+        area_coordinator: Option<AreaLoadCoordinator>,
+        recovery: StartupWorldRecovery,
+        confirm_initial_dynamic_state: bool,
     ) -> Result<Self, GameError> {
         let (tx, mut rx) = mpsc::channel(WORLD_COMMAND_QUEUE_CAPACITY);
         let (startup_reply, startup_receive) = oneshot::channel();
@@ -239,63 +290,36 @@ impl WorldHandle {
         let start_room_id: Arc<str> = Arc::from(world.start_room_id());
         let creation_catalog = Arc::new(world.progression_catalog().clone());
         let actor_store = Arc::clone(&store);
+        let actor_area_coordinator = area_coordinator.clone();
         tokio::spawn(async move {
             let mut world = world;
+            let mut runtime_content = runtime_content;
             let mut next_session = 1_u64;
             let mut session_roles = HashMap::new();
             let mut session_staff_accesses = HashMap::new();
 
-            if let Err(error) = actor_store.purge_expired_mail().await {
-                return report_startup_failure(
-                    startup_reply,
-                    GameError::Startup {
-                        stage: "purge_expired_mail",
-                        reason: error.to_string(),
-                    },
-                );
-            }
-            if let Err(error) = actor_store.purge_expired_boards().await {
-                return report_startup_failure(
-                    startup_reply,
-                    GameError::Startup {
-                        stage: "purge_expired_boards",
-                        reason: error.to_string(),
-                    },
-                );
-            }
-            let startup = match actor_store.load_runtime_snapshot().await {
-                Ok(Some(snapshot)) => {
-                    world
-                        .restore_runtime_snapshot(snapshot)
-                        .map_err(|error| GameError::Startup {
-                            stage: "restore_runtime_snapshot",
-                            reason: error.to_string(),
-                        })
-                }
-                Ok(None) => match actor_store.load_domain_events().await {
-                    Ok(events) => {
-                        for (index, event) in events.iter().enumerate() {
-                            if let Err(error) = world.replay_persisted_event(event) {
-                                return report_startup_failure(
-                                    startup_reply,
-                                    GameError::Startup {
-                                        stage: "replay_domain_events",
-                                        reason: format!("event {index}: {error}"),
-                                    },
-                                );
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(error) => Err(GameError::Startup {
-                        stage: "load_domain_events",
+            let startup = match recovery {
+                StartupWorldRecovery::Empty => Ok(()),
+                StartupWorldRecovery::Snapshot(snapshot) => world
+                    .restore_runtime_snapshot(snapshot)
+                    .map_err(|error| GameError::Startup {
+                        stage: "restore_runtime_snapshot",
                         reason: error.to_string(),
                     }),
-                },
-                Err(error) => Err(GameError::Startup {
-                    stage: "load_runtime_snapshot",
-                    reason: error.to_string(),
-                }),
+                StartupWorldRecovery::Ledger(events) => {
+                    for (index, event) in events.iter().enumerate() {
+                        if let Err(error) = world.replay_persisted_event(event) {
+                            return report_startup_failure(
+                                startup_reply,
+                                GameError::Startup {
+                                    stage: "replay_domain_events",
+                                    reason: format!("event {index}: {error}"),
+                                },
+                            );
+                        }
+                    }
+                    Ok(())
+                }
             };
             if let Err(error) = startup {
                 return report_startup_failure(startup_reply, error);
@@ -476,6 +500,24 @@ impl WorldHandle {
             drop(extra_trade_participant_ids);
             drop(trade_participant_ids);
             drop(runtime_owner_ids);
+            if confirm_initial_dynamic_state
+                && let Err(error) = actor_store
+                    .commit_action(Vec::new(), world.runtime_snapshot(), Vec::new())
+                    .await
+            {
+                return report_startup_failure(
+                    startup_reply,
+                    GameError::Startup {
+                        stage: "commit_initial_area_state",
+                        reason: error.to_string(),
+                    },
+                );
+            }
+            // These purges mutate the selected backend. Keep them behind all
+            // recovery replay/restore and startup validation so corrupt
+            // durable world authority cannot change unrelated stored data
+            // before the process fails closed.
+            maintain_expired_social_content(actor_store.as_ref()).await;
             if startup_reply.send(Ok(())).is_err() {
                 error!(
                     stage = "startup_barrier",
@@ -491,9 +533,9 @@ impl WorldHandle {
             }
             let mut social_maintenance = tokio::time::interval(SOCIAL_MAINTENANCE_INTERVAL);
             social_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            // Tokio intervals fire immediately. Startup already performed the
-            // fail-closed purge, so consume that first instant and schedule
-            // subsequent bounded maintenance runs one hour apart.
+            // Tokio intervals fire immediately. Startup already attempted the
+            // bounded maintenance pass, so consume that first instant and
+            // schedule subsequent runs one hour apart.
             social_maintenance.tick().await;
 
             loop {
@@ -669,6 +711,25 @@ impl WorldHandle {
                         .await;
                         let _ = reply.send(result);
                     }
+                    Command::InstallPreparedAreas { batch, reply } => {
+                        let result = install_prepared_areas(
+                            &mut world,
+                            &mut runtime_content,
+                            actor_store.as_ref(),
+                            batch.as_ref(),
+                        )
+                        .await;
+                        if let (Ok(area_ids), Some(coordinator)) =
+                            (&result, &actor_area_coordinator)
+                        {
+                            coordinator.mark_resident(area_ids);
+                        }
+                        if let Some(metrics) = &operational_metrics {
+                            metrics.set_resident_areas(world.active_area_count());
+                            metrics.set_deferred_area_exits(world.deferred_area_exit_count());
+                        }
+                        let _ = reply.send(result);
+                    }
                     Command::Leave { session } => {
                         let role = session_roles
                             .remove(&session)
@@ -749,6 +810,7 @@ impl WorldHandle {
             store,
             start_room_id,
             creation_catalog,
+            area_coordinator,
         };
         match startup_receive.await {
             Ok(Ok(())) => Ok(handle),
@@ -903,6 +965,27 @@ impl WorldHandle {
         // receives an authorized, fully loaded snapshot and serializes the
         // world mutation that grants the live character lease.
         let snapshot = self.store.load_character(account_id, character_id).await?;
+        if let Some(coordinator) = &self.area_coordinator {
+            let owner = coordinator
+                .generation()
+                .room_owner(&snapshot.room_id)
+                .ok_or(GameError::AreaUnavailable)?;
+            if !coordinator.is_resident(owner) {
+                let batch = coordinator
+                    .prepare(owner.to_owned())
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(%error, "character area preparation failed");
+                        GameError::AreaUnavailable
+                    })?;
+                self.install_prepared_area_batch(batch)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(%error, "character area installation failed");
+                        GameError::AreaUnavailable
+                    })?;
+            }
+        }
         let gameplay = self.store.load_character_gameplay(character_id).await?;
         let staff_access = self.store.staff_access(character_id).await?;
         let (reply, receive) = oneshot::channel();
@@ -985,6 +1068,43 @@ impl WorldHandle {
         session: SessionId,
         action: PlayerAction,
     ) -> Result<AppliedAction, GameError> {
+        let first = self.apply_once(session, action.clone()).await;
+        let request = match first {
+            Err(GameError::World(CoreWorldError::AreaLoadRequired(request))) => request,
+            result => return result,
+        };
+        let Some(coordinator) = &self.area_coordinator else {
+            return Err(GameError::AreaUnavailable);
+        };
+        if coordinator.generation().generation_id() != request.generation_id.as_str() {
+            return Err(GameError::AreaUnavailable);
+        }
+        let batch = coordinator
+            .prepare(request.target_area_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "area preparation failed");
+                GameError::AreaUnavailable
+            })?;
+        self.install_prepared_area_batch(batch)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "area installation failed");
+                GameError::AreaUnavailable
+            })?;
+        match self.apply_once(session, action).await {
+            Err(GameError::World(CoreWorldError::AreaLoadRequired(_))) => {
+                Err(GameError::AreaUnavailable)
+            }
+            result => result,
+        }
+    }
+
+    async fn apply_once(
+        &self,
+        session: SessionId,
+        action: PlayerAction,
+    ) -> Result<AppliedAction, GameError> {
         let (reply, receive) = oneshot::channel();
         self.tx
             .send(Command::Apply {
@@ -995,6 +1115,19 @@ impl WorldHandle {
             .await
             .map_err(|_| GameError::ActorStopped)?;
         receive.await.map_err(|_| GameError::ActorStopped)?
+    }
+
+    async fn install_prepared_area_batch(
+        &self,
+        batch: Arc<PreparedAreaBatch>,
+    ) -> Result<(), GameError> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(Command::InstallPreparedAreas { batch, reply })
+            .await
+            .map_err(|_| GameError::ActorStopped)?;
+        let _installed = receive.await.map_err(|_| GameError::ActorStopped)??;
+        Ok(())
     }
 
     pub async fn current_state(
@@ -1108,6 +1241,87 @@ async fn authenticated_roster(
         .map_err(GameError::from)
 }
 
+async fn install_prepared_areas(
+    world: &mut World,
+    runtime_content: &mut RuntimeContent,
+    store: &dyn CharacterStore,
+    prepared: &PreparedAreaBatch,
+) -> Result<Vec<String>, GameError> {
+    let started = Instant::now();
+    let metrics = runtime_content.operational_metrics();
+    let world_checkpoint = world.lifecycle_checkpoint();
+    let runtime_checkpoint = runtime_content.clone();
+    if prepared.core.areas.is_empty() {
+        if world.area_generation() != Some(&prepared.core.generation_id) {
+            return Err(CoreWorldError::InvalidAreaLifecycle.into());
+        }
+        if let Some(metrics) = &metrics {
+            metrics.area_load_finished(started.elapsed(), 0, AreaLoadMetricResult::AlreadyResident);
+        }
+        return Ok(Vec::new());
+    }
+    let confirmed_area_ids = prepared
+        .core
+        .areas
+        .iter()
+        .map(|area| area.area_id.clone())
+        .collect::<Vec<_>>();
+    let result = (|| {
+        let outcome = world.install_prepared_areas(prepared.core.clone())?;
+        for area_id in &outcome.installed_area_ids {
+            let delta = prepared
+                .runtime_by_area
+                .get(area_id)
+                .cloned()
+                .ok_or(CoreWorldError::InvalidAreaLifecycle)?;
+            runtime_content
+                .install_delta(delta)
+                .map_err(|_| CoreWorldError::InvalidAreaLifecycle)?;
+        }
+        Ok::<_, GameError>(outcome)
+    })();
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            world.restore_lifecycle_checkpoint(world_checkpoint);
+            *runtime_content = runtime_checkpoint;
+            if let Some(metrics) = &metrics {
+                metrics.area_load_finished(
+                    started.elapsed(),
+                    0,
+                    AreaLoadMetricResult::InstallationFailed,
+                );
+            }
+            return Err(error);
+        }
+    };
+    if outcome.created_dynamic_state
+        && let Err(error) = store
+            .commit_action(Vec::new(), world.runtime_snapshot(), Vec::new())
+            .await
+    {
+        world.restore_lifecycle_checkpoint(world_checkpoint);
+        *runtime_content = runtime_checkpoint;
+        if let Some(metrics) = &metrics {
+            metrics.area_load_finished(
+                started.elapsed(),
+                0,
+                AreaLoadMetricResult::InstallationFailed,
+            );
+        }
+        return Err(error.into());
+    }
+    if let Some(metrics) = &metrics {
+        let result = if outcome.installed_areas == 0 {
+            AreaLoadMetricResult::AlreadyResident
+        } else {
+            AreaLoadMetricResult::Installed
+        };
+        metrics.area_load_finished(started.elapsed(), 0, result);
+    }
+    Ok(confirmed_area_ids)
+}
+
 async fn enter_prepared_character(
     world: &mut World,
     store: &dyn CharacterStore,
@@ -1135,14 +1349,7 @@ async fn enter_prepared_character(
         }
     };
 
-    // A removed or renamed room in an old save is repaired immediately.
     let resolved = world.character_snapshot(session)?;
-    if resolved != snapshot
-        && let Err(error) = store.save(resolved.clone()).await
-    {
-        world.restore_checkpoint(checkpoint);
-        return Err(error.into());
-    }
 
     let mut trade_events = match world.cancel_trade_for_character(
         resolved.id,
@@ -1464,6 +1671,11 @@ async fn apply(
             board_entry: applied.entry,
             events: Vec::new(),
         });
+    }
+    if let PlayerAction::Move(direction) = &action
+        && let Some(request) = world.deferred_area_load_request(session, *direction)?
+    {
+        return Err(CoreWorldError::AreaLoadRequired(request).into());
     }
     let checkpoint = world.checkpoint();
     let action = match action {
@@ -2355,13 +2567,13 @@ fn event_changes_character_quest(events: &[DomainEvent], character_id: Character
 mod tests {
     use super::*;
     use crate::auth::SessionToken;
-    use crate::runtime_content::RuntimeScript;
+    use crate::runtime_content::{RuntimeContentDelta, RuntimeScript};
     use async_trait::async_trait;
     use std::{
-        collections::{BTreeSet, HashMap, HashSet},
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
         sync::{
             Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
     use tiamud_core::{
@@ -2405,6 +2617,108 @@ mod tests {
         staff_audit: Vec<crate::persistence::StaffAuditEntry>,
     }
 
+    fn additive_area_install_fixture() -> (World, PreparedAreaBatch) {
+        let generation =
+            tiamud_core::AreaGenerationId::from_catalog_sha256("a".repeat(64)).unwrap();
+        let initial = tiamud_core::PreparedCoreAreaBatch {
+            generation_id: generation.clone(),
+            areas: vec![tiamud_core::PreparedCoreArea {
+                area_id: "test:start-area".into(),
+                revision: 1,
+                bundle_sha256: "b".repeat(64),
+                rooms: vec![RoomDefinition {
+                    stable_id: "test:start-room".into(),
+                    title: "Start".into(),
+                    prose: vec!["A stable start room.".into()],
+                    image: None,
+                    audio: None,
+                    exits: Vec::new(),
+                    item_ids: Vec::new(),
+                }],
+                room_presentations: Vec::new(),
+                item_prototypes: Vec::new(),
+                initial_item_instances: Vec::new(),
+                npcs: Vec::new(),
+                npc_ability_sets: Vec::new(),
+                loot_tables: Vec::new(),
+                loot_sources: Vec::new(),
+                affixes: Vec::new(),
+                affix_pools: Vec::new(),
+                room_light: Vec::new(),
+                hidden_items: Vec::new(),
+                hidden_npcs: Vec::new(),
+                secret_exits: Vec::new(),
+            }],
+            deferred_exits: Vec::new(),
+        };
+        let (world, _) = World::from_initial_prepared_areas("test:start-room", initial).unwrap();
+        let area_id = "test:dynamic-area".to_owned();
+        let core = tiamud_core::PreparedCoreAreaBatch {
+            generation_id: generation,
+            areas: vec![tiamud_core::PreparedCoreArea {
+                area_id: area_id.clone(),
+                revision: 1,
+                bundle_sha256: "c".repeat(64),
+                rooms: vec![RoomDefinition {
+                    stable_id: "test:dynamic-room".into(),
+                    title: "Dynamic".into(),
+                    prose: vec!["A dynamically installed room.".into()],
+                    image: None,
+                    audio: None,
+                    exits: Vec::new(),
+                    item_ids: Vec::new(),
+                }],
+                room_presentations: Vec::new(),
+                item_prototypes: Vec::new(),
+                initial_item_instances: Vec::new(),
+                npcs: vec![NpcDefinition {
+                    stable_id: "test:dynamic-npc".into(),
+                    name: "sentinel".into(),
+                    description: "A persistent test sentinel.".into(),
+                    room_id: "test:dynamic-room".into(),
+                    level: 1,
+                    max_health: 10,
+                    strength: 1,
+                    defence: 0,
+                    experience_reward: 0,
+                    loot_item_ids: Vec::new(),
+                    respawn_ticks: 10,
+                }],
+                npc_ability_sets: Vec::new(),
+                loot_tables: Vec::new(),
+                loot_sources: Vec::new(),
+                affixes: Vec::new(),
+                affix_pools: Vec::new(),
+                room_light: Vec::new(),
+                hidden_items: Vec::new(),
+                hidden_npcs: Vec::new(),
+                secret_exits: Vec::new(),
+            }],
+            deferred_exits: Vec::new(),
+        };
+        let runtime = RuntimeContentDelta::new(
+            Vec::new(),
+            Vec::new(),
+            vec![RuntimeScript {
+                id: "test:dynamic-script".into(),
+                room_id: "test:dynamic-room".into(),
+                hooks: BTreeSet::new(),
+                capabilities: BTreeSet::new(),
+                limits: ScriptLimits::default(),
+                source: String::new(),
+            }],
+        );
+        (
+            world,
+            PreparedAreaBatch {
+                core,
+                runtime_by_area: BTreeMap::from([(area_id, runtime)]),
+                bundle_bytes: 1,
+                closure_areas: 1,
+            },
+        )
+    }
+
     #[derive(Clone)]
     struct MemoryMail {
         sender: CharacterId,
@@ -2429,6 +2743,9 @@ mod tests {
         state: Mutex<MemoryState>,
         fail_saves: AtomicBool,
         fail_social_reads: AtomicBool,
+        successful_commits: AtomicUsize,
+        purge_mail_calls: AtomicUsize,
+        purge_board_calls: AtomicUsize,
     }
 
     fn durable_gameplay_world() -> World {
@@ -3005,6 +3322,23 @@ mod tests {
             Ok(self.state.lock().unwrap().runtime.clone())
         }
 
+        async fn load_startup_world_recovery(
+            &self,
+        ) -> Result<crate::persistence::StartupWorldRecovery, StoreError> {
+            let state = self.state.lock().unwrap();
+            Ok(match &state.runtime {
+                Some(snapshot) => {
+                    crate::persistence::StartupWorldRecovery::Snapshot(snapshot.clone())
+                }
+                None if state.domain_events.is_empty() => {
+                    crate::persistence::StartupWorldRecovery::Empty
+                }
+                None => {
+                    crate::persistence::StartupWorldRecovery::Ledger(state.domain_events.clone())
+                }
+            })
+        }
+
         async fn load_domain_events(&self) -> Result<Vec<tiamud_core::DomainEvent>, StoreError> {
             Ok(self.state.lock().unwrap().domain_events.clone())
         }
@@ -3309,6 +3643,7 @@ mod tests {
         }
 
         async fn purge_expired_mail(&self) -> Result<u64, StoreError> {
+            self.purge_mail_calls.fetch_add(1, Ordering::SeqCst);
             Ok(0)
         }
 
@@ -3460,6 +3795,7 @@ mod tests {
         }
 
         async fn purge_expired_boards(&self) -> Result<u64, StoreError> {
+            self.purge_board_calls.fetch_add(1, Ordering::SeqCst);
             Ok(0)
         }
 
@@ -3797,6 +4133,7 @@ mod tests {
             }
             state.runtime = Some(runtime);
             state.domain_events.extend(events);
+            self.successful_commits.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -3839,13 +4176,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_dynamic_area_commit_restores_core_and_runtime_content() {
+        let store = MemoryStore::default();
+        store.fail_saves.store(true, Ordering::SeqCst);
+        let (mut world, prepared) = additive_area_install_fixture();
+        let mut runtime_content = RuntimeContent::default();
+        let before = world.active_area_count();
+
+        let failed =
+            install_prepared_areas(&mut world, &mut runtime_content, &store, &prepared).await;
+
+        assert!(matches!(failed, Err(GameError::Persistence(_))));
+        assert_eq!(world.active_area_count(), before);
+        assert!(!world.area_is_active("test:dynamic-area"));
+
+        store.fail_saves.store(false, Ordering::SeqCst);
+        install_prepared_areas(&mut world, &mut runtime_content, &store, &prepared)
+            .await
+            .unwrap();
+        assert!(world.area_is_active("test:dynamic-area"));
+        assert_eq!(world.active_area_count(), before + 1);
+    }
+
+    #[tokio::test]
     async fn invalid_runtime_snapshot_fails_the_startup_barrier() {
         let store = Arc::new(MemoryStore::default());
         let mut snapshot = World::demo().runtime_snapshot();
         snapshot.snapshot_version += 1;
         store.state.lock().unwrap().runtime = Some(snapshot);
 
-        let result = WorldHandle::spawn(World::demo(), store).await;
+        let result = WorldHandle::spawn(World::demo(), store.clone()).await;
 
         assert!(matches!(
             result,
@@ -3854,6 +4214,60 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(store.purge_mail_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.purge_board_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_area_bootstrap_confirms_initial_dynamic_state_exactly_once() {
+        let store = Arc::new(MemoryStore::default());
+
+        let handle = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
+            World::demo(),
+            store.clone(),
+            WorldSchedulerConfig::default(),
+            RuntimeContent::default(),
+            None,
+            StartupWorldRecovery::Empty,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.successful_commits.load(Ordering::SeqCst), 1);
+        assert!(store.state.lock().unwrap().runtime.is_some());
+        assert_eq!(store.purge_mail_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.purge_board_calls.load(Ordering::SeqCst), 1);
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_initial_area_commit_never_reaches_readiness_or_purges() {
+        let store = Arc::new(MemoryStore::default());
+        store.fail_saves.store(true, Ordering::SeqCst);
+
+        let result = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
+            World::demo(),
+            store.clone(),
+            WorldSchedulerConfig::default(),
+            RuntimeContent::default(),
+            None,
+            StartupWorldRecovery::Empty,
+            true,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(GameError::Startup {
+                stage: "commit_initial_area_state",
+                ..
+            })
+        ));
+        assert_eq!(store.successful_commits.load(Ordering::SeqCst), 0);
+        assert!(store.state.lock().unwrap().runtime.is_none());
+        assert_eq!(store.purge_mail_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.purge_board_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -8455,6 +8869,7 @@ mod tests {
                 backgrounds: Vec::new(),
                 base_classes: Vec::new(),
             }),
+            area_coordinator: None,
         };
         for _ in 0..WORLD_COMMAND_QUEUE_CAPACITY {
             let (reply, _receive) = oneshot::channel();

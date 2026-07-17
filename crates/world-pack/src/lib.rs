@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod area_catalog;
+mod area_registry;
 mod authoring;
 mod composition;
 mod progression;
@@ -17,6 +18,12 @@ pub use area_catalog::{
     AreaPortalDirection, AreaReleaseEntry, AreaReleaseManifest, CompiledArea, ContentDigest,
     ReleaseTrustMode, VerifiedAreaRelease, build_area_release, parse_area_bundle,
     parse_area_catalog, parse_area_release_manifest, verify_area_release,
+};
+pub use area_registry::{
+    LocalAreaGeneration, LocalAreaRegistryError, MAX_LOCAL_HARD_DEPENDENCY_CLOSURE,
+    local_area_bundle_path, local_area_catalog_path, local_area_world_path,
+    read_bounded_local_registry_file, read_bounded_regular_file,
+    verify_existing_registry_directory,
 };
 pub use authoring::{
     AudioChannel, AudioCue, Condition, ConditionContext, ConditionField, ConditionValidationError,

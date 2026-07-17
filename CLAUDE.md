@@ -33,8 +33,7 @@ describe el baseline vigente de personajes, inventario y medios.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
 - WorldPack v9 y AreaPack v8 son actuales; WorldProject permanece en v2.
-  WorldPack v8/v7/v6/v5/v4/v3/v2, AreaPack v7/v6/v5/v4/v3/v2/v1 y Envy se normalizan en fronteras explícitas. El servidor carga un paquete
-  completo. La fase 6A de ADR 0005 está **implementada** como publicación local
+  WorldPack v8/v7/v6/v5/v4/v3/v2, AreaPack v7/v6/v5/v4/v3/v2/v1 y Envy se normalizan en fronteras explícitas. La fase 6A de ADR 0005 está **implementada** como publicación local
   separada: manifiesto de release <=256 KiB, catálogo <=1 MiB/256 entradas,
   bundles JSON canónicos <=16 MiB y suma <=16 MiB; los tres sobres limitan
   profundidad JSON a 16 y rechazan duplicados recursivos. Los metadatos por
@@ -42,8 +41,7 @@ describe el baseline vigente de personajes, inventario y medios.
   portales, digests, `unsigned_local` explícito,
   `contentLicense=CC-BY-4.0` para mundo/prosa/medios y
   `scriptLicense=MIT OR Apache-2.0` para Lua/software, blobs inmutables y
-  puntero atómico. No implementa carga/activación/reemplazo/descarga/LRU en
-  runtime, red, compresión ni firma remota; esas fases siguen pendientes.
+  puntero atómico. No atribuyas carga runtime a 6A.
   `AreaPack.dependsOn` conserva la declaración editorial exhaustiva, pero
   `hardDependencies` deriva solo de cross-references no-`RoomExit`; los
   `RoomExit` cruzados van a `portals` y no fijan residencia.
@@ -58,6 +56,24 @@ describe el baseline vigente de personajes, inventario y medios.
   resincronización durable de blobs idénticos y stdout con el path exacto;
   `area-verify` es read-only. `unsigned_local` presupone registro local y host
   confiable: escritor hostil, lock ignorado y TOCTOU adversarial quedan fuera.
+- La fase 6B de ADR 0020 está **implementada**. El arranque acepta exactamente
+  el modo monolítico (`TIAMUD_WORLD_PACK` o embebido) o la pareja
+  `TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`; los modos son excluyentes y
+  una configuración incompleta falla cerrada. El catálogo exacto fija su
+  SHA-256 como generación hasta apagar y los cambios de `area-active` se
+  ignoran.
+  Con snapshot y ledger vacíos se carga `startRoomId` más su cierre duro; con
+  cualquiera de esas autoridades se carga toda la generación antes de
+  restore/replay. Un portal cruzado queda como `DeferredExit`, no como hard
+  dependency. La demanda no muta y se prepara fuera del actor con coalescing,
+  dos trabajos activos, ocho pendientes, timeout total de cinco segundos y
+  cierre máximo de 32 áreas. El actor instala `World` + `RuntimeContent` +
+  residencia atómicamente y reintenta la acción una vez. Solo persiste si el
+  lote crea estado dinámico cubierto por snapshot v7; el cliente recibe un
+  error genérico y las métricas nunca etiquetan IDs/digests.
+  Todas las áreas añadidas permanecen residentes. Sustitución, coexistencia de
+  generaciones, drenaje, descarga, LRU, red, compresión y firma remota siguen
+  pendientes para 6C y posteriores.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
@@ -301,6 +317,14 @@ protocolo, runtime, snapshot ni SQL y no acredita una nueva puerta
 Web/PostgreSQL. Véase el
 [registro 6A](docs/project/log/2026-07-17-area-catalog-bundles-phase-6a.md).
 
+La fase 6B está implementada. Las suites enfocadas cubren core, `world-pack`,
+coordinador, rollback y recovery; clippy estricto de servidor pasa. Un humo
+real publica
+el catálogo 6A, arranca servidor+SQLite en modo catálogo, abre Web/Telnet,
+obtiene readiness, confirma dos áreas residentes en bootstrap vacío y cierra
+limpio. La puerta y sus límites exactos están en el
+[registro 6B](docs/project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
+
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
 mixto limpio y 3.081.428 ejecuciones fuzz Telnet. Vincula aquel árbol: no es
@@ -373,8 +397,9 @@ Ante un cambio material:
 6. añade un ADR antes de cambiar arquitectura aceptada.
 
 No reescribas registros históricos para que parezcan actuales. No conviertas
-un workflow configurado en un pase. No afirmes áreas calientes, producción,
-lector manual, release etiquetada ni soak 24 h sin evidencia.
+un workflow configurado en un pase. No confundas la carga aditiva 6B con
+reemplazo/descarga/LRU caliente, ni afirmes producción, lector manual, release
+etiquetada o soak 24 h sin evidencia.
 
 Antes de entregar: revisa `git diff`, ejecuta `git diff --check`, verifica
 enlaces/comandos modificados y declara exactamente qué se validó.

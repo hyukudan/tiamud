@@ -74,6 +74,43 @@ bytes, no de puntos de código.
 Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
 
+### Catálogo y carga local aditiva de áreas 6A–6B
+
+WorldPack monolítico continúa siendo una ruta de ejecución válida. La ruta
+alternativa local requiere juntas `TIAMUD_AREA_REGISTRY` y
+`TIAMUD_AREA_CATALOG`; es excluyente con `TIAMUD_WORLD_PACK` y falla cerrada si
+la pareja está incompleta. La fase 6A publica catálogo y bundles canónicos,
+inmutables y verificables. La fase 6B fija antes de listeners una generación
+identificada por el SHA-256 de los bytes canónicos exactos del catálogo y no
+vuelve a observar el puntero editorial `area-active`.
+
+Con `WorldRuntimeSnapshot` y ledger vacíos, el servidor instala el área
+propietaria de `startRoomId` y su cierre transitivo de dependencias duras. Si
+existe cualquiera de esas autoridades, carga la generación completa antes de
+restore o replay. Un `RoomExit` entre áreas no es una dependencia dura: la sala
+origen conserva un `DeferredExit` con destino y revisión exigida. Intentar
+cruzarlo produce un resultado interno antes de mutar mundo, revisión, tick,
+RNG, hooks, eventos o persistencia. Tras preparar e instalar, la misma acción
+se reautoriza y reintenta una sola vez. Una ubicación durable conocida puede
+provocar carga; una sala que el catálogo no posee falla cerrada, sin fallback a
+`startRoomId`.
+
+El coordinador único comparte trabajos por `(catalogSha256, areaId)`, admite
+dos preparaciones activas, ocho pendientes adicionales, cinco segundos desde
+admisión y un cierre duro máximo de 32 áreas. Lee, verifica, convierte y
+compila Lua fuera del actor. El actor publica todo el lote o ninguno bajo un
+checkpoint conjunto de `World`, `RuntimeContent` y residencia. Una instalación
+estática no escribe snapshot; si aparecen instancias o NPC iniciales que forman
+parte de snapshot v7, se confirma su estado mediante la transacción durable
+existente antes de publicar. El resultado público es genérico y las métricas
+no usan IDs, revisiones, digests o generaciones como labels.
+
+La residencia solo crece y dura hasta apagar. Cambiar de catálogo requiere
+reiniciar. Sustitución de revisiones, coexistencia de generaciones, drenaje,
+descarga, LRU, presupuesto de memoria residente, red, compresión y firma remota
+pertenecen a 6C o fases posteriores. El contrato completo está en
+[ADR 0020](decisions/0020-additive-local-area-loading.md).
+
 ### Objetos, inventario y botín 3A–4B
 
 WorldPack v9 separa `itemPrototypes`, que contienen contenido y reglas
@@ -593,7 +630,8 @@ secuencia ni se infieren de prosa. Referencia:
 | --- | --- |
 | Combate y habilidades acotadas | Baseline implementado y probado |
 | Límites acumulados y nivel sin relleno | Implementado y probado |
-| WorldPack v9/AreaPack v8/WorldProject v2, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v8/v7/v6/v5/v4/v3/v2 y AreaPack v7/v6/v5/v4/v3/v2/v1 se normalizan sin inventar sellos, afijos, telepatía, emotes ni loot ausente |
+| WorldPack v9/AreaPack v8/WorldProject v2, validador, normalizador y catálogo | Integrado; entradas WorldPack v8/v7/v6/v5/v4/v3/v2 y AreaPack v7/v6/v5/v4/v3/v2/v1 se normalizan sin inventar sellos, afijos, telepatía, emotes ni loot ausente |
+| Áreas 6A/6B | Catálogo/bundles locales verificables y carga aditiva por generación fijada implementados; `DeferredExit`, staging 2 activos + 8 pendientes, timeout 5 s, cierre 32, instalación/rollback atómicos y recovery completo cubiertos; sin reemplazo, descarga o LRU |
 | Linaje/clase/talento/promoción y persistencia | Implementado y probado |
 | Creación v3 navegador/Telnet | Default/none/explícito implementado |
 | Ficha, talentos y promociones web | Implementado y probado |
@@ -839,7 +877,8 @@ Comunicación 5E — demostrada sobre el árbol integrado:
 
 Aplazado hasta necesidad demostrada: transformaciones, culturas, respec,
 rangos de clase, editor de grafos, simulación de balance, medios animados,
-gráficos raster terminales y carga caliente. El compositor necesita sprites
+gráficos raster terminales y sustitución/descarga/LRU caliente de áreas. La
+carga local aditiva 6B ya existe. El compositor necesita sprites
 revisados; avatar, heal cue y lápida son mejoras opcionales. Need/greed,
 master-loot, reparto por contribución y pity requieren diseño adicional.
 

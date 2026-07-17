@@ -986,6 +986,10 @@ async fn write_auth_error(connection: &mut TelnetConnection, error: &GameError) 
 
 fn public_error(error: &GameError) -> String {
     match error {
+        GameError::AreaUnavailable
+        | GameError::World(tiamud_core::WorldError::AreaLoadRequired(_)) => {
+            "The destination is not available right now.".to_owned()
+        }
         GameError::MailRecipientUnavailable => "That mail recipient is not available.".to_owned(),
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
         GameError::World(tiamud_core::WorldError::LootUnavailable) => {
@@ -3784,6 +3788,10 @@ mod tests {
 
     #[test]
     fn public_errors_expose_safe_party_and_social_failures_only() {
+        assert_eq!(
+            public_error(&GameError::AreaUnavailable),
+            "The destination is not available right now."
+        );
         assert_eq!(
             public_error(&GameError::World(tiamud_core::WorldError::PartyForbidden)),
             "Only the party leader may do that."

@@ -12,7 +12,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use postgres::{Client, GenericClient};
+use postgres::{Client, GenericClient, IsolationLevel};
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, BoardKey, CharacterGameplaySnapshot, CharacterId,
     CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, MAX_BOARD_BODY_BYTES,
@@ -37,10 +37,10 @@ use crate::{
         DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, MailMessage, MailMessageSummary,
         MailPage, MailReportEvidence, MailSendResult, ModerationAction, PreparedLogin, Request,
         SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry, StaffAuditRecord,
-        StaffReport, StartupGameplayLoadLimits, StoreError, decode_runtime_snapshot,
-        decode_startup_gameplay, ensure_all_character_ids_exist,
-        ensure_all_startup_characters_loaded, normalise_character_identity_ids,
-        normalise_startup_character_ids,
+        StaffReport, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
+        decode_runtime_snapshot, decode_startup_domain_events, decode_startup_gameplay,
+        ensure_all_character_ids_exist, ensure_all_startup_characters_loaded,
+        normalise_character_identity_ids, normalise_startup_character_ids,
     },
 };
 
@@ -243,6 +243,9 @@ impl PostgresCharacterStore {
                         }
                         Request::LoadRuntimeSnapshot { reply } => {
                             let _ = reply.send(load_runtime_snapshot(&mut connection));
+                        }
+                        Request::LoadStartupWorldRecovery { reply } => {
+                            let _ = reply.send(load_startup_world_recovery(&mut connection));
                         }
                         Request::LoadDomainEvents { reply } => {
                             let _ = reply.send(load_domain_events(&mut connection));
@@ -878,6 +881,12 @@ impl CharacterStore for PostgresCharacterStore {
     async fn load_runtime_snapshot(&self) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
         let (reply, receive) = oneshot::channel();
         self.request(Request::LoadRuntimeSnapshot { reply }, receive)
+            .await
+    }
+
+    async fn load_startup_world_recovery(&self) -> Result<StartupWorldRecovery, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::LoadStartupWorldRecovery { reply }, receive)
             .await
     }
 
@@ -1871,6 +1880,42 @@ fn load_runtime_snapshot<C: GenericClient>(
             decode_runtime_snapshot(snapshot_version, &json)
         })
         .transpose()
+}
+
+fn load_startup_world_recovery(
+    connection: &mut Client,
+) -> Result<StartupWorldRecovery, StoreError> {
+    let mut transaction = connection
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()?;
+    let recovery = match load_runtime_snapshot(&mut transaction)? {
+        Some(snapshot) => StartupWorldRecovery::Snapshot(snapshot),
+        None => match load_startup_domain_events(&mut transaction)? {
+            events if events.is_empty() => StartupWorldRecovery::Empty,
+            events => StartupWorldRecovery::Ledger(events),
+        },
+    };
+    transaction.commit()?;
+    Ok(recovery)
+}
+
+fn load_startup_domain_events<C: GenericClient>(
+    connection: &mut C,
+) -> Result<Vec<DomainEvent>, StoreError> {
+    let rows = connection.query(
+        "SELECT sequence, event_json
+         FROM domain_events
+         ORDER BY sequence
+         LIMIT $1",
+        &[&(DOMAIN_EVENT_RETENTION + 1)],
+    )?;
+    decode_startup_domain_events(
+        rows.into_iter()
+            .map(|row| (row.get::<_, i64>(0), row.get::<_, String>(1)))
+            .collect(),
+    )
 }
 
 fn load_domain_events<C: GenericClient>(
@@ -4337,6 +4382,100 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_startup_recovery_is_atomic_and_snapshot_authoritative() {
+        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("tiamud_recovery_test_{}_{}", process::id(), nonce);
+        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
+        let store = PostgresCharacterStore::open(&scoped_url(&base_url, &schema))
+            .await
+            .unwrap();
+
+        let empty = store.load_startup_world_recovery().await.unwrap();
+        assert_eq!(empty, StartupWorldRecovery::Empty);
+        assert!(!empty.requires_full_generation());
+
+        let event = DomainEvent::CharacterMoved {
+            actor_id: CharacterId(1),
+            actor_name: "Aria".into(),
+            from_room_id: "room:a".into(),
+            to_room_id: "room:b".into(),
+            direction: Direction::North,
+        };
+        let event_json = serde_json::to_string(&event).unwrap().replace('\'', "''");
+        admin_batch(
+            &base_url,
+            format!("INSERT INTO {schema}.domain_events (event_json) VALUES ('{event_json}')"),
+        )
+        .await;
+        let ledger = store.load_startup_world_recovery().await.unwrap();
+        assert_eq!(ledger, StartupWorldRecovery::Ledger(vec![event]));
+        assert!(ledger.requires_full_generation());
+
+        let snapshot = World::demo().runtime_snapshot();
+        store
+            .commit_action(Vec::new(), snapshot.clone(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_startup_world_recovery().await.unwrap(),
+            StartupWorldRecovery::Snapshot(snapshot)
+        );
+
+        // A present but invalid snapshot must never fall through to the valid
+        // retained ledger observed by the same repeatable-read transaction.
+        admin_batch(
+            &base_url,
+            format!("UPDATE {schema}.world_runtime SET snapshot_json = '{{}}' WHERE singleton = 1"),
+        )
+        .await;
+        assert!(matches!(
+            store.load_startup_world_recovery().await,
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+
+        admin_batch(
+            &base_url,
+            format!(
+                "DELETE FROM {schema}.world_runtime;
+                 DELETE FROM {schema}.domain_events;
+                 INSERT INTO {schema}.domain_events (sequence, event_json)
+                 VALUES (1, '{event_json}'), (3, '{event_json}')"
+            ),
+        )
+        .await;
+        assert!(matches!(
+            store.load_startup_world_recovery().await,
+            Err(StoreError::InvalidStartupLedger)
+        ));
+
+        admin_batch(
+            &base_url,
+            format!(
+                "DELETE FROM {schema}.domain_events;
+                 INSERT INTO {schema}.domain_events (sequence, event_json)
+                 SELECT sequence, '{{}}'
+                 FROM generate_series(1, {}) AS generated(sequence)",
+                DOMAIN_EVENT_RETENTION + 1
+            ),
+        )
+        .await;
+        assert!(matches!(
+            store.load_startup_world_recovery().await,
+            Err(StoreError::InvalidStartupLedger)
+        ));
+
+        drop(store);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ use std::{
 };
 
 use serde::Serialize;
+use thiserror::Error;
 use tiamud_core::{
     AccountRole, AuthorizedRuntimeContext, DomainEvent, PlayerAction, QuestAction, SceneAudio,
     SceneImage, SceneView, SessionId, WeatherKind, World,
@@ -24,7 +25,7 @@ use crate::operations::{RuntimeMetrics, ScriptMetricOutcome};
 
 pub(crate) const SCRIPT_BATCH_WALL_BUDGET: Duration = Duration::from_millis(50);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct RuntimeContent {
     variants: HashMap<String, RoomSceneVariants>,
     entity_media: HashMap<(EntityMediaKind, String), EntityMediaDefinition>,
@@ -119,6 +120,53 @@ impl RuntimeContent {
 
     pub(crate) fn operational_metrics(&self) -> Option<Arc<RuntimeMetrics>> {
         self.operational_metrics.as_ref().map(Arc::clone)
+    }
+
+    /// Installs the presentation and script slice prepared for one or more
+    /// areas. Validation happens against a private candidate so callers can
+    /// compose this with the core lifecycle checkpoint without ever exposing
+    /// a partially installed area to a transport.
+    pub(crate) fn install_delta(
+        &mut self,
+        delta: RuntimeContentDelta,
+    ) -> Result<(), RuntimeContentInstallError> {
+        let mut candidate = self.clone();
+        for variants in delta.variants {
+            let room_id = variants.room_id.clone();
+            if candidate
+                .variants
+                .insert(room_id.clone(), variants)
+                .is_some()
+            {
+                return Err(RuntimeContentInstallError::ExistingRoomVariants(room_id));
+            }
+        }
+        for media in delta.entity_media {
+            let kind = media.kind;
+            let subject_id = media.subject_id.clone();
+            let key = (kind, subject_id.clone());
+            if candidate.entity_media.insert(key, media).is_some() {
+                return Err(RuntimeContentInstallError::EntityMediaOccupied { kind, subject_id });
+            }
+        }
+        let mut script_ids = candidate
+            .scripts
+            .iter()
+            .map(|script| script.id.as_str())
+            .collect::<BTreeSet<_>>();
+        for script in &delta.scripts {
+            if !script_ids.insert(script.id.as_str()) {
+                return Err(RuntimeContentInstallError::ScriptIdCollision(
+                    script.id.clone(),
+                ));
+            }
+        }
+        candidate.scripts.extend(delta.scripts);
+        candidate
+            .scripts
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        *self = candidate;
+        Ok(())
     }
 
     pub(crate) fn resolve_scene(
@@ -523,7 +571,41 @@ impl ProjectedPoses {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RuntimeContentDelta {
+    pub(crate) variants: Vec<RoomSceneVariants>,
+    pub(crate) entity_media: Vec<EntityMediaDefinition>,
+    pub(crate) scripts: Vec<RuntimeScript>,
+}
+
+impl RuntimeContentDelta {
+    pub(crate) fn new(
+        variants: Vec<RoomSceneVariants>,
+        entity_media: Vec<EntityMediaDefinition>,
+        scripts: Vec<RuntimeScript>,
+    ) -> Self {
+        Self {
+            variants,
+            entity_media,
+            scripts,
+        }
+    }
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub(crate) enum RuntimeContentInstallError {
+    #[error("room `{0}` already has runtime variants")]
+    ExistingRoomVariants(String),
+    #[error("{kind:?} entity `{subject_id}` already has runtime media")]
+    EntityMediaOccupied {
+        kind: EntityMediaKind,
+        subject_id: String,
+    },
+    #[error("script `{0}` is already installed")]
+    ScriptIdCollision(String),
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct RuntimeScript {
     pub(crate) id: String,
     pub(crate) room_id: String,
@@ -873,6 +955,90 @@ mod tests {
                 defeated: None,
             },
         }
+    }
+
+    #[test]
+    fn runtime_delta_is_atomic_when_it_contains_duplicate_media() {
+        let mut content = RuntimeContent::default();
+        let duplicate = test_entity_media("test:duplicate");
+        let error = content
+            .install_delta(RuntimeContentDelta::new(
+                Vec::new(),
+                vec![duplicate.clone(), duplicate],
+                Vec::new(),
+            ))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RuntimeContentInstallError::EntityMediaOccupied {
+                kind: EntityMediaKind::Item,
+                subject_id: "test:duplicate".into(),
+            }
+        );
+        assert!(content.entity_media.is_empty());
+    }
+
+    #[test]
+    fn runtime_delta_rejects_existing_scripts_without_mutating_order() {
+        let mut content =
+            RuntimeContent::new(Vec::new(), vec![flag_script(2, ScriptHook::OnLook)], 7);
+        let before = content
+            .scripts
+            .iter()
+            .map(|script| script.id.clone())
+            .collect::<Vec<_>>();
+
+        let error = content
+            .install_delta(RuntimeContentDelta::new(
+                Vec::new(),
+                Vec::new(),
+                vec![flag_script(2, ScriptHook::OnLook)],
+            ))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RuntimeContentInstallError::ScriptIdCollision("script:bounded-02".into())
+        );
+        assert_eq!(
+            content
+                .scripts
+                .iter()
+                .map(|script| script.id.clone())
+                .collect::<Vec<_>>(),
+            before
+        );
+    }
+
+    #[test]
+    fn runtime_delta_commits_scripts_in_stable_order() {
+        let mut content =
+            RuntimeContent::new(Vec::new(), vec![flag_script(2, ScriptHook::OnLook)], 7);
+
+        content
+            .install_delta(RuntimeContentDelta::new(
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    flag_script(3, ScriptHook::OnLook),
+                    flag_script(1, ScriptHook::OnLook),
+                ],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            content
+                .scripts
+                .iter()
+                .map(|script| script.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "script:bounded-01",
+                "script:bounded-02",
+                "script:bounded-03"
+            ]
+        );
     }
 
     #[test]

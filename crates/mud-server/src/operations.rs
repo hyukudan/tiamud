@@ -233,6 +233,24 @@ pub struct RuntimeMetrics {
     social_delivery_enqueued_total: AtomicU64,
     world_delivery_dropped_total: AtomicU64,
     social_delivery_dropped_total: AtomicU64,
+    resident_areas: AtomicUsize,
+    preparing_areas: AtomicUsize,
+    pending_areas: AtomicUsize,
+    deferred_area_exits: AtomicUsize,
+    area_load_demands_total: AtomicU64,
+    area_load_coalesced_total: AtomicU64,
+    area_load_rejected_total: AtomicU64,
+    area_closure_areas_total: AtomicU64,
+    area_load_installed_total: AtomicU64,
+    area_load_prepared_total: AtomicU64,
+    area_load_already_resident_total: AtomicU64,
+    area_load_queue_full_total: AtomicU64,
+    area_load_timeout_total: AtomicU64,
+    area_load_cancelled_total: AtomicU64,
+    area_load_preparation_failed_total: AtomicU64,
+    area_load_installation_failed_total: AtomicU64,
+    area_load_latency_microseconds: AtomicU64,
+    area_bundle_bytes_total: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,6 +270,22 @@ pub enum ScriptMetricOutcome {
 pub enum RoutedDeliveryKind {
     World,
     Social,
+}
+
+/// Closed outcomes for an admitted area-load demand.
+///
+/// Keeping this vocabulary in code prevents catalog-controlled identifiers or
+/// failure details from becoming Prometheus labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AreaLoadMetricResult {
+    Prepared,
+    Installed,
+    AlreadyResident,
+    QueueFull,
+    Timeout,
+    Cancelled,
+    PreparationFailed,
+    InstallationFailed,
 }
 
 impl RuntimeMetrics {
@@ -415,6 +449,73 @@ impl RuntimeMetrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Sets the number of areas which the actor has published as resident.
+    pub fn set_resident_areas(&self, count: usize) {
+        self.resident_areas.store(count, Ordering::Relaxed);
+    }
+
+    /// Sets the number of areas currently held in private preparation arenas.
+    pub fn set_preparing_areas(&self, count: usize) {
+        self.preparing_areas.store(count, Ordering::Relaxed);
+    }
+
+    pub fn set_pending_areas(&self, count: usize) {
+        self.pending_areas.store(count, Ordering::Relaxed);
+    }
+
+    pub fn set_deferred_area_exits(&self, count: usize) {
+        self.deferred_area_exits.store(count, Ordering::Relaxed);
+    }
+
+    pub fn record_area_load_demand(&self) {
+        self.area_load_demands_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_area_load_coalesced(&self) {
+        self.area_load_coalesced_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_area_load_rejection(&self) {
+        self.area_load_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_area_closure(&self, area_count: usize) {
+        self.area_closure_areas_total
+            .fetch_add(area_count.try_into().unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    /// Records one completed or rejected area-load demand.
+    ///
+    /// `bundle_bytes` is the number of immutable bundle bytes read for this
+    /// demand and should be zero when no bundle was admitted. The outcome is a
+    /// closed enum so callers cannot add content-controlled labels.
+    pub fn area_load_finished(
+        &self,
+        elapsed: Duration,
+        bundle_bytes: u64,
+        result: AreaLoadMetricResult,
+    ) {
+        let counter = match result {
+            AreaLoadMetricResult::Prepared => &self.area_load_prepared_total,
+            AreaLoadMetricResult::Installed => &self.area_load_installed_total,
+            AreaLoadMetricResult::AlreadyResident => &self.area_load_already_resident_total,
+            AreaLoadMetricResult::QueueFull => &self.area_load_queue_full_total,
+            AreaLoadMetricResult::Timeout => &self.area_load_timeout_total,
+            AreaLoadMetricResult::Cancelled => &self.area_load_cancelled_total,
+            AreaLoadMetricResult::PreparationFailed => &self.area_load_preparation_failed_total,
+            AreaLoadMetricResult::InstallationFailed => &self.area_load_installation_failed_total,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.area_load_latency_microseconds.fetch_add(
+            elapsed.as_micros().try_into().unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.area_bundle_bytes_total
+            .fetch_add(bundle_bytes, Ordering::Relaxed);
+    }
+
     pub fn prometheus(&self, world_queue_depth: usize) -> String {
         format!(
             concat!(
@@ -478,6 +579,33 @@ impl RuntimeMetrics {
                 "# TYPE tiamud_delivery_dropped_total counter\n",
                 "tiamud_delivery_dropped_total{{kind=\"world\"}} {}\n",
                 "tiamud_delivery_dropped_total{{kind=\"social\"}} {}\n",
+                "# TYPE tiamud_areas gauge\n",
+                "tiamud_areas{{state=\"resident\"}} {}\n",
+                "tiamud_areas{{state=\"preparing\"}} {}\n",
+                "tiamud_areas{{state=\"pending\"}} {}\n",
+                "# TYPE tiamud_deferred_area_exits gauge\n",
+                "tiamud_deferred_area_exits {}\n",
+                "# TYPE tiamud_area_load_demands_total counter\n",
+                "tiamud_area_load_demands_total {}\n",
+                "# TYPE tiamud_area_load_coalesced_total counter\n",
+                "tiamud_area_load_coalesced_total {}\n",
+                "# TYPE tiamud_area_load_rejected_total counter\n",
+                "tiamud_area_load_rejected_total {}\n",
+                "# TYPE tiamud_area_closure_areas_total counter\n",
+                "tiamud_area_closure_areas_total {}\n",
+                "# TYPE tiamud_area_loads_total counter\n",
+                "tiamud_area_loads_total{{result=\"prepared\"}} {}\n",
+                "tiamud_area_loads_total{{result=\"installed\"}} {}\n",
+                "tiamud_area_loads_total{{result=\"already_resident\"}} {}\n",
+                "tiamud_area_loads_total{{result=\"queue_full\"}} {}\n",
+                "tiamud_area_loads_total{{result=\"timeout\"}} {}\n",
+                "tiamud_area_loads_total{{result=\"cancelled\"}} {}\n",
+                "tiamud_area_loads_total{{result=\"preparation_failed\"}} {}\n",
+                "tiamud_area_loads_total{{result=\"installation_failed\"}} {}\n",
+                "# TYPE tiamud_area_load_latency_seconds_sum counter\n",
+                "tiamud_area_load_latency_seconds_sum {:.6}\n",
+                "# TYPE tiamud_area_bundle_bytes_total counter\n",
+                "tiamud_area_bundle_bytes_total {}\n",
                 "# TYPE process_resident_memory_bytes gauge\n",
                 "process_resident_memory_bytes {}\n",
             ),
@@ -518,6 +646,27 @@ impl RuntimeMetrics {
             self.social_delivery_enqueued_total.load(Ordering::Relaxed),
             self.world_delivery_dropped_total.load(Ordering::Relaxed),
             self.social_delivery_dropped_total.load(Ordering::Relaxed),
+            self.resident_areas.load(Ordering::Relaxed),
+            self.preparing_areas.load(Ordering::Relaxed),
+            self.pending_areas.load(Ordering::Relaxed),
+            self.deferred_area_exits.load(Ordering::Relaxed),
+            self.area_load_demands_total.load(Ordering::Relaxed),
+            self.area_load_coalesced_total.load(Ordering::Relaxed),
+            self.area_load_rejected_total.load(Ordering::Relaxed),
+            self.area_closure_areas_total.load(Ordering::Relaxed),
+            self.area_load_prepared_total.load(Ordering::Relaxed),
+            self.area_load_installed_total.load(Ordering::Relaxed),
+            self.area_load_already_resident_total
+                .load(Ordering::Relaxed),
+            self.area_load_queue_full_total.load(Ordering::Relaxed),
+            self.area_load_timeout_total.load(Ordering::Relaxed),
+            self.area_load_cancelled_total.load(Ordering::Relaxed),
+            self.area_load_preparation_failed_total
+                .load(Ordering::Relaxed),
+            self.area_load_installation_failed_total
+                .load(Ordering::Relaxed),
+            self.area_load_latency_microseconds.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            self.area_bundle_bytes_total.load(Ordering::Relaxed),
             process_resident_memory_bytes(),
         )
     }
@@ -631,6 +780,19 @@ mod tests {
         metrics.set_database_queue_depth(3);
         metrics.tick_finished(Duration::from_millis(5), true);
         metrics.script_finished(Duration::from_millis(2), ScriptMetricOutcome::Timeout);
+        metrics.set_resident_areas(3);
+        metrics.set_preparing_areas(2);
+        metrics.set_pending_areas(1);
+        metrics.set_deferred_area_exits(4);
+        metrics.record_area_load_demand();
+        metrics.record_area_load_coalesced();
+        metrics.record_area_load_rejection();
+        metrics.record_area_closure(3);
+        metrics.area_load_finished(
+            Duration::from_millis(4),
+            4_096,
+            AreaLoadMetricResult::Installed,
+        );
         let output = metrics.prometheus(7);
         assert!(output.contains("tiamud_connections{transport=\"websocket\"} 1"));
         assert!(output.contains("tiamud_connections{transport=\"telnet\"} 1"));
@@ -658,6 +820,90 @@ mod tests {
         assert!(output.contains("tiamud_scripts_total 1"));
         assert!(output.contains("tiamud_script_timeouts_total 1"));
         assert!(output.contains("tiamud_script_latency_seconds_sum 0.002000"));
+        assert!(output.contains("tiamud_areas{state=\"resident\"} 3"));
+        assert!(output.contains("tiamud_areas{state=\"preparing\"} 2"));
+        assert!(output.contains("tiamud_areas{state=\"pending\"} 1"));
+        assert!(output.contains("tiamud_deferred_area_exits 4"));
+        assert!(output.contains("tiamud_area_load_demands_total 1"));
+        assert!(output.contains("tiamud_area_load_coalesced_total 1"));
+        assert!(output.contains("tiamud_area_load_rejected_total 1"));
+        assert!(output.contains("tiamud_area_closure_areas_total 3"));
+        assert!(output.contains("tiamud_area_loads_total{result=\"installed\"} 1"));
+        assert!(output.contains("tiamud_area_load_latency_seconds_sum 0.004000"));
+        assert!(output.contains("tiamud_area_bundle_bytes_total 4096"));
         assert!(output.contains("process_resident_memory_bytes "));
+    }
+
+    #[test]
+    fn area_load_metrics_expose_only_the_closed_result_vocabulary() {
+        let metrics = RuntimeMetrics::default();
+        let results = [
+            AreaLoadMetricResult::Prepared,
+            AreaLoadMetricResult::Installed,
+            AreaLoadMetricResult::AlreadyResident,
+            AreaLoadMetricResult::QueueFull,
+            AreaLoadMetricResult::Timeout,
+            AreaLoadMetricResult::Cancelled,
+            AreaLoadMetricResult::PreparationFailed,
+            AreaLoadMetricResult::InstallationFailed,
+        ];
+        for (index, result) in results.into_iter().enumerate() {
+            metrics.area_load_finished(
+                Duration::from_micros((index + 1) as u64),
+                (index + 1) as u64,
+                result,
+            );
+        }
+
+        let output = metrics.prometheus(0);
+        let result_series = output
+            .lines()
+            .filter(|line| line.starts_with("tiamud_area_loads_total{"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            result_series,
+            vec![
+                "tiamud_area_loads_total{result=\"prepared\"} 1",
+                "tiamud_area_loads_total{result=\"installed\"} 1",
+                "tiamud_area_loads_total{result=\"already_resident\"} 1",
+                "tiamud_area_loads_total{result=\"queue_full\"} 1",
+                "tiamud_area_loads_total{result=\"timeout\"} 1",
+                "tiamud_area_loads_total{result=\"cancelled\"} 1",
+                "tiamud_area_loads_total{result=\"preparation_failed\"} 1",
+                "tiamud_area_loads_total{result=\"installation_failed\"} 1",
+            ]
+        );
+        assert!(output.contains("tiamud_area_load_latency_seconds_sum 0.000036"));
+        assert!(output.contains("tiamud_area_bundle_bytes_total 36"));
+        assert!(!output.contains("areaId"));
+        assert!(!output.contains("roomId"));
+        assert!(!output.contains("sha256"));
+    }
+
+    #[test]
+    fn area_load_metrics_are_safe_for_concurrent_recording() {
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let workers = (0..4)
+            .map(|_| {
+                let metrics = metrics.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..250 {
+                        metrics.area_load_finished(
+                            Duration::from_micros(10),
+                            4,
+                            AreaLoadMetricResult::Installed,
+                        );
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let output = metrics.prometheus(0);
+        assert!(output.contains("tiamud_area_loads_total{result=\"installed\"} 1000"));
+        assert!(output.contains("tiamud_area_load_latency_seconds_sum 0.010000"));
+        assert!(output.contains("tiamud_area_bundle_bytes_total 4000"));
     }
 }

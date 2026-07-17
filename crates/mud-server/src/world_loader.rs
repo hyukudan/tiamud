@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::runtime_content::{RuntimeContent, RuntimeScript};
+use crate::runtime_content::{RuntimeContent, RuntimeContentDelta, RuntimeScript};
 use thiserror::Error;
 use tiamud_core::{
     AbilityCategory as CoreAbilityCategory,
@@ -41,8 +41,8 @@ use tiamud_core::{
     NpcAbilitySetDefinition as CoreNpcAbilitySetDefinition, NpcDefinition,
     RequirementDefinition as CoreRequirementDefinition,
     RequirementDisclosure as CoreRequirementDisclosure,
-    RequirementPredicate as CoreRequirementPredicate, RoomDefinition, SceneAudio, SceneImage,
-    SocialEmoteAudience as CoreSocialEmoteAudience,
+    RequirementPredicate as CoreRequirementPredicate, RoomDefinition, RoomPresentationDefinition,
+    SceneAudio, SceneImage, SocialEmoteAudience as CoreSocialEmoteAudience,
     SocialEmoteDefinition as CoreSocialEmoteDefinition,
     SocialEmoteTargetedTemplates as CoreSocialEmoteTargetedTemplates,
     SocialEmoteTargeting as CoreSocialEmoteTargeting,
@@ -88,6 +88,48 @@ pub struct LoadedWorldDefinition {
     pub hidden_npcs: Vec<(String, u16)>,
     pub secret_exits: Vec<(String, CoreDirection, u16)>,
     pub runtime_content: RuntimeContent,
+}
+
+/// Global authored rules pinned from the verified monolithic fallback. Area
+/// bundles can add local entities and presentation, but character creation,
+/// progression, abilities, emotes, the world identity and RNG seed never
+/// change during one catalog generation.
+#[derive(Debug)]
+pub(crate) struct PinnedWorldContent {
+    pub(crate) world_id: String,
+    pub(crate) world_name: String,
+    pub(crate) start_room_id: String,
+    pub(crate) rng_seed: Option<u64>,
+    pub(crate) character_progression: CoreCharacterProgressionDefinition,
+    pub(crate) abilities: Vec<CoreAbilityDefinition>,
+    pub(crate) social_emotes: Vec<CoreSocialEmoteDefinition>,
+    authored_character_progression: world_pack::CharacterProgressionDefinition,
+    authored_abilities: Vec<world_pack::AbilityDefinition>,
+    authored_social_emotes: Vec<world_pack::SocialEmoteDefinition>,
+    authored_rooms: HashMap<String, world_pack::Room>,
+    room_ids_by_vnum: HashMap<i64, String>,
+    authored_npc_prototypes: HashMap<String, world_pack::NpcPrototype>,
+    authored_npc_spawns: Vec<world_pack::NpcSpawn>,
+}
+
+/// Pure, actor-independent conversion result for one verified area bundle.
+/// The coordinator may prepare this on a blocking worker; no runtime state is
+/// touched until the actor installs the corresponding batch.
+#[derive(Debug)]
+pub(crate) struct LoadedAreaDefinition {
+    pub(crate) definition: WorldDefinition,
+    pub(crate) room_presentations: Vec<RoomPresentationDefinition>,
+    pub(crate) npcs: Vec<NpcDefinition>,
+    pub(crate) npc_ability_sets: Vec<CoreNpcAbilitySetDefinition>,
+    pub(crate) loot_tables: Vec<CoreLootTableDefinition>,
+    pub(crate) loot_sources: Vec<CoreLootSourceDefinition>,
+    pub(crate) affixes: Vec<CoreAffixDefinition>,
+    pub(crate) affix_pools: Vec<CoreAffixPoolDefinition>,
+    pub(crate) room_light: Vec<(String, CoreLightLevel)>,
+    pub(crate) hidden_items: Vec<(String, u16)>,
+    pub(crate) hidden_npcs: Vec<(String, u16)>,
+    pub(crate) secret_exits: Vec<(String, CoreDirection, u16)>,
+    pub(crate) runtime_content: RuntimeContentDelta,
 }
 
 #[derive(Debug, Error)]
@@ -188,6 +230,186 @@ pub fn parse_loaded_world(bytes: &[u8]) -> Result<LoadedWorldDefinition, WorldLo
     convert_document(document)
 }
 
+pub(crate) fn parse_pinned_world_content(
+    bytes: &[u8],
+) -> Result<PinnedWorldContent, WorldLoadError> {
+    if bytes.len() > MAX_WORLD_PACK_BYTES {
+        return Err(WorldLoadError::TooLarge {
+            size: bytes.len(),
+            max: MAX_WORLD_PACK_BYTES,
+        });
+    }
+    let document = WorldPackDocument::from_json(bytes)?;
+    document.validate()?;
+    let authored_character_progression = document
+        .world
+        .gameplay
+        .character_progression
+        .clone()
+        .ok_or(WorldLoadError::MissingCharacterProgression)?;
+    let authored_abilities = document.world.gameplay.abilities.clone();
+    let authored_social_emotes = document.world.gameplay.social_emotes.clone();
+    let authored_rooms = document
+        .world
+        .rooms
+        .iter()
+        .cloned()
+        .map(|room| (room.id.clone(), room))
+        .collect::<HashMap<_, _>>();
+    let room_ids_by_vnum = document
+        .world
+        .rooms
+        .iter()
+        .filter_map(|room| room.legacy_vnum.map(|vnum| (vnum, room.id.clone())))
+        .collect::<HashMap<_, _>>();
+    let authored_npc_prototypes = document
+        .world
+        .gameplay
+        .npc_prototypes
+        .iter()
+        .cloned()
+        .map(|prototype| (prototype.id.clone(), prototype))
+        .collect::<HashMap<_, _>>();
+    let authored_npc_spawns = document.world.gameplay.npc_spawns.clone();
+    let world_id = document.world.id.clone();
+    let world_name = document.world.name.clone();
+    let start_room_id = document.world.start_room_id.clone();
+    let loaded = convert_document(document)?;
+    Ok(PinnedWorldContent {
+        world_id,
+        world_name,
+        start_room_id,
+        rng_seed: loaded.rng_seed,
+        character_progression: loaded.character_progression,
+        abilities: loaded.abilities,
+        social_emotes: loaded.social_emotes,
+        authored_character_progression,
+        authored_abilities,
+        authored_social_emotes,
+        authored_rooms,
+        room_ids_by_vnum,
+        authored_npc_prototypes,
+        authored_npc_spawns,
+    })
+}
+
+pub(crate) fn convert_compiled_area(
+    mut area: world_pack::CompiledArea,
+    pinned: &PinnedWorldContent,
+) -> Result<LoadedAreaDefinition, WorldLoadError> {
+    for variants in &area.scene_variants {
+        for variant in &variants.variants {
+            if let Some(path) = &variant.asset_manifest
+                && !runtime_asset_manifest_path(path)
+            {
+                return Err(WorldLoadError::UnsupportedAssetManifestPath {
+                    room_id: variants.room_id.clone(),
+                    path: path.clone(),
+                });
+            }
+        }
+    }
+    let mut scripts = Vec::with_capacity(area.scripts.len());
+    for definition in std::mem::take(&mut area.scripts) {
+        let script_id = definition.id.clone();
+        let script = RuntimeScript::from_definition(definition);
+        tiamud_scripting::validate_module(&script.source, &script.hooks, script.limits)
+            .map_err(|source| WorldLoadError::Script { script_id, source })?;
+        scripts.push(script);
+    }
+    let runtime_content = RuntimeContentDelta::new(
+        std::mem::take(&mut area.scene_variants),
+        std::mem::take(&mut area.entity_media),
+        scripts,
+    );
+    let mut room_presentations = Vec::new();
+    for media in std::mem::take(&mut area.room_media) {
+        let room = pinned.authored_rooms.get(&media.room_id).ok_or_else(|| {
+            WorldLoadError::MissingAuthoredRoom {
+                room_id: media.room_id.clone(),
+            }
+        })?;
+        if let Some(presentation) = room_presentation(media, room)? {
+            room_presentations.push(presentation);
+        }
+    }
+    let npc_spawns = std::mem::take(&mut area.npc_spawns);
+    let mut npc_prototypes = Vec::new();
+    let mut seen_prototypes = BTreeSet::new();
+    for spawn in &npc_spawns {
+        if seen_prototypes.insert(spawn.prototype_id.clone()) {
+            npc_prototypes.push(
+                pinned
+                    .authored_npc_prototypes
+                    .get(&spawn.prototype_id)
+                    .cloned()
+                    .ok_or_else(|| WorldLoadError::MissingNpcPrototype {
+                        prototype_id: spawn.prototype_id.clone(),
+                        npc_id: spawn.id.clone(),
+                    })?,
+            );
+        }
+    }
+    let owned_npc_ability_sets = std::mem::take(&mut area.npc_ability_sets);
+    let mut npc_ability_sets = owned_npc_ability_sets
+        .iter()
+        .flat_map(|definition| {
+            pinned
+                .authored_npc_spawns
+                .iter()
+                .filter(move |spawn| spawn.prototype_id == definition.npc_prototype_id)
+                .map(move |spawn| map_npc_ability_set(&spawn.id, definition))
+        })
+        .collect::<Vec<_>>();
+    npc_ability_sets.sort_by(|left, right| left.npc_id.cmp(&right.npc_id));
+    let pack = WorldPack {
+        schema_version: world_pack::CURRENT_SCHEMA_VERSION,
+        id: pinned.world_id.clone(),
+        name: pinned.world_name.clone(),
+        start_room_id: pinned.start_room_id.clone(),
+        source: None,
+        item_prototypes: std::mem::take(&mut area.item_prototypes),
+        initial_item_instances: std::mem::take(&mut area.initial_item_instances),
+        rooms: std::mem::take(&mut area.rooms),
+        gameplay: world_pack::GameplayDefinition {
+            rng_seed: pinned.rng_seed,
+            npc_prototypes,
+            npc_spawns,
+            character_progression: Some(pinned.authored_character_progression.clone()),
+            default_archetype_id: None,
+            archetypes: Vec::new(),
+            abilities: pinned.authored_abilities.clone(),
+            social_emotes: pinned.authored_social_emotes.clone(),
+            npc_ability_sets: Vec::new(),
+            loot_tables: std::mem::take(&mut area.loot_tables),
+            loot_sources: std::mem::take(&mut area.loot_sources),
+            affixes: std::mem::take(&mut area.affixes),
+            affix_pools: std::mem::take(&mut area.affix_pools),
+        },
+    };
+    let loaded = convert_pack(
+        pack,
+        Vec::new(),
+        std::mem::take(&mut area.room_perception),
+        Some(&pinned.room_ids_by_vnum),
+    )?;
+    Ok(LoadedAreaDefinition {
+        definition: loaded.definition,
+        room_presentations,
+        npcs: loaded.npcs,
+        npc_ability_sets,
+        loot_tables: loaded.loot_tables,
+        loot_sources: loaded.loot_sources,
+        affixes: loaded.affixes,
+        affix_pools: loaded.affix_pools,
+        room_light: loaded.room_light,
+        hidden_items: loaded.hidden_items,
+        hidden_npcs: loaded.hidden_npcs,
+        secret_exits: loaded.secret_exits,
+        runtime_content,
+    })
+}
+
 fn convert_document(
     mut document: WorldPackDocument,
 ) -> Result<LoadedWorldDefinition, WorldLoadError> {
@@ -219,6 +441,7 @@ fn convert_document(
         document.world,
         std::mem::take(&mut document.room_media),
         std::mem::take(&mut document.room_perception),
+        None,
     )?;
     loaded.runtime_content = runtime_content;
     Ok(loaded)
@@ -228,6 +451,7 @@ fn convert_pack(
     mut pack: WorldPack,
     room_media: Vec<RoomMediaDefinition>,
     room_perception: Vec<RoomPerceptionDefinition>,
+    global_room_ids_by_vnum: Option<&HashMap<i64, String>>,
 ) -> Result<LoadedWorldDefinition, WorldLoadError> {
     let world_pack::GameplayDefinition {
         rng_seed,
@@ -314,8 +538,9 @@ fn convert_pack(
         for exit in room.exits {
             let target_room_id = match exit.target {
                 ExitTarget::Room { room_id } => room_id,
-                ExitTarget::LegacyVnum { vnum } => room_ids_by_vnum
-                    .get(&vnum)
+                ExitTarget::LegacyVnum { vnum } => global_room_ids_by_vnum
+                    .and_then(|rooms| rooms.get(&vnum))
+                    .or_else(|| room_ids_by_vnum.get(&vnum))
                     .cloned()
                     .ok_or_else(|| WorldLoadError::UnresolvedLegacyVnum {
                         room_id: room.id.clone(),
@@ -330,23 +555,10 @@ fn convert_pack(
         }
 
         let image = match room.asset_manifest {
-            Some(path) if runtime_asset_manifest_path(&path) => Some(SceneImage {
-                alt: media
-                    .as_ref()
-                    .and_then(|media| media.image_alt.resolve("en"))
-                    .expect("validated image manifests always have localized alt text")
-                    .to_owned(),
-                localized_alt: media
-                    .as_ref()
-                    .map(|media| media.image_alt.0.clone())
-                    .unwrap_or_default(),
-                manifest: Some(format!("/{path}")),
-                avif: None,
-                webp: None,
-                jpeg: None,
-                width: None,
-                height: None,
-            }),
+            Some(path) if runtime_asset_manifest_path(&path) => media
+                .as_ref()
+                .map(|media| scene_image(&room.id, &path, media))
+                .transpose()?,
             Some(path) => {
                 return Err(WorldLoadError::UnsupportedAssetManifestPath {
                     room_id: room.id,
@@ -400,19 +612,18 @@ fn convert_pack(
     let mut npc_ability_sets = Vec::new();
     let npcs = npc_spawns
         .into_iter()
-        .filter_map(|spawn| {
-            let prototype = prototypes.get(&spawn.prototype_id)?;
+        .map(|spawn| {
+            let prototype = prototypes.get(&spawn.prototype_id).ok_or_else(|| {
+                WorldLoadError::MissingNpcPrototype {
+                    prototype_id: spawn.prototype_id.clone(),
+                    npc_id: spawn.id.clone(),
+                }
+            })?;
             let loot_item_ids = loot_by_npc.remove(&spawn.id).unwrap_or_default();
             if let Some(definition) = npc_ability_sets_by_prototype.get(&spawn.prototype_id) {
-                npc_ability_sets.push(CoreNpcAbilitySetDefinition {
-                    npc_id: spawn.id.clone(),
-                    resource_pools: definition.resource_pools.clone(),
-                    resource_regeneration: definition.resource_regeneration.clone(),
-                    resistances: map_resistances(definition.resistances.clone()),
-                    ability_ids: definition.ability_ids.clone(),
-                });
+                npc_ability_sets.push(map_npc_ability_set(&spawn.id, definition));
             }
-            Some(NpcDefinition {
+            Ok(NpcDefinition {
                 stable_id: spawn.id,
                 name: prototype.name.clone(),
                 description: prototype.description.clone(),
@@ -426,7 +637,7 @@ fn convert_pack(
                 respawn_ticks: prototype.respawn_ticks,
             })
         })
-        .collect();
+        .collect::<Result<Vec<_>, WorldLoadError>>()?;
     let mut room_light = Vec::with_capacity(room_perception.len());
     let mut hidden_items = Vec::new();
     let mut hidden_npcs = Vec::new();
@@ -933,6 +1144,19 @@ fn map_resistances(
         .collect()
 }
 
+fn map_npc_ability_set(
+    npc_id: &str,
+    definition: &world_pack::NpcAbilitySet,
+) -> CoreNpcAbilitySetDefinition {
+    CoreNpcAbilitySetDefinition {
+        npc_id: npc_id.to_owned(),
+        resource_pools: definition.resource_pools.clone(),
+        resource_regeneration: definition.resource_regeneration.clone(),
+        resistances: map_resistances(definition.resistances.clone()),
+        ability_ids: definition.ability_ids.clone(),
+    }
+}
+
 fn map_ability_status_effect(
     status: world_pack::AbilityStatusEffect,
 ) -> CoreAbilityStatusEffectDefinition {
@@ -992,6 +1216,56 @@ fn scene_audio(cue: &AudioCue) -> SceneAudio {
         url: format!("/{}", cue.path),
         looped: cue.looped,
     }
+}
+
+fn scene_image(
+    room_id: &str,
+    path: &str,
+    media: &RoomMediaDefinition,
+) -> Result<SceneImage, WorldLoadError> {
+    let alt = media
+        .image_alt
+        .resolve("en")
+        .ok_or_else(|| WorldLoadError::MissingRoomMediaAlt {
+            room_id: room_id.to_owned(),
+        })?;
+    Ok(SceneImage {
+        alt: alt.to_owned(),
+        localized_alt: media.image_alt.0.clone(),
+        manifest: Some(format!("/{path}")),
+        avif: None,
+        webp: None,
+        jpeg: None,
+        width: None,
+        height: None,
+    })
+}
+
+fn room_presentation(
+    media: RoomMediaDefinition,
+    room: &world_pack::Room,
+) -> Result<Option<RoomPresentationDefinition>, WorldLoadError> {
+    let image = match room.asset_manifest.as_deref() {
+        Some(path) if runtime_asset_manifest_path(path) => {
+            Some(scene_image(&room.id, path, &media)?)
+        }
+        Some(path) => {
+            return Err(WorldLoadError::UnsupportedAssetManifestPath {
+                room_id: room.id.clone(),
+                path: path.to_owned(),
+            });
+        }
+        None => None,
+    };
+    let audio = media.audio.as_ref().map(scene_audio);
+    if image.is_none() && audio.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(RoomPresentationDefinition {
+        room_id: room.id.clone(),
+        image,
+        audio,
+    }))
 }
 
 fn map_equipment_slot(slot: PackEquipmentSlot) -> CoreEquipmentSlot {
@@ -1068,7 +1342,7 @@ fn split_prose(description: &str) -> Vec<String> {
         .collect()
 }
 
-fn map_direction(direction: PackDirection) -> CoreDirection {
+pub(crate) fn map_direction(direction: PackDirection) -> CoreDirection {
     match direction {
         PackDirection::North => CoreDirection::North,
         PackDirection::East => CoreDirection::East,
@@ -1097,6 +1371,15 @@ pub enum WorldLoadError {
     TooLarge { size: usize, max: usize },
     #[error("WorldPack v3 requires a character progression definition")]
     MissingCharacterProgression,
+    #[error("verified fallback has no authored room {room_id:?}")]
+    MissingAuthoredRoom { room_id: String },
+    #[error("NPC spawn {npc_id:?} references missing prototype {prototype_id:?}")]
+    MissingNpcPrototype {
+        prototype_id: String,
+        npc_id: String,
+    },
+    #[error("room {room_id:?} has an image manifest without localized alt text")]
+    MissingRoomMediaAlt { room_id: String },
     #[error("WorldPack is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("WorldPack could not be decoded or normalized: {0}")]
@@ -1266,6 +1549,103 @@ mod tests {
 
         assert_eq!(definition.start_room_id, "demo:lantern-square");
         assert_eq!(definition.rooms.len(), 3);
+    }
+
+    #[test]
+    fn catalog_mode_pins_global_rules_without_retaining_local_world_state() {
+        let pinned = parse_pinned_world_content(DEFAULT_WORLD_PACK).unwrap();
+
+        assert_eq!(pinned.world_id, "lantern-square");
+        assert_eq!(pinned.start_room_id, "demo:lantern-square");
+        assert!(!pinned.character_progression.base_classes.is_empty());
+        assert!(!pinned.abilities.is_empty());
+        assert!(!pinned.social_emotes.is_empty());
+    }
+
+    fn empty_compiled_area() -> world_pack::CompiledArea {
+        world_pack::CompiledArea {
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
+            rooms: Vec::new(),
+            npc_prototypes: Vec::new(),
+            npc_spawns: Vec::new(),
+            loot_tables: Vec::new(),
+            loot_sources: Vec::new(),
+            affixes: Vec::new(),
+            affix_pools: Vec::new(),
+            archetypes: Vec::new(),
+            level_thresholds: Vec::new(),
+            lineages: Vec::new(),
+            backgrounds: Vec::new(),
+            base_classes: Vec::new(),
+            advanced_classes: Vec::new(),
+            talent_graphs: Vec::new(),
+            abilities: Vec::new(),
+            social_emotes: Vec::new(),
+            npc_ability_sets: Vec::new(),
+            room_media: Vec::new(),
+            entity_media: Vec::new(),
+            room_perception: Vec::new(),
+            scene_variants: Vec::new(),
+            scripts: Vec::new(),
+            content_tests: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn catalog_area_conversion_resolves_verified_cross_area_references() {
+        let document = WorldPackDocument::from_json(DEFAULT_WORLD_PACK).unwrap();
+        let mut pinned = parse_pinned_world_content(DEFAULT_WORLD_PACK).unwrap();
+
+        let mut spawn_area = empty_compiled_area();
+        spawn_area.npc_spawns = document.world.gameplay.npc_spawns.clone();
+        let loaded_spawn = convert_compiled_area(spawn_area, &pinned).unwrap();
+        assert_eq!(loaded_spawn.npcs.len(), 1);
+        assert_eq!(loaded_spawn.npcs[0].stable_id, "tiamud:gate-stalker-1");
+
+        let mut rules_area = empty_compiled_area();
+        rules_area.npc_ability_sets = document.world.gameplay.npc_ability_sets.clone();
+        let loaded_rules = convert_compiled_area(rules_area, &pinned).unwrap();
+        assert_eq!(loaded_rules.npc_ability_sets.len(), 1);
+        assert_eq!(
+            loaded_rules.npc_ability_sets[0].npc_id,
+            "tiamud:gate-stalker-1"
+        );
+
+        let mut media_area = empty_compiled_area();
+        media_area.room_media = document.room_media.clone();
+        let loaded_media = convert_compiled_area(media_area, &pinned).unwrap();
+        assert_eq!(loaded_media.room_presentations.len(), 1);
+        assert_eq!(
+            loaded_media.room_presentations[0].room_id,
+            "demo:lantern-square"
+        );
+        assert!(loaded_media.room_presentations[0].image.is_some());
+
+        pinned
+            .room_ids_by_vnum
+            .insert(777, "demo:north-gate".into());
+        let mut legacy_portal_area = empty_compiled_area();
+        legacy_portal_area.rooms.push(world_pack::Room {
+            id: "test:legacy-source".into(),
+            legacy_vnum: None,
+            title: "Legacy source".into(),
+            description: "A room with a cross-area legacy portal.".into(),
+            asset_manifest: None,
+            exits: vec![world_pack::Exit {
+                direction: PackDirection::North,
+                target: ExitTarget::LegacyVnum { vnum: 777 },
+                description: String::new(),
+                keywords: String::new(),
+                legacy_values: Vec::new(),
+            }],
+            legacy: None,
+        });
+        let loaded_portal = convert_compiled_area(legacy_portal_area, &pinned).unwrap();
+        assert_eq!(
+            loaded_portal.definition.rooms[0].exits[0].target_room_id,
+            "demo:north-gate"
+        );
     }
 
     #[test]

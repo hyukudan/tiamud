@@ -75,7 +75,9 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   composición sin conexión de WorldProject v2 produce un WorldPack v9
   canónico, determinista y revisable. La fase 6A implementa una ruta local
   separada para catalogar revisiones y bundles de área
-  verificables. El servidor aún carga un único paquete completo al arrancar.
+  verificables. La fase 6B permite arrancar desde un catálogo exacto y añadir
+  bajo demanda áreas locales verificadas, sin sustituir ni descargar ninguna
+  durante ese proceso.
 - **Operación en un host:** adaptadores PostgreSQL/SQLite, credenciales
   Argon2id, sesiones revocables, colas acotadas, salud, métricas Prometheus,
   apagado ordenado, copia/restauración SQLite y traslado explícito a PostgreSQL.
@@ -98,7 +100,7 @@ flowchart LR
     Projection --> Web
     Projection --> TN
     Actor <--> Store[(PostgreSQL<br/>o SQLite)]
-    Pack[WorldPack revisado] --> Actor
+    Pack[WorldPack revisado<br/>o generación local fijada] --> Actor
 ```
 
 Cuatro límites mantienen el motor flexible:
@@ -193,7 +195,7 @@ board report <referencia> | <motivo>
 | Navegador | HTTP en bucle local | HTTPS/WSS detrás de Caddy |
 | Terminal | `plaintext` explícito en localhost/LAN confiable | Telnet TLS directo |
 | Persistencia | SQLite sin configuración | PostgreSQL en el mismo equipo |
-| Mundo | WorldPack de ejemplo embebido | WorldPack externo revisado |
+| Mundo | WorldPack de ejemplo embebido o catálogo local 6B | WorldPack externo revisado o catálogo local fijado |
 
 La [guía de operación](docs/operations/single-host.md) cubre Caddy, systemd,
 Telnet TLS, copias, monitorización, actualización y reversión. Los ejemplos
@@ -208,6 +210,8 @@ revisados están en [`deploy/`](deploy/).
 | `TIAMUD_DB_PATH` | `data/tiamud.db` | Ruta SQLite sin URL de base de datos |
 | `TIAMUD_DATABASE_URL` | — | Perfil PostgreSQL o URL `sqlite://` explícita |
 | `TIAMUD_WORLD_PACK` | paquete embebido | WorldPack externo revisado |
+| `TIAMUD_AREA_REGISTRY` | — | Raíz del registro local 6A/6B |
+| `TIAMUD_AREA_CATALOG` | — | Ruta content-addressed exacta del catálogo fijado |
 | `TIAMUD_TICK_MILLIS` | `1000` | Cadencia del ciclo lógico |
 | `RUST_LOG` | `tiamud_server=info,tower_http=info` | Filtro de registro estructurado |
 
@@ -215,6 +219,12 @@ revisados están en [`deploy/`](deploy/).
 SQLite a PostgreSQL es una operación sin conexión, no replicación. Los datos
 consultables siguen siendo relacionales; las instantáneas JSON acotadas se
 guardan como texto opaco porque el servidor no consulta su interior.
+
+`TIAMUD_AREA_REGISTRY` y `TIAMUD_AREA_CATALOG` deben aparecer juntas y son
+excluyentes con `TIAMUD_WORLD_PACK`. Sin ninguna de las tres se usa el
+WorldPack embebido. En modo catálogo, `TIAMUD_AREA_CATALOG` debe señalar la
+ruta exacta bajo `area-catalogs/`; el servidor no resuelve ni vuelve a observar
+`area-active` durante la partida.
 
 Ambos adaptadores implementan actualmente el **esquema v13**. La migración
 v10→v11 reconstruye de forma transaccional la custodia opaca del runtime y
@@ -487,8 +497,9 @@ cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
 ```
 
 Esto es más eficiente para autoría, revisión, caché y compilación incremental
-que mantener un único archivo fuente. No implica carga caliente. El servidor
-actual valida y carga un paquete completo antes de abrir los puntos de escucha.
+que mantener un único archivo fuente. El WorldPack monolítico continúa siendo
+la ruta simple y el respaldo verificable; el modo catálogo 6B usa esos mismos
+bundles para construir una generación local aditiva.
 
 La fase 6A de [ADR 0005](docs/decisions/0005-hot-area-lifecycle.md) está
 **implementada**. Su alcance es exclusivamente editorial y local: un catálogo acotado
@@ -535,22 +546,57 @@ carreras TOCTOU que provoque quedan fuera de este modo de confianza.
 
 ```mermaid
 flowchart LR
-    accTitle: Fronteras de autoría y publicación local de áreas
-    accDescr: Los mismos módulos AreaPack pueden componerse en un WorldPack monolítico o prepararse como bundles locales verificables; solo el WorldPack completo entra hoy en el servidor.
+    accTitle: Autoría modular y carga local aditiva de áreas
+    accDescr: Los mismos módulos producen un WorldPack monolítico y bundles locales. El servidor elige una ruta al arrancar; el modo catálogo fija una generación y añade áreas verificadas sin reemplazarlas ni descargarlas.
 
     Areas[AreaPack v8<br/>módulos revisados] --> Project[WorldProject v2]
     Project --> Compose[Composición sin conexión]
     Compose --> World[WorldPack v9 canónico]
-    World --> Runtime[Servidor actual<br/>carga completa al arrancar]
+    World --> Runtime[Servidor<br/>modo monolítico]
     Areas --> Bundle[Bundles locales<br/>JSON canónico e inmutable]
     Bundle --> Catalog[Catálogo local<br/>metadatos + digests]
-    Catalog -. no activa .-> Runtime
+    Catalog --> Fixed[Generación fijada<br/>SHA-256 del catálogo]
+    Fixed --> Stage[Staging acotado<br/>fuera del actor]
+    Stage --> Actor[Instalación atómica<br/>áreas siempre residentes]
 ```
 
-Esta fase no carga, activa, sustituye, descarga ni expulsa áreas en ejecución;
-tampoco introduce red, descarga de cliente/servidor, compresión o firma remota.
-La carga/reemplazo caliente y la descarga/LRU cuando no hay jugadores siguen
-siendo fases futuras del ADR, no funcionalidad publicada.
+La fase 6A no carga áreas por sí sola. La fase 6B de
+[ADR 0020](docs/decisions/0020-additive-local-area-loading.md) está
+**implementada** como ruta local aditiva. El proceso recibe exactamente
+`TIAMUD_AREA_REGISTRY` y `TIAMUD_AREA_CATALOG`, verifica y fija el SHA-256 de
+los bytes canónicos del catálogo antes de abrir listeners. Estas variables son
+excluyentes con `TIAMUD_WORLD_PACK`; no existe mezcla ni fallback silencioso.
+
+En una base vacía se instala el área propietaria de `startRoomId` y el cierre
+transitivo de sus dependencias duras. Si existe snapshot o ledger previo, se
+carga la generación completa antes de restaurar o reproducir, por lotes
+acotados. Una ubicación durable conocida pero no residente provoca demanda;
+una sala ajena al catálogo falla cerrada y nunca se corrige silenciosamente a
+la sala inicial.
+
+Los portales no son dependencias duras. Una salida a un destino no residente
+se conserva como `DeferredExit`: sigue visible como salida autorizada, pero no
+permite que voz espacial ni mapa atraviesen una sala inexistente. Al intentar
+moverse, el core devuelve una señal interna antes de mutar mundo, revisión,
+RNG, eventos o persistencia. El coordinador prepara el cierre duro fuera del
+actor, este lo instala de forma atómica y la acción original se reintenta una
+sola vez. Web, Telnet y GMCP solo reciben el resultado normal o el error
+genérico «El destino no está disponible ahora».
+
+El coordinador comparte demandas por `(catalogSha256, areaId)`, admite dos
+preparaciones activas, ocho distintas pendientes, cinco segundos totales por
+trabajo y un cierre máximo de 32 áreas. La E/S, hashes, JSON, validación y Lua
+ocurren fuera del actor. La instalación toma un checkpoint conjunto de mundo,
+contenido runtime y residencia; una instalación estática no escribe snapshot,
+mientras el estado dinámico inicial se confirma mediante la transacción
+durable existente antes de publicar el lote. Las métricas usan resultados y
+etapas cerradas, nunca IDs de área, sala, revisión o digest como labels.
+
+La generación queda fija hasta apagar: cambiar `area-active` se ignora durante
+el proceso y todas las áreas usadas permanecen residentes. 6B no implementa
+sustitución de revisiones, coexistencia de generaciones, drenaje, descarga,
+LRU, presupuesto de memoria residente, red, compresión ni firma remota. Ese
+trabajo pertenece a 6C y fases posteriores.
 
 La puerta final pasa 144/144 pruebas de `world-pack`, incluidas 10/10 del CLI,
 y 707/707 pruebas Rust del workspace; también pasan formato, `git diff
@@ -559,6 +605,14 @@ de tres bundles y el catálogo anterior, humo, `cargo deny check advisories
 sources` y licencias/avisos para 308 dependencias Rust y 76 web. 6A no cambia
 Web, protocolo, runtime, snapshot ni SQL, por lo que no se atribuye una nueva
 puerta Web o PostgreSQL.
+
+La cobertura enfocada 6B incluye core, `world-pack`, coordinador, rollback
+actor/persistencia y rutas SQLite de recovery. Clippy estricto de servidor
+pasa. Un humo real
+publica el catálogo de Lantern Square, arranca servidor+SQLite en modo catálogo,
+abre Web y Telnet, obtiene readiness y confirma dos áreas residentes en un
+bootstrap vacío. La puerta agregada y sus límites se conservan en el
+[registro 6B](docs/project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
 
 El vocabulario v9 separa la definición reusable en `itemPrototypes` de cada
 unidad inicial en `initialItemInstances`. Una instancia empieza en una sala,
@@ -907,8 +961,9 @@ Puertas externas pendientes:
 
 Siguientes líneas técnicas y de producto:
 
-- implementar 6B como carga aditiva local bajo demanda, sin reemplazo ni
-  descarga, por las salvaguardas del ADR 0005;
+- evolucionar desde la carga aditiva local 6B ya implementada hacia 6C solo
+  cuando exista necesidad medida: sustitución por generaciones, drenaje y
+  rollback antes de cualquier descarga o LRU;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
 - considerar need/greed, master-loot o contribución solo tras modelar sus
@@ -918,8 +973,8 @@ Siguientes líneas técnicas y de producto:
 - añadir alias/migraciones de IDs y mejores vistas previas de balance;
 - optimizar con seguimiento de personajes modificados y deltas acotados antes
   de considerar distribución;
-- implementar carga caliente/LRU de áreas solo tras medir la necesidad y
-  conservar checkpoint, rollback y una única autoridad;
+- implementar descarga/LRU de áreas solo después de 6C, tras medir la necesidad
+  y conservar checkpoint, rollback y una única autoridad;
 - publicar el primer hito explícito de compatibilidad `tiamud.v1`.
 
 ## Mapa del repositorio
@@ -976,7 +1031,9 @@ deploy/                      ejemplos Caddy, systemd y entorno
   [telepatía directa authored](docs/decisions/0015-authored-online-telepathy.md) ·
   [emotes de sala authored](docs/decisions/0016-authored-room-emotes.md) ·
   [correo offline acotado](docs/decisions/0017-bounded-offline-mail.md) ·
-  [tablones comunitarios acotados](docs/decisions/0018-bounded-moderable-community-boards.md).
+  [tablones comunitarios acotados](docs/decisions/0018-bounded-moderable-community-boards.md) ·
+  [voz espacial acotada](docs/decisions/0019-bounded-spatial-voice.md) ·
+  [carga local aditiva](docs/decisions/0020-additive-local-area-loading.md).
 - **Estado:** [matriz](docs/project/COMPLETION_MATRIX.md) ·
   [especificación v0.3](docs/spec-v0.3.md) ·
   [memoria](docs/project/PROJECT_MEMORY.md) ·
