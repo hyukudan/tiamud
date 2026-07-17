@@ -771,6 +771,7 @@ mod tests {
     fn remove_v7_fields(snapshot: &mut serde_json::Value) {
         let snapshot = snapshot.as_object_mut().unwrap();
         snapshot.remove("nextRewardOpenId");
+        snapshot.remove("areaResidency");
         for item in snapshot["itemInstances"]
             .as_object_mut()
             .unwrap()

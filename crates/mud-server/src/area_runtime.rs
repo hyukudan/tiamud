@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -12,10 +12,14 @@ use std::sync::Condvar;
 
 use thiserror::Error;
 use tiamud_core::{
-    AreaGenerationId, AreaLoadRequest, PreparedCoreArea, PreparedCoreAreaBatch, World,
+    AreaDynamicCheckpoint, AreaGenerationId, AreaLoadRequest, AreaRetirementUnit,
+    AreaRuntimeOwnership, ItemInstanceId, PreparedCoreArea, PreparedCoreAreaBatch, World,
 };
 use tokio::sync::{Notify, Semaphore, oneshot};
-use world_pack::{AreaPortalDirection, LocalAreaGeneration, StagedLocalAreaGenerationReplacement};
+use world_pack::{
+    AreaCatalogEntry, AreaPortalDirection, LocalAreaGeneration,
+    StagedLocalAreaGenerationReplacement,
+};
 #[cfg(unix)]
 use world_pack::{
     LocalAreaPublicationReadGuard, LocalAreaRegistryError,
@@ -27,9 +31,11 @@ use crate::{
     runtime_content::RuntimeContentDelta,
     world_loader::{PinnedWorldContent, convert_compiled_area, map_direction},
 };
+use sha2::{Digest, Sha256};
 
 const MAX_ACTIVE_PREPARATIONS: usize = 2;
 const MAX_PENDING_PREPARATIONS: usize = 8;
+const MAX_LIFECYCLE_PREPARATIONS: usize = MAX_ACTIVE_PREPARATIONS + MAX_PENDING_PREPARATIONS;
 const AREA_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
@@ -38,6 +44,16 @@ pub(crate) struct PreparedAreaBatch {
     pub(crate) runtime_by_area: BTreeMap<String, RuntimeContentDelta>,
     pub(crate) bundle_bytes: u64,
     pub(crate) closure_areas: usize,
+}
+
+/// Exact, generation-local retirement candidate prepared outside the actor.
+/// `rehydration` retains the verified immutable definitions and runtime slices
+/// needed to reverse the transition without rereading mutable editorial state.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedAreaRetirementBatch {
+    pub(crate) unit_id: String,
+    pub(crate) core: AreaRetirementUnit,
+    pub(crate) rehydration: PreparedAreaBatch,
 }
 
 /// Fully private, full-generation staging result for the quiescent 6C
@@ -457,6 +473,36 @@ impl AreaGenerationRouter {
         coordinator.mark_resident(area_ids);
         true
     }
+
+    pub(crate) fn mark_nonresident_if_active(
+        &self,
+        generation: &AreaGenerationId,
+        area_ids: &[String],
+    ) -> Result<(), AreaPreparationError> {
+        let coordinator = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if coordinator_generation_id(&state.coordinator) != *generation {
+                return Err(AreaPreparationError::Invalid(
+                    "retirement generation is no longer active".into(),
+                ));
+            }
+            state.coordinator.clone()
+        };
+        coordinator.mark_nonresident(area_ids)
+    }
+
+    pub(crate) fn has_retired_areas(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .coordinator
+            .has_retired_areas()
+    }
 }
 
 fn coordinator_generation_id(coordinator: &AreaLoadCoordinator) -> AreaGenerationId {
@@ -480,6 +526,8 @@ pub(crate) enum AreaPreparationError {
     Timeout,
     #[error("area preparation was cancelled")]
     Cancelled,
+    #[error("area is retired and requires its durable checkpoint")]
+    Retired,
     #[error("area preparation failed: {0}")]
     Invalid(String),
 }
@@ -493,6 +541,7 @@ struct CoordinatorInner {
     generation: Arc<LocalAreaGeneration>,
     pinned: Arc<PinnedWorldContent>,
     active_permits: Arc<Semaphore>,
+    lifecycle_admissions: AtomicUsize,
     preparation_timeout: Duration,
     state: Mutex<CoordinatorState>,
     metrics: Option<Arc<RuntimeMetrics>>,
@@ -545,6 +594,20 @@ struct ActivePreparationGuard {
     coordinator: AreaLoadCoordinator,
 }
 
+struct LifecycleAdmissionGuard {
+    inner: Arc<CoordinatorInner>,
+}
+
+impl Drop for LifecycleAdmissionGuard {
+    fn drop(&mut self) {
+        let previous = self
+            .inner
+            .lifecycle_admissions
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "lifecycle admission count underflowed");
+    }
+}
+
 impl Drop for ActivePreparationGuard {
     fn drop(&mut self) {
         self.coordinator.set_active_delta(-1);
@@ -557,6 +620,7 @@ struct CoordinatorState {
     next_job_id: u64,
     next_waiter_id: u64,
     resident: BTreeSet<String>,
+    retired: BTreeSet<String>,
     jobs: HashMap<String, AreaJob>,
 }
 
@@ -609,6 +673,7 @@ impl AreaLoadCoordinator {
                 generation: Arc::new(generation),
                 pinned: Arc::new(pinned),
                 active_permits: Arc::new(Semaphore::new(MAX_ACTIVE_PREPARATIONS)),
+                lifecycle_admissions: AtomicUsize::new(0),
                 preparation_timeout: AREA_PREPARATION_TIMEOUT,
                 state: Mutex::new(CoordinatorState::default()),
                 metrics,
@@ -783,6 +848,9 @@ impl AreaLoadCoordinator {
             }
             return Err(AreaPreparationError::UnknownArea);
         }
+        if self.is_retired(&area_id) {
+            return Err(AreaPreparationError::Retired);
+        }
         if self.is_resident(&area_id) {
             return self.resident_noop_batch();
         }
@@ -864,6 +932,112 @@ impl AreaLoadCoordinator {
             .unwrap_or(Err(AreaPreparationError::Cancelled));
         guard.armed = false;
         result
+    }
+
+    pub(crate) async fn prepare_retirement(
+        &self,
+        area_id: impl Into<String>,
+    ) -> Result<Arc<PreparedAreaRetirementBatch>, AreaPreparationError> {
+        let area_id = area_id.into();
+        if !self.is_resident(&area_id) {
+            return Err(if self.inner.generation.entry(&area_id).is_some() {
+                AreaPreparationError::Invalid("area is not resident".into())
+            } else {
+                AreaPreparationError::UnknownArea
+            });
+        }
+        let admission = self.acquire_lifecycle_admission()?;
+        let generation = Arc::clone(&self.inner.generation);
+        let pinned = Arc::clone(&self.inner.pinned);
+        let resident = self.resident_snapshot();
+        let deadline = tokio::time::Instant::now() + self.inner.preparation_timeout;
+        let permit = tokio::time::timeout_at(
+            deadline,
+            Arc::clone(&self.inner.active_permits).acquire_owned(),
+        )
+        .await
+        .map_err(|_| AreaPreparationError::Timeout)?
+        .map_err(|_| AreaPreparationError::Cancelled)?;
+        let prepared = tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            let _permit = permit;
+            prepare_area_retirement_unit(&generation, &pinned, &area_id, &resident)
+        });
+        tokio::time::timeout_at(deadline, prepared)
+            .await
+            .map_err(|_| AreaPreparationError::Timeout)?
+            .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?
+            .map(Arc::new)
+    }
+
+    pub(crate) async fn prepare_rehydration(
+        &self,
+        checkpoint: &AreaDynamicCheckpoint,
+    ) -> AreaPreparationResult {
+        if checkpoint.generation_sha256 != self.inner.generation.generation_id() {
+            return Err(AreaPreparationError::Invalid(
+                "checkpoint belongs to another generation".into(),
+            ));
+        }
+        let area_ids = checkpoint
+            .areas
+            .iter()
+            .map(|identity| identity.area_id.clone())
+            .collect::<Vec<_>>();
+        if area_ids.iter().any(|area_id| !self.is_retired(area_id)) {
+            return Err(AreaPreparationError::Invalid(
+                "checkpoint area is not retired".into(),
+            ));
+        }
+        let admission = self.acquire_lifecycle_admission()?;
+        let generation = Arc::clone(&self.inner.generation);
+        let pinned = Arc::clone(&self.inner.pinned);
+        let resident = self.resident_snapshot();
+        let identities = checkpoint.areas.clone();
+        let deadline = tokio::time::Instant::now() + self.inner.preparation_timeout;
+        let permit = tokio::time::timeout_at(
+            deadline,
+            Arc::clone(&self.inner.active_permits).acquire_owned(),
+        )
+        .await
+        .map_err(|_| AreaPreparationError::Timeout)?
+        .map_err(|_| AreaPreparationError::Cancelled)?;
+        let prepared = tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            let _permit = permit;
+            let mut entries = Vec::with_capacity(identities.len());
+            for identity in &identities {
+                let entry = generation.entry(&identity.area_id).ok_or_else(|| {
+                    AreaPreparationError::Invalid("checkpoint names an unknown area".into())
+                })?;
+                if entry.revision != identity.revision
+                    || entry.bundle_sha256 != identity.bundle_sha256
+                {
+                    return Err(AreaPreparationError::Invalid(
+                        "checkpoint area identity differs from the fixed catalog".into(),
+                    ));
+                }
+                entries.push(entry);
+            }
+            prepare_exact_area_batch(&generation, &pinned, entries, &resident)
+        });
+        tokio::time::timeout_at(deadline, prepared)
+            .await
+            .map_err(|_| AreaPreparationError::Timeout)?
+            .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?
+            .map(Arc::new)
+    }
+
+    fn acquire_lifecycle_admission(&self) -> Result<LifecycleAdmissionGuard, AreaPreparationError> {
+        self.inner
+            .lifecycle_admissions
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < MAX_LIFECYCLE_PREPARATIONS).then_some(current + 1)
+            })
+            .map_err(|_| AreaPreparationError::QueueFull)?;
+        Ok(LifecycleAdmissionGuard {
+            inner: Arc::clone(&self.inner),
+        })
     }
 
     async fn run_job(&self, area_id: String, job_id: u64) {
@@ -1120,12 +1294,64 @@ impl AreaLoadCoordinator {
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            state.resident.extend(area_ids.iter().cloned());
+            for area_id in area_ids {
+                state.retired.remove(area_id);
+                state.resident.insert(area_id.clone());
+            }
             state.resident.len()
         };
         if let Some(metrics) = self.metrics() {
             metrics.set_resident_areas(count);
         }
+    }
+
+    pub(crate) fn mark_nonresident(&self, area_ids: &[String]) -> Result<(), AreaPreparationError> {
+        let unique = area_ids.iter().collect::<BTreeSet<_>>();
+        let count = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if area_ids.is_empty()
+                || unique.len() != area_ids.len()
+                || area_ids
+                    .iter()
+                    .any(|area_id| !state.resident.contains(area_id))
+            {
+                return Err(AreaPreparationError::Invalid(
+                    "retirement residence precondition changed".into(),
+                ));
+            }
+            for area_id in area_ids {
+                state.resident.remove(area_id);
+                state.retired.insert(area_id.clone());
+            }
+            state.resident.len()
+        };
+        if let Some(metrics) = self.metrics() {
+            metrics.set_resident_areas(count);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_retired_areas(&self) -> bool {
+        !self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retired
+            .is_empty()
+    }
+
+    pub(crate) fn is_retired(&self, area_id: &str) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retired
+            .contains(area_id)
     }
 
     fn resident_snapshot(&self) -> BTreeSet<String> {
@@ -1182,6 +1408,243 @@ fn install_runtime_slices(
             .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?;
     }
     Ok(())
+}
+
+fn prepare_area_retirement_unit(
+    generation: &LocalAreaGeneration,
+    pinned: &PinnedWorldContent,
+    area_id: &str,
+    resident: &BTreeSet<String>,
+) -> Result<PreparedAreaRetirementBatch, AreaPreparationError> {
+    generation
+        .validate_eviction_units()
+        .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?;
+    let units = generation
+        .eviction_closure_for_area(area_id)
+        .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?;
+    let mut entries = Vec::new();
+    for unit in units {
+        let resident_count = unit
+            .iter()
+            .filter(|entry| resident.contains(&entry.area_id))
+            .count();
+        if resident_count != 0 && resident_count != unit.len() {
+            return Err(AreaPreparationError::Invalid(
+                "an eviction SCC is only partially resident".into(),
+            ));
+        }
+        if resident_count == unit.len() {
+            entries.extend(unit);
+        }
+    }
+    entries.sort_by(|left, right| left.area_id.cmp(&right.area_id));
+    if entries.is_empty() || !entries.iter().any(|entry| entry.area_id == area_id) {
+        return Err(AreaPreparationError::Invalid(
+            "retirement target is no longer resident".into(),
+        ));
+    }
+
+    let generation_id = AreaGenerationId::from_catalog_sha256(generation.generation_id())
+        .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?;
+    let selected = entries
+        .iter()
+        .map(|entry| entry.area_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut boundary_exits =
+        inbound_boundary_requests(generation, &generation_id, &selected, resident);
+    boundary_exits.sort_by(area_request_order);
+    let ownership = entries
+        .iter()
+        .map(|entry| AreaRuntimeOwnership {
+            area_id: entry.area_id.clone(),
+            revision: entry.revision,
+            bundle_sha256: entry.bundle_sha256.clone(),
+            rooms: entry.ownership.rooms.iter().cloned().collect(),
+            initial_item_instances: entry
+                .ownership
+                .initial_item_instances
+                .iter()
+                .cloned()
+                .map(ItemInstanceId)
+                .collect(),
+            npc_spawns: entry.ownership.npc_spawns.iter().cloned().collect(),
+        })
+        .collect::<Vec<_>>();
+    let unit_id = area_retirement_unit_id(&generation_id, &ownership);
+    let rehydration = prepare_exact_area_batch(generation, pinned, entries, resident)?;
+    Ok(PreparedAreaRetirementBatch {
+        unit_id,
+        core: AreaRetirementUnit {
+            generation_id,
+            areas: ownership,
+            boundary_exits,
+        },
+        rehydration,
+    })
+}
+
+fn prepare_exact_area_batch(
+    generation: &LocalAreaGeneration,
+    pinned: &PinnedWorldContent,
+    mut entries: Vec<&AreaCatalogEntry>,
+    resident: &BTreeSet<String>,
+) -> Result<PreparedAreaBatch, AreaPreparationError> {
+    entries.sort_by(|left, right| left.area_id.cmp(&right.area_id));
+    if entries.is_empty()
+        || entries
+            .windows(2)
+            .any(|pair| pair[0].area_id >= pair[1].area_id)
+    {
+        return Err(AreaPreparationError::Invalid(
+            "exact area batch is empty or duplicated".into(),
+        ));
+    }
+    let generation_id = AreaGenerationId::from_catalog_sha256(generation.generation_id())
+        .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?;
+    let selected = entries
+        .iter()
+        .map(|entry| entry.area_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut areas = Vec::with_capacity(entries.len());
+    let mut runtime_by_area = BTreeMap::new();
+    let mut bundle_bytes = 0_u64;
+    for entry in &entries {
+        bundle_bytes = bundle_bytes
+            .checked_add(entry.stored_bytes)
+            .ok_or_else(|| AreaPreparationError::Invalid("bundle byte sum overflow".into()))?;
+        let bundle = generation
+            .read_bundle_exact(&entry.area_id)
+            .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?;
+        let loaded = convert_compiled_area(bundle.compiled_area, pinned)
+            .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?;
+        areas.push(PreparedCoreArea {
+            area_id: entry.area_id.clone(),
+            revision: entry.revision,
+            bundle_sha256: entry.bundle_sha256.clone(),
+            rooms: loaded.definition.rooms,
+            room_presentations: loaded.room_presentations,
+            item_prototypes: loaded.definition.item_prototypes,
+            initial_item_instances: loaded.definition.initial_item_instances,
+            npcs: loaded.npcs,
+            npc_ability_sets: loaded.npc_ability_sets,
+            loot_tables: loaded.loot_tables,
+            loot_sources: loaded.loot_sources,
+            affixes: loaded.affixes,
+            affix_pools: loaded.affix_pools,
+            room_light: loaded.room_light,
+            hidden_items: loaded.hidden_items,
+            hidden_npcs: loaded.hidden_npcs,
+            secret_exits: loaded.secret_exits,
+        });
+        runtime_by_area.insert(entry.area_id.clone(), loaded.runtime_content);
+    }
+    let mut deferred_exits = entries
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .portals
+                .iter()
+                .filter(|portal| {
+                    portal.direction == AreaPortalDirection::Outgoing
+                        && !selected.contains(portal.peer_area_id.as_str())
+                })
+                .map(|portal| AreaLoadRequest {
+                    generation_id: generation_id.clone(),
+                    source_room_id: portal.source_room_id.clone(),
+                    direction: map_direction(portal.source_exit),
+                    target_room_id: portal.target_room_id.clone(),
+                    target_area_id: portal.peer_area_id.clone(),
+                    minimum_target_revision: portal.minimum_peer_revision,
+                })
+        })
+        .chain(inbound_boundary_requests(
+            generation,
+            &generation_id,
+            &selected,
+            resident,
+        ))
+        .collect::<Vec<_>>();
+    deferred_exits.sort_by(area_request_order);
+    if deferred_exits.windows(2).any(|pair| {
+        pair[0].source_room_id == pair[1].source_room_id
+            && pair[0].direction == pair[1].direction
+            && pair[0] != pair[1]
+    }) {
+        return Err(AreaPreparationError::Invalid(
+            "catalog produces conflicting exact area boundaries".into(),
+        ));
+    }
+    deferred_exits.dedup();
+    Ok(PreparedAreaBatch {
+        core: PreparedCoreAreaBatch {
+            generation_id,
+            areas,
+            deferred_exits,
+        },
+        runtime_by_area,
+        bundle_bytes,
+        closure_areas: entries.len(),
+    })
+}
+
+fn inbound_boundary_requests(
+    generation: &LocalAreaGeneration,
+    generation_id: &AreaGenerationId,
+    selected: &BTreeSet<&str>,
+    resident: &BTreeSet<String>,
+) -> Vec<AreaLoadRequest> {
+    generation
+        .catalog()
+        .entries
+        .iter()
+        .filter(|entry| {
+            resident.contains(&entry.area_id) && !selected.contains(entry.area_id.as_str())
+        })
+        .flat_map(|entry| {
+            entry
+                .portals
+                .iter()
+                .filter(|portal| {
+                    portal.direction == AreaPortalDirection::Outgoing
+                        && selected.contains(portal.peer_area_id.as_str())
+                })
+                .map(|portal| AreaLoadRequest {
+                    generation_id: generation_id.clone(),
+                    source_room_id: portal.source_room_id.clone(),
+                    direction: map_direction(portal.source_exit),
+                    target_room_id: portal.target_room_id.clone(),
+                    target_area_id: portal.peer_area_id.clone(),
+                    minimum_target_revision: portal.minimum_peer_revision,
+                })
+        })
+        .collect()
+}
+
+fn area_request_order(left: &AreaLoadRequest, right: &AreaLoadRequest) -> std::cmp::Ordering {
+    left.source_room_id
+        .cmp(&right.source_room_id)
+        .then_with(|| left.direction.cmp(&right.direction))
+        .then_with(|| left.target_room_id.cmp(&right.target_room_id))
+}
+
+fn area_retirement_unit_id(
+    generation: &AreaGenerationId,
+    ownership: &[AreaRuntimeOwnership],
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"tiamud-area-retirement-unit-v1\0");
+    digest.update(generation.as_str().as_bytes());
+    for area in ownership {
+        for value in [
+            area.area_id.as_str(),
+            &area.revision.to_string(),
+            area.bundle_sha256.as_str(),
+        ] {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    hex::encode(digest.finalize())
 }
 
 fn prepare_area_closure(
@@ -1553,7 +2016,7 @@ mod tests {
     async fn actor_cutover_requires_zero_sessions_rolls_back_failed_cas_and_rejects_old_batch() {
         let published = PublishedRegistry::real_lantern_square();
         let current = published.coordinator();
-        let bootstrap = current.bootstrap_world(false).await.unwrap();
+        let bootstrap = current.bootstrap_world(true).await.unwrap();
         let base = coordinator_generation_id(&current);
         let database = published.registry.join("cutover.sqlite3");
         let store = Arc::new(SqliteCharacterStore::open(&database).await.unwrap());
@@ -1628,10 +2091,13 @@ mod tests {
         let failed = handle
             .activate_prepared_generation(prepared, durable_base.clone(), invalid_target)
             .await;
-        assert!(matches!(
-            failed,
-            Err(crate::world_actor::AreaGenerationActivationError::Persistence(_))
-        ));
+        assert!(
+            matches!(
+                &failed,
+                Err(crate::world_actor::AreaGenerationActivationError::Persistence(_))
+            ),
+            "unexpected cutover result: {failed:?}"
+        );
         assert_eq!(
             handle.area_generation_status().unwrap().active_generation,
             base
@@ -1677,7 +2143,7 @@ mod tests {
     async fn ambiguous_generation_authority_seals_admission_and_stops_the_actor() {
         let published = PublishedRegistry::real_lantern_square();
         let current = published.coordinator();
-        let bootstrap = current.bootstrap_world(false).await.unwrap();
+        let bootstrap = current.bootstrap_world(true).await.unwrap();
         let base = coordinator_generation_id(&current);
         let database = published.registry.join("ambiguous-cutover.sqlite3");
         let store = Arc::new(SqliteCharacterStore::open(&database).await.unwrap());
@@ -1716,12 +2182,16 @@ mod tests {
         .unwrap();
 
         store.simulate_ambiguous_area_generation_commit_failure();
-        assert!(matches!(
-            handle
-                .activate_prepared_generation(prepared, durable_base.clone(), durable_target)
-                .await,
-            Err(crate::world_actor::AreaGenerationActivationError::DurableAuthorityAmbiguous)
-        ));
+        let result = handle
+            .activate_prepared_generation(prepared, durable_base.clone(), durable_target)
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(crate::world_actor::AreaGenerationActivationError::DurableAuthorityAmbiguous)
+            ),
+            "unexpected ambiguous cutover result: {result:?}"
+        );
         let status = handle.area_generation_status().unwrap();
         assert_eq!(status.phase, AreaGenerationPhase::Committing);
         assert_eq!(status.active_generation, base);
@@ -1740,7 +2210,7 @@ mod tests {
     async fn publication_read_lock_remains_held_until_generation_cas_finishes() {
         let published = PublishedRegistry::real_lantern_square();
         let current = published.coordinator();
-        let bootstrap = current.bootstrap_world(false).await.unwrap();
+        let bootstrap = current.bootstrap_world(true).await.unwrap();
         let base = coordinator_generation_id(&current);
         let database = published.registry.join("locked-cutover.sqlite3");
         let store = Arc::new(SqliteCharacterStore::open(&database).await.unwrap());
@@ -1989,6 +2459,35 @@ mod tests {
         let error = coordinator.prepare("square").await.unwrap_err();
 
         assert_eq!(error, AreaPreparationError::QueueFull);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_eleventh_lifecycle_preparation_before_it_can_wait() {
+        let published = PublishedRegistry::real_lantern_square();
+        let coordinator = published.coordinator();
+        coordinator.bootstrap_world(true).await.unwrap();
+        let admissions = (0..MAX_LIFECYCLE_PREPARATIONS)
+            .map(|_| coordinator.acquire_lifecycle_admission().unwrap())
+            .collect::<Vec<_>>();
+
+        let error = coordinator.prepare_retirement("square").await.unwrap_err();
+
+        assert_eq!(error, AreaPreparationError::QueueFull);
+        assert_eq!(
+            coordinator
+                .inner
+                .lifecycle_admissions
+                .load(Ordering::Acquire),
+            MAX_LIFECYCLE_PREPARATIONS
+        );
+        drop(admissions);
+        assert_eq!(
+            coordinator
+                .inner
+                .lifecycle_admissions
+                .load(Ordering::Acquire),
+            0
+        );
     }
 
     #[test]
@@ -2260,6 +2759,8 @@ mod tests {
             AreaPreparationError::QueueFull,
             AreaPreparationError::Timeout,
             AreaPreparationError::UnknownArea,
+            AreaPreparationError::Cancelled,
+            AreaPreparationError::Retired,
         ] {
             let rendered = error.to_string();
             assert!(!rendered.contains(secret_area));

@@ -1,7 +1,8 @@
-use std::{env, fs, process, time::SystemTime};
+use std::{collections::BTreeMap, env, fs, process, time::SystemTime};
 
 use postgres::{Client, NoTls};
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 /// Opt-in because the normal test suite must not require a PostgreSQL service.
@@ -127,6 +128,44 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             params![runtime.snapshot_version, runtime_json],
         )
         .unwrap();
+    let checkpoint = tiamud_core::AreaDynamicCheckpoint {
+        checkpoint_version: tiamud_core::AREA_DYNAMIC_CHECKPOINT_VERSION,
+        generation_sha256: "a".repeat(64),
+        areas: vec![tiamud_core::AreaDynamicCheckpointIdentity {
+            area_id: "demo:archive".to_owned(),
+            revision: 1,
+            bundle_sha256: "d".repeat(64),
+            residency_epoch: 7,
+        }],
+        captured_world_revision: 1,
+        captured_logical_tick: 42,
+        captured_rng_state: 1,
+        captured_next_item_instance_sequence: 1,
+        captured_next_loot_drop_id: tiamud_core::LootDropId(1),
+        captured_next_reward_open_id: tiamud_core::RewardOpenId(1),
+        npcs: BTreeMap::new(),
+        item_instances: BTreeMap::new(),
+        item_provenance: BTreeMap::new(),
+        ground_loot: BTreeMap::new(),
+    };
+    tiamud_core::validate_area_dynamic_checkpoint(&checkpoint).unwrap();
+    let checkpoint_json = serde_json::to_string(&checkpoint).unwrap();
+    let checkpoint_sha256 = hex::encode(Sha256::digest(checkpoint_json.as_bytes()));
+    sqlite
+        .execute(
+            "INSERT INTO world_area_checkpoints
+                 (generation_sha256, unit_id, residency_epoch,
+                  checkpoint_version, checkpoint_sha256, captured_logical_tick,
+                  checkpoint_json, created_at, updated_at)
+             VALUES (?1, ?2, 7, 1, ?3, 42, ?4, 980, 981)",
+            params![
+                "a".repeat(64),
+                "b".repeat(64),
+                checkpoint_sha256,
+                checkpoint_json
+            ],
+        )
+        .unwrap();
     let gameplay_json = r#"{"lineageId":"tiamud:mortal","backgroundId":"tiamud:city-guard","baseClassId":"tiamud:vanguard","activeClassId":"tiamud:bastion","classHistory":["tiamud:vanguard","tiamud:bastion"],"progressionPoints":{"talent":0},"talentNodeRanks":{"tiamud:martial-talents":{"tiamud:guarded-stance":1}},"tags":["tiamud:founder"],"receivedSignals":["tiamud:heard-call"]}"#;
     sqlite
         .execute(
@@ -138,7 +177,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     let report =
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres).unwrap();
-    assert_eq!(report.total_rows, 23);
+    assert_eq!(report.total_rows, 24);
     assert_eq!(
         postgres
             .query_one("SELECT COUNT(*)::BIGINT FROM characters", &[])
@@ -187,7 +226,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 14, to: 14 }
+        tiamud_persistence_postgres::MigrationReport { from: 15, to: 15 }
     );
     assert_eq!(
         postgres
@@ -211,6 +250,24 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .get::<_, i64>(0),
         7
     );
+    let checkpoint_row = postgres
+        .query_one(
+            "SELECT generation_sha256, unit_id, residency_epoch,
+                    checkpoint_version, checkpoint_sha256,
+                    captured_logical_tick, checkpoint_json, created_at, updated_at
+             FROM world_area_checkpoints",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(checkpoint_row.get::<_, String>(0), "a".repeat(64));
+    assert_eq!(checkpoint_row.get::<_, String>(1), "b".repeat(64));
+    assert_eq!(checkpoint_row.get::<_, i64>(2), 7);
+    assert_eq!(checkpoint_row.get::<_, i64>(3), 1);
+    assert_eq!(checkpoint_row.get::<_, String>(4), checkpoint_sha256);
+    assert_eq!(checkpoint_row.get::<_, i64>(5), 42);
+    assert_eq!(checkpoint_row.get::<_, String>(6), checkpoint_json);
+    assert_eq!(checkpoint_row.get::<_, i64>(7), 980);
+    assert_eq!(checkpoint_row.get::<_, i64>(8), 981);
     assert_eq!(
         postgres
             .query_one(
@@ -308,13 +365,14 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     postgres
         .batch_execute(
-            "DROP TABLE world_area_generation;
+            "DROP TABLE world_area_checkpoints;
+             DROP TABLE world_area_generation;
              UPDATE tiamud_schema SET version = 13 WHERE singleton = 1",
         )
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 13, to: 14 }
+        tiamud_persistence_postgres::MigrationReport { from: 13, to: 15 }
     );
     assert_eq!(
         postgres
@@ -325,7 +383,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .unwrap()
             .get::<_, String>(0),
         runtime_json,
-        "v13 to v14 must not rewrite the runtime snapshot"
+        "v13 to v15 must not rewrite the runtime snapshot"
     );
     assert_eq!(
         postgres
@@ -337,7 +395,8 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     postgres
         .batch_execute(
-            "DROP TABLE social_board_report_evidence;
+            "DROP TABLE world_area_checkpoints;
+             DROP TABLE social_board_report_evidence;
              DROP TABLE world_area_generation;
              DROP TABLE social_board_posts;
              DROP TABLE social_board_usage;
@@ -355,7 +414,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 10, to: 14 }
+        tiamud_persistence_postgres::MigrationReport { from: 10, to: 15 }
     );
     let constraint: String = postgres
         .query_one(
@@ -389,7 +448,8 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     ));
     postgres
         .batch_execute(
-            "DROP TABLE character_adventure;
+            "DROP TABLE world_area_checkpoints;
+             DROP TABLE character_adventure;
              DROP TABLE world_adventure;
              DROP TABLE world_area_generation;
              DROP TABLE social_channel_subscriptions;
@@ -422,7 +482,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 14 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 15 }
     );
     assert!(
         postgres
@@ -465,25 +525,25 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 15 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 16 WHERE singleton = 1",
             &[],
         )
         .unwrap();
     assert!(matches!(
         tiamud_persistence_postgres::migrate(&mut postgres),
-        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 15 })
+        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 16 })
     ));
     assert_eq!(
         postgres
             .query_one("SELECT version FROM tiamud_schema WHERE singleton = 1", &[])
             .unwrap()
             .get::<_, i32>(0),
-        15,
+        16,
         "future metadata must remain untouched after rejection"
     );
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 14 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 15 WHERE singleton = 1",
             &[],
         )
         .unwrap();

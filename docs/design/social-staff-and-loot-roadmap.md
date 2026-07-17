@@ -24,7 +24,7 @@ sobre la aceptación de la especificación histórica.
   denuncia acotados, y existen tablones públicos `general`/`newbie` con
   retención, cuota, capacidad y evidencia moderable propias. No existe
   historial general durable de conversación. La voz espacial 5E implementa
-  `yell`/`shout` con puerta final retenida.
+  `yell`/`shout` y tiene su puerta final completada.
 - Sí existen los perfiles `helper`, `builder`, `moderator`, `administrator` e
   `implementor`, doce capacidades cerradas y un título narrativo opcional. La
   XP, la ficha, WorldPack, el perfil visible y el rol legado nunca sustituyen

@@ -5,11 +5,16 @@
 ## Especificación técnica propuesta v0.2
 
 - Estado: especificación histórica con estado implementado actualizado.
-- Fecha original: 2026-07-15; actualización de implementación: 2026-07-16.
+- Fecha original: 2026-07-15; nota de estado actualizada: 2026-07-17.
 - Prioridad: ejecutable en un único equipo sin infraestructura externa.
 - Alcance: Tiamud es un motor nuevo inspirado por EnvyMUD, Merc y otros MUD de su época, no una traducción de su código.
 
-> Nota histórica: este documento conserva la propuesta previa a la entrega alfa. Tiamud es el nombre definitivo. La [matriz de completitud](project/COMPLETION_MATRIX.md) contrasta cada requisito con evidencia actual; la memoria, los ADR y los registros versionados conservan las decisiones y entregas.
+> Nota histórica: este documento conserva la propuesta previa a la entrega alfa
+> y no es el contrato vigente. Tiamud es el nombre definitivo. La
+> [especificación v0.3](spec-v0.3.md), la
+> [matriz de completitud](project/COMPLETION_MATRIX.md), la memoria y los ADR
+> describen el baseline actual, incluido snapshot v8/esquema SQL v15 y el estado
+> parcial de la retirada reversible 6D.
 
 ## 1. Decisión principal
 

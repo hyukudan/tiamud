@@ -18,7 +18,7 @@ AreaPack v8 + assets revisados
       publicación inmutable 6A
               |
               v
- carga aditiva 6B o corte completo 6C
+ carga aditiva 6B, corte 6C o retiro interno 6D
 ```
 
 ## Bucle recomendado
@@ -43,7 +43,8 @@ resuelve bundles locales bajo demanda dentro de una generación. 6C abre y
 verifica la candidata completa fuera del actor y solo la activa con cero
 sesiones y cero leases; un `busy` conserva la generación anterior. El corte no
 migra datos: reglas, objetos iniciales, NPC, botín, afijos, áreas, ownership e
-IDs estables deben ser idénticos. No existen reemplazo, descarga o LRU por área.
+IDs estables deben ser idénticos. 6D solo retira/rehidrata internamente la misma
+revisión de una unidad vacía; no existen reemplazo de revisión ni LRU operativo.
 
 Para un rollback explícito, selecciona un catálogo inmutable retenido y solicita
 la reconciliación local:
@@ -77,9 +78,9 @@ decisión humana separada. Consulta la
 ## Frontera runtime
 
 El servidor carga el WorldPack embebido, `TIAMUD_WORLD_PACK` o la pareja
-`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. En modo catálogo, SQL v14 liga
+`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. En modo catálogo, SQL v15 liga
 la generación durable y prevalece en restart sobre `area-active`; SIGHUP es la
-única reconciliación en vivo. `WorldRuntimeSnapshot` sigue en v7 y una
+única reconciliación en vivo. `WorldRuntimeSnapshot` usa v8 y una
 activación confirma snapshot + puntero mediante CAS antes del swap en memoria.
 
 Al actualizar una instalación 6B/v13 con recovery compartido o personajes,
@@ -95,7 +96,9 @@ si no determina G0/G1. El ACK falla cerrado en modo monolítico, con liga, sin
 recovery/personaje o ante digest distinto.
 
 El contrato de artefacto permanece WorldPack v9/AreaPack v8/Project v2. Los
-snapshots raw v1–v5 admiten 1 MiB; v6 y v7, 2 MiB. No hay otra autoridad de
+snapshots raw v1–v5 admiten 1 MiB; v6–v8, 2 MiB. No hay otra autoridad de
 botín, inventario o trade ni doble escritura. La puerta 6C pasa 774 pruebas Rust
-—329 del servidor— y la reauditoría 0 P1/0 P2. El humo está retenido y
-PostgreSQL real no se abrió sin URL.
+—329 del servidor— y la reauditoría 0 P1/0 P2. PostgreSQL 18 desechable pasa
+20/20 pruebas del adaptador y 7/7 enfocadas del servidor, incluida la CAS v14;
+el humo liga G0 y valida `noop`, readiness, Web, Telnet y cierre limpio. Véase
+el [registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).

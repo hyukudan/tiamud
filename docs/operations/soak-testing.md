@@ -1,9 +1,12 @@
 # Load and soak evidence
 
-Status at the v0.2 documentation audit: the harness, CI short profile and
-manual 24-hour workflow are implemented, but no successful 24-hour candidate
-report is retained. This runbook therefore describes how to obtain acceptance;
-it is not itself acceptance evidence.
+Estado actual de prelanzamiento: el harness, el perfil corto configurado para
+CI y el workflow manual de 24 horas están implementados, pero no se conserva
+ningún informe candidato de 24 horas satisfactorio. La ejecución alojada de
+GitHub Actions está además bloqueada antes de sus pasos por facturación o
+límite de gasto; que el workflow exista no demuestra que se haya ejecutado.
+Este runbook describe cómo obtener la aceptación, pero no constituye por sí
+mismo evidencia de aceptación.
 
 `scripts/load.mjs` supplies the bounded multi-user workload. The retained
 evidence runner, `scripts/soak.mjs`, starts an isolated server or targets an

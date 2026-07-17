@@ -1,7 +1,8 @@
 # ADR 0005: ciclo de vida de áreas cargables en caliente
 
-- Estado: arquitectura objetivo aceptada; fases 6A y 6B implementadas; sustitución,
-  drenaje, descarga y LRU pendientes.
+- Estado: arquitectura objetivo aceptada; fases 6A, 6B y 6C implementadas y
+  aceptadas; retirada reversible 6D implementada parcialmente; sustitución de revisión por área,
+  descarga automática y LRU pendientes.
 - Fecha: 2026-07-15.
 - Alcance: catálogo, activación, sustitución y descarga de áreas del mundo.
 
@@ -16,9 +17,9 @@ consume un solo artefacto plano al arrancar.
 
 Esa composición resolvió el problema editorial inmediato: varias personas
 pueden poseer áreas distintas, revisar dependencias y obtener digests
-reproducibles sin mantener un JSON monolítico. La fase 6B añade ahora la carga
-local aditiva bajo demanda de una generación fijada. En la implementación
-actual:
+reproducibles sin mantener un JSON monolítico. Las fases 6B y 6C añaden la
+carga local aditiva bajo demanda y el corte quiescente de una generación
+completa. En la implementación actual:
 
 - el servidor elige de forma excluyente el WorldPack monolítico o un catálogo
   local exacto mediante `TIAMUD_AREA_REGISTRY` y `TIAMUD_AREA_CATALOG`;
@@ -27,17 +28,25 @@ actual:
   antes de recuperar autoridad durable;
 - los portales hacia áreas no residentes quedan como `DeferredExit` y una
   entrada real coordina staging acotado fuera del actor e instalación atómica;
-- todas las áreas incorporadas permanecen residentes hasta apagar el proceso;
-  no existe aún presupuesto LRU; y
-- publicar, revertir o cambiar `area-active` solo selecciona una generación
-  para un arranque posterior: cambiar de publicación exige reiniciar.
+- SQL v15 conserva la liga durable de generación introducida en v14; SIGHUP reconcilia el
+  puntero editorial local, prepara fuera del actor una candidata completa y la
+  activa solo con cero sesiones y cero leases mediante CAS de snapshot y
+  generación;
+- una activación normal y un rollback explícito usan el mismo corte 6C, y el
+  arranque recupera por digest la autoridad durable aunque `area-active` haya
+  cambiado; y
+- dentro de una generación, la ruta interna 6D puede retirar y rehidratar la
+  misma revisión de una unidad vacía; todavía no existe presupuesto LRU
+  ejecutable ni superficie operativa.
 
-La arquitectura completa de sustitución y descarga podría reducir memoria y
-permitir corregir regiones sin reiniciar, pero no está implementada y solo se
-justifica en mundos suficientemente grandes. En un mundo pequeño como Lantern
-Square, catálogo, checkpoints y coordinación de revisiones pueden consumir más
-recursos y complejidad que mantenerlo completo en memoria. Cada optimización se
-activa por medición, no por el simple número de ficheros.
+6C permite publicar o revertir una generación compatible sin reiniciar, pero no
+sustituye una revisión individual. La
+arquitectura 6D aceptada en [ADR 0022](0022-reversible-area-unit-retirement.md)
+trabaja en retirar y rehidratar la misma revisión de una unidad vacía y sin
+pins. Solo después de demostrar esa transición, reinicio y ahorro real podrá
+habilitarse LRU. En un mundo pequeño como Lantern Square, catálogo, checkpoints
+y coordinación pueden consumir más recursos que mantenerlo completo en
+memoria. Cada optimización se activa por medición, no por el número de ficheros.
 
 ## Decisión
 
@@ -49,20 +58,25 @@ Se adopta como arquitectura objetivo un modelo híbrido:
    por contenido, acompañados por un catálogo local pequeño. La fase 6B
    implementa su consumo local aditivo y residencia hasta apagar, sin ampliar
    el alcance editorial de 6A.
-3. Una revisión se preparará y validará fuera del actor del mundo. Solo una
-   transición explícita del actor podrá activarla.
-4. Las áreas con actividad se fijarán en memoria. Las vacías podrán descargarse
-   mediante LRU ponderado únicamente tras persistir un checkpoint completo y
-   demostrar que ningún trabajo vivo las referencia.
-5. Una actualización nunca mutará una revisión activa en el sitio. Se instalará
-   una generación nueva, se drenará la anterior y se conservará una vía de
-   rollback.
+3. 6C prepara y valida una generación completa fuera del actor y solo la activa
+   mediante la transición explícita, quiescente y durable de
+   [ADR 0021](0021-quiescent-area-generation-cutover.md).
+4. Las áreas con actividad permanecen fijadas. 6D modela unidades por
+   componentes fuertemente conexas de dependencias duras y solo podrá retirar
+   una unidad vacía tras cero pins y un checkpoint durable; esta implementación
+   está implementada parcialmente y aún no habilita LRU.
+5. Una actualización nunca muta una revisión activa en el sitio. 6C instala una
+   generación nueva completa, drena admisiones, confirma el CAS SQL v14 y
+   conserva rollback explícito a una generación inmutable retenida.
 6. Los clientes cargarán multimedia por digest y bajo demanda. La prosa y toda
    información jugable seguirán siendo completas sin esos recursos.
 
-Esta decisión no exige otro cambio de formato.
-WorldPack v9/AreaPack v8 siguen siendo la frontera; catálogo y bundle usan su
-propio sobre versionado y no convierten AreaPack en un protocolo de activación.
+WorldPack v9/AreaPack v8 siguen siendo la frontera de contenido; catálogo y
+bundle usan su propio sobre versionado y no convierten AreaPack en un protocolo
+de activación. 6C conserva `WorldRuntimeSnapshot` v7 y añade la identidad
+durable de generación en SQL v15. 6D implementa snapshot v8 y SQL v15 para
+manifiesto de residencia y checkpoints de unidad; la fase completa continúa
+parcial hasta cerrar la evidencia de ADR 0022.
 
 La fase 6A mantiene además un WorldPack v9 monolítico, content-addressed y
 verificado como respaldo. Su puntero local de publicación se llama `area-active`
@@ -139,23 +153,31 @@ observa una sola generación coherente.
 
 ```mermaid
 stateDiagram-v2
-    accTitle: Ciclo de vida por fases de un área de Tiamud
-    accDescr: La fase 6B implementa el crecimiento Unloaded a Loading a Active. Draining, descarga, sustitución y LRU siguen siendo arquitectura futura.
+    accTitle: Ciclo de vida aditivo y retirada de una unidad de áreas
+    accDescr: 6B implementa el crecimiento Unloaded a Loading a Active. 6D trabaja en Draining, checkpoint durable, Retired y rehidratación de la misma revisión; LRU permanece posterior.
 
     [*] --> Unloaded
     Unloaded --> Loading: demanda 6B o precarga futura
     Loading --> Active: digest, esquema, grafo, assets y scripts válidos
     Loading --> Unloaded: fallo; no cambia el mundo
-    Active --> Draining: sustitución o presión LRU
+    Active --> Draining: petición local de retirada 6D
     Draining --> Active: aparece actividad o falla el checkpoint
-    Draining --> Unloaded: sin pins + checkpoint confirmado
+    Draining --> Retired: cero pins + checkpoint y snapshot confirmados
+    Retired --> Loading: portal, login o precarga
+    Loading --> Retired: bundle o checkpoint inválido
+    Loading --> Rehydrating: staging completo
+    Rehydrating --> Retired: falla o conflicto durable
+    Rehydrating --> Active: checkpoint consumido + snapshot confirmado
     Active --> Active: acciones en la revisión fijada
 ```
 
 - `Unloaded`, `Loading` y `Active` forman la transición aditiva implementada en
   6B. Un área `Active` no vuelve a descargarse durante ese proceso.
-- `Draining` y la vuelta a `Unloaded` describen las fases 6C y posteriores; no
-  son estados ejecutables de 6B.
+- La sustitución 6C opera sobre estados de router de **generación completa**,
+  no mediante este ciclo por unidad; está implementada en ADR 0021.
+- `Draining` y `Retired` describen la vertical interna parcial 6D de ADR 0022.
+  No implican una superficie operativa ni política automática; LRU sigue siendo
+  posterior.
 
 Solo el actor propietario del mundo publica transiciones. E/S, descompresión,
 hashing, validación y compilación Lua suceden fuera del actor y entregan un
@@ -169,6 +191,14 @@ la generación fijada. No sustituye una revisión activa, no mezcla generaciones
 y no sigue de nuevo el puntero editorial durante la ejecución. El contrato
 exacto, incluidos `DeferredExit`, coalescing, límites y rollback, está en
 [ADR 0020](0020-additive-local-area-loading.md).
+
+La fase 6C implementa una ruta distinta: SIGHUP prepara una generación completa,
+revalida `area-active` bajo el lock cooperativo, cierra admisiones, exige cero
+sesiones y cero leases y confirma snapshot v7 más identidad SQL v14 antes del
+swap. Activación y rollback explícito recorren el mismo protocolo; un resultado
+ambiguo se reconcilia contra SQL y falla cerrado si no existe una autoridad
+única. El contrato y su aceptación están en
+[ADR 0021](0021-quiescent-area-generation-cutover.md).
 
 La instalación de una revisión sigue estas fases:
 
@@ -186,20 +216,27 @@ La instalación de una revisión sigue estas fases:
 7. Activarla solo si su precondición —catálogo, generación, revisión previa y
    dependencias— sigue siendo cierta.
 
-Para un área nueva sin referencias vivas, la activación puede ser inmediata.
-Para sustituir una activa, la revisión anterior pasa a `Draining`. Los jugadores
-que ya están dentro permanecen fijados a una política explícita: normalmente se
-esperará a que salgan; una migración en vivo solo será válida si existe una
-función total, versionada, determinista y probada para cada estado afectado.
+Para un área nueva sin referencias vivas, 6B puede instalarla de inmediato. 6C
+no pone una sola revisión en `Draining`: sustituye la generación completa cuando
+el mundo está vacío. 6D tampoco sustituye revisiones; trabaja en retirar y
+rehidratar la **misma** revisión de una unidad vacía. La sustitución individual
+y cualquier migración en vivo permanecen fuera de estas fases y solo serán
+válidas con funciones directas e inversas totales, versionadas, deterministas y
+probadas para cada estado afectado.
 
 No se parchean estructuras compartidas campo a campo. Un lote activa todas sus
 áreas o ninguna. Si cambia un portal, el extremo origen y destino se publican en
 la misma generación. Si falla cualquier precondición, se descarta staging y la
 generación activa no cambia.
 
-## Pins: cuándo un área no puede descargarse
+## Pins: cuándo una unidad no puede retirarse
 
-Un área permanece fijada mientras exista cualquiera de estos pins:
+Esta sección describe el contrato 6D aceptado y parcialmente implementado, no
+una política operativa terminada. La unidad mínima es una componente fuertemente conexa
+del grafo de dependencias duras e incluye el cierre inverso residente necesario;
+el área propietaria de `startRoomId` nunca es candidata.
+
+Una unidad permanece fijada mientras exista cualquiera de estos pins:
 
 - un jugador, conexión en reconexión o transferencia de entrada/salida;
 - combate, derrota pendiente, efecto, intercambio o transacción económica;
@@ -226,23 +263,31 @@ termine conservando todo el mundo en memoria.
 
 ## Checkpoint y descarga
 
-Una descarga segura es una transición, no una liberación de memoria oportunista:
+La retirada segura diseñada por 6D es una transición, no una liberación de
+memoria oportunista:
 
 1. Marcar `Draining` y cerrar nuevas entradas salvo rollback o cancelación.
 2. Esperar a cero jugadores y cero pins. No se expulsa ni teletransporta a un
    jugador solo para satisfacer el presupuesto.
 3. Convertir trabajo diferible —por ejemplo, respawns— en registros durables con
    tick lógico objetivo, no en temporizadores de proceso.
-4. Construir un checkpoint que incluya revisión, generación, secuencia de
-   eventos, RNG, entidades, apariciones, objetos, scripts y jobs.
-5. Persistirlo en una transacción y esperar confirmación del backend.
-6. Registrar el digest del checkpoint y una barrera que impida acciones tardías.
-7. Retirar la revisión de los índices del actor y liberar su arena completa.
+4. Construir un checkpoint acotado de la unidad con NPC, respawns en ticks
+   absolutos, raíces de objetos y subárboles, procedencia, afijos, derechos de
+   botín, salidas diferidas y jobs serializables.
+5. Confirmar mediante CAS el checkpoint, el snapshot v8 y el manifiesto
+   `Retired` en SQL v15.
+6. Registrar digest y epoch para impedir que un resultado tardío recupere
+   autoridad.
+7. Retirar la unidad de los índices del actor y liberar sus estructuras.
 
-Si el checkpoint, la barrera o el backend fallan, el área vuelve a `Active` con
-la misma revisión; nunca se libera memoria sobre estado no confirmado. Al cargar,
-se verifica que catálogo, bundle y checkpoint sean compatibles y se reanudan los
-jobs comparando ticks lógicos. La recuperación debe ser idempotente.
+RNG, revisión y contadores globales permanecen en la autoridad global y nunca
+retroceden al rehidratar. Si el checkpoint, la barrera o el backend fallan, la
+unidad vuelve a `Active` con la misma revisión; nunca se libera memoria sobre
+estado no confirmado. Al cargar se verifican catálogo, bundle y checkpoint, se
+aplican jobs vencidos contra el tick global, se consume el checkpoint en el CAS
+que publica `Resident` y se reintenta una vez la entrada original. La
+recuperación debe ser idempotente. Esta transición sigue en implementación
+según [ADR 0022](0022-reversible-area-unit-retirement.md).
 
 ### Estado que cruza áreas
 
@@ -261,13 +306,18 @@ jobs comparando ticks lógicos. La recuperación debe ser idempotente.
 
 ## Política de carga, precarga y LRU
 
-Una entrada a un portal de área descargada inicia carga y devuelve un resultado
-explícito de espera/reintento; nunca mueve al jugador a un destino inexistente.
-Se precargan vecinos inmediatos cuando su coste cabe en el presupuesto y hay
-demanda observada. La precarga es cancelable y tiene menor prioridad que una
-entrada real.
+En 6B, una entrada a un portal de área aún no residente inicia carga y reintenta
+una vez; nunca mueve al jugador a un destino inexistente. En la arquitectura
+6D, portal o login hacia una unidad `Retired` deben rehidratarla antes de entrar.
+La precarga por presupuesto será cancelable y tendrá menor prioridad que una
+entrada real, pero todavía no se afirma implementada.
 
-La selección de descarga usa LRU ponderado, no solo antigüedad. Considera:
+La primera entrega 6D no habilita LRU automáticamente. Antes debe demostrar
+retiro, reinicio, rehidratación y descenso real de índices, contenido y RSS.
+Lo siguiente describe la política posterior, no comportamiento implementado.
+
+La selección automática futura usará LRU ponderado, no solo antigüedad, y
+considerará:
 
 - memoria residente medida, coste de recarga y bytes de bundle;
 - recencia y frecuencia de jugadores/portales;
@@ -366,10 +416,19 @@ opcional descargada no vuelve por sí sola no-ready al proceso.
    atómica, compatibilidad y recuperación; todas las áreas usadas permanecen
    residentes. Véanse [ADR 0020](0020-additive-local-area-loading.md) y el
    [registro 6B](../project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
-4. **Sustitución caliente, fase 6C pendiente:** staging, generaciones, drenaje y rollback por lote,
-   primero para áreas vacías y sin migraciones.
-5. **Checkpoint y descarga:** persistencia por área, jobs durables, LRU ponderado,
-   histéresis y pruebas de caída en cada barrera.
+4. **Sustitución quiescente, fase 6C implementada y aceptada:** generación
+   completa, SIGHUP local, staging privado, cero sesiones/leases, identidad
+   durable SQL v14, CAS con snapshot v7, recuperación y rollback explícito.
+   Véanse [ADR 0021](0021-quiescent-area-generation-cutover.md), el
+   [registro 6C](../project/log/2026-07-17-quiescent-area-generation-cutover-phase-6c.md)
+   y su
+   [aceptación PostgreSQL v14](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+5. **Retirada reversible, fase 6D parcial:** unidades SCC con cierre inverso,
+   pins y epochs, snapshot v8, checkpoints SQL v15, retiro y rehidratación de la
+   misma revisión. [ADR 0022](0022-reversible-area-unit-retirement.md) está
+   implementado como primera vertical interna, pero 6D no se considera completa
+   hasta cerrar todas sus pruebas de aceptación. LRU e histéresis se habilitan solo después
+   de demostrar ahorro real y estabilidad.
 6. **Casos avanzados:** transferencias NPC, migraciones de estado y registro
    remoto firmado solo si existe demanda medida.
 
@@ -380,11 +439,13 @@ como implementada por tener solamente tipos o documentación.
 
 ## Consecuencias
 
-La composición offline ofrece ya la flexibilidad editorial de múltiples áreas
-con un runtime sencillo. La arquitectura objetivo permite crecer hacia adición,
-reemplazo y descarga caliente sin atar la identidad durable a objetos en memoria.
-El precio es significativo: catálogo, generaciones, persistencia por área,
-coordinación de portales y muchos estados de fallo.
+La composición offline ofrece ya la flexibilidad editorial de múltiples áreas.
+6B añade carga local bajo demanda y 6C permite activar o revertir generaciones
+completas compatibles sin reiniciar, con autoridad durable. La arquitectura 6D
+en curso busca añadir retirada y rehidratación reversible sin atar la identidad
+durable a objetos en memoria. El precio es significativo: catálogo,
+generaciones, checkpoints por unidad, coordinación de portales y muchos estados
+de fallo.
 
 Por ello, el modo monolítico seguirá siendo válido y preferente para mundos que
 caben con margen en memoria. La descarga LRU será opcional y justificada por

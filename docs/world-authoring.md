@@ -28,8 +28,9 @@ el `CompiledArea` ya publicado y contrastado con el WorldPack monolítico de
 respaldo.
 
 El modo catálogo fija el SHA-256 canónico como identidad de generación. Puede
-añadir áreas verificadas bajo demanda y 6C puede sustituir la generación
-completa mediante SIGHUP local, pero nunca parchea o descarga una sola área.
+añadir áreas verificadas bajo demanda, 6C puede sustituir la generación
+completa mediante SIGHUP local y 6D puede retirar/rehidratar internamente la
+misma revisión de una unidad vacía. Nunca parchea una revisión individual.
 La base de datos conserva la generación autoritativa: cambiar `area-active` no
 modifica por sí solo el runtime y un reinicio recupera por digest la autoridad
 durable. Los IDs publicados continúan siendo identidad, no títulos, y perder
@@ -52,7 +53,8 @@ flowchart LR
     Catalog --> Stage[Staging completo 6C]
     Stage --> Quiet[Cero sesiones + leases]
     Quiet --> Server
-    Future[Descarga · checkpoint por área · LRU] -. fase posterior .-> Server
+    Server --> Partial6D[Retiro/rehidratación<br/>misma revisión · 6D parcial]
+    Future[Presupuesto · LRU · reemplazo] -. fase posterior .-> Partial6D
 ```
 
 ## Versiones y compatibilidad
@@ -878,7 +880,7 @@ Límites principales:
 | Peso/cantidad de una entrada | 1..=1.000.000 / 1..=32 |
 | Raíces fijas + repetibles por derrota | 64 |
 
-## Publicación 6A, ejecución aditiva 6B y corte 6C
+## Publicación 6A, ejecución aditiva 6B, corte 6C y retirada 6D
 
 El release revisado declara revisión, propiedad, dependencias, portales,
 procedencia y licencias de cada área. Se publica en un registro local:
@@ -986,8 +988,9 @@ recursos, percepción, variantes, medios y scripts síncronos validados.
 
 El corte cierra admisiones y requiere cero sesiones y cero leases. Si existe
 actividad devuelve `busy`, no expulsa jugadores y conserva la generación
-anterior. Con quiescencia restaura el snapshot v7 actual sobre la candidata,
-confirma por CAS snapshot + identidad SQL v14 y solo entonces intercambia el
+anterior. Con quiescencia exige residencia completa, restaura el snapshot v8
+actual sobre la candidata, confirma por CAS snapshot + identidad SQL v15 y solo
+entonces intercambia el
 estado en memoria. La primera ejecución liga la generación; en restart la fila
 durable prevalece sobre un `area-active` más reciente.
 
@@ -1008,13 +1011,19 @@ vacía o con cuentas sin personajes/recovery de mundo puede ligar sin ACK.
 Monolítico con autoridad→catálogo no pertenece a 6C. El ACK se rechaza en modo
 monolítico, con liga, sin recovery/personaje o ante digest distinto.
 
-6C no implementa reemplazo por área, jugadores durante drenaje, migraciones,
-checkpoint/descarga por área, LRU, GC, red, compresión o firma remota. El
+6D implementa una ruta interna parcial de checkpoint, retirada y rehidratación
+de la misma revisión de una unidad vacía. No implementa reemplazo de revisión,
+jugadores durante retirada, migraciones, LRU, GC, red, compresión o firma. El
 gate pasa 774 pruebas Rust —329 del servidor— y la reauditoría 0 P1/0 P2. El
-humo está retenido y PostgreSQL real no se abrió sin URL. Véanse
+humo SQLite está retenido. PostgreSQL 18 desechable pasa 20/20 pruebas del
+adaptador y 7/7 enfocadas del servidor, incluida la CAS v14; su humo liga G0 y
+valida `noop`, readiness, Web, Telnet, dos áreas residentes y cierre limpio.
+Véanse el
+[registro de aceptación PostgreSQL v14/PWA](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md),
 [ADR 0005](decisions/0005-hot-area-lifecycle.md) y
 [ADR 0020](decisions/0020-additive-local-area-loading.md) y
-[ADR 0021](decisions/0021-quiescent-area-generation-cutover.md).
+[ADR 0021](decisions/0021-quiescent-area-generation-cutover.md), y el estado
+parcial 6D está en [ADR 0022](decisions/0022-reversible-area-unit-retirement.md).
 
 ## Flujo editorial
 
@@ -1030,7 +1039,7 @@ cargo run --locked -p world-pack --bin tiamud-world -- diff anterior.json nuevo.
 
 Publicación y rollback usan artefactos inmutables por digest. El puntero
 `area-active` es selección editorial y SIGHUP es su única reconciliación local
-en ejecución. La fila SQL v14, no ese fichero mutable, decide recovery. Una
+en ejecución. La fila SQL v15, no ese fichero mutable, decide recovery. Una
 selección anterior requiere `area-select`; no se interpreta una revisión menor
 accidental como permiso de rollback. El corte retiene el mismo lock cooperativo
 del registro que `area-publish` y `area-select` hasta resolver el CAS durable.
@@ -1053,7 +1062,7 @@ validación y revisión humana.
 
 ## Persistencia y evolución del formato
 
-WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v7 define dónde están
+WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v8 define dónde están
 las instancias después de jugar, su `binding` obligatorio, los contadores de
 identidad y apertura, los afijos aplicados, las reservas de trade, la
 procedencia normal o sellada, los encuentros de botín, los derechos sobre suelo
@@ -1071,11 +1080,14 @@ v7 en v6 no adelanta su versión.
 También se rechazan referencias, ciclos, profundidad, capacidad, contador,
 propietario, vínculo, participante, reserva, cohorte o procedencia inválidos.
 
-SQLite y PostgreSQL usan esquema v14. `world_area_generation` guarda solo
+SQLite y PostgreSQL usan esquema v15. `world_area_generation` guarda solo
 `worldId`, digest activo, digest anterior, secuencia de activación y timestamp;
 las rutas se derivan del registro configurado. Una transición 6C actualiza esa
-fila y el snapshot v7 en la misma transacción mediante compare-and-swap. No es
+fila y el snapshot v8 en la misma transacción mediante compare-and-swap. No es
 otra autoridad del mundo y el traslado SQLite→PostgreSQL la conserva.
+`world_area_checkpoints` conserva solo el estado dinámico de unidades 6D
+retiradas y se confirma/consume atómicamente con el manifiesto v8; el mover
+valida y copia sus filas.
 
 Al restaurar un snapshot anterior, las instancias iniciales nuevas del
 WorldPack se conservan y el estado durable se superpone; una instancia creada
@@ -1091,12 +1103,12 @@ botín abiertos antes de readiness, pero los derechos ya generados sobreviven al
 reinicio. Esos agregados temporales no quedan en el mundo activo.
 
 El runtime admite hasta 65.536 instancias. Los snapshots raw heredados v1-v5
-conservan el límite físico de 1 MiB; el snapshot v6 compatible y el v7 actual,
+conservan el límite físico de 1 MiB; los snapshots v6–v8,
 así como
 cada nueva admisión/confirmación, admiten hasta 2 MiB. La suma de fichas de
 propietarios
 inspeccionadas sigue limitada a 1 MiB y cada ficha a 64 KiB. SQLite y
-PostgreSQL esquema v14 guardan el snapshot como `TEXT` opaco dentro de la
+PostgreSQL esquema v15 guardan el snapshot como `TEXT` opaco dentro de la
 transacción existente. La migración v10→v11 aumenta de forma transaccional la
 restricción física del singleton runtime a 2 MiB y conserva versión, JSON,
 secuencia cubierta y fecha; no convierte el JSON ni crea otra autoridad. No hay

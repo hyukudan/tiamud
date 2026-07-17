@@ -22,13 +22,14 @@ describe el baseline vigente de personajes, inventario y medios.
 
 - Tiamud es el nombre definitivo; `hyukudan/tiamud` es el repositorio canónico
   y `main` la rama de desarrollo.
-- Es un proyecto de código abierto en prelanzamiento `0.1.0`, sin producción pública ni
-  protocolo estable.
+- Está preparado bajo licencias de código abierto y en prelanzamiento `0.1.0`;
+  el repositorio canónico sigue privado hasta una decisión explícita. No hay
+  producción pública ni protocolo estable.
 - Toolchain Rust 1.93.1, edition 2024, MSRV 1.88. CI usa Node 24 y pnpm 11.11;
   el paquete web admite pnpm 10+.
 - Un servidor Rust posee un actor de mundo con escritor único. Navegador y
   Telnet comparten dominio, persistencia y proyección.
-- PostgreSQL esquema v14 es el perfil público recomendado; SQLite esquema v14 es
+- PostgreSQL esquema v15 es el perfil público recomendado; SQLite esquema v15 es
   la ruta local sin servicios. Cada proceso abre uno y nunca doble-escribe.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
@@ -69,10 +70,11 @@ describe el baseline vigente de personajes, inventario y medios.
   dos trabajos activos, ocho pendientes, timeout total de cinco segundos y
   cierre máximo de 32 áreas. El actor instala `World` + `RuntimeContent` +
   residencia atómicamente y reintenta la acción una vez. Solo persiste si el
-  lote crea estado dinámico cubierto por snapshot v7; el cliente recibe un
+  lote crea estado dinámico cubierto por snapshot v8; el cliente recibe un
   error genérico y las métricas nunca etiquetan IDs/digests.
   Todas las áreas añadidas permanecen residentes durante esa generación.
-- La fase 6C mínima de ADR 0021 está implementada con puerta final retenida. SIGHUP
+- La fase 6C mínima de ADR 0021 está implementada y su puerta funcional está
+  cerrada. SIGHUP
   local resuelve `area-active`, verifica y construye una generación completa
   fuera del actor. Solo admite el corte con cero sesiones y cero leases; en
   otro caso devuelve `busy` sin expulsar jugadores. No sustituye áreas sueltas.
@@ -80,7 +82,8 @@ describe el baseline vigente de personajes, inventario y medios.
   iniciales, NPC, loot, afijos, áreas, ownership e IDs estables; permite prosa,
   salidas y presentación/scripts síncronos validados. El staging aísla los
   gauges de la candidata hasta el swap confirmado.
-  El snapshot sigue en v7. SQL v14 añade `world_area_generation` y confirma
+  El baseline actual usa snapshot v8. SQL v14 añadió `world_area_generation`,
+  conservada en v15, y confirma
   snapshot + generación mediante CAS antes del swap de mundo, contenido y
   coordinador. Startup deriva por digest la autoridad durable aunque cambie el
   puntero editorial. Activación exige revisiones crecientes; rollback usa
@@ -103,18 +106,33 @@ describe el baseline vigente de personajes, inventario y medios.
   Solaris comparte el protocolo `fcntl` compatible con `fd-lock`.
   `CharacterStore::has_durable_character_authority` cubre SQLite, PostgreSQL,
   wrapper medido y memoria de pruebas.
-  Siguen ausentes migraciones de estado, jugadores durante drenaje, reemplazo o
-  checkpoint por área, descarga, LRU, GC, red, compresión y firma remota.
+  La última aceptación PostgreSQL integral retenida es v14: pasa 20/20 pruebas `--all-targets` del
+  adaptador y 7/7 enfocadas del servidor, incluida la CAS de generación. El humo
+  abre esquema 14, liga G0, confirma readiness/Web/Telnet, dos áreas residentes,
+  SIGHUP `noop` y cierre limpio. Es evidencia histórica y no un pase v15.
+- La fase 6D de ADR 0022 está **parcialmente implementada**. Snapshot v8 añade
+  manifiesto de residencia; SQL v15 añade `world_area_checkpoints`; ambos
+  adaptadores y el mover validan y conservan checkpoints acotados. Core y
+  servidor tienen SCC/cierre inverso, pins cerrados, checkpoint de NPC/objetos,
+  desmontaje/reinstalación exactos de contenido y una ruta interna del actor que
+  retira una unidad vacía de la misma revisión y la rehidrata antes de entrada.
+  Recovery valida manifiesto/checkpoints antes de readiness. No hay todavía
+  presupuesto/LRU, histéresis, superficie operativa, sustitución de revisión,
+  coordinación multiproceso, E2E específico de ACK perdido 6D, evidencia RSS ni
+  aceptación operativa final. La puerta local pasa 792/792 Rust y servidor 337/337;
+  PostgreSQL v15 22/22 del adaptador+mover y 8/8 del servidor, web
+  125/check/build y reauditoría 0 P1/P2.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
-- La fase de inventario 4B separa `itemPrototypes` de instancias durables y
-  persiste `WorldRuntimeSnapshot` v7 con DTO exactos v1-v7. v1-v3 se
+- La fase de inventario 4B separa `itemPrototypes` de instancias durables; el
+  baseline persiste `WorldRuntimeSnapshot` v8 con DTO exactos v1-v8. v8 conserva
+  la autoridad global de v7 y añade residencia de áreas. v1-v3 se
   convierten a vínculo `unbound`; schema-smuggling, vínculos y políticas
   incoherentes fallan cerrados; v4 normaliza a contador inicial y trades vacíos.
-  SQLite/PostgreSQL conservan el snapshot único en esquema v14, sin tabla
+  SQLite/PostgreSQL conservan el snapshot único en esquema v15, sin tabla
   espejo ni custodia SQL. Los snapshots v1-v5 conservan el límite de 1 MiB y
-  v6-v7 admiten 2 MiB; v6 rechaza campos v7 y normaliza a afijos vacíos y
+  v6-v8 admiten 2 MiB; v6 rechaza campos v7 y normaliza a afijos vacíos y
   contador de aperturas inicial. Restore conserva nuevas
   instancias iniciales del WorldPack y superpone el snapshot sin resucitar
   instancias runtime ausentes.
@@ -204,6 +222,9 @@ describe el baseline vigente de personajes, inventario y medios.
   talentos o WorldPack.
 - La composición opcional de sprites está conectada y es segura ante
   percepción. Faltan sprites revisados, jugador separado, heal cue y lápida.
+- La identidad PWA publica favicon SVG, iconos 192/512, variante maskable y
+  Apple Touch derivados del wordmark. La puerta web actual pasa 125 Vitest,
+  check 0/0 y build; Playwright retenido sigue en 46 escenarios soportados.
 - Texto plano siempre completo. Medios, ANSI, GMCP rico y gráficos son
   opcionales, acotados y consentidos.
 - Escenas de botín se acotan semánticamente a 14 KiB Web y 48 KiB Telnet,
@@ -357,19 +378,21 @@ limpio. La puerta y sus límites exactos están en el
 [registro 6B](docs/project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
 
 La puerta 6C pasa 774 pruebas Rust —329 del servidor—, formato/diff, clippy,
-MSRV, cargo-deny, licencias/avisos 308 Rust/76 web, Svelte 0/0 y 123 Vitest. La
-reauditoría queda en 0 P1/0 P2. PostgreSQL v14 real no se ejecutó porque
-falta `TIAMUD_TEST_POSTGRES_URL` y no se afirma. El humo real liga G0, hace
-`noop`, activa G1, revierte a G0 y recupera por restart con
-readiness/Web/Telnet, métricas exactas y apagado limpio.
+MSRV, cargo-deny, licencias/avisos 308 Rust/76 web, Svelte 0/0 y 125 Vitest. La
+reauditoría queda en 0 P1/0 P2. PostgreSQL 18 real pasa 20/20 en
+`tiamud-persistence-postgres --all-targets` y 7/7 pruebas enfocadas del servidor,
+incluida la CAS v14. El humo PostgreSQL liga G0 y valida `noop`; el humo SQLite
+6C activa G1, revierte a G0 y recupera por restart.
 El [registro 6C](docs/project/log/2026-07-17-quiescent-area-generation-cutover-phase-6c.md)
-conserva los comandos, cifras y límites exactos.
+conserva su entrega y el [registro PostgreSQL/PWA](docs/project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md)
+la aceptación posterior.
 
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
 mixto limpio y 3.081.428 ejecuciones fuzz Telnet. Vincula aquel árbol: no es
-aceptación v10 ni permite omitir nuevas pruebas. GitHub Actions puede bloquearse
-por facturación antes de ejecutar.
+aceptación v10 ni permite omitir nuevas pruebas. La ejecución alojada actual de
+GitHub Actions está bloqueada antes de sus pasos por facturación o límite de
+gasto; la evidencia local no se presenta como CI.
 
 ## Reglas de decisión
 

@@ -47,16 +47,17 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
-pub(crate) const APPLICATION_TABLES: [&str; 24] = [
+pub(crate) const APPLICATION_TABLES: [&str; 25] = [
     "accounts",
     "characters",
     "auth_sessions",
     "domain_events",
     "world_runtime",
     "world_area_generation",
+    "world_area_checkpoints",
     "social_ignores",
     "social_blocks",
     "social_channel_subscriptions",
@@ -156,6 +157,23 @@ CREATE TABLE world_area_generation (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
     CHECK (previous_catalog_sha256 IS NULL
            OR previous_catalog_sha256 <> active_catalog_sha256)
+);
+
+CREATE TABLE world_area_checkpoints (
+    generation_sha256 TEXT NOT NULL
+        CHECK (generation_sha256 ~ '^[0-9a-f]{64}$'),
+    unit_id TEXT NOT NULL CHECK (unit_id ~ '^[0-9a-f]{64}$'),
+    residency_epoch BIGINT NOT NULL CHECK (residency_epoch > 0),
+    checkpoint_version BIGINT NOT NULL CHECK (checkpoint_version > 0),
+    checkpoint_sha256 TEXT NOT NULL
+        CHECK (checkpoint_sha256 ~ '^[0-9a-f]{64}$'),
+    captured_logical_tick BIGINT NOT NULL CHECK (captured_logical_tick >= 0),
+    checkpoint_json TEXT NOT NULL
+        CHECK (octet_length(checkpoint_json) BETWEEN 1 AND 2097152),
+    created_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
+    updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
+    PRIMARY KEY (generation_sha256, unit_id, residency_epoch),
+    CHECK (updated_at >= created_at)
 );
 
 CREATE TABLE social_ignores (
@@ -447,7 +465,7 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 14);
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 15);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -766,6 +784,28 @@ SET version = 14, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 13;
 "#;
 
+const UPGRADE_V14_TO_V15_SQL: &str = r#"
+CREATE TABLE world_area_checkpoints (
+    generation_sha256 TEXT NOT NULL
+        CHECK (generation_sha256 ~ '^[0-9a-f]{64}$'),
+    unit_id TEXT NOT NULL CHECK (unit_id ~ '^[0-9a-f]{64}$'),
+    residency_epoch BIGINT NOT NULL CHECK (residency_epoch > 0),
+    checkpoint_version BIGINT NOT NULL CHECK (checkpoint_version > 0),
+    checkpoint_sha256 TEXT NOT NULL
+        CHECK (checkpoint_sha256 ~ '^[0-9a-f]{64}$'),
+    captured_logical_tick BIGINT NOT NULL CHECK (captured_logical_tick >= 0),
+    checkpoint_json TEXT NOT NULL
+        CHECK (octet_length(checkpoint_json) BETWEEN 1 AND 2097152),
+    created_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
+    updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
+    PRIMARY KEY (generation_sha256, unit_id, residency_epoch),
+    CHECK (updated_at >= created_at)
+);
+UPDATE tiamud_schema
+SET version = 15, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 14;
+"#;
+
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
 WITH candidate AS (
     SELECT id FROM accounts
@@ -804,17 +844,17 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v14 schema or migration from v6/v7/v8/v9/v10/v11/v12/v13"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v15 schema or migration from v6/v7/v8/v9/v10/v11/v12/v13/v14"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v14 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v15 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6-v13 are upgraded to v14, and v14 is verified.
+/// at the current version, v6-v14 are upgraded to v15, and v15 is verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
     let report = migrate_in_transaction(&mut transaction)?;
@@ -885,7 +925,7 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
             client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
         }
         11 => client.batch_execute(UPGRADE_V11_TO_V12_SQL)?,
-        12 | 13 => {}
+        12..=14 => {}
         SCHEMA_VERSION => {}
         _ => return Err(SchemaError::UnsupportedVersion { found }),
     }
@@ -894,6 +934,9 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
     }
     if (6..=13).contains(&found) {
         client.batch_execute(UPGRADE_V13_TO_V14_SQL)?;
+    }
+    if (6..=14).contains(&found) {
+        client.batch_execute(UPGRADE_V14_TO_V15_SQL)?;
     }
     for &table in &APPLICATION_TABLES {
         let exists: bool = client
@@ -935,6 +978,7 @@ mod tests {
             "domain_events",
             "world_runtime",
             "world_area_generation",
+            "world_area_checkpoints",
             "social_ignores",
             "social_blocks",
             "social_channel_subscriptions",
@@ -959,7 +1003,7 @@ mod tests {
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 14)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 15)"));
         assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
@@ -1090,6 +1134,34 @@ mod tests {
         assert!(UPGRADE_V13_TO_V14_SQL.contains("SET version = 14"));
         assert!(!UPGRADE_V13_TO_V14_SQL.contains("world_runtime"));
         assert!(!UPGRADE_V13_TO_V14_SQL.contains("DELETE FROM"));
+    }
+
+    #[test]
+    fn v15_upgrade_adds_only_bounded_area_checkpoints() {
+        assert!(UPGRADE_V14_TO_V15_SQL.contains("CREATE TABLE world_area_checkpoints"));
+        for column in [
+            "generation_sha256",
+            "unit_id",
+            "residency_epoch",
+            "checkpoint_version",
+            "checkpoint_sha256",
+            "captured_logical_tick",
+            "checkpoint_json",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(UPGRADE_V14_TO_V15_SQL.contains(column));
+            assert!(SCHEMA_SQL.contains(column));
+        }
+        assert!(UPGRADE_V14_TO_V15_SQL.contains("^[0-9a-f]{64}$"));
+        assert!(UPGRADE_V14_TO_V15_SQL.contains("BETWEEN 1 AND 2097152"));
+        assert!(
+            UPGRADE_V14_TO_V15_SQL
+                .contains("PRIMARY KEY (generation_sha256, unit_id, residency_epoch)")
+        );
+        assert!(UPGRADE_V14_TO_V15_SQL.contains("SET version = 15"));
+        assert!(!UPGRADE_V14_TO_V15_SQL.contains("world_runtime"));
+        assert!(!UPGRADE_V14_TO_V15_SQL.contains("DELETE FROM"));
     }
 
     #[test]

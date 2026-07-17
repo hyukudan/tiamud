@@ -34,19 +34,22 @@ use crate::{
     persistence::{
         BOARD_ACCOUNT_CAPACITY, BOARD_CAPACITY_PER_BOARD, BOARD_MAX_PAGES, BOARD_PAGE_SIZE,
         BoardEntry, BoardPage, BoardPostSummary, BoardReportEvidence, CharacterStore,
-        DOMAIN_EVENT_RETENTION, DurableAreaGeneration, DurableCharacterGameplay, MailMessage,
-        MailMessageSummary, MailPage, MailReportEvidence, MailSendResult, ModerationAction,
-        PreparedLogin, Request, SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry,
-        StaffAuditRecord, StaffReport, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
-        decode_runtime_snapshot, decode_startup_domain_events, decode_startup_gameplay,
-        ensure_all_character_ids_exist, ensure_all_startup_characters_loaded,
-        normalise_character_identity_ids, normalise_startup_character_ids,
-        validate_area_generation, validate_area_generation_transition,
+        DOMAIN_EVENT_RETENTION, DurableAreaCheckpoint, DurableAreaGeneration,
+        DurableCharacterGameplay, MailMessage, MailMessageSummary, MailPage, MailReportEvidence,
+        MailSendResult, ModerationAction, PreparedLogin, Request, SocialProfile,
+        SocialRelationKind, StaffAccess, StaffAuditEntry, StaffAuditRecord, StaffReport,
+        StartupGameplayLoadLimits, StartupWorldRecovery, StoreError, decode_runtime_snapshot,
+        decode_startup_domain_events, decode_startup_gameplay, ensure_all_character_ids_exist,
+        ensure_all_startup_characters_loaded, normalise_character_identity_ids,
+        normalise_startup_character_ids, validate_area_checkpoint, validate_area_generation,
+        validate_area_generation_transition, validate_area_rehydration_commit,
+        validate_area_rehydration_previous_runtime, validate_area_retirement_commit,
+        validate_area_retirement_previous_runtime,
     },
 };
 
 #[cfg(test)]
-use crate::persistence::AuditEntry;
+use crate::persistence::{AuditEntry, area_checkpoint_unit_id};
 
 const MAX_IDENTITY_NAME_BYTES: usize = 64;
 const MAX_ACTIVE_SESSIONS: i64 = 16;
@@ -269,6 +272,35 @@ impl PostgresCharacterStore {
                                 &runtime,
                                 &expected_current,
                                 &next,
+                            ));
+                        }
+                        Request::LoadAreaCheckpoints { reply } => {
+                            let _ = reply.send(load_area_checkpoints(&mut connection));
+                        }
+                        Request::CommitAreaRetirement {
+                            runtime,
+                            expected_generation,
+                            checkpoint,
+                            reply,
+                        } => {
+                            let _ = reply.send(commit_area_retirement(
+                                &mut connection,
+                                &runtime,
+                                &expected_generation,
+                                &checkpoint,
+                            ));
+                        }
+                        Request::CommitAreaRehydration {
+                            runtime,
+                            expected_generation,
+                            checkpoint,
+                            reply,
+                        } => {
+                            let _ = reply.send(commit_area_rehydration(
+                                &mut connection,
+                                &runtime,
+                                &expected_generation,
+                                &checkpoint,
                             ));
                         }
                         Request::LoadDomainEvents { reply } => {
@@ -950,6 +982,50 @@ impl CharacterStore for PostgresCharacterStore {
                 runtime,
                 expected_current,
                 next,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn load_area_checkpoints(&self) -> Result<Vec<DurableAreaCheckpoint>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::LoadAreaCheckpoints { reply }, receive)
+            .await
+    }
+
+    async fn commit_area_retirement(
+        &self,
+        runtime: WorldRuntimeSnapshot,
+        expected_generation: DurableAreaGeneration,
+        checkpoint: DurableAreaCheckpoint,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::CommitAreaRetirement {
+                runtime,
+                expected_generation,
+                checkpoint,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn commit_area_rehydration(
+        &self,
+        runtime: WorldRuntimeSnapshot,
+        expected_generation: DurableAreaGeneration,
+        checkpoint: DurableAreaCheckpoint,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::CommitAreaRehydration {
+                runtime,
+                expected_generation,
+                checkpoint,
                 reply,
             },
             receive,
@@ -1936,6 +2012,29 @@ fn ensure_character_ids_exist_batch<C: GenericClient>(
 fn load_runtime_snapshot<C: GenericClient>(
     connection: &mut C,
 ) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
+    load_durable_runtime_snapshot(connection).map(|snapshot| snapshot.map(|(_, snapshot)| snapshot))
+}
+
+fn load_runtime_snapshot_for_update<C: GenericClient>(
+    connection: &mut C,
+) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
+    connection
+        .query_opt(
+            "SELECT snapshot_version, snapshot_json
+             FROM world_runtime WHERE singleton = 1 FOR UPDATE",
+            &[],
+        )?
+        .map(|row| {
+            let snapshot_version: i64 = row.get(0);
+            let json: String = row.get(1);
+            decode_runtime_snapshot(snapshot_version, &json)
+        })
+        .transpose()
+}
+
+fn load_durable_runtime_snapshot<C: GenericClient>(
+    connection: &mut C,
+) -> Result<Option<(u32, WorldRuntimeSnapshot)>, StoreError> {
     connection
         .query_opt(
             "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
@@ -1944,7 +2043,10 @@ fn load_runtime_snapshot<C: GenericClient>(
         .map(|row| {
             let snapshot_version: i64 = row.get(0);
             let json: String = row.get(1);
+            let durable_version =
+                u32::try_from(snapshot_version).map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
             decode_runtime_snapshot(snapshot_version, &json)
+                .map(|snapshot| (durable_version, snapshot))
         })
         .transpose()
 }
@@ -1978,6 +2080,204 @@ fn load_area_generation<C: GenericClient>(
         validate_area_generation(generation)?;
     }
     Ok(generation)
+}
+
+fn load_area_checkpoints<C: GenericClient>(
+    connection: &mut C,
+) -> Result<Vec<DurableAreaCheckpoint>, StoreError> {
+    let limit = i64::try_from(tiamud_core::MAX_RUNTIME_AREA_RESIDENCY_ENTRIES + 1)
+        .map_err(|_| StoreError::InvalidAreaCheckpoint)?;
+    let rows = connection.query(
+        "SELECT generation_sha256, unit_id, residency_epoch,
+                checkpoint_version, checkpoint_sha256, captured_logical_tick,
+                checkpoint_json
+         FROM world_area_checkpoints
+         ORDER BY generation_sha256, unit_id, residency_epoch
+         LIMIT $1",
+        &[&limit],
+    )?;
+    if rows.len() > tiamud_core::MAX_RUNTIME_AREA_RESIDENCY_ENTRIES {
+        return Err(StoreError::InvalidAreaCheckpoint);
+    }
+    let active_generation = load_area_generation(connection)?;
+    rows.into_iter()
+        .map(|row| {
+            let durable = DurableAreaCheckpoint {
+                generation_sha256: row.get(0),
+                unit_id: row.get(1),
+                residency_epoch: u64::try_from(row.get::<_, i64>(2)).unwrap_or(0),
+                checkpoint_version: u32::try_from(row.get::<_, i64>(3)).unwrap_or(0),
+                checkpoint_sha256: row.get(4),
+                captured_logical_tick: u64::try_from(row.get::<_, i64>(5)).unwrap_or(u64::MAX),
+                checkpoint_json: row.get(6),
+            };
+            if active_generation
+                .as_ref()
+                .is_none_or(|active| active.active_catalog_sha256 != durable.generation_sha256)
+            {
+                return Err(StoreError::InvalidAreaCheckpoint);
+            }
+            validate_area_checkpoint(&durable)?;
+            Ok(durable)
+        })
+        .collect()
+}
+
+fn verify_exact_area_generation<C: GenericClient>(
+    transaction: &mut C,
+    expected: &DurableAreaGeneration,
+) -> Result<(), StoreError> {
+    let row = transaction.query_opt(
+        "SELECT world_id, active_catalog_sha256, previous_catalog_sha256,
+                activation_sequence
+         FROM world_area_generation WHERE singleton = 1 FOR UPDATE",
+        &[],
+    )?;
+    let Some(row) = row else {
+        return Err(StoreError::AreaGenerationConflict);
+    };
+    let actual = DurableAreaGeneration {
+        world_id: row.get(0),
+        active_catalog_sha256: row.get(1),
+        previous_catalog_sha256: row.get(2),
+        activation_sequence: u64::try_from(row.get::<_, i64>(3)).unwrap_or(0),
+    };
+    if actual != *expected {
+        return Err(StoreError::AreaGenerationConflict);
+    }
+    Ok(())
+}
+
+fn persist_area_runtime<C: GenericClient>(
+    transaction: &mut C,
+    runtime: &WorldRuntimeSnapshot,
+) -> Result<(), StoreError> {
+    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
+    let adventure_json = bounded_json(
+        &runtime.adventure,
+        "world adventure",
+        MAX_RUNTIME_JSON_BYTES,
+    )?;
+    transaction.execute(
+        "INSERT INTO world_adventure (singleton, state_json, updated_at)
+         VALUES (1, $1, floor(extract(epoch FROM now()))::BIGINT)
+         ON CONFLICT(singleton) DO UPDATE SET
+             state_json = excluded.state_json,
+             updated_at = excluded.updated_at",
+        &[&adventure_json],
+    )?;
+    let last_event_sequence: i64 = transaction
+        .query_one(
+            "SELECT GREATEST(
+                 COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
+                 COALESCE((SELECT last_event_sequence FROM world_runtime
+                           WHERE singleton = 1), 0))",
+            &[],
+        )?
+        .get(0);
+    let snapshot_version = i64::from(runtime.snapshot_version);
+    transaction.execute(
+        "INSERT INTO world_runtime
+             (singleton, snapshot_version, snapshot_json,
+              last_event_sequence, updated_at)
+         VALUES (1, $1, $2, $3, floor(extract(epoch FROM now()))::BIGINT)
+         ON CONFLICT(singleton) DO UPDATE SET
+             snapshot_version = excluded.snapshot_version,
+             snapshot_json = excluded.snapshot_json,
+             last_event_sequence = excluded.last_event_sequence,
+             updated_at = excluded.updated_at",
+        &[&snapshot_version, &runtime_json, &last_event_sequence],
+    )?;
+    transaction.execute(
+        "DELETE FROM domain_events
+         WHERE sequence <= ($1::BIGINT - $2::BIGINT) AND sequence <= $1::BIGINT",
+        &[&last_event_sequence, &DOMAIN_EVENT_RETENTION],
+    )?;
+    Ok(())
+}
+
+fn commit_area_retirement(
+    connection: &mut Client,
+    runtime: &WorldRuntimeSnapshot,
+    expected: &DurableAreaGeneration,
+    durable: &DurableAreaCheckpoint,
+) -> Result<(), StoreError> {
+    let checkpoint = validate_area_retirement_commit(runtime, expected, durable)?;
+    let epoch =
+        i64::try_from(durable.residency_epoch).map_err(|_| StoreError::InvalidAreaCheckpoint)?;
+    let version = i64::from(durable.checkpoint_version);
+    let tick = i64::try_from(durable.captured_logical_tick)
+        .map_err(|_| StoreError::InvalidAreaCheckpoint)?;
+    let mut transaction = connection.transaction()?;
+    verify_exact_area_generation(&mut transaction, expected)?;
+    let current = load_runtime_snapshot_for_update(&mut transaction)?
+        .ok_or(StoreError::AreaCheckpointConflict)?;
+    validate_area_retirement_previous_runtime(&current, runtime, &checkpoint)?;
+    let inserted = transaction.execute(
+        "INSERT INTO world_area_checkpoints
+             (generation_sha256, unit_id, residency_epoch,
+              checkpoint_version, checkpoint_sha256, captured_logical_tick,
+              checkpoint_json, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7,
+                 floor(extract(epoch FROM now()))::BIGINT,
+                 floor(extract(epoch FROM now()))::BIGINT)
+         ON CONFLICT(generation_sha256, unit_id, residency_epoch) DO NOTHING",
+        &[
+            &durable.generation_sha256,
+            &durable.unit_id,
+            &epoch,
+            &version,
+            &durable.checkpoint_sha256,
+            &tick,
+            &durable.checkpoint_json,
+        ],
+    )?;
+    if inserted != 1 {
+        return Err(StoreError::AreaCheckpointConflict);
+    }
+    persist_area_runtime(&mut transaction, runtime)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn commit_area_rehydration(
+    connection: &mut Client,
+    runtime: &WorldRuntimeSnapshot,
+    expected: &DurableAreaGeneration,
+    durable: &DurableAreaCheckpoint,
+) -> Result<(), StoreError> {
+    let checkpoint = validate_area_rehydration_commit(runtime, expected, durable)?;
+    let epoch =
+        i64::try_from(durable.residency_epoch).map_err(|_| StoreError::InvalidAreaCheckpoint)?;
+    let version = i64::from(durable.checkpoint_version);
+    let tick = i64::try_from(durable.captured_logical_tick)
+        .map_err(|_| StoreError::InvalidAreaCheckpoint)?;
+    let mut transaction = connection.transaction()?;
+    verify_exact_area_generation(&mut transaction, expected)?;
+    let current = load_runtime_snapshot_for_update(&mut transaction)?
+        .ok_or(StoreError::AreaCheckpointConflict)?;
+    validate_area_rehydration_previous_runtime(&current, runtime, durable, &checkpoint)?;
+    let deleted = transaction.execute(
+        "DELETE FROM world_area_checkpoints
+         WHERE generation_sha256 = $1 AND unit_id = $2 AND residency_epoch = $3
+           AND checkpoint_version = $4 AND checkpoint_sha256 = $5
+           AND captured_logical_tick = $6 AND checkpoint_json = $7",
+        &[
+            &durable.generation_sha256,
+            &durable.unit_id,
+            &epoch,
+            &version,
+            &durable.checkpoint_sha256,
+            &tick,
+            &durable.checkpoint_json,
+        ],
+    )?;
+    if deleted != 1 {
+        return Err(StoreError::AreaCheckpointConflict);
+    }
+    persist_area_runtime(&mut transaction, runtime)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn bind_area_generation_if_absent(
@@ -2106,8 +2406,11 @@ fn load_startup_world_recovery(
         .isolation_level(IsolationLevel::RepeatableRead)
         .read_only(true)
         .start()?;
-    let recovery = match load_runtime_snapshot(&mut transaction)? {
-        Some(snapshot) => StartupWorldRecovery::Snapshot(snapshot),
+    let recovery = match load_durable_runtime_snapshot(&mut transaction)? {
+        Some((durable_version, snapshot)) => StartupWorldRecovery::Snapshot {
+            durable_version,
+            snapshot,
+        },
         None => match load_startup_domain_events(&mut transaction)? {
             events if events.is_empty() => StartupWorldRecovery::Empty,
             events => StartupWorldRecovery::Ledger(events),
@@ -4372,11 +4675,14 @@ fn bounded_json<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::{collections::BTreeMap, env, process, time::Duration};
     use tiamud_core::{
-        AdventureRuntimeSnapshot, Direction, ItemBinding, ItemInstanceId, ItemLocationSnapshot,
+        AdventureRuntimeSnapshot, AreaDynamicCheckpoint, AreaDynamicCheckpointIdentity,
+        AreaRuntimeResidence, Direction, ItemBinding, ItemInstanceId, ItemLocationSnapshot,
         ItemProvenance, LootDropId, RuntimeItemInstanceSnapshot, RuntimeItemInstanceSnapshotV3,
-        RuntimeItemLocation, WORLD_RUNTIME_SNAPSHOT_VERSION, World, WorldRuntimeSnapshotV3,
+        RuntimeItemLocation, WORLD_RUNTIME_SNAPSHOT_VERSION, World, WorldRuntimeSnapshot,
+        WorldRuntimeSnapshotV3,
     };
 
     fn area_generation(
@@ -4391,6 +4697,81 @@ mod tests {
             previous_catalog_sha256: previous.map(|digest| digest.to_string().repeat(64)),
             activation_sequence,
         }
+    }
+
+    fn area_checkpoint(runtime: &WorldRuntimeSnapshot) -> DurableAreaCheckpoint {
+        let checkpoint = AreaDynamicCheckpoint {
+            checkpoint_version: tiamud_core::AREA_DYNAMIC_CHECKPOINT_VERSION,
+            generation_sha256: "a".repeat(64),
+            areas: vec![AreaDynamicCheckpointIdentity {
+                area_id: "demo:archive".into(),
+                revision: 1,
+                bundle_sha256: "d".repeat(64),
+                residency_epoch: 2,
+            }],
+            captured_world_revision: runtime.revision,
+            captured_logical_tick: runtime.logical_tick,
+            captured_rng_state: runtime.rng_state,
+            captured_next_item_instance_sequence: runtime.next_item_instance_sequence,
+            captured_next_loot_drop_id: runtime.next_loot_drop_id,
+            captured_next_reward_open_id: runtime.next_reward_open_id,
+            npcs: BTreeMap::new(),
+            item_instances: BTreeMap::new(),
+            item_provenance: BTreeMap::new(),
+            ground_loot: BTreeMap::new(),
+        };
+        tiamud_core::validate_area_dynamic_checkpoint(&checkpoint).unwrap();
+        let checkpoint_json = serde_json::to_string(&checkpoint).unwrap();
+        DurableAreaCheckpoint {
+            generation_sha256: checkpoint.generation_sha256.clone(),
+            unit_id: area_checkpoint_unit_id(&checkpoint),
+            residency_epoch: checkpoint.areas[0].residency_epoch,
+            checkpoint_version: checkpoint.checkpoint_version,
+            checkpoint_sha256: hex::encode(Sha256::digest(checkpoint_json.as_bytes())),
+            captured_logical_tick: checkpoint.captured_logical_tick,
+            checkpoint_json,
+        }
+    }
+
+    fn retired_runtime(
+        mut runtime: WorldRuntimeSnapshot,
+        durable: &DurableAreaCheckpoint,
+    ) -> WorldRuntimeSnapshot {
+        runtime.area_residency.insert(
+            "demo:archive".into(),
+            AreaRuntimeResidence::Retired {
+                revision: 1,
+                bundle_sha256: "d".repeat(64),
+                residency_epoch: durable.residency_epoch,
+                checkpoint_version: durable.checkpoint_version,
+                checkpoint_sha256: durable.checkpoint_sha256.clone(),
+            },
+        );
+        runtime
+    }
+
+    fn initial_resident_runtime(mut runtime: WorldRuntimeSnapshot) -> WorldRuntimeSnapshot {
+        runtime.area_residency.insert(
+            "demo:archive".into(),
+            AreaRuntimeResidence::Resident {
+                revision: 1,
+                bundle_sha256: "d".repeat(64),
+                residency_epoch: 1,
+            },
+        );
+        runtime
+    }
+
+    fn rehydrated_runtime(mut runtime: WorldRuntimeSnapshot) -> WorldRuntimeSnapshot {
+        runtime.area_residency.insert(
+            "demo:archive".into(),
+            AreaRuntimeResidence::Resident {
+                revision: 1,
+                bundle_sha256: "d".repeat(64),
+                residency_epoch: 3,
+            },
+        );
+        runtime
     }
 
     #[test]
@@ -4562,6 +4943,7 @@ mod tests {
             "groundLoot",
             "partyLootCursors",
             "nextRewardOpenId",
+            "areaResidency",
         ] {
             v4.as_object_mut().unwrap().remove(field);
         }
@@ -4575,6 +4957,7 @@ mod tests {
         let mut v6 = serde_json::to_value(&current).unwrap();
         v6["snapshotVersion"] = serde_json::json!(6);
         v6.as_object_mut().unwrap().remove("nextRewardOpenId");
+        v6.as_object_mut().unwrap().remove("areaResidency");
         for item in v6["itemInstances"].as_object_mut().unwrap().values_mut() {
             item.as_object_mut().unwrap().remove("itemAffixes");
         }
@@ -4657,8 +5040,35 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.load_startup_world_recovery().await.unwrap(),
-            StartupWorldRecovery::Snapshot(snapshot)
+            StartupWorldRecovery::Snapshot {
+                durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
+                snapshot: snapshot.clone(),
+            }
         );
+
+        let mut legacy = serde_json::to_value(snapshot).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.insert("snapshotVersion".into(), serde_json::json!(7));
+        object.remove("areaResidency");
+        let legacy_json = serde_json::to_string(&legacy).unwrap().replace('\'', "''");
+        admin_batch(
+            &base_url,
+            format!(
+                "UPDATE {schema}.world_runtime
+                 SET snapshot_version = 7, snapshot_json = '{legacy_json}'
+                 WHERE singleton = 1"
+            ),
+        )
+        .await;
+        let StartupWorldRecovery::Snapshot {
+            durable_version,
+            snapshot,
+        } = store.load_startup_world_recovery().await.unwrap()
+        else {
+            panic!("expected durable snapshot authority");
+        };
+        assert_eq!(durable_version, 7);
+        assert!(snapshot.area_residency.is_empty());
 
         // A present but invalid snapshot must never fall through to the valid
         // retained ledger observed by the same repeatable-read transaction.
@@ -4757,7 +5167,10 @@ mod tests {
         );
         assert_eq!(
             store.load_startup_world_recovery().await.unwrap(),
-            StartupWorldRecovery::Snapshot(activated_runtime.clone())
+            StartupWorldRecovery::Snapshot {
+                durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
+                snapshot: activated_runtime.clone(),
+            }
         );
 
         let mut stale_runtime = activated_runtime.clone();
@@ -4778,7 +5191,10 @@ mod tests {
         );
         assert_eq!(
             store.load_startup_world_recovery().await.unwrap(),
-            StartupWorldRecovery::Snapshot(activated_runtime.clone())
+            StartupWorldRecovery::Snapshot {
+                durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
+                snapshot: activated_runtime.clone(),
+            }
         );
 
         admin_batch(
@@ -4789,6 +5205,7 @@ mod tests {
                  BEGIN
                      RAISE EXCEPTION 'injected snapshot failure';
                  END;
+                 $$;
                  CREATE TRIGGER reject_generation_snapshot
                  BEFORE UPDATE ON {schema}.world_runtime
                  FOR EACH ROW EXECUTE FUNCTION {schema}.reject_generation_snapshot()"
@@ -4817,10 +5234,168 @@ mod tests {
         );
         assert_eq!(
             store.load_startup_world_recovery().await.unwrap(),
-            StartupWorldRecovery::Snapshot(activated_runtime)
+            StartupWorldRecovery::Snapshot {
+                durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
+                snapshot: activated_runtime,
+            }
         );
 
         drop(competing_store);
+        drop(store);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_area_checkpoint_transitions_are_exact_restart_safe_and_atomic() {
+        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("tiamud_area_checkpoint_test_{}_{}", process::id(), nonce);
+        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
+        let scoped_url = scoped_url(&base_url, &schema);
+        let store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
+        let generation = area_generation("Mundo de Ámbar", 'a', None, 1);
+        store
+            .bind_area_generation_if_absent(generation.clone())
+            .await
+            .unwrap();
+        let baseline = initial_resident_runtime(World::demo().runtime_snapshot());
+        store
+            .commit_action(Vec::new(), baseline.clone(), Vec::new())
+            .await
+            .unwrap();
+        let stale_checkpoint = area_checkpoint(&baseline);
+        let stale_retired = retired_runtime(baseline.clone(), &stale_checkpoint);
+        let mut current = baseline;
+        current.logical_tick += 1;
+        store
+            .commit_action(Vec::new(), current.clone(), Vec::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .commit_area_retirement(stale_retired, generation.clone(), stale_checkpoint,)
+                .await,
+            Err(StoreError::AreaCheckpointConflict)
+        ));
+        let checkpoint = area_checkpoint(&current);
+        let retired = retired_runtime(current.clone(), &checkpoint);
+
+        admin_batch(
+            &base_url,
+            format!(
+                "CREATE FUNCTION {schema}.reject_area_checkpoint_snapshot() RETURNS trigger
+                 LANGUAGE plpgsql AS $$
+                 BEGIN
+                     RAISE EXCEPTION 'injected area checkpoint snapshot failure';
+                 END;
+                 $$;
+                 CREATE TRIGGER reject_area_checkpoint_snapshot
+                 BEFORE UPDATE ON {schema}.world_runtime
+                 FOR EACH ROW EXECUTE FUNCTION {schema}.reject_area_checkpoint_snapshot()"
+            ),
+        )
+        .await;
+        assert!(
+            store
+                .commit_area_retirement(retired.clone(), generation.clone(), checkpoint.clone(),)
+                .await
+                .is_err()
+        );
+        assert!(store.load_area_checkpoints().await.unwrap().is_empty());
+        assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(current));
+
+        admin_batch(
+            &base_url,
+            format!("DROP TRIGGER reject_area_checkpoint_snapshot ON {schema}.world_runtime"),
+        )
+        .await;
+        store
+            .commit_area_retirement(retired.clone(), generation.clone(), checkpoint.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_area_checkpoints().await.unwrap(),
+            vec![checkpoint.clone()]
+        );
+        assert_eq!(
+            store.load_runtime_snapshot().await.unwrap(),
+            Some(retired.clone())
+        );
+        assert!(matches!(
+            store
+                .commit_area_retirement(retired.clone(), generation.clone(), checkpoint.clone())
+                .await,
+            Err(StoreError::AreaCheckpointConflict)
+        ));
+
+        let stale_resident = rehydrated_runtime(retired.clone());
+        let mut current_retired = retired;
+        current_retired.logical_tick += 1;
+        store
+            .commit_action(Vec::new(), current_retired.clone(), Vec::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .commit_area_rehydration(stale_resident, generation.clone(), checkpoint.clone(),)
+                .await,
+            Err(StoreError::AreaCheckpointConflict)
+        ));
+        assert_eq!(
+            store.load_area_checkpoints().await.unwrap(),
+            vec![checkpoint.clone()]
+        );
+        let resident = rehydrated_runtime(current_retired.clone());
+        admin_batch(
+            &base_url,
+            format!(
+                "CREATE TRIGGER reject_area_checkpoint_snapshot
+                 BEFORE UPDATE ON {schema}.world_runtime
+                 FOR EACH ROW EXECUTE FUNCTION {schema}.reject_area_checkpoint_snapshot()"
+            ),
+        )
+        .await;
+        assert!(
+            store
+                .commit_area_rehydration(resident.clone(), generation.clone(), checkpoint.clone(),)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.load_area_checkpoints().await.unwrap(),
+            vec![checkpoint.clone()]
+        );
+        assert_eq!(
+            store.load_runtime_snapshot().await.unwrap(),
+            Some(current_retired)
+        );
+        admin_batch(
+            &base_url,
+            format!("DROP TRIGGER reject_area_checkpoint_snapshot ON {schema}.world_runtime"),
+        )
+        .await;
+        store
+            .commit_area_rehydration(resident.clone(), generation.clone(), checkpoint.clone())
+            .await
+            .unwrap();
+        assert!(store.load_area_checkpoints().await.unwrap().is_empty());
+        assert_eq!(
+            store.load_runtime_snapshot().await.unwrap(),
+            Some(resident.clone())
+        );
+        assert!(matches!(
+            store
+                .commit_area_rehydration(resident, generation, checkpoint)
+                .await,
+            Err(StoreError::AreaCheckpointConflict)
+        ));
+
         drop(store);
         tokio::time::sleep(Duration::from_millis(25)).await;
         admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
@@ -5134,6 +5709,7 @@ mod tests {
             next_trade_id: tiamud_core::TradeId(1),
             trades: BTreeMap::new(),
             next_reward_open_id: tiamud_core::RewardOpenId(1),
+            area_residency: BTreeMap::new(),
         };
         let event = DomainEvent::CharacterMoved {
             actor_id: keeper_character.id,

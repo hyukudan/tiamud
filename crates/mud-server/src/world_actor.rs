@@ -1,16 +1,17 @@
 use crate::{
     area_runtime::{
         AreaGenerationCutoverGuard, AreaGenerationRouteError, AreaGenerationRouter,
-        AreaLoadCoordinator, PreparedAreaBatch, PreparedGenerationCutover,
+        AreaLoadCoordinator, AreaPreparationError, PreparedAreaBatch, PreparedAreaRetirementBatch,
+        PreparedGenerationCutover,
     },
     auth::AuthenticatedSession,
     boards::{BoardDescriptor, apply_board},
     delivery::{DeliveryInbox, DeliveryRouter},
     operations::{AreaGenerationMetricPhase, AreaLoadMetricResult},
     persistence::{
-        BoardEntry, BoardPage, CharacterStore, DurableAreaGeneration, DurableCharacterGameplay,
-        MailMessage, MailPage, StaffAccess, StartupGameplayLoadLimits, StartupWorldRecovery,
-        StoreError,
+        BoardEntry, BoardPage, CharacterStore, DurableAreaCheckpoint, DurableAreaGeneration,
+        DurableCharacterGameplay, MailMessage, MailPage, StaffAccess, StartupGameplayLoadLimits,
+        StartupWorldRecovery, StoreError, validate_area_checkpoint,
     },
     runtime_content::{RuntimeContent, ScenePresentation},
     social::{
@@ -20,6 +21,7 @@ use crate::{
     },
     staff::{apply_staff, derived_role},
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
@@ -27,14 +29,15 @@ use std::{
 };
 use thiserror::Error;
 use tiamud_core::{
-    AccountId, AccountRole, AccountSnapshot, AdventureEvent, BackgroundSelection,
+    AccountId, AccountRole, AccountSnapshot, AdventureEvent,
+    AreaRetirementError as CoreAreaRetirementError, BackgroundSelection,
     CharacterCreationCatalogView, CharacterGameplaySnapshot, CharacterId, CharacterSnapshot,
     ContainerContentsView, DomainEvent, GameplayEvent, PlayerAction, PlayerStateView,
     RewardOddsView, SceneView, SessionId, TradeAction, TradeCancellationReason, TradeContentsView,
-    ViewEvent, World, WorldCheckpoint, WorldError as CoreWorldError,
+    ViewEvent, World, WorldCheckpoint, WorldError as CoreWorldError, WorldRuntimeSnapshot,
 };
 use tiamud_scripting::ScriptHook;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, warn};
 #[cfg(unix)]
@@ -92,6 +95,34 @@ impl From<AreaGenerationRouteError> for AreaGenerationActivationError {
             AreaGenerationRouteError::Busy => Self::Busy,
             AreaGenerationRouteError::WrongGeneration
             | AreaGenerationRouteError::SameGeneration => Self::WrongGeneration,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum AreaRetirementOperationError {
+    #[error("the area retirement or rehydration precondition is busy")]
+    Busy,
+    #[error("the prepared area retirement or checkpoint is invalid or stale")]
+    Invalid,
+    #[error("the durable area transition failed: {0}")]
+    Persistence(#[source] StoreError),
+    #[error("durable area authority is ambiguous; the world actor stopped")]
+    DurableAuthorityAmbiguous,
+    #[allow(dead_code)]
+    #[error("the world actor stopped unexpectedly")]
+    ActorStopped,
+}
+
+impl From<AreaPreparationError> for AreaRetirementOperationError {
+    fn from(error: AreaPreparationError) -> Self {
+        match error {
+            AreaPreparationError::QueueFull
+            | AreaPreparationError::Timeout
+            | AreaPreparationError::Cancelled => Self::Busy,
+            AreaPreparationError::UnknownArea
+            | AreaPreparationError::Retired
+            | AreaPreparationError::Invalid(_) => Self::Invalid,
         }
     }
 }
@@ -222,6 +253,18 @@ enum Command {
         batch: Arc<PreparedAreaBatch>,
         reply: oneshot::Sender<Result<Vec<String>, GameError>>,
     },
+    #[allow(dead_code)]
+    RetirePreparedAreas {
+        prepared: Arc<PreparedAreaRetirementBatch>,
+        expected_generation: DurableAreaGeneration,
+        reply: oneshot::Sender<Result<Vec<String>, AreaRetirementOperationError>>,
+    },
+    RehydratePreparedAreas {
+        prepared: Arc<PreparedAreaBatch>,
+        checkpoint: DurableAreaCheckpoint,
+        expected_generation: DurableAreaGeneration,
+        reply: oneshot::Sender<Result<Vec<String>, AreaRetirementOperationError>>,
+    },
     InspectAreaQuiescence {
         reply: oneshot::Sender<AreaGenerationQuiescence>,
     },
@@ -263,6 +306,7 @@ pub struct WorldHandle {
     start_room_id: Arc<str>,
     creation_catalog: Arc<CharacterCreationCatalogView>,
     area_router: Option<AreaGenerationRouter>,
+    area_rehydration_lock: Arc<AsyncMutex<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -361,7 +405,7 @@ impl WorldHandle {
 
             let startup = match recovery {
                 StartupWorldRecovery::Empty => Ok(()),
-                StartupWorldRecovery::Snapshot(snapshot) => world
+                StartupWorldRecovery::Snapshot { snapshot, .. } => world
                     .restore_runtime_snapshot(snapshot)
                     .map_err(|error| GameError::Startup {
                         stage: "restore_runtime_snapshot",
@@ -789,6 +833,75 @@ impl WorldHandle {
                         }
                         let _ = reply.send(result);
                     }
+                    Command::RetirePreparedAreas {
+                        prepared,
+                        expected_generation,
+                        reply,
+                    } => {
+                        let result = retire_prepared_areas(
+                            &mut world,
+                            &mut runtime_content,
+                            actor_store.as_ref(),
+                            prepared.as_ref(),
+                            &expected_generation,
+                        )
+                        .await;
+                        if let (Ok(area_ids), Some(router)) = (&result, &actor_area_router)
+                            && router
+                                .mark_nonresident_if_active(&prepared.core.generation_id, area_ids)
+                                .is_err()
+                        {
+                            error!("durable retirement could not publish coordinator residence");
+                            let _ = reply
+                                .send(Err(AreaRetirementOperationError::DurableAuthorityAmbiguous));
+                            rx.close();
+                            break;
+                        }
+                        let must_fail_stop = matches!(
+                            &result,
+                            Err(AreaRetirementOperationError::DurableAuthorityAmbiguous)
+                        );
+                        let _ = reply.send(result);
+                        if must_fail_stop {
+                            rx.close();
+                            break;
+                        }
+                    }
+                    Command::RehydratePreparedAreas {
+                        prepared,
+                        checkpoint,
+                        expected_generation,
+                        reply,
+                    } => {
+                        let result = rehydrate_prepared_areas(
+                            &mut world,
+                            &mut runtime_content,
+                            actor_store.as_ref(),
+                            prepared.as_ref(),
+                            &checkpoint,
+                            &expected_generation,
+                        )
+                        .await;
+                        if let (Ok(area_ids), Some(router)) = (&result, &actor_area_router)
+                            && !router
+                                .mark_resident_if_active(&prepared.core.generation_id, area_ids)
+                        {
+                            error!("durable rehydration could not publish coordinator residence");
+                            let _ = reply
+                                .send(Err(AreaRetirementOperationError::DurableAuthorityAmbiguous));
+                            rx.close();
+                            break;
+                        }
+                        let must_fail_stop = matches!(
+                            &result,
+                            Err(AreaRetirementOperationError::DurableAuthorityAmbiguous)
+                        );
+                        let _ = reply.send(result);
+                        if must_fail_stop {
+                            rx.close();
+                            break;
+                        }
+                    }
                     Command::InspectAreaQuiescence { reply } => {
                         let _ = reply.send(AreaGenerationQuiescence {
                             connected_sessions: world.connected_sessions().len(),
@@ -917,6 +1030,7 @@ impl WorldHandle {
             start_room_id,
             creation_catalog,
             area_router,
+            area_rehydration_lock: Arc::new(AsyncMutex::new(())),
         };
         match startup_receive.await {
             Ok(Ok(())) => Ok(handle),
@@ -1086,19 +1200,23 @@ impl WorldHandle {
                 .room_owner(&snapshot.room_id)
                 .ok_or(GameError::AreaUnavailable)?;
             if !coordinator.is_resident(owner) {
-                let batch = coordinator
-                    .prepare(owner.to_owned())
-                    .await
-                    .map_err(|error| {
-                        tracing::warn!(%error, "character area preparation failed");
-                        GameError::AreaUnavailable
-                    })?;
-                self.install_prepared_area_batch(batch)
-                    .await
-                    .map_err(|error| {
-                        tracing::warn!(%error, "character area installation failed");
-                        GameError::AreaUnavailable
-                    })?;
+                if coordinator.is_retired(owner) {
+                    self.rehydrate_retired_area(coordinator, owner).await?;
+                } else {
+                    let batch = coordinator
+                        .prepare(owner.to_owned())
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(%error, "character area preparation failed");
+                            GameError::AreaUnavailable
+                        })?;
+                    self.install_prepared_area_batch(batch)
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(%error, "character area installation failed");
+                            GameError::AreaUnavailable
+                        })?;
+                }
             }
         }
         let gameplay = self.store.load_character_gameplay(character_id).await?;
@@ -1203,20 +1321,25 @@ impl WorldHandle {
         if route.generation() != &request.generation_id {
             return Err(GameError::AreaUnavailable);
         }
-        let batch = route
-            .coordinator()
-            .prepare(request.target_area_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "area preparation failed");
-                GameError::AreaUnavailable
-            })?;
-        self.install_prepared_area_batch(batch)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "area installation failed");
-                GameError::AreaUnavailable
-            })?;
+        if route.coordinator().is_retired(&request.target_area_id) {
+            self.rehydrate_retired_area(route.coordinator(), &request.target_area_id)
+                .await?;
+        } else {
+            let batch = route
+                .coordinator()
+                .prepare(request.target_area_id)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "area preparation failed");
+                    GameError::AreaUnavailable
+                })?;
+            self.install_prepared_area_batch(batch)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "area installation failed");
+                    GameError::AreaUnavailable
+                })?;
+        }
         match self.apply_once(session, action).await {
             Err(GameError::World(CoreWorldError::AreaLoadRequired(_))) => {
                 Err(GameError::AreaUnavailable)
@@ -1252,6 +1375,106 @@ impl WorldHandle {
             .await
             .map_err(|_| GameError::ActorStopped)?;
         let _installed = receive.await.map_err(|_| GameError::ActorStopped)??;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn retire_area(
+        &self,
+        area_id: &str,
+    ) -> Result<(), AreaRetirementOperationError> {
+        let router = self
+            .area_router
+            .as_ref()
+            .ok_or(AreaRetirementOperationError::Invalid)?;
+        let route = router
+            .try_route(None)
+            .map_err(|_| AreaRetirementOperationError::Busy)?;
+        let expected_generation = self
+            .store
+            .load_area_generation()
+            .await
+            .map_err(AreaRetirementOperationError::Persistence)?
+            .ok_or(AreaRetirementOperationError::Invalid)?;
+        if expected_generation.active_catalog_sha256 != route.generation().as_str() {
+            return Err(AreaRetirementOperationError::Invalid);
+        }
+        let prepared = route.coordinator().prepare_retirement(area_id).await?;
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(Command::RetirePreparedAreas {
+                prepared,
+                expected_generation,
+                reply,
+            })
+            .await
+            .map_err(|_| AreaRetirementOperationError::ActorStopped)?;
+        let _area_ids = receive
+            .await
+            .map_err(|_| AreaRetirementOperationError::ActorStopped)??;
+        drop(route);
+        Ok(())
+    }
+
+    async fn rehydrate_retired_area(
+        &self,
+        coordinator: &AreaLoadCoordinator,
+        area_id: &str,
+    ) -> Result<(), GameError> {
+        // One bounded process-wide critical section is sufficient for the
+        // single-writer baseline and makes concurrent moves into the same
+        // retired unit observe the first durable result instead of racing its
+        // consumed checkpoint. It can be narrowed to a per-unit map later.
+        let _rehydration = self.area_rehydration_lock.lock().await;
+        if coordinator.is_resident(area_id) {
+            return Ok(());
+        }
+        if !coordinator.is_retired(area_id) {
+            return Err(GameError::AreaUnavailable);
+        }
+        let durable_checkpoints = self.store.load_area_checkpoints().await?;
+        let mut selected = None;
+        for durable in durable_checkpoints {
+            let checkpoint = validate_area_checkpoint(&durable)?;
+            if checkpoint.areas.iter().any(|area| area.area_id == area_id)
+                && selected.replace((durable, checkpoint)).is_some()
+            {
+                return Err(GameError::AreaUnavailable);
+            }
+        }
+        let (durable, checkpoint) = selected.ok_or(GameError::AreaUnavailable)?;
+        let expected_generation = self
+            .store
+            .load_area_generation()
+            .await?
+            .ok_or(GameError::AreaUnavailable)?;
+        if expected_generation.active_catalog_sha256 != coordinator.generation().generation_id() {
+            return Err(GameError::AreaUnavailable);
+        }
+        let prepared = coordinator
+            .prepare_rehydration(&checkpoint)
+            .await
+            .map_err(|error| {
+                warn!(%error, "retired area rehydration preparation failed");
+                GameError::AreaUnavailable
+            })?;
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(Command::RehydratePreparedAreas {
+                prepared,
+                checkpoint: durable,
+                expected_generation,
+                reply,
+            })
+            .await
+            .map_err(|_| GameError::ActorStopped)?;
+        receive
+            .await
+            .map_err(|_| GameError::ActorStopped)?
+            .map_err(|error| {
+                warn!(%error, "retired area rehydration failed");
+                GameError::AreaUnavailable
+            })?;
         Ok(())
     }
 
@@ -1303,6 +1526,9 @@ impl WorldHandle {
             .area_router
             .as_ref()
             .ok_or(AreaGenerationActivationError::InvalidCandidate)?;
+        if router.has_retired_areas() {
+            return Err(AreaGenerationActivationError::Busy);
+        }
         #[cfg(unix)]
         let publication_guard =
             prepared
@@ -1464,6 +1690,11 @@ async fn activate_prepared_generation(
         next,
     } = activation;
     if !world.connected_sessions().is_empty()
+        || world
+            .runtime_snapshot()
+            .area_residency
+            .values()
+            .any(|state| matches!(state, tiamud_core::AreaRuntimeResidence::Retired { .. }))
         || world.area_generation() != Some(&prepared.expected_current_generation)
         || prepared.world.area_generation() != Some(&prepared.candidate_generation)
         || expected_current.active_catalog_sha256 != prepared.expected_current_generation.as_str()
@@ -1480,7 +1711,11 @@ async fn activate_prepared_generation(
     // no-migration replacement. Reusing the ordinary strict restore against a
     // complete private candidate preserves every dynamic authority while
     // allowing static room/presentation/script content to change.
-    let snapshot = world.runtime_snapshot();
+    let mut snapshot = world.runtime_snapshot();
+    // A 6B bootstrap may have durably confirmed only its initially resident
+    // closure. The 6C candidate is fully staged, so make the transition to a
+    // complete resident manifest explicit before strict restore and commit.
+    snapshot.area_residency = prepared.world.runtime_snapshot().area_residency;
     let PreparedGenerationCutover {
         expected_current_generation: _,
         candidate_generation: _,
@@ -1635,6 +1870,280 @@ async fn install_prepared_areas(
         metrics.area_load_finished(started.elapsed(), 0, result);
     }
     Ok(confirmed_area_ids)
+}
+
+async fn retire_prepared_areas(
+    world: &mut World,
+    runtime_content: &mut RuntimeContent,
+    store: &dyn CharacterStore,
+    prepared: &PreparedAreaRetirementBatch,
+    expected_generation: &DurableAreaGeneration,
+) -> Result<Vec<String>, AreaRetirementOperationError> {
+    if world.area_generation() != Some(&prepared.core.generation_id)
+        || expected_generation.active_catalog_sha256 != prepared.core.generation_id.as_str()
+    {
+        return Err(AreaRetirementOperationError::Invalid);
+    }
+    let before_snapshot = world.runtime_snapshot();
+    let world_checkpoint = world.lifecycle_checkpoint();
+    let runtime_checkpoint = runtime_content.clone();
+    let retirement = world
+        .prepare_area_retirement(prepared.core.clone())
+        .map_err(map_core_area_retirement_error)?;
+    let checkpoint_json = serde_json::to_string(&retirement.checkpoint)
+        .map_err(|_| AreaRetirementOperationError::Invalid)?;
+    let checkpoint_sha256 = hex::encode(Sha256::digest(checkpoint_json.as_bytes()));
+    let residency_epoch = retirement
+        .checkpoint
+        .areas
+        .first()
+        .map(|area| area.residency_epoch)
+        .ok_or(AreaRetirementOperationError::Invalid)?;
+    if retirement
+        .checkpoint
+        .areas
+        .iter()
+        .any(|area| area.residency_epoch != residency_epoch)
+    {
+        return Err(AreaRetirementOperationError::Invalid);
+    }
+    let durable = DurableAreaCheckpoint {
+        generation_sha256: prepared.core.generation_id.as_str().to_owned(),
+        unit_id: prepared.unit_id.clone(),
+        residency_epoch,
+        checkpoint_version: retirement.checkpoint.checkpoint_version,
+        checkpoint_sha256: checkpoint_sha256.clone(),
+        captured_logical_tick: retirement.checkpoint.captured_logical_tick,
+        checkpoint_json,
+    };
+    let area_ids = retirement
+        .checkpoint
+        .areas
+        .iter()
+        .map(|area| area.area_id.clone())
+        .collect::<Vec<_>>();
+    let mutated = (|| {
+        world
+            .apply_prepared_area_retirement(retirement, checkpoint_sha256)
+            .map_err(map_core_area_retirement_error)?;
+        for area_id in &area_ids {
+            let delta = prepared
+                .rehydration
+                .runtime_by_area
+                .get(area_id)
+                .ok_or(AreaRetirementOperationError::Invalid)?;
+            runtime_content
+                .uninstall_delta(delta)
+                .map_err(|_| AreaRetirementOperationError::Invalid)?;
+        }
+        Ok::<(), AreaRetirementOperationError>(())
+    })();
+    if let Err(error) = mutated {
+        world.restore_lifecycle_checkpoint(world_checkpoint);
+        *runtime_content = runtime_checkpoint;
+        return Err(error);
+    }
+    let candidate_snapshot = world.runtime_snapshot();
+    if let Err(error) = store
+        .commit_area_retirement(
+            candidate_snapshot.clone(),
+            expected_generation.clone(),
+            durable.clone(),
+        )
+        .await
+    {
+        if area_commit_error_is_definitive(&error) {
+            world.restore_lifecycle_checkpoint(world_checkpoint);
+            *runtime_content = runtime_checkpoint;
+            return Err(AreaRetirementOperationError::Persistence(error));
+        }
+        match reconcile_area_commit_after_error(
+            store,
+            &before_snapshot,
+            &candidate_snapshot,
+            &durable,
+            true,
+        )
+        .await
+        {
+            AreaCommitReadback::Committed => {
+                warn!(%error, "durable area retirement succeeded but its acknowledgement was lost");
+            }
+            AreaCommitReadback::NotCommitted => {
+                world.restore_lifecycle_checkpoint(world_checkpoint);
+                *runtime_content = runtime_checkpoint;
+                return Err(AreaRetirementOperationError::Persistence(error));
+            }
+            AreaCommitReadback::Ambiguous => {
+                return Err(AreaRetirementOperationError::DurableAuthorityAmbiguous);
+            }
+        }
+    }
+    Ok(area_ids)
+}
+
+async fn rehydrate_prepared_areas(
+    world: &mut World,
+    runtime_content: &mut RuntimeContent,
+    store: &dyn CharacterStore,
+    prepared: &PreparedAreaBatch,
+    durable: &DurableAreaCheckpoint,
+    expected_generation: &DurableAreaGeneration,
+) -> Result<Vec<String>, AreaRetirementOperationError> {
+    if world.area_generation() != Some(&prepared.core.generation_id)
+        || expected_generation.active_catalog_sha256 != prepared.core.generation_id.as_str()
+        || durable.generation_sha256 != prepared.core.generation_id.as_str()
+    {
+        return Err(AreaRetirementOperationError::Invalid);
+    }
+    let checkpoint =
+        validate_area_checkpoint(durable).map_err(AreaRetirementOperationError::Persistence)?;
+    let area_ids = checkpoint
+        .areas
+        .iter()
+        .map(|area| area.area_id.clone())
+        .collect::<Vec<_>>();
+    if prepared
+        .core
+        .areas
+        .iter()
+        .map(|area| area.area_id.as_str())
+        .ne(area_ids.iter().map(String::as_str))
+    {
+        return Err(AreaRetirementOperationError::Invalid);
+    }
+    let before_snapshot = world.runtime_snapshot();
+    let world_checkpoint = world.lifecycle_checkpoint();
+    let runtime_checkpoint = runtime_content.clone();
+    let mutated = (|| {
+        world
+            .rehydrate_retired_areas(
+                prepared.core.clone(),
+                checkpoint,
+                &durable.checkpoint_sha256,
+            )
+            .map_err(map_core_area_retirement_error)?;
+        for area_id in &area_ids {
+            let delta = prepared
+                .runtime_by_area
+                .get(area_id)
+                .cloned()
+                .ok_or(AreaRetirementOperationError::Invalid)?;
+            runtime_content
+                .install_delta(delta)
+                .map_err(|_| AreaRetirementOperationError::Invalid)?;
+        }
+        Ok::<(), AreaRetirementOperationError>(())
+    })();
+    if let Err(error) = mutated {
+        world.restore_lifecycle_checkpoint(world_checkpoint);
+        *runtime_content = runtime_checkpoint;
+        return Err(error);
+    }
+    let candidate_snapshot = world.runtime_snapshot();
+    if let Err(error) = store
+        .commit_area_rehydration(
+            candidate_snapshot.clone(),
+            expected_generation.clone(),
+            durable.clone(),
+        )
+        .await
+    {
+        if area_commit_error_is_definitive(&error) {
+            world.restore_lifecycle_checkpoint(world_checkpoint);
+            *runtime_content = runtime_checkpoint;
+            return Err(AreaRetirementOperationError::Persistence(error));
+        }
+        match reconcile_area_commit_after_error(
+            store,
+            &before_snapshot,
+            &candidate_snapshot,
+            durable,
+            false,
+        )
+        .await
+        {
+            AreaCommitReadback::Committed => {
+                warn!(%error, "durable area rehydration succeeded but its acknowledgement was lost");
+            }
+            AreaCommitReadback::NotCommitted => {
+                world.restore_lifecycle_checkpoint(world_checkpoint);
+                *runtime_content = runtime_checkpoint;
+                return Err(AreaRetirementOperationError::Persistence(error));
+            }
+            AreaCommitReadback::Ambiguous => {
+                return Err(AreaRetirementOperationError::DurableAuthorityAmbiguous);
+            }
+        }
+    }
+    Ok(area_ids)
+}
+
+fn map_core_area_retirement_error(error: CoreAreaRetirementError) -> AreaRetirementOperationError {
+    match error {
+        CoreAreaRetirementError::Busy(_) => AreaRetirementOperationError::Busy,
+        CoreAreaRetirementError::Invalid | CoreAreaRetirementError::Stale => {
+            AreaRetirementOperationError::Invalid
+        }
+    }
+}
+
+fn area_commit_error_is_definitive(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::InvalidAreaCheckpoint
+            | StoreError::AreaCheckpointConflict
+            | StoreError::InvalidAreaGeneration
+            | StoreError::AreaGenerationConflict
+            | StoreError::AreaCheckpointUnsupported
+            | StoreError::AreaGenerationUnsupported
+            | StoreError::SnapshotTooLarge { .. }
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AreaCommitReadback {
+    Committed,
+    NotCommitted,
+    Ambiguous,
+}
+
+async fn reconcile_area_commit_after_error(
+    store: &dyn CharacterStore,
+    before_snapshot: &WorldRuntimeSnapshot,
+    candidate_snapshot: &WorldRuntimeSnapshot,
+    expected_checkpoint: &DurableAreaCheckpoint,
+    candidate_has_checkpoint: bool,
+) -> AreaCommitReadback {
+    let recovery = match store.load_startup_world_recovery().await {
+        Ok(StartupWorldRecovery::Snapshot { snapshot, .. }) => snapshot,
+        Ok(StartupWorldRecovery::Empty | StartupWorldRecovery::Ledger(_)) | Err(_) => {
+            return AreaCommitReadback::Ambiguous;
+        }
+    };
+    let checkpoints = match store.load_area_checkpoints().await {
+        Ok(checkpoints) => checkpoints,
+        Err(_) => return AreaCommitReadback::Ambiguous,
+    };
+    let matching_slot = checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            checkpoint.generation_sha256 == expected_checkpoint.generation_sha256
+                && checkpoint.unit_id == expected_checkpoint.unit_id
+        })
+        .collect::<Vec<_>>();
+    let checkpoint_present = match matching_slot.as_slice() {
+        [] => false,
+        [checkpoint] if *checkpoint == expected_checkpoint => true,
+        _ => return AreaCommitReadback::Ambiguous,
+    };
+    if recovery == *candidate_snapshot && checkpoint_present == candidate_has_checkpoint {
+        AreaCommitReadback::Committed
+    } else if recovery == *before_snapshot && checkpoint_present != candidate_has_checkpoint {
+        AreaCommitReadback::NotCommitted
+    } else {
+        AreaCommitReadback::Ambiguous
+    }
 }
 
 async fn enter_prepared_character(
@@ -3642,9 +4151,10 @@ mod tests {
         ) -> Result<crate::persistence::StartupWorldRecovery, StoreError> {
             let state = self.state.lock().unwrap();
             Ok(match &state.runtime {
-                Some(snapshot) => {
-                    crate::persistence::StartupWorldRecovery::Snapshot(snapshot.clone())
-                }
+                Some(snapshot) => crate::persistence::StartupWorldRecovery::Snapshot {
+                    durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
+                    snapshot: snapshot.clone(),
+                },
                 None if state.domain_events.is_empty() => {
                     crate::persistence::StartupWorldRecovery::Empty
                 }
@@ -9189,6 +9699,7 @@ mod tests {
                 base_classes: Vec::new(),
             }),
             area_router: None,
+            area_rehydration_lock: Arc::new(AsyncMutex::new(())),
         };
         for _ in 0..WORLD_COMMAND_QUEUE_CAPACITY {
             let (reply, _receive) = oneshot::channel();

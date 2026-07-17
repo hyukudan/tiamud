@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512"
+     height="512"
+     viewBox="0 0 512 512"
+     role="img"
+     aria-labelledby="tiamud-icon-title tiamud-icon-description">
+  <title id="tiamud-icon-title">Tiamud</title>
+  <desc id="tiamud-icon-description">The blue-glass lantern from the Tiamud wordmark.</desc>
+
+  <!-- The background reaches every edge so the same source remains safe when masked. -->
+  <rect width="512" height="512" fill="#11130f"/>
+  <circle cx="256" cy="256" r="202" fill="#18313a" opacity="0.7"/>
+  <path d="M256 50L462 256L256 462L50 256Z"
+        fill="none"
+        stroke="#20251b"
+        stroke-width="18"
+        stroke-linejoin="round"/>
+  <path d="M256 54L458 256L256 458L54 256Z"
+        fill="none"
+        stroke="#b8a16b"
+        stroke-width="6"
+        stroke-linejoin="round"/>
+
+  <!-- Exact I and lantern geometry adapted from the reviewed Tiamud wordmark. -->
+  <g transform="translate(172.4 88) scale(2.2)"
+     stroke="#20251b"
+     stroke-linejoin="round"
+     paint-order="stroke fill">
+    <path d="M0 0H76V20H60V120H76V140H0V120H16V20H0Z"
+          fill="#f4ead7"
+          stroke-width="4"/>
+    <path d="M25 43L31 32H45L51 43"
+          fill="none"
+          stroke="#c7b174"
+          stroke-width="6"
+          stroke-linecap="round"/>
+    <path d="M21 45H55L61 89H15Z"
+          fill="#72d0ee"
+          stroke-width="4"/>
+    <path d="M21 45H55M15 89H61"
+          fill="none"
+          stroke="#c7b174"
+          stroke-width="6"/>
+    <path d="M30 48L27 85M46 48L50 85"
+          fill="none"
+          stroke="#e4d3a8"
+          stroke-width="3"
+          opacity="0.78"/>
+    <path d="M38 54V82"
+          fill="none"
+          stroke="#ecfbff"
+          stroke-width="3"
+          stroke-linecap="round"
+          opacity="0.72"/>
+  </g>
+</svg>

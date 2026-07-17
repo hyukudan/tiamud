@@ -21,11 +21,12 @@ pub use area_catalog::{
 };
 pub use area_registry::{
     ActiveAreaCatalog, ActiveAreaCatalogIdentity, GenerationReplacementKind, LocalAreaGeneration,
-    LocalAreaRegistryError, MAX_LOCAL_AREA_POINTER_BYTES, MAX_LOCAL_HARD_DEPENDENCY_CLOSURE,
-    StagedLocalAreaGenerationReplacement, local_active_area_catalog_path, local_area_bundle_path,
-    local_area_catalog_path, local_area_publication_lock_path, local_area_world_path,
-    read_bounded_local_registry_file, read_bounded_regular_file, stage_generation_replacement,
-    stage_generation_rollback, validate_generation_replacement, verify_existing_registry_directory,
+    LocalAreaRegistryError, MAX_LOCAL_AREA_POINTER_BYTES, MAX_LOCAL_EVICTION_UNITS,
+    MAX_LOCAL_HARD_DEPENDENCY_CLOSURE, StagedLocalAreaGenerationReplacement,
+    local_active_area_catalog_path, local_area_bundle_path, local_area_catalog_path,
+    local_area_publication_lock_path, local_area_world_path, read_bounded_local_registry_file,
+    read_bounded_regular_file, stage_generation_replacement, stage_generation_rollback,
+    validate_generation_replacement, verify_existing_registry_directory,
 };
 #[cfg(unix)]
 pub use area_registry::{

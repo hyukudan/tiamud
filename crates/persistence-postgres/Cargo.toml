@@ -8,17 +8,19 @@ publish = false
 
 [dependencies]
 clap.workspace = true
+hex.workspace = true
 postgres.workspace = true
 rusqlite.workspace = true
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tiamud-core = { path = "../mud-core" }
 tiamud-persistence-sqlite = { path = "../persistence-sqlite" }
 tokio-postgres-rustls = { version = "0.14.0", features = ["native-certs", "ring"] }
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true
 
 [[bin]]

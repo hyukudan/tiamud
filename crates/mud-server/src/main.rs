@@ -14,7 +14,7 @@ mod web;
 mod world_actor;
 mod world_loader;
 
-use area_runtime::AreaLoadCoordinator;
+use area_runtime::{AreaLoadCoordinator, CatalogWorldBootstrap};
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -25,11 +25,21 @@ use operations::{
     RuntimeMetrics,
 };
 use persistence::{
-    CharacterStore, DurableAreaGeneration, MeasuredCharacterStore, SqliteCharacterStore, StoreError,
+    CharacterStore, DurableAreaGeneration, MeasuredCharacterStore, SqliteCharacterStore,
+    StartupWorldRecovery, StoreError, validate_area_checkpoint,
 };
 use persistence_postgres::PostgresCharacterStore;
-use std::{env, error::Error, net::SocketAddr, path::Path, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    error::Error,
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+    time::Instant,
+};
 use thiserror::Error;
+use tiamud_core::{AreaRuntimeResidence, WorldRuntimeSnapshot};
 use tokio::{
     net::TcpListener,
     signal,
@@ -93,7 +103,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Arc::new(MeasuredCharacterStore::new(store, metrics.clone()));
     let store_shutdown = store.clone();
     let durable_generation_before_recovery = store.load_area_generation().await?;
-    let recovery = store.load_startup_world_recovery().await?;
+    let mut recovery = store.load_startup_world_recovery().await?;
     let has_durable_character_authority = store.has_durable_character_authority().await?;
     let durable_area_generation = store.load_area_generation().await?;
     if durable_generation_before_recovery != durable_area_generation {
@@ -178,11 +188,19 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             let pinned = parse_pinned_world_content(generation.world_artifact())?;
             let source = format!("area catalog {generation_id}");
             let coordinator = AreaLoadCoordinator::new(*generation, pinned, Some(metrics.clone()));
-            let bootstrap = coordinator
+            let had_world_recovery = recovery.requires_full_generation();
+            let mut bootstrap = coordinator
                 .bootstrap_world(recovery.requires_full_generation())
                 .await?;
+            recovery = prepare_catalog_startup_recovery(
+                recovery,
+                &mut bootstrap,
+                &coordinator,
+                store.as_ref(),
+            )
+            .await?;
             let confirm_initial_dynamic_state =
-                !recovery.requires_full_generation() && bootstrap.created_dynamic_state;
+                !had_world_recovery && bootstrap.created_dynamic_state;
             if durable_area_generation.is_none() {
                 let proposed = DurableAreaGeneration {
                     world_id: world_id.clone(),
@@ -335,6 +353,235 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             error!(%error, "persistence worker stopped before shutdown acknowledgement")
         }
         Err(_) => error!("persistence worker shutdown exceeded its five-second timeout"),
+    }
+    Ok(())
+}
+
+async fn prepare_catalog_startup_recovery(
+    recovery: StartupWorldRecovery,
+    bootstrap: &mut CatalogWorldBootstrap,
+    coordinator: &AreaLoadCoordinator,
+    store: &dyn CharacterStore,
+) -> Result<StartupWorldRecovery, Box<dyn Error + Send + Sync>> {
+    let StartupWorldRecovery::Snapshot {
+        durable_version,
+        mut snapshot,
+    } = recovery
+    else {
+        return Ok(recovery);
+    };
+    let generation = coordinator.generation();
+    let generation_id = generation.generation_id();
+    let catalog_manifest = bootstrap.world.runtime_snapshot().area_residency;
+    if durable_version < tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
+        if !snapshot.area_residency.is_empty() {
+            return Err("a legacy catalog snapshot unexpectedly contains v8 residency".into());
+        }
+        snapshot.area_residency = catalog_manifest;
+        tiamud_core::validate_world_runtime_snapshot_semantics(&snapshot).map_err(
+            |_| "legacy catalog snapshot could not accept the explicit resident manifest",
+        )?;
+        if store
+            .load_area_checkpoints()
+            .await?
+            .iter()
+            .any(|checkpoint| checkpoint.generation_sha256 == generation_id)
+        {
+            return Err("legacy catalog snapshot has impossible area checkpoints".into());
+        }
+        return Ok(StartupWorldRecovery::Snapshot {
+            durable_version,
+            snapshot,
+        });
+    }
+    complete_and_validate_catalog_runtime_manifest(generation, &catalog_manifest, &mut snapshot)?;
+
+    let durable_checkpoints = store.load_area_checkpoints().await?;
+    let mut current_checkpoints = Vec::new();
+    for durable in durable_checkpoints
+        .into_iter()
+        .filter(|checkpoint| checkpoint.generation_sha256 == generation_id)
+    {
+        let checkpoint = validate_area_checkpoint(&durable)?;
+        current_checkpoints.push((durable, checkpoint));
+    }
+    let retired_ids = snapshot
+        .area_residency
+        .iter()
+        .filter_map(|(area_id, state)| {
+            matches!(state, AreaRuntimeResidence::Retired { .. }).then_some(area_id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    if retired_ids.is_empty() {
+        if !current_checkpoints.is_empty() {
+            return Err("resident catalog snapshot retains active-generation checkpoints".into());
+        }
+        return Ok(StartupWorldRecovery::Snapshot {
+            durable_version,
+            snapshot,
+        });
+    }
+
+    current_checkpoints.sort_by(|left, right| left.0.unit_id.cmp(&right.0.unit_id));
+    let mut covered = BTreeSet::new();
+    for (durable, checkpoint) in &current_checkpoints {
+        if checkpoint.areas.iter().any(|identity| {
+            !covered.insert(identity.area_id.clone())
+                || snapshot
+                    .area_residency
+                    .get(&identity.area_id)
+                    .is_none_or(|state| {
+                        !matches!(
+                            state,
+                            AreaRuntimeResidence::Retired {
+                                revision,
+                                bundle_sha256,
+                                residency_epoch,
+                                checkpoint_version,
+                                checkpoint_sha256,
+                            } if *revision == identity.revision
+                                && bundle_sha256 == &identity.bundle_sha256
+                                && *residency_epoch == identity.residency_epoch
+                                && *checkpoint_version == durable.checkpoint_version
+                                && checkpoint_sha256 == &durable.checkpoint_sha256
+                        )
+                    })
+        }) {
+            return Err("retired catalog manifest and checkpoint identities differ".into());
+        }
+    }
+    if covered != retired_ids {
+        return Err("retired catalog manifest is not covered by exact checkpoints".into());
+    }
+
+    // Reconstruct the historical retirement order. Removing one inverse
+    // dependency closure can make another closure independently evictable, so
+    // preparing every unit against the original all-resident graph is wrong.
+    let mut remaining = current_checkpoints;
+    let mut prepared_units = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let mut matched = None;
+        for (index, (durable, checkpoint)) in remaining.iter().enumerate() {
+            let first_area = checkpoint
+                .areas
+                .first()
+                .ok_or("durable area checkpoint has no areas")?;
+            let Ok(prepared) = coordinator.prepare_retirement(&first_area.area_id).await else {
+                continue;
+            };
+            let prepared_ids = prepared
+                .core
+                .areas
+                .iter()
+                .map(|area| area.area_id.as_str())
+                .collect::<Vec<_>>();
+            let checkpoint_ids = checkpoint
+                .areas
+                .iter()
+                .map(|area| area.area_id.as_str())
+                .collect::<Vec<_>>();
+            if prepared.unit_id == durable.unit_id && prepared_ids == checkpoint_ids {
+                matched = Some((index, prepared));
+                break;
+            }
+        }
+        let Some((index, prepared)) = matched else {
+            return Err(
+                "durable checkpoints cannot reconstruct their catalog eviction order".into(),
+            );
+        };
+        let area_ids = prepared
+            .core
+            .areas
+            .iter()
+            .map(|area| area.area_id.clone())
+            .collect::<Vec<_>>();
+        coordinator.mark_nonresident(&area_ids)?;
+        prepared_units.push(prepared);
+        remaining.remove(index);
+    }
+    bootstrap
+        .world
+        .restore_runtime_snapshot_with_retired_areas(
+            snapshot,
+            prepared_units
+                .iter()
+                .map(|prepared| prepared.core.clone())
+                .collect(),
+        )
+        .map_err(|error| format!("could not restore retired catalog runtime: {error}"))?;
+    for prepared in prepared_units {
+        for area_id in prepared.core.areas.iter().map(|area| &area.area_id) {
+            let delta = prepared
+                .rehydration
+                .runtime_by_area
+                .get(area_id)
+                .ok_or("retired startup unit has no runtime delta")?;
+            bootstrap
+                .runtime_content
+                .uninstall_delta(delta)
+                .map_err(|error| format!("could not uninstall retired runtime delta: {error}"))?;
+        }
+    }
+    Ok(StartupWorldRecovery::Empty)
+}
+
+fn complete_and_validate_catalog_runtime_manifest(
+    generation: &LocalAreaGeneration,
+    catalog_manifest: &BTreeMap<String, AreaRuntimeResidence>,
+    snapshot: &mut WorldRuntimeSnapshot,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let catalog_identities = generation
+        .catalog()
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.area_id.clone(),
+                (entry.revision, entry.bundle_sha256.clone()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    complete_catalog_residency_manifest(
+        &catalog_identities,
+        catalog_manifest,
+        &mut snapshot.area_residency,
+    )
+    .map_err(|error| -> Box<dyn Error + Send + Sync> { error.into() })?;
+    tiamud_core::validate_world_runtime_snapshot_semantics(snapshot)
+        .map_err(|_| "v8 catalog snapshot residency is invalid".into())
+}
+
+fn complete_catalog_residency_manifest(
+    catalog_identities: &BTreeMap<String, (u64, String)>,
+    catalog_manifest: &BTreeMap<String, AreaRuntimeResidence>,
+    durable_manifest: &mut BTreeMap<String, AreaRuntimeResidence>,
+) -> Result<(), String> {
+    if durable_manifest.is_empty() {
+        return Err("v8 catalog snapshot has an empty residency manifest".into());
+    }
+    for (area_id, state) in durable_manifest.iter() {
+        let Some((revision, bundle_sha256)) = catalog_identities.get(area_id) else {
+            return Err("v8 catalog snapshot names an area outside the fixed catalog".into());
+        };
+        if state.revision() != *revision || state.bundle_sha256() != bundle_sha256 {
+            return Err("v8 catalog snapshot has a mismatched residency manifest".into());
+        }
+    }
+    for (area_id, (revision, bundle_sha256)) in catalog_identities {
+        if durable_manifest.contains_key(area_id) {
+            continue;
+        }
+        let resident = catalog_manifest
+            .get(area_id)
+            .ok_or("full catalog bootstrap has an incomplete residency manifest")?;
+        if !matches!(resident, AreaRuntimeResidence::Resident { .. })
+            || resident.revision() != *revision
+            || resident.bundle_sha256() != bundle_sha256
+        {
+            return Err("full catalog bootstrap residency differs from its catalog".into());
+        }
+        durable_manifest.insert(area_id.clone(), resident.clone());
     }
     Ok(())
 }

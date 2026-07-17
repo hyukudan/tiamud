@@ -169,6 +169,106 @@ impl RuntimeContent {
         Ok(())
     }
 
+    /// Removes one exact, previously installed area contribution from a
+    /// private candidate.
+    ///
+    /// Every key and value is prevalidated before the candidate is changed.
+    /// The delta therefore cannot remove content owned by another area merely
+    /// by reusing its room, entity or script identity. This operation does not
+    /// decide whether an area may retire and does not publish a runtime change.
+    #[allow(dead_code)] // 6D staging API; actor integration is deliberately separate.
+    pub(crate) fn uninstall_delta(
+        &mut self,
+        delta: &RuntimeContentDelta,
+    ) -> Result<(), RuntimeContentUninstallError> {
+        let mut room_ids = BTreeSet::new();
+        for variants in &delta.variants {
+            if !room_ids.insert(variants.room_id.as_str()) {
+                return Err(RuntimeContentUninstallError::DuplicateRoomVariants(
+                    variants.room_id.clone(),
+                ));
+            }
+            let installed = self.variants.get(&variants.room_id).ok_or_else(|| {
+                RuntimeContentUninstallError::MissingRoomVariants(variants.room_id.clone())
+            })?;
+            if installed != variants {
+                return Err(RuntimeContentUninstallError::RoomVariantsMismatch(
+                    variants.room_id.clone(),
+                ));
+            }
+        }
+
+        let mut media_keys = BTreeSet::new();
+        for media in &delta.entity_media {
+            let key = (media.kind, media.subject_id.as_str());
+            if !media_keys.insert(key) {
+                return Err(RuntimeContentUninstallError::DuplicateEntityMedia {
+                    kind: media.kind,
+                    subject_id: media.subject_id.clone(),
+                });
+            }
+            let installed = self
+                .entity_media
+                .get(&(media.kind, media.subject_id.clone()))
+                .ok_or_else(|| RuntimeContentUninstallError::MissingEntityMedia {
+                    kind: media.kind,
+                    subject_id: media.subject_id.clone(),
+                })?;
+            if installed != media {
+                return Err(RuntimeContentUninstallError::EntityMediaMismatch {
+                    kind: media.kind,
+                    subject_id: media.subject_id.clone(),
+                });
+            }
+        }
+
+        let mut script_ids = BTreeSet::new();
+        for script in &delta.scripts {
+            if !script_ids.insert(script.id.as_str()) {
+                return Err(RuntimeContentUninstallError::DuplicateScript(
+                    script.id.clone(),
+                ));
+            }
+            let mut installed = self
+                .scripts
+                .iter()
+                .filter(|installed| installed.id == script.id);
+            let Some(installed_script) = installed.next() else {
+                return Err(RuntimeContentUninstallError::MissingScript(
+                    script.id.clone(),
+                ));
+            };
+            if installed.next().is_some() {
+                return Err(RuntimeContentUninstallError::InstalledScriptIdAmbiguous(
+                    script.id.clone(),
+                ));
+            }
+            if !installed_script.exactly_matches(script) {
+                return Err(RuntimeContentUninstallError::ScriptMismatch(
+                    script.id.clone(),
+                ));
+            }
+        }
+
+        let mut candidate = self.clone();
+        for room_id in room_ids {
+            candidate.variants.remove(room_id);
+        }
+        for (kind, subject_id) in media_keys {
+            candidate
+                .entity_media
+                .remove(&(kind, subject_id.to_owned()));
+        }
+        candidate
+            .scripts
+            .retain(|script| !script_ids.contains(script.id.as_str()));
+        candidate
+            .scripts
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        *self = candidate;
+        Ok(())
+    }
+
     pub(crate) fn resolve_scene(
         &self,
         world: &World,
@@ -605,6 +705,40 @@ pub(crate) enum RuntimeContentInstallError {
     ScriptIdCollision(String),
 }
 
+#[derive(Debug, Error, Eq, PartialEq)]
+#[allow(dead_code)] // Constructed by the staged 6D API before actor integration.
+pub(crate) enum RuntimeContentUninstallError {
+    #[error("runtime delta repeats room variants for `{0}`")]
+    DuplicateRoomVariants(String),
+    #[error("room `{0}` has no installed runtime variants")]
+    MissingRoomVariants(String),
+    #[error("room `{0}` runtime variants do not match the installed contribution")]
+    RoomVariantsMismatch(String),
+    #[error("runtime delta repeats {kind:?} entity media for `{subject_id}`")]
+    DuplicateEntityMedia {
+        kind: EntityMediaKind,
+        subject_id: String,
+    },
+    #[error("{kind:?} entity `{subject_id}` has no installed runtime media")]
+    MissingEntityMedia {
+        kind: EntityMediaKind,
+        subject_id: String,
+    },
+    #[error("{kind:?} entity `{subject_id}` media do not match the installed contribution")]
+    EntityMediaMismatch {
+        kind: EntityMediaKind,
+        subject_id: String,
+    },
+    #[error("runtime delta repeats script `{0}`")]
+    DuplicateScript(String),
+    #[error("script `{0}` is not installed")]
+    MissingScript(String),
+    #[error("script `{0}` is installed more than once")]
+    InstalledScriptIdAmbiguous(String),
+    #[error("script `{0}` does not match the installed contribution")]
+    ScriptMismatch(String),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeScript {
     pub(crate) id: String,
@@ -638,6 +772,21 @@ impl RuntimeScript {
             },
             source: definition.source,
         }
+    }
+
+    #[allow(dead_code)] // Used by the staged 6D uninstall validation.
+    fn exactly_matches(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.room_id == other.room_id
+            && self.hooks == other.hooks
+            && self.capabilities == other.capabilities
+            && self.limits.max_source_bytes == other.limits.max_source_bytes
+            && self.limits.max_memory_bytes == other.limits.max_memory_bytes
+            && self.limits.max_instructions == other.limits.max_instructions
+            && self.limits.max_wall_time == other.limits.max_wall_time
+            && self.limits.max_events == other.limits.max_events
+            && self.limits.max_event_field_bytes == other.limits.max_event_field_bytes
+            && self.source.as_bytes() == other.source.as_bytes()
     }
 }
 
@@ -957,6 +1106,51 @@ mod tests {
         }
     }
 
+    fn test_room_variants(index: usize) -> RoomSceneVariants {
+        RoomSceneVariants {
+            room_id: format!("test:room-{index:02}"),
+            variants: vec![world_pack::SceneVariant {
+                id: format!("test:variant-{index:02}"),
+                priority: i32::try_from(index).unwrap(),
+                when: None,
+                title: Some(format!("Area {index} title patch")),
+                description: Some(format!("Area {index} reviewed prose patch.")),
+                asset_manifest: None,
+                image_alt: world_pack::LocalizedText(BTreeMap::new()),
+                audio: None,
+            }],
+        }
+    }
+
+    fn test_area_delta(index: usize) -> RuntimeContentDelta {
+        let mut script = flag_script(index, ScriptHook::OnLook);
+        script.room_id = format!("test:room-{index:02}");
+        RuntimeContentDelta::new(
+            vec![test_room_variants(index)],
+            vec![test_entity_media(&format!("test:item-{index:02}"))],
+            vec![script],
+        )
+    }
+
+    fn assert_runtime_content_exact(actual: &RuntimeContent, expected: &RuntimeContent) {
+        assert_eq!(actual.variants, expected.variants);
+        assert_eq!(actual.entity_media, expected.entity_media);
+        assert_eq!(actual.scripts.len(), expected.scripts.len());
+        assert!(
+            actual
+                .scripts
+                .iter()
+                .zip(&expected.scripts)
+                .all(|(actual, expected)| actual.exactly_matches(expected))
+        );
+        assert_eq!(actual.seed, expected.seed);
+        match (&actual.operational_metrics, &expected.operational_metrics) {
+            (Some(actual), Some(expected)) => assert!(Arc::ptr_eq(actual, expected)),
+            (None, None) => {}
+            _ => panic!("runtime metric ownership changed"),
+        }
+    }
+
     #[test]
     fn runtime_delta_is_atomic_when_it_contains_duplicate_media() {
         let mut content = RuntimeContent::default();
@@ -1039,6 +1233,172 @@ mod tests {
                 "script:bounded-03"
             ]
         );
+    }
+
+    #[test]
+    fn runtime_delta_install_uninstall_roundtrip_is_exact_and_preserves_runtime_identity() {
+        let base = test_area_delta(40);
+        let added = test_area_delta(41);
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let mut content = RuntimeContent::new(base.variants, base.scripts, 0x5449_414d)
+            .with_entity_media(base.entity_media)
+            .with_operational_metrics(metrics);
+        let before = content.clone();
+
+        content.install_delta(added.clone()).unwrap();
+        content.uninstall_delta(&added).unwrap();
+
+        assert_runtime_content_exact(&content, &before);
+    }
+
+    #[test]
+    fn runtime_delta_uninstall_rejects_mismatch_absence_and_duplicates_atomically() {
+        let installed = test_area_delta(50);
+        let mut content = RuntimeContent::default();
+        content.install_delta(installed.clone()).unwrap();
+        let before = content.clone();
+
+        let mut variants_mismatch = installed.clone();
+        variants_mismatch.variants[0].variants[0].title = Some("foreign patch".into());
+        assert_eq!(
+            content.uninstall_delta(&variants_mismatch),
+            Err(RuntimeContentUninstallError::RoomVariantsMismatch(
+                "test:room-50".into()
+            ))
+        );
+        assert_runtime_content_exact(&content, &before);
+
+        let mut media_mismatch = installed.clone();
+        media_mismatch.entity_media[0].priority += 1;
+        assert_eq!(
+            content.uninstall_delta(&media_mismatch),
+            Err(RuntimeContentUninstallError::EntityMediaMismatch {
+                kind: EntityMediaKind::Item,
+                subject_id: "test:item-50".into(),
+            })
+        );
+        assert_runtime_content_exact(&content, &before);
+
+        let mut script_mismatch = installed.clone();
+        script_mismatch.scripts[0]
+            .source
+            .push_str(" -- foreign bytes");
+        assert_eq!(
+            content.uninstall_delta(&script_mismatch),
+            Err(RuntimeContentUninstallError::ScriptMismatch(
+                "script:bounded-50".into()
+            ))
+        );
+        assert_runtime_content_exact(&content, &before);
+
+        let absent = test_area_delta(51);
+        assert_eq!(
+            content.uninstall_delta(&absent),
+            Err(RuntimeContentUninstallError::MissingRoomVariants(
+                "test:room-51".into()
+            ))
+        );
+        assert_eq!(
+            content.uninstall_delta(&RuntimeContentDelta::new(
+                Vec::new(),
+                absent.entity_media,
+                Vec::new(),
+            )),
+            Err(RuntimeContentUninstallError::MissingEntityMedia {
+                kind: EntityMediaKind::Item,
+                subject_id: "test:item-51".into(),
+            })
+        );
+        assert_eq!(
+            content.uninstall_delta(&RuntimeContentDelta::new(
+                Vec::new(),
+                Vec::new(),
+                absent.scripts,
+            )),
+            Err(RuntimeContentUninstallError::MissingScript(
+                "script:bounded-51".into()
+            ))
+        );
+        assert_runtime_content_exact(&content, &before);
+
+        let mut duplicate_variants = installed.clone();
+        duplicate_variants
+            .variants
+            .push(duplicate_variants.variants[0].clone());
+        assert_eq!(
+            content.uninstall_delta(&duplicate_variants),
+            Err(RuntimeContentUninstallError::DuplicateRoomVariants(
+                "test:room-50".into()
+            ))
+        );
+        let duplicate_media = RuntimeContentDelta::new(
+            Vec::new(),
+            vec![
+                installed.entity_media[0].clone(),
+                installed.entity_media[0].clone(),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            content.uninstall_delta(&duplicate_media),
+            Err(RuntimeContentUninstallError::DuplicateEntityMedia {
+                kind: EntityMediaKind::Item,
+                subject_id: "test:item-50".into(),
+            })
+        );
+        let duplicate_scripts = RuntimeContentDelta::new(
+            Vec::new(),
+            Vec::new(),
+            vec![installed.scripts[0].clone(), installed.scripts[0].clone()],
+        );
+        assert_eq!(
+            content.uninstall_delta(&duplicate_scripts),
+            Err(RuntimeContentUninstallError::DuplicateScript(
+                "script:bounded-50".into()
+            ))
+        );
+        assert_runtime_content_exact(&content, &before);
+    }
+
+    #[test]
+    fn runtime_delta_uninstall_removes_only_one_areas_patch_presentation_and_script() {
+        let area_a = test_area_delta(60);
+        let area_b = test_area_delta(61);
+        let mut content = RuntimeContent::new(Vec::new(), Vec::new(), 77);
+        content.install_delta(area_b.clone()).unwrap();
+        content.install_delta(area_a.clone()).unwrap();
+        assert_eq!(
+            content
+                .scripts
+                .iter()
+                .map(|script| script.id.as_str())
+                .collect::<Vec<_>>(),
+            ["script:bounded-60", "script:bounded-61"]
+        );
+
+        content.uninstall_delta(&area_a).unwrap();
+        assert!(!content.variants.contains_key("test:room-60"));
+        assert!(content.variants.contains_key("test:room-61"));
+        assert!(
+            !content
+                .entity_media
+                .contains_key(&(EntityMediaKind::Item, "test:item-60".into()))
+        );
+        assert_eq!(
+            content
+                .entity_media
+                .get(&(EntityMediaKind::Item, "test:item-61".into())),
+            Some(&area_b.entity_media[0])
+        );
+        assert_eq!(content.scripts.len(), 1);
+        assert!(content.scripts[0].exactly_matches(&area_b.scripts[0]));
+        assert_eq!(content.seed, 77);
+
+        content.uninstall_delta(&area_b).unwrap();
+        assert!(content.variants.is_empty());
+        assert!(content.entity_media.is_empty());
+        assert!(content.scripts.is_empty());
+        assert_eq!(content.seed, 77);
     }
 
     #[test]

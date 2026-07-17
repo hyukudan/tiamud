@@ -1,0 +1,10 @@
+Use case: stylized-concept
+Asset type: static 2D game entity sprite source, idle pose, intended for later transparent cutout
+Input image 1: palette and painterly world-style reference only; do not copy its scene, architecture, lantern, or composition
+Primary request: create the canonical idle pose of the Tiamud NPC `tiamud:gate-stalker`, a lean supernatural wolf-like gate hunter from Lantern Square's rain-dark North Gate
+Scene/backdrop: perfectly flat solid #ff00ff chroma-key background for local background removal; one uniform color, no shadows, gradient, texture, floor plane, reflection, mist, rain streaks, or lighting variation
+Subject: one full-body quadruped in three-quarter side view facing right; unnaturally slender but anatomically coherent wolf form; long alert legs; narrow ribcage; low guarded shoulders; long rain-dark charcoal-black coat painted in clean grouped tufts rather than fine flyaway hairs; slightly ragged silhouette; two luminous storm-crystal eyes in cold sapphire/cyan, like faceted glass holding a tiny storm; closed mouth; tense watchful expression; no collar, armor, clothing, horns, wings, chains, props, wounds, or extra limbs
+Style/medium: polished original 2D painterly fantasy game art, restrained stylized realism, visible brush texture, same deep navy/slate/charcoal and cold blue visual language as the reference, no glossy 3D render, no anime, no photorealism
+Composition/framing: isolated single creature, full body including paws, ears and tail, centered with generous even padding, consistent orthographic-like game-sprite viewpoint, clean readable silhouette at small size
+Lighting/mood: cool soft rim light from above-left, restrained sapphire accents in eyes only, mysterious and vigilant rather than horrific
+Constraints: perfectly opaque subject against key color; crisp recuttable contour; keep fur edges as clean painted masses without isolated hairs; no cast/contact shadow; do not use #ff00ff or magenta anywhere in the creature; no text, UI, logo, border, watermark, scenery, gore, blood, exposed bone, severed parts, or duplicated body parts

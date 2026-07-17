@@ -5,7 +5,9 @@ consume un **WorldPack v9** canónico. Los autores pueden mantenerlo como módul
 **AreaPack v8** estrictos bajo un **WorldProjectManifest v2** y componerlos sin
 conexión. 6A publica un catálogo local y bundles inmutables; 6B los incorpora
 bajo demanda; 6C puede sustituir solo la generación completa durante un corte
-quiescente. Las áreas no son servicios ni se despliegan de forma independiente.
+quiescente; 6D permite internamente retirar/rehidratar la misma revisión de una
+unidad vacía. No hay reemplazo de revisión ni LRU operativo. Las áreas no son
+servicios ni se despliegan de forma independiente.
 
 Los tipos, validadores y pruebas Rust de `crates/world-pack` son la autoridad
 exacta del esquema. Estas páginas explican el flujo soportado y enlazan el
@@ -59,7 +61,7 @@ cargo run --locked -p world-pack --bin tiamud-world -- diff \
 No publiques solo porque un documento pueda decodificarse. Revisa antes prosa,
 licencias, texto alternativo, estado oculto, balance y diff semántico.
 
-## Catálogo, bundles y generaciones locales (fases 6A–6C)
+## Catálogo, bundles y generaciones locales (fases 6A–6D)
 
 6A no sustituye `compose` ni cambia WorldPack v9, AreaPack v8 o WorldProject
 v2. Añade una segunda representación local y sin conexión:
@@ -131,7 +133,7 @@ síncrono validado.
 Durante el corte, el servidor retiene el mismo lock cooperativo del registro
 que `area-publish`/`area-select` hasta resolver el CAS durable.
 
-La generación activa vive en SQL v14; snapshot v7 y puntero avanzan por CAS en
+La generación activa vive en SQL v15; snapshot v8 y puntero avanzan por CAS en
 una transacción. Para rollback selecciona un catálogo retenido y solicita el
 corte:
 
@@ -158,13 +160,19 @@ Si un commit es ambiguo se relee SQL y, sin G0/G1 determinable, readiness queda
 503. El ACK se rechaza en modo monolítico, con liga, sin recovery/personaje o
 ante digest distinto.
 
-No existen reemplazo/descarga por área, migraciones de estado, LRU, GC, red,
-compresión o firma remota. La puerta pasa 774 pruebas Rust —329 del servidor— y
-la reauditoría 0 P1/0 P2. El humo está retenido y PostgreSQL real no se ejecutó
-sin URL. Consulta
+6D añade retirada/rehidratación interna de la misma revisión con snapshot v8 y
+SQL v15, pero permanece parcial. No existen reemplazo de revisión, migraciones
+de estado, LRU, GC, red, compresión o firma remota. La puerta histórica 6C pasa
+774 pruebas Rust —329 del servidor— y
+la reauditoría 0 P1/0 P2. PostgreSQL 18 desechable pasa 20/20 pruebas del
+adaptador y 7/7 enfocadas del servidor, incluida la CAS v14; el humo liga G0,
+valida readiness/Web/Telnet, dos áreas residentes, `noop` y cierre limpio.
+Consulta el
+[registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md),
 [ADR 0005](../decisions/0005-hot-area-lifecycle.md),
 [ADR 0020](../decisions/0020-additive-local-area-loading.md) y
-[ADR 0021](../decisions/0021-quiescent-area-generation-cutover.md).
+[ADR 0021](../decisions/0021-quiescent-area-generation-cutover.md), y consulta
+[ADR 0022](../decisions/0022-reversible-area-unit-retirement.md) para 6D.
 
 La puerta retenida 6A pasa 144/144 pruebas `world-pack`, incluidas 10/10 CLI,
 y 707/707 Rust del workspace, además de clippy, formato/diff, MSRV Rust 1.88,
@@ -183,7 +191,7 @@ E2E, humo, cargo-deny y licencias/avisos. No debe atribuirse a 6C.
   `lootItemIds`.
 - WorldPack v9 y AreaPack v8 aceptan `transferable`, `character_bound` y
   `non_transferable`. El vínculo es estado runtime creado en la primera
-  adquisición y persistido en snapshot v7, no un campo de autoría. WorldPack
+  adquisición y persistido en snapshot v8, no un campo de autoría. WorldPack
   v4/AreaPack v3 y entradas más antiguas solo normalizan a `transferable`.
 - La política de transferencia cubre todo el subárbol. Una bolsa transferible
   con un descendiente ligado/no transferible no puede darse o soltarse.
@@ -215,9 +223,9 @@ E2E, humo, cargo-deny y licencias/avisos. No debe atribuirse a 6C.
   minúsculos únicos, targeting y plantillas determinan la forma exacta; solo se
   admiten `{actor}`/`{target}` y el peor caso renderizado cabe en 512 bytes.
   Formatos anteriores e importación normalizan a catálogo vacío.
-- `WorldRuntimeSnapshot` v7 es la autoridad durable de ubicaciones, vínculo,
+- `WorldRuntimeSnapshot` v8 es la autoridad durable de ubicaciones, vínculo,
   reservas, procedencia, derechos, afijos y contador de apertura. SQLite y
-  PostgreSQL v14 lo guardan como `TEXT` opaco; v1–v5 retienen 1 MiB y v6–v7,
+  PostgreSQL v15 lo guardan como `TEXT` opaco; v1–v5 retienen 1 MiB y v6–v8,
   2 MiB. La conversión v6 añade afijos vacíos y contador uno. No hay tabla
   espejo de loot/escrow ni doble escritura.
 - Títulos base/variante admiten 1..=128 bytes UTF-8 seguros; descripciones,
@@ -250,6 +258,7 @@ E2E, humo, cargo-deny y licencias/avisos. No debe atribuirse a 6C.
 - [Ciclo de áreas](../decisions/0005-hot-area-lifecycle.md)
 - [Carga aditiva 6B](../decisions/0020-additive-local-area-loading.md)
 - [Corte quiescente 6C](../decisions/0021-quiescent-area-generation-cutover.md)
+- [Retirada reversible 6D](../decisions/0022-reversible-area-unit-retirement.md)
 - [Compilador de assets](../../crates/asset-pipeline/README.md)
 - [Runtime Lua](../../crates/scripting/README.md)
 - [IA editorial opcional](../../crates/editorial-ai/README.md)

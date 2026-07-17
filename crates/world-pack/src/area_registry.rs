@@ -26,6 +26,7 @@ use crate::{
 };
 
 pub const MAX_LOCAL_HARD_DEPENDENCY_CLOSURE: usize = 32;
+pub const MAX_LOCAL_EVICTION_UNITS: usize = crate::MAX_AREA_COUNT;
 pub const MAX_LOCAL_AREA_POINTER_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -127,8 +128,286 @@ pub struct LocalAreaGeneration {
     world_artifact: Vec<u8>,
     fallback: WorldPackDocument,
     area_index: BTreeMap<String, usize>,
+    eviction_index: LocalAreaEvictionIndex,
     room_owners: BTreeMap<String, String>,
     active_pointer_identity: Option<ActiveAreaCatalogIdentity>,
+}
+
+/// Generation-local index used to keep hard-dependency cycles indivisible.
+///
+/// Unit numbers are deliberately private implementation details. Public
+/// queries return only catalog entries in canonical order, so this index does
+/// not create another stable identifier or protocol surface.
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct LocalAreaEvictionIndex {
+    area_to_unit: Vec<usize>,
+    units: Vec<LocalAreaEvictionUnit>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct LocalAreaEvictionUnit {
+    area_indices: Vec<usize>,
+    hard_dependency_units: Vec<usize>,
+    hard_dependent_units: Vec<usize>,
+    eviction_closure: Vec<usize>,
+}
+
+impl LocalAreaEvictionIndex {
+    fn build(
+        catalog: &AreaCatalog,
+        area_index: &BTreeMap<String, usize>,
+    ) -> Result<Self, LocalAreaRegistryError> {
+        let area_count = catalog.entries.len();
+        if area_count == 0
+            || area_count > MAX_LOCAL_EVICTION_UNITS
+            || area_index.len() != area_count
+        {
+            return Err(LocalAreaRegistryError::Invalid(format!(
+                "eviction-unit index requires 1..={MAX_LOCAL_EVICTION_UNITS} unique areas"
+            )));
+        }
+
+        // With at most 256 catalog entries, an explicit transitive-reachability
+        // matrix is smaller and easier to audit than an unbounded recursive SCC
+        // walk. It also makes the inverse eviction closure deterministic.
+        let mut reachable = vec![vec![false; area_count]; area_count];
+        for (source_index, entry) in catalog.entries.iter().enumerate() {
+            if area_index.get(&entry.area_id) != Some(&source_index) {
+                return Err(LocalAreaRegistryError::Invalid(
+                    "eviction-unit area index does not match canonical catalog order".into(),
+                ));
+            }
+            if entry
+                .hard_dependencies
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            {
+                return Err(LocalAreaRegistryError::Invalid(format!(
+                    "hard dependencies for area {:?} are not strictly sorted",
+                    entry.area_id
+                )));
+            }
+            reachable[source_index][source_index] = true;
+            for dependency in &entry.hard_dependencies {
+                let dependency_index = area_index.get(dependency).copied().ok_or_else(|| {
+                    LocalAreaRegistryError::Invalid(format!(
+                        "hard dependency {dependency:?} for area {:?} is unknown",
+                        entry.area_id
+                    ))
+                })?;
+                if dependency_index == source_index {
+                    return Err(LocalAreaRegistryError::Invalid(format!(
+                        "area {:?} cannot hard-depend on itself",
+                        entry.area_id
+                    )));
+                }
+                reachable[source_index][dependency_index] = true;
+            }
+        }
+
+        for intermediate in 0..area_count {
+            let intermediate_reachability = reachable[intermediate].clone();
+            for source_reachability in &mut reachable {
+                if !source_reachability[intermediate] {
+                    continue;
+                }
+                for (target, intermediate_target) in source_reachability
+                    .iter_mut()
+                    .zip(&intermediate_reachability)
+                {
+                    *target |= *intermediate_target;
+                }
+            }
+        }
+
+        let mut area_to_unit = vec![usize::MAX; area_count];
+        let mut unit_areas = Vec::new();
+        for source in 0..area_count {
+            if area_to_unit[source] != usize::MAX {
+                continue;
+            }
+            let unit_index = unit_areas.len();
+            let mut areas = Vec::new();
+            for candidate in source..area_count {
+                if area_to_unit[candidate] == usize::MAX
+                    && reachable[source][candidate]
+                    && reachable[candidate][source]
+                {
+                    area_to_unit[candidate] = unit_index;
+                    areas.push(candidate);
+                }
+            }
+            if areas.is_empty() {
+                return Err(LocalAreaRegistryError::Invalid(
+                    "eviction-unit SCC construction produced an empty unit".into(),
+                ));
+            }
+            unit_areas.push(areas);
+        }
+        if unit_areas.is_empty() || unit_areas.len() > MAX_LOCAL_EVICTION_UNITS {
+            return Err(LocalAreaRegistryError::Invalid(
+                "eviction-unit count exceeds its catalog bound".into(),
+            ));
+        }
+
+        let mut dependency_units = vec![BTreeSet::new(); unit_areas.len()];
+        let mut dependent_units = vec![BTreeSet::new(); unit_areas.len()];
+        for (source_index, entry) in catalog.entries.iter().enumerate() {
+            let source_unit = area_to_unit[source_index];
+            for dependency in &entry.hard_dependencies {
+                let dependency_index = area_index[dependency];
+                let dependency_unit = area_to_unit[dependency_index];
+                if source_unit != dependency_unit {
+                    dependency_units[source_unit].insert(dependency_unit);
+                    dependent_units[dependency_unit].insert(source_unit);
+                }
+            }
+        }
+
+        let mut units = Vec::with_capacity(unit_areas.len());
+        for (unit_index, area_indices) in unit_areas.into_iter().enumerate() {
+            let mut pending = VecDeque::from([unit_index]);
+            let mut eviction_closure = BTreeSet::new();
+            while let Some(current) = pending.pop_front() {
+                if !eviction_closure.insert(current) {
+                    continue;
+                }
+                if eviction_closure.len() > MAX_LOCAL_EVICTION_UNITS {
+                    return Err(LocalAreaRegistryError::Invalid(
+                        "inverse eviction closure exceeds its catalog bound".into(),
+                    ));
+                }
+                pending.extend(dependent_units[current].iter().copied());
+            }
+            units.push(LocalAreaEvictionUnit {
+                area_indices,
+                hard_dependency_units: dependency_units[unit_index].iter().copied().collect(),
+                hard_dependent_units: dependent_units[unit_index].iter().copied().collect(),
+                eviction_closure: eviction_closure.into_iter().collect(),
+            });
+        }
+
+        let index = Self {
+            area_to_unit,
+            units,
+        };
+        index.validate(catalog, area_index)?;
+        Ok(index)
+    }
+
+    fn validate(
+        &self,
+        catalog: &AreaCatalog,
+        area_index: &BTreeMap<String, usize>,
+    ) -> Result<(), LocalAreaRegistryError> {
+        if self.area_to_unit.len() != catalog.entries.len()
+            || self.units.is_empty()
+            || self.units.len() > MAX_LOCAL_EVICTION_UNITS
+        {
+            return Err(LocalAreaRegistryError::Invalid(
+                "eviction-unit index has invalid bounded cardinality".into(),
+            ));
+        }
+
+        let mut covered_areas = BTreeSet::new();
+        for (unit_index, unit) in self.units.iter().enumerate() {
+            if unit.area_indices.is_empty()
+                || unit.area_indices.windows(2).any(|pair| pair[0] >= pair[1])
+                || unit
+                    .hard_dependency_units
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                || unit
+                    .hard_dependent_units
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                || unit
+                    .eviction_closure
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                || unit.eviction_closure.binary_search(&unit_index).is_err()
+            {
+                return Err(LocalAreaRegistryError::Invalid(
+                    "eviction-unit index is not canonical".into(),
+                ));
+            }
+            for &area in &unit.area_indices {
+                if area >= catalog.entries.len()
+                    || self.area_to_unit[area] != unit_index
+                    || !covered_areas.insert(area)
+                {
+                    return Err(LocalAreaRegistryError::Invalid(
+                        "eviction-unit index does not partition catalog areas".into(),
+                    ));
+                }
+            }
+            for &dependency in &unit.hard_dependency_units {
+                if dependency >= self.units.len()
+                    || dependency == unit_index
+                    || self.units[dependency]
+                        .hard_dependent_units
+                        .binary_search(&unit_index)
+                        .is_err()
+                {
+                    return Err(LocalAreaRegistryError::Invalid(
+                        "eviction-unit dependency inverse is inconsistent".into(),
+                    ));
+                }
+            }
+            for &dependent in &unit.hard_dependent_units {
+                if dependent >= self.units.len()
+                    || dependent == unit_index
+                    || self.units[dependent]
+                        .hard_dependency_units
+                        .binary_search(&unit_index)
+                        .is_err()
+                {
+                    return Err(LocalAreaRegistryError::Invalid(
+                        "eviction-unit dependent inverse is inconsistent".into(),
+                    ));
+                }
+            }
+        }
+        if covered_areas.len() != catalog.entries.len() {
+            return Err(LocalAreaRegistryError::Invalid(
+                "eviction-unit index omits catalog areas".into(),
+            ));
+        }
+
+        // No unit outside an eviction closure may retain a hard dependency on
+        // a unit inside it. That property is the future runtime safety boundary
+        // this generation-local index supplies; it does not itself unload.
+        for (unit_index, unit) in self.units.iter().enumerate() {
+            for outside in 0..self.units.len() {
+                if unit.eviction_closure.binary_search(&outside).is_ok() {
+                    continue;
+                }
+                if self.units[outside]
+                    .hard_dependency_units
+                    .iter()
+                    .any(|dependency| unit.eviction_closure.binary_search(dependency).is_ok())
+                {
+                    return Err(LocalAreaRegistryError::Invalid(format!(
+                        "eviction closure for canonical unit {unit_index} leaves an active hard dependent"
+                    )));
+                }
+            }
+        }
+
+        for (area_id, &area) in area_index {
+            if catalog
+                .entries
+                .get(area)
+                .map(|entry| entry.area_id.as_str())
+                != Some(area_id.as_str())
+            {
+                return Err(LocalAreaRegistryError::Invalid(
+                    "eviction-unit validation found a non-canonical area index".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +480,14 @@ impl LocalAreaGeneration {
             ));
         }
 
+        let area_index = catalog
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.area_id.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        let eviction_index = LocalAreaEvictionIndex::build(&catalog, &area_index)?;
+
         let world_path =
             local_area_world_path(&registry, &catalog.world_id, &catalog.world_artifact_sha256);
         let world_artifact = read_bounded_local_registry_file(
@@ -210,12 +497,6 @@ impl LocalAreaGeneration {
             "monolithic WorldPack fallback",
         )?;
         let fallback = verify_area_catalog_fallback(&catalog, &world_artifact)?;
-        let area_index = catalog
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (entry.area_id.clone(), index))
-            .collect::<BTreeMap<_, _>>();
         let room_owners = catalog
             .entries
             .iter()
@@ -235,6 +516,7 @@ impl LocalAreaGeneration {
             world_artifact,
             fallback,
             area_index,
+            eviction_index,
             room_owners,
             active_pointer_identity: None,
         };
@@ -378,6 +660,70 @@ impl LocalAreaGeneration {
 
     pub fn room_owner(&self, room_id: &str) -> Option<&str> {
         self.room_owners.get(room_id).map(String::as_str)
+    }
+
+    /// Resolves the indivisible SCC that contains `area_id`.
+    ///
+    /// Entries are returned in catalog order. The unit has no public ID and is
+    /// valid only for this immutable generation.
+    pub fn eviction_unit_for_area(
+        &self,
+        area_id: &str,
+    ) -> Result<Vec<&AreaCatalogEntry>, LocalAreaRegistryError> {
+        let area =
+            self.area_index.get(area_id).copied().ok_or_else(|| {
+                LocalAreaRegistryError::Invalid(format!("unknown area {area_id:?}"))
+            })?;
+        let unit = self.eviction_index.area_to_unit[area];
+        Ok(self.eviction_index.units[unit]
+            .area_indices
+            .iter()
+            .map(|&index| &self.catalog.entries[index])
+            .collect())
+    }
+
+    /// Resolves the complete inverse hard-dependency closure for eviction.
+    ///
+    /// The result includes the area's SCC and every SCC that depends on it,
+    /// directly or transitively. A future runtime must ensure every active unit
+    /// in this set leaves before or atomically with the target; units that are
+    /// already absent need no transition. No unit outside this closure has a
+    /// hard dependency on one inside it. Both units and entries inside each
+    /// unit use canonical catalog order.
+    pub fn eviction_closure_for_area(
+        &self,
+        area_id: &str,
+    ) -> Result<Vec<Vec<&AreaCatalogEntry>>, LocalAreaRegistryError> {
+        let area =
+            self.area_index.get(area_id).copied().ok_or_else(|| {
+                LocalAreaRegistryError::Invalid(format!("unknown area {area_id:?}"))
+            })?;
+        let unit = self.eviction_index.area_to_unit[area];
+        Ok(self.eviction_index.units[unit]
+            .eviction_closure
+            .iter()
+            .map(|&closure_unit| {
+                self.eviction_index.units[closure_unit]
+                    .area_indices
+                    .iter()
+                    .map(|&index| &self.catalog.entries[index])
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// Rebuilds and revalidates the bounded SCC partition and its
+    /// direct/inverse indexes against the immutable catalog.
+    ///
+    /// This is a pure generation-local check and does not perform eviction.
+    pub fn validate_eviction_units(&self) -> Result<(), LocalAreaRegistryError> {
+        let rebuilt = LocalAreaEvictionIndex::build(&self.catalog, &self.area_index)?;
+        if rebuilt != self.eviction_index {
+            return Err(LocalAreaRegistryError::Invalid(
+                "eviction-unit index differs from its immutable catalog".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn hard_dependency_closure(
@@ -1518,6 +1864,26 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].area_id < pair[1].area_id)
         );
+        let eviction_unit = generation
+            .eviction_unit_for_area(&cyclic.entries[1].area_id)
+            .unwrap();
+        assert_eq!(
+            eviction_unit
+                .iter()
+                .map(|entry| entry.area_id.as_str())
+                .collect::<Vec<_>>(),
+            cyclic
+                .entries
+                .iter()
+                .map(|entry| entry.area_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        let eviction_closure = generation
+            .eviction_closure_for_area(&cyclic.entries[2].area_id)
+            .unwrap();
+        assert_eq!(eviction_closure.len(), 1);
+        assert_eq!(eviction_closure[0], eviction_unit);
+        generation.validate_eviction_units().unwrap();
 
         let second = tempfile::tempdir().unwrap();
         let mut oversized = release.catalog.clone();
@@ -1554,6 +1920,154 @@ mod tests {
         let path = write_catalog(second.path(), &oversized);
         let error = LocalAreaGeneration::open_exact(second.path(), path).unwrap_err();
         assert!(error.to_string().contains("exceeds 32 areas"));
+    }
+
+    #[test]
+    fn eviction_units_follow_sccs_and_inverse_closure_in_canonical_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let release = built_release();
+        let mut catalog = release.catalog.clone();
+        let ids = catalog
+            .entries
+            .iter()
+            .map(|entry| entry.area_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["archive", "north-gate", "square"]);
+        catalog.entries[0].hard_dependencies = vec![ids[1].clone()];
+        catalog.entries[1].hard_dependencies = vec![ids[2].clone()];
+        catalog.entries[2].hard_dependencies.clear();
+
+        let world_path = local_area_world_path(
+            temp.path(),
+            &catalog.world_id,
+            &catalog.world_artifact_sha256,
+        );
+        fs::create_dir_all(world_path.parent().unwrap()).unwrap();
+        fs::write(world_path, &release.world_artifact).unwrap();
+        let path = write_catalog(temp.path(), &catalog);
+        let generation = LocalAreaGeneration::open_exact(temp.path(), path).unwrap();
+
+        for area_id in &ids {
+            assert_eq!(
+                generation
+                    .eviction_unit_for_area(area_id)
+                    .unwrap()
+                    .iter()
+                    .map(|entry| entry.area_id.as_str())
+                    .collect::<Vec<_>>(),
+                [area_id.as_str()]
+            );
+        }
+        let closure_ids = |area_id: &str| {
+            generation
+                .eviction_closure_for_area(area_id)
+                .unwrap()
+                .into_iter()
+                .map(|unit| {
+                    unit.into_iter()
+                        .map(|entry| entry.area_id.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            closure_ids(&ids[0]),
+            vec![vec![ids[0].as_str()]],
+            "evicting a dependent does not require its dependencies to leave"
+        );
+        assert_eq!(
+            closure_ids(&ids[1]),
+            vec![vec![ids[0].as_str()], vec![ids[1].as_str()]],
+            "the direct dependent must leave with its dependency"
+        );
+        assert_eq!(
+            closure_ids(&ids[2]),
+            vec![
+                vec![ids[0].as_str()],
+                vec![ids[1].as_str()],
+                vec![ids[2].as_str()]
+            ],
+            "the inverse closure includes transitive dependents"
+        );
+        assert!(generation.eviction_unit_for_area("unknown-area").is_err());
+        assert!(
+            generation
+                .eviction_closure_for_area("unknown-area")
+                .is_err()
+        );
+        generation.validate_eviction_units().unwrap();
+    }
+
+    #[test]
+    fn eviction_index_rejects_self_unknown_unsorted_and_over_limit_catalogs() {
+        let release = built_release();
+        let first_id = release.catalog.entries[0].area_id.clone();
+
+        for (hard_dependencies, expected) in [
+            (vec![first_id.clone()], "cannot hard-depend on itself"),
+            (vec!["missing-area".to_owned()], "is unknown"),
+            (
+                vec![
+                    release.catalog.entries[2].area_id.clone(),
+                    release.catalog.entries[1].area_id.clone(),
+                ],
+                "not strictly sorted",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut invalid = release.catalog.clone();
+            invalid.entries[0].hard_dependencies = hard_dependencies;
+            let path = write_catalog(temp.path(), &invalid);
+            let error = LocalAreaGeneration::open_exact(temp.path(), path).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let at_limit = tempfile::tempdir().unwrap();
+        let mut bounded = release.catalog.clone();
+        let template = bounded.entries[0].clone();
+        for index in bounded.entries.len()..MAX_LOCAL_EVICTION_UNITS {
+            let mut entry = template.clone();
+            entry.area_id = format!("limit-area-{index:03}");
+            entry.revision = (index + 1) as u64;
+            entry.ownership = empty_ownership();
+            entry.hard_dependencies.clear();
+            entry.portals.clear();
+            entry.asset_manifests.clear();
+            entry.lua_modules.clear();
+            bounded.entries.push(entry);
+        }
+        bounded
+            .entries
+            .sort_by(|left, right| left.area_id.cmp(&right.area_id));
+        let world_path = local_area_world_path(
+            at_limit.path(),
+            &bounded.world_id,
+            &bounded.world_artifact_sha256,
+        );
+        fs::create_dir_all(world_path.parent().unwrap()).unwrap();
+        fs::write(world_path, &release.world_artifact).unwrap();
+        let path = write_catalog(at_limit.path(), &bounded);
+        let generation = LocalAreaGeneration::open_exact(at_limit.path(), path).unwrap();
+        generation.validate_eviction_units().unwrap();
+        assert_eq!(
+            generation.eviction_index.units.len(),
+            MAX_LOCAL_EVICTION_UNITS
+        );
+
+        let over_limit = tempfile::tempdir().unwrap();
+        let mut oversized = bounded;
+        let mut extra = template;
+        extra.area_id = "zz-over-limit-area".into();
+        extra.revision = (MAX_LOCAL_EVICTION_UNITS + 1) as u64;
+        extra.ownership = empty_ownership();
+        extra.hard_dependencies.clear();
+        extra.portals.clear();
+        extra.asset_manifests.clear();
+        extra.lua_modules.clear();
+        oversized.entries.push(extra);
+        let path = write_catalog(over_limit.path(), &oversized);
+        let error = LocalAreaGeneration::open_exact(over_limit.path(), path).unwrap_err();
+        assert!(error.to_string().contains("1..=256 unique areas"));
     }
 
     #[test]

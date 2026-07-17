@@ -179,7 +179,7 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v14, both SQLite and PostgreSQL retain the v8
+In current schema v15, both SQLite and PostgreSQL retain the
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
@@ -248,10 +248,18 @@ delete/report, staff resolution, expiry, restart and integrity checks pass.
 El esquema v14 añade el singleton `world_area_generation`. Guarda el ID del
 mundo, los digests activo y anterior del catálogo, la secuencia de activación y
 el timestamp; no guarda rutas del host ni duplica estado runtime. La migración
-v13→v14 es aditiva. Un corte 6C actualiza esta fila y
-`WorldRuntimeSnapshot` v7 en la misma transacción mediante compare-and-swap.
+v13→v14 es aditiva. En aquel baseline, un corte 6C actualizaba esta fila y
+`WorldRuntimeSnapshot` v7 en la misma transacción mediante compare-and-swap;
+v15 conserva la frontera con snapshot v8.
 Conserva la copia de seguridad hasta que pasen arranque, activación, rollback
 explícito y las comprobaciones de integridad del backend elegido.
+
+El esquema v15 añade `world_area_checkpoints` sin cambiar la liga generacional.
+Cada fila conserva generación, unidad, revisiones, epoch, versión, tick, JSON
+acotado y SHA-256. La migración v14→v15 crea la tabla vacía. Conserva la copia
+hasta validar que un snapshot v8 residente arranca, que un manifiesto retirado
+falla cerrado sin su checkpoint exacto y que el mover copia o rechaza cada fila
+de forma atómica. No habilites LRU ni retiros automáticos solo por migrar.
 
 Para una instalación 6B existente, la fila v14 nace vacía y no existe forma de
 reconstruir automáticamente qué catálogo v13 estaba ejecutando. Recovery sin
@@ -281,7 +289,7 @@ variable falla cerrada en modo monolítico, con liga existente, sin
 recovery/personaje que reconocer o si no coincide con el SHA-256 canónico.
 
 The decoder applies a dual admission rule: raw legacy snapshots v1-v5 remain
-limited to 1 MiB, while v6 and current v7 snapshots and new commits may use up
+limited to 1 MiB, while v6-v8 snapshots and new commits may use up
 to 2 MiB. This prevents an oversized old document from using migration as a
 way around its original bound. A strict v6 document expands to the exact v7
 form with empty applied-affix state and sealed-open counter one; v7 additionally
@@ -310,7 +318,7 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires schema v14 and refuses to run while any operational
+The command requires schema v15 and refuses to run while any operational
 `administrator` or `implementor` profile exists. A legacy `admin` role alone
 does not count as executable authority. Recovery replaces the target's profile
 with `implementor`, clears its lore title and previous direct assignments,
@@ -322,7 +330,7 @@ commit in one transaction; any failure rolls all of them back.
 `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
 verify the installation's normal `pg_dump` or physical backup, then run
 `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
-equivalent schema-v14 transaction:
+equivalent schema-v15 transaction:
 
 ```sql
 BEGIN;
@@ -334,8 +342,8 @@ DECLARE
     target_id BIGINT;
     recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 14 THEN
-        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 14';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 15 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 15';
     END IF;
     IF EXISTS (
         SELECT 1 FROM staff_profiles
@@ -455,11 +463,12 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v14, including durable social
+The mover requires the current SQLite schema v15, including durable social
 channel subscriptions, staff profiles, capability assignments, report
 resolutions, staff audit, offline mail usage/messages and retained mail-report
 evidence, board posts, usage and retained evidence, and the durable area
-generation row when present. It refuses a non-empty target and commits schema
+generation row and every validated area checkpoint when present. It refuses a
+non-empty target and commits schema
 plus rows in one PostgreSQL transaction. Configure exactly one line in the
 service environment and remove/comment the other:
 
@@ -469,7 +478,7 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 ```
 
 Exercise registration, login, movement, combat and social state before deleting
-or archiving the SQLite rollback copy. For schema v14 explicitly send, list,
+or archiving the SQLite rollback copy. For schema v15 explicitly send, list,
 read, delete and report mail, restart, and confirm that the moved PostgreSQL
 state retains the inbox, usage quota and report evidence. Also publish, list,
 read, delete and report one board post; confirm post quota/evidence survive the
@@ -498,7 +507,7 @@ installation.
 
 Esta operación solo existe cuando el servicio usa
 `TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. La primera ejecución liga el
-catálogo verificado en SQL v14 antes de readiness. En reinicios posteriores la
+catálogo verificado en SQL v15 antes de readiness. En reinicios posteriores la
 fila durable prevalece: el servidor deriva la ruta exacta a partir del registro,
 `worldId` y digest aunque `area-active` apunte a una publicación distinta. Una
 base ligada a catálogo no puede arrancar en modo WorldPack monolítico. Si se
@@ -539,7 +548,8 @@ publicador cooperante espera en vez de cambiar `area-active` durante el corte.
 En Solaris, runtime y CLI usan el mismo protocolo de registro `fcntl` compatible
 con `fd-lock`; no dependen de locks de familias distintas.
 
-Con quiescencia, el actor restaura el snapshot v7 actual sobre la candidata,
+Con quiescencia, el actor exige todas las unidades residentes y restaura el
+snapshot v8 actual sobre la candidata,
 confirma snapshot + puntero durable mediante CAS y solo entonces intercambia
 mundo, contenido runtime y coordinador. Verificación, incompatibilidad, restore
 y fallos definitivos antes del commit dejan activa la generación anterior. Una
@@ -567,13 +577,32 @@ solo conserva la generación inmediatamente anterior; no es un historial ni
 borra blobs. Retén explícitamente los catálogos y bundles necesarios.
 
 6C no soporta jugadores durante drenaje, migraciones directas/inversas,
-reemplazo, checkpoint o descarga por área, LRU, GC, registro remoto,
+reemplazo de revisión por área, LRU, GC, registro remoto,
 compresión o firma. La puerta pasa 774 pruebas Rust —329 del servidor— y la
-reauditoría 0 P1/0 P2. PostgreSQL v14 real no se ejecutó sin
-`TIAMUD_TEST_POSTGRES_URL`. El humo retenido cubre
-liga/noop/activación/rollback, restart, readiness/Web/Telnet, métricas y apagado;
-conserva el mismo procedimiento sobre persistencia y registro desechables antes
-de una instalación propia.
+reauditoría 0 P1/0 P2. Sobre PostgreSQL 18 desechable pasan 20/20 pruebas del
+adaptador y 7/7 enfocadas del servidor, incluida la CAS de generación v14. El
+humo real abre esquema 14, liga G0 `e954be…15a6` en secuencia 1, confirma
+readiness PostgreSQL/mundo, Web 200, banner Telnet, dos áreas residentes,
+SIGHUP `noop=1` y cierre actor/store limpio. El humo SQLite retenido cubre
+además activación G1, rollback G0 y restart. Conserva el mismo procedimiento
+sobre persistencia y registro desechables antes de una instalación propia y
+consulta el [registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+
+## Retirada reversible 6D: estado operativo parcial
+
+El esquema v15 y snapshot v8 permiten que el runtime interno retire y
+rehidrate una unidad vacía de la misma revisión. No existe todavía un comando
+de operador, señal, endpoint, acción staff ni política LRU para solicitarlo. No
+edites `world_area_checkpoints` ni el manifiesto del snapshot a mano: deben
+avanzar juntos mediante el CAS del servidor.
+
+Antes de considerar esta función operativa en una instalación, aunque las
+pruebas enfocadas PostgreSQL v15 pasan 22/22+8/8, falta probar el humo de
+restart y un E2E específico de ACK perdido 6D, medir descenso
+real de índices y RSS y definir presupuesto/histéresis. La evidencia PostgreSQL
+v14 anterior no cubre esta tabla. Una inconsistencia de manifiesto/checkpoint
+debe bloquear readiness; restaura el backend completo verificado en vez de
+suprimir una fila aislada.
 
 ## Actualización del binario y del mundo
 

@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MigrationReport {
@@ -134,6 +134,27 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
              CHECK(previous_catalog_sha256 IS NULL
                    OR previous_catalog_sha256 != active_catalog_sha256)
+         );
+         CREATE TABLE IF NOT EXISTS world_area_checkpoints (
+             generation_sha256 TEXT NOT NULL
+                 CHECK(length(generation_sha256) = 64
+                       AND generation_sha256 NOT GLOB '*[^0-9a-f]*'),
+             unit_id TEXT NOT NULL
+                 CHECK(length(unit_id) = 64
+                       AND unit_id NOT GLOB '*[^0-9a-f]*'),
+             residency_epoch INTEGER NOT NULL CHECK(residency_epoch > 0),
+             checkpoint_version INTEGER NOT NULL CHECK(checkpoint_version > 0),
+             checkpoint_sha256 TEXT NOT NULL
+                 CHECK(length(checkpoint_sha256) = 64
+                       AND checkpoint_sha256 NOT GLOB '*[^0-9a-f]*'),
+             captured_logical_tick INTEGER NOT NULL
+                 CHECK(captured_logical_tick >= 0),
+             checkpoint_json TEXT NOT NULL
+                 CHECK(length(CAST(checkpoint_json AS BLOB)) BETWEEN 1 AND 2097152),
+             created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+             updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+             PRIMARY KEY(generation_sha256, unit_id, residency_epoch),
+             CHECK(updated_at >= created_at)
          );
          CREATE TABLE IF NOT EXISTS social_ignores (
              owner_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -417,7 +438,7 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              state_json TEXT NOT NULL CHECK(length(state_json) <= 1048576),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         PRAGMA user_version = 14;",
+         PRAGMA user_version = 15;",
     )?;
     if !column_exists(&transaction, "social_reports", "report_kind")? {
         transaction.execute_batch(
@@ -761,12 +782,12 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let report = migrate(&mut connection).unwrap();
 
-        assert_eq!(report, MigrationReport { from: 0, to: 14 });
+        assert_eq!(report, MigrationReport { from: 0, to: 15 });
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            14
+            15
         );
         assert!(
             connection
@@ -774,6 +795,7 @@ mod tests {
                 .is_ok()
         );
         for table in [
+            "world_area_checkpoints",
             "social_mail_messages",
             "social_mail_usage",
             "social_mail_report_evidence",
@@ -879,7 +901,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 13, to: 14 }
+            MigrationReport { from: 13, to: 15 }
         );
         assert_eq!(
             connection
@@ -898,6 +920,52 @@ mod tests {
                 )
                 .unwrap(),
             "{}"
+        );
+    }
+
+    #[test]
+    fn upgrades_v14_with_an_empty_area_checkpoint_table() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let generation = "a".repeat(64);
+        connection
+            .execute(
+                "INSERT INTO world_area_generation
+                     (singleton, world_id, active_catalog_sha256,
+                      activation_sequence, updated_at)
+                 VALUES (1, 'demo:world', ?1, 3, 900)",
+                [&generation],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE world_area_checkpoints;
+                 PRAGMA user_version = 14;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 14, to: 15 }
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM world_area_checkpoints", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT active_catalog_sha256
+                     FROM world_area_generation WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            generation
         );
     }
 
@@ -936,6 +1004,184 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn area_checkpoint_schema_is_bounded_and_has_a_deterministic_key() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let generation = "a".repeat(64);
+        let unit = "b".repeat(64);
+        let checkpoint = "c".repeat(64);
+        let insert = "INSERT INTO world_area_checkpoints
+             (generation_sha256, unit_id, residency_epoch, checkpoint_version,
+              checkpoint_sha256, captured_logical_tick, checkpoint_json,
+              created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+
+        connection
+            .execute(
+                insert,
+                rusqlite::params![
+                    generation, unit, 1_i64, 1_i64, checkpoint, 0_i64, "{}", 10_i64, 10_i64
+                ],
+            )
+            .unwrap();
+        assert!(
+            connection
+                .execute(
+                    insert,
+                    rusqlite::params![
+                        "a".repeat(64),
+                        "b".repeat(64),
+                        1_i64,
+                        1_i64,
+                        "d".repeat(64),
+                        0_i64,
+                        "{}",
+                        10_i64,
+                        10_i64
+                    ],
+                )
+                .is_err(),
+            "the composite checkpoint key must reject duplicates"
+        );
+        connection
+            .execute(
+                insert,
+                rusqlite::params![
+                    "a".repeat(64),
+                    "b".repeat(64),
+                    2_i64,
+                    1_i64,
+                    "d".repeat(64),
+                    0_i64,
+                    "{}",
+                    10_i64,
+                    10_i64
+                ],
+            )
+            .unwrap();
+
+        for (generation, unit, epoch, version, digest, tick, json, created, updated) in [
+            (
+                "A".repeat(64),
+                "b".repeat(64),
+                3,
+                1,
+                "c".repeat(64),
+                0,
+                "{}".to_owned(),
+                10,
+                10,
+            ),
+            (
+                "a".repeat(64),
+                "b".repeat(63),
+                3,
+                1,
+                "c".repeat(64),
+                0,
+                "{}".to_owned(),
+                10,
+                10,
+            ),
+            (
+                "a".repeat(64),
+                "b".repeat(64),
+                0,
+                1,
+                "c".repeat(64),
+                0,
+                "{}".to_owned(),
+                10,
+                10,
+            ),
+            (
+                "a".repeat(64),
+                "b".repeat(64),
+                3,
+                0,
+                "c".repeat(64),
+                0,
+                "{}".to_owned(),
+                10,
+                10,
+            ),
+            (
+                "a".repeat(64),
+                "b".repeat(64),
+                3,
+                1,
+                "C".repeat(64),
+                0,
+                "{}".to_owned(),
+                10,
+                10,
+            ),
+            (
+                "a".repeat(64),
+                "b".repeat(64),
+                3,
+                1,
+                "c".repeat(64),
+                -1,
+                "{}".to_owned(),
+                10,
+                10,
+            ),
+            (
+                "a".repeat(64),
+                "b".repeat(64),
+                3,
+                1,
+                "c".repeat(64),
+                0,
+                String::new(),
+                10,
+                10,
+            ),
+            (
+                "a".repeat(64),
+                "b".repeat(64),
+                3,
+                1,
+                "c".repeat(64),
+                0,
+                "{}".to_owned(),
+                11,
+                10,
+            ),
+        ] {
+            assert!(
+                connection
+                    .execute(
+                        insert,
+                        rusqlite::params![
+                            generation, unit, epoch, version, digest, tick, json, created, updated
+                        ],
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            connection
+                .execute(
+                    insert,
+                    rusqlite::params![
+                        "a".repeat(64),
+                        "b".repeat(64),
+                        3_i64,
+                        1_i64,
+                        "c".repeat(64),
+                        0_i64,
+                        "x".repeat(2_097_153),
+                        10_i64,
+                        10_i64
+                    ],
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -979,7 +1225,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 11, to: 14 }
+            MigrationReport { from: 11, to: 15 }
         );
         for table in [
             "social_mail_messages",
@@ -1055,7 +1301,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 12, to: 14 }
+            MigrationReport { from: 12, to: 15 }
         );
         assert_eq!(
             connection
@@ -1249,7 +1495,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 10, to: 14 }
+            MigrationReport { from: 10, to: 15 }
         );
         assert_eq!(
             connection
@@ -1314,7 +1560,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 3, to: 14 }
+            MigrationReport { from: 3, to: 15 }
         );
         assert_eq!(
             connection
@@ -1358,7 +1604,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 4, to: 14 }
+            MigrationReport { from: 4, to: 15 }
         );
         let gameplay: String = connection
             .query_row(
@@ -1423,7 +1669,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 5, to: 14 }
+            MigrationReport { from: 5, to: 15 }
         );
         assert_eq!(
             connection
@@ -1480,7 +1726,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 6, to: 14 }
+            MigrationReport { from: 6, to: 15 }
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
@@ -1532,7 +1778,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 7, to: 14 }
+            MigrationReport { from: 7, to: 15 }
         );
         assert_eq!(
             connection
@@ -1621,7 +1867,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 8, to: 14 }
+            MigrationReport { from: 8, to: 15 }
         );
         assert_eq!(
             connection
@@ -1663,7 +1909,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 14, to: 14 }
+            MigrationReport { from: 15, to: 15 }
         );
         assert_eq!(
             connection
@@ -1731,7 +1977,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 9, to: 14 }
+            MigrationReport { from: 9, to: 15 }
         );
         assert_eq!(
             connection

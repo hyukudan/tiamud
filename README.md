@@ -51,8 +51,8 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   tiempos de reutilización y estados están acotados.
 - **Grupos y conversación:** `say` local, `tell` y `reply` en línea, telepatía
   directa como habilidad authored con recurso/cooldowns, emotes de sala
-  definidos por el mundo con plantillas seguras, chat de grupo,
-  liderazgo completo, canales suscritos `general`, `newbie` y `staff`, y correo
+  definidos por el mundo con plantillas seguras, chat y ciclo de grupo acotado,
+  canales suscritos `general`, `newbie` y `staff`, y correo
   offline privado con cuotas, buzón/caducidad acotados y denuncia moderable,
   y tablones públicos `general`/`newbie` con publicación, lectura, borrado
   propio, denuncia y retención acotadas.
@@ -66,8 +66,9 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   pero ni ese título ni XP, clase, WorldPack o el rol legado autorizan comandos.
 - **Una ruta autoritativa:** navegador y Telnet producen las mismas
   `PlayerAction`, pasan por las mismas reglas y mutan un único actor de mundo.
-- **Clientes web y terminal:** Svelte 5 adaptable; Telnet plano/ANSI; GMCP,
-  MSSP, MCCP2, MXP/MSLP opcional; integraciones TinTin++ y Mudlet.
+- **Clientes web y terminal:** Svelte 5 adaptable e instalable como PWA con
+  favicon, iconos 192/512, variante maskable y Apple Touch; Telnet plano/ANSI;
+  GMCP, MSSP, MCCP2, MXP/MSLP opcional; integraciones TinTin++ y Mudlet.
 - **Multimedia segura:** imagen de escena y audio opcionales, recursos
   inmutables direccionados por contenido, texto alternativo y preferencias de
   medios, movimiento, contraste y lector de pantalla.
@@ -79,7 +80,11 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   bajo demanda áreas locales verificadas. La fase 6C añade sustitución
   quiescente de una **generación completa** mediante SIGHUP local, staging
   privado, compatibilidad estricta, identidad durable y rollback explícito.
-  No sustituye áreas individuales ni descarga contenido.
+  La fase 6D, todavía en curso, añade el primer vertical interno de retirada
+  reversible por unidades SCC de una misma generación: checkpoint durable,
+  descarga exacta de estado y rehidratación por movimiento o login. No hay aún
+  sustitución de revisión individual, política automática, presupuesto RSS ni
+  LRU.
 - **Operación en un host:** adaptadores PostgreSQL/SQLite, credenciales
   Argon2id, sesiones revocables, colas acotadas, salud, métricas Prometheus,
   apagado ordenado, copia/restauración SQLite y traslado explícito a PostgreSQL.
@@ -212,7 +217,7 @@ revisados están en [`deploy/`](deploy/).
 | `TIAMUD_DB_PATH` | `data/tiamud.db` | Ruta SQLite sin URL de base de datos |
 | `TIAMUD_DATABASE_URL` | — | Perfil PostgreSQL o URL `sqlite://` explícita |
 | `TIAMUD_WORLD_PACK` | paquete embebido | WorldPack externo revisado |
-| `TIAMUD_AREA_REGISTRY` | — | Raíz del registro local 6A–6C |
+| `TIAMUD_AREA_REGISTRY` | — | Raíz del registro local 6A–6D |
 | `TIAMUD_AREA_CATALOG` | — | Catálogo exacto inicial; la autoridad durable prevalece tras la primera liga |
 | `TIAMUD_ACK_LEGACY_AREA_GENERATION` | — | Aceptación de una sola vez del SHA-256 G0 exacto si una base 6B/v13 sin liga conserva recovery compartido o algún personaje |
 | `TIAMUD_TICK_MILLIS` | `1000` | Cadencia del ciclo lógico |
@@ -231,25 +236,40 @@ la base de datos; los arranques posteriores recuperan por digest la generación
 durable aunque `area-active` señale una publicación más reciente. Durante la
 ejecución, SIGHUP es la única reconciliación local del puntero editorial.
 
-Ambos adaptadores implementan actualmente el **esquema v14**. La migración
+Ambos adaptadores implementan actualmente el **esquema v15**. La migración
 v10→v11 reconstruye de forma transaccional la custodia opaca del runtime y
 v11→v12 añade correo offline, cuotas y evidencia de denuncia. El
 paso v12→v13 añade tablones, cuota de publicación y evidencia moderable, y
 amplía de forma cerrada los tipos de reporte sin cambiar el snapshot. El
 paso v13→v14 añade el puntero singleton `world_area_generation`: conserva
 `worldId`, digest activo, digest anterior y una secuencia de activación, pero
-no duplica estado de juego ni guarda rutas del host. El snapshot vigente sigue
-siendo v7 y una activación 6C confirma snapshot y puntero mediante un CAS en la
-misma transacción. Los DTO v1–v5 siguen limitados a 1 MiB y v6–v7 admiten
+no duplica estado de juego ni guarda rutas del host. El paso v14→v15 añade
+`world_area_checkpoints`, inicialmente vacía, para unidades retiradas de la
+generación activa; no inventa checkpoints durante la migración. El snapshot
+vigente es v8: conserva el estado de v7 y añade un manifiesto acotado de
+residencia por área. Una activación 6C confirma snapshot y puntero mediante un
+CAS en la misma transacción, y 6D confirma snapshot, generación y checkpoint
+contra el snapshot anterior. Los DTO v1–v5 siguen limitados a 1 MiB y v6–v8
+admiten
 hasta 2 MiB al decodificarse. Se conservan las relaciones sociales y de
 staff de v9/v10, y el traslado SQLite→PostgreSQL las copia junto con el estado
-actual. La evidencia PostgreSQL 18.4 retenida pasa 19/19 pruebas del adaptador
-y mover v13,
-incluida migración de una base actual representativa; el servidor cubre además
-flujo board/runtime y concurrencia advisory dentro de su suite final.
+actual. La evidencia histórica PostgreSQL 18.4 pasa 19/19 pruebas del adaptador
+y mover v13. La última aceptación real retenida antes de v15, sobre PostgreSQL
+18 desechable, pasa 20/20
+pruebas `--all-targets` de `tiamud-persistence-postgres` y 7/7 pruebas enfocadas
+`persistence_postgres::tests::postgres_` del servidor, incluida la CAS de
+generación v14. Ese humo histórico abre esquema 14, liga G0 `e954be…15a6` con
+secuencia 1, devuelve readiness PostgreSQL/mundo, Web 200, banner Telnet y dos
+áreas residentes, registra un SIGHUP `noop` y cierra actor y store limpiamente.
+La evidencia y sus límites están en el
+[registro de aceptación PostgreSQL v14/PWA](docs/project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+Sobre el esquema v15 actual, una instancia PostgreSQL 18 desechable pasa 22/22
+pruebas del adaptador+mover y 8/8 pruebas PostgreSQL del servidor, incluida la
+transición atómica de checkpoints. Es aceptación funcional enfocada, no el humo
+operativo Web/Telnet/TLS/backup de una instalación pública.
 
 > **Actualización 6B/v13 con recovery compartido o personajes:** conserva el
-> catálogo G0 exacto que ejecutaba el servidor, copia backend y registro, instala v14 y
+> catálogo G0 exacto que ejecutaba el servidor, copia backend y registro, instala v15 y
 > arranca todavía con ese mismo `TIAMUD_AREA_CATALOG` y
 > `TIAMUD_ACK_LEGACY_AREA_GENERATION=<SHA-256 exacto de G0>`. Verifica que la liga
 > durable se creó, elimina la variable de aceptación y solo después
@@ -348,7 +368,7 @@ implementado de la hoja de ruta.
 | --- | --- | --- |
 | Conversación | `say` local; `yell` de radio uno y `shout` de radio tres mediante BFS dirigido, determinista, sin salidas secretas y limitado a 259 salas; `tell` online; `reply` al último remitente válido mientras siga conectado; telepatía directa online como habilidad authored con recurso/cooldowns y bloqueo por sala; emotes de sala authored mediante plantillas cerradas y sin texto libre; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`; correo offline separado, privado y paginado, con 64 mensajes/128 KiB/30 días, cuotas por cuenta y evidencia de denuncia durante 90 días; tablones públicos `general`/`newbie`, bajo demanda y sin fan-out, con páginas, cuotas, capacidad y retención de 90 días. | Quedan fuera historial general durable, emotes globales/de grupo, hilos/edición/búsqueda de tablones y telepatía de grupo/offline. `tell` no es telepatía, correo ni tablón. |
 | Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. Una cohorte congelada de miembros próximos y vivos participa en el reparto round-robin del botín. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos y reparto need/greed, master-loot o por contribución. |
-| Canales | Suscripción persistente en SQLite/PostgreSQL v13; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. Los tablones son otra superficie y nunca reutilizan el archivo del canal. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
+| Canales | Suscripción persistente introducida en SQLite/PostgreSQL v13 y conservada por el esquema v15 actual; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. Los tablones son otra superficie y nunca reutilizan el archivo del canal. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
 | Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
 | Inventario | WorldPack v9 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo, vínculo, afijo y acceso al botín; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` es unilateral; `trade` negocia hasta 128 raíces transferibles y moneda mediante reservas durables, revisión exacta y dos confirmaciones, y liquida ambos lados en un solo commit. Un afijo durable por instancia puede aportar prefijo/sufijo y deltas acotados de ataque/curación. Web, Telnet y GMCP proyectan política, cantidades, afijo e IDs opacos, nunca dueños, cohortes ni identidades durables. | Desgaste/durabilidad de objetos; trade remoto/offline, subastas y mercado offline. |
 | Botín | WorldPack v9/AreaPack v8 conservan las fuentes `npc_spawn`, tablas enteras repetibles, recompensas selladas ganadas y pools de afijos deterministas de 4B. La derrota confirma procedencia y derechos para un máximo de 64 raíces; `party_round_robin`, `loot pass` y los plazos 20/120 siguen siendo autoritativos. Un sello ligado y portado se consulta con `reward odds` y se abre con `open`: Tiamud simula RNG, IDs, afijo, vínculo, capacidad y el límite de 16 recompensas antes de consumirlo y confirmar todo en un único commit. Web, Telnet y `Char.Reward 1` GMCP comparten fracciones exactas paginadas y referencias opacas. | Need/greed, master-loot y reparto por contribución. Cajas, llaves, moneda premium, pity y tiradas pagadas quedan fuera del baseline. |
@@ -577,7 +597,7 @@ carreras TOCTOU que provoque quedan fuera de este modo de confianza.
 ```mermaid
 flowchart LR
     accTitle: Autoría modular y generaciones locales de áreas
-    accDescr: Los mismos módulos producen un WorldPack monolítico y bundles locales. El servidor puede añadir áreas de la generación activa y sustituir la generación completa solo durante un corte quiescente; no descarga áreas.
+    accDescr: Los módulos producen un WorldPack monolítico y bundles locales. El servidor carga bajo demanda, cambia una generación completa en un corte quiescente y puede retirar de forma reversible unidades cerradas de la misma generación.
 
     Areas[AreaPack v8<br/>módulos revisados] --> Project[WorldProject v2]
     Project --> Compose[Composición sin conexión]
@@ -588,6 +608,11 @@ flowchart LR
     Catalog --> Active[Generación durable<br/>SHA-256 del catálogo]
     Active --> Demand[Demanda 6B<br/>staging acotado]
     Demand --> Actor[Actor<br/>áreas residentes]
+    Actor --> Pins{Pins de dominio<br/>¿se puede retirar?}
+    Pins -->|sí| Checkpoint[Checkpoint 6D<br/>snapshot v8 + SQL v15]
+    Checkpoint --> Cold[Unidad SCC retirada<br/>sin estado runtime residente]
+    Cold -->|portal o login| Rehydrate[Rehidratación exacta<br/>misma generación]
+    Rehydrate --> Actor
     Catalog --> FullStage[Staging 6C completo<br/>fuera del actor]
     FullStage --> Quiet[Cero sesiones<br/>y cero leases]
     Quiet --> CAS[CAS durable<br/>snapshot + generación]
@@ -626,7 +651,7 @@ mientras el estado dinámico inicial se confirma mediante la transacción
 durable existente antes de publicar el lote. Las métricas usan resultados y
 etapas cerradas, nunca IDs de área, sala, revisión o digest como labels.
 
-Dentro de una generación, todas las áreas usadas permanecen residentes. 6B no
+6B por sí sola conserva en memoria todas las áreas que llega a instalar y no
 sustituye revisiones. La fase 6C mínima de
 [ADR 0021](docs/decisions/0021-quiescent-area-generation-cutover.md) prepara
 fuera del actor una candidata **completa**, vuelve a verificar `area-active` y
@@ -637,8 +662,8 @@ cambiar prosa, salidas, medios, percepción, variantes y Lua síncrono ya
 validado. El staging usa métricas aisladas: los gauges públicos siguen
 describiendo G0 hasta el swap confirmado. No hay migración semántica.
 
-El tramo crítico cierra admisiones, restaura el snapshot v7 actual sobre la
-candidata, confirma mediante CAS el snapshot y la identidad SQL v14 y después
+El tramo crítico cierra admisiones, restaura el snapshot v8 actual sobre la
+candidata, confirma mediante CAS el snapshot y la identidad SQL v15 y después
 intercambia de forma indivisible mundo, contenido runtime y coordinador. Una
 sesión o carga en vuelo devuelve `busy` sin expulsar a nadie ni modificar la
 generación activa. Una activación normal exige revisiones crecientes; para
@@ -659,19 +684,49 @@ fallo definitivo anterior al commit, incluido un CAS rechazado, conserva la
 generación anterior. Si el resultado del commit es ambiguo, el servidor relee
 SQL: publica G1 si quedó durable, reabre G0 si no y, ante otro valor o error de
 lectura, queda en `Committing`, detiene el actor y mantiene readiness en 503 sin
-admitir tráfico hasta reinicio/recuperación durable. 6C no implementa reemplazo
-por área, jugadores durante el drenaje, migraciones, descarga, checkpoint por
-área, LRU, GC, red, compresión, firma remota ni coordinación multiproceso. Es
+admitir tráfico hasta reinicio/recuperación durable. 6C no implementa por sí
+sola reemplazo por área, jugadores durante el drenaje, migraciones, descarga,
+checkpoint por área, LRU, GC, red, compresión, firma remota ni coordinación
+multiproceso. Es
 un corte local dentro del servidor único. La puerta final pasa 774 pruebas Rust,
 329 del servidor, y la reauditoría queda en 0 P1/0 P2. También pasan formato,
-clippy, MSRV, cargo-deny, licencias/avisos 308 Rust/76 web, Svelte y 123 Vitest.
-PostgreSQL v14 real no se ejecutó porque
-falta `TIAMUD_TEST_POSTGRES_URL` y no se afirma. El humo retenido liga G0, hace `noop`,
-activa G1, revierte a G0, reinicia sobre la autoridad durable y comprueba
-readiness/Web/Telnet, métricas y apagado. La
+clippy, MSRV, cargo-deny, licencias/avisos 308 Rust/76 web, Svelte y 125 Vitest.
+PostgreSQL v14 real pasa las suites 20/20 y 7/7 anteriores; su humo liga G0,
+hace `noop` y comprueba readiness/Web/Telnet y apagado. Por separado, el humo
+SQLite activa G1, revierte a G0, reinicia sobre la autoridad durable y comprueba
+las métricas del corte. La
 [matriz](docs/project/COMPLETION_MATRIX.md) y el
 [registro de fase](docs/project/log/2026-07-17-quiescent-area-generation-cutover-phase-6c.md)
-son la autoridad sobre sus puertas.
+son la autoridad sobre sus puertas; el
+[registro PostgreSQL/PWA](docs/project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md)
+conserva la aceptación posterior.
+
+La fase 6D de [ADR 0022](docs/decisions/0022-reversible-area-unit-retirement.md)
+está **parcialmente implementada**. El catálogo calcula SCC y su cierre
+inverso para que una unidad retirada no deje referencias residentes rotas. El
+core rechaza la operación si el área inicial, un personaje conectado, combate,
+trade, un tick pendiente, estado temporal de NPC o una referencia cruzada la
+mantienen fijada. Si pasa la puerta, el actor conserva en un checkpoint v1 el
+estado dinámico local —NPC, objetos y botín de suelo—, desinstala exactamente
+su contenido runtime y confirma de forma conjunta el snapshot v8, la generación
+y la fila v15. RNG, tick y allocators globales nunca se rebobinan.
+
+Un portal o el login de un personaje desconectado vuelve a verificar el bundle
+inmutable, consume el checkpoint y aplica catch-up determinista antes de
+publicar la unidad. El arranque distingue el encoding durable v7 de v8 y no
+acepta un manifiesto v8 vacío como si fuera legado. Este primer vertical sigue
+siendo interno: todavía faltan una superficie operativa soportada, métricas de
+retiro/RSS, política de memoria/LRU, sustitución de una sola revisión y
+aceptación prolongada. Durante recovery catalogado se materializa de forma
+transitoria la generación completa antes de reconstruir las unidades
+retiradas; no se atribuye aún un arranque verdaderamente parcial.
+
+La puerta local del árbol final pasa 792/792 pruebas Rust del workspace,
+337/337 del servidor, clippy estricto del workspace, formato y `git diff
+--check`. El cliente conserva 125/125 Vitest, `svelte-check` sin diagnósticos y
+build de producción. La auditoría final del diff 6D queda en 0 P1/0 P2. No se
+atribuye el E2E específico retiro→restart→rehidratación ni descenso RSS: ambos
+siguen pendientes y mantienen 6D en estado parcial.
 
 La puerta final pasa 144/144 pruebas de `world-pack`, incluidas 10/10 del CLI,
 y 707/707 pruebas Rust del workspace; también pasan formato, `git diff
@@ -727,16 +782,18 @@ iniciales del WorldPack y superpone las ubicaciones durables, sin resucitar
 instancias runtime ausentes. Antes de abrir listeners valida también
 propietarios desconectados, equipo, capacidad y todos los IDs ligados, incluso
 si el objeto ya fue consumido, mediante lecturas acotadas que descarta después;
-no convierte esas fichas en personajes activos. El snapshot vigente es v7:
+no convierte esas fichas en personajes activos. El snapshot vigente es v8:
 además de instancias, vínculo y trade, conserva RNG, procedencia, encuentros,
-derechos de suelo, cursores round-robin, afijos por instancia y el contador de
-aperturas. El decoder separa explícitamente las formas v1–v7; una forma v1–v5
-está limitada a 1 MiB, mientras v6 y v7 admiten hasta 2 MiB. El DTO v6 rechaza
+derechos de suelo, cursores round-robin, afijos por instancia, el contador de
+aperturas y la residencia `Resident`/`Retired` de las áreas cargadas. El
+decoder separa explícitamente las formas v1–v8; una forma v1–v5 está limitada
+a 1 MiB, mientras v6–v8 admiten hasta 2 MiB. El DTO v6 rechaza
 campos v7 y migra con afijos vacíos y contador inicial, sin inventar
 procedencia. Al reiniciar se validan por lotes todas las identidades de los derechos,
 se cancelan los encuentros aún abiertos y su combate antes de readiness, y se
 conservan intactos los derechos ya creados. SQLite y PostgreSQL usan esquema
-v14, sin tabla de loot/escrow espejo ni doble escritura.
+v15, sin tabla de loot/escrow espejo ni doble escritura; la tabla nueva solo
+custodia checkpoints acotados de unidades de área.
 
 El mundo revisado compone tres áreas en 10 prototipos, 9 instancias iniciales,
 2 tablas, 1 fuente de botín, 1 afijo y 1 pool de afijos. Añade la habilidad
@@ -1021,12 +1078,16 @@ es un pase ni un fallo de aplicación.
 
 ## Estado y hoja de ruta
 
-Tiamud es un proyecto de código abierto en prelanzamiento `0.1.0`. El protocolo
-WebSocket sigue siendo experimental. La matriz de completitud es la autoridad
-sobre aceptación.
+Tiamud está preparado bajo licencias de código abierto y permanece en
+prelanzamiento `0.1.0`; el repositorio canónico sigue privado hasta una decisión
+explícita de visibilidad. El protocolo WebSocket continúa experimental. La
+matriz de completitud es la autoridad sobre aceptación.
 
 Puertas externas pendientes:
 
+- restablecer la ejecución alojada de GitHub Actions, actualmente bloqueada
+  antes de sus pasos por facturación o límite de gasto, y obtener un CI verde
+  del candidato exacto;
 - ejercicio específico de la instalación pública para TLS PostgreSQL,
   backup/restore, monitorización y recuperación operativa;
 - soak retenido y verificado de 24 horas para el candidato exacto;
@@ -1036,8 +1097,10 @@ Puertas externas pendientes:
 
 Siguientes líneas técnicas y de producto:
 
-- medir 6C antes de diseñar 6D, reemplazo por área, descarga o LRU, y repetir
-  PostgreSQL v14 real cuando exista una URL desechable;
+- cerrar el E2E retiro/restart, el humo PostgreSQL v15 y métricas del vertical
+  6D antes de diseñar política automática, presupuesto de memoria,
+  reemplazo por área o LRU; la aceptación funcional PostgreSQL v14 previa
+  permanece como evidencia histórica;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
 - considerar need/greed, master-loot o contribución solo tras modelar sus
@@ -1047,8 +1110,8 @@ Siguientes líneas técnicas y de producto:
 - añadir alias/migraciones de IDs y mejores vistas previas de balance;
 - optimizar con seguimiento de personajes modificados y deltas acotados antes
   de considerar distribución;
-- implementar descarga/LRU de áreas solo después de 6C, tras medir la necesidad
-  y conservar checkpoint, rollback y una única autoridad;
+- medir el retiro reversible 6D y solo después decidir una política LRU; el
+  checkpoint no convierte por sí solo la heurística de expulsión en segura;
 - publicar el primer hito explícito de compatibilidad `tiamud.v1`.
 
 ## Mapa del repositorio
@@ -1108,7 +1171,8 @@ deploy/                      ejemplos Caddy, systemd y entorno
   [tablones comunitarios acotados](docs/decisions/0018-bounded-moderable-community-boards.md) ·
   [voz espacial acotada](docs/decisions/0019-bounded-spatial-voice.md) ·
   [carga local aditiva](docs/decisions/0020-additive-local-area-loading.md) ·
-  [sustitución quiescente durable](docs/decisions/0021-quiescent-area-generation-cutover.md).
+  [sustitución quiescente durable](docs/decisions/0021-quiescent-area-generation-cutover.md) ·
+  [retirada reversible de unidades](docs/decisions/0022-reversible-area-unit-retirement.md).
 - **Estado:** [matriz](docs/project/COMPLETION_MATRIX.md) ·
   [especificación v0.3](docs/spec-v0.3.md) ·
   [memoria](docs/project/PROJECT_MEMORY.md) ·

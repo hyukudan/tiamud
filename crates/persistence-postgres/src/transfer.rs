@@ -2,13 +2,14 @@ use std::path::{Path, PathBuf};
 
 use postgres::{Client, GenericClient};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transaction};
 
 const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 
-const TABLES: [&str; 24] = APPLICATION_TABLES;
+const TABLES: [&str; 25] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -50,6 +51,12 @@ pub enum TransferError {
     RuntimeSnapshotTooLarge { maximum: usize },
     #[error("SQLite source contains an invalid world runtime snapshot")]
     InvalidRuntimeSnapshot,
+    #[error("SQLite source area checkpoint exceeds {maximum} bytes")]
+    AreaCheckpointTooLarge { maximum: usize },
+    #[error("SQLite source contains an invalid area checkpoint")]
+    InvalidAreaCheckpoint,
+    #[error("SQLite source area checkpoint SHA-256 does not match its exact JSON bytes")]
+    AreaCheckpointHashMismatch,
     #[error(
         "PostgreSQL target table {table} contains {rows} row(s); refusing to merge or overwrite"
     )]
@@ -107,6 +114,10 @@ pub fn copy_sqlite_to_postgres(
     tables.push(TableCount {
         table: "world_area_generation",
         rows: copy_world_area_generation(&source, &mut target)?,
+    });
+    tables.push(TableCount {
+        table: "world_area_checkpoints",
+        rows: copy_world_area_checkpoints(&source, &mut target)?,
     });
     tables.push(TableCount {
         table: "social_ignores",
@@ -199,7 +210,8 @@ fn lock_target_tables<C: GenericClient>(target: &mut C) -> Result<(), postgres::
     // and accidentally turning an offline copy into a merge.
     target.batch_execute(
         "LOCK TABLE accounts, characters, auth_sessions, domain_events,
-                    world_runtime, world_area_generation, social_ignores, social_blocks,
+                    world_runtime, world_area_generation, world_area_checkpoints,
+                    social_ignores, social_blocks,
                     social_channel_subscriptions,
                     social_mail_usage, social_board_usage,
                     social_mail_messages,
@@ -462,6 +474,107 @@ fn copy_world_area_generation<C: GenericClient>(
         ],
     )?;
     Ok(1)
+}
+
+fn copy_world_area_checkpoints<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT generation_sha256, unit_id, residency_epoch,
+                checkpoint_version, checkpoint_sha256, captured_logical_tick,
+                checkpoint_json, created_at, updated_at
+         FROM world_area_checkpoints
+         ORDER BY generation_sha256, unit_id, residency_epoch",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0_u64;
+    while let Some(row) = rows.next()? {
+        let generation_sha256: String = row.get(0)?;
+        let unit_id: String = row.get(1)?;
+        let residency_epoch: i64 = row.get(2)?;
+        let checkpoint_version: i64 = row.get(3)?;
+        let checkpoint_sha256: String = row.get(4)?;
+        let captured_logical_tick: i64 = row.get(5)?;
+        let checkpoint_json: String = row.get(6)?;
+        let created_at: i64 = row.get(7)?;
+        let updated_at: i64 = row.get(8)?;
+        validate_area_checkpoint(
+            &generation_sha256,
+            residency_epoch,
+            checkpoint_version,
+            &checkpoint_sha256,
+            captured_logical_tick,
+            &checkpoint_json,
+        )?;
+        target.execute(
+            "INSERT INTO world_area_checkpoints
+                 (generation_sha256, unit_id, residency_epoch,
+                  checkpoint_version, checkpoint_sha256, captured_logical_tick,
+                  checkpoint_json, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &generation_sha256,
+                &unit_id,
+                &residency_epoch,
+                &checkpoint_version,
+                &checkpoint_sha256,
+                &captured_logical_tick,
+                &checkpoint_json,
+                &created_at,
+                &updated_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn validate_area_checkpoint(
+    generation_sha256: &str,
+    residency_epoch: i64,
+    checkpoint_version: i64,
+    checkpoint_sha256: &str,
+    captured_logical_tick: i64,
+    checkpoint_json: &str,
+) -> Result<(), TransferError> {
+    if checkpoint_json.is_empty() {
+        return Err(TransferError::InvalidAreaCheckpoint);
+    }
+    if checkpoint_json.len() > tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES {
+        return Err(TransferError::AreaCheckpointTooLarge {
+            maximum: tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES,
+        });
+    }
+    let residency_epoch =
+        u64::try_from(residency_epoch).map_err(|_| TransferError::InvalidAreaCheckpoint)?;
+    let checkpoint_version =
+        u32::try_from(checkpoint_version).map_err(|_| TransferError::InvalidAreaCheckpoint)?;
+    let captured_logical_tick =
+        u64::try_from(captured_logical_tick).map_err(|_| TransferError::InvalidAreaCheckpoint)?;
+    if residency_epoch == 0 || checkpoint_version == 0 {
+        return Err(TransferError::InvalidAreaCheckpoint);
+    }
+    let checkpoint: tiamud_core::AreaDynamicCheckpoint =
+        serde_json::from_str(checkpoint_json).map_err(|_| TransferError::InvalidAreaCheckpoint)?;
+    tiamud_core::validate_area_dynamic_checkpoint(&checkpoint)
+        .map_err(|_| TransferError::InvalidAreaCheckpoint)?;
+    if checkpoint.generation_sha256 != generation_sha256
+        || checkpoint.checkpoint_version != checkpoint_version
+        || checkpoint.captured_logical_tick != captured_logical_tick
+        || checkpoint
+            .areas
+            .iter()
+            .any(|area| area.residency_epoch != residency_epoch)
+    {
+        return Err(TransferError::InvalidAreaCheckpoint);
+    }
+    let digest = Sha256::digest(checkpoint_json.as_bytes());
+    let actual = hex::encode(digest);
+    if actual != checkpoint_sha256 {
+        return Err(TransferError::AreaCheckpointHashMismatch);
+    }
+    Ok(())
 }
 
 fn validate_runtime_snapshot(
@@ -1110,6 +1223,7 @@ fn reset_sequences<C: GenericClient>(target: &mut C) -> Result<(), postgres::Err
 mod tests {
     use super::*;
     use rusqlite::params;
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     fn current_source(path: &Path) -> Connection {
@@ -1118,8 +1232,36 @@ mod tests {
         connection
     }
 
+    fn valid_area_checkpoint(residency_epoch: u64) -> (String, String) {
+        let checkpoint = tiamud_core::AreaDynamicCheckpoint {
+            checkpoint_version: tiamud_core::AREA_DYNAMIC_CHECKPOINT_VERSION,
+            generation_sha256: "a".repeat(64),
+            areas: vec![tiamud_core::AreaDynamicCheckpointIdentity {
+                area_id: "demo:archive".to_owned(),
+                revision: 1,
+                bundle_sha256: "d".repeat(64),
+                residency_epoch,
+            }],
+            captured_world_revision: 1,
+            captured_logical_tick: 42,
+            captured_rng_state: 1,
+            captured_next_item_instance_sequence: 1,
+            captured_next_loot_drop_id: tiamud_core::LootDropId(1),
+            captured_next_reward_open_id: tiamud_core::RewardOpenId(1),
+            npcs: BTreeMap::new(),
+            item_instances: BTreeMap::new(),
+            item_provenance: BTreeMap::new(),
+            ground_loot: BTreeMap::new(),
+        };
+        tiamud_core::validate_area_dynamic_checkpoint(&checkpoint).unwrap();
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let sha256 = hex::encode(Sha256::digest(json.as_bytes()));
+        (json, sha256)
+    }
+
     fn remove_v7_fields(snapshot: &mut serde_json::Value) {
         let snapshot = snapshot.as_object_mut().unwrap();
+        snapshot.remove("areaResidency");
         snapshot.remove("nextRewardOpenId");
         for item in snapshot["itemInstances"]
             .as_object_mut()
@@ -1151,6 +1293,36 @@ mod tests {
         let connection = current_source(&path);
 
         validate_source(&connection).unwrap();
+    }
+
+    #[test]
+    fn validates_area_checkpoint_shape_identity_and_exact_hash() {
+        let (json, sha256) = valid_area_checkpoint(7);
+        validate_area_checkpoint(&"a".repeat(64), 7, 1, &sha256, 42, &json).unwrap();
+
+        for result in [
+            validate_area_checkpoint(&"b".repeat(64), 7, 1, &sha256, 42, &json),
+            validate_area_checkpoint(&"a".repeat(64), 8, 1, &sha256, 42, &json),
+            validate_area_checkpoint(&"a".repeat(64), 7, 2, &sha256, 42, &json),
+            validate_area_checkpoint(&"a".repeat(64), 7, 1, &sha256, 43, &json),
+        ] {
+            assert!(matches!(result, Err(TransferError::InvalidAreaCheckpoint)));
+        }
+        assert!(matches!(
+            validate_area_checkpoint(&"a".repeat(64), 7, 1, &"e".repeat(64), 42, &json),
+            Err(TransferError::AreaCheckpointHashMismatch)
+        ));
+        assert!(matches!(
+            validate_area_checkpoint(
+                &"a".repeat(64),
+                7,
+                1,
+                &sha256,
+                42,
+                &"x".repeat(tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES + 1),
+            ),
+            Err(TransferError::AreaCheckpointTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -1301,7 +1473,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 14
+                required: 15
             }
         ));
         assert_eq!(
@@ -1340,7 +1512,16 @@ mod tests {
     fn transfer_manifest_is_parent_before_child_and_complete() {
         assert_eq!(TABLES[0], "accounts");
         assert_eq!(TABLES[1], "characters");
-        assert_eq!(TABLES.len(), 24);
+        assert_eq!(TABLES.len(), 25);
+        let generation = TABLES
+            .iter()
+            .position(|table| *table == "world_area_generation")
+            .unwrap();
+        let checkpoints = TABLES
+            .iter()
+            .position(|table| *table == "world_area_checkpoints")
+            .unwrap();
+        assert_eq!(checkpoints, generation + 1);
         let reports = TABLES
             .iter()
             .position(|table| *table == "social_reports")

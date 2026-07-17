@@ -67,12 +67,13 @@ convierte en firma remota porque el CLI viaje dentro de un archivo atestado.
 
 Antes de actualizar el binario de una instalación en modo catálogo, conserva
 la raíz del registro, el catálogo activo y el anterior y una copia verificada
-del backend. SQL v14 referencia la generación por digest, no por una ruta
+del backend. SQL v15 referencia la generación por digest y puede contener
+checkpoints de unidades, no una ruta
 incluida en el paquete: borrar esos blobs puede impedir el siguiente arranque o
 un rollback. `area-select` solo selecciona una generación local ya publicada;
 no descarga contenido ni lo obtiene del release de GitHub.
 
-La sustitución quiescente 6C, su migración v14 y un rollback explícito deben
+La sustitución quiescente 6C, las migraciones v13→v14→v15 y un rollback explícito deben
 probarse como parte del candidato instalado según la
 [guía de un único host](single-host.md#sustitución-quiescente-de-generaciones-de-área).
 Una actualización 6B/v13 sin liga pero con recovery compartido o cualquier
@@ -80,8 +81,22 @@ personaje debe ligar G0 una sola vez mediante
 `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>` y retirar la variable.
 Cuentas solas no son autoridad de mundo; un release tampoco convierte
 implícitamente una autoridad monolítica existente a catálogo.
-La puerta final 6C está retenida; PostgreSQL real no se abrió sin URL. Esa
-evidencia y una futura atestación remota son pruebas distintas.
+La puerta funcional 6C está cerrada. PostgreSQL 18 desechable pasa 20/20 pruebas
+del adaptador y 7/7 enfocadas del servidor, incluida la CAS v14; el humo real
+liga G0 secuencia 1 y valida readiness, Web, Telnet, dos áreas residentes,
+SIGHUP `noop` y cierre limpio. Esta aceptación local y una futura atestación
+remota siguen siendo pruebas distintas. Véase el
+[registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+
+El candidato v15 debe conservar y verificar `world_area_checkpoints` en backup,
+restore y traslado. La aceptación v14 anterior no acredita esa tabla. 6D sigue
+parcial: no hay LRU ni superficie de operador, y un release no debe anunciar
+descarga automática o ahorro RSS hasta que exista evidencia integral retenida.
+
+El paquete web incorpora la identidad PWA revisada: manifiesto, favicon SVG,
+PNG 192/512, variante maskable y Apple Touch. Su gate local pasa 125 Vitest,
+check 0/0 y build. No atribuye un pase Playwright nuevo ni sustituye la
+verificación del archivo release exacto.
 
 ## Consumer verification
 
@@ -130,3 +145,5 @@ An empty diff is necessary but not sufficient for publication: a tagged
 release must pass the locked notice/policy check, pass the workflow, publish its
 signed provenance, and be independently verified with the commands above.
 Until that happens for a specific tag, release acceptance remains partial.
+La ejecución alojada actual de GitHub Actions está bloqueada antes de los pasos
+por facturación o límite de gasto; los pases locales no se relabelan como CI.
