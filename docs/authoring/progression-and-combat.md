@@ -1,6 +1,6 @@
 # Progression, abilities and combat
 
-The v3 character model in WorldPack v5 separates character identity from role:
+The v3 character model in WorldPack v6 separates character identity from role:
 
 - a lineage is an inherited or supernatural origin;
 - an optional background is learned personal history;
@@ -58,17 +58,35 @@ NPC ability sets attach resources, regeneration, resistances and known
 abilities. Reusable item prototypes attach equipment slots, attack bonuses,
 healing, consumption, weight, slot cost, rarity, item level, transfer/stack
 policy, optional bounded-container capacity and short regeneration or strength
-effects. Phase 3B accepts `unique` or `fungible` stacks but still accepts only
-`transferable`; bound/non-transferable values are reserved and rejected until
-their runtime semantics land. Fungible stacks are derived from durable units
-and never author a quantity or stack ID. A container must be unique and
-non-consumable. Fixed NPC loot is an `initialItemInstances` unit whose location
-is the intended `npc_spawn`; it is not a list on the NPC prototype.
+effects. Native WorldPack v6/AreaPack v5 accept `transferable`,
+`character_bound` and `non_transferable`. Fungible stacks are derived from
+durable units and never author a quantity or stack ID. A container must be
+unique and non-consumable.
+
+Fixed NPC loot is an `initialItemInstances` unit whose location is the intended
+`npc_spawn`; it is not a list on the NPC prototype. Repeatable loot is separate:
+a `lootSource` links one NPC spawn to one `lootTable`. Guaranteed entries are
+materialized before weighted integer pools; `nothing` is an explicit weighted
+outcome. Every referenced prototype, spawn and table must exist. The combined
+worst case of fixed roots and repeatable units is at most 64 per defeat.
+
+Loot rights are authored on the source as `credited_character` or
+`party_round_robin`. Round-robin freezes an eligible party cohort and uses a
+durable cursor; it is not a discretionary leader choice. The runtime records
+the table's canonical SHA-256 with per-instance provenance and resolves RNG,
+creation, rights, NPC defeat and XP in one checkpointed commit. Need/greed,
+master-loot, contribution-based sharing, affixes and paid boxes are not
+authoring features.
 
 All actions still pass through the same authoritative world actor. Browser and
 Telnet commands do not implement separate combat rules. Definitions are
 bounded at publication and runtime; combat arithmetic saturates defensively
 instead of wrapping.
+
+The reviewed gate-stalker demonstrates both paths: its authored
+`tiamud:stormglass-talon` is fixed loot, while its repeatable table guarantees
+one road token and rolls once between a wolf clasp with weight 6000 and
+`nothing` with weight 4000. The source uses party round-robin.
 
 ## Author checklist
 
@@ -80,4 +98,6 @@ instead of wrapping.
 - Test promotion at its minimum level and after any catch-up milestone.
 - Exercise resource exhaustion, cooldown, resistance, defeat and missing
   target behavior.
+- Check each loot table's exact integer weights, quantity ranges, canonical
+  references and fixed-plus-repeatable 64-root worst case.
 - Treat sample values as demonstration balance, not universal balance.

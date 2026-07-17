@@ -130,6 +130,20 @@ describe('protocol messages', () => {
         recipient: 'o3333333333333333', quantity: 2,
       },
     });
+    expect(createActionPerform('loot.status', undefined, 'loot-status')).toEqual({
+      v: 1,
+      type: 'action.perform',
+      data: { requestId: 'loot-status', action: 'loot.status' },
+    });
+    expect(createActionPerform(
+      'loot.pass',
+      { target: 'o4444444444444444' },
+      'loot-pass',
+    )).toMatchObject({
+      data: {
+        requestId: 'loot-pass', action: 'loot.pass', target: 'o4444444444444444',
+      },
+    });
     expect(createActionPerform('party.say', { message: 'Hold the bridge.' }, 'request-party')).toMatchObject({
       data: { requestId: 'request-party', action: 'party.say', message: 'Hold the bridge.' },
     });
@@ -182,6 +196,22 @@ describe('protocol messages', () => {
     expect(() => createActionPerform(
       'item.give', { target: 'tonic', recipient: 'x'.repeat(65) }, 'bad',
     )).toThrow(RangeError);
+  });
+
+  it('creates only the exact closed loot action forms', () => {
+    expect(() => createActionPerform(
+      'loot.status', { target: 'o1111111111111111' }, 'extra',
+    )).toThrow('exact closed field set');
+    expect(() => createActionPerform('loot.pass', undefined, 'missing'))
+      .toThrow('exact closed field set');
+    expect(() => createActionPerform('loot.pass', { target: '' }, 'empty'))
+      .toThrow('bounded visible selector');
+    expect(() => createActionPerform(
+      'loot.pass', { target: 'x'.repeat(257) }, 'long',
+    )).toThrow('bounded visible selector');
+    expect(() => createActionPerform(
+      'loot.pass', { target: 'o1111111111111111', quantity: 1 }, 'extra',
+    )).toThrow('exact closed field set');
   });
 
   it('creates only the exact closed trade action forms', () => {
@@ -480,9 +510,11 @@ describe('protocol messages', () => {
           totalWeightGrams: 1600,
           transferPolicy: 'transferable',
           boundToYou: false,
+          loot: { access: 'yours', expiresInTicks: 12 },
           actions: [
             { label: 'Examine', command: 'examine tiamud:blue-lantern' },
             { label: 'Take', command: 'take tiamud:blue-lantern' },
+            { label: 'Pass', command: 'loot pass tiamud:blue-lantern' },
           ],
         }],
       },
@@ -493,9 +525,54 @@ describe('protocol messages', () => {
       data: { items: [{
         id: 'tiamud:blue-lantern',
         label: 'blue-glass lantern',
-        actions: [{ command: 'examine tiamud:blue-lantern' }, { command: 'take tiamud:blue-lantern' }],
+        loot: { access: 'yours', expiresInTicks: 12 },
+        actions: [
+          { command: 'examine tiamud:blue-lantern' },
+          { command: 'take tiamud:blue-lantern' },
+          { command: 'loot pass tiamud:blue-lantern' },
+        ],
       }] },
     });
+
+    const reserved = JSON.parse(JSON.stringify({
+      v: 1,
+      type: 'scene.snapshot',
+      seq: 4,
+      data: {
+        title: 'Lantern Square', prose: [], exits: [], npcs: [],
+        items: [{
+          id: 'o1111111111111111', label: 'wolf clasp', description: '', rarity: 'rare',
+          itemLevel: 2, weightGrams: 100, quantity: 1, stackSlots: 1,
+          totalWeightGrams: 100, transferPolicy: 'transferable', boundToYou: false,
+          loot: { access: 'reserved' }, actions: [],
+        }],
+      },
+    }));
+    expect(parseServerMessage(JSON.stringify(reserved))).toMatchObject({
+      data: { items: [{ loot: { access: 'reserved' } }] },
+    });
+    for (const loot of [
+      { access: 'yours' },
+      { access: 'yours', expiresInTicks: 0 },
+      { access: 'yours', expiresInTicks: 21 },
+      { access: 'reserved', expiresInTicks: 4 },
+      { access: 'reserved', beneficiary: 7 },
+      { access: 'public' },
+    ]) {
+      reserved.data.items[0].loot = loot;
+      const parsed = parseServerMessage(JSON.stringify(reserved));
+      expect(parsed?.type).toBe('scene.snapshot');
+      if (parsed?.type !== 'scene.snapshot') throw new Error('expected scene snapshot');
+      expect(parsed.data.items).toEqual([]);
+    }
+    reserved.data.items[0].loot = { access: 'reserved' };
+    reserved.data.items[0].actions = [{
+      label: 'Take', command: 'take o1111111111111111',
+    }];
+    const unauthorized = parseServerMessage(JSON.stringify(reserved));
+    expect(unauthorized?.type).toBe('scene.snapshot');
+    if (unauthorized?.type !== 'scene.snapshot') throw new Error('expected scene snapshot');
+    expect(unauthorized.data.items).toEqual([]);
   });
 
   it('accepts bounded entity annotations only in the scene presentation sidecar', () => {

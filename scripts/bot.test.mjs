@@ -198,6 +198,39 @@ test('strict bot accepts the complete bounded phase-3B scene item contract', () 
   );
 });
 
+test('strict bot accepts only perception-safe relative loot access', () => {
+  const yours = parseServerMessage(JSON.stringify(sceneEnvelope(sceneItem({
+    loot: { access: 'yours', expiresInTicks: 20 },
+    actions: [
+      { label: 'Take', command: `take ${OPAQUE_ITEM}` },
+      { label: 'Pass', command: `loot pass ${OPAQUE_ITEM}` },
+    ],
+  }))));
+  assert.deepEqual(yours.data.items[0].loot, { access: 'yours', expiresInTicks: 20 });
+
+  const reserved = parseServerMessage(JSON.stringify(sceneEnvelope(sceneItem({
+    loot: { access: 'reserved' },
+    actions: [],
+  }))));
+  assert.deepEqual(reserved.data.items[0].loot, { access: 'reserved' });
+  assert.equal(sceneEnvelope(sceneItem()).data.items[0].loot, undefined);
+
+  for (const loot of [
+    { access: 'yours' },
+    { access: 'yours', expiresInTicks: 0 },
+    { access: 'yours', expiresInTicks: 21 },
+    { access: 'reserved', expiresInTicks: 4 },
+    { access: 'reserved', beneficiary: 42 },
+    { access: 'public' },
+  ]) {
+    assert.throws(() => parseServerMessage(JSON.stringify(sceneEnvelope(sceneItem({ loot })))));
+  }
+  assert.throws(() => parseServerMessage(JSON.stringify(sceneEnvelope(sceneItem({
+    loot: { access: 'reserved' },
+    actions: [{ label: 'Take', command: `take ${OPAQUE_ITEM}` }],
+  })))), /unauthorized action/);
+});
+
 test('strict bot accepts opaque itemGiven projections without durable ownership', () => {
   const event = {
     revision: 8,

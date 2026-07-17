@@ -62,8 +62,8 @@ matriz, memoria y documentación pública a la vez.
 - Mundo y conversación usan buzones acotados de 256 entradas por sesión,
   encaminados por `SessionId`. Conserva el fan-out O(S), recuperación por lag y
   limpieza segura ante cancelación.
-- PostgreSQL esquema v10 es el perfil recomendado para un host público nuevo.
-  SQLite esquema v10 es la ruta local/predeterminada sin servicios. Se abre un
+- PostgreSQL esquema v11 es el perfil recomendado para un host público nuevo.
+  SQLite esquema v11 es la ruta local/predeterminada sin servicios. Se abre un
   único sistema autoritativo; no hay doble escritura.
 - `tiamud-migrate-postgres` traslada sin conexión una instantánea SQLite actual
   a PostgreSQL vacío en una transacción, incluidas suscripciones, perfiles,
@@ -71,13 +71,13 @@ matriz, memoria y documentación pública a la vez.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
-- `WorldRuntimeSnapshot` v5 es la única autoridad durable del grafo de
-  instancias de objeto y de las reservas de trade. SQLite y PostgreSQL la
-  confirman con personajes/eventos en su
-  transacción existente; ambos adaptadores continúan en esquema v10 y no hay
-  esquema v11, tabla espejo ni custodia SQL de trade. DTO exactos v1, v2, v3,
-  v4 y v5 se seleccionan por
-  `snapshotVersion`; v1-v3 se convierten a vínculo `unbound` y un campo
+- `WorldRuntimeSnapshot` v6 es la única autoridad durable del grafo de
+  instancias, reservas de trade, procedencia y derechos de botín. SQLite y
+  PostgreSQL la confirman con personajes/eventos en su transacción existente;
+  ambos adaptadores usan esquema v11 y no hay tabla espejo ni custodia SQL de
+  trade o botín. DTO exactos v1-v6 se seleccionan por `snapshotVersion`;
+  snapshots v1-v5 conservan su límite legado de 1 MiB y v6 admite hasta 2 MiB.
+  v1-v3 se convierten a vínculo `unbound` y un campo
   `binding` inyectado en v3 se rechaza; v4 crea `nextTradeId: 1` y `trades`
   vacío. La lectura falla cerrada ante campos de otra versión, referencias,
   grafo, vínculo, trade, reserva, política o contador inválidos. Al
@@ -92,8 +92,9 @@ matriz, memoria y documentación pública a la vez.
 
 ### Mundo, personajes y juego
 
-- WorldPack v5 es canónico; AreaPack v4 es la autoría modular nativa.
-  WorldPack v4/v3/v2, AreaPack v3/v2/v1 y Envy/Merc solo entran por
+- WorldPack v6 es canónico; AreaPack v5 es la autoría modular nativa y
+  WorldProject permanece en v2. WorldPack v5/v4/v3/v2,
+  AreaPack v4/v3/v2/v1 y Envy/Merc solo entran por
   normalización/importación.
 - Se valida y carga un WorldPack completo antes de abrir listeners.
   `TIAMUD_WORLD_PACK` selecciona uno externo revisado; si no, se usa el
@@ -101,8 +102,11 @@ matriz, memoria y documentación pública a la vez.
 - `tiamud-world compose` realiza composición modular determinista sin conexión.
   Carga/reemplazo caliente y expulsión LRU **no están implementados**. ADR 0005
   es diseño futuro.
+- La autoría mide UTF-8 por bytes: título de sala 1..=128 y descripción
+  1..=8.192; rechaza controles inseguros y normaliza entradas legacy antes de
+  validar. No subas estos topes para hacer caber prosa generada.
 - El modelo de personaje v3 funciona de extremo a extremo dentro de WorldPack
-  v5: linaje, trasfondo opcional, clase
+  v6: linaje, trasfondo opcional, clase
   base/avanzada, XP global, clase activa, historial, reservas, talentos con
   rango y promoción atómica.
 - `archetype` no es identidad canónica. Normalízalo en la frontera; no crees un
@@ -114,7 +118,7 @@ matriz, memoria y documentación pública a la vez.
   habilidades del jugador respetan un cooldown global de un ciclo lógico.
 - Los NPC eligen habilidades de forma determinista y tienen ataque básico de
   respaldo. No hay IA generativa en ejecución.
-- Objetos/equipo, combate, derrota/recuperación, botín fijo, tiempo, clima,
+- Objetos/equipo, combate, derrota/recuperación, botín fijo y repetible, tiempo, clima,
   misiones, grupos, economía, conversación y moderación persisten en ambos
   adaptadores. Los objetos separan `itemPrototypes` de instancias durables;
   cada personaje tiene capacidad autoritativa por slots/peso y rareza cerrada
@@ -132,9 +136,9 @@ matriz, memoria y documentación pública a la vez.
   `contents` pagina 20 grupos; Web, Telnet y GMCP reciben cantidad, slots, peso
   total, capacidad, política de transferencia y estado de vínculo mediante
   referencias opacas.
-- WorldPack v5 y AreaPack v4 aceptan el vocabulario cerrado `transferable`,
-  `character_bound` y `non_transferable`; WorldPack v4/AreaPack v3 y formatos
-  anteriores solo normalizan `transferable`. La primera adquisición liga
+- WorldPack v6 y AreaPack v5 aceptan el vocabulario cerrado `transferable`,
+  `character_bound` y `non_transferable`, igual que WorldPack v5/AreaPack v4;
+  WorldPack v4/AreaPack v3 y anteriores solo normalizan `transferable`. La primera adquisición liga
   recursivamente un `character_bound`. Mover dentro del grafo del mismo dueño
   está permitido, pero `drop` o un cambio de dueño exige que toda la raíz y sus
   descendientes sean `transferable`; `non_transferable` no guarda dueño ligado
@@ -143,8 +147,7 @@ matriz, memoria y documentación pública a la vez.
   personaje conectado de la misma sala. Acepta selector opaco o nombre exacto,
   rechaza al propio emisor, prevalida capacidad de ambos agregados, respeta
   ignore del receptor y block bilateral y confirma un único `ItemsGiven` antes
-  de proyectar. La entrega offline/remota, el reparto de grupo y las tablas de
-  botín aleatorias siguen ausentes.
+  de proyectar. La entrega offline/remota sigue ausente.
 - `trade` implementa intercambio bilateral confirmado entre dos personajes
   conectados, en la misma sala, fuera de combate y permitidos por la política
   social. El escrow es una reserva durable: objetos y monedas no cambian de
@@ -160,16 +163,26 @@ matriz, memoria y documentación pública a la vez.
   temporalmente sus agregados y valida existencia, vínculo, equipo, grafo y
   capacidad, incluidos los desconectados. Esos agregados no quedan retenidos
   como personajes conectados. Una incoherencia bloquea listeners.
+- WorldPack v6 añade tablas enteras de botín y fuentes por aparición de NPC.
+  Cada derrota resuelve una vez el botín fijo y repetible, con rejection
+  sampling sin sesgo, procedencia durable y máximo combinado de 64 raíces. La
+  capacidad puede suprimir un drop sin bloquear la derrota ni permitir reroll.
+  `party_round_robin` congela una cohorte de hasta seis personajes y `loot pass`
+  cede el derecho sin renovar el plazo; la reserva es exclusiva 20 ticks,
+  pública después y desaparece al tick 120. Reiniciar cancela encuentros
+  abiertos antes de readiness, pero conserva intactos los derechos ya creados.
+  Need/greed, master-loot, contribución, afijos y recompensas selladas son fases
+  posteriores; cajas, llaves o tiradas pagadas no pertenecen al baseline.
 - Los grupos admiten hasta seis miembros y soportan
   create/invite/accept/revoke/kick/transfer/disband/leave/status y `party say`
   (`gsay`/`gtell`). No hay follow/assist/rescue, selección general de aliados,
-  XP/crédito de misión compartidos ni reparto de botín.
+  XP/crédito de misión compartidos ni reparto avanzado de botín.
 - La membresía permanece al desconectar y el snapshot muestra miembros offline,
   pero accept/revoke/kick/transfer resuelven un nombre conectado. No afirmes
   administración dirigida de un líder/invitado/miembro desconectado.
 - La conversación incluye `say` local, `tell`, `reply` en memoria mientras el
   destinatario siga conectado, chat de grupo y canales `general`, `newbie` y
-  `staff`. Suscripciones son durables en v10; `staff` requiere perfil
+  `staff`. Suscripciones son durables en v11; `staff` requiere perfil
   `moderator`, `administrator` o `implementor` al unirse, enviar y recibir;
   `helper` y `builder` no acceden. Web, Telnet y `Comm.Channel.Text` GMCP
   comparten política. No hay correo/historial durable, shout/yell ni telepatía
@@ -187,7 +200,7 @@ matriz, memoria y documentación pública a la vez.
   `implementor`; un Admin migrado recibe `administrator`. Cambiar un perfil
   elimina las asignaciones previas y siembra exactamente su bundle; toda acción
   sobre otra cuenta exige rango de perfil estrictamente inferior. Reportes,
-  sanciones, asignaciones y acciones staff exigen motivo; la auditoría v10 es
+  sanciones, asignaciones y acciones staff exigen motivo; la auditoría v11 es
   durable y append-only.
 - `staff inspect|where|goto|transfer|restore <nombre> | <motivo>` actúa solo
   sobre objetivos conectados. `staff announce <texto> | <motivo>`, la cola y
@@ -208,7 +221,11 @@ matriz, memoria y documentación pública a la vez.
 - `tiamud.v1` experimental usa secuencias monótonas, deduplicación acotada,
   heartbeats y recuperación autoritativa; no hay replay general de eventos.
 - Una recuperación devuelve `sync.scene` y `sync.player` correlacionados, cada
-  uno bajo 16 KiB; el navegador valida y aplica el par atómicamente.
+  uno bajo 16 KiB; el navegador valida y aplica el par atómicamente. La ventana
+  semántica Web para escenas es 14 KiB y conserva en orden botín propio,
+  público y reservado; Telnet usa 48 KiB. Ambos degradan prosa/entidades de
+  forma determinista y visible, y los lotes se acotan a 16 eventos antes de
+  coalescer y emitir un snapshot autoritativo.
 - Todo frame WebSocket normal está limitado a 16 KiB JSON compacto. No evites
   límites de frame, profundidad o cola.
 - Una escena GMCP sobredimensionada degrada a un fallback estructurado acotado
@@ -286,7 +303,7 @@ bibliotecas GTK/GStreamer ausentes. No se ejecutaron PostgreSQL real v10 ni
 soak de 24 horas; esta comprobación local sobre un árbol dirty no es evidencia
 de CI, release o producción.
 
-La fase 3D está implementada en el árbol actual mediante snapshot v5 y
+La fase histórica 3D quedó implementada mediante snapshot v5 y
 reservas durables de objetos/moneda, revisión y digest canónicos, doble
 confirmación, liquidación simultánea y recuperación restart-safe. La evidencia
 integrada pasa 550 pruebas Rust: 102 core (80+3+14+5), 97 WorldPack, 28
@@ -295,6 +312,22 @@ Vitest y 83 Node/bot.
 El pase Playwright final completa 36/36 escenarios, 18 Chromium y 18 Firefox.
 No convierte
 PostgreSQL real v10, WebKit local ni el soak de 24 horas en ejecutados.
+
+### Evidencia integrada de botín 4A
+
+La fase 4A usa WorldPack v6, AreaPack v5, snapshot v6 y esquema SQL v11. El
+artefacto canónico de Lantern Square contiene tres salas, nueve prototipos,
+nueve instancias iniciales, una tabla y una fuente; ocupa 50.498 bytes y su
+SHA-256 es
+`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
+El árbol integrado pasa 587/587 pruebas Rust (113 core, 240 servidor, 112
+WorldPack y 122 restantes), formato y clippy estricto; `svelte-check` 0/0,
+109/109 Vitest, 84/84 Node/bot y 19/19 escenarios Chromium. También pasan
+`cargo-deny`, licencias y avisos 307 Rust/76 web, humo, la carga exacta de CI
+con 16 bootstraps/32 rondas y un soak corto de 30 s con 58 rondas, 127 acciones
+y readiness 8/8. No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector
+de pantalla ni soak de 24 horas; la evidencia local precommit no es una
+aceptación de release.
 
 ### Evidencia histórica retenida
 
@@ -338,10 +371,10 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 9. Autoridad de staff separada de XP, nivel, clase y talentos. Usa la capacidad
    concreta y auditoría append-only; perfiles y títulos son asignación/presentación,
    no autorización implícita.
-10. Las fases 3A–3D ya separan prototipo/instancia, derivan pilas, aplican
-    capacidad recursiva, ejecutan `give` con políticas y trade confirmado por
-    reservas. Antes de botín repetible/aleatorio define propiedad, elegibilidad,
-    procedencia y reparto atómicos.
+10. Las fases 3A–4A ya separan prototipo/instancia, derivan pilas, aplican
+    capacidad recursiva, ejecutan `give` y trade, y resuelven botín repetible
+    con procedencia, derechos round-robin y pass atómicos. Conserva esos
+    invariantes antes de añadir afijos, recompensas selladas u otro reparto.
     Cajas, llaves y tiradas pagadas quedan fuera.
 11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
     conservando snapshot atómico.
@@ -355,8 +388,8 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 | --- | --- |
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
-| `crates/persistence-sqlite/` | SQLite esquema v10 y almacenamiento local |
-| `crates/persistence-postgres/` | PostgreSQL esquema v10, adaptador y mover |
+| `crates/persistence-sqlite/` | SQLite esquema v11 y almacenamiento local |
+| `crates/persistence-postgres/` | PostgreSQL esquema v11, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
@@ -488,10 +521,11 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - fase social 1 implementada, pero sin correo/historial, shout/yell o telepatía;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
-- fase 3D de inventario implementada: prototipos/instancias, creación durable,
+- fase 4A de inventario/botín implementada: prototipos/instancias, creación durable,
   pilas derivadas, contenedores con capacidad/profundidad acotadas, cantidades,
-  paginación, rareza, `itemLevel`, vínculo, políticas, `give` y trade confirmado
-  mediante reservas; sin derechos/reparto, procedencia ni botín aleatorio;
+  paginación, rareza, `itemLevel`, vínculo, políticas, `give`, trade confirmado,
+  botín repetible, procedencia, round-robin y pass; sin recompensas selladas,
+  afijos, need/greed, contribución ni master-loot;
 - backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;
 - marca/dominios y derechos de terceros siguen siendo trabajo legal externo.
 

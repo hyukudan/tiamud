@@ -47,7 +47,7 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
 pub(crate) const APPLICATION_TABLES: [&str; 17] = [
@@ -129,7 +129,9 @@ CREATE TABLE domain_events (
 CREATE TABLE world_runtime (
     singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
     snapshot_version BIGINT NOT NULL,
-    snapshot_json TEXT NOT NULL CHECK (octet_length(snapshot_json) <= 1048576),
+    snapshot_json TEXT NOT NULL
+        CONSTRAINT world_runtime_snapshot_json_check
+        CHECK (octet_length(snapshot_json) <= 2097152),
     last_event_sequence BIGINT
         CHECK (last_event_sequence IS NULL OR last_event_sequence >= 0),
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
@@ -319,7 +321,7 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 10);
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 11);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -486,6 +488,16 @@ SET version = 10, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 9;
 "#;
 
+const UPGRADE_V10_TO_V11_SQL: &str = r#"
+ALTER TABLE world_runtime
+    DROP CONSTRAINT world_runtime_snapshot_json_check,
+    ADD CONSTRAINT world_runtime_snapshot_json_check
+        CHECK (octet_length(snapshot_json) <= 2097152);
+UPDATE tiamud_schema
+SET version = 11, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 10;
+"#;
+
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
 WITH candidate AS (
     SELECT id FROM accounts
@@ -524,17 +536,18 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v10 schema or migration from v6/v7/v8/v9"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v11 schema or migration from v6/v7/v8/v9/v10"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v10 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v11 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6/v7/v8/v9 are upgraded to v10, and v10 is verified.
+/// at the current version, v6/v7/v8/v9/v10 are upgraded to v11, and v11 is
+/// verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
     let report = migrate_in_transaction(&mut transaction)?;
@@ -579,17 +592,24 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
             client.batch_execute(UPGRADE_V7_TO_V8_SQL)?;
             client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
             client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
+            client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
         }
         7 => {
             client.batch_execute(UPGRADE_V7_TO_V8_SQL)?;
             client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
             client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
+            client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
         }
         8 => {
             client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
             client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
+            client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
         }
-        9 => client.batch_execute(UPGRADE_V9_TO_V10_SQL)?,
+        9 => {
+            client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
+            client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
+        }
+        10 => client.batch_execute(UPGRADE_V10_TO_V11_SQL)?,
         SCHEMA_VERSION => {}
         _ => return Err(SchemaError::UnsupportedVersion { found }),
     }
@@ -650,7 +670,7 @@ mod tests {
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 10)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 11)"));
         assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
@@ -658,7 +678,7 @@ mod tests {
     fn schema_keeps_security_relevant_limits_and_case_insensitive_identity() {
         assert!(SCHEMA_SQL.contains("octet_length(token_hash) = 32"));
         assert!(SCHEMA_SQL.contains("octet_length(gameplay_json) <= 65536"));
-        assert!(SCHEMA_SQL.contains("octet_length(snapshot_json) <= 1048576"));
+        assert!(SCHEMA_SQL.contains("octet_length(snapshot_json) <= 2097152"));
         assert!(SCHEMA_SQL.contains("octet_length(details_json) <= 4096"));
         assert!(SCHEMA_SQL.contains("accounts (lower(name))"));
         assert!(SCHEMA_SQL.contains("characters (account_id, lower(name))"));
@@ -718,6 +738,17 @@ mod tests {
         assert!(SCHEMA_SQL.contains("staff_audit_no_delete"));
         assert!(UPGRADE_V9_TO_V10_SQL.contains("accounts.role = 'moderator'"));
         assert!(UPGRADE_V9_TO_V10_SQL.contains("SET version = 10"));
+    }
+
+    #[test]
+    fn v11_upgrade_replaces_only_the_runtime_snapshot_byte_constraint() {
+        assert!(
+            UPGRADE_V10_TO_V11_SQL.contains("DROP CONSTRAINT world_runtime_snapshot_json_check")
+        );
+        assert!(UPGRADE_V10_TO_V11_SQL.contains("CHECK (octet_length(snapshot_json) <= 2097152)"));
+        assert!(UPGRADE_V10_TO_V11_SQL.contains("SET version = 11"));
+        assert!(!UPGRADE_V10_TO_V11_SQL.contains("DROP TABLE"));
+        assert!(!UPGRADE_V10_TO_V11_SQL.contains("DELETE FROM"));
     }
 
     #[test]

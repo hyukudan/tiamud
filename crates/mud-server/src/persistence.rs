@@ -36,7 +36,7 @@ const MAX_IDENTITY_NAME_BYTES: usize = 64;
 const MAX_ACTIVE_SESSIONS: i64 = 16;
 const MAX_CHARACTER_JSON_BYTES: usize = 65_536;
 const MAX_EVENT_JSON_BYTES: usize = 65_536;
-const MAX_RUNTIME_JSON_BYTES: usize = 1_048_576;
+const MAX_RUNTIME_JSON_BYTES: usize = tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES;
 /// Number of snapshot-covered domain events retained for diagnostics and
 /// compatibility. Older covered events are compacted transactionally.
 pub(super) const DOMAIN_EVENT_RETENTION: i64 = 10_000;
@@ -53,10 +53,17 @@ const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// runtime snapshot budget, then the bounded set of extra trade participants
 /// under its separate exact aggregate budget.
 pub(super) const MAX_STARTUP_ITEM_OWNERS: usize = MAX_ITEM_INSTANCES;
-pub(super) const MAX_STARTUP_OWNER_GAMEPLAY_BYTES: usize = MAX_RUNTIME_JSON_BYTES;
+pub(super) const MAX_STARTUP_OWNER_GAMEPLAY_BYTES: usize =
+    tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES;
 pub(super) const MAX_STARTUP_TRADE_PARTICIPANTS: usize = 128;
 pub(super) const MAX_STARTUP_TRADE_GAMEPLAY_BYTES: usize =
     MAX_STARTUP_TRADE_PARTICIPANTS * MAX_CHARACTER_JSON_BYTES;
+/// Maximum distinct durable character identities that one restored runtime may
+/// reference without loading their gameplay aggregates. This covers both the
+/// maximum 2,048 ground-loot reservations and 2,048 active loot encounters,
+/// each with cohorts of six, while keeping startup admission independent from
+/// snapshot contents and from gameplay-document budgets.
+pub(super) const MAX_STARTUP_CHARACTER_EXISTENCE_IDS: usize = (2_048 + 2_048) * 6;
 const SQLITE_CHARACTER_BATCH_SIZE: usize = 900;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,6 +214,8 @@ pub enum StoreError {
     SnapshotTooLarge { kind: &'static str, maximum: usize },
     #[error("durable character count exceeds the {maximum} aggregate startup limit")]
     TooManyCharacterAggregates { maximum: usize },
+    #[error("durable character identity count exceeds the {maximum} startup limit")]
+    TooManyCharacterIdentities { maximum: usize },
     #[error("the persistence worker stopped unexpectedly")]
     WorkerStopped,
     #[error("the persistence worker did not answer within the bounded timeout")]
@@ -240,6 +249,10 @@ pub enum StoreError {
     },
     #[error("character gameplay state for {0:?} does not exist")]
     CharacterGameplayNotFound(CharacterId),
+    #[error("character identity {0:?} is not a positive durable ID")]
+    InvalidCharacterIdentity(CharacterId),
+    #[error("character identity {0:?} does not exist")]
+    CharacterIdentityNotFound(CharacterId),
     #[error("no character matches that social target")]
     SocialTargetNotFound,
     #[error("that social target is ambiguous")]
@@ -349,6 +362,14 @@ pub trait CharacterStore: Send + Sync {
         &self,
         character_id: CharacterId,
     ) -> Result<CharacterGameplaySnapshot, StoreError>;
+
+    /// Ensure every distinct positive identity exists without loading gameplay
+    /// JSON. Startup uses this for durable references that require identity
+    /// integrity but not a live character aggregate.
+    async fn ensure_character_ids_exist_batch(
+        &self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<(), StoreError>;
 
     /// Load only the durable gameplay aggregates requested by the restored
     /// runtime, using set-based batches and the closed startup scope rather
@@ -682,6 +703,15 @@ impl CharacterStore for MeasuredCharacterStore {
         self.inner.load_character_gameplay(character_id).await
     }
 
+    async fn ensure_character_ids_exist_batch(
+        &self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .ensure_character_ids_exist_batch(character_ids)
+            .await
+    }
+
     async fn load_character_gameplay_batch(
         &self,
         character_ids: Vec<CharacterId>,
@@ -869,6 +899,10 @@ pub(super) enum Request {
         character_ids: Vec<CharacterId>,
         limits: StartupGameplayLoadLimits,
         reply: oneshot::Sender<Result<Vec<DurableCharacterGameplay>, StoreError>>,
+    },
+    EnsureCharacterIdsExistBatch {
+        character_ids: Vec<CharacterId>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
     },
     LoadRuntimeSnapshot {
         reply: oneshot::Sender<Result<Option<WorldRuntimeSnapshot>, StoreError>>,
@@ -1120,6 +1154,13 @@ impl SqliteCharacterStore {
                                 character_ids,
                                 limits,
                             ));
+                        }
+                        Request::EnsureCharacterIdsExistBatch {
+                            character_ids,
+                            reply,
+                        } => {
+                            let _ = reply
+                                .send(ensure_character_ids_exist_batch(&connection, character_ids));
                         }
                         Request::LoadRuntimeSnapshot { reply } => {
                             let _ = reply.send(load_runtime_snapshot(&connection));
@@ -1583,6 +1624,21 @@ impl CharacterStore for SqliteCharacterStore {
             Request::LoadCharacterGameplayBatch {
                 character_ids,
                 limits,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn ensure_character_ids_exist_batch(
+        &self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::EnsureCharacterIdsExistBatch {
+                character_ids,
                 reply,
             },
             receive,
@@ -3452,6 +3508,69 @@ fn load_character_gameplay_batch(
     Ok(aggregates)
 }
 
+fn ensure_character_ids_exist_batch(
+    connection: &Connection,
+    character_ids: Vec<CharacterId>,
+) -> Result<(), StoreError> {
+    let character_ids = normalise_character_identity_ids(character_ids)?;
+    let mut found = Vec::with_capacity(character_ids.len());
+    for batch in character_ids.chunks(SQLITE_CHARACTER_BATCH_SIZE) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT id FROM characters WHERE id IN ({placeholders}) ORDER BY id");
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(batch.iter().map(|id| id.0)), |row| {
+            row.get::<_, i64>(0).map(CharacterId)
+        })?;
+        for row in rows {
+            found.push(row?);
+        }
+    }
+    ensure_all_character_ids_exist(&character_ids, &found)
+}
+
+pub(super) fn normalise_character_identity_ids(
+    mut character_ids: Vec<CharacterId>,
+) -> Result<Vec<CharacterId>, StoreError> {
+    character_ids.sort_unstable();
+    character_ids.dedup();
+    if character_ids.len() > MAX_STARTUP_CHARACTER_EXISTENCE_IDS {
+        return Err(StoreError::TooManyCharacterIdentities {
+            maximum: MAX_STARTUP_CHARACTER_EXISTENCE_IDS,
+        });
+    }
+    if let Some(invalid) = character_ids.iter().find(|id| id.0 <= 0) {
+        return Err(StoreError::InvalidCharacterIdentity(*invalid));
+    }
+    Ok(character_ids)
+}
+
+pub(super) fn ensure_all_character_ids_exist(
+    requested: &[CharacterId],
+    found: &[CharacterId],
+) -> Result<(), StoreError> {
+    let mut found_ids = BTreeSet::new();
+    for character_id in found {
+        if character_id.0 <= 0 || !found_ids.insert(*character_id) {
+            return Err(StoreError::InvalidRuntimeSnapshot);
+        }
+    }
+    if found_ids.len() > requested.len()
+        || found_ids
+            .iter()
+            .any(|character_id| requested.binary_search(character_id).is_err())
+    {
+        return Err(StoreError::InvalidRuntimeSnapshot);
+    }
+    requested
+        .iter()
+        .find(|character_id| !found_ids.contains(character_id))
+        .map_or(Ok(()), |missing| {
+            Err(StoreError::CharacterIdentityNotFound(*missing))
+        })
+}
+
 pub(super) fn normalise_startup_character_ids(
     mut character_ids: Vec<CharacterId>,
     limits: StartupGameplayLoadLimits,
@@ -3544,20 +3663,30 @@ pub(super) fn decode_runtime_snapshot(
     durable_version: i64,
     json: &str,
 ) -> Result<WorldRuntimeSnapshot, StoreError> {
-    // `str::len` is the UTF-8 byte length, unlike SQLite's text `length()`.
-    if json.len() > MAX_RUNTIME_JSON_BYTES {
-        return Err(StoreError::SnapshotTooLarge {
-            kind: "world runtime",
-            maximum: MAX_RUNTIME_JSON_BYTES,
-        });
-    }
     let durable_version =
         u32::try_from(durable_version).map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
+    let maximum = if durable_version < tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
+        tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
+    } else {
+        MAX_RUNTIME_JSON_BYTES
+    };
+    // `str::len` is the UTF-8 byte length, unlike SQLite's text `length()`.
+    if json.len() > maximum {
+        return Err(StoreError::SnapshotTooLarge {
+            kind: "world runtime",
+            maximum,
+        });
+    }
     let snapshot = tiamud_core::decode_world_runtime_snapshot(durable_version, json)
         .map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
     if snapshot.snapshot_version != tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
         return Err(StoreError::InvalidRuntimeSnapshot);
     }
+    // Admission must cover the normalized current representation too. A valid
+    // near-limit legacy payload can expand substantially when v6 adds explicit
+    // binding and provenance per instance. Reject it here, before the decoder
+    // hands persistence an inadmissible v6 representation for restoration.
+    bounded_json(&snapshot, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
     Ok(snapshot)
 }
 
@@ -4555,6 +4684,61 @@ mod tests {
     }
 
     #[test]
+    fn legacy_runtime_upgrade_rejects_a_current_snapshot_above_the_v6_budget() {
+        let build = |count: usize| WorldRuntimeSnapshotV2 {
+            snapshot_version: 2,
+            revision: 1,
+            logical_tick: 0,
+            rng_state: 1,
+            next_item_instance_sequence: 1,
+            item_instances: (0..count)
+                .map(|index| {
+                    (
+                        ItemInstanceId(format!("legacy:{index}")),
+                        RuntimeItemInstanceSnapshotV2 {
+                            prototype_id: "p".into(),
+                            location: RuntimeItemLocationV2::Staged,
+                        },
+                    )
+                })
+                .collect(),
+            npcs: BTreeMap::new(),
+            adventure: tiamud_core::AdventureRuntimeSnapshot::default(),
+            progression_flags: BTreeSet::new(),
+        };
+
+        let mut accepted = 0_usize;
+        let mut rejected = MAX_ITEM_INSTANCES + 1;
+        while accepted + 1 < rejected {
+            let candidate = accepted + (rejected - accepted) / 2;
+            let bytes = serde_json::to_vec(&build(candidate)).unwrap().len();
+            if bytes <= tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES {
+                accepted = candidate;
+            } else {
+                rejected = candidate;
+            }
+        }
+        let legacy_json = serde_json::to_string(&build(accepted)).unwrap();
+        assert!(
+            legacy_json.len() > tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES - 4_096,
+            "fixture should exercise a near-limit legacy snapshot"
+        );
+        let upgraded = tiamud_core::decode_world_runtime_snapshot(2, &legacy_json).unwrap();
+        assert!(
+            serde_json::to_vec(&upgraded).unwrap().len()
+                > tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES,
+            "the fixture must reproduce expansion beyond the current budget"
+        );
+        assert!(matches!(
+            decode_runtime_snapshot(2, &legacy_json),
+            Err(StoreError::SnapshotTooLarge {
+                kind: "world runtime",
+                maximum: tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES,
+            })
+        ));
+    }
+
+    #[test]
     fn sqlite_runtime_loader_upgrades_v3_binding_as_unbound_and_rejects_smuggling() {
         let legacy = WorldRuntimeSnapshotV3 {
             snapshot_version: 3,
@@ -4616,8 +4800,17 @@ mod tests {
         migrate(&mut connection).unwrap();
         let mut legacy = serde_json::to_value(World::demo().runtime_snapshot()).unwrap();
         legacy["snapshotVersion"] = serde_json::json!(4);
-        legacy.as_object_mut().unwrap().remove("nextTradeId");
-        legacy.as_object_mut().unwrap().remove("trades");
+        for field in [
+            "nextTradeId",
+            "trades",
+            "nextLootDropId",
+            "itemProvenance",
+            "lootEncounters",
+            "groundLoot",
+            "partyLootCursors",
+        ] {
+            legacy.as_object_mut().unwrap().remove(field);
+        }
         connection
             .execute(
                 "INSERT INTO world_runtime
@@ -4700,9 +4893,13 @@ mod tests {
     fn sqlite_runtime_loader_rejects_multibyte_snapshot_above_byte_limit() {
         let mut connection = Connection::open_in_memory().unwrap();
         migrate(&mut connection).unwrap();
-        let oversized = format!("\"{}\"", "é".repeat(MAX_RUNTIME_JSON_BYTES / 2));
+        let oversized = format!(
+            "\"{}\"",
+            "é".repeat(tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES / 2)
+        );
         assert!(oversized.chars().count() <= MAX_RUNTIME_JSON_BYTES);
-        assert!(oversized.len() > MAX_RUNTIME_JSON_BYTES);
+        assert!(oversized.len() > tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES);
+        assert!(oversized.len() <= MAX_RUNTIME_JSON_BYTES);
         connection
             .execute(
                 "INSERT INTO world_runtime
@@ -4716,7 +4913,7 @@ mod tests {
             load_runtime_snapshot(&connection),
             Err(StoreError::SnapshotTooLarge {
                 kind: "world runtime",
-                maximum: MAX_RUNTIME_JSON_BYTES
+                maximum: tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
             })
         ));
     }
@@ -4790,6 +4987,108 @@ mod tests {
                 &[aggregate.clone(), aggregate],
             ),
             Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
+    fn startup_identity_scope_deduplicates_and_rejects_invalid_or_excess_ids() {
+        assert_eq!(
+            normalise_character_identity_ids(vec![
+                CharacterId(3),
+                CharacterId(1),
+                CharacterId(3),
+                CharacterId(2),
+            ])
+            .unwrap(),
+            vec![CharacterId(1), CharacterId(2), CharacterId(3)]
+        );
+        assert!(matches!(
+            normalise_character_identity_ids(vec![CharacterId(0)]),
+            Err(StoreError::InvalidCharacterIdentity(CharacterId(0)))
+        ));
+
+        let excess = (1..=MAX_STARTUP_CHARACTER_EXISTENCE_IDS + 1)
+            .map(|id| CharacterId(i64::try_from(id).unwrap()))
+            .collect();
+        assert!(matches!(
+            normalise_character_identity_ids(excess),
+            Err(StoreError::TooManyCharacterIdentities {
+                maximum: MAX_STARTUP_CHARACTER_EXISTENCE_IDS,
+            })
+        ));
+    }
+
+    #[test]
+    fn sqlite_identity_existence_query_crosses_the_parameter_batch_boundary() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        connection
+            .execute("INSERT INTO accounts (id, name) VALUES (1, 'Owner')", [])
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT INTO characters (id, account_id, name, room_id)
+                     VALUES (?1, 1, ?2, 'test:start')",
+                )
+                .unwrap();
+            for id in 1..=SQLITE_CHARACTER_BATCH_SIZE + 1 {
+                let id = i64::try_from(id).unwrap();
+                statement
+                    .execute(params![id, format!("Character {id}")])
+                    .unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+
+        let ids = (1..=SQLITE_CHARACTER_BATCH_SIZE + 1)
+            .rev()
+            .map(|id| CharacterId(i64::try_from(id).unwrap()))
+            .collect();
+        ensure_character_ids_exist_batch(&connection, ids).unwrap();
+        assert!(matches!(
+            ensure_character_ids_exist_batch(
+                &connection,
+                vec![CharacterId(
+                    i64::try_from(SQLITE_CHARACTER_BATCH_SIZE + 2).unwrap()
+                )],
+            ),
+            Err(StoreError::CharacterIdentityNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_checks_identity_only_with_dedupe_and_fail_closed_errors() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let owner = account(&store, "Identity Owner").await;
+        let first = store
+            .load_or_create_character(owner.id, "Aria", "demo:lantern-square")
+            .await
+            .unwrap();
+        let second = store
+            .load_or_create_character(owner.id, "Bryn", "demo:lantern-square")
+            .await
+            .unwrap();
+
+        store
+            .ensure_character_ids_exist_batch(vec![second.id, first.id, second.id])
+            .await
+            .unwrap();
+        store
+            .ensure_character_ids_exist_batch(Vec::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .ensure_character_ids_exist_batch(vec![CharacterId(0)])
+                .await,
+            Err(StoreError::InvalidCharacterIdentity(CharacterId(0)))
+        ));
+        let missing = CharacterId(second.id.0 + 1_000);
+        assert!(matches!(
+            store.ensure_character_ids_exist_batch(vec![missing]).await,
+            Err(StoreError::CharacterIdentityNotFound(character_id)) if character_id == missing
         ));
     }
 

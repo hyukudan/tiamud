@@ -1013,7 +1013,7 @@ function validateSceneEntity(entity, kind, extraKeys = []) {
   const itemKeys = kind === 'item'
     ? [
         'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
-        'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou',
+        'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou', 'loot',
       ]
     : [];
   assertOnlyKeys(
@@ -1024,7 +1024,10 @@ function validateSceneEntity(entity, kind, extraKeys = []) {
   assertOpaqueId(entity.id, `scene ${kind} id`);
   assertBoundedString(entity.label, 256, `scene ${kind} label`);
   assertStringMax(entity.description, 4096, `scene ${kind} description`);
-  if (kind === 'item') validateItemMetadata(entity, 'scene item');
+  if (kind === 'item') {
+    validateItemMetadata(entity, 'scene item');
+    if (entity.loot !== undefined) validateSceneLootAccess(entity.loot, 'scene item loot');
+  }
   assertArrayMax(entity.actions, 8, `scene ${kind} actions`);
   for (const action of entity.actions) {
     assertRecord(action, `scene ${kind} action`);
@@ -1035,6 +1038,12 @@ function validateSceneEntity(entity, kind, extraKeys = []) {
     if (action.command.includes(' ') && !OPAQUE_ID.test(target)) {
       throw new Error(`Scene ${kind} action does not target an opaque id.`);
     }
+  }
+  if (kind === 'item' && entity.loot?.access === 'reserved' && entity.actions.some((action) => {
+    const command = action.command.trim().toLowerCase();
+    return command.startsWith('take ') || command.startsWith('loot pass ');
+  })) {
+    throw new Error('Reserved scene loot exposed an unauthorized action.');
   }
 }
 
@@ -1666,6 +1675,18 @@ function validateItemMetadata(item, label) {
     }
     validateCapacityShape(item.containerCapacity, `${label} container capacity`);
   }
+}
+
+function validateSceneLootAccess(loot, label) {
+  assertRecord(loot, label);
+  if (loot.access === 'reserved') {
+    assertOnlyKeys(loot, ['access'], label);
+    return;
+  }
+  if (loot.access !== 'yours') throw new Error(`${label} access is invalid.`);
+  assertOnlyKeys(loot, ['access', 'expiresInTicks'], label);
+  assertPositiveInteger(loot.expiresInTicks, `${label} expiry`);
+  if (loot.expiresInTicks > 20) throw new Error(`${label} expiry exceeds 20 ticks.`);
 }
 
 function validateInventoryCapacity(capacity, inventory, equipment, label) {

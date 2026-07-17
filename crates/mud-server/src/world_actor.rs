@@ -266,6 +266,19 @@ impl WorldHandle {
             if let Err(error) = startup {
                 return report_startup_failure(startup_reply, error);
             }
+            let loot_identity_ids = world.loot_identity_ids();
+            if let Err(error) = actor_store
+                .ensure_character_ids_exist_batch(loot_identity_ids.iter().copied().collect())
+                .await
+            {
+                return report_startup_failure(
+                    startup_reply,
+                    GameError::Startup {
+                        stage: "validate_loot_identities",
+                        reason: error.to_string(),
+                    },
+                );
+            }
             let runtime_owner_ids = world.runtime_item_owner_ids();
             let trade_participant_ids = world.trade_participants();
             let extra_trade_participant_ids = trade_participant_ids
@@ -393,6 +406,35 @@ impl WorldHandle {
                     );
                 }
             }
+            let checkpoint = world.checkpoint();
+            let loot_cleanup_events = match world.cancel_all_loot_encounters_for_restart() {
+                Ok(events) => events,
+                Err(error) => {
+                    world.restore_checkpoint(checkpoint);
+                    return report_startup_failure(
+                        startup_reply,
+                        GameError::Startup {
+                            stage: "cancel_restored_loot_encounters",
+                            reason: error.to_string(),
+                        },
+                    );
+                }
+            };
+            if !loot_cleanup_events.is_empty()
+                && let Err(error) = actor_store
+                    .commit_action(Vec::new(), world.runtime_snapshot(), loot_cleanup_events)
+                    .await
+            {
+                world.restore_checkpoint(checkpoint);
+                return report_startup_failure(
+                    startup_reply,
+                    GameError::Startup {
+                        stage: "commit_restored_loot_cleanup",
+                        reason: error.to_string(),
+                    },
+                );
+            }
+            drop(loot_identity_ids);
             drop(trade_gameplay);
             drop(startup_gameplay);
             drop(durable_trade_gameplay);
@@ -1821,6 +1863,7 @@ fn durable_connected_characters(
 fn advance_tick_with_expiry_barrier(world: &mut World) -> Result<Vec<DomainEvent>, CoreWorldError> {
     world.begin_tick()?;
     let mut events = world.cancel_expired_trades()?;
+    events.extend(world.expire_ground_loot()?);
     events.extend(world.resolve_tick_after_expiry()?);
     Ok(events)
 }
@@ -2595,6 +2638,21 @@ mod tests {
                 .ok_or(StoreError::CharacterGameplayNotFound(character_id))
         }
 
+        async fn ensure_character_ids_exist_batch(
+            &self,
+            character_ids: Vec<CharacterId>,
+        ) -> Result<(), StoreError> {
+            let character_ids =
+                crate::persistence::normalise_character_identity_ids(character_ids)?;
+            let state = self.state.lock().unwrap();
+            let found = character_ids
+                .iter()
+                .copied()
+                .filter(|character_id| state.characters.contains_key(character_id))
+                .collect::<Vec<_>>();
+            crate::persistence::ensure_all_character_ids_exist(&character_ids, &found)
+        }
+
         async fn load_character_gameplay_batch(
             &self,
             character_ids: Vec<CharacterId>,
@@ -3195,6 +3253,84 @@ mod tests {
             )));
         }
         restarted.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_validates_loot_identities_and_cancels_open_encounters_before_readiness() {
+        let store = Arc::new(MemoryStore::default());
+        let first = WorldHandle::spawn(durable_gameplay_world(), store.clone())
+            .await
+            .unwrap();
+        let entered = first.enter("Restart Hunter".into()).await.unwrap();
+        first
+            .apply(entered.session_id, PlayerAction::Attack("guardian".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .runtime
+                .as_ref()
+                .unwrap()
+                .loot_encounters
+                .len(),
+            1
+        );
+        first.shutdown().await.unwrap();
+
+        let restarted = WorldHandle::spawn(durable_gameplay_world(), store.clone())
+            .await
+            .unwrap();
+        {
+            let state = store.state.lock().unwrap();
+            assert!(state.runtime.as_ref().unwrap().loot_encounters.is_empty());
+            assert!(state.domain_events.iter().any(|event| matches!(
+                event,
+                DomainEvent::Gameplay {
+                    event: GameplayEvent::LootEncounterCancelled { .. }
+                }
+            )));
+        }
+        restarted.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_a_missing_identity_referenced_only_by_loot() {
+        let store = Arc::new(MemoryStore::default());
+        let first = WorldHandle::spawn(durable_gameplay_world(), store.clone())
+            .await
+            .unwrap();
+        let entered = first.enter("Missing Hunter".into()).await.unwrap();
+        first
+            .apply(entered.session_id, PlayerAction::Attack("guardian".into()))
+            .await
+            .unwrap();
+        let character_id = store
+            .state
+            .lock()
+            .unwrap()
+            .characters
+            .values()
+            .find(|character| character.name == "Missing Hunter")
+            .unwrap()
+            .id;
+        first.shutdown().await.unwrap();
+        {
+            let mut state = store.state.lock().unwrap();
+            state.characters.remove(&character_id);
+            state.gameplay.remove(&character_id);
+        }
+
+        let result = WorldHandle::spawn(durable_gameplay_world(), store).await;
+        assert!(matches!(
+            result,
+            Err(GameError::Startup {
+                stage: "validate_loot_identities",
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

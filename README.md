@@ -37,10 +37,11 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
 - **Mundo persistente:** cuentas, personajes, salas, objetos, NPC, equipo,
   combate, misiones, grupos, economía, tiempo lógico y clima. Los objetos
   separan prototipos reutilizables e instancias durables, con capacidad por
-  slots/peso, pilas fungibles derivadas, contenedores acotados y botín fijo;
+  slots/peso, pilas fungibles derivadas, contenedores acotados y botín fijo y
+  repetible;
   `give`, políticas de transferencia e intercambio bilateral confirmado con
-  objetos y moneda ya funcionan. Los derechos de botín y las tablas aleatorias
-  aún no.
+  objetos y moneda ya funcionan. Las tablas ponderadas enteras, la procedencia,
+  los derechos exclusivos y el reparto de grupo round-robin también funcionan.
 - **Personajes definidos por datos:** el modelo de personaje v3 modela linajes, trasfondo
   opcional, clases base y avanzadas, una curva global de XP, talentos con rango
   y promociones atómicas. Atributos, habilidades, recursos, resistencias,
@@ -60,9 +61,10 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
 - **Multimedia segura:** imagen de escena y audio opcionales, recursos
   inmutables direccionados por contenido, texto alternativo y preferencias de
   medios, movimiento, contraste y lector de pantalla.
-- **Autoría modular:** AreaPack v4 permite dividir un mundo en áreas; la
-  composición sin conexión produce un WorldPack v5 canónico, determinista y
-  revisable. El servidor aún carga un único paquete completo al arrancar.
+- **Autoría modular:** AreaPack v5 permite dividir un mundo en áreas; la
+  composición sin conexión de WorldProject v2 produce un WorldPack v6
+  canónico, determinista y revisable. El servidor aún carga un único paquete
+  completo al arrancar.
 - **Operación en un host:** adaptadores PostgreSQL/SQLite, credenciales
   Argon2id, sesiones revocables, colas acotadas, salud, métricas Prometheus,
   apagado ordenado, copia/restauración SQLite y traslado explícito a PostgreSQL.
@@ -132,6 +134,7 @@ Comandos representativos:
 ```text
 look                       north / east / south / west
 inventory                  take / drop [cantidad] <objeto>
+loot / loot status         loot pass <objeto-reservado>
 give [cantidad] <objeto> to <personaje>
 trade request <personaje>  trade accept / decline / status / cancel
 trade offer item [cantidad] <objeto>   trade remove item <objeto>
@@ -193,12 +196,13 @@ SQLite a PostgreSQL es una operación sin conexión, no replicación. Los datos
 consultables siguen siendo relacionales; las instantáneas JSON acotadas se
 guardan como texto opaco porque el servidor no consulta su interior.
 
-Ambos adaptadores implementan actualmente el **esquema v10**. La migración
-v9→v10 añade perfiles, asignaciones de capacidades, resolución cerrada de
-reportes y auditoría de staff append-only; conserva las suscripciones v9. El
-traslado SQLite→PostgreSQL copia también estas relaciones. La evidencia real
-PostgreSQL retenida acredita v8: todavía no existe una aceptación PostgreSQL
-v10 contra un servidor real.
+Ambos adaptadores implementan actualmente el **esquema v11**. La migración
+v10→v11 reconstruye de forma transaccional la custodia opaca del runtime para
+admitir el snapshot v6 de hasta 2 MiB; los snapshots legacy v1–v5 siguen
+limitados a 1 MiB al decodificarse. Se conservan las relaciones sociales y de
+staff de v9/v10, y el traslado SQLite→PostgreSQL las copia junto con el estado
+actual. La evidencia real PostgreSQL retenida acredita v8: todavía no existe
+una aceptación PostgreSQL v11 contra un servidor real.
 
 Si una instalación pierde toda autoridad administrativa, la recuperación
 offline documentada no se limita al rol legado: `tiamud-admin recover-admin`
@@ -213,7 +217,7 @@ de referencia de Caddy no publica métricas.
 
 ## Personajes, clases y progresión
 
-WorldPack v5 conserva el modelo de personaje v3: compone un personaje con
+WorldPack v6 conserva el modelo de personaje v3: compone un personaje con
 linaje, trasfondo opcional y clase base.
 Una XP acumulada gobierna el nivel global, las concesiones de clase y reservas
 de puntos separadas. Hay una clase activa y un historial ordenado, no
@@ -221,7 +225,7 @@ multiclase libre.
 
 ```mermaid
 flowchart LR
-    accTitle: Composición y avance de un personaje v3 en WorldPack v5
+    accTitle: Composición y avance de un personaje v3 en WorldPack v6
     accDescr: Linaje, trasfondo opcional y clase base forman la ficha permanente. El nivel concede mejoras y puntos; los talentos modifican la ficha y una promoción atómica activa una clase avanzada cuando se cumplen sus requisitos.
 
     Lineage[Linaje] --> Sheet[Ficha permanente]
@@ -258,7 +262,7 @@ del trasfondo predeterminado. Telnet recibe además la ficha mediante
 | Clases base | Wanderer, Vanguard, Arcanist |
 | Clases avanzadas | Pathfinder, Bastion, Stormcaller, Spellblade |
 
-WorldPack v4/v3/v2, AreaPack v3/v2/v1 y Envy/Merc solo entran por límites
+WorldPack v5/v4/v3/v2, AreaPack v4/v3/v2/v1 y Envy/Merc solo entran por límites
 explícitos de normalización/importación; `archetype` no es una segunda
 identidad del personaje. Los IDs publicados son la frontera de migración de
 contenido.
@@ -279,11 +283,30 @@ implementado de la hoja de ruta.
 | Sistema | Implementado | Pendiente |
 | --- | --- | --- |
 | Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`. | Correo e historial durable, shout/yell espacial, emotes, tablones y telepatía definida por el mundo. `tell` no es telepatía. |
-| Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos, elegibilidad y reparto de botín. |
-| Canales | Suscripción persistente en SQLite/PostgreSQL v10; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
+| Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. Una cohorte congelada de miembros próximos y vivos participa en el reparto round-robin del botín. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos y reparto need/greed, master-loot o por contribución. |
+| Canales | Suscripción persistente en SQLite/PostgreSQL v11; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
 | Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
-| Inventario | WorldPack v5 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo y vínculo; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` es unilateral; `trade` negocia hasta 128 raíces transferibles y moneda mediante reservas durables, revisión exacta y dos confirmaciones, y liquida ambos lados en un solo commit. Ambos participantes deben seguir conectados, en la misma sala, fuera de combate y permitidos por ignore/block. Web, Telnet y GMCP proyectan política, cantidades disponibles/reservadas, saldo gastable e IDs opacos, nunca dueños ni identidades durables. | Durabilidad, afijos, procedencia y derechos/reparto de botín; trade remoto/offline, subastas y mercado offline. |
-| Botín | El botín fijo es una instancia inicial cuya ubicación es `npc_spawn`; se transfiere al derrotar al NPC y conserva identidad. Varias unidades fungibles se agrupan solo al proyectarlas. El RNG general y el snapshot del mundo son seguros ante reinicio; todavía no existe RNG específico de tablas de botín. | Derechos y reparto de grupo, tablas ponderadas, tiradas/cantidades aleatorias, procedencia de drops repetibles y contenedores aleatorios. |
+| Inventario | WorldPack v6 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo, vínculo y acceso al botín; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` es unilateral; `trade` negocia hasta 128 raíces transferibles y moneda mediante reservas durables, revisión exacta y dos confirmaciones, y liquida ambos lados en un solo commit. Web, Telnet y GMCP proyectan política, cantidades, acceso e IDs opacos, nunca dueños, cohortes ni identidades durables. | Desgaste/durabilidad de objetos, afijos y recompensas selladas ganadas jugando; trade remoto/offline, subastas y mercado offline. |
+| Botín | WorldPack v6/AreaPack v5 definen fuentes `npc_spawn` y tablas enteras con drops garantizados y pools ponderados repetibles. La tirada usa rejection sampling, queda confirmada con procedencia y derechos, y suma como máximo 64 raíces fijas+generadas por derrota. `credited_character` y `party_round_robin` reservan cada raíz 20 ticks; `loot pass` la cede dentro de la cohorte y al tick 120 se retira lo no reclamado. La capacidad puede suprimir generación sin bloquear derrota/XP ni permitir reroll. | Afijos y recompensas selladas de fase 4B. Need/greed, master-loot, reparto por contribución y cajas o llaves pagadas quedan fuera del baseline. |
+
+```mermaid
+flowchart LR
+    accTitle: Resolución atómica y ciclo de acceso del botín repetible
+    accDescr: Una derrota poda capacidad, resuelve una tabla entera una sola vez y confirma RNG, procedencia y derechos. La reserva se hace pública tras veinte ticks y desaparece a los ciento veinte si nadie la reclama.
+
+    Defeat[Derrota confirmada] --> Prune[Poda segura]
+    Prune --> Roll[Tirada entera<br/>rejection sampling]
+    Fixed[Raíces fijas] --> Limit{Máximo combinado<br/>64 raíces}
+    Roll --> Limit
+    Limit --> Commit[Commit único<br/>NPC + XP + RNG + procedencia + derechos]
+    Limit -->|sin capacidad| Suppress[Suprimir generación<br/>sin bloquear derrota]
+    Commit --> Exclusive[Exclusivo 20 ticks<br/>credited o round-robin]
+    Exclusive -->|loot pass| Next[Siguiente miembro<br/>de cohorte congelada]
+    Exclusive -->|vence| Public[Público]
+    Next -->|queda alguien| Exclusive
+    Next -->|todos pasan| Public
+    Public -->|tick 120| Despawn[Despawn o tombstone authored]
+```
 
 ```mermaid
 stateDiagram-v2
@@ -360,9 +383,9 @@ mantiene estos límites explícitos.
 
 ![Ilustración técnica de las tres salas de Lantern Square y sus módulos de medios, percepción, variantes, guiones y pruebas.](docs/images/tiamud-worldpack.webp)
 
-El entorno de ejecución consume **un WorldPack v5 canónico**. Para trabajar con
-menos acoplamiento, los autores dividen el proyecto en **AreaPack v4** con
-dependencias y propiedad declaradas, y los componen sin conexión:
+El entorno de ejecución consume **un WorldPack v6 canónico**. Para trabajar con
+menos acoplamiento, los autores dividen un **WorldProject v2** en **AreaPack
+v5** con dependencias y propiedad declaradas, y los componen sin conexión:
 
 ```sh
 mkdir -p build/worlds
@@ -379,15 +402,20 @@ jugadores son arquitectura futura de
 [ADR 0005](docs/decisions/0005-hot-area-lifecycle.md), no funcionalidad
 publicada.
 
-El vocabulario v5 separa la definición reusable en `itemPrototypes` de cada
+El vocabulario v6 separa la definición reusable en `itemPrototypes` de cada
 unidad inicial en `initialItemInstances`. Una instancia empieza en una sala,
 un `npc_spawn`, `staged` o dentro de otra instancia contenedor; los IDs durables
 y de prototipo permanecen en el servidor y cada sesión recibe solo IDs opacos.
-WorldPack v4/v3/v2 y AreaPack v3/v2/v1 se aceptan únicamente para
+Añade `lootTables` y `lootSources` enteras y acotadas, con como máximo 64
+raíces fijas y generables por derrota. Los títulos de sala —incluidas sus
+variantes— ocupan como máximo 128 bytes y las descripciones 8.192 bytes; ambos
+se validan como texto seguro.
+WorldPack v5/v4/v3/v2 y AreaPack v4/v3/v2/v1 se aceptan únicamente para
 normalización determinista. Las entradas antiguas no pueden introducir campos
-de fases posteriores: en particular, WorldPack v4 y AreaPack v3 exigen
-`transferable` y rechazan políticas o campos 3C. Para publicar
-`character_bound` o `non_transferable` se requiere WorldPack v5/AreaPack v4.
+de fases posteriores: los formatos previos a v6/v5 rechazan `lootTables` o
+`lootSources` aunque estén vacíos. WorldPack v4 y AreaPack v3 exigen
+`transferable`; para publicar `character_bound` o `non_transferable` se
+requiere al menos WorldPack v5/AreaPack v4.
 
 Las instancias fungibles comparten `stackPolicy: fungible` y
 `maxStackUnits: 2..=1000`; el runtime deriva grupos ordenados sin persistir una
@@ -409,22 +437,23 @@ iniciales del WorldPack y superpone las ubicaciones durables, sin resucitar
 instancias runtime ausentes. Antes de abrir listeners valida también
 propietarios desconectados, equipo, capacidad y todos los IDs ligados, incluso
 si el objeto ya fue consumido, mediante lecturas acotadas que descarta después;
-no convierte esas fichas en personajes activos. El snapshot vigente es v5:
-añade `nextTradeId` y las reservas de trade al nivel superior, y exige un
-vínculo cerrado por instancia. El decoder separa explícitamente las formas v1,
-v2, v3, v4 y v5; v1-v3 migran a `unbound`, v4 crea un estado de trades vacío y
-un payload antiguo que inyecta campos posteriores se rechaza. Al reiniciar se
-validan los participantes adicionales con presupuesto separado y se cancelan
-las reservas antes de abrir listeners. SQLite y PostgreSQL continúan en
-esquema v10, sin tabla de escrow ni doble escritura.
+no convierte esas fichas en personajes activos. El snapshot vigente es v6:
+además de instancias, vínculo y trade, conserva RNG, procedencia, encuentros,
+derechos de suelo y cursores round-robin. El decoder separa explícitamente las
+formas v1–v6; una forma v1–v5 está limitada a 1 MiB, migra con procedencia
+`legacy_snapshot` y rechaza campos de v6, mientras la forma actual admite hasta
+2 MiB. Al reiniciar se validan por lotes todas las identidades de los derechos,
+se cancelan los encuentros aún abiertos y su combate antes de readiness, y se
+conservan intactos los derechos ya creados. SQLite y PostgreSQL usan esquema
+v11, sin tabla de loot/escrow espejo ni doble escritura.
 
-El mundo revisado compone tres áreas en 9 prototipos y 10 instancias iniciales:
-49.603 bytes con SHA-256
-`f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
-`rain-writ` demuestra `non_transferable`; `stormglass-talon`, botín del
-gate-stalker, demuestra adquisición `character_bound`. Los IDs publicados
-anteriores conservan su política para que un snapshot v3 legítimo siga
-restaurando sin reinterpretación.
+El mundo revisado compone tres áreas en 9 prototipos, 9 instancias iniciales,
+una tabla y una fuente de botín: 50.498 bytes con SHA-256
+`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
+El gate-stalker conserva su `stormglass-talon` fijo, garantiza un `road-token`
+y resuelve una tirada ponderada repetible de `wolf-clasp` o `nothing` con
+derechos round-robin. Los IDs publicados anteriores conservan su política para
+que un snapshot legítimo siga restaurando sin reinterpretación.
 
 | Herramienta | Finalidad |
 | --- | --- |
@@ -573,6 +602,19 @@ Firefox. No se ejecutaron
 PostgreSQL real v10, WebKit local ni soak de 24 horas. Consulta el
 [registro de fase 3D](docs/project/log/2026-07-16-confirmed-trade-reservations-phase-3d.md).
 
+La fase 4A añade botín fijo+repetible, procedencia durable, reparto inicial
+round-robin y `loot pass`, junto con WorldPack v6, AreaPack v5, snapshot v6 y
+los esquemas SQL v11. El árbol integrado supera formato y clippy estricto,
+587 pruebas Rust (113 core, 240 servidor, 112 WorldPack y 122 restantes), 109
+Vitest, 84 Node/bot y 19 escenarios Chromium. También pasan licencias y avisos
+de 307 dependencias Rust/76 web, `cargo-deny` para advisories/sources, humo, la
+carga exacta de 16 usuarios (16 bootstraps, 32 rondas, cero errores y
+57.774.080 bytes de crecimiento RSS, por debajo de 96 MiB) y el soak corto de
+30 s (58 rondas, 127 acciones, readiness 8/8, cero errores y sin crecimiento
+continuo). No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector de
+pantalla real ni soak de 24 horas; las puertas locales no demuestran una
+release pública o producción.
+
 Una prueba corta de carga no sustituye al soak de 24 horas. WebKit no arranca
 en el host local actual por bibliotecas GTK/GStreamer/medios ausentes; eso no
 es un pase ni un fallo de aplicación.
@@ -596,8 +638,9 @@ Siguientes líneas técnicas y de producto:
 - añadir correo/historial/emotes solo con retención y moderación explícitas;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
-- definir derechos/reparto de grupo, procedencia y tablas de botín
-  enteras restart-safe;
+- diseñar los afijos y recompensas selladas ganadas jugando de fase 4B;
+- considerar need/greed, master-loot o contribución solo tras modelar sus
+  requisitos; no presentarlos como parte del reparto round-robin actual;
 - mantener fuera del baseline las cajas de botín pagadas;
 - publicar sprites de demostración revisados;
 - añadir alias/migraciones de IDs y mejores vistas previas de balance;
@@ -635,7 +678,7 @@ deploy/                      ejemplos Caddy, systemd y entorno
 - **Operación:** [host único](docs/operations/single-host.md) ·
   [releases](docs/operations/releases.md) ·
   [carga y soak](docs/operations/soak-testing.md).
-- **Autoría:** [WorldPack v5](docs/authoring/README.md) ·
+- **Autoría:** [WorldPack v6](docs/authoring/README.md) ·
   [progresión v3](docs/design/character-progression-v3.md) ·
   [compositor de escena](docs/design/scene-compositor-v1.md) ·
   [hoja social/staff/botín](docs/design/social-staff-and-loot-roadmap.md) ·

@@ -71,7 +71,26 @@ async function installMockWorld(
           {
             v: 1, type: 'scene.snapshot', seq: 2, data: {
               viewId: 'o1111111111111111', revision: 1, title: 'Lantern Square',
-              prose: ['Rain shines on the stones.'], exits: [], items: [],
+              prose: ['Rain shines on the stones.'], exits: [], items: [
+                {
+                  id: 'o9999999999999999', label: 'wolf clasp', description: 'A rain-dark clasp.',
+                  rarity: 'rare', itemLevel: 2, weightGrams: 100,
+                  quantity: 1, stackSlots: 1, totalWeightGrams: 100,
+                  transferPolicy: 'transferable', boundToYou: false,
+                  loot: { access: 'yours', expiresInTicks: 12 },
+                  actions: [
+                    { label: 'Take', command: 'take o9999999999999999' },
+                    { label: 'Pass', command: 'loot pass o9999999999999999' },
+                  ],
+                },
+                {
+                  id: 'oaaaaaaaaaaaaaaaa', label: 'road token', description: 'A stamped token.',
+                  rarity: 'common', itemLevel: 1, weightGrams: 10,
+                  quantity: 1, stackSlots: 1, totalWeightGrams: 10,
+                  transferPolicy: 'transferable', boundToYou: false,
+                  loot: { access: 'reserved' }, actions: [],
+                },
+              ],
               npcs: [{
                 id: 'opaque-wolf', label: 'rain wolf', description: 'It watches the lanterns.',
                 health: 12, maxHealth: 12,
@@ -613,6 +632,34 @@ test('authenticated mobile play exposes complete accessible panels and a fixed c
     clientWidth: document.documentElement.clientWidth,
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+  const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test('loot rights stay textual, private, and use structured status and pass actions', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+
+  await expect(page.getByText('Reserved for you · 12 ticks remaining', { exact: true }))
+    .toBeVisible();
+  await expect(page.getByText('Reserved for another adventurer', { exact: true }))
+    .toBeVisible();
+  await page.getByRole('button', { name: 'Review loot rights' }).click();
+  await page.getByRole('button', { name: 'Pass', exact: true }).click();
+
+  const actions = await page.evaluate(() =>
+    (window as Window & { mockActions?: Array<{ data?: Record<string, unknown> }> }).mockActions ?? [],
+  );
+  expect(actions.map((action) => action.data)).toEqual([
+    expect.objectContaining({ action: 'loot.status' }),
+    expect.objectContaining({ action: 'loot.pass', target: 'o9999999999999999' }),
+  ]);
+  expect(JSON.stringify(actions)).not.toContain('beneficiary');
+  expect(JSON.stringify(actions)).not.toContain('partyId');
+
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
     .analyze();

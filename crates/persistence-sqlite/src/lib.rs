@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MigrationReport {
@@ -107,7 +107,8 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
          CREATE TABLE IF NOT EXISTS world_runtime (
              singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
              snapshot_version INTEGER NOT NULL,
-             snapshot_json TEXT NOT NULL CHECK(length(snapshot_json) <= 1048576),
+             snapshot_json TEXT NOT NULL
+                 CHECK(length(CAST(snapshot_json AS BLOB)) <= 2097152),
              last_event_sequence INTEGER
                  CHECK(last_event_sequence IS NULL OR last_event_sequence >= 0),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -283,7 +284,7 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              state_json TEXT NOT NULL CHECK(length(state_json) <= 1048576),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         PRAGMA user_version = 10;",
+         PRAGMA user_version = 11;",
     )?;
     // A legacy snapshot does not prove which event sequence it covers. Keep a
     // NULL watermark until the next successful runtime commit establishes it;
@@ -293,6 +294,9 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
             "ALTER TABLE world_runtime ADD COLUMN last_event_sequence INTEGER
                  CHECK(last_event_sequence IS NULL OR last_event_sequence >= 0);",
         )?;
+    }
+    if from < 11 {
+        migrate_world_runtime_v11(&transaction)?;
     }
     if from < 6 {
         let bootstrap_admin = transaction
@@ -328,6 +332,28 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
         from,
         to: SCHEMA_VERSION,
     })
+}
+
+fn migrate_world_runtime_v11(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE world_runtime RENAME TO world_runtime_v10;
+         CREATE TABLE world_runtime (
+             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+             snapshot_version INTEGER NOT NULL,
+             snapshot_json TEXT NOT NULL
+                 CHECK(length(CAST(snapshot_json AS BLOB)) <= 2097152),
+             last_event_sequence INTEGER
+                 CHECK(last_event_sequence IS NULL OR last_event_sequence >= 0),
+             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+         );
+         INSERT INTO world_runtime
+             (singleton, snapshot_version, snapshot_json,
+              last_event_sequence, updated_at)
+         SELECT singleton, snapshot_version, snapshot_json,
+                last_event_sequence, updated_at
+         FROM world_runtime_v10;
+         DROP TABLE world_runtime_v10;",
+    )
 }
 
 fn migrate_social_reports_v10(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -473,12 +499,12 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let report = migrate(&mut connection).unwrap();
 
-        assert_eq!(report, MigrationReport { from: 0, to: 10 });
+        assert_eq!(report, MigrationReport { from: 0, to: 11 });
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            10
+            11
         );
         assert!(
             connection
@@ -591,6 +617,72 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_v10_runtime_limit_without_losing_snapshot_metadata() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE world_runtime;
+                 CREATE TABLE world_runtime (
+                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                     snapshot_version INTEGER NOT NULL,
+                     snapshot_json TEXT NOT NULL CHECK(length(snapshot_json) <= 1048576),
+                     last_event_sequence INTEGER
+                         CHECK(last_event_sequence IS NULL OR last_event_sequence >= 0),
+                     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json,
+                      last_event_sequence, updated_at)
+                 VALUES (1, 5, '{\"snapshotVersion\":5}', 73, 123456);
+                 PRAGMA user_version = 10;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 10, to: 11 }
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT snapshot_version, snapshot_json,
+                            last_event_sequence, updated_at
+                     FROM world_runtime WHERE singleton = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (5, "{\"snapshotVersion\":5}".to_owned(), Some(73), 123456,)
+        );
+
+        let within_v6_limit = "é".repeat(1_000_000);
+        connection
+            .execute(
+                "UPDATE world_runtime SET snapshot_json = ?1 WHERE singleton = 1",
+                [&within_v6_limit],
+            )
+            .unwrap();
+        let above_v6_limit = "é".repeat(1_048_577);
+        assert!(
+            connection
+                .execute(
+                    "UPDATE world_runtime SET snapshot_json = ?1 WHERE singleton = 1",
+                    [&above_v6_limit],
+                )
+                .is_err(),
+            "the v11 constraint must count UTF-8 bytes, not Unicode scalar values"
+        );
+    }
+
+    #[test]
     fn upgrades_v3_with_an_empty_domain_event_ledger() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
@@ -614,7 +706,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 3, to: 10 }
+            MigrationReport { from: 3, to: 11 }
         );
         assert_eq!(
             connection
@@ -658,7 +750,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 4, to: 10 }
+            MigrationReport { from: 4, to: 11 }
         );
         let gameplay: String = connection
             .query_row(
@@ -723,7 +815,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 5, to: 10 }
+            MigrationReport { from: 5, to: 11 }
         );
         assert_eq!(
             connection
@@ -780,7 +872,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 6, to: 10 }
+            MigrationReport { from: 6, to: 11 }
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
@@ -832,7 +924,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 7, to: 10 }
+            MigrationReport { from: 7, to: 11 }
         );
         assert_eq!(
             connection
@@ -921,7 +1013,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 8, to: 10 }
+            MigrationReport { from: 8, to: 11 }
         );
         assert_eq!(
             connection
@@ -963,7 +1055,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 10, to: 10 }
+            MigrationReport { from: 11, to: 11 }
         );
         assert_eq!(
             connection
@@ -1029,7 +1121,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 9, to: 10 }
+            MigrationReport { from: 9, to: 11 }
         );
         assert_eq!(
             connection

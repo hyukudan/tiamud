@@ -70,6 +70,12 @@ fn imports_all_supported_historical_sections_without_executing_content() {
 fn only_unconditional_room_object_resets_become_world_pack_items() {
     let result = parse_import(FULL_AREA, "synthetic-full", None, TextEncoding::Ascii).unwrap();
 
+    assert_eq!(
+        result.world_pack.schema_version,
+        world_pack::CURRENT_SCHEMA_VERSION
+    );
+    assert!(result.world_pack.gameplay.loot_tables.is_empty());
+    assert!(result.world_pack.gameplay.loot_sources.is_empty());
     assert_eq!(result.world_pack.item_prototypes.len(), 1);
     assert_eq!(result.world_pack.initial_item_instances.len(), 1);
     let prototype = &result.world_pack.item_prototypes[0];

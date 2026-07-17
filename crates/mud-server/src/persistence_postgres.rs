@@ -32,7 +32,8 @@ use crate::{
         CharacterStore, DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, ModerationAction,
         PreparedLogin, Request, SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry,
         StaffAuditRecord, StaffReport, StartupGameplayLoadLimits, StoreError,
-        decode_runtime_snapshot, decode_startup_gameplay, ensure_all_startup_characters_loaded,
+        decode_runtime_snapshot, decode_startup_gameplay, ensure_all_character_ids_exist,
+        ensure_all_startup_characters_loaded, normalise_character_identity_ids,
         normalise_startup_character_ids,
     },
 };
@@ -44,7 +45,7 @@ const MAX_IDENTITY_NAME_BYTES: usize = 64;
 const MAX_ACTIVE_SESSIONS: i64 = 16;
 const MAX_CHARACTER_JSON_BYTES: usize = 65_536;
 const MAX_EVENT_JSON_BYTES: usize = 65_536;
-const MAX_RUNTIME_JSON_BYTES: usize = 1_048_576;
+const MAX_RUNTIME_JSON_BYTES: usize = tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES;
 const MAX_SOCIAL_REASON_BYTES: usize = 1_024;
 const MAX_REPORT_REASON_BYTES: usize = 2_048;
 const MAX_AUDIT_DETAILS_BYTES: usize = 4_096;
@@ -54,7 +55,9 @@ const STAFF_LIST_LIMIT: i64 = 10;
 const MAX_MODERATION_DURATION_SECONDS: i64 = 365 * 24 * 60 * 60;
 const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
 const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const POSTGRES_CHARACTER_BATCH_SIZE: usize = MAX_RUNTIME_JSON_BYTES / MAX_CHARACTER_JSON_BYTES;
+const POSTGRES_CHARACTER_BATCH_SIZE: usize =
+    tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES / MAX_CHARACTER_JSON_BYTES;
+const POSTGRES_CHARACTER_EXISTENCE_BATCH_SIZE: usize = 4_096;
 
 #[derive(Clone)]
 pub struct PostgresCharacterStore {
@@ -195,6 +198,15 @@ impl PostgresCharacterStore {
                                 &mut connection,
                                 character_ids,
                                 limits,
+                            ));
+                        }
+                        Request::EnsureCharacterIdsExistBatch {
+                            character_ids,
+                            reply,
+                        } => {
+                            let _ = reply.send(ensure_character_ids_exist_batch(
+                                &mut connection,
+                                character_ids,
                             ));
                         }
                         Request::LoadRuntimeSnapshot { reply } => {
@@ -663,6 +675,21 @@ impl CharacterStore for PostgresCharacterStore {
             Request::LoadCharacterGameplayBatch {
                 character_ids,
                 limits,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn ensure_character_ids_exist_batch(
+        &self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::EnsureCharacterIdsExistBatch {
+                character_ids,
                 reply,
             },
             receive,
@@ -1435,6 +1462,26 @@ fn load_character_gameplay_batch<C: GenericClient>(
     }
     ensure_all_startup_characters_loaded(&character_ids, &aggregates)?;
     Ok(aggregates)
+}
+
+fn ensure_character_ids_exist_batch<C: GenericClient>(
+    connection: &mut C,
+    character_ids: Vec<CharacterId>,
+) -> Result<(), StoreError> {
+    let character_ids = normalise_character_identity_ids(character_ids)?;
+    let mut found = Vec::with_capacity(character_ids.len());
+    for batch in character_ids.chunks(POSTGRES_CHARACTER_EXISTENCE_BATCH_SIZE) {
+        let database_ids = batch.iter().map(|id| id.0).collect::<Vec<_>>();
+        let rows = connection.query(
+            "SELECT id FROM characters WHERE id = ANY($1) ORDER BY id",
+            &[&database_ids],
+        )?;
+        found.extend(
+            rows.into_iter()
+                .map(|row| CharacterId(row.get::<_, i64>(0))),
+        );
+    }
+    ensure_all_character_ids_exist(&character_ids, &found)
 }
 
 fn load_runtime_snapshot<C: GenericClient>(
@@ -2662,8 +2709,8 @@ mod tests {
     use std::{collections::BTreeMap, env, process, time::Duration};
     use tiamud_core::{
         AdventureRuntimeSnapshot, Direction, ItemBinding, ItemInstanceId, ItemLocationSnapshot,
-        RuntimeItemInstanceSnapshot, RuntimeItemInstanceSnapshotV3, RuntimeItemLocation,
-        WORLD_RUNTIME_SNAPSHOT_VERSION, World, WorldRuntimeSnapshotV3,
+        ItemProvenance, LootDropId, RuntimeItemInstanceSnapshot, RuntimeItemInstanceSnapshotV3,
+        RuntimeItemLocation, WORLD_RUNTIME_SNAPSHOT_VERSION, World, WorldRuntimeSnapshotV3,
     };
 
     #[test]
@@ -2728,8 +2775,17 @@ mod tests {
 
         let mut v4 = current_json;
         v4["snapshotVersion"] = serde_json::json!(4);
-        v4.as_object_mut().unwrap().remove("nextTradeId");
-        v4.as_object_mut().unwrap().remove("trades");
+        for field in [
+            "nextTradeId",
+            "trades",
+            "nextLootDropId",
+            "itemProvenance",
+            "lootEncounters",
+            "groundLoot",
+            "partyLootCursors",
+        ] {
+            v4.as_object_mut().unwrap().remove(field);
+        }
         decode_runtime_snapshot(4, &v4.to_string()).unwrap();
         v4["trades"] = serde_json::json!({});
         assert!(decode_runtime_snapshot(4, &v4.to_string()).is_err());
@@ -2897,6 +2953,14 @@ mod tests {
                     },
                 },
             )]),
+            next_loot_drop_id: LootDropId(1),
+            item_provenance: BTreeMap::from([(
+                ItemInstanceId("item:lamp".into()),
+                ItemProvenance::AuthoredInitial,
+            )]),
+            loot_encounters: BTreeMap::new(),
+            ground_loot: BTreeMap::new(),
+            party_loot_cursors: BTreeMap::new(),
             npcs: BTreeMap::new(),
             adventure: AdventureRuntimeSnapshot::default(),
             progression_flags: Default::default(),

@@ -180,6 +180,7 @@
     const commands = [
       'look',
       'inventory',
+      'loot',
       'north',
       'east',
       'south',
@@ -578,7 +579,7 @@
     const sent = connection?.perform(action, fields, id) ?? false;
     if (sent && [
       'item.take', 'item.drop', 'item.put', 'item.get', 'item.give', 'item.contents',
-      'item.use', 'item.equip', 'item.unequip',
+      'item.use', 'item.equip', 'item.unequip', 'loot.pass',
     ].includes(action)) {
       containerContents = undefined;
     }
@@ -896,6 +897,11 @@
           {#if scene.items.length > 0}
             <section class="scene-items" aria-labelledby="items-title">
               <h2 id="items-title">Within reach</h2>
+              <button
+                class="loot-status-button"
+                type="button"
+                onclick={() => submitAction('loot.status', undefined, 'loot status')}
+              >Review loot rights</button>
               <ul>
                 {#each scene.items as item (item.id)}
                   <li>
@@ -915,19 +921,31 @@
                         </p>
                       {/if}
                       {#if item.description}<p>{item.description}</p>{/if}
+                      {#if item.loot?.access === 'yours'}
+                        <p class="loot-access">
+                          Reserved for you · {item.loot.expiresInTicks}
+                          {item.loot.expiresInTicks === 1 ? 'tick' : 'ticks'} remaining
+                        </p>
+                      {:else if item.loot?.access === 'reserved'}
+                        <p class="loot-access">Reserved for another adventurer</p>
+                      {/if}
                     </div>
                     <div class="item-actions">
                       {#each item.actions as action (action.command)}
                         <button
                           type="button"
                           onclick={() => {
-                            const actionName = itemActionName(action.command);
-                            if (actionName === 'item.contents') {
+                            if (action.command.trim().toLowerCase().startsWith('loot pass ')) {
+                              submitAction('loot.pass', { target: item.id }, action.command);
+                            } else {
+                              const actionName = itemActionName(action.command);
+                              if (actionName === 'item.contents') {
                               submitAction(actionName, { container: item.id, page: 1 }, action.command);
-                            } else if (actionName) {
-                              submitAction(actionName, { target: item.id }, action.command);
+                              } else if (actionName) {
+                                submitAction(actionName, { target: item.id }, action.command);
+                              }
+                              else submitCommand(action.command);
                             }
-                            else submitCommand(action.command);
                           }}
                         >{action.label}</button>
                       {/each}

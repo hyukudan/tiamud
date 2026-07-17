@@ -6,7 +6,7 @@ repository, the Rust CLI and a reviewable asset directory on a developer or
 builder machine, then deploys one validated artifact to the server.
 
 ```text
-AreaPack sources + reviewed assets
+AreaPack v5 sources + reviewed assets
                 |
                 v
         compose and validate
@@ -18,7 +18,7 @@ AreaPack sources + reviewed assets
        immutable publication
                 |
                 v
-    one WorldPack loaded at startup
+    one WorldPack v6 loaded at startup
 ```
 
 ## Recommended loop
@@ -37,6 +37,12 @@ AreaPack sources + reviewed assets
 The runtime never composes areas, invokes image encoders, calls an AI provider
 or downloads third-party media. See the [single-host operations guide](../operations/single-host.md)
 for service, database, TLS, backup and rollback procedures.
+
+AreaPacks are a multipack editorial layout, not independently deployable
+services. Their complete dependency graph is resolved from local reviewed files
+before publication. Runtime area download, hot-add/replacement and LRU eviction
+remain future work; changing an area means producing one new complete WorldPack
+and restarting intentionally.
 
 ## Historical content
 
@@ -59,3 +65,9 @@ The server loads either the embedded reviewed pack or the external path named
 by `TIAMUD_WORLD_PACK`. It loads one complete artifact before opening game
 ports. Area hot-loading remains future architecture, not part of the current
 authoring or deployment path.
+
+The current artifact contract is WorldPack v6/AreaPack v5/Project v2. The
+selected persistence backend is prepared as schema v11 before readiness;
+legacy raw runtime snapshots v1-v5 keep their 1 MiB physical limit, while
+current v6 admission and commits allow 2 MiB. This storage migration does not
+compose content, create a second loot table authority or enable dual writes.

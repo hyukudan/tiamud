@@ -139,10 +139,10 @@ cannot displace an accepted command result.
 ### Additive v1 rollout policy
 
 `tiamud.v1` aún no ha alcanzado su primer hito de compatibilidad ni se ha usado
-en producción pública. Durante este intervalo de prelanzamiento, la fase 3D
+en producción pública. Durante este intervalo de prelanzamiento, la fase 4A
 sustituye deliberadamente el contrato fuente de forma incompatible: el servidor
 y el cliente oficial deben proceder del mismo checkout. No existe una capacidad
-negociada que haga compatible un cliente anterior con los campos o enums de 3D,
+negociada que haga compatible un cliente anterior con los campos o enums de 4A,
 y no debe afirmarse esa compatibilidad.
 
 La política aditiva siguiente será vinculante a partir del primer hito explícito
@@ -261,6 +261,7 @@ Nombres de acción implementados:
 look, inventory, move
 item.take, item.drop, item.contents, item.put, item.get, item.give,
 item.examine, item.use, item.equip, item.unequip
+loot.status, loot.pass
 combat.attack, combat.ability
 progression.promote, progression.talent
 party.create, party.invite, party.accept, party.revoke, party.kick,
@@ -341,6 +342,19 @@ reejecutar; cambiar cualquiera de esos valores con el mismo ID es un error de
 protocolo. Los selectores opacos pertenecen a la sesión que los creó; la caché
 continúa indexada por personaje/`requestId` y solo puede reproducir la misma
 firma exacta según las reglas generales descritas más abajo.
+
+Las acciones de botín tienen formas cerradas:
+
+| Acción | Campos exactos adicionales |
+| --- | --- |
+| `loot.status` | Ninguno |
+| `loot.pass` | `target` |
+
+`target` es el selector opaco o nombre exacto visible de una raíz reservada y
+ocupa como máximo 256 bytes sin controles. Forma parte de la firma de
+deduplicación; cambiarlo bajo el mismo `requestId` se rechaza. `loot.pass` solo
+puede ceder un derecho propio a la siguiente identidad de la cohorte congelada,
+no renueva el plazo y no revela esa identidad al cliente.
 
 El intercambio confirmado usa estas formas cerradas; todo selector es opaco y
 pertenece a la sesión que lo proyectó:
@@ -494,6 +508,12 @@ critical results. When a connection cannot drain critical output within the
 bounded queue/write timeout, the server closes it explicitly. An
 actor/broadcast lag is recovered with a notice and authoritative snapshots.
 
+Una entrega de dominio proyecta como máximo 16 eventos narrativos por batch.
+Si una ráfaga contiene más, Web y Telnet emiten un único aviso acotado,
+coalescen la narración excedente y conservan un snapshot autoritativo crítico;
+el cliente no debe inferir que el aviso sea un journal ni solicitar replay de
+los eventos omitidos.
+
 Before `server.welcome`, a rejected connection is reported as the typed error
 notice documented under the authenticated handshake. Codes after welcome are
 ordinary operational notices and do not retroactively reject authenticated
@@ -533,9 +553,11 @@ Representative `scene.snapshot`:
       "totalWeightGrams":1200,
       "transferPolicy":"transferable",
       "boundToYou":false,
+      "loot":{"access":"yours","expiresInTicks":12},
       "actions":[
         {"label":"Examine","command":"examine of75b645d851f21cf"},
-        {"label":"Take","command":"take of75b645d851f21cf"}
+        {"label":"Take","command":"take of75b645d851f21cf"},
+        {"label":"Pass","command":"loot pass of75b645d851f21cf"}
       ]
     }
   ],
@@ -549,6 +571,24 @@ are observer/session specific and cannot be correlated with durable WorldPack
 IDs. Scene revision belongs to the authorized view. Hidden items/NPCs/exits,
 private flags, author variant IDs and conditions are filtered before this
 payload exists.
+
+`loot` solo aparece en un objeto de suelo con derecho exclusivo. Su forma es
+`{"access":"yours","expiresInTicks":1..20}` para el beneficiario o
+`{"access":"reserved"}` para cualquier tercero; un objeto público omite el
+campo. El servidor elimina `Take`/`Pass` cuando el observador no puede usarlos.
+Nunca se proyectan `CharacterId`, `PartyId`, cohorte, drop, tabla, digest o
+procedencia durable. Las pilas se particionan por acceso antes de asignar su
+selector, por lo que una referencia no mezcla unidades propias, reservadas y
+públicas.
+
+La autoría limita el título de sala a 128 bytes y la descripción a 8.192
+bytes. Además, antes de serializar, Web reduce cada escena a una ventana
+semántica de 14 KiB y Telnet a 48 KiB. El orden de retención es determinista:
+botín propio, objetos públicos y botín reservado ajeno, seguido del resto de
+entidades/prosa según el presupuesto. Toda reducción añade un aviso textual y
+la siguiente proyección autoritativa revela gradualmente el contenido restante.
+La ventana Web deja margen para el envelope físico de 16 KiB; no aumenta ese
+límite de frame.
 
 `image` is optional. Its content-addressed root-relative URLs and contextual
 localized alt text are presentation only. The official client resolves exact
@@ -908,7 +948,7 @@ propia sal; el observador de sala no recibe una lista ajena.
 `general`, `newbie` o `staff`), `sender` y texto plano acotado. Ignore y block
 por cualquiera de las partes se aplican antes de entregar. Mute/ban y rate
 limit se aplican en servidor. `general`, `newbie` y `staff` requieren
-suscripción durable en esquema v10; `staff` exige además perfil `moderator`,
+suscripción durable en esquema v11; `staff` exige además perfil `moderator`,
 `administrator` o `implementor` al unirse, enviar y recibir. `helper`,
 `builder` y los roles legados `Player`/`Moderator`/`Admin` no conceden ese
 acceso. `announcement` es entrega del servidor, no un canal suscribible. La
@@ -957,10 +997,16 @@ rendering remains authoritative and is never removed by this fallback.
 ## Limits and failure policy
 
 - HTTP/WS body, frame and message: 16 KiB.
+- escena semántica antes del envelope: 14 KiB en Web; escena semántica usada
+  para texto/GMCP/celdas: 48 KiB en Telnet. Una reducción conserva primero
+  botín propio, público y reservado ajeno y siempre publica aviso;
+- eventos proyectados por batch: 16; un exceso se coalesce con aviso y
+  snapshot autoritativo;
 - Every post-authentication outbound WebSocket envelope is compact-serialized
   and checked against that same 16 KiB limit before entering the output queue.
-  An individually oversized scene/player projection fails closed with an
-  explicit close reason and
+  La escena ya se reduce a su ventana semántica; cualquier envelope restante o
+  proyección privada individual que aún exceda el límite falla de forma cerrada
+  con motivo explícito y
   `tiamud_outbound_budget_exceeded_total{transport="websocket",message="frame"}`
   increment rather than emitting an invalid frame.
 - JSON nesting: 16.

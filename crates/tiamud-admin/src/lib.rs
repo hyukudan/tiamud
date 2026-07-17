@@ -21,7 +21,6 @@ use world_pack::{DocumentToolError, ValidationErrors, WorldPack, WorldPackDocume
 /// this value remain supported because the server can migrate them on startup.
 pub const SUPPORTED_DATABASE_SCHEMA_VERSION: i64 = SCHEMA_VERSION;
 const MAX_WORLD_PACK_BYTES: usize = 16 * 1024 * 1024;
-const MAX_RUNTIME_SNAPSHOT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckReport {
@@ -648,14 +647,19 @@ fn validate_runtime_snapshot(connection: &Connection, path: &Path) -> Result<(),
     let Some((version, json)) = snapshot else {
         return Ok(());
     };
-    if json.len() > MAX_RUNTIME_SNAPSHOT_BYTES {
-        return Err(AdminError::RuntimeSnapshotTooLarge {
-            path: path.to_owned(),
-            maximum: MAX_RUNTIME_SNAPSHOT_BYTES,
-        });
-    }
     let version =
         u32::try_from(version).map_err(|_| AdminError::InvalidRuntimeSnapshot(path.to_owned()))?;
+    let maximum = if version < tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
+        tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
+    } else {
+        tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+    };
+    if json.len() > maximum {
+        return Err(AdminError::RuntimeSnapshotTooLarge {
+            path: path.to_owned(),
+            maximum,
+        });
+    }
     let snapshot = tiamud_core::decode_world_runtime_snapshot(version, &json)
         .map_err(|_| AdminError::InvalidRuntimeSnapshot(path.to_owned()))?;
     tiamud_core::validate_world_runtime_snapshot_semantics(&snapshot)
@@ -763,6 +767,19 @@ mod tests {
         .unwrap();
     }
 
+    fn remove_v6_loot_fields(snapshot: &mut serde_json::Value) {
+        let snapshot = snapshot.as_object_mut().unwrap();
+        for field in [
+            "nextLootDropId",
+            "itemProvenance",
+            "lootEncounters",
+            "groundLoot",
+            "partyLootCursors",
+        ] {
+            snapshot.remove(field);
+        }
+    }
+
     #[test]
     fn check_accepts_a_sound_database_and_world_pack() {
         let temporary = TempDir::new().unwrap();
@@ -817,6 +834,7 @@ mod tests {
                 let mut runtime =
                     serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
                 runtime["snapshotVersion"] = serde_json::json!(3);
+                remove_v6_loot_fields(&mut runtime);
                 runtime.as_object_mut().unwrap().remove("nextTradeId");
                 runtime.as_object_mut().unwrap().remove("trades");
                 for item in runtime["itemInstances"]
@@ -831,6 +849,7 @@ mod tests {
                 let mut runtime =
                     serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
                 runtime["snapshotVersion"] = serde_json::json!(4);
+                remove_v6_loot_fields(&mut runtime);
                 runtime.as_object_mut().unwrap().remove("nextTradeId");
                 runtime.as_object_mut().unwrap().remove("trades");
                 runtime.to_string()
@@ -840,7 +859,10 @@ mod tests {
                 item.location = tiamud_core::RuntimeItemLocation::Carried {
                     character_id: tiamud_core::CharacterId(10),
                 };
-                serde_json::to_string(&runtime).unwrap()
+                let mut runtime = serde_json::to_value(runtime).unwrap();
+                runtime["snapshotVersion"] = serde_json::json!(5);
+                remove_v6_loot_fields(&mut runtime);
+                runtime.to_string()
             };
             let decoded = tiamud_core::decode_world_runtime_snapshot(
                 u32::try_from(snapshot_version).unwrap(),

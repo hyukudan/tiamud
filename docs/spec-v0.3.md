@@ -1,6 +1,6 @@
 # Especificación técnica de Tiamud v0.3
 
-Estado: especificación de implementación en prelanzamiento, 2026-07-16.
+Estado: especificación de implementación en prelanzamiento, 2026-07-17.
 
 Este documento registra las decisiones actuales de producto y arquitectura de
 Tiamud. Sustituye la planificación de personajes y multimedia de la
@@ -36,11 +36,12 @@ PostgreSQL se recomienda para instalaciones públicas nuevas; SQLite es la
 alternativa local sin servicio. Se selecciona uno y nunca se hace doble
 escritura.
 
-Ambos adaptadores implementan el esquema v10. Conserva las suscripciones
-durables v9 y añade perfiles/capacidades de staff, resolución cerrada de
-reportes y auditoría append-only. El traslado SQLite→PostgreSQL copia estas
-relaciones en una transacción. La aceptación PostgreSQL real retenida es v8;
-no se relabela como aceptación v10 y aún falta ejecutar v10 contra un servidor
+Ambos adaptadores implementan el esquema v11. Conserva las relaciones sociales
+y de staff de v9/v10 y amplía de forma transaccional el límite físico del
+snapshot opaco actual a 2 MiB. Los snapshots legacy v1–v5 continúan limitados a
+1 MiB al decodificarse. El traslado SQLite→PostgreSQL copia estas relaciones y
+el runtime en una transacción. La aceptación PostgreSQL real retenida es v8;
+no se relabela como aceptación v11 y aún falta ejecutar v11 contra un servidor
 PostgreSQL real.
 
 La operación está en [single-host.md](operations/single-host.md). Microservicios
@@ -48,9 +49,10 @@ y orquestación no son objetivo sin carga medida que lo justifique.
 
 ## Datos de mundo y autoría
 
-WorldPack v5 es el objetivo canónico. AreaPack v4 permite composición modular
-estricta. WorldPack v4/v3/v2, AreaPack v3/v2/v1 y Envy/Merc se normalizan al
-importar o componer; el dominio no conserva vocabulario heredado.
+WorldPack v6 es el objetivo canónico. AreaPack v5 permite composición modular
+estricta bajo WorldProject v2. WorldPack v5/v4/v3/v2, AreaPack v4/v3/v2/v1 y
+Envy/Merc se normalizan al importar o componer; el dominio no conserva
+vocabulario heredado.
 
 Propiedades obligatorias:
 
@@ -62,12 +64,17 @@ Propiedades obligatorias:
 - origen, licencia, procedencia y revisión de medios; y
 - resolución en servidor de secretos y variantes de percepción.
 
+Los títulos de sala y sus variantes ocupan `1..=128` bytes; las descripciones
+base o de variante ocupan `1..=8192`
+bytes. Se validan como UTF-8 normalizado y texto seguro; los límites son de
+bytes, no de puntos de código.
+
 Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
 
-### Objetos e inventario 3A–3D
+### Objetos, inventario y botín 3A–4A
 
-WorldPack v5 separa `itemPrototypes`, que contienen contenido y reglas
+WorldPack v6 separa `itemPrototypes`, que contienen contenido y reglas
 reutilizables, de `initialItemInstances`, que asignan cada unidad durable a una
 sala, un `npc_spawn`, `staged` o a otra instancia contenedor. En runtime
 `ItemInstanceId` es una cadena tipada interna; las instancias nuevas usan una
@@ -119,9 +126,10 @@ cantidad opcional, `put <objeto> in <contenedor>` mueve raíces portadas y
 1..=256 unidades. `contents` pagina veinte grupos y evita incrustar árboles
 recursivos en las fichas o escenas.
 
-WorldPack v5 y AreaPack v4 aceptan el vocabulario cerrado `transferable`,
-`character_bound` y `non_transferable`; WorldPack v4, AreaPack v3 y formatos
-anteriores solo normalizan `transferable`. El propietario efectivo de una
+WorldPack v6 y AreaPack v5 actuales, igual que WorldPack v5 y AreaPack v4,
+aceptan el vocabulario cerrado `transferable`, `character_bound` y
+`non_transferable`; WorldPack v4, AreaPack v3 y formatos anteriores solo
+normalizan `transferable`. El propietario efectivo de una
 instancia se obtiene siguiendo como máximo cuatro aristas de contención hasta
 una raíz portada o equipada. La primera adquisición por un personaje liga
 atómicamente la raíz y cada descendiente `character_bound`. Un objeto ligado
@@ -168,9 +176,11 @@ texto en escena, inventario, equipo y contenidos. El color nunca es la única
 señal. Web usa `container.contents`; Telnet ofrece texto equivalente y GMCP
 proyecta `Char.Items.List` con ubicación `container`.
 
-`WorldRuntimeSnapshot` v5 conserva `itemInstances`, su grafo de ubicaciones,
+`WorldRuntimeSnapshot` v6 conserva `itemInstances`, su grafo de ubicaciones,
 el vínculo obligatorio por instancia, el siguiente contador de instancia,
-`nextTradeId` y las reservas vivas. El vínculo tiene
+`nextTradeId`, las reservas de trade, RNG y cinco campos de botín:
+`nextLootDropId`, `itemProvenance`, `lootEncounters`, `groundLoot` y
+`partyLootCursors`. El vínculo tiene
 exactamente una de estas formas:
 
 ```json
@@ -178,27 +188,57 @@ exactamente una de estas formas:
 {"kind":"character","characterId":42}
 ```
 
-El decoder lee primero `snapshotVersion` y usa DTO explícitos v1, v2, v3, v4 y
-v5; v1-v3 se convierten a `unbound` y v4 produce contador de trade inicial y
-mapa vacío. Campos posteriores inyectados en una versión antigua, referencias
-huérfanas, ciclos, profundidad, política/vínculo, trades, reservas o contadores
-inválidos bloquean el arranque. La restauración conserva instancias iniciales
-nuevas del WorldPack y superpone el estado durable, sin resucitar instancias
-runtime ausentes. Antes
-de abrir listeners se valida por lotes la unión de propietarios raíz y todos los
-`CharacterId` ligados, incluso si la instancia está consumida, junto con
-equipo, grafo y capacidad; después se descartan esos agregados. SQLite y
-PostgreSQL confirman el snapshot como única autoridad en su transacción de
-esquema v10; no hay tabla espejo, tabla de escrow ni esquema v11.
+El decoder lee primero `snapshotVersion` y usa DTO explícitos v1–v6; v1–v3 se
+convierten a `unbound`, v4 produce un estado de trade vacío y v1–v5 reciben
+procedencia `legacy_snapshot { sourceVersion }` sin inventar derechos. Campos
+posteriores inyectados en una versión antigua, referencias huérfanas, ciclos,
+profundidad, política/vínculo, trades, procedencia, derechos, reservas o
+contadores inválidos bloquean el arranque. La restauración conserva instancias
+iniciales nuevas del WorldPack y superpone el estado durable, sin resucitar
+instancias runtime ausentes.
+
+Antes de abrir listeners se valida por lotes la unión de identidades referidas
+por el snapshot. Para propietarios raíz e IDs ligados se cargan fichas y se
+comprueban existencia, equipo, grafo y capacidad sin convertir identidades
+desconectadas en personajes activos; para cohortes o beneficiarios que solo
+aparecen en botín se realiza una consulta `existence-only`. Después se cancelan
+los encuentros de botín aún abiertos y su estado de combate en un commit previo
+a readiness; los derechos `groundLoot` ya resueltos sobreviven intactos. SQLite
+y PostgreSQL confirman el snapshot como única autoridad en su transacción de
+esquema v11; no hay tabla espejo de loot o escrow ni doble escritura.
 
 Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
-WorldPack, 65.536 instancias runtime, 1 MiB para el snapshot y 1 MiB agregado
-para las fichas de propietarios inspeccionadas al arrancar; cada ficha tiene un
-máximo de 64 KiB. Lantern Square contiene 9 prototipos y 10 instancias
-iniciales; el WorldPack canónico ocupa 49.603 bytes y tiene SHA-256
-`f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
-Los derechos/reparto, procedencia y tablas de botín aleatorias pertenecen a
-fases posteriores.
+WorldPack, 65.536 instancias runtime, 1 MiB para un snapshot legacy v1–v5 y 2
+MiB para el snapshot v6 actual. El presupuesto agregado de fichas de
+propietarios inspeccionadas al arrancar sigue siendo 1 MiB y cada ficha tiene
+un máximo de 64 KiB. Lantern Square contiene 3 salas, 9 prototipos, 9
+instancias iniciales, 1 tabla y 1 fuente; el WorldPack canónico ocupa 50.498
+bytes y tiene SHA-256
+`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
+
+WorldPack v6/AreaPack v5 admiten drops garantizados y pools ponderados con
+pesos enteros. Las entradas se ordenan canónicamente y cada selección usa
+rejection sampling, evitando sesgo de módulo. Una fuente `npc_spawn` se
+resuelve una sola vez por derrota; botín fijo y generable suman como máximo 64
+raíces. Tirada, RNG, contador, procedencia, derechos, NPC, XP, eventos y
+snapshot se confirman o revierten juntos.
+
+La política `credited_character` reserva todas las raíces al iniciador. La
+política `party_round_robin` congela al empezar el encuentro una cohorte de
+hasta seis personajes próximos, conectados y vivos, siempre con el iniciador;
+en la derrota vuelve a comprobar proximidad y party de los acompañantes. Un
+cursor durable reparte las raíces y `loot pass <referencia>` cede una a la
+siguiente identidad elegible sin renovar el plazo. El derecho es exclusivo
+durante 20 ticks, pasa a público después y lo no reclamado se retira al tick
+120. Need/greed, master-loot y reparto por contribución no forman parte de 4A.
+
+Cada raíz conserva procedencia cerrada `authored_initial`, `legacy_snapshot`,
+`runtime_created` o `npc_loot` con digest canónico de tabla. Si tras la poda no
+cabe el peor caso bajo los presupuestos de instancias/derechos, las raíces
+fijas tienen prioridad y la generación restante se suprime de forma durable:
+la derrota y XP se confirman, RNG y `dropId` avanzan y un reinicio no permite
+reroll. Los afijos y recompensas selladas ganadas jugando se aplazan a 4B; las
+cajas, llaves o tiradas pagadas quedan fuera del baseline.
 
 ## Modelo de personaje
 
@@ -286,7 +326,8 @@ administran un objetivo offline.
 La misma política, rate limit, mute, ignore/block y buzones por sesión sirve a
 acciones web, comandos Telnet y `Comm.Channel.Text` GMCP. No existen correo o
 historial durable, shout/yell espacial, telepatía authored, follow/assist/
-rescue, selección general de aliados, XP/misión compartida ni reparto de botín.
+rescue, selección general de aliados ni XP/misión compartida. El reparto de
+botín implementado se limita a la cohorte próxima y round-robin de 4A.
 
 La autoridad ejecutable de staff es independiente de la ficha y usa una de
 doce capacidades cerradas: `reports.view`, `reports.resolve`,
@@ -343,8 +384,10 @@ transfieren al morir. Capacidad por slots/peso, rareza textual, `itemLevel`,
 pilas fungibles derivadas, contenedores acotados, cantidades, consulta paginada,
 tres políticas de transferencia y `give` atómico están implementados. También
 lo está el trade confirmado mediante reservas durables, revisión/digest y
-liquidación simultánea. Faltan afijos, propiedad y reparto de grupo,
-procedencia de drops repetibles y tablas ponderadas. Cajas de botín pagadas o
+liquidación simultánea. 4A añade tablas enteras fixed+repeatable, procedencia,
+derechos de 20 ticks, reparto de grupo round-robin, `loot pass`, publicidad y
+despawn al tick 120. Faltan afijos y recompensas selladas de 4B; need/greed,
+master-loot y contribución no están implementados. Cajas de botín pagadas o
 tiradas con moneda prémium quedan fuera del baseline.
 
 Consulta la [hoja de ruta social/staff/botín](design/social-staff-and-loot-roadmap.md).
@@ -397,6 +440,11 @@ y secuencias por sesión. Texto y percepción preceden cada representación.
 Salvaguardas implementadas:
 
 - 16 KiB compactos por frame WebSocket de salida;
+- ventana semántica determinista de escena de 14 KiB en Web y 48 KiB en
+  Telnet, priorizando botín propio, público y reservado ajeno antes de truncar
+  entidades/prosa con un aviso explícito;
+- batches de como máximo 16 eventos proyectados, con coalescing y snapshot
+  autoritativo cuando una ráfaga es mayor; y
 - recuperación correlacionada `sync.scene`/`sync.player`, aplicada como par; y
 - escena GMCP grande degradada a escena mínima más aviso acotado, nunca silencio.
 
@@ -423,7 +471,7 @@ secuencia ni se infieren de prosa. Referencia:
 | --- | --- |
 | Combate y habilidades acotadas | Baseline implementado y probado |
 | Límites acumulados y nivel sin relleno | Implementado y probado |
-| WorldPack v5/AreaPack v4, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v4/v3/v2 y AreaPack v3/v2/v1 se normalizan |
+| WorldPack v6/AreaPack v5/WorldProject v2, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v5/v4/v3/v2 y AreaPack v4/v3/v2/v1 se normalizan sin inventar loot |
 | Linaje/clase/talento/promoción y persistencia | Implementado y probado |
 | Creación v3 navegador/Telnet | Default/none/explícito implementado |
 | Ficha, talentos y promociones web | Implementado y probado |
@@ -432,13 +480,14 @@ secuencia ni se infieren de prosa. Referencia:
 | Perfil de sprite transparente | WebP alfa + PNG implementado |
 | Sidecar de entidades seguro | Implementado; sin sprites de muestra |
 | Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
-| Social fase 1 y esquema v10 | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v10 aún no retenida |
-| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v10 aún no retenida |
+| Social fase 1 y esquema v11 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v11 aún no retenida |
+| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v11 aún no retenida |
 | Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3C | Snapshot v4 con vínculo durable y migración v1-v3, tres políticas, `give` atómico, opacidad y paridad Web/Telnet/GMCP implementados; puertas locales soportadas superadas |
 | Inventario fase 3D | Snapshot v5 migrado desde v4, reservas durables, doble confirmación y liquidación simultánea de objetos/moneda en Web/Telnet/GMCP; puertas integradas y Playwright final 36/36 superados |
-| Protocolo atómico de delta denso | Pendiente |
+| Botín fase 4A | Snapshot v6 migrado estrictamente desde v1–v5, tablas enteras fixed+repeatable, rejection sampling, procedencia, round-robin/pass, 20/120 ticks, privacidad y paridad Web/Telnet/GMCP implementados |
+| Proyección densa acotada | Ventanas semánticas Web/Telnet, batches de 16 y coalescing con snapshot autoritativo implementados; no es un journal/replay general de eventos |
 
 En la evidencia histórica integrada de fase 3A pasan formato, pruebas bloqueadas del workspace
 y clippy estricto; 77 pruebas de core, 80 de WorldPack, 28 del importador y 195
@@ -470,6 +519,16 @@ y 18 Firefox. Pasan licencias, avisos, humo, carga de 16 usuarios/32
 rondas sin errores y soak corto de 30 s con 44 rondas, 97 acciones y 8/8
 readiness. No se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24
 horas; estas puertas locales no demuestran CI, publicación o producción.
+
+En el árbol integrado de fase 4A pasan formato, clippy estricto y 587 pruebas
+Rust: 113 core, 240 servidor, 112 WorldPack y 122 restantes. También pasan
+109 Vitest, 84 Node/bot, 19 escenarios Chromium, licencias y
+avisos de 307 dependencias Rust/76 web, `cargo-deny` advisories/sources y humo.
+La carga exacta completa 16 bootstraps/32 rondas con cero errores y 57.774.080
+bytes de crecimiento RSS bajo el límite de 96 MiB; el soak corto de 30 s
+completa 58 rondas, 127 acciones, readiness 8/8 y cero errores sin crecimiento
+continuo. No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector real ni
+soak de 24 horas; esta evidencia local no demuestra release o producción.
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
 cuando las puertas de integración cambien.
@@ -542,14 +601,34 @@ Inventario 3D:
 7. Web, texto Telnet, `Char.Trade 1`, páginas GMCP, bot, SQLite, PostgreSQL,
    admin y mover comparten acciones, límites, decoder y opacidad por sesión.
 
+Botín 4A:
+
+1. WorldPack v6/AreaPack v5 validan referencias, pesos enteros y el peor caso
+   fijo+generado de 64 raíces; versiones anteriores rechazan campos 4A.
+2. Snapshot v6 conserva procedencia, encuentros, derechos y cursor; v1–v5 se
+   migran con forma exacta bajo 1 MiB y v6 queda acotado a 2 MiB.
+3. La misma semilla y snapshot producen el mismo resultado mediante rejection
+   sampling; un commit fallido revierte RNG, contador, NPC, XP y objetos.
+4. Cohorte, round-robin y `loot pass` preservan derechos ante reconexión y
+   reinicio; la exclusividad vence al tick 20 y el despawn al 120.
+5. Capacidad insuficiente suprime generación, avanza la tirada de forma durable
+   y nunca bloquea la derrota ni permite reroll.
+6. Web, Telnet y GMCP proyectan solo `yours`, `reserved` o público mediante IDs
+   opacos; no revelan beneficiario, cohorte, tabla, procedencia o drop durable.
+7. Escenas densas respetan ventanas semánticas Web 14 KiB/Telnet 48 KiB,
+   batches de 16, aviso/coalescing y recuperación mediante snapshot autoritativo.
+
 ## Trabajo aplazado o rechazado
 
 Aplazado hasta necesidad demostrada: transformaciones, culturas, respec,
 rangos de clase, editor de grafos, simulación de balance, medios animados,
 gráficos raster terminales y carga caliente. El compositor necesita sprites
-revisados; avatar, heal cue y lápida son mejoras opcionales.
+revisados; avatar, heal cue y lápida son mejoras opcionales. La fase 4B conserva
+afijos y recompensas selladas obtenidas jugando; need/greed, master-loot y
+contribución requieren diseño adicional.
 
 Rechazado como baseline: Kubernetes, microservicios, Redis, object storage
 obligatorio, generación de imagen runtime, decisiones LLM runtime, layout de
 píxeles en servidor, física espacial continua, Canvas/WebGL para diez sprites,
 scripts generales de progresión y blobs multimedia por Telnet.
+También quedan fuera las cajas, llaves o tiradas pagadas.

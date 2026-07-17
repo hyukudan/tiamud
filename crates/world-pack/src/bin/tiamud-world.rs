@@ -47,7 +47,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Compose strict AreaPack v4 modules offline into one canonical runtime WorldPack v5.
+    /// Compose strict AreaPack v5 modules offline into one canonical runtime WorldPack v6.
     Compose {
         project: PathBuf,
         #[arg(short, long)]
@@ -424,11 +424,13 @@ fn run(cli: Cli) -> Result<(), CliError> {
             validate_document_assets(&input, &document)?;
             report_world_diagnostics(&document.world);
             println!(
-                "valid WorldPack {:?}: {} rooms, {} item prototype(s), {} initial item instance(s), {} scene variant set(s), {} content test(s)",
+                "valid WorldPack {:?}: {} rooms, {} item prototype(s), {} initial item instance(s), {} loot table(s), {} loot source(s), {} scene variant set(s), {} content test(s)",
                 document.world.id,
                 document.world.rooms.len(),
                 document.world.item_prototypes.len(),
                 document.world.initial_item_instances.len(),
+                document.world.gameplay.loot_tables.len(),
+                document.world.gameplay.loot_sources.len(),
                 document.scene_variants.len(),
                 document.content_tests.len()
             );

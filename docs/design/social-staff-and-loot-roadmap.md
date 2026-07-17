@@ -1,6 +1,6 @@
 # Hoja de ruta de sistemas sociales, staff e inventario/botín
 
-Estado: auditoría de implementación y diseño de continuación, 2026-07-16.
+Estado: auditoría de implementación y diseño de continuación, 2026-07-17.
 
 Este documento distingue lo que Tiamud implementa hoy de los sistemas que son
 habituales en algunos MUD clásicos o convenientes para un mundo persistente
@@ -33,12 +33,16 @@ sobre la aceptación de la especificación histórica.
   políticas `transferable`, `character_bound` y `non_transferable`. También
   existe trade bilateral confirmado mediante reservas durables, revisión y
   doble confirmación de objetos y moneda.
-- No existen derechos o reparto de botín, afijos ni tablas de botín aleatorias.
+- Sí existen tablas enteras fixed+repeatable, procedencia durable, derechos de
+  20 ticks, reparto de cohorte round-robin, `loot pass` y despawn al tick 120.
+- No existen afijos, recompensas selladas, need/greed, master-loot o reparto por
+  contribución. Las cajas y llaves pagadas quedan fuera.
 
 Las fases 1, comunicación/grupo, 2, staff por capacidades, 3A, fundamento de
 objetos, 3B, pilas/contenedores, 3C, entrega/políticas, y 3D, trade confirmado,
-están implementadas. La secuencia pendiente es propiedad y reparto del botín;
-después, drops repetibles, afijos y tablas aleatorias.
+están implementadas. También está implementada 4A, botín repetible con derechos
+y procedencia. La continuación 4B reserva afijos y recompensas selladas ganadas
+jugando.
 
 ## Estado verificado en el código
 
@@ -63,11 +67,12 @@ sanciones y cambio de rol. `SocialChannel` contiene `Announcement`, `Say`,
 - la entrega usa el router directo y los buzones acotados por sesión;
 - reportes, relaciones, sanciones y suscripciones sobreviven a un reinicio.
 
-SQLite y PostgreSQL implementan actualmente el esquema v10. Conserva
+SQLite y PostgreSQL implementan actualmente el esquema v11. Conserva
 `social_channel_subscriptions` de v9 y añade perfiles, capacidades, resolución
-cerrada de reportes y auditoría append-only; el traslado sin conexión también
-los copia. La evidencia histórica PostgreSQL real sigue acreditando v8 y no se
-presenta como aceptación v10.
+cerrada de reportes y auditoría append-only de v10; v11 amplía a 2 MiB el
+snapshot actual sin relajar el límite legacy v1–v5 de 1 MiB. El traslado sin
+conexión también los copia. La evidencia histórica PostgreSQL real sigue
+acreditando v8 y no se presenta como aceptación v11.
 
 Por tanto, `tell` sirve como mensaje privado online clásico, pero no debe
 presentarse como telepatía: no consume una habilidad o recurso, no aplica
@@ -93,8 +98,10 @@ Accept, revoke, kick y transfer resuelven el nombre de un personaje conectado.
 La persistencia de membresía offline no implica que esas operaciones dirigidas
 puedan gestionar a un objetivo desconectado.
 
-No hay seguimiento, asistencia/rescate, selección general de aliados, crédito
-de misión/XP compartido ni política de botín.
+No hay seguimiento, asistencia/rescate, selección general de aliados ni
+crédito de misión/XP compartido. La única política de botín de grupo actual es
+round-robin sobre una cohorte próxima congelada; no hay need/greed, master-loot
+o contribución.
 
 ### Staff y moderación
 
@@ -166,7 +173,7 @@ capa de operador.
 
 ### Inventario y botín
 
-WorldPack v5/AreaPack v4 separan `itemPrototypes` de
+WorldPack v6/AreaPack v5 separan `itemPrototypes` de
 `initialItemInstances`. El prototipo contiene nombre, descripción, aliases,
 equipo/ataque/curación/efecto, peso, coste de slot, rareza, nivel y políticas
 cerradas. Cada instancia durable referencia un prototipo y comienza en una
@@ -180,9 +187,10 @@ servidor; Web, Telnet y GMCP reciben un ID opaco distinto por unidad, derivado
 de una sal criptográficamente aleatoria nueva por sesión. Telnet lo muestra
 como referencia y permite usarlo como selector exacto. Una pila visible usa la
 referencia opaca de su primer miembro visible ordenado; las consultas textuales
-ambiguas fallan en vez de escoger una unidad arbitraria. 3B no almacena origen
-o procedencia durable: la ubicación inicial authored no sustituye ese futuro
-registro de fase 4.
+ambiguas fallan en vez de escoger una unidad arbitraria. 4A añade procedencia
+durable exacta: `authored_initial`, `legacy_snapshot`, `runtime_created` o
+`npc_loot` con tabla/digest/entrada/tirada; esa procedencia nunca sale del
+servidor.
 
 La presentación de un objeto se autoriza por instancia visible, pero el
 registro `entityMedia` se comparte por prototipo. La política
@@ -226,25 +234,36 @@ Separación, combate, derrota, desconexión, cambio social, expiración o reinic
 cancelan de forma cerrada. Web, Telnet y `Char.Trade 1` GMCP proyectan ofertas,
 reservas y saldo gastable con IDs opacos por sesión.
 
-El botín fijo actual es una instancia inicial ubicada en `npc_spawn`. El
-validador exige prototipo, instancia, spawn y ubicación coherentes. La unidad
-se entrega al NPC al cargar y se transfiere al derrotarlo. Esto sigue siendo
-botín fijo y determinista, no una tabla aleatoria repetible.
+El botín fijo continúa como instancia inicial ubicada en `npc_spawn`, pero 4A
+añade una `lootSource` repetible con una `lootTable` de garantizados y pools
+ponderados enteros. Cada fuente se resuelve una sola vez por derrota mediante
+rejection sampling. Fijos y generables suman como máximo 64 raíces; tirada,
+RNG, contador, procedencia, derechos, NPC, XP, eventos y snapshot se confirman
+o revierten juntos. Si falta capacidad, lo generado se suprime de forma
+durable sin bloquear la derrota ni permitir reroll.
 
-`WorldRuntimeSnapshot` v5 persiste instancias, contención, contadores, vínculo
-obligatorio y reservas de trade; las lecturas v1/v2/v3 usan DTO exactos,
-migran a `unbound`, y v4 crea un estado de trade vacío. Todas rechazan campos
-de una versión posterior. SQLite
-y PostgreSQL confirman ese snapshot único en la
-transacción existente de esquema v10. Al restaurar se conservan nuevas
-instancias iniciales del WorldPack y se superpone el estado durable, sin
-recuperar instancias runtime ausentes del snapshot. La barrera de arranque
-valida propietarios siguiendo contenedores hasta su raíz, IDs ligados incluso
-en objetos consumidos, equipo, grafo y capacidad de personajes conectados o
-desconectados mediante agregados acotados que descarta después. Los
-participantes adicionales de un trade se cargan bajo un presupuesto separado;
-al reiniciar se validan y cancelan las reservas antes de readiness. No hay
-tabla espejo/escrow ni esquema v11.
+`credited_character` reserva las raíces al iniciador. `party_round_robin`
+congela una cohorte de hasta seis personajes conectados, vivos y próximos,
+revalida a los acompañantes en la derrota y avanza un cursor durable. El
+beneficiario puede usar `loot pass`; la raíz es exclusiva durante 20 ticks,
+pública después y se retira al tick 120. Web, Telnet y GMCP solo muestran
+`yours` con ticks restantes, `reserved` sin identidad, o público; las pilas se
+parten por ese acceso.
+
+`WorldRuntimeSnapshot` v6 persiste instancias, contención, contadores, vínculo,
+trade, RNG, procedencia, encuentros, derechos y cursores. Las lecturas v1–v5
+usan DTO exactos bajo 1 MiB, migran con procedencia legacy y rechazan campos v6;
+el snapshot actual admite hasta 2 MiB. SQLite y PostgreSQL confirman esa única
+autoridad en la transacción de esquema v11, sin tabla espejo de loot/escrow.
+Al restaurar se conservan nuevas instancias authored sin resucitar runtime
+ausente. La barrera valida por lotes propietarios, vínculos, cohortes y
+beneficiarios; cancela encuentros abiertos antes de readiness, pero conserva
+los derechos de suelo ya creados.
+
+Las escenas densas conservan una ventana semántica determinista de 14 KiB en
+Web y 48 KiB en Telnet, con prioridad propia→pública→reservada y aviso de
+reducción. Cada batch proyecta como máximo 16 eventos y un exceso se coalesce
+con snapshot autoritativo; esto no introduce replay general.
 
 ## Qué muestran los MUD clásicos
 
@@ -386,7 +405,7 @@ Son sistemas distintos y deben modelarse por separado.
 ```mermaid
 flowchart LR
     accTitle: Inventario implementado y ampliaciones de transferencia y botín
-    accDescr: Cada unidad conserva identidad durable; pilas, contenedores, políticas, entrega directa y trade confirmado ya son autoritativos. Derechos y tablas siguen como fases posteriores.
+    accDescr: Cada unidad conserva identidad durable; pilas, contenedores, políticas, trade, tablas repetibles, procedencia y derechos ya son autoritativos. Los afijos y recompensas selladas quedan para 4B.
 
     Prototype[ItemPrototype implementado<br/>nombre · reglas · rareza · peso] --> Instance[ItemInstance implementada<br/>ID durable · prototypeId · ubicación]
     Sequence[(Secuencia persistida)] --> Instance
@@ -397,12 +416,16 @@ flowchart LR
     Policy[Política + vínculo durable] --> Give
     Give --> Trade[Trade confirmado<br/>reserva + doble confirmación]
 
-    Prototype -. fase 4 .-> Table[LootTable validada]
+    Prototype --> Table[LootTable validada<br/>fixed + weighted]
     RNG[(RNG persistido)] --> Roll[Tirada entera determinista]
     Table --> Roll
     Roll --> Generated[Instancia nueva + procedencia]
-    Generated --> Rights[Elegibilidad y propietario]
-    Rights --> Future[Reparto]
+    Generated --> Rights[Derecho 20 ticks]
+    Cohort[Cohorte congelada] --> RR[Round-robin + pass]
+    RR --> Rights
+    Rights --> Public[Público]
+    Public --> Despawn[Despawn tick 120]
+    Table -. fase 4B .-> Sealed[Selladas + afijos]
 ```
 
 ### Fundamento y secuencia
@@ -419,8 +442,10 @@ flowchart LR
 5. Implementado: intercambio confirmado por ambas partes para ofertas de
    objetos y moneda, con reserva durable acotada e invalidación ante cualquier
    cambio material.
-6. Pendiente: derechos de botín con ventana exclusiva y política inicial determinista, por
-   ejemplo round-robin, antes de dejarlo libre en la sala.
+6. Implementado: tablas enteras fixed+repeatable, procedencia, ventana
+   exclusiva de 20 ticks, round-robin de cohorte y `loot pass`; publicación y
+   despawn ocurren a 20/120 ticks.
+7. Pendiente 4B: afijos y recompensas selladas obtenidas jugando.
 
 ### Rareza y nivel de objeto
 
@@ -432,24 +457,21 @@ del color.
 por slot/tier/nivel y aritmética saturada. Una rareza alta no puede saltarse
 requisitos, capacidades o validación económica.
 
-### Tablas y cofres aleatorios
+### Tablas y recompensas selladas
 
-Una tabla de botín segura necesita:
+4A implementa tablas con pesos enteros acotados y suma comprobada, cantidades y
+tiradas limitadas, `nothing`, RNG persistido con rejection sampling,
+procedencia durable y commit atómico. No incluye tablas anidadas, condiciones,
+afijos, reglas de únicos, pity ni scripts de recompensa. El peor caso fijo más
+generado se valida a 64 raíces por derrota.
 
-- pesos enteros acotados y suma comprobada;
-- número mínimo/máximo de tiradas y cantidades acotadas;
-- condiciones con la gramática declarativa existente, no scripts arbitrarios;
-- reglas de únicos y duplicados;
-- RNG persistido para que un reinicio no permita repetir o cambiar la tirada;
-- creación, asignación, evento de dominio y snapshot en la misma transacción;
-- procedencia durable para diagnóstico y economía;
-- probabilidades visibles para cualquier contenedor aleatorio.
-
-Los cofres conseguidos jugando pueden ser contenido normal si no se venden
-llaves, tiradas ni moneda premium y si sus probabilidades son transparentes.
-Las loot boxes de pago quedan fuera del baseline: añaden incentivos y riesgos
-legales/éticos que no son necesarios para el motor. Si algún día se plantea
-monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo.
+4B podrá añadir recompensas selladas conseguidas jugando y afijos. Abrir una
+deberá prevalidar tirada, vínculo y capacidad antes de consumir contenedor, RNG
+o contador, confirmar recompensa y consumo juntos y mostrar probabilidades
+exactas. Las loot boxes, llaves y tiradas pagadas quedan fuera del baseline:
+añaden incentivos y riesgos legales/éticos innecesarios para el motor. Si algún
+día se plantea monetización, es preferible vender cosméticos conocidos o apoyo
+de precio fijo.
 
 ## Otros sistemas MUD candidatos
 
@@ -495,7 +517,7 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 - prototipos reutilizables, instancias durables y contador monotónico;
 - snapshot v2, conversión explícita desde v1 y rollback exacto;
 - slots/peso, rareza/`itemLevel` textual e IDs opacos en ambos transportes;
-- snapshot único en SQLite/PostgreSQL v10, sin tabla espejo ni esquema v11.
+- en aquel corte, snapshot único en SQLite/PostgreSQL v10, sin tabla espejo.
 
 ### Fase 3B — pilas y contenedores — implementada
 
@@ -526,14 +548,32 @@ monetización, es preferible vender cosméticos conocidos o apoyo de precio fijo
 El contrato aceptado e implementado está en
 [ADR 0012](../decisions/0012-confirmed-trade-reservations.md).
 
-### Fase 4 — propiedad y botín aleatorio — pendiente
+### Fase 4A — botín repetible, derechos y procedencia — implementada
 
-- elegibilidad y distribución de party;
-- procedencia durable y afijos con presupuestos de rareza/`itemLevel`;
-- tablas enteras validadas y tirada transaccional restart-safe;
-- probabilidades visibles, pruebas estadísticas deterministas y límites de
-  economía;
-- cofres solo como recompensa de juego en el baseline.
+- WorldPack v6/AreaPack v5/WorldProject v2 con una tabla y fuente canónicas;
+- snapshot v6 y esquema SQL v11; legacy v1–v5 limitado a 1 MiB y v6 a 2 MiB;
+- pesos enteros, rejection sampling y resolución exactly-once de botín fijo más
+  repetible, con máximo combinado de 64 raíces;
+- procedencia durable, cohorte congelada, round-robin, `loot pass`, exclusividad
+  20 ticks y despawn 120;
+- supresión por capacidad sin bloquear derrota/XP ni permitir reroll;
+- arranque que valida identidades y cancela encuentros abiertos sin borrar
+  derechos resueltos;
+- privacidad y acciones equivalentes en Web/Telnet/GMCP, con ventanas
+  semánticas 14/48 KiB y batches/coalescing de 16 eventos.
+
+El contrato aceptado e implementado está en
+[ADR 0013](../decisions/0013-repeatable-loot-rights-and-provenance.md).
+
+### Fase 4B — selladas y afijos — pendiente
+
+- recompensas selladas obtenidas jugando, con probabilidades exactas;
+- simulación de tirada, vínculo y capacidad antes del consumo atómico;
+- afijos acotados por rareza/`itemLevel` y economía;
+- pruebas deterministas de probabilidades y límites.
+
+Need/greed, master-loot y reparto por contribución no forman parte de 4B sin
+diseño adicional. Cajas, llaves y tiradas pagadas permanecen fuera.
 
 ### Fase 5 — comunidad y contenido — pendiente
 

@@ -10,14 +10,15 @@ use tiamud_scripting::{MAX_MODULES_PER_ROOM_HOOK_BATCH, ScriptLimits, validate_m
 pub use tiamud_scripting::{ScriptCapability, ScriptHook};
 
 use super::{
-    Direction, EffectRule, EquipmentSlot, InitialItemLocation, ValidationError, ValidationErrors,
-    WorldPack, valid_content_addressed_audio_path, valid_relative_asset_path,
+    Direction, EffectRule, EquipmentSlot, InitialItemLocation, MAX_ROOM_DESCRIPTION_BYTES,
+    MAX_ROOM_TITLE_BYTES, ValidationError, ValidationErrors, WorldPack, safe_gameplay_label,
+    safe_gameplay_text, valid_content_addressed_audio_path, valid_relative_asset_path,
 };
 
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 1_024;
 
-/// A WorldPack v5 plus optional authoring data ignored by older runtime readers.
+/// A WorldPack v6 plus optional authoring data ignored by older runtime readers.
 ///
 /// Keeping the additions at the top level preserves Rust source compatibility for
 /// existing `WorldPack` and `Room` struct literals. Serde's default unknown-field
@@ -1384,14 +1385,14 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
             .get("gameplay")
             .is_some_and(|gameplay| gameplay.get("itemRules").is_some())
     {
-        return Err("WorldPack v5 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("WorldPack v6 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("WorldPack v5 rooms cannot declare legacy items".to_owned());
+        return Err("WorldPack v6 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("gameplay")
@@ -1403,8 +1404,31 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("WorldPack v5 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("WorldPack v6 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
+    Ok(())
+}
+
+fn reject_legacy_loot_fields(value: &serde_json::Value, schema_version: u64) -> Result<(), String> {
+    if value.get("gameplay").is_some_and(|gameplay| {
+        gameplay.get("lootTables").is_some() || gameplay.get("lootSources").is_some()
+    }) {
+        return Err(format!(
+            "WorldPack v{schema_version} cannot declare v6 lootTables or lootSources"
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_v5_loot(value: &mut serde_json::Value) -> Result<(), String> {
+    reject_native_legacy_item_fields(value)?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "WorldPack root must be an object".to_owned())?;
+    root.insert(
+        "schemaVersion".to_owned(),
+        serde_json::json!(crate::CURRENT_SCHEMA_VERSION),
+    );
     Ok(())
 }
 
@@ -1474,9 +1498,17 @@ impl WorldPackDocument {
             .unwrap_or_default();
         let legacy_schema = schema_version == 2 || schema_version == 3;
         if legacy_schema {
+            reject_legacy_loot_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
             normalize_legacy_items(&mut value).map_err(DocumentToolError::LegacyItems)?;
         } else if schema_version == 4 {
+            reject_legacy_loot_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
             normalize_v4_items(&mut value).map_err(DocumentToolError::LegacyItems)?;
+        } else if schema_version == 5 {
+            reject_legacy_loot_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
+            normalize_v5_loot(&mut value).map_err(DocumentToolError::LegacyItems)?;
         } else if schema_version == u64::from(crate::CURRENT_SCHEMA_VERSION) {
             reject_native_legacy_item_fields(&value).map_err(DocumentToolError::LegacyItems)?;
         }
@@ -2112,6 +2144,32 @@ impl WorldPackDocument {
                     .iter()
                     .map(|set| (&set.npc_prototype_id, set)),
             ),
+            loot_tables: diff_entities(
+                self.world
+                    .gameplay
+                    .loot_tables
+                    .iter()
+                    .map(|table| (&table.id, table)),
+                other
+                    .world
+                    .gameplay
+                    .loot_tables
+                    .iter()
+                    .map(|table| (&table.id, table)),
+            ),
+            loot_sources: diff_entities(
+                self.world
+                    .gameplay
+                    .loot_sources
+                    .iter()
+                    .map(|source| (&source.id, source)),
+                other
+                    .world
+                    .gameplay
+                    .loot_sources
+                    .iter()
+                    .map(|source| (&source.id, source)),
+            ),
             scene_variants: diff_entities(
                 self.scene_variants
                     .iter()
@@ -2188,6 +2246,25 @@ impl WorldPackDocument {
         for set in &mut document.world.gameplay.npc_ability_sets {
             set.ability_ids.sort();
         }
+        document
+            .world
+            .gameplay
+            .loot_tables
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        for table in &mut document.world.gameplay.loot_tables {
+            table
+                .guaranteed
+                .sort_by(|left, right| left.id.cmp(&right.id));
+            table.pools.sort_by(|left, right| left.id.cmp(&right.id));
+            for pool in &mut table.pools {
+                pool.entries.sort_by(|left, right| left.id.cmp(&right.id));
+            }
+        }
+        document
+            .world
+            .gameplay
+            .loot_sources
+            .sort_by(|left, right| left.id.cmp(&right.id));
         document
             .world
             .rooms
@@ -2416,25 +2493,31 @@ fn validate_scene_variants(
                 variant_id: variant.id.clone(),
             });
         }
-        if variant
-            .title
-            .as_ref()
-            .is_some_and(|title| title.trim().is_empty())
-        {
-            errors.push(ValidationError::EmptySceneVariantTitle {
-                room_id: set.room_id.clone(),
-                variant_id: variant.id.clone(),
-            });
+        if let Some(title) = &variant.title {
+            if title.trim().is_empty() {
+                errors.push(ValidationError::EmptySceneVariantTitle {
+                    room_id: set.room_id.clone(),
+                    variant_id: variant.id.clone(),
+                });
+            } else if !safe_gameplay_label(title, MAX_ROOM_TITLE_BYTES) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "room {:?} scene variant {:?} title must contain 1..={MAX_ROOM_TITLE_BYTES} safe bytes without control characters",
+                    set.room_id, variant.id
+                )));
+            }
         }
-        if variant
-            .description
-            .as_ref()
-            .is_some_and(|description| description.trim().is_empty())
-        {
-            errors.push(ValidationError::EmptySceneVariantDescription {
-                room_id: set.room_id.clone(),
-                variant_id: variant.id.clone(),
-            });
+        if let Some(description) = &variant.description {
+            if description.trim().is_empty() {
+                errors.push(ValidationError::EmptySceneVariantDescription {
+                    room_id: set.room_id.clone(),
+                    variant_id: variant.id.clone(),
+                });
+            } else if !safe_gameplay_text(description, MAX_ROOM_DESCRIPTION_BYTES) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "room {:?} scene variant {:?} description must contain 1..={MAX_ROOM_DESCRIPTION_BYTES} safe bytes",
+                    set.room_id, variant.id
+                )));
+            }
         }
         if let Some(path) = &variant.asset_manifest
             && !valid_relative_asset_path(path)
@@ -2620,6 +2703,8 @@ pub struct WorldPackDiff {
     pub archetypes: EntityDiff,
     pub abilities: EntityDiff,
     pub npc_ability_sets: EntityDiff,
+    pub loot_tables: EntityDiff,
+    pub loot_sources: EntityDiff,
     pub scene_variants: EntityDiff,
     pub scripts: EntityDiff,
     pub content_tests: EntityDiff,
@@ -2639,6 +2724,8 @@ impl WorldPackDiff {
             && self.archetypes.is_empty()
             && self.abilities.is_empty()
             && self.npc_ability_sets.is_empty()
+            && self.loot_tables.is_empty()
+            && self.loot_sources.is_empty()
             && self.scene_variants.is_empty()
             && self.scripts.is_empty()
             && self.content_tests.is_empty()
@@ -2668,6 +2755,8 @@ impl fmt::Display for WorldPackDiff {
         write_entity_diff(formatter, "archetypes", &self.archetypes)?;
         write_entity_diff(formatter, "abilities", &self.abilities)?;
         write_entity_diff(formatter, "NPC ability sets", &self.npc_ability_sets)?;
+        write_entity_diff(formatter, "loot tables", &self.loot_tables)?;
+        write_entity_diff(formatter, "loot sources", &self.loot_sources)?;
         write_entity_diff(formatter, "scene variants", &self.scene_variants)?;
         write_entity_diff(formatter, "scripts", &self.scripts)?;
         write_entity_diff(formatter, "content tests", &self.content_tests)
@@ -2854,6 +2943,70 @@ mod tests {
                 ],
             ),
         ])
+    }
+
+    fn add_repeatable_loot(document: &mut WorldPackDocument) {
+        document
+            .world
+            .gameplay
+            .npc_prototypes
+            .push(crate::NpcPrototype {
+                id: "demo:wolf".into(),
+                name: "wolf".into(),
+                description: "A test wolf.".into(),
+                level: 1,
+                max_health: 10,
+                strength: 2,
+                defence: 0,
+                experience_reward: 10,
+                respawn_ticks: 2,
+            });
+        document.world.gameplay.npc_spawns.push(crate::NpcSpawn {
+            id: "demo:wolf-1".into(),
+            prototype_id: "demo:wolf".into(),
+            room_id: "demo:gate".into(),
+        });
+        document
+            .world
+            .gameplay
+            .loot_tables
+            .push(crate::LootTableDefinition {
+                id: "demo:wolf-drops".into(),
+                guaranteed: Vec::new(),
+                pools: vec![crate::LootPoolDefinition {
+                    id: "demo:trophy".into(),
+                    rolls: 1,
+                    entries: vec![
+                        crate::LootEntryDefinition {
+                            kind: crate::LootEntryKind::Nothing,
+                            id: "demo:nothing".into(),
+                            weight: 4_000,
+                            item_prototype_id: None,
+                            min_quantity: None,
+                            max_quantity: None,
+                        },
+                        crate::LootEntryDefinition {
+                            kind: crate::LootEntryKind::Item,
+                            id: "demo:lantern-drop".into(),
+                            weight: 6_000,
+                            item_prototype_id: Some("demo:lantern".into()),
+                            min_quantity: Some(1),
+                            max_quantity: Some(1),
+                        },
+                    ],
+                }],
+            });
+        document
+            .world
+            .gameplay
+            .loot_sources
+            .push(crate::LootSourceDefinition {
+                kind: crate::LootSourceKind::NpcSpawn,
+                id: "demo:wolf-source".into(),
+                npc_spawn_id: "demo:wolf-1".into(),
+                loot_table_id: "demo:wolf-drops".into(),
+                rights: crate::LootRightsPolicy::PartyRoundRobin,
+            });
     }
 
     #[test]
@@ -3170,7 +3323,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_items_normalize_to_typed_v5_identity_without_duplicate_authorities() {
+    fn v3_items_normalize_to_typed_v6_identity_without_duplicate_authorities() {
         let legacy = serde_json::json!({
             "schemaVersion": 3,
             "id": "legacy",
@@ -3241,6 +3394,62 @@ mod tests {
                 Err(DocumentToolError::LegacyItems(_))
             ));
         }
+    }
+
+    #[test]
+    fn world_pack_v2_through_v5_normalize_without_inventing_loot() {
+        let current = serde_json::to_value(document()).unwrap();
+        for schema_version in [2, 3, 4, 5] {
+            let mut legacy = current.clone();
+            legacy["schemaVersion"] = serde_json::json!(schema_version);
+            if schema_version <= 3 {
+                legacy.as_object_mut().unwrap().remove("itemPrototypes");
+                legacy
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("initialItemInstances");
+                legacy["items"] = serde_json::json!([]);
+            } else if schema_version == 4 {
+                legacy["itemPrototypes"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("maxStackUnits");
+                legacy["itemPrototypes"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("container");
+            }
+            let normalized =
+                WorldPackDocument::from_json(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+            assert_eq!(
+                normalized.world.schema_version,
+                crate::CURRENT_SCHEMA_VERSION
+            );
+            assert!(normalized.world.gameplay.loot_tables.is_empty());
+            assert!(normalized.world.gameplay.loot_sources.is_empty());
+
+            for field in ["lootTables", "lootSources"] {
+                let mut smuggled = legacy.clone();
+                smuggled["gameplay"][field] = serde_json::json!([]);
+                assert!(matches!(
+                    WorldPackDocument::from_json(&serde_json::to_vec(&smuggled).unwrap()),
+                    Err(DocumentToolError::LegacyItems(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn native_loot_dtos_reject_unknown_nested_fields() {
+        let mut value = document();
+        add_repeatable_loot(&mut value);
+        let mut json = serde_json::to_value(value).unwrap();
+        json["gameplay"]["lootTables"][0]["pools"][0]["entries"][0]["future"] =
+            serde_json::json!(true);
+        assert!(matches!(
+            WorldPackDocument::from_json(&serde_json::to_vec(&json).unwrap()),
+            Err(DocumentToolError::Json(_))
+        ));
     }
 
     #[test]
@@ -3340,7 +3549,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_rejects_legacy_item_authorities() {
+    fn v6_rejects_legacy_item_authorities() {
         let mut native = serde_json::to_value(document()).unwrap();
         native["rooms"][0]["items"] = serde_json::json!(["demo:lantern"]);
         let error =
@@ -3349,7 +3558,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_normalizes_to_v5_but_rejects_schema_smuggling() {
+    fn v4_normalizes_to_v6_but_rejects_schema_smuggling() {
         let mut legacy = serde_json::to_value(document()).unwrap();
         legacy["schemaVersion"] = serde_json::json!(4);
         legacy["itemPrototypes"][0]
@@ -3487,6 +3696,57 @@ mod tests {
     }
 
     #[test]
+    fn scene_variant_text_uses_the_same_utf8_byte_and_control_bounds_as_rooms() {
+        let mut boundary = document();
+        add_variants(&mut boundary);
+        boundary.scene_variants[0].variants[0].title =
+            Some("é".repeat(crate::MAX_ROOM_TITLE_BYTES / 2));
+        boundary.scene_variants[0].variants[0].description =
+            Some("é".repeat(crate::MAX_ROOM_DESCRIPTION_BYTES / 2));
+        boundary.validate().unwrap();
+
+        for (title, description, expected) in [
+            (
+                Some("é".repeat(crate::MAX_ROOM_TITLE_BYTES / 2 + 1)),
+                None,
+                "title must contain 1..=128 safe bytes",
+            ),
+            (
+                Some("unsafe\nvariant".into()),
+                None,
+                "title must contain 1..=128 safe bytes",
+            ),
+            (
+                None,
+                Some("é".repeat(crate::MAX_ROOM_DESCRIPTION_BYTES / 2 + 1)),
+                "description must contain 1..=8192 safe bytes",
+            ),
+            (
+                None,
+                Some("unsafe\u{7}variant".into()),
+                "description must contain 1..=8192 safe bytes",
+            ),
+        ] {
+            let mut invalid = boundary.clone();
+            if let Some(title) = title {
+                invalid.scene_variants[0].variants[0].title = Some(title);
+            }
+            if let Some(description) = description {
+                invalid.scene_variants[0].variants[0].description = Some(description);
+            }
+            let messages = invalid
+                .validate()
+                .unwrap_err()
+                .0
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(messages.contains(expected), "{messages}");
+        }
+    }
+
+    #[test]
     fn script_validation_compiles_lua_and_checks_every_declared_hook() {
         let definition = |source: &str, hooks: Vec<ScriptHook>| ScriptDefinition {
             id: "demo:square-script".into(),
@@ -3565,9 +3825,13 @@ mod tests {
     fn deterministic_artifact_ignores_semantically_irrelevant_order() {
         let mut left = document();
         add_variants(&mut left);
+        add_repeatable_loot(&mut left);
         let mut right = left.clone();
         right.world.rooms.reverse();
         right.world.item_prototypes[0].aliases.reverse();
+        right.world.gameplay.loot_tables[0].pools[0]
+            .entries
+            .reverse();
         right.scene_variants[0].variants.reverse();
         if let Some(Condition::All(conditions)) = &mut right.scene_variants[0].variants[0].when {
             conditions.reverse();
@@ -3612,8 +3876,11 @@ mod tests {
 
     #[test]
     fn text_and_ansi_previews_are_complete_and_sanitize_terminal_controls() {
-        let mut document = document();
-        document.world.rooms[0].title = "Lantern \u{1b}[31mSquare".into();
+        assert_eq!(
+            sanitize_terminal_text("Lantern \u{1b}[31mSquare"),
+            "Lantern [31mSquare"
+        );
+        let document = document();
         let text = document
             .render_preview(
                 "demo:square",
@@ -3632,8 +3899,7 @@ mod tests {
                 PreviewFormat::Ansi,
             )
             .unwrap();
-        assert!(ansi.starts_with("\u{1b}[1;36mLantern [31mSquare"));
-        assert!(!ansi.contains("\u{1b}[31mSquare"));
+        assert!(ansi.starts_with("\u{1b}[1;36mLantern Square"));
     }
 
     #[test]
@@ -3641,6 +3907,7 @@ mod tests {
         let before = document();
         let mut after = before.clone();
         add_variants(&mut after);
+        add_repeatable_loot(&mut after);
         after.world.item_prototypes[0].equipment_slot = Some(crate::EquipmentSlot::Trinket);
         after.world.rooms[0].description.push_str(" Changed.");
         after.content_tests.push(ContentTest {
@@ -3657,6 +3924,8 @@ mod tests {
         assert_eq!(diff.scene_variants.added, ["demo:square"]);
         assert_eq!(diff.item_prototypes.changed, ["demo:lantern"]);
         assert_eq!(diff.content_tests.added, ["smoke"]);
+        assert_eq!(diff.loot_tables.added, ["demo:wolf-drops"]);
+        assert_eq!(diff.loot_sources.added, ["demo:wolf-source"]);
         assert!(diff.to_string().contains("scene variants: + demo:square"));
     }
 

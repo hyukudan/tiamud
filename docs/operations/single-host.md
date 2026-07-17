@@ -172,7 +172,7 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v10, both SQLite and PostgreSQL retain the v8
+In current schema v11, both SQLite and PostgreSQL retain the v8
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
@@ -201,6 +201,21 @@ tiamud-admin migrate \
 sudo systemctl start tiamud
 ```
 
+Schema v11 changes the physical bound of the opaque `world_runtime` singleton,
+not its authority or representation. SQLite rebuilds that table transactionally
+during v10→v11 and preserves its singleton key, snapshot version, JSON,
+`last_event_sequence` and update timestamp. PostgreSQL replaces the named size
+constraint and advances `tiamud_schema` in the same migration chain. Neither
+backend creates a mirror loot table, converts the snapshot to `jsonb` or writes
+to both stores.
+
+The decoder applies a dual admission rule: raw legacy snapshots v1-v5 remain
+limited to 1 MiB, while current v6 snapshots and new commits may use up to
+2 MiB. This prevents an oversized old document from using migration as a way
+around its original bound, while allowing a valid legacy document to expand
+into the exact v6 provenance and rights form. Always keep the pre-migration
+backup until integrity, readiness, restart and gameplay checks pass.
+
 ## Emergency Implementor recovery
 
 Schema migration never recreates canonical staff authority during an ordinary
@@ -219,7 +234,7 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires schema v10 and refuses to run while any operational
+The command requires schema v11 and refuses to run while any operational
 `administrator` or `implementor` profile exists. A legacy `admin` role alone
 does not count as executable authority. Recovery replaces the target's profile
 with `implementor`, clears its lore title and previous direct assignments,
@@ -231,7 +246,7 @@ commit in one transaction; any failure rolls all of them back.
 `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
 verify the installation's normal `pg_dump` or physical backup, then run
 `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
-equivalent schema-v10 transaction:
+equivalent schema-v11 transaction:
 
 ```sql
 BEGIN;
@@ -243,8 +258,8 @@ DECLARE
     target_id BIGINT;
     recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 10 THEN
-        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 10';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 11 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 11';
     END IF;
     IF EXISTS (
         SELECT 1 FROM staff_profiles
@@ -357,7 +372,7 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v10, including durable social
+The mover requires the current SQLite schema v11, including durable social
 channel subscriptions, staff profiles, capability assignments, report
 resolutions and staff audit. It refuses a non-empty target and commits schema
 plus rows in one PostgreSQL transaction. Configure exactly one line in the
@@ -374,10 +389,11 @@ The repository's retained [PostgreSQL 18 schema-v8 acceptance
 run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the earlier v8 adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
 authenticated restart against a separate disposable server process. It does
-not prove or claim a schema-v10 acceptance run. Focused v10 migration, store
-and transfer tests cover subscriptions and the additive staff tables, but they
-do not replace this exercise or establish monitoring, TLS, PostgreSQL
-backup/restore or point-in-time recovery for a production installation.
+not prove or claim a schema-v11 acceptance run. Focused v11 migration, store
+and transfer tests cover the runtime-snapshot cap, subscriptions and additive
+staff tables, but they do not replace this exercise or establish monitoring,
+TLS, PostgreSQL backup/restore or point-in-time recovery for a production
+installation.
 
 ## Binary and world update
 

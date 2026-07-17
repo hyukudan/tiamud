@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "id": "north-gate",
   "dependsOn": [
     "square"
@@ -100,14 +100,6 @@
         "kind": "npc_spawn",
         "npcSpawnId": "tiamud:gate-stalker-1"
       }
-    },
-    {
-      "id": "tiamud:wolf-clasp",
-      "prototypeId": "tiamud:wolf-clasp",
-      "location": {
-        "kind": "npc_spawn",
-        "npcSpawnId": "tiamud:gate-stalker-1"
-      }
     }
   ],
   "rooms": [
@@ -144,6 +136,48 @@
       "id": "tiamud:gate-stalker-1",
       "prototypeId": "tiamud:gate-stalker",
       "roomId": "demo:north-gate"
+    }
+  ],
+  "lootTables": [
+    {
+      "id": "tiamud:gate-stalker-drops",
+      "guaranteed": [
+        {
+          "id": "tiamud:drop:road-token",
+          "itemPrototypeId": "tiamud:road-token",
+          "quantity": 1
+        }
+      ],
+      "pools": [
+        {
+          "id": "tiamud:drop:trophy",
+          "rolls": 1,
+          "entries": [
+            {
+              "kind": "item",
+              "id": "tiamud:drop:wolf-clasp",
+              "weight": 6000,
+              "itemPrototypeId": "tiamud:wolf-clasp",
+              "minQuantity": 1,
+              "maxQuantity": 1
+            },
+            {
+              "kind": "nothing",
+              "id": "tiamud:drop:nothing",
+              "weight": 4000
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "lootSources": [
+    {
+      "kind": "npc_spawn",
+      "id": "tiamud:gate-stalker-loot",
+      "npcSpawnId": "tiamud:gate-stalker-1",
+      "lootTableId": "tiamud:gate-stalker-drops",
+      "rights": "party_round_robin"
     }
   ],
   "npcAbilitySets": [

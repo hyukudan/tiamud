@@ -146,7 +146,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 10, to: 10 }
+        tiamud_persistence_postgres::MigrationReport { from: 11, to: 11 }
     );
     assert_eq!(
         postgres
@@ -208,6 +208,42 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         runtime_json,
         "offline transfer must preserve the validated runtime snapshot byte-for-byte"
     );
+    postgres
+        .batch_execute(
+            "ALTER TABLE world_runtime
+                 DROP CONSTRAINT world_runtime_snapshot_json_check,
+                 ADD CONSTRAINT world_runtime_snapshot_json_check
+                     CHECK (octet_length(snapshot_json) <= 1048576);
+             UPDATE tiamud_schema SET version = 10 WHERE singleton = 1",
+        )
+        .unwrap();
+    assert_eq!(
+        tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
+        tiamud_persistence_postgres::MigrationReport { from: 10, to: 11 }
+    );
+    let constraint: String = postgres
+        .query_one(
+            "SELECT pg_get_constraintdef(oid)
+             FROM pg_constraint
+             WHERE conrelid = 'world_runtime'::regclass
+               AND conname = 'world_runtime_snapshot_json_check'",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(constraint.contains("2097152"));
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT snapshot_version, snapshot_json, last_event_sequence
+                 FROM world_runtime WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, String>(1),
+        runtime_json,
+        "v10 to v11 must preserve the runtime payload and its metadata"
+    );
     assert!(matches!(
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres),
         Err(tiamud_persistence_postgres::TransferError::TargetNotEmpty {
@@ -239,7 +275,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 10 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 11 }
     );
     assert!(
         postgres
@@ -279,6 +315,31 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .get::<_, i64>(0),
         1
     );
+
+    postgres
+        .execute(
+            "UPDATE tiamud_schema SET version = 12 WHERE singleton = 1",
+            &[],
+        )
+        .unwrap();
+    assert!(matches!(
+        tiamud_persistence_postgres::migrate(&mut postgres),
+        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 12 })
+    ));
+    assert_eq!(
+        postgres
+            .query_one("SELECT version FROM tiamud_schema WHERE singleton = 1", &[])
+            .unwrap()
+            .get::<_, i32>(0),
+        12,
+        "future metadata must remain untouched after rejection"
+    );
+    postgres
+        .execute(
+            "UPDATE tiamud_schema SET version = 11 WHERE singleton = 1",
+            &[],
+        )
+        .unwrap();
 
     postgres.batch_execute("SET search_path TO public").unwrap();
     postgres

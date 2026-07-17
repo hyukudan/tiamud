@@ -588,7 +588,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
     }
 
     for bad_area in [
-        json!({"schemaVersion":5,"id":"a","rooms":[room("a:start", None)]}),
+        json!({"schemaVersion":6,"id":"a","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","rooms":[room("a:start", None)],"unknown":true}),
         json!({"schemaVersion":1,"id":"wrong","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","dependsOn":["missing"],"rooms":[room("a:start", None)]}),
@@ -603,7 +603,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
 }
 
 #[test]
-fn area_v3_normalizes_to_v4_but_rejects_v4_schema_smuggling() {
+fn area_v3_normalizes_to_v5_but_rejects_v4_schema_smuggling() {
     let legacy = json!({
         "schemaVersion": 3,
         "id": "a",
@@ -681,7 +681,7 @@ fn area_v1_and_v2_only_normalize_transferable_items() {
 }
 
 #[test]
-fn area_v4_accepts_all_native_transfer_policies() {
+fn area_v4_normalizes_to_v5_and_accepts_all_transfer_policies() {
     for transfer_policy in ["transferable", "character_bound", "non_transferable"] {
         let area: AreaPack = serde_json::from_value(json!({
             "schemaVersion": 4,
@@ -709,6 +709,129 @@ fn area_v4_accepts_all_native_transfer_policies() {
         assert_eq!(area.schema_version, world_pack::AREA_PACK_SCHEMA_VERSION);
         assert_eq!(area.item_prototypes.len(), 1);
     }
+}
+
+#[test]
+fn area_v1_through_v4_reject_repeatable_loot_schema_smuggling() {
+    for schema_version in [1, 2, 3, 4] {
+        for field in ["lootTables", "lootSources"] {
+            let mut value = json!({
+                "schemaVersion": schema_version,
+                "id": "a",
+                "rooms": [room("a:start", None)]
+            });
+            value[field] = json!([]);
+            let error = serde_json::from_value::<AreaPack>(value).unwrap_err();
+            assert!(error.to_string().contains("cannot declare v5"), "{error}");
+        }
+    }
+
+    let normalized: AreaPack = serde_json::from_value(json!({
+        "schemaVersion": 4,
+        "id": "a",
+        "rooms": [room("a:start", None)]
+    }))
+    .unwrap();
+    assert_eq!(
+        normalized.schema_version,
+        world_pack::AREA_PACK_SCHEMA_VERSION
+    );
+    assert!(normalized.loot_tables.is_empty());
+    assert!(normalized.loot_sources.is_empty());
+}
+
+#[test]
+fn loot_ownership_and_cross_area_dependencies_are_complete_and_deterministic() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_area = json!({
+        "schemaVersion": 5,
+        "id": "a",
+        "dependsOn": ["b"],
+        "rooms": [room("a:start", None)],
+        "lootSources": [{
+            "kind": "npc_spawn",
+            "id": "a:source",
+            "npcSpawnId": "b:wolf-1",
+            "lootTableId": "b:drops",
+            "rights": "party_round_robin"
+        }]
+    });
+    let table_area = json!({
+        "schemaVersion": 5,
+        "id": "b",
+        "dependsOn": ["c"],
+        "rooms": [room("b:room", None)],
+        "npcPrototypes": [{
+            "id":"b:wolf","name":"Wolf","description":"A wolf.","level":1,
+            "maxHealth":10,"strength":2,"defence":0,"experienceReward":10,"respawnTicks":2
+        }],
+        "npcSpawns": [{"id":"b:wolf-1","prototypeId":"b:wolf","roomId":"b:room"}],
+        "lootTables": [{
+            "id": "b:drops",
+            "guaranteed": [{"id":"b:fixed","itemPrototypeId":"c:token","quantity":1}],
+            "pools": [{
+                "id":"b:pool","rolls":1,"entries":[
+                    {"kind":"item","id":"b:item","weight":1,"itemPrototypeId":"c:token","minQuantity":1,"maxQuantity":1}
+                ]
+            }]
+        }]
+    });
+    let item_area = json!({
+        "schemaVersion": 5,
+        "id": "c",
+        "itemPrototypes": [{
+            "id":"c:token","name":"Token","description":"A token.","weightGrams":1,
+            "slotCost":1,"rarity":"common","itemLevel":1,"stackPolicy":"unique",
+            "maxStackUnits":1,"transferPolicy":"transferable"
+        }]
+    });
+    write_json(&temp.path().join("a.json"), &source_area);
+    write_json(&temp.path().join("b.json"), &table_area);
+    write_json(&temp.path().join("c.json"), &item_area);
+    let manifest = temp.path().join("world.project.json");
+    write_json(
+        &manifest,
+        &project(vec![("a", "a.json"), ("b", "b.json"), ("c", "c.json")]),
+    );
+
+    let composed = compose_world_project(&manifest).unwrap();
+    assert_eq!(composed.document.world.gameplay.loot_tables.len(), 1);
+    assert_eq!(composed.document.world.gameplay.loot_sources.len(), 1);
+    let a = composed
+        .report
+        .areas
+        .iter()
+        .find(|area| area.id == "a")
+        .unwrap();
+    let b = composed
+        .report
+        .areas
+        .iter()
+        .find(|area| area.id == "b")
+        .unwrap();
+    assert_eq!(a.ownership.loot_sources, ["a:source"]);
+    assert_eq!(b.ownership.loot_tables, ["b:drops"]);
+    for kind in [
+        world_pack::AreaCrossReferenceKind::LootGuaranteedPrototype,
+        world_pack::AreaCrossReferenceKind::LootEntryPrototype,
+        world_pack::AreaCrossReferenceKind::LootSourceNpcSpawn,
+        world_pack::AreaCrossReferenceKind::LootSourceTable,
+    ] {
+        assert!(
+            composed
+                .report
+                .cross_area_references
+                .iter()
+                .any(|reference| reference.kind == kind),
+            "missing {kind:?}"
+        );
+    }
+
+    let reparsed = WorldPackDocument::from_json(&composed.artifact).unwrap();
+    assert_eq!(
+        reparsed.deterministic_artifact().unwrap(),
+        composed.artifact
+    );
 }
 
 #[test]
@@ -1008,7 +1131,7 @@ fn compose_is_present_in_top_level_and_subcommand_help() {
     let help = String::from_utf8_lossy(&compose.stdout);
     assert!(help.contains("world.project.json") || help.contains("<PROJECT>"));
     assert!(help.contains("--output"));
-    assert!(help.contains("AreaPack v4"));
+    assert!(help.contains("AreaPack v5"));
 }
 
 #[test]

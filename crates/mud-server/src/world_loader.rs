@@ -27,7 +27,11 @@ use tiamud_core::{
     ItemStackPolicy as CoreItemStackPolicy, ItemTransferPolicy as CoreItemTransferPolicy,
     LevelGrantDefinition as CoreLevelGrantDefinition,
     LevelThresholdDefinition as CoreLevelThresholdDefinition, LightLevel as CoreLightLevel,
-    LineageDefinition as CoreLineageDefinition,
+    LineageDefinition as CoreLineageDefinition, LootEntryDefinition as CoreLootEntryDefinition,
+    LootEntryKind as CoreLootEntryKind, LootGuaranteedDefinition as CoreLootGuaranteedDefinition,
+    LootPoolDefinition as CoreLootPoolDefinition, LootRightsPolicy as CoreLootRightsPolicy,
+    LootSourceDefinition as CoreLootSourceDefinition, LootSourceKind as CoreLootSourceKind,
+    LootTableDefinition as CoreLootTableDefinition,
     NpcAbilitySetDefinition as CoreNpcAbilitySetDefinition, NpcDefinition,
     RequirementDefinition as CoreRequirementDefinition,
     RequirementDisclosure as CoreRequirementDisclosure,
@@ -62,6 +66,8 @@ pub struct LoadedWorldDefinition {
     pub abilities: Vec<CoreAbilityDefinition>,
     pub npcs: Vec<NpcDefinition>,
     pub npc_ability_sets: Vec<CoreNpcAbilitySetDefinition>,
+    pub loot_tables: Vec<CoreLootTableDefinition>,
+    pub loot_sources: Vec<CoreLootSourceDefinition>,
     pub room_light: Vec<(String, CoreLightLevel)>,
     pub hidden_items: Vec<(String, u16)>,
     pub hidden_npcs: Vec<(String, u16)>,
@@ -103,6 +109,7 @@ pub fn build_loaded_world(
     for npc in &loaded.npcs {
         world.spawn_npc(npc.clone())?;
     }
+    world.configure_loot(loaded.loot_tables.clone(), loaded.loot_sources.clone())?;
     for npc_ability_set in &loaded.npc_ability_sets {
         world.configure_npc_abilities(npc_ability_set.clone())?;
     }
@@ -212,6 +219,8 @@ fn convert_pack(
         character_progression,
         abilities: pack_abilities,
         npc_ability_sets: pack_npc_ability_sets,
+        loot_tables: pack_loot_tables,
+        loot_sources: pack_loot_sources,
         ..
     } = std::mem::take(&mut pack.gameplay);
     let start_room_id = pack.start_room_id.clone();
@@ -351,6 +360,8 @@ fn convert_pack(
         .map(map_character_progression)
         .ok_or(WorldLoadError::MissingCharacterProgression)?;
     let abilities = pack_abilities.into_iter().map(map_ability).collect();
+    let loot_tables = pack_loot_tables.into_iter().map(map_loot_table).collect();
+    let loot_sources = pack_loot_sources.into_iter().map(map_loot_source).collect();
     let prototypes = npc_prototypes
         .into_iter()
         .map(|prototype| (prototype.id.clone(), prototype))
@@ -417,12 +428,71 @@ fn convert_pack(
         abilities,
         npcs,
         npc_ability_sets,
+        loot_tables,
+        loot_sources,
         room_light,
         hidden_items,
         hidden_npcs,
         secret_exits,
         runtime_content: RuntimeContent::default(),
     })
+}
+
+fn map_loot_table(table: world_pack::LootTableDefinition) -> CoreLootTableDefinition {
+    let digest_sha256 = table.canonical_sha256();
+    CoreLootTableDefinition {
+        id: table.id,
+        digest_sha256,
+        guaranteed: table
+            .guaranteed
+            .into_iter()
+            .map(|entry| CoreLootGuaranteedDefinition {
+                id: entry.id,
+                item_prototype_id: entry.item_prototype_id,
+                quantity: entry.quantity,
+            })
+            .collect(),
+        pools: table
+            .pools
+            .into_iter()
+            .map(|pool| CoreLootPoolDefinition {
+                id: pool.id,
+                rolls: pool.rolls,
+                entries: pool
+                    .entries
+                    .into_iter()
+                    .map(|entry| CoreLootEntryDefinition {
+                        kind: match entry.kind {
+                            world_pack::LootEntryKind::Item => CoreLootEntryKind::Item,
+                            world_pack::LootEntryKind::Nothing => CoreLootEntryKind::Nothing,
+                        },
+                        id: entry.id,
+                        weight: entry.weight,
+                        item_prototype_id: entry.item_prototype_id,
+                        min_quantity: entry.min_quantity,
+                        max_quantity: entry.max_quantity,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn map_loot_source(source: world_pack::LootSourceDefinition) -> CoreLootSourceDefinition {
+    CoreLootSourceDefinition {
+        kind: match source.kind {
+            world_pack::LootSourceKind::NpcSpawn => CoreLootSourceKind::NpcSpawn,
+        },
+        id: source.id,
+        npc_spawn_id: source.npc_spawn_id,
+        loot_table_id: source.loot_table_id,
+        rights: match source.rights {
+            world_pack::LootRightsPolicy::CreditedCharacter => {
+                CoreLootRightsPolicy::CreditedCharacter
+            }
+            world_pack::LootRightsPolicy::PartyRoundRobin => CoreLootRightsPolicy::PartyRoundRobin,
+        },
+    }
 }
 
 fn map_character_progression(
@@ -1048,7 +1118,7 @@ mod tests {
     fn reviewed_pack_loads_item_prototypes_instances_and_an_npc_spawn() {
         let loaded = default_loaded_world().unwrap();
         assert_eq!(loaded.definition.item_prototypes.len(), 9);
-        assert_eq!(loaded.definition.initial_item_instances.len(), 10);
+        assert_eq!(loaded.definition.initial_item_instances.len(), 9);
         let tonic = loaded
             .definition
             .item_prototypes
@@ -1129,13 +1199,29 @@ mod tests {
         assert_eq!(loaded.abilities.len(), 3);
         assert_eq!(loaded.npcs.len(), 1);
         assert_eq!(loaded.npc_ability_sets.len(), 1);
+        assert_eq!(loaded.loot_tables.len(), 1);
+        assert_eq!(loaded.loot_sources.len(), 1);
+        assert_eq!(loaded.loot_tables[0].id, "tiamud:gate-stalker-drops");
+        assert_eq!(loaded.loot_tables[0].digest_sha256.len(), 64);
+        assert!(
+            loaded.loot_tables[0]
+                .digest_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_eq!(loaded.loot_sources[0].npc_spawn_id, "tiamud:gate-stalker-1");
+        assert_eq!(
+            loaded.loot_sources[0].loot_table_id,
+            "tiamud:gate-stalker-drops"
+        );
+        assert_eq!(
+            loaded.loot_sources[0].rights,
+            CoreLootRightsPolicy::PartyRoundRobin
+        );
         assert_eq!(loaded.npcs[0].stable_id, "tiamud:gate-stalker-1");
         assert_eq!(
             loaded.npcs[0].loot_item_ids,
-            [
-                ItemInstanceId("tiamud:stormglass-talon".into()),
-                ItemInstanceId("tiamud:wolf-clasp".into()),
-            ]
+            [ItemInstanceId("tiamud:stormglass-talon".into())]
         );
         assert_eq!(loaded.rng_seed, Some(6_073_466_303_471_576_068));
         assert!(
@@ -1264,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_pack_builds_and_assigns_loot_to_its_npc_without_room_placement() {
+    fn reviewed_pack_stages_fixed_loot_and_configures_repeatable_loot() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worlds/lantern-square.world.json");
         let loaded = load_loaded_world(path).unwrap();
@@ -1282,11 +1368,17 @@ mod tests {
         assert_eq!(
             snapshot
                 .item_instances
-                .get(&ItemInstanceId("tiamud:wolf-clasp".into()))
+                .get(&ItemInstanceId("tiamud:stormglass-talon".into()))
                 .map(|instance| &instance.location),
             Some(&tiamud_core::RuntimeItemLocation::HeldByNpc {
                 npc_id: "tiamud:gate-stalker-1".into(),
             })
+        );
+        assert!(
+            !snapshot
+                .item_instances
+                .contains_key(&ItemInstanceId("tiamud:wolf-clasp".into())),
+            "repeatable loot must not exist before the NPC is defeated"
         );
     }
 

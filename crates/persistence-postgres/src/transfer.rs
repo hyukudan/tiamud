@@ -7,7 +7,6 @@ use thiserror::Error;
 use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transaction};
 
 const TABLES: [&str; 17] = APPLICATION_TABLES;
-const MAX_RUNTIME_SNAPSHOT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -393,13 +392,16 @@ fn validate_runtime_snapshot(
     snapshot_version: i64,
     snapshot_json: &str,
 ) -> Result<(), TransferError> {
-    if snapshot_json.len() > MAX_RUNTIME_SNAPSHOT_BYTES {
-        return Err(TransferError::RuntimeSnapshotTooLarge {
-            maximum: MAX_RUNTIME_SNAPSHOT_BYTES,
-        });
-    }
     let runtime_version =
         u32::try_from(snapshot_version).map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
+    let maximum = if runtime_version < tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
+        tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
+    } else {
+        tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+    };
+    if snapshot_json.len() > maximum {
+        return Err(TransferError::RuntimeSnapshotTooLarge { maximum });
+    }
     let snapshot = tiamud_core::decode_world_runtime_snapshot(runtime_version, snapshot_json)
         .map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
     tiamud_core::validate_world_runtime_snapshot_semantics(&snapshot)
@@ -784,6 +786,19 @@ mod tests {
         connection
     }
 
+    fn remove_v6_loot_fields(snapshot: &mut serde_json::Value) {
+        let snapshot = snapshot.as_object_mut().unwrap();
+        for field in [
+            "nextLootDropId",
+            "itemProvenance",
+            "lootEncounters",
+            "groundLoot",
+            "partyLootCursors",
+        ] {
+            snapshot.remove(field);
+        }
+    }
+
     #[test]
     fn accepts_a_valid_current_source_snapshot() {
         let temporary = TempDir::new().unwrap();
@@ -852,6 +867,7 @@ mod tests {
 
         let mut v3 = serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
         v3["snapshotVersion"] = serde_json::json!(3);
+        remove_v6_loot_fields(&mut v3);
         v3.as_object_mut().unwrap().remove("nextTradeId");
         v3.as_object_mut().unwrap().remove("trades");
         for item in v3["itemInstances"].as_object_mut().unwrap().values_mut() {
@@ -866,6 +882,7 @@ mod tests {
 
         let mut v4 = serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
         v4["snapshotVersion"] = serde_json::json!(4);
+        remove_v6_loot_fields(&mut v4);
         v4.as_object_mut().unwrap().remove("nextTradeId");
         v4.as_object_mut().unwrap().remove("trades");
         validate_runtime_snapshot(4, &v4.to_string()).unwrap();
@@ -893,7 +910,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 10
+                required: 11
             }
         ));
         assert_eq!(

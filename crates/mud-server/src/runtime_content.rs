@@ -417,6 +417,10 @@ impl ScenePresentation {
     pub(crate) fn contains_entity(&self, entity_id: &str) -> bool {
         self.entities.iter().any(|entity| entity.id == entity_id)
     }
+
+    pub(crate) fn retain_entities(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.entities.retain(|entity| keep(&entity.id));
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

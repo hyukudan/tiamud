@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod authoring;
@@ -37,7 +38,9 @@ pub use progression::{
     RequirementPredicate, TalentGraphDefinition, TalentNodeDefinition, TalentRankDefinition,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const MAX_ROOM_TITLE_BYTES: usize = 128;
+pub const MAX_ROOM_DESCRIPTION_BYTES: usize = 8_192;
 pub const MAX_ITEM_PROTOTYPES: usize = 1_024;
 pub const MAX_INITIAL_ITEM_INSTANCES: usize = 8_192;
 pub const MAX_ITEM_ALIASES: usize = 32;
@@ -51,6 +54,17 @@ pub const MAX_ITEM_STACK_UNITS: u16 = 1_000;
 pub const MAX_ITEM_CONTAINER_SLOTS: u16 = 1_000;
 pub const MAX_ITEM_CONTAINER_WEIGHT_GRAMS: u32 = 1_000_000;
 pub const MAX_ITEM_CONTAINER_DEPTH: usize = 4;
+pub const MAX_LOOT_TABLES: usize = 256;
+pub const MAX_LOOT_SOURCES: usize = 1_024;
+pub const MAX_LOOT_GUARANTEED_PER_TABLE: usize = 8;
+pub const MAX_LOOT_POOLS_PER_TABLE: usize = 8;
+pub const MAX_LOOT_ROLLS_PER_POOL: u8 = 8;
+pub const MAX_LOOT_ENTRIES_PER_POOL: usize = 64;
+pub const MAX_LOOT_ENTRIES: usize = 4_096;
+pub const MAX_LOOT_WEIGHT: u32 = 1_000_000;
+pub const MAX_LOOT_QUANTITY: u16 = 32;
+pub const MAX_LOOT_UNITS_PER_RESOLUTION: u64 = 64;
+pub const MAX_LOOT_ROOTS_PER_DEFEAT: u64 = 64;
 pub const MAX_ARCHETYPES: usize = 32;
 pub const MAX_ABILITIES: usize = 512;
 pub const MAX_NPC_ABILITY_SETS: usize = 512;
@@ -219,6 +233,10 @@ pub struct GameplayDefinition {
     /// Ability loadouts remain separate from [`NpcPrototype`] and reusable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_ability_sets: Vec<NpcAbilitySet>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loot_tables: Vec<LootTableDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loot_sources: Vec<LootSourceDefinition>,
 }
 
 impl GameplayDefinition {
@@ -231,7 +249,98 @@ impl GameplayDefinition {
             && self.archetypes.is_empty()
             && self.abilities.is_empty()
             && self.npc_ability_sets.is_empty()
+            && self.loot_tables.is_empty()
+            && self.loot_sources.is_empty()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LootTableDefinition {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guaranteed: Vec<LootGuaranteedDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pools: Vec<LootPoolDefinition>,
+}
+
+impl LootTableDefinition {
+    /// SHA-256 of the stable authoring form used by durable loot provenance.
+    pub fn canonical_sha256(&self) -> String {
+        let mut canonical = self.clone();
+        canonical
+            .guaranteed
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        canonical
+            .pools
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        for pool in &mut canonical.pools {
+            pool.entries.sort_by(|left, right| left.id.cmp(&right.id));
+        }
+        let bytes = serde_json::to_vec(&canonical)
+            .expect("loot table definitions contain only serializable values");
+        hex::encode(Sha256::digest(bytes))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LootGuaranteedDefinition {
+    pub id: String,
+    pub item_prototype_id: String,
+    pub quantity: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LootPoolDefinition {
+    pub id: String,
+    pub rolls: u8,
+    pub entries: Vec<LootEntryDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LootEntryDefinition {
+    pub kind: LootEntryKind,
+    pub id: String,
+    pub weight: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_prototype_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_quantity: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_quantity: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LootEntryKind {
+    Item,
+    Nothing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LootSourceDefinition {
+    pub kind: LootSourceKind,
+    pub id: String,
+    pub npc_spawn_id: String,
+    pub loot_table_id: String,
+    pub rights: LootRightsPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LootSourceKind {
+    NpcSpawn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LootRightsPolicy {
+    CreditedCharacter,
+    PartyRoundRobin,
 }
 
 /// Data-driven class/archetype shown during character creation.
@@ -567,6 +676,17 @@ impl WorldPack {
 
             if room.title.trim().is_empty() {
                 errors.push(ValidationError::EmptyRoomTitle(room.id.clone()));
+            } else if !safe_gameplay_label(&room.title, MAX_ROOM_TITLE_BYTES) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "room {:?} title must contain 1..={MAX_ROOM_TITLE_BYTES} safe bytes without control characters",
+                    room.id
+                )));
+            }
+            if !safe_gameplay_text(&room.description, MAX_ROOM_DESCRIPTION_BYTES) {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "room {:?} description must contain 1..={MAX_ROOM_DESCRIPTION_BYTES} safe bytes",
+                    room.id
+                )));
             }
             if let Some(path) = &room.asset_manifest
                 && !valid_relative_asset_path(path)
@@ -848,6 +968,15 @@ impl WorldPack {
             )));
         }
 
+        validate_loot_authoring(
+            &self.gameplay.loot_tables,
+            &self.gameplay.loot_sources,
+            &self.initial_item_instances,
+            &item_prototype_ids,
+            &spawn_ids,
+            &mut errors,
+        );
+
         for instance in &self.initial_item_instances {
             match &instance.location {
                 InitialItemLocation::NpcSpawn { npc_spawn_id }
@@ -918,6 +1047,349 @@ impl WorldPack {
                 start_room_id: self.start_room_id.clone(),
             })
             .collect()
+    }
+}
+
+fn validate_loot_authoring(
+    tables: &[LootTableDefinition],
+    sources: &[LootSourceDefinition],
+    initial_item_instances: &[InitialItemInstance],
+    item_prototype_ids: &HashSet<&str>,
+    npc_spawn_ids: &HashSet<&str>,
+    errors: &mut Vec<ValidationError>,
+) {
+    if tables.len() > MAX_LOOT_TABLES {
+        invalid_gameplay(
+            errors,
+            format!(
+                "WorldPack declares {} loot tables; the maximum is {MAX_LOOT_TABLES}",
+                tables.len()
+            ),
+        );
+    }
+    if sources.len() > MAX_LOOT_SOURCES {
+        invalid_gameplay(
+            errors,
+            format!(
+                "WorldPack declares {} loot sources; the maximum is {MAX_LOOT_SOURCES}",
+                sources.len()
+            ),
+        );
+    }
+
+    let mut table_ids = HashSet::new();
+    let mut table_worst_case_units = HashMap::new();
+    let mut total_pool_entries = 0usize;
+    for table in tables {
+        if !valid_gameplay_identifier(&table.id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "loot table id {:?} must contain 1..=128 canonical identifier bytes",
+                    table.id
+                ),
+            );
+        } else if !table_ids.insert(table.id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!("loot table id {:?} appears more than once", table.id),
+            );
+        }
+        if table.guaranteed.is_empty() && table.pools.is_empty() {
+            invalid_gameplay(
+                errors,
+                format!("loot table {:?} must not be empty", table.id),
+            );
+        }
+        if table.guaranteed.len() > MAX_LOOT_GUARANTEED_PER_TABLE {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "loot table {:?} has {} guaranteed entries; the maximum is {MAX_LOOT_GUARANTEED_PER_TABLE}",
+                    table.id,
+                    table.guaranteed.len()
+                ),
+            );
+        }
+        if table.pools.len() > MAX_LOOT_POOLS_PER_TABLE {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "loot table {:?} has {} pools; the maximum is {MAX_LOOT_POOLS_PER_TABLE}",
+                    table.id,
+                    table.pools.len()
+                ),
+            );
+        }
+
+        let mut worst_case_units = 0u64;
+        let mut component_ids = HashSet::new();
+        for guaranteed in &table.guaranteed {
+            validate_loot_local_id(
+                &guaranteed.id,
+                &mut component_ids,
+                "guaranteed entry",
+                &table.id,
+                errors,
+            );
+            if !item_prototype_ids.contains(guaranteed.item_prototype_id.as_str()) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "loot table {:?} guaranteed entry {:?} references missing item prototype {:?}",
+                        table.id, guaranteed.id, guaranteed.item_prototype_id
+                    ),
+                );
+            }
+            if !(1..=MAX_LOOT_QUANTITY).contains(&guaranteed.quantity) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "loot table {:?} guaranteed entry {:?} quantity must be 1..={MAX_LOOT_QUANTITY}",
+                        table.id, guaranteed.id
+                    ),
+                );
+            }
+            worst_case_units = worst_case_units.saturating_add(u64::from(guaranteed.quantity));
+        }
+
+        for pool in &table.pools {
+            validate_loot_local_id(&pool.id, &mut component_ids, "pool", &table.id, errors);
+            if !(1..=MAX_LOOT_ROLLS_PER_POOL).contains(&pool.rolls) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "loot table {:?} pool {:?} rolls must be 1..={MAX_LOOT_ROLLS_PER_POOL}",
+                        table.id, pool.id
+                    ),
+                );
+            }
+            if pool.entries.is_empty() || pool.entries.len() > MAX_LOOT_ENTRIES_PER_POOL {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "loot table {:?} pool {:?} must contain 1..={MAX_LOOT_ENTRIES_PER_POOL} entries",
+                        table.id, pool.id
+                    ),
+                );
+            }
+            total_pool_entries = total_pool_entries.saturating_add(pool.entries.len());
+
+            let mut total_weight = 0u64;
+            let mut maximum_quantity = 0u16;
+            for entry in &pool.entries {
+                validate_loot_local_id(
+                    &entry.id,
+                    &mut component_ids,
+                    "pool entry",
+                    &table.id,
+                    errors,
+                );
+                if !(1..=MAX_LOOT_WEIGHT).contains(&entry.weight) {
+                    invalid_gameplay(
+                        errors,
+                        format!(
+                            "loot table {:?} pool {:?} entry {:?} weight must be 1..={MAX_LOOT_WEIGHT}",
+                            table.id, pool.id, entry.id
+                        ),
+                    );
+                }
+                total_weight = total_weight.saturating_add(u64::from(entry.weight));
+                match entry.kind {
+                    LootEntryKind::Item => {
+                        let (Some(prototype_id), Some(minimum), Some(maximum)) = (
+                            entry.item_prototype_id.as_deref(),
+                            entry.min_quantity,
+                            entry.max_quantity,
+                        ) else {
+                            invalid_gameplay(
+                                errors,
+                                format!(
+                                    "loot table {:?} pool {:?} item entry {:?} requires itemPrototypeId, minQuantity and maxQuantity",
+                                    table.id, pool.id, entry.id
+                                ),
+                            );
+                            continue;
+                        };
+                        if !item_prototype_ids.contains(prototype_id) {
+                            invalid_gameplay(
+                                errors,
+                                format!(
+                                    "loot table {:?} pool {:?} entry {:?} references missing item prototype {:?}",
+                                    table.id, pool.id, entry.id, prototype_id
+                                ),
+                            );
+                        }
+                        if minimum == 0 || minimum > maximum || maximum > MAX_LOOT_QUANTITY {
+                            invalid_gameplay(
+                                errors,
+                                format!(
+                                    "loot table {:?} pool {:?} entry {:?} quantity must be an ordered range within 1..={MAX_LOOT_QUANTITY}",
+                                    table.id, pool.id, entry.id
+                                ),
+                            );
+                        }
+                        maximum_quantity = maximum_quantity.max(maximum);
+                    }
+                    LootEntryKind::Nothing => {
+                        if entry.item_prototype_id.is_some()
+                            || entry.min_quantity.is_some()
+                            || entry.max_quantity.is_some()
+                        {
+                            invalid_gameplay(
+                                errors,
+                                format!(
+                                    "loot table {:?} pool {:?} nothing entry {:?} cannot declare item or quantity fields",
+                                    table.id, pool.id, entry.id
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            if total_weight == u64::MAX {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "loot table {:?} pool {:?} weight sum overflows",
+                        table.id, pool.id
+                    ),
+                );
+            }
+            worst_case_units = worst_case_units
+                .saturating_add(u64::from(pool.rolls).saturating_mul(u64::from(maximum_quantity)));
+        }
+        if worst_case_units > MAX_LOOT_UNITS_PER_RESOLUTION {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "loot table {:?} can generate {worst_case_units} units; the maximum is {MAX_LOOT_UNITS_PER_RESOLUTION}",
+                    table.id
+                ),
+            );
+        }
+        table_worst_case_units.insert(table.id.as_str(), worst_case_units);
+    }
+    if total_pool_entries > MAX_LOOT_ENTRIES {
+        invalid_gameplay(
+            errors,
+            format!(
+                "WorldPack declares {total_pool_entries} weighted loot entries; the maximum is {MAX_LOOT_ENTRIES}"
+            ),
+        );
+    }
+
+    let mut source_ids = HashSet::new();
+    let mut source_spawns = HashSet::new();
+    let mut used_tables = HashSet::new();
+    let mut fixed_roots_by_spawn = HashMap::<&str, u64>::new();
+    for instance in initial_item_instances {
+        if let InitialItemLocation::NpcSpawn { npc_spawn_id } = &instance.location {
+            let count = fixed_roots_by_spawn
+                .entry(npc_spawn_id.as_str())
+                .or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+    for source in sources {
+        if !valid_gameplay_identifier(&source.id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "loot source id {:?} must contain 1..=128 canonical identifier bytes",
+                    source.id
+                ),
+            );
+        } else if !source_ids.insert(source.id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!("loot source id {:?} appears more than once", source.id),
+            );
+        }
+        if !source_spawns.insert(source.npc_spawn_id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "NPC spawn {:?} has more than one loot source",
+                    source.npc_spawn_id
+                ),
+            );
+        }
+        if !npc_spawn_ids.contains(source.npc_spawn_id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "loot source {:?} references missing NPC spawn {:?}",
+                    source.id, source.npc_spawn_id
+                ),
+            );
+        }
+        if !table_ids.contains(source.loot_table_id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "loot source {:?} references missing loot table {:?}",
+                    source.id, source.loot_table_id
+                ),
+            );
+        } else {
+            used_tables.insert(source.loot_table_id.as_str());
+        }
+        let fixed_roots = fixed_roots_by_spawn
+            .get(source.npc_spawn_id.as_str())
+            .copied()
+            .unwrap_or_default();
+        let repeatable_roots = table_worst_case_units
+            .get(source.loot_table_id.as_str())
+            .copied()
+            .unwrap_or_default();
+        let total_roots = fixed_roots.saturating_add(repeatable_roots);
+        if total_roots > MAX_LOOT_ROOTS_PER_DEFEAT {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "NPC spawn {:?} can drop {total_roots} roots ({fixed_roots} fixed plus {repeatable_roots} repeatable); the maximum is {MAX_LOOT_ROOTS_PER_DEFEAT}",
+                    source.npc_spawn_id
+                ),
+            );
+        }
+    }
+    for (npc_spawn_id, fixed_roots) in fixed_roots_by_spawn {
+        if !source_spawns.contains(npc_spawn_id) && fixed_roots > MAX_LOOT_ROOTS_PER_DEFEAT {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "NPC spawn {npc_spawn_id:?} can drop {fixed_roots} fixed roots; the maximum is {MAX_LOOT_ROOTS_PER_DEFEAT}"
+                ),
+            );
+        }
+    }
+    for table_id in table_ids {
+        if !used_tables.contains(table_id) {
+            invalid_gameplay(errors, format!("loot table {table_id:?} has no source"));
+        }
+    }
+}
+
+fn validate_loot_local_id<'a>(
+    id: &'a str,
+    seen: &mut HashSet<&'a str>,
+    kind: &str,
+    table_id: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if !valid_gameplay_identifier(id) {
+        invalid_gameplay(
+            errors,
+            format!(
+                "loot table {table_id:?} {kind} id {id:?} must contain 1..=128 canonical identifier bytes"
+            ),
+        );
+    } else if !seen.insert(id) {
+        invalid_gameplay(
+            errors,
+            format!("loot table {table_id:?} repeats {kind} id {id:?}"),
+        );
     }
 }
 
@@ -2214,6 +2686,76 @@ mod tests {
         }
     }
 
+    fn pack_with_loot() -> WorldPack {
+        let mut value = pack();
+        value.item_prototypes.push(item_prototype("test:token"));
+        value.gameplay.npc_prototypes.push(NpcPrototype {
+            id: "test:wolf".into(),
+            name: "wolf".into(),
+            description: "A test wolf.".into(),
+            level: 1,
+            max_health: 10,
+            strength: 2,
+            defence: 0,
+            experience_reward: 10,
+            respawn_ticks: 2,
+        });
+        value.gameplay.npc_spawns.push(NpcSpawn {
+            id: "test:wolf-1".into(),
+            prototype_id: "test:wolf".into(),
+            room_id: "test:1".into(),
+        });
+        value.gameplay.loot_tables.push(LootTableDefinition {
+            id: "test:wolf-drops".into(),
+            guaranteed: vec![LootGuaranteedDefinition {
+                id: "test:guaranteed".into(),
+                item_prototype_id: "test:token".into(),
+                quantity: 1,
+            }],
+            pools: vec![LootPoolDefinition {
+                id: "test:pool".into(),
+                rolls: 1,
+                entries: vec![
+                    LootEntryDefinition {
+                        kind: LootEntryKind::Item,
+                        id: "test:item".into(),
+                        weight: 6_000,
+                        item_prototype_id: Some("test:token".into()),
+                        min_quantity: Some(1),
+                        max_quantity: Some(2),
+                    },
+                    LootEntryDefinition {
+                        kind: LootEntryKind::Nothing,
+                        id: "test:nothing".into(),
+                        weight: 4_000,
+                        item_prototype_id: None,
+                        min_quantity: None,
+                        max_quantity: None,
+                    },
+                ],
+            }],
+        });
+        value.gameplay.loot_sources.push(LootSourceDefinition {
+            kind: LootSourceKind::NpcSpawn,
+            id: "test:wolf-source".into(),
+            npc_spawn_id: "test:wolf-1".into(),
+            loot_table_id: "test:wolf-drops".into(),
+            rights: LootRightsPolicy::PartyRoundRobin,
+        });
+        value
+    }
+
+    fn add_fixed_loot_roots(pack: &mut WorldPack, count: usize) {
+        pack.initial_item_instances
+            .extend((0..count).map(|index| InitialItemInstance {
+                id: format!("test:fixed-{index}"),
+                prototype_id: "test:token".into(),
+                location: InitialItemLocation::NpcSpawn {
+                    npc_spawn_id: "test:wolf-1".into(),
+                },
+            }));
+    }
+
     #[test]
     fn valid_pack_round_trips_through_json() {
         let pack = pack();
@@ -2223,6 +2765,238 @@ mod tests {
         let decoded: WorldPack = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, pack);
+    }
+
+    #[test]
+    fn repeatable_loot_contract_is_valid_and_has_a_canonical_digest() {
+        let pack = pack_with_loot();
+        pack.validate().unwrap();
+        let table = &pack.gameplay.loot_tables[0];
+        let digest = table.canonical_sha256();
+        assert_eq!(digest.len(), 64);
+
+        let mut reordered = table.clone();
+        reordered.pools[0].entries.reverse();
+        assert_eq!(reordered.canonical_sha256(), digest);
+    }
+
+    #[test]
+    fn repeatable_loot_rejects_invalid_entry_shapes_references_and_duplicate_sources() {
+        let mut invalid = pack_with_loot();
+        let nothing = &mut invalid.gameplay.loot_tables[0].pools[0].entries[1];
+        nothing.id = "test:pool".into();
+        nothing.item_prototype_id = Some("test:missing".into());
+        nothing.min_quantity = Some(1);
+        invalid.gameplay.loot_sources.push(LootSourceDefinition {
+            kind: LootSourceKind::NpcSpawn,
+            id: "test:duplicate-source".into(),
+            npc_spawn_id: "test:wolf-1".into(),
+            loot_table_id: "test:missing-table".into(),
+            rights: LootRightsPolicy::CreditedCharacter,
+        });
+
+        let message = invalid
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(message.contains("nothing entry"), "{message}");
+        assert!(message.contains("repeats pool entry id"), "{message}");
+        assert!(message.contains("more than one loot source"), "{message}");
+        assert!(message.contains("missing loot table"), "{message}");
+    }
+
+    #[test]
+    fn repeatable_loot_worst_case_is_limited_to_sixty_four_units() {
+        let mut boundary = pack_with_loot();
+        boundary.gameplay.loot_tables[0].guaranteed[0].quantity = 32;
+        boundary.gameplay.loot_tables[0].pools[0].rolls = 8;
+        boundary.gameplay.loot_tables[0].pools[0].entries[0].max_quantity = Some(4);
+        boundary.validate().unwrap();
+
+        boundary.gameplay.loot_tables[0].pools[0].entries[0].max_quantity = Some(5);
+        let message = boundary
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(message.contains("can generate 72 units"), "{message}");
+    }
+
+    #[test]
+    fn fixed_loot_roots_per_defeat_are_limited_to_sixty_four() {
+        let mut invalid = pack_with_loot();
+        invalid.gameplay.loot_tables.clear();
+        invalid.gameplay.loot_sources.clear();
+        add_fixed_loot_roots(&mut invalid, 65);
+
+        let message = invalid
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(message.contains("can drop 65 fixed roots"), "{message}");
+        assert!(message.contains("maximum is 64"), "{message}");
+    }
+
+    #[test]
+    fn fixed_and_repeatable_loot_share_the_per_defeat_root_limit() {
+        let mut invalid = pack_with_loot();
+        add_fixed_loot_roots(&mut invalid, 62);
+
+        let message = invalid
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            message.contains("can drop 65 roots (62 fixed plus 3 repeatable)"),
+            "{message}"
+        );
+        assert!(message.contains("maximum is 64"), "{message}");
+    }
+
+    #[test]
+    fn repeatable_loot_collection_and_member_limits_fail_closed() {
+        let base = pack_with_loot();
+        let mut oversized = base.clone();
+        oversized.gameplay.loot_tables =
+            vec![base.gameplay.loot_tables[0].clone(); MAX_LOOT_TABLES + 1];
+        oversized.gameplay.loot_sources =
+            vec![base.gameplay.loot_sources[0].clone(); MAX_LOOT_SOURCES + 1];
+        let message = oversized
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(message.contains("maximum is 256"), "{message}");
+        assert!(message.contains("maximum is 1024"), "{message}");
+
+        let mut invalid = pack_with_loot();
+        let table = &mut invalid.gameplay.loot_tables[0];
+        table.guaranteed = vec![table.guaranteed[0].clone(); MAX_LOOT_GUARANTEED_PER_TABLE + 1];
+        table.pools = vec![table.pools[0].clone(); MAX_LOOT_POOLS_PER_TABLE + 1];
+        table.pools[0].rolls = MAX_LOOT_ROLLS_PER_POOL + 1;
+        table.pools[0].entries =
+            vec![table.pools[0].entries[0].clone(); MAX_LOOT_ENTRIES_PER_POOL + 1];
+        table.pools[0].entries[0].weight = MAX_LOOT_WEIGHT + 1;
+        table.pools[0].entries[0].max_quantity = Some(MAX_LOOT_QUANTITY + 1);
+        let message = invalid
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "maximum is 8",
+            "rolls must be 1..=8",
+            "1..=64 entries",
+            "weight must be 1..=1000000",
+            "within 1..=32",
+        ] {
+            assert!(
+                message.contains(expected),
+                "missing {expected:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeatable_loot_ids_accept_128_bytes_and_reject_129() {
+        let boundary_id = "a".repeat(128);
+        let mut boundary = pack_with_loot();
+        boundary.gameplay.loot_sources[0].loot_table_id = boundary_id.clone();
+        boundary.gameplay.loot_tables[0].id = boundary_id.clone();
+        boundary.gameplay.loot_sources[0].id = "b".repeat(128);
+        boundary.gameplay.loot_tables[0].guaranteed[0].id = "c".repeat(128);
+        boundary.gameplay.loot_tables[0].pools[0].id = "d".repeat(128);
+        boundary.gameplay.loot_tables[0].pools[0].entries[0].id = "e".repeat(128);
+        boundary.gameplay.loot_tables[0].pools[0].entries[1].id = "f".repeat(128);
+        boundary.validate().unwrap();
+
+        boundary.gameplay.loot_tables[0].pools[0].entries[1].id = "f".repeat(129);
+        let message = boundary
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(message.contains("1..=128 canonical"), "{message}");
+    }
+
+    #[test]
+    fn repeatable_loot_limits_weighted_entries_globally() {
+        let mut value = pack_with_loot();
+        value.gameplay.npc_spawns.clear();
+        value.gameplay.loot_tables.clear();
+        value.gameplay.loot_sources.clear();
+        for table_index in 0..9 {
+            let spawn_id = format!("test:wolf-{table_index}");
+            let table_id = format!("test:table-{table_index}");
+            value.gameplay.npc_spawns.push(NpcSpawn {
+                id: spawn_id.clone(),
+                prototype_id: "test:wolf".into(),
+                room_id: "test:1".into(),
+            });
+            value.gameplay.loot_tables.push(LootTableDefinition {
+                id: table_id.clone(),
+                guaranteed: Vec::new(),
+                pools: (0..8)
+                    .map(|pool_index| LootPoolDefinition {
+                        id: format!("test:pool-{pool_index}"),
+                        rolls: 1,
+                        entries: (0..64)
+                            .map(|entry_index| LootEntryDefinition {
+                                kind: LootEntryKind::Nothing,
+                                id: format!("test:entry-{pool_index}-{entry_index}"),
+                                weight: 1,
+                                item_prototype_id: None,
+                                min_quantity: None,
+                                max_quantity: None,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            });
+            value.gameplay.loot_sources.push(LootSourceDefinition {
+                kind: LootSourceKind::NpcSpawn,
+                id: format!("test:source-{table_index}"),
+                npc_spawn_id: spawn_id,
+                loot_table_id: table_id,
+                rights: LootRightsPolicy::CreditedCharacter,
+            });
+        }
+        let message = value
+            .validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            message.contains("declares 4608 weighted loot entries"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -2441,6 +3215,107 @@ mod tests {
         pack.rooms[0].asset_manifest = Some("assets/0123456789abcdef/manifest.json".to_owned());
 
         pack.validate().unwrap();
+    }
+
+    #[test]
+    fn room_text_is_byte_bounded_multiline_and_control_safe() {
+        let mut boundary = pack();
+        boundary.rooms[0].title = "é".repeat(MAX_ROOM_TITLE_BYTES / 2);
+        boundary.rooms[0].description =
+            format!("{}\n\tok", "é".repeat((MAX_ROOM_DESCRIPTION_BYTES - 4) / 2));
+        assert_eq!(boundary.rooms[0].title.len(), MAX_ROOM_TITLE_BYTES);
+        assert_eq!(
+            boundary.rooms[0].description.len(),
+            MAX_ROOM_DESCRIPTION_BYTES
+        );
+        boundary.validate().unwrap();
+
+        let invalid_cases = [
+            (
+                "oversized title",
+                "é".repeat(MAX_ROOM_TITLE_BYTES / 2 + 1),
+                "safe description".to_owned(),
+                "title must contain 1..=128 safe bytes",
+            ),
+            (
+                "oversized description",
+                "safe title".to_owned(),
+                "é".repeat(MAX_ROOM_DESCRIPTION_BYTES / 2 + 1),
+                "description must contain 1..=8192 safe bytes",
+            ),
+            (
+                "title control",
+                "unsafe\u{1b}title".to_owned(),
+                "safe description".to_owned(),
+                "title must contain 1..=128 safe bytes",
+            ),
+            (
+                "description control",
+                "safe title".to_owned(),
+                "safe line\nunsafe\u{0}line".to_owned(),
+                "description must contain 1..=8192 safe bytes",
+            ),
+            (
+                "empty multiline description",
+                "safe title".to_owned(),
+                " \n\t\r ".to_owned(),
+                "description must contain 1..=8192 safe bytes",
+            ),
+        ];
+        for (case, title, description, expected) in invalid_cases {
+            let mut invalid = pack();
+            invalid.rooms[0].title = title;
+            invalid.rooms[0].description = description;
+            let message = invalid
+                .validate()
+                .unwrap_err()
+                .0
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(message.contains(expected), "{case}: {message}");
+        }
+    }
+
+    #[test]
+    fn legacy_room_text_bounds_survive_every_supported_normalization() {
+        let current = serde_json::to_value(pack()).unwrap();
+        for schema_version in [2, 3, 4, 5] {
+            for (field, value, expected) in [
+                (
+                    "title",
+                    "é".repeat(MAX_ROOM_TITLE_BYTES / 2 + 1),
+                    "title must contain 1..=128 safe bytes",
+                ),
+                (
+                    "description",
+                    "d".repeat(MAX_ROOM_DESCRIPTION_BYTES + 1),
+                    "description must contain 1..=8192 safe bytes",
+                ),
+            ] {
+                let mut legacy = current.clone();
+                legacy["schemaVersion"] = serde_json::json!(schema_version);
+                legacy["rooms"][0][field] = serde_json::Value::String(value);
+                let normalized = WorldPackDocument::from_json(
+                    &serde_json::to_vec(&legacy).expect("legacy fixture serializes"),
+                )
+                .expect("supported legacy schema normalizes structurally");
+                assert_eq!(normalized.world.schema_version, CURRENT_SCHEMA_VERSION);
+                let message = normalized
+                    .validate()
+                    .unwrap_err()
+                    .0
+                    .into_iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    message.contains(expected),
+                    "WorldPack v{schema_version} field {field}: {message}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -19,7 +19,7 @@ The implemented importer can:
 - preserve raw room flags, sectors, exit values, and legacy VNUMs;
 - resolve exits between rooms in the same file while retaining external VNUMs;
 - convert each reviewed object VNUM used by an unconditional room reset into
-  one WorldPack v5 item prototype and each reset into a distinct initial item
+  one WorldPack v6 item prototype and each reset into a distinct initial item
   instance;
 - preserve every other historical construct as inert structured data with
   line/VNUM diagnostics and recommendations;
@@ -29,7 +29,10 @@ The implemented importer can:
   shop, special, program-owner, and recall references without guessing;
 - emit either validated WorldPack JSON or a complete machine-readable report.
 
-WorldPack v5 separates reusable item prototypes from initial item instances.
+WorldPack v6 separates reusable item prototypes from initial item instances
+and supports reviewed repeatable loot tables. The historical importer always
+leaves those tables empty: it never invents probabilities or rights from
+legacy resets.
 The importer preserves a VNUM as one prototype and reset order as stable
 instance ordinals, but deliberately assigns only neutral bounded defaults for
 rules it cannot prove: every imported object is `unique`, declares

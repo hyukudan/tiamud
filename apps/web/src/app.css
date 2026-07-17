@@ -1327,6 +1327,16 @@ h1 {
   text-transform: uppercase;
 }
 
+.loot-status-button {
+  margin-bottom: 0.75rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid #6f795f;
+  border-radius: 0.35rem;
+  color: #f4ead7;
+  background: #262c20;
+  cursor: pointer;
+}
+
 .scene-items ul {
   display: grid;
   gap: 0.65rem;

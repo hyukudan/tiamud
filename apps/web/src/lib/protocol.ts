@@ -101,8 +101,13 @@ export interface SceneItem {
   transferPolicy: ItemTransferPolicy;
   boundToYou: boolean;
   containerCapacity?: InventoryCapacitySnapshot;
+  loot?: SceneLootAccess;
   actions: SceneAction[];
 }
+
+export type SceneLootAccess =
+  | { access: 'yours'; expiresInTicks: number }
+  | { access: 'reserved' };
 
 export interface SceneNpc {
   id: string;
@@ -736,6 +741,20 @@ const boundedPossiblyEmptyString = (value: unknown, maximum: number): string | u
 const hasOnlyKeys = (value: Record<string, unknown>, allowed: readonly string[]): boolean => {
   const keys = new Set(allowed);
   return Object.keys(value).every((key) => keys.has(key));
+};
+
+const parseSceneLootAccess = (value: unknown): SceneLootAccess | undefined => {
+  if (!isRecord(value)) return undefined;
+  if (value.access === 'reserved') {
+    return hasOnlyKeys(value, ['access']) ? { access: 'reserved' } : undefined;
+  }
+  if (value.access !== 'yours' || !hasOnlyKeys(value, ['access', 'expiresInTicks'])) {
+    return undefined;
+  }
+  const expiresInTicks = positiveIntegerOrUndefined(value.expiresInTicks);
+  return expiresInTicks !== undefined && expiresInTicks <= 20
+    ? { access: 'yours', expiresInTicks }
+    : undefined;
 };
 
 const opaqueId = (value: unknown): string | undefined => {
@@ -1773,12 +1792,18 @@ const toItems = (value: unknown): SceneItem[] => {
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
     const transfer = parseItemTransfer(entry);
+    const loot = entry.loot === undefined ? undefined : parseSceneLootAccess(entry.loot);
     if (!rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
-      weightGrams > 1_000_000 || !stack || !transfer || (stack.containerCapacity
+      weightGrams > 1_000_000 || !stack || !transfer ||
+      (entry.loot !== undefined && !loot) || (stack.containerCapacity
         ? stack.quantity !== 1 || stack.totalWeightGrams !==
           weightGrams + stack.containerCapacity.usedWeightGrams
         : stack.totalWeightGrams !== weightGrams * stack.quantity)) return [];
     const suppliedActions = toActions(entry.actions);
+    if (loot?.access === 'reserved' && suppliedActions.some((action) => {
+      const command = action.command.trim().toLowerCase();
+      return command.startsWith('take ') || command.startsWith('loot pass ');
+    })) return [];
     return [{
       id,
       label,
@@ -1788,7 +1813,8 @@ const toItems = (value: unknown): SceneItem[] => {
       weightGrams,
       ...stack,
       ...transfer,
-      actions: suppliedActions.length > 0
+      ...(loot ? { loot } : {}),
+      actions: suppliedActions.length > 0 || loot
         ? suppliedActions
         : [
             { label: 'Examine', command: `examine ${id}` },
@@ -2243,6 +2269,7 @@ export function createActionPerform(
   requestId: string,
 ): ActionPerform {
   if (action.startsWith('trade.')) validateTradeActionFields(action, fields);
+  if (action.startsWith('loot.')) validateLootActionFields(action, fields);
   if (fields?.reportId !== undefined &&
     (!Number.isSafeInteger(fields.reportId) || fields.reportId <= 0)) {
     throw new RangeError('reportId must be a positive safe integer');
@@ -2283,6 +2310,28 @@ export function createActionPerform(
     type: 'action.perform',
     data: { requestId, action, ...fields },
   };
+}
+
+function validateLootActionFields(
+  action: string,
+  fields: ActionPerformFields | undefined,
+): void {
+  const expectedByAction: Record<string, readonly (keyof ActionPerformFields)[]> = {
+    'loot.status': [],
+    'loot.pass': ['target'],
+  };
+  const expected = expectedByAction[action];
+  if (!expected) throw new RangeError('unknown loot action');
+  const actual = Object.keys(fields ?? {}).toSorted();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new RangeError(`${action} requires its exact closed field set`);
+  }
+  if (action === 'loot.pass' && (
+    typeof fields?.target !== 'string' || fields.target.length === 0 || fields.target.length > 256 ||
+    /[\u0000-\u001f\u007f]/.test(fields.target)
+  )) {
+    throw new RangeError('loot target must be a bounded visible selector');
+  }
 }
 
 function validateTradeActionFields(

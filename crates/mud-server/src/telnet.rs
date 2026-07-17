@@ -66,6 +66,8 @@ const MAX_RATE_VIOLATIONS: u8 = 3;
 const TELNET_OUTPUT_MAX_FRAMES: usize = 64;
 const TELNET_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TELNET_OUTPUT_MAX_FRAME_BYTES: usize = 128 * 1024;
+const MAX_TELNET_SCENE_SEMANTIC_BYTES: usize = 48 * 1024;
+const MAX_PROJECTED_EVENTS_PER_BATCH: usize = 16;
 const TELNET_CELL_FRAME_MAX_CELLS: usize = 512;
 const TELNET_CELL_FRAME_MAX_BYTES: usize = 64 * 1024;
 
@@ -984,6 +986,9 @@ async fn write_auth_error(connection: &mut TelnetConnection, error: &GameError) 
 fn public_error(error: &GameError) -> String {
     match error {
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
+        GameError::World(tiamud_core::WorldError::LootUnavailable) => {
+            "That loot is not available.".to_owned()
+        }
         GameError::TradeUnavailable
         | GameError::World(
             tiamud_core::WorldError::TradeUnavailable
@@ -1145,10 +1150,23 @@ async fn serve_entered(
                         ignore_world_through_revision = None;
                         if !delivery.events.is_empty() {
                             let mut bytes = Vec::new();
-                            for event in delivery.events {
+                            let event_count = delivery.events.len();
+                            for event in delivery
+                                .events
+                                .into_iter()
+                                .take(MAX_PROJECTED_EVENTS_PER_BATCH)
+                            {
                                 bytes.extend_from_slice(b"\r\n");
                                 bytes.extend_from_slice(event.event.text.as_bytes());
                                 bytes.extend_from_slice(b"\r\n");
+                            }
+                            if event_count > MAX_PROJECTED_EVENTS_PER_BATCH {
+                                bytes.extend_from_slice(
+                                    format!(
+                                        "\r\n{event_count} world changes were coalesced; the authoritative scene follows.\r\n"
+                                    )
+                                    .as_bytes(),
+                                );
                             }
                             output.bytes(OutputPriority::Interactive, bytes)?;
                         }
@@ -1309,6 +1327,8 @@ fn write_scene(
     scene: &SceneView,
     player: &PlayerStateView,
 ) -> io::Result<()> {
+    let scene = bounded_telnet_scene(scene.clone());
+    let scene = &scene;
     let mut bytes = render_scene(scene, &input.negotiation).into_bytes();
     let gmcp = input
         .negotiation
@@ -1334,6 +1354,83 @@ fn write_scene(
         },
         bytes,
     )
+}
+
+fn bounded_telnet_scene(mut scene: SceneView) -> SceneView {
+    let fits = |scene: &SceneView| {
+        serde_json::to_vec(scene).is_ok_and(|bytes| bytes.len() <= MAX_TELNET_SCENE_SEMANTIC_BYTES)
+    };
+    if fits(&scene) {
+        return scene;
+    }
+    scene.items.sort_by(|left, right| {
+        let priority =
+            |item: &tiamud_core::SceneItem| match item.loot.as_ref().map(|loot| loot.access) {
+                Some(tiamud_core::LootAccessView::Yours) => 0_u8,
+                None => 1,
+                Some(tiamud_core::LootAccessView::Reserved) => 2,
+            };
+        priority(left)
+            .cmp(&priority(right))
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let original_prose = scene.prose.clone();
+    let original_items = scene.items.len();
+    let original_npcs = scene.npcs.len();
+    let mut omitted_items = 0_usize;
+    let mut omitted_npcs = 0_usize;
+    while !fits(&scene) && !scene.items.is_empty() {
+        scene.items.pop();
+        omitted_items = original_items.saturating_sub(scene.items.len());
+        set_telnet_scene_notice(&mut scene, omitted_items, omitted_npcs, false);
+    }
+    while !fits(&scene) && !scene.npcs.is_empty() {
+        scene.npcs.pop();
+        omitted_npcs = original_npcs.saturating_sub(scene.npcs.len());
+        set_telnet_scene_notice(&mut scene, omitted_items, omitted_npcs, false);
+    }
+    if !fits(&scene) {
+        let prose = original_prose.join("\n\n");
+        for maximum in [16_384, 8_192, 4_096, 2_048, 1_024, 512, 0] {
+            scene.prose = if maximum == 0 {
+                Vec::new()
+            } else {
+                vec![bounded_utf8_prefix(&prose, maximum).0]
+            };
+            set_telnet_scene_notice(&mut scene, omitted_items, omitted_npcs, true);
+            if fits(&scene) {
+                break;
+            }
+        }
+    }
+    scene
+}
+
+fn set_telnet_scene_notice(
+    scene: &mut SceneView,
+    omitted_items: usize,
+    omitted_npcs: usize,
+    prose_shortened: bool,
+) {
+    scene
+        .prose
+        .retain(|paragraph| !paragraph.starts_with("Bounded scene notice:"));
+    let mut details = Vec::new();
+    if omitted_items > 0 {
+        details.push(format!(
+            "{omitted_items} additional item stack(s); interact with visible items or use loot status to reveal the next entries"
+        ));
+    }
+    if omitted_npcs > 0 {
+        details.push(format!("{omitted_npcs} additional creature(s)"));
+    }
+    if prose_shortened {
+        details.push("the room description was shortened for this transport".into());
+    }
+    scene
+        .prose
+        .push(format!("Bounded scene notice: {}.", details.join("; ")));
 }
 
 fn write_prompt(output: &TelnetOutputQueue, input: &TelnetInput) -> io::Result<()> {
@@ -2999,8 +3096,15 @@ fn render_scene(scene: &SceneView, session: &TelnetSession) -> String {
                             });
                     let transfer_policy =
                         item_transfer_policy_label(item.transfer_policy, item.bound_to_you);
+                    let loot = item
+                        .loot
+                        .as_ref()
+                        .and_then(|loot| serde_json::to_value(loot).ok())
+                        .map_or_else(String::new, |loot| {
+                            render_loot_access(&loot, &item.id)
+                        });
                     format!(
-                        "{} × {} [{} · level {} · {} · {} g each · {} {} · {} g total{} · ref {}]",
+                        "{} × {} [{} · level {} · {} · {} g each · {} {} · {} g total{}{} · ref {}]",
                         item.quantity,
                         item.label,
                         item.rarity,
@@ -3011,6 +3115,7 @@ fn render_scene(scene: &SceneView, session: &TelnetSession) -> String {
                         stack_slots,
                         item.total_weight_grams,
                         container,
+                        loot,
                         item.id,
                     )
                 })
@@ -3047,6 +3152,23 @@ fn render_scene(scene: &SceneView, session: &TelnetSession) -> String {
     }
     output.push_str("\r\n");
     output
+}
+
+fn render_loot_access(loot: &Value, selector: &str) -> String {
+    match loot.get("access").and_then(Value::as_str) {
+        Some("yours") => loot
+            .get("expiresInTicks")
+            .and_then(Value::as_u64)
+            .filter(|ticks| *ticks > 0)
+            .map_or_else(String::new, |ticks| {
+                let unit = if ticks == 1 { "tick" } else { "ticks" };
+                format!(
+                    " · loot reserved for you · {ticks} {unit} remaining · pass with `loot pass {selector}`"
+                )
+            }),
+        Some("reserved") => " · loot reserved for another adventurer".into(),
+        _ => String::new(),
+    }
 }
 
 fn item_transfer_policy_label(
@@ -3321,6 +3443,10 @@ mod tests {
                 tiamud_core::WorldError::StaleTradeRevision
             )),
             "That trade is not available."
+        );
+        assert_eq!(
+            public_error(&GameError::World(tiamud_core::WorldError::LootUnavailable)),
+            "That loot is not available."
         );
     }
 
@@ -4972,6 +5098,12 @@ mod tests {
                 binding: tiamud_core::ItemBinding::Unbound,
             },
         );
+        runtime.item_provenance.insert(
+            tiamud_core::ItemInstanceId("runtime:1".into()),
+            tiamud_core::ItemProvenance::RuntimeCreated {
+                created_tick: runtime.logical_tick,
+            },
+        );
         runtime.next_item_instance_sequence = 2;
         world.restore_runtime_snapshot(runtime).unwrap();
         let session_id = tiamud_core::SessionId(90);
@@ -5017,6 +5149,101 @@ mod tests {
     }
 
     #[test]
+    fn plain_telnet_loot_access_is_complete_relative_and_private() {
+        let selector = "o1111111111111111";
+        let yours = render_loot_access(&json!({"access": "yours", "expiresInTicks": 12}), selector);
+        assert!(yours.contains("loot reserved for you"));
+        assert!(yours.contains("12 ticks remaining"));
+        assert!(yours.contains(&format!("loot pass {selector}")));
+
+        let reserved = render_loot_access(&json!({"access": "reserved"}), selector);
+        assert_eq!(reserved, " · loot reserved for another adventurer");
+        assert!(!reserved.contains(selector));
+        assert!(render_loot_access(&json!({"access": "public"}), selector).is_empty());
+
+        for forbidden in ["beneficiary", "party", "drop", "table", "provenance"] {
+            assert!(!yours.contains(forbidden));
+            assert!(!reserved.contains(forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn crowded_loot_scene_stays_within_one_telnet_snapshot_frame() {
+        let mut scene = sample_scene();
+        scene.items = (0..300)
+            .map(|index| tiamud_core::SceneItem {
+                id: format!("o{index:016x}"),
+                label: format!("Reserved trophy {index:03}"),
+                description: "d".repeat(2_048),
+                rarity: "common".into(),
+                item_level: 1,
+                weight_grams: 1,
+                quantity: 1,
+                stack_slots: 1,
+                total_weight_grams: 1,
+                transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+                bound_to_you: false,
+                container_capacity: None,
+                loot: Some(tiamud_core::SceneLootAccessView {
+                    access: tiamud_core::LootAccessView::Yours,
+                    expires_in_ticks: Some(20),
+                }),
+                actions: vec![tiamud_core::SceneAction {
+                    label: "Pass".into(),
+                    command: format!("loot pass o{index:016x}"),
+                }],
+            })
+            .collect();
+        let bounded = bounded_telnet_scene(scene.clone());
+        assert!(bounded.items.len() < scene.items.len());
+        assert!(
+            bounded
+                .prose
+                .last()
+                .is_some_and(|line| { line.starts_with("Bounded scene notice:") })
+        );
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= MAX_TELNET_SCENE_SEMANTIC_BYTES);
+        let mut prose_only = sample_scene();
+        prose_only.prose = vec!["multibyte ñ".repeat(20_000)];
+        let bounded_prose = bounded_telnet_scene(prose_only);
+        assert!(
+            serde_json::to_vec(&bounded_prose).unwrap().len() <= MAX_TELNET_SCENE_SEMANTIC_BYTES
+        );
+        assert!(
+            bounded_prose
+                .prose
+                .last()
+                .is_some_and(|line| { line.contains("room description was shortened") })
+        );
+
+        let mut world = tiamud_core::World::demo();
+        let session = tiamud_core::SessionId(9_901);
+        world
+            .connect(
+                session,
+                tiamud_core::CharacterSnapshot {
+                    id: tiamud_core::CharacterId(9_902),
+                    account_id: tiamud_core::AccountId(9_903),
+                    name: "Bounded Telnet".into(),
+                    room_id: world.start_room_id().to_owned(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let player = world.player_state_view(session).unwrap();
+        let output = TelnetOutputQueue::new(TELNET_OUTPUT_MAX_FRAMES, TELNET_OUTPUT_MAX_BYTES);
+        let mut input = TelnetInput::default();
+        write_scene(&output, &mut input, &scene, &player).unwrap();
+        let frame = output.next().await.expect("bounded scene frame");
+        assert!(frame.byte_len() <= TELNET_OUTPUT_MAX_FRAME_BYTES);
+        let OutputFrame::Bytes { bytes, .. } = frame else {
+            panic!("scene must be emitted as bytes")
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("Bounded scene notice:"));
+    }
+
+    #[test]
     fn plain_telnet_scene_names_container_capacity_without_internal_ids() {
         let mut value = sample_scene();
         value.items.push(tiamud_core::SceneItem {
@@ -5037,6 +5264,7 @@ mod tests {
                 used_weight_grams: 200,
                 max_weight_grams: 5_000,
             }),
+            loot: None,
             actions: Vec::new(),
         });
 

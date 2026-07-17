@@ -35,6 +35,14 @@ describe('Tiamud entry flow', () => {
     expect(appSource).toContain('Jump to latest');
   });
 
+  it('renders loot access textually and submits native status and pass actions', () => {
+    expect(appSource).toContain('Reserved for you');
+    expect(appSource).toContain('Reserved for another adventurer');
+    expect(appSource).toContain("submitAction('loot.status', undefined, 'loot status')");
+    expect(appSource).toContain("submitAction('loot.pass', { target: item.id }, action.command)");
+    expect(appSource).toContain("'loot.pass'");
+  });
+
   it('keeps optional scene sprites decorative, bounded and non-interactive', () => {
     expect(appSource).toContain('layoutSceneEntities');
     expect(appSource).toContain('maxVisible: 10');

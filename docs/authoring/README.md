@@ -1,8 +1,8 @@
 # World authoring
 
 This is the current English entry point for creating Tiamud content. The
-runtime consumes one canonical **WorldPack v5**. Authors can maintain that
-world as strict **AreaPack v4** modules under a **WorldProjectManifest v2** and
+runtime consumes one canonical **WorldPack v6**. Authors can maintain that
+world as strict **AreaPack v5** modules under a **WorldProjectManifest v2** and
 compose them offline; areas are not services and are not loaded independently
 at runtime.
 
@@ -67,10 +67,10 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   `staged` location. Fungible stacks remain derived from individual instances;
   do not author or persist stack IDs/quantities. Do not restore v3 `items`,
   `itemRules` or `lootItemIds` fields.
-- Native WorldPack v5 and AreaPack v4 accept `transferable`,
+- Native WorldPack v6 and AreaPack v5 accept `transferable`,
   `character_bound` and `non_transferable`. Character binding is runtime state,
   not an authoring field: it is created on first acquisition and persisted in
-  WorldRuntimeSnapshot v4. Legacy WorldPack v4/AreaPack v3 inputs must remain
+  WorldRuntimeSnapshot v6. Legacy WorldPack v4/AreaPack v3 inputs must remain
   exactly `transferable`; older packs and Envy/Merc imports also normalize only
   to transferable objects instead of inferring ownership from historical flags.
 - Transfer policy applies to the entire contained subtree. A transferable bag
@@ -78,9 +78,23 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   The projected `canGive` flag is UI guidance; the server always rechecks
   effective ownership, binding, proximity, social policy and both inventories
   atomically.
-- WorldRuntimeSnapshot v4 stores location and mandatory per-instance binding
-  as the single durable item authority. SQLite and PostgreSQL remain schema
-  v10; neither authoring nor phase 3C adds a mirror table or dual writes.
+- Use a `npc_spawn` initial location for one-time fixed loot. Use
+  `lootTables` plus `lootSources` for repeatable drops: guaranteed entries run
+  first, weighted integer pools may explicitly select `nothing`, and each NPC
+  spawn has at most one source. Fixed and repeatable roots share a hard
+  worst-case limit of 64 per defeat.
+- Loot tables and sources are native only to WorldPack v6/AreaPack v5. Older
+  packs normalize to empty collections and reject injected fields instead of
+  inferring probabilities. The canonical table digest becomes durable drop
+  provenance; IDs, weights, quantities and references are validated strictly.
+- WorldRuntimeSnapshot v6 is the single durable authority for item location,
+  binding, trade reservations, loot provenance and ground rights. SQLite and
+  PostgreSQL schema v11 store it as opaque `TEXT`; legacy raw v1-v5 snapshots
+  retain a 1 MiB physical cap while v6 admission and commits use 2 MiB. There
+  is no mirror loot/escrow table or dual write.
+- Base and variant room titles contain 1..=128 safe UTF-8 bytes and base or
+  variant descriptions 1..=8,192; limits count bytes rather than Unicode
+  characters.
 - Item `entityMedia` targets the reusable prototype, while
   `roomPerception.hiddenItems` targets one durable instance. Do not use an
   instance ID as the media subject or a prototype ID as the hidden-item key.
@@ -102,18 +116,23 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
 - [WorldPack v4 item prototype/instance foundation](../decisions/0009-item-prototypes-instances-and-capacity.md)
 - [WorldPack v5 derived stacks and bounded containers](../decisions/0010-derived-stacks-and-bounded-containers.md)
 - [Atomic give and executable transfer policies](../decisions/0011-atomic-give-and-item-transfer-policies.md)
+- [Confirmed trade reservations](../decisions/0012-confirmed-trade-reservations.md)
+- [Repeatable loot, rights and provenance](../decisions/0013-repeatable-loot-rights-and-provenance.md)
 - [Scene compositor decision](../decisions/0008-optional-scene-compositor.md)
 - [Asset compiler](../../crates/asset-pipeline/README.md)
 - [Lua runtime](../../crates/scripting/README.md)
 - [Optional editorial AI](../../crates/editorial-ai/README.md)
 - [Historical Envy/Merc importer](../../tools/envy-import/README.md)
 
-The [Spanish WorldPack v5/AreaPack v4 guide](../world-authoring.md) is the
+The [Spanish WorldPack v6/AreaPack v5 guide](../world-authoring.md) is the
 current compact schema and workflow reference. Its reviewed Lantern Square
-example has nine item prototypes and ten initial instances. The 49,603-byte
+example has three rooms, nine item prototypes, nine initial instances, one
+loot table and one loot source. The 50,498-byte
 canonical artifact has SHA-256
-`f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
+`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
 It keeps the published `tiamud:road-token` and `tiamud:wolf-clasp` semantics
 transferable, and demonstrates phase 3C with the non-transferable consumable
 `tiamud:rain-writ` in `demo:north-gate` and the character-bound fixed loot
-`tiamud:stormglass-talon` on `tiamud:gate-stalker-1`.
+`tiamud:stormglass-talon` on `tiamud:gate-stalker-1`. That spawn also uses
+party round-robin for one guaranteed road token and one weighted roll: 60%
+wolf clasp, 40% nothing.

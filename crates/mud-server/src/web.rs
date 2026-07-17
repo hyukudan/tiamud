@@ -24,15 +24,15 @@ use rust_embed::RustEmbed;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Instant,
 };
 use tiamud_core::{
     AccountRole, CharacterId, CharacterSnapshot, ContainerContentsView, EconomyAction,
-    ItemSelection, PartyAction, PlayerAction, PlayerStateView, QuestAction, SceneView, SessionId,
-    SocialAction, SocialChannelName, StaffAction, StaffCapability, StaffProfileKey,
+    ItemSelection, LootAction, PartyAction, PlayerAction, PlayerStateView, QuestAction, SceneView,
+    SessionId, SocialAction, SocialChannelName, StaffAction, StaffCapability, StaffProfileKey,
     StaffReportResolution, TradeAction, TradeContentsView, WorldError, parse_action,
 };
 use tokio::{
@@ -43,6 +43,10 @@ use tokio::{
 use tracing::warn;
 
 const MAX_WS_MESSAGE_BYTES: usize = 16 * 1024;
+// Leave room for the envelope, sync metadata and a small optional annotation.
+// A deterministic semantic window also keeps tick diffs bounded when hundreds
+// of ground-loot reservations exist in one room.
+const MAX_WS_SCENE_SEMANTIC_BYTES: usize = 14 * 1024;
 const TRADE_LABEL_FALLBACK_BYTES: [usize; 4] = [128, 64, 32, 16];
 const MAX_COMMAND_BYTES: usize = 1024;
 const MAX_REQUEST_ID_BYTES: usize = 128;
@@ -57,6 +61,8 @@ const MAX_JSON_DEPTH: usize = 16;
 const GLOBAL_REQUEST_CACHE_CAPACITY: usize = 4_096;
 const WS_INBOUND_CAPACITY: usize = 32;
 const WS_OUTBOUND_CAPACITY: usize = 32;
+const MAX_WS_SEMANTIC_DELTA_FRAMES: usize = 8;
+const MAX_PROJECTED_EVENTS_PER_BATCH: usize = 16;
 const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
@@ -943,8 +949,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
     let driver = tokio::spawn(websocket_driver(socket, outbound.clone(), inbound_tx));
 
     let mut sequence = 1_u64;
-    let mut last_scene = entered.scene;
-    let mut last_presentation = entered.presentation;
+    let mut last_scene = bounded_web_scene(entered.scene);
+    let mut last_presentation = bounded_web_presentation(entered.presentation, &last_scene);
     let mut last_player = entered.player;
     let mut ignore_world_through_revision = None;
     if !queue_sequenced(
@@ -1019,24 +1025,25 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             continue;
                         }
                         ignore_world_through_revision = None;
-                        for event in delivery.events {
-                            if !queue_view_event(
-                                &outbound,
-                                &mut sequence,
-                                event,
-                                &last_presentation,
-                                &delivery.presentation,
-                            ) {
-                                break 'session;
-                            }
+                        let next_scene = bounded_web_scene(delivery.scene);
+                        let next_presentation =
+                            bounded_web_presentation(delivery.presentation, &next_scene);
+                        if !queue_view_events(
+                            &outbound,
+                            &mut sequence,
+                            delivery.events,
+                            &last_presentation,
+                            &next_presentation,
+                        ) {
+                            break 'session;
                         }
-                        if delivery.scene.revision <= last_scene.revision {
+                        if next_scene.revision <= last_scene.revision {
                             continue;
                         }
                         let previous_scene = last_scene.clone();
                         let previous_player = last_player.clone();
-                        last_scene = delivery.scene;
-                        last_presentation = delivery.presentation;
+                        last_scene = next_scene;
+                        last_presentation = next_presentation;
                         last_player = delivery.player;
                         if !queue_semantic_updates(
                             &outbound,
@@ -1066,8 +1073,9 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             Ok((scene, presentation, player)) => {
                                 let previous_audio = last_scene.audio.clone();
                                 ignore_world_through_revision = Some(scene.revision);
-                                last_scene = scene;
-                                last_presentation = presentation;
+                                last_scene = bounded_web_scene(scene);
+                                last_presentation =
+                                    bounded_web_presentation(presentation, &last_scene);
                                 last_player = player;
                                 if !queue_notice(
                                     &outbound,
@@ -1102,7 +1110,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             "chat.message",
                             json!(delivery),
                         ) {
-                            break;
+                            break 'session;
                         }
                     }
                     Some(SessionDelivery::SocialLagged) => {
@@ -1111,7 +1119,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             &mut sequence,
                             "Some chat messages were skipped because this client fell behind.",
                         ) {
-                            break;
+                            break 'session;
                         }
                     }
                     None => break,
@@ -1241,8 +1249,11 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             Ok(action) => match state.world.apply(entered.session_id, action).await {
                                 Ok(outcome) => {
                                     state.metrics.action_finished(action_started.elapsed(), true);
-                                    last_scene = outcome.scene;
-                                    last_presentation = outcome.presentation;
+                                    last_scene = bounded_web_scene(outcome.scene);
+                                    last_presentation = bounded_web_presentation(
+                                        outcome.presentation,
+                                        &last_scene,
+                                    );
                                     last_player = outcome.player;
                                     (
                                         true,
@@ -1297,16 +1308,14 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         {
                             break;
                         }
-                        for event in events {
-                            if !queue_view_event(
-                                &outbound,
-                                &mut sequence,
-                                event,
-                                &previous_presentation,
-                                &last_presentation,
-                            ) {
-                                break 'session;
-                            }
+                        if !queue_view_events(
+                            &outbound,
+                            &mut sequence,
+                            events,
+                            &previous_presentation,
+                            &last_presentation,
+                        ) {
+                            break 'session;
                         }
                         if ok && !queue_semantic_updates(
                             &outbound,
@@ -1493,7 +1502,7 @@ fn queue_scene(
             return queue_sequenced(
                 outbound,
                 sequence,
-                OutboundPriority::State,
+                OutboundPriority::Critical,
                 Some(CoalesceKey::Scene),
                 message_type,
                 data,
@@ -1503,6 +1512,114 @@ fn queue_scene(
         // optional annotation before risking the semantic scene frame.
         presentation.entities.pop();
     }
+}
+
+fn bounded_web_scene(mut scene: SceneView) -> SceneView {
+    let fits = |scene: &SceneView| {
+        serde_json::to_vec(scene).is_ok_and(|bytes| bytes.len() <= MAX_WS_SCENE_SEMANTIC_BYTES)
+    };
+    if fits(&scene) {
+        return scene;
+    }
+
+    // When a room is crowded, keep the actionable window deterministic and
+    // useful: own reservations first, then public items, then reservations of
+    // others. Removing/taking an item naturally reveals the next stack on the
+    // following authoritative projection.
+    scene.items.sort_by(|left, right| {
+        let priority =
+            |item: &tiamud_core::SceneItem| match item.loot.as_ref().map(|loot| loot.access) {
+                Some(tiamud_core::LootAccessView::Yours) => 0_u8,
+                None => 1,
+                Some(tiamud_core::LootAccessView::Reserved) => 2,
+            };
+        priority(left)
+            .cmp(&priority(right))
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let original_prose = scene.prose.clone();
+    let original_items = scene.items.len();
+    let original_npcs = scene.npcs.len();
+    let mut omitted_items = 0_usize;
+    let mut omitted_npcs = 0_usize;
+    while !fits(&scene) && !scene.items.is_empty() {
+        scene.items.pop();
+        omitted_items = original_items.saturating_sub(scene.items.len());
+        set_scene_projection_notice(&mut scene, omitted_items, omitted_npcs, false);
+    }
+    while !fits(&scene) && !scene.npcs.is_empty() {
+        scene.npcs.pop();
+        omitted_npcs = original_npcs.saturating_sub(scene.npcs.len());
+        set_scene_projection_notice(&mut scene, omitted_items, omitted_npcs, false);
+    }
+    if !fits(&scene) {
+        let prose = original_prose.join("\n\n");
+        for maximum in [4_096, 2_048, 1_024, 512, 256, 0] {
+            scene.prose = if maximum == 0 {
+                Vec::new()
+            } else {
+                vec![bounded_utf8_prefix(&prose, maximum)]
+            };
+            set_scene_projection_notice(&mut scene, omitted_items, omitted_npcs, true);
+            if fits(&scene) {
+                break;
+            }
+        }
+    }
+    scene
+}
+
+fn set_scene_projection_notice(
+    scene: &mut SceneView,
+    omitted_items: usize,
+    omitted_npcs: usize,
+    prose_shortened: bool,
+) {
+    scene
+        .prose
+        .retain(|paragraph| !paragraph.starts_with("Bounded scene notice:"));
+    let mut details = Vec::new();
+    if omitted_items > 0 {
+        details.push(format!(
+            "{omitted_items} additional item stack(s); interact with visible items or use loot status to reveal the next entries"
+        ));
+    }
+    if omitted_npcs > 0 {
+        details.push(format!("{omitted_npcs} additional creature(s)"));
+    }
+    if prose_shortened {
+        details.push("the room description was shortened for this transport".into());
+    }
+    scene
+        .prose
+        .push(format!("Bounded scene notice: {}.", details.join("; ")));
+}
+
+fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> String {
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let next = index + character.len_utf8();
+        if next > maximum_bytes {
+            break;
+        }
+        end = next;
+    }
+    value[..end].to_owned()
+}
+
+fn bounded_web_presentation(
+    mut presentation: crate::runtime_content::ScenePresentation,
+    scene: &SceneView,
+) -> crate::runtime_content::ScenePresentation {
+    let visible = scene
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .chain(scene.npcs.iter().map(|npc| npc.id.as_str()))
+        .collect::<HashSet<_>>();
+    presentation.retain_entities(|entity_id| visible.contains(entity_id));
+    presentation
 }
 
 fn queue_player(outbound: &OutboundHandle, sequence: &mut u64, player: &PlayerStateView) -> bool {
@@ -1742,6 +1859,21 @@ fn queue_semantic_updates(
     let Some(scene_object) = scene_json.as_object() else {
         return false;
     };
+    let previous_entities = scene_entities(previous_scene_object);
+    let entities = scene_entities(scene_object);
+    let entity_delta_count = previous_entities
+        .keys()
+        .filter(|key| !entities.contains_key(*key))
+        .count()
+        + entities
+            .iter()
+            .filter(|(key, entity)| {
+                previous_entities
+                    .get(*key)
+                    .is_none_or(|previous| previous != *entity)
+            })
+            .count();
+    let emit_scene_deltas = entity_delta_count <= MAX_WS_SEMANTIC_DELTA_FRAMES;
 
     let mut patch = Map::from_iter([
         ("viewId".to_owned(), json!(scene.view_id)),
@@ -1755,7 +1887,8 @@ fn queue_semantic_updates(
             );
         }
     }
-    if patch.len() > 2
+    if emit_scene_deltas
+        && patch.len() > 2
         && !queue_sequenced(
             outbound,
             sequence,
@@ -1768,11 +1901,9 @@ fn queue_semantic_updates(
         return false;
     }
 
-    let previous_entities = scene_entities(previous_scene_object);
-    let entities = scene_entities(scene_object);
     for ((kind, id), _) in previous_entities
         .iter()
-        .filter(|(key, _)| !entities.contains_key(*key))
+        .filter(|(key, _)| emit_scene_deltas && !entities.contains_key(*key))
     {
         if !queue_sequenced(
             outbound,
@@ -1791,9 +1922,10 @@ fn queue_semantic_updates(
         }
     }
     for ((kind, id), entity) in entities.iter().filter(|(key, entity)| {
-        previous_entities
-            .get(*key)
-            .is_none_or(|previous| previous != *entity)
+        emit_scene_deltas
+            && previous_entities
+                .get(*key)
+                .is_none_or(|previous| previous != *entity)
     }) {
         if !queue_sequenced(
             outbound,
@@ -2026,6 +2158,41 @@ fn queue_view_event(
         "message.append",
         data,
     )
+}
+
+fn queue_view_events(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    events: Vec<ProjectedViewEvent>,
+    previous_presentation: &crate::runtime_content::ScenePresentation,
+    current_presentation: &crate::runtime_content::ScenePresentation,
+) -> bool {
+    if events.len() > MAX_PROJECTED_EVENTS_PER_BATCH {
+        return queue_sequenced(
+            outbound,
+            sequence,
+            OutboundPriority::Narrative,
+            None,
+            "server.notice",
+            json!({
+                "level": "info",
+                "code": "world.events_coalesced",
+                "message": format!(
+                    "{} world changes were coalesced; the authoritative scene follows.",
+                    events.len()
+                ),
+            }),
+        );
+    }
+    events.into_iter().all(|event| {
+        queue_view_event(
+            outbound,
+            sequence,
+            event,
+            previous_presentation,
+            current_presentation,
+        )
+    })
 }
 
 pub async fn static_asset(uri: Uri) -> Response {
@@ -2584,6 +2751,10 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     match action {
         "look" => exact_no_fields().map(|()| PlayerAction::Look),
         "inventory" => exact_no_fields().map(|()| PlayerAction::Inventory),
+        "loot.status" => exact_no_fields().map(|()| PlayerAction::Loot(LootAction::Status)),
+        "loot.pass" => gameplay_target()
+            .map(LootAction::Pass)
+            .map(PlayerAction::Loot),
         "move" => {
             let target = gameplay_target()?;
             match parse_action(&target) {
@@ -3200,6 +3371,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
 fn public_game_error(error: &GameError) -> String {
     match error {
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
+        GameError::World(WorldError::LootUnavailable) => "That loot is not available.".to_owned(),
         GameError::TradeUnavailable
         | GameError::World(
             WorldError::TradeUnavailable
@@ -3666,6 +3838,10 @@ mod tests {
             public_game_error(&GameError::World(WorldError::StaleTradeRevision)),
             "That trade is not available."
         );
+        assert_eq!(
+            public_game_error(&GameError::World(WorldError::LootUnavailable)),
+            "That loot is not available."
+        );
     }
 
     #[test]
@@ -3792,6 +3968,23 @@ mod tests {
                 recipient: "o3333333333333333".into(),
             })
         );
+        let loot_status = requested_action(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"loot-status","action":"loot.status"}}"#,
+        );
+        assert_eq!(
+            loot_status.action,
+            Ok(PlayerAction::Loot(LootAction::Status))
+        );
+        let loot_pass = requested_action(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"loot-pass","action":"loot.pass","target":"o5555555555555555"}}"#,
+        );
+        assert_eq!(
+            loot_pass.action,
+            Ok(PlayerAction::Loot(LootAction::Pass(
+                "o5555555555555555".into()
+            )))
+        );
+        assert_ne!(loot_status.signature, loot_pass.signature);
         assert_ne!(action.signature, put.signature);
         let signatures = [
             r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.put","target":"o1111111111111111","container":"o2222222222222222","quantity":12}}"#,
@@ -3848,6 +4041,9 @@ mod tests {
             r#"{"v":1,"type":"action.perform","data":{"requestId":"give-missing-recipient","action":"item.give","target":"tonic"}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"give-extra","action":"item.give","target":"tonic","recipient":"Bram","message":"smuggled"}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"drop-recipient","action":"item.drop","target":"tonic","recipient":"Bram"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"loot-status-target","action":"loot.status","target":"tonic"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"loot-pass-missing","action":"loot.pass"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"loot-pass-extra","action":"loot.pass","target":"tonic","message":"smuggled"}}"#,
         ] {
             let ClientMessage::Action(action) = parse_client_message(invalid_fields).unwrap()
             else {
@@ -5286,6 +5482,148 @@ mod tests {
         assert!(metrics.prometheus(0).contains(
             "tiamud_outbound_budget_exceeded_total{transport=\"websocket\",message=\"frame\"} 1"
         ));
+    }
+
+    #[test]
+    fn crowded_loot_uses_one_stable_bounded_window_for_diff_snapshot_and_sync() {
+        let mut full = test_scene();
+        full.revision = 10;
+        full.items = (0..300)
+            .map(|index| tiamud_core::SceneItem {
+                id: format!("o{index:016x}"),
+                label: format!("Reserved trophy {index:03}"),
+                description: "d".repeat(2_048),
+                rarity: "common".into(),
+                item_level: 1,
+                weight_grams: 1,
+                quantity: 1,
+                stack_slots: 1,
+                total_weight_grams: 1,
+                transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+                bound_to_you: false,
+                container_capacity: None,
+                loot: Some(tiamud_core::SceneLootAccessView {
+                    access: tiamud_core::LootAccessView::Yours,
+                    expires_in_ticks: Some(20),
+                }),
+                actions: vec![tiamud_core::SceneAction {
+                    label: "Pass".into(),
+                    command: format!("loot pass o{index:016x}"),
+                }],
+            })
+            .collect();
+
+        let first = bounded_web_scene(full.clone());
+        assert!(first.items.len() < full.items.len());
+        assert!(
+            first
+                .prose
+                .last()
+                .is_some_and(|line| { line.starts_with("Bounded scene notice:") })
+        );
+        assert!(
+            serde_json::to_vec(&first).unwrap().len() <= MAX_WS_SCENE_SEMANTIC_BYTES,
+            "the retained semantic window must leave envelope headroom"
+        );
+        let mut prose_only = test_scene();
+        prose_only.items.clear();
+        prose_only.npcs.clear();
+        prose_only.prose = vec!["multibyte ñ".repeat(20_000)];
+        let bounded_prose = bounded_web_scene(prose_only);
+        assert!(serde_json::to_vec(&bounded_prose).unwrap().len() <= MAX_WS_SCENE_SEMANTIC_BYTES);
+        assert!(
+            bounded_prose
+                .prose
+                .last()
+                .is_some_and(|line| { line.contains("room description was shortened") })
+        );
+
+        full.revision = 11;
+        for item in &mut full.items {
+            item.loot
+                .as_mut()
+                .expect("crowded fixture uses reserved loot")
+                .expires_in_ticks = Some(19);
+        }
+        let second = bounded_web_scene(full);
+        assert_eq!(first.items.len(), second.items.len());
+
+        let player = test_player_state();
+        let outbound =
+            OutboundHandle::new(WS_OUTBOUND_CAPACITY, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_semantic_updates(
+            &outbound,
+            &mut sequence,
+            &first,
+            &second,
+            &player,
+            &player,
+        ));
+        assert!(queue_scene(
+            &outbound,
+            &mut sequence,
+            "scene.snapshot",
+            &second,
+            &crate::runtime_content::ScenePresentation::default(),
+        ));
+        assert!(outbound.take_disconnect_reason().is_none());
+        let frames = std::iter::from_fn(|| outbound.pop()).collect::<Vec<_>>();
+        assert!(frames.len() <= WS_OUTBOUND_CAPACITY);
+        assert!(frames.iter().all(|frame| {
+            serde_json::to_vec(&frame.value).unwrap().len() <= MAX_WS_MESSAGE_BYTES
+        }));
+
+        let mut replacement = second.clone();
+        replacement.revision = 12;
+        for (index, item) in replacement.items.iter_mut().enumerate() {
+            item.id = format!("z{index:016x}");
+        }
+        assert!(
+            first.items.len() + replacement.items.len() > MAX_WS_SEMANTIC_DELTA_FRAMES,
+            "fixture must cross the delta-to-snapshot threshold"
+        );
+        let outbound =
+            OutboundHandle::new(WS_OUTBOUND_CAPACITY, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 50;
+        assert!(queue_semantic_updates(
+            &outbound,
+            &mut sequence,
+            &second,
+            &replacement,
+            &player,
+            &player,
+        ));
+        assert!(queue_scene(
+            &outbound,
+            &mut sequence,
+            "scene.snapshot",
+            &replacement,
+            &crate::runtime_content::ScenePresentation::default(),
+        ));
+        let replacement_frames = std::iter::from_fn(|| outbound.pop()).collect::<Vec<_>>();
+        assert_eq!(replacement_frames.len(), 1);
+        assert_eq!(replacement_frames[0].value["type"], "scene.snapshot");
+
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 100;
+        assert!(queue_sync_recovery(
+            &outbound,
+            &mut sequence,
+            99,
+            &second,
+            &crate::runtime_content::ScenePresentation::default(),
+            &player,
+        ));
+        let sync_scene = outbound.pop().expect("sync scene");
+        assert_eq!(
+            sync_scene.value["data"]["scene"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            second.items.len()
+        );
+        assert!(serde_json::to_vec(&sync_scene.value).unwrap().len() <= MAX_WS_MESSAGE_BYTES);
     }
 
     #[test]

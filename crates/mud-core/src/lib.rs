@@ -101,6 +101,7 @@ pub enum PlayerAction {
         selection: ItemSelection,
         recipient: String,
     },
+    Loot(LootAction),
     Trade(TradeAction),
     Examine(String),
     Attack(String),
@@ -128,6 +129,18 @@ pub enum PlayerAction {
 }
 
 pub const MAX_ITEM_SELECTION_QUANTITY: u16 = 256;
+
+pub const MAX_LOOT_UNITS_PER_RESOLUTION: usize = 64;
+pub const MAX_GROUND_LOOT_RESERVATIONS: usize = 2_048;
+pub const MAX_LOOT_ENCOUNTERS: usize = 2_048;
+pub const LOOT_EXCLUSIVE_TICKS: u64 = 20;
+pub const LOOT_DESPAWN_TICKS: u64 = 120;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LootAction {
+    Status,
+    Pass(String),
+}
 
 pub const MAX_TRADE_ITEM_QUANTITY: u16 = 128;
 pub const MAX_TRADE_COINS: u64 = 1_000_000_000;
@@ -583,6 +596,15 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if normalised == "shop" {
         return Ok(PlayerAction::Economy(EconomyAction::Shop));
+    }
+    if matches!(normalised.as_str(), "loot" | "loot status") {
+        return Ok(PlayerAction::Loot(LootAction::Status));
+    }
+    if let Some(target) = command_tail_phrase(input, "loot pass") {
+        return Ok(PlayerAction::Loot(LootAction::Pass(target)));
+    }
+    if normalised == "loot pass" {
+        return Err(ParseActionError::MissingTarget { command: "loot" });
     }
     match normalised.as_str() {
         "trade accept" => return Ok(PlayerAction::Trade(TradeAction::Accept)),
@@ -1375,6 +1397,21 @@ pub struct SceneAction {
     pub command: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LootAccessView {
+    Yours,
+    Reserved,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneLootAccessView {
+    pub access: LootAccessView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_ticks: Option<u64>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneItem {
@@ -1391,6 +1428,8 @@ pub struct SceneItem {
     pub bound_to_you: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_capacity: Option<InventoryCapacityView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loot: Option<SceneLootAccessView>,
     pub actions: Vec<SceneAction>,
 }
 
@@ -2210,6 +2249,128 @@ pub struct PartySnapshot {
     pub invitations: BTreeMap<CharacterId, u64>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LootRightsPolicy {
+    CreditedCharacter,
+    PartyRoundRobin,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LootEntryKind {
+    Item,
+    Nothing,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LootSourceKind {
+    NpcSpawn,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LootGuaranteedDefinition {
+    pub id: String,
+    pub item_prototype_id: String,
+    pub quantity: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LootEntryDefinition {
+    pub kind: LootEntryKind,
+    pub id: String,
+    pub weight: u32,
+    pub item_prototype_id: Option<String>,
+    pub min_quantity: Option<u16>,
+    pub max_quantity: Option<u16>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LootPoolDefinition {
+    pub id: String,
+    pub rolls: u8,
+    pub entries: Vec<LootEntryDefinition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LootTableDefinition {
+    pub id: String,
+    pub digest_sha256: String,
+    pub guaranteed: Vec<LootGuaranteedDefinition>,
+    pub pools: Vec<LootPoolDefinition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LootSourceDefinition {
+    pub kind: LootSourceKind,
+    pub id: String,
+    pub npc_spawn_id: String,
+    pub loot_table_id: String,
+    pub rights: LootRightsPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct LootDropId(pub u64);
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ItemProvenance {
+    AuthoredInitial,
+    LegacySnapshot {
+        source_version: u32,
+    },
+    RuntimeCreated {
+        created_tick: u64,
+    },
+    NpcLoot {
+        drop_id: LootDropId,
+        npc_spawn_id: String,
+        loot_table_id: String,
+        table_digest_sha256: String,
+        entry_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pool_id: Option<String>,
+        roll_index: u8,
+        quantity_index: u16,
+        generated_tick: u64,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LootEncounter {
+    pub npc_spawn_id: String,
+    pub initiator: CharacterId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub party_id: Option<u64>,
+    pub cohort: Vec<CharacterId>,
+    pub room_id: String,
+    pub started_tick: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroundLootReservation {
+    pub drop_id: LootDropId,
+    pub root_item_id: ItemInstanceId,
+    pub room_id: String,
+    pub cohort: Vec<CharacterId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beneficiary: Option<CharacterId>,
+    #[serde(default)]
+    pub passed: BTreeSet<CharacterId>,
+    pub created_tick: u64,
+    pub claim_until_tick: u64,
+    pub despawn_at_tick: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdventureRuntimeSnapshot {
@@ -2241,7 +2402,9 @@ pub struct DurableCharacterSnapshot {
     pub gameplay: CharacterGameplaySnapshot,
 }
 
-pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
+pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 6;
+pub const MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES: usize = 1_048_576;
+pub const MAX_WORLD_RUNTIME_SNAPSHOT_BYTES: usize = 2_097_152;
 const MAX_ACTIVE_EFFECTS: usize = 32;
 pub const MAX_ITEM_INSTANCES: usize = 65_536;
 pub const MAX_ITEM_INSTANCE_ID_BYTES: usize = 128;
@@ -2543,6 +2706,31 @@ pub struct WorldRuntimeSnapshot {
     pub progression_flags: BTreeSet<String>,
     pub next_trade_id: TradeId,
     pub trades: BTreeMap<TradeId, TradeSnapshot>,
+    pub next_loot_drop_id: LootDropId,
+    pub item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
+    pub loot_encounters: BTreeMap<String, LootEncounter>,
+    pub ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
+    pub party_loot_cursors: BTreeMap<u64, u64>,
+}
+
+/// Exact snapshot shape produced by inventory phase 3D. It intentionally has
+/// no phase-4 loot fields; v5 inputs receive conservative legacy provenance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldRuntimeSnapshotV5 {
+    pub snapshot_version: u32,
+    pub revision: u64,
+    pub logical_tick: u64,
+    pub rng_state: u64,
+    pub next_item_instance_sequence: u64,
+    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshot>,
+    pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
+    #[serde(default)]
+    pub adventure: AdventureRuntimeSnapshot,
+    #[serde(default)]
+    pub progression_flags: BTreeSet<String>,
+    pub next_trade_id: TradeId,
+    pub trades: BTreeMap<TradeId, TradeSnapshot>,
 }
 
 /// Exact snapshot shape produced by inventory phase 3C. It intentionally has
@@ -2625,38 +2813,49 @@ pub struct WorldRuntimeSnapshotV1 {
 
 impl WorldRuntimeSnapshot {
     pub fn upgrade_v1(snapshot: WorldRuntimeSnapshotV1) -> Result<Self, WorldError> {
-        Self::upgrade_v2(WorldRuntimeSnapshotV2::upgrade_v1(snapshot)?)
+        let mut upgraded = Self::upgrade_v2(WorldRuntimeSnapshotV2::upgrade_v1(snapshot)?)?;
+        for provenance in upgraded.item_provenance.values_mut() {
+            *provenance = ItemProvenance::LegacySnapshot { source_version: 1 };
+        }
+        Ok(upgraded)
     }
 
     pub fn upgrade_v2(snapshot: WorldRuntimeSnapshotV2) -> Result<Self, WorldError> {
         if snapshot.snapshot_version != 2 {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
+        let item_instances = snapshot
+            .item_instances
+            .into_iter()
+            .map(|(item_id, instance)| {
+                (
+                    item_id,
+                    RuntimeItemInstanceSnapshot {
+                        prototype_id: instance.prototype_id,
+                        location: instance.location.into(),
+                        binding: ItemBinding::Unbound,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let item_provenance = legacy_item_provenance(&item_instances, 2);
         Ok(Self {
             snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
             revision: snapshot.revision,
             logical_tick: snapshot.logical_tick,
             rng_state: snapshot.rng_state,
             next_item_instance_sequence: snapshot.next_item_instance_sequence,
-            item_instances: snapshot
-                .item_instances
-                .into_iter()
-                .map(|(item_id, instance)| {
-                    (
-                        item_id,
-                        RuntimeItemInstanceSnapshot {
-                            prototype_id: instance.prototype_id,
-                            location: instance.location.into(),
-                            binding: ItemBinding::Unbound,
-                        },
-                    )
-                })
-                .collect(),
+            item_instances,
             npcs: snapshot.npcs,
             adventure: snapshot.adventure,
             progression_flags: snapshot.progression_flags,
             next_trade_id: TradeId(1),
             trades: BTreeMap::new(),
+            next_loot_drop_id: LootDropId(1),
+            item_provenance,
+            loot_encounters: BTreeMap::new(),
+            ground_loot: BTreeMap::new(),
+            party_loot_cursors: BTreeMap::new(),
         })
     }
 
@@ -2664,31 +2863,38 @@ impl WorldRuntimeSnapshot {
         if snapshot.snapshot_version != 3 {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
+        let item_instances = snapshot
+            .item_instances
+            .into_iter()
+            .map(|(item_id, instance)| {
+                (
+                    item_id,
+                    RuntimeItemInstanceSnapshot {
+                        prototype_id: instance.prototype_id,
+                        location: instance.location,
+                        binding: ItemBinding::Unbound,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let item_provenance = legacy_item_provenance(&item_instances, 3);
         Ok(Self {
             snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
             revision: snapshot.revision,
             logical_tick: snapshot.logical_tick,
             rng_state: snapshot.rng_state,
             next_item_instance_sequence: snapshot.next_item_instance_sequence,
-            item_instances: snapshot
-                .item_instances
-                .into_iter()
-                .map(|(item_id, instance)| {
-                    (
-                        item_id,
-                        RuntimeItemInstanceSnapshot {
-                            prototype_id: instance.prototype_id,
-                            location: instance.location,
-                            binding: ItemBinding::Unbound,
-                        },
-                    )
-                })
-                .collect(),
+            item_instances,
             npcs: snapshot.npcs,
             adventure: snapshot.adventure,
             progression_flags: snapshot.progression_flags,
             next_trade_id: TradeId(1),
             trades: BTreeMap::new(),
+            next_loot_drop_id: LootDropId(1),
+            item_provenance,
+            loot_encounters: BTreeMap::new(),
+            ground_loot: BTreeMap::new(),
+            party_loot_cursors: BTreeMap::new(),
         })
     }
 
@@ -2696,6 +2902,7 @@ impl WorldRuntimeSnapshot {
         if snapshot.snapshot_version != 4 {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
+        let item_provenance = legacy_item_provenance(&snapshot.item_instances, 4);
         Ok(Self {
             snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
             revision: snapshot.revision,
@@ -2708,8 +2915,49 @@ impl WorldRuntimeSnapshot {
             progression_flags: snapshot.progression_flags,
             next_trade_id: TradeId(1),
             trades: BTreeMap::new(),
+            next_loot_drop_id: LootDropId(1),
+            item_provenance,
+            loot_encounters: BTreeMap::new(),
+            ground_loot: BTreeMap::new(),
+            party_loot_cursors: BTreeMap::new(),
         })
     }
+
+    pub fn upgrade_v5(snapshot: WorldRuntimeSnapshotV5) -> Result<Self, WorldError> {
+        if snapshot.snapshot_version != 5 {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        let item_provenance = legacy_item_provenance(&snapshot.item_instances, 5);
+        Ok(Self {
+            snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
+            revision: snapshot.revision,
+            logical_tick: snapshot.logical_tick,
+            rng_state: snapshot.rng_state,
+            next_item_instance_sequence: snapshot.next_item_instance_sequence,
+            item_instances: snapshot.item_instances,
+            npcs: snapshot.npcs,
+            adventure: snapshot.adventure,
+            progression_flags: snapshot.progression_flags,
+            next_trade_id: snapshot.next_trade_id,
+            trades: snapshot.trades,
+            next_loot_drop_id: LootDropId(1),
+            item_provenance,
+            loot_encounters: BTreeMap::new(),
+            ground_loot: BTreeMap::new(),
+            party_loot_cursors: BTreeMap::new(),
+        })
+    }
+}
+
+fn legacy_item_provenance<T>(
+    items: &BTreeMap<ItemInstanceId, T>,
+    source_version: u32,
+) -> BTreeMap<ItemInstanceId, ItemProvenance> {
+    items
+        .keys()
+        .cloned()
+        .map(|item_id| (item_id, ItemProvenance::LegacySnapshot { source_version }))
+        .collect()
 }
 
 impl WorldRuntimeSnapshotV2 {
@@ -2746,7 +2994,8 @@ impl WorldRuntimeSnapshotV2 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompatibleWorldRuntimeSnapshot {
-    V5(WorldRuntimeSnapshot),
+    V6(WorldRuntimeSnapshot),
+    V5(WorldRuntimeSnapshotV5),
     V4(WorldRuntimeSnapshotV4),
     V3(WorldRuntimeSnapshotV3),
     V2(WorldRuntimeSnapshotV2),
@@ -2779,6 +3028,9 @@ impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
             5 => serde_json::from_value(value)
                 .map(Self::V5)
                 .map_err(serde::de::Error::custom),
+            6 => serde_json::from_value(value)
+                .map(Self::V6)
+                .map_err(serde::de::Error::custom),
             _ => Err(serde::de::Error::custom("unsupported snapshotVersion")),
         }
     }
@@ -2787,7 +3039,8 @@ impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
 impl CompatibleWorldRuntimeSnapshot {
     pub fn into_current(self) -> Result<WorldRuntimeSnapshot, WorldError> {
         match self {
-            Self::V5(snapshot) => Ok(snapshot),
+            Self::V6(snapshot) => Ok(snapshot),
+            Self::V5(snapshot) => WorldRuntimeSnapshot::upgrade_v5(snapshot),
             Self::V4(snapshot) => WorldRuntimeSnapshot::upgrade_v4(snapshot),
             Self::V3(snapshot) => WorldRuntimeSnapshot::upgrade_v3(snapshot),
             Self::V2(snapshot) => WorldRuntimeSnapshot::upgrade_v2(snapshot),
@@ -2803,9 +3056,18 @@ pub fn decode_world_runtime_snapshot(
     durable_version: u32,
     json: &str,
 ) -> Result<WorldRuntimeSnapshot, WorldError> {
+    let byte_limit = if durable_version <= 5 {
+        MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
+    } else {
+        MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+    };
+    if json.len() > byte_limit {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
     let compatible: CompatibleWorldRuntimeSnapshot =
         serde_json::from_str(json).map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
     let payload_version = match &compatible {
+        CompatibleWorldRuntimeSnapshot::V6(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V5(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V4(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V3(snapshot) => snapshot.snapshot_version,
@@ -2825,6 +3087,13 @@ pub fn decode_world_runtime_snapshot(
 pub fn validate_world_runtime_snapshot_semantics(
     snapshot: &WorldRuntimeSnapshot,
 ) -> Result<(), WorldError> {
+    if serde_json::to_vec(snapshot)
+        .map_err(|_| WorldError::InvalidRuntimeSnapshot)?
+        .len()
+        > MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+    {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
     if snapshot.snapshot_version != WORLD_RUNTIME_SNAPSHOT_VERSION
         || snapshot.revision == 0
         || snapshot.rng_state == 0
@@ -2845,6 +3114,17 @@ pub fn validate_world_runtime_snapshot_semantics(
         .max()
         .is_none_or(|sequence| sequence < snapshot.next_item_instance_sequence);
     if !runtime_sequence_valid {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+    if snapshot.next_loot_drop_id.0 == 0
+        || snapshot.item_provenance.len() != snapshot.item_instances.len()
+        || snapshot
+            .item_provenance
+            .keys()
+            .ne(snapshot.item_instances.keys())
+        || snapshot.loot_encounters.len() > MAX_LOOT_ENCOUNTERS
+        || snapshot.ground_loot.len() > MAX_GROUND_LOOT_RESERVATIONS
+    {
         return Err(WorldError::InvalidRuntimeSnapshot);
     }
 
@@ -2899,6 +3179,126 @@ pub fn validate_world_runtime_snapshot_semantics(
             }
             current = container_id;
         }
+    }
+
+    let valid_digest = |digest: &str| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let mut greatest_drop_id = 0_u64;
+    for provenance in snapshot.item_provenance.values() {
+        match provenance {
+            ItemProvenance::AuthoredInitial => {}
+            ItemProvenance::LegacySnapshot { source_version } => {
+                if !(1..=5).contains(source_version) {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+            ItemProvenance::RuntimeCreated { created_tick } => {
+                if *created_tick > snapshot.logical_tick {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+            ItemProvenance::NpcLoot {
+                drop_id,
+                npc_spawn_id,
+                loot_table_id,
+                table_digest_sha256,
+                entry_id,
+                pool_id,
+                roll_index,
+                quantity_index,
+                generated_tick,
+            } => {
+                greatest_drop_id = greatest_drop_id.max(drop_id.0);
+                if drop_id.0 == 0
+                    || !valid_definition_id(npc_spawn_id)
+                    || !valid_definition_id(loot_table_id)
+                    || !valid_definition_id(entry_id)
+                    || pool_id.as_ref().is_some_and(|id| !valid_definition_id(id))
+                    || !valid_digest(table_digest_sha256)
+                    || *roll_index >= 8
+                    || *quantity_index >= 32
+                    || *generated_tick > snapshot.logical_tick
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+        }
+    }
+    for (npc_id, encounter) in &snapshot.loot_encounters {
+        let npc = snapshot
+            .npcs
+            .get(npc_id)
+            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+        if npc_id != &encounter.npc_spawn_id
+            || npc.engaged_character != Some(encounter.initiator)
+            || encounter.initiator.0 <= 0
+            || encounter.started_tick > snapshot.logical_tick
+            || !valid_definition_id(&encounter.room_id)
+            || encounter.room_id != npc.spawn_room_id
+            || encounter.party_id == Some(0)
+            || encounter.cohort.is_empty()
+            || encounter.cohort.len() > 6
+            || !encounter.cohort.contains(&encounter.initiator)
+            || encounter.cohort.iter().any(|id| id.0 <= 0)
+            || !encounter.cohort.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+    }
+    for (root_id, reservation) in &snapshot.ground_loot {
+        greatest_drop_id = greatest_drop_id.max(reservation.drop_id.0);
+        let instance = snapshot
+            .item_instances
+            .get(root_id)
+            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+        if root_id != &reservation.root_item_id
+            || reservation.drop_id.0 == 0
+            || instance.location
+                != (RuntimeItemLocation::Room {
+                    room_id: reservation.room_id.clone(),
+                })
+            || !valid_definition_id(&reservation.room_id)
+            || reservation.cohort.is_empty()
+            || reservation.cohort.len() > 6
+            || reservation.cohort.iter().any(|id| id.0 <= 0)
+            || !reservation.cohort.windows(2).all(|pair| pair[0] < pair[1])
+            || reservation.beneficiary.is_some_and(|id| {
+                !reservation.cohort.contains(&id) || reservation.passed.contains(&id)
+            })
+            || (snapshot.logical_tick >= reservation.claim_until_tick
+                && reservation.beneficiary.is_some())
+            || !reservation
+                .passed
+                .iter()
+                .all(|id| reservation.cohort.contains(id))
+            || reservation.claim_until_tick
+                != reservation
+                    .created_tick
+                    .checked_add(LOOT_EXCLUSIVE_TICKS)
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?
+            || reservation.despawn_at_tick
+                != reservation
+                    .created_tick
+                    .checked_add(LOOT_DESPAWN_TICKS)
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?
+            || snapshot.logical_tick >= reservation.despawn_at_tick
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+    }
+    if greatest_drop_id >= snapshot.next_loot_drop_id.0
+        || snapshot
+            .party_loot_cursors
+            .iter()
+            .any(|(party_id, cursor)| {
+                *party_id == 0 || *cursor == 0 || !snapshot.adventure.parties.contains_key(party_id)
+            })
+    {
+        return Err(WorldError::InvalidRuntimeSnapshot);
     }
 
     let mut party_members = BTreeSet::new();
@@ -3171,6 +3571,30 @@ struct ItemInstance {
 }
 
 #[derive(Clone, Debug)]
+struct LootTable {
+    id: String,
+    digest_sha256: String,
+    guaranteed: Vec<LootGuaranteedDefinition>,
+    pools: Vec<LootPoolDefinition>,
+    worst_case_units: usize,
+}
+
+#[derive(Clone, Debug)]
+struct LootSource {
+    loot_table_id: String,
+    rights: LootRightsPolicy,
+}
+
+#[derive(Clone, Debug)]
+struct RolledLootUnit {
+    prototype_id: String,
+    entry_id: String,
+    pool_id: Option<String>,
+    roll_index: u8,
+    quantity_index: u16,
+}
+
+#[derive(Clone, Debug)]
 struct Room {
     stable_id: String,
     title: String,
@@ -3252,6 +3676,19 @@ impl DeterministicRng {
         debug_assert!(minimum <= maximum);
         minimum + (self.next_u64() % (maximum - minimum + 1) as u64) as i32
     }
+
+    fn uniform_below(&mut self, upper_exclusive: u64) -> Result<u64, WorldError> {
+        if upper_exclusive == 0 {
+            return Err(WorldError::InvalidGameplayDefinition);
+        }
+        let threshold = upper_exclusive.wrapping_neg() % upper_exclusive;
+        loop {
+            let value = self.next_u64();
+            if value >= threshold {
+                return Ok(value % upper_exclusive);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3310,6 +3747,8 @@ pub enum WorldError {
     TradeTargetUnavailable,
     #[error("That item is reserved for a trade.")]
     ItemReservedForTrade,
+    #[error("That loot action is not available.")]
+    LootUnavailable,
     #[error("That trade confirmation refers to an obsolete revision.")]
     StaleTradeRevision,
     #[error("Nothing is equipped in that slot.")]
@@ -3557,6 +3996,34 @@ pub enum GameplayEvent {
         item_name: String,
         room_id: String,
     },
+    LootGenerated {
+        drop_id: LootDropId,
+        npc_id: String,
+        npc_name: String,
+        item_ids: Vec<ItemInstanceId>,
+        room_id: String,
+    },
+    LootRightsChanged {
+        item_id: ItemInstanceId,
+        room_id: String,
+        summary: String,
+    },
+    LootGenerationSuppressed {
+        drop_id: LootDropId,
+        npc_id: String,
+        npc_name: String,
+        reason: String,
+        room_id: String,
+    },
+    LootDespawned {
+        item_ids: Vec<ItemInstanceId>,
+        room_id: String,
+    },
+    LootEncounterCancelled {
+        npc_id: String,
+        npc_name: String,
+        room_id: String,
+    },
     ExperienceGained {
         character_id: CharacterId,
         character_name: String,
@@ -3714,6 +4181,13 @@ pub struct World {
     initial_item_prototypes: BTreeMap<ItemInstanceId, String>,
     item_instances: BTreeMap<ItemInstanceId, ItemInstance>,
     next_item_instance_sequence: u64,
+    item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
+    loot_tables: BTreeMap<String, LootTable>,
+    loot_sources: BTreeMap<String, LootSource>,
+    next_loot_drop_id: LootDropId,
+    loot_encounters: BTreeMap<String, LootEncounter>,
+    ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
+    party_loot_cursors: BTreeMap<u64, u64>,
     room_light: HashMap<String, LightLevel>,
     hidden_items: HashMap<String, u16>,
     hidden_npcs: HashMap<String, u16>,
@@ -3749,6 +4223,11 @@ pub struct WorldCheckpoint {
     entities: SlotMap<EntityId, Entity>,
     item_instances: BTreeMap<ItemInstanceId, ItemInstance>,
     next_item_instance_sequence: u64,
+    item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
+    next_loot_drop_id: LootDropId,
+    loot_encounters: BTreeMap<String, LootEncounter>,
+    ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
+    party_loot_cursors: BTreeMap<u64, u64>,
     npcs: BTreeMap<String, Npc>,
     character_gameplay: HashMap<CharacterId, CharacterGameplaySnapshot>,
     observer_views: HashMap<SessionId, ObserverView>,
@@ -3975,6 +4454,11 @@ impl World {
             .iter()
             .map(|(id, instance)| (id.clone(), instance.prototype_id.clone()))
             .collect();
+        let item_provenance = item_instances
+            .keys()
+            .cloned()
+            .map(|id| (id, ItemProvenance::AuthoredInitial))
+            .collect();
         let next_item_instance_sequence = item_instances
             .keys()
             .filter_map(runtime_item_sequence)
@@ -3990,6 +4474,13 @@ impl World {
             initial_item_prototypes,
             item_instances,
             next_item_instance_sequence,
+            item_provenance,
+            loot_tables: BTreeMap::new(),
+            loot_sources: BTreeMap::new(),
+            next_loot_drop_id: LootDropId(1),
+            loot_encounters: BTreeMap::new(),
+            ground_loot: BTreeMap::new(),
+            party_loot_cursors: BTreeMap::new(),
             room_light: HashMap::new(),
             hidden_items: HashMap::new(),
             hidden_npcs: HashMap::new(),
@@ -4227,6 +4718,185 @@ impl World {
         self.rng = DeterministicRng::new(seed);
     }
 
+    pub fn configure_loot(
+        &mut self,
+        mut tables: Vec<LootTableDefinition>,
+        mut sources: Vec<LootSourceDefinition>,
+    ) -> Result<(), WorldError> {
+        if tables.len() > 256 || sources.len() > 1_024 {
+            return Err(WorldError::InvalidGameplayDefinition);
+        }
+        tables.sort_by(|left, right| left.id.cmp(&right.id));
+        sources.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut compiled = BTreeMap::new();
+        let mut total_entries = 0_usize;
+        for mut table in tables {
+            if !valid_definition_id(&table.id)
+                || table.digest_sha256.len() != 64
+                || !table
+                    .digest_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || table.guaranteed.len() > 8
+                || table.pools.len() > 8
+            {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+            table
+                .guaranteed
+                .sort_by(|left, right| left.id.cmp(&right.id));
+            table.pools.sort_by(|left, right| left.id.cmp(&right.id));
+            let mut ids = BTreeSet::new();
+            let mut worst_case_units = 0_usize;
+            for guaranteed in &table.guaranteed {
+                if !ids.insert(guaranteed.id.clone())
+                    || !valid_definition_id(&guaranteed.id)
+                    || !self
+                        .item_prototypes
+                        .contains_key(&guaranteed.item_prototype_id)
+                    || !(1..=32).contains(&guaranteed.quantity)
+                {
+                    return Err(WorldError::InvalidGameplayDefinition);
+                }
+                worst_case_units = worst_case_units
+                    .checked_add(usize::from(guaranteed.quantity))
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+            }
+            for pool in &mut table.pools {
+                if !ids.insert(pool.id.clone())
+                    || !valid_definition_id(&pool.id)
+                    || !(1..=8).contains(&pool.rolls)
+                    || pool.entries.is_empty()
+                    || pool.entries.len() > 64
+                {
+                    return Err(WorldError::InvalidGameplayDefinition);
+                }
+                pool.entries.sort_by(|left, right| left.id.cmp(&right.id));
+                total_entries = total_entries
+                    .checked_add(pool.entries.len())
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+                let mut total_weight = 0_u64;
+                let mut maximum_quantity = 0_u16;
+                for entry in &pool.entries {
+                    if !ids.insert(entry.id.clone())
+                        || !valid_definition_id(&entry.id)
+                        || !(1..=1_000_000).contains(&entry.weight)
+                    {
+                        return Err(WorldError::InvalidGameplayDefinition);
+                    }
+                    total_weight = total_weight
+                        .checked_add(u64::from(entry.weight))
+                        .ok_or(WorldError::InvalidGameplayDefinition)?;
+                    match entry.kind {
+                        LootEntryKind::Item => {
+                            let prototype_id = entry
+                                .item_prototype_id
+                                .as_ref()
+                                .ok_or(WorldError::InvalidGameplayDefinition)?;
+                            let minimum = entry
+                                .min_quantity
+                                .ok_or(WorldError::InvalidGameplayDefinition)?;
+                            let maximum = entry
+                                .max_quantity
+                                .ok_or(WorldError::InvalidGameplayDefinition)?;
+                            if !self.item_prototypes.contains_key(prototype_id)
+                                || minimum == 0
+                                || minimum > maximum
+                                || maximum > 32
+                            {
+                                return Err(WorldError::InvalidGameplayDefinition);
+                            }
+                            maximum_quantity = maximum_quantity.max(maximum);
+                        }
+                        LootEntryKind::Nothing => {
+                            if entry.item_prototype_id.is_some()
+                                || entry.min_quantity.is_some()
+                                || entry.max_quantity.is_some()
+                            {
+                                return Err(WorldError::InvalidGameplayDefinition);
+                            }
+                        }
+                    }
+                }
+                if total_weight == 0 {
+                    return Err(WorldError::InvalidGameplayDefinition);
+                }
+                worst_case_units = worst_case_units
+                    .checked_add(usize::from(pool.rolls) * usize::from(maximum_quantity))
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+            }
+            if total_entries > 4_096 || worst_case_units > MAX_LOOT_UNITS_PER_RESOLUTION {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+            let id = table.id.clone();
+            if compiled
+                .insert(
+                    id.clone(),
+                    LootTable {
+                        id,
+                        digest_sha256: table.digest_sha256,
+                        guaranteed: table.guaranteed,
+                        pools: table.pools,
+                        worst_case_units,
+                    },
+                )
+                .is_some()
+            {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+        }
+        let mut compiled_sources = BTreeMap::new();
+        let mut used_tables = BTreeSet::new();
+        let mut source_ids = BTreeSet::new();
+        for source in sources {
+            if source.kind != LootSourceKind::NpcSpawn
+                || !valid_definition_id(&source.id)
+                || !source_ids.insert(source.id.clone())
+                || !valid_definition_id(&source.npc_spawn_id)
+                || !compiled.contains_key(&source.loot_table_id)
+                || !self.npcs.contains_key(&source.npc_spawn_id)
+            {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+            let combined_worst_case = self
+                .npcs
+                .get(&source.npc_spawn_id)
+                .ok_or(WorldError::InvalidGameplayDefinition)?
+                .loot_item_ids
+                .len()
+                .checked_add(
+                    compiled
+                        .get(&source.loot_table_id)
+                        .ok_or(WorldError::InvalidGameplayDefinition)?
+                        .worst_case_units,
+                )
+                .ok_or(WorldError::InvalidGameplayDefinition)?;
+            if combined_worst_case > MAX_LOOT_UNITS_PER_RESOLUTION {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+            used_tables.insert(source.loot_table_id.clone());
+            let npc_spawn_id = source.npc_spawn_id;
+            if compiled_sources
+                .insert(
+                    npc_spawn_id,
+                    LootSource {
+                        loot_table_id: source.loot_table_id,
+                        rights: source.rights,
+                    },
+                )
+                .is_some()
+            {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+        }
+        if compiled.keys().any(|id| !used_tables.contains(id)) {
+            return Err(WorldError::InvalidGameplayDefinition);
+        }
+        self.loot_tables = compiled;
+        self.loot_sources = compiled_sources;
+        Ok(())
+    }
+
     /// Allocates one durable repeatable instance without publishing it into a
     /// room or inventory. The caller must include creation/assignment in the
     /// same checkpointed durable commit before making the instance visible.
@@ -4254,6 +4924,12 @@ impl World {
                     prototype_id: prototype_id.to_owned(),
                     location: SharedItemLocation::Staged,
                     binding: ItemBinding::Unbound,
+                },
+            );
+            self.item_provenance.insert(
+                instance_id.clone(),
+                ItemProvenance::RuntimeCreated {
+                    created_tick: self.logical_tick,
                 },
             );
             return Ok(instance_id);
@@ -4311,6 +4987,11 @@ impl World {
             entities: self.entities.clone(),
             item_instances: self.item_instances.clone(),
             next_item_instance_sequence: self.next_item_instance_sequence,
+            item_provenance: self.item_provenance.clone(),
+            next_loot_drop_id: self.next_loot_drop_id,
+            loot_encounters: self.loot_encounters.clone(),
+            ground_loot: self.ground_loot.clone(),
+            party_loot_cursors: self.party_loot_cursors.clone(),
             npcs: self.npcs.clone(),
             character_gameplay: self.character_gameplay.clone(),
             observer_views: self.observer_views.clone(),
@@ -4331,6 +5012,11 @@ impl World {
         self.entities = checkpoint.entities;
         self.item_instances = checkpoint.item_instances;
         self.next_item_instance_sequence = checkpoint.next_item_instance_sequence;
+        self.item_provenance = checkpoint.item_provenance;
+        self.next_loot_drop_id = checkpoint.next_loot_drop_id;
+        self.loot_encounters = checkpoint.loot_encounters;
+        self.ground_loot = checkpoint.ground_loot;
+        self.party_loot_cursors = checkpoint.party_loot_cursors;
         self.npcs = checkpoint.npcs;
         self.character_gameplay = checkpoint.character_gameplay;
         self.observer_views = checkpoint.observer_views;
@@ -4426,6 +5112,11 @@ impl World {
             progression_flags: self.world_progression_flags.clone(),
             next_trade_id: self.next_trade_id,
             trades: self.trades.clone(),
+            next_loot_drop_id: self.next_loot_drop_id,
+            item_provenance: self.item_provenance.clone(),
+            loot_encounters: self.loot_encounters.clone(),
+            ground_loot: self.ground_loot.clone(),
+            party_loot_cursors: self.party_loot_cursors.clone(),
         }
     }
 
@@ -4613,6 +5304,18 @@ impl World {
                 },
             );
         }
+        let mut item_provenance = item_instances
+            .keys()
+            .filter(|item_id| self.initial_item_prototypes.contains_key(*item_id))
+            .cloned()
+            .map(|item_id| (item_id, ItemProvenance::AuthoredInitial))
+            .collect::<BTreeMap<_, _>>();
+        for (item_id, provenance) in &snapshot.item_provenance {
+            item_provenance.insert(item_id.clone(), provenance.clone());
+        }
+        if item_provenance.keys().ne(item_instances.keys()) {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
 
         if validate_item_graph(&item_instances, &self.item_prototypes).is_err()
             || npcs.values().any(|npc| {
@@ -4647,6 +5350,7 @@ impl World {
         };
         self.npcs = npcs;
         self.item_instances = item_instances;
+        self.item_provenance = item_provenance;
         self.next_item_instance_sequence = snapshot
             .next_item_instance_sequence
             .max(self.next_item_instance_sequence);
@@ -4658,6 +5362,10 @@ impl World {
         self.world_progression_flags = snapshot.progression_flags;
         self.next_trade_id = snapshot.next_trade_id;
         self.trades = snapshot.trades;
+        self.next_loot_drop_id = snapshot.next_loot_drop_id;
+        self.loot_encounters = snapshot.loot_encounters;
+        self.ground_loot = snapshot.ground_loot;
+        self.party_loot_cursors = snapshot.party_loot_cursors;
         self.tick_resolution_pending = false;
         self.last_view_bump = None;
         Ok(())
@@ -5251,6 +5959,7 @@ impl World {
             && (0..=max_stat_value).contains(&definition.defence)
             && definition.respawn_ticks > 0
             && loot_unique
+            && definition.loot_item_ids.len() <= MAX_LOOT_UNITS_PER_RESOLUTION
             && definition.loot_item_ids.iter().all(|item_id| {
                 self.item_instances.contains_key(item_id)
                     && (matches!(
@@ -5315,6 +6024,7 @@ impl World {
         let advanced = (|| {
             self.begin_tick()?;
             let mut events = self.cancel_expired_trades()?;
+            events.extend(self.expire_ground_loot()?);
             events.extend(self.resolve_tick_after_expiry()?);
             Ok(events)
         })();
@@ -5328,8 +6038,8 @@ impl World {
     }
 
     /// Opens a logical tick without resolving effects, respawns or combat.
-    /// The actor cancels expired trades next and then calls
-    /// `resolve_tick_after_expiry` exactly once.
+    /// The actor cancels expired trades and expires ground loot next, then
+    /// calls `resolve_tick_after_expiry` exactly once.
     pub fn begin_tick(&mut self) -> Result<(), WorldError> {
         if self.tick_resolution_pending {
             return Err(WorldError::InvalidDomainTransition);
@@ -5620,10 +6330,15 @@ impl World {
                 state.statuses.clear();
             }
             if collapsed {
+                let mut released_npcs = Vec::new();
                 for npc in self.npcs.values_mut() {
                     if npc.engaged_character == Some(character_id) {
                         npc.engaged_character = None;
+                        released_npcs.push(npc.stable_id.clone());
                     }
+                }
+                for npc_id in released_npcs {
+                    self.loot_encounters.remove(&npc_id);
                 }
                 if let Some(npc_id) = defeating_npc_id
                     && let Some(npc) = self.npcs.get(&npc_id)
@@ -5656,6 +6371,7 @@ impl World {
     fn resolve_npc_respawns(&mut self, tick: u64, events: &mut Vec<DomainEvent>) {
         for npc in self.npcs.values_mut() {
             if npc.respawn_at_tick.is_some_and(|respawn| respawn <= tick) {
+                self.loot_encounters.remove(&npc.stable_id);
                 npc.respawn_at_tick = None;
                 npc.health = npc.max_health;
                 npc.engaged_character = None;
@@ -5754,6 +6470,7 @@ impl World {
                     events,
                 )?;
             } else if self.npcs.contains_key(&npc_id) {
+                self.loot_encounters.remove(&npc_id);
                 let (npc_name, room_id, loot) = {
                     let npc = self.npcs.get_mut(&npc_id).ok_or(WorldError::NpcNotFound)?;
                     npc.engaged_character = None;
@@ -5813,6 +6530,7 @@ impl World {
             if let Some(npc) = self.npcs.get_mut(npc_id) {
                 npc.engaged_character = None;
             }
+            self.loot_encounters.remove(npc_id);
             return Ok(());
         };
         let character = self.character(session)?;
@@ -5837,6 +6555,7 @@ impl World {
             if let Some(npc) = self.npcs.get_mut(npc_id) {
                 npc.engaged_character = None;
             }
+            self.loot_encounters.remove(npc_id);
             return Ok(());
         }
 
@@ -6081,6 +6800,7 @@ impl World {
             if let Some(npc) = self.npcs.get_mut(npc_id) {
                 npc.engaged_character = None;
             }
+            self.loot_encounters.remove(npc_id);
             events.push(DomainEvent::Gameplay {
                 event: GameplayEvent::CharacterDefeated {
                     character_id,
@@ -6091,6 +6811,201 @@ impl World {
                     room_id,
                 },
             });
+        }
+        Ok(())
+    }
+
+    fn prune_consumed_runtime_items(&mut self) -> Result<(), WorldError> {
+        let reserved = self.reserved_item_ids()?;
+        let parents = self
+            .item_instances
+            .values()
+            .filter_map(|instance| match &instance.location {
+                SharedItemLocation::Contained(parent) => Some(parent.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let removable = self
+            .item_instances
+            .iter()
+            .filter_map(|(item_id, instance)| {
+                (runtime_item_sequence(item_id).is_some()
+                    && matches!(instance.location, SharedItemLocation::Consumed)
+                    && !self.initial_item_prototypes.contains_key(item_id)
+                    && !self.ground_loot.contains_key(item_id)
+                    && !reserved.contains(item_id)
+                    && !parents.contains(item_id))
+                .then_some(item_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for item_id in removable {
+            self.item_instances.remove(&item_id);
+            self.item_provenance.remove(&item_id);
+        }
+        Ok(())
+    }
+
+    fn roll_loot_table(
+        &mut self,
+        table_id: &str,
+    ) -> Result<(LootTable, Vec<RolledLootUnit>), WorldError> {
+        let table = self
+            .loot_tables
+            .get(table_id)
+            .cloned()
+            .ok_or(WorldError::InvalidGameplayDefinition)?;
+        let mut units = Vec::with_capacity(table.worst_case_units);
+        for guaranteed in &table.guaranteed {
+            for quantity_index in 0..guaranteed.quantity {
+                units.push(RolledLootUnit {
+                    prototype_id: guaranteed.item_prototype_id.clone(),
+                    entry_id: guaranteed.id.clone(),
+                    pool_id: None,
+                    roll_index: 0,
+                    quantity_index,
+                });
+            }
+        }
+        for pool in &table.pools {
+            let total_weight = pool.entries.iter().try_fold(0_u64, |total, entry| {
+                total
+                    .checked_add(u64::from(entry.weight))
+                    .ok_or(WorldError::InvalidGameplayDefinition)
+            })?;
+            for roll_index in 0..pool.rolls {
+                let selected = self.rng.uniform_below(total_weight)?;
+                let mut cumulative = 0_u64;
+                let entry = pool
+                    .entries
+                    .iter()
+                    .find(|entry| {
+                        cumulative = cumulative.saturating_add(u64::from(entry.weight));
+                        selected < cumulative
+                    })
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+                if entry.kind == LootEntryKind::Nothing {
+                    continue;
+                }
+                let minimum = entry
+                    .min_quantity
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+                let maximum = entry
+                    .max_quantity
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+                let width = u64::from(maximum - minimum) + 1;
+                let quantity = minimum
+                    + u16::try_from(self.rng.uniform_below(width)?)
+                        .map_err(|_| WorldError::InvalidGameplayDefinition)?;
+                for quantity_index in 0..quantity {
+                    units.push(RolledLootUnit {
+                        prototype_id: entry
+                            .item_prototype_id
+                            .clone()
+                            .ok_or(WorldError::InvalidGameplayDefinition)?,
+                        entry_id: entry.id.clone(),
+                        pool_id: Some(pool.id.clone()),
+                        roll_index,
+                        quantity_index,
+                    });
+                }
+            }
+        }
+        if units.len() > MAX_LOOT_UNITS_PER_RESOLUTION {
+            return Err(WorldError::InvalidGameplayDefinition);
+        }
+        Ok((table, units))
+    }
+
+    fn final_loot_cohort(&self, encounter: &LootEncounter, room_id: &str) -> Vec<CharacterId> {
+        let mut cohort = vec![encounter.initiator];
+        if let Some(party_id) = encounter.party_id
+            && let Some(party) = self.adventure.parties.get(&party_id)
+            && party.members.contains(&encounter.initiator)
+        {
+            for member in encounter
+                .cohort
+                .iter()
+                .copied()
+                .filter(|member| *member != encounter.initiator)
+            {
+                let eligible = party.members.contains(&member)
+                    && self
+                        .session_for_character(member)
+                        .and_then(|session| self.character(session).ok())
+                        .and_then(|character| {
+                            room_checked(&self.entities, character.location)
+                                .ok()
+                                .map(|room| room.stable_id == room_id)
+                        })
+                        .unwrap_or(false)
+                    && self.character_gameplay.get(&member).is_some_and(|state| {
+                        state.vitals.health > 0 && state.recovery_at_tick.is_none()
+                    });
+                if eligible {
+                    cohort.push(member);
+                }
+            }
+        }
+        cohort.sort_unstable();
+        cohort.dedup();
+        cohort
+    }
+
+    fn reserve_ground_loot(
+        &mut self,
+        drop_id: LootDropId,
+        roots: &[ItemInstanceId],
+        encounter: &LootEncounter,
+        rights: LootRightsPolicy,
+        room_id: &str,
+        tick: u64,
+    ) -> Result<(), WorldError> {
+        let cohort = self.final_loot_cohort(encounter, room_id);
+        let round_robin_party = encounter.party_id.filter(|party_id| {
+            rights == LootRightsPolicy::PartyRoundRobin
+                && cohort.len() > 1
+                && self.adventure.parties.contains_key(party_id)
+        });
+        let mut cursor = round_robin_party
+            .and_then(|party_id| self.party_loot_cursors.get(&party_id).copied())
+            .unwrap_or(0);
+        for root_item_id in roots {
+            if self.ground_loot.len() >= MAX_GROUND_LOOT_RESERVATIONS {
+                return Err(WorldError::InvalidDomainTransition);
+            }
+            let beneficiary = if round_robin_party.is_some() {
+                let index = usize::try_from(cursor % u64::try_from(cohort.len()).unwrap_or(1))
+                    .map_err(|_| WorldError::InvalidDomainTransition)?;
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or(WorldError::InvalidDomainTransition)?;
+                Some(cohort[index])
+            } else {
+                Some(encounter.initiator)
+            };
+            self.ground_loot.insert(
+                root_item_id.clone(),
+                GroundLootReservation {
+                    drop_id,
+                    root_item_id: root_item_id.clone(),
+                    room_id: room_id.to_owned(),
+                    cohort: cohort.clone(),
+                    beneficiary,
+                    passed: BTreeSet::new(),
+                    created_tick: tick,
+                    claim_until_tick: tick
+                        .checked_add(LOOT_EXCLUSIVE_TICKS)
+                        .ok_or(WorldError::InvalidDomainTransition)?,
+                    despawn_at_tick: tick
+                        .checked_add(LOOT_DESPAWN_TICKS)
+                        .ok_or(WorldError::InvalidDomainTransition)?,
+                },
+            );
+        }
+        if let Some(party_id) = round_robin_party
+            && cursor > 0
+        {
+            self.party_loot_cursors.insert(party_id, cursor);
         }
         Ok(())
     }
@@ -6128,21 +7043,196 @@ impl World {
                 room_id: room_id.to_owned(),
             },
         });
-        for item_id in loot {
-            if self.item_location(&item_id)
-                == Some(&SharedItemLocation::HeldByNpc(npc_id.to_owned()))
-            {
-                self.set_item_location(&item_id, SharedItemLocation::Room(room_id.to_owned()))?;
-                let item_name = self.item_prototype_for(&item_id)?.name.clone();
+        let encounter = self
+            .loot_encounters
+            .remove(npc_id)
+            .unwrap_or_else(|| LootEncounter {
+                npc_spawn_id: npc_id.to_owned(),
+                initiator: character_id,
+                party_id: None,
+                cohort: vec![character_id],
+                room_id: room_id.to_owned(),
+                started_tick: tick,
+            });
+        let mut loot = loot;
+        loot.sort();
+        let fixed_candidates = loot
+            .into_iter()
+            .filter(|item_id| {
+                self.item_location(item_id)
+                    == Some(&SharedItemLocation::HeldByNpc(npc_id.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        let source = self.loot_sources.get(npc_id).cloned();
+        if source.is_some() || !fixed_candidates.is_empty() {
+            self.prune_consumed_runtime_items()?;
+            let drop_id = self.next_loot_drop_id;
+            self.next_loot_drop_id = LootDropId(
+                drop_id
+                    .0
+                    .checked_add(1)
+                    .ok_or(WorldError::InvalidDomainTransition)?,
+            );
+            // Roll before any capacity decision. A rejected drop therefore
+            // advances the deterministic RNG and durable drop identity exactly
+            // as an admitted drop would.
+            let rolled = source
+                .as_ref()
+                .map(|source| self.roll_loot_table(&source.loot_table_id))
+                .transpose()?;
+            let rights = source
+                .as_ref()
+                .map_or(LootRightsPolicy::CreditedCharacter, |source| source.rights);
+            let mut fixed_suppressed = 0_usize;
+            for item_id in fixed_candidates {
+                let checkpoint = self.checkpoint();
+                let admitted = if self.ground_loot.len() < MAX_GROUND_LOOT_RESERVATIONS {
+                    self.set_item_location(&item_id, SharedItemLocation::Room(room_id.to_owned()))?;
+                    self.reserve_ground_loot(
+                        drop_id,
+                        std::slice::from_ref(&item_id),
+                        &encounter,
+                        rights,
+                        room_id,
+                        tick,
+                    )?;
+                    let fits = serde_json::to_vec(&self.runtime_snapshot())
+                        .map_err(|_| WorldError::InvalidDomainTransition)?
+                        .len()
+                        <= MAX_WORLD_RUNTIME_SNAPSHOT_BYTES;
+                    if !fits {
+                        self.restore_checkpoint(checkpoint);
+                    }
+                    fits
+                } else {
+                    false
+                };
+                if admitted {
+                    let item_name = self.item_prototype_for(&item_id)?.name.clone();
+                    events.push(DomainEvent::Gameplay {
+                        event: GameplayEvent::LootDropped {
+                            npc_id: npc_id.to_owned(),
+                            npc_name: npc_name.clone(),
+                            item_id,
+                            item_name,
+                            room_id: room_id.to_owned(),
+                        },
+                    });
+                } else {
+                    self.set_item_location(&item_id, SharedItemLocation::Staged)?;
+                    fixed_suppressed = fixed_suppressed.saturating_add(1);
+                }
+            }
+            if fixed_suppressed > 0 {
                 events.push(DomainEvent::Gameplay {
-                    event: GameplayEvent::LootDropped {
+                    event: GameplayEvent::LootGenerationSuppressed {
+                        drop_id,
                         npc_id: npc_id.to_owned(),
                         npc_name: npc_name.clone(),
-                        item_id,
-                        item_name,
+                        reason: format!(
+                            "capacity: {fixed_suppressed} authored fixed root(s) tombstoned"
+                        ),
                         room_id: room_id.to_owned(),
                     },
                 });
+            }
+            if let Some((table, units)) = rolled {
+                let capacity_suppressed = !units.is_empty()
+                    && (self
+                        .item_instances
+                        .len()
+                        .checked_add(table.worst_case_units)
+                        .is_none_or(|total| total > MAX_ITEM_INSTANCES)
+                        || self
+                            .ground_loot
+                            .len()
+                            .checked_add(units.len())
+                            .is_none_or(|total| total > MAX_GROUND_LOOT_RESERVATIONS));
+                if capacity_suppressed {
+                    events.push(DomainEvent::Gameplay {
+                        event: GameplayEvent::LootGenerationSuppressed {
+                            drop_id,
+                            npc_id: npc_id.to_owned(),
+                            npc_name: npc_name.clone(),
+                            reason: "capacity".into(),
+                            room_id: room_id.to_owned(),
+                        },
+                    });
+                } else if !units.is_empty() {
+                    // This checkpoint is intentionally after RNG/drop-id and
+                    // after all admitted fixed roots. Restoring it suppresses
+                    // the complete random batch without rewinding either.
+                    let checkpoint = self.checkpoint();
+                    let mut generated_events = Vec::new();
+                    let mut generated_roots = Vec::with_capacity(units.len());
+                    for unit in units {
+                        let item_id = self.create_staged_item_instance(&unit.prototype_id)?;
+                        self.set_item_location(
+                            &item_id,
+                            SharedItemLocation::Room(room_id.to_owned()),
+                        )?;
+                        self.item_provenance.insert(
+                            item_id.clone(),
+                            ItemProvenance::NpcLoot {
+                                drop_id,
+                                npc_spawn_id: npc_id.to_owned(),
+                                loot_table_id: table.id.clone(),
+                                table_digest_sha256: table.digest_sha256.clone(),
+                                entry_id: unit.entry_id,
+                                pool_id: unit.pool_id,
+                                roll_index: unit.roll_index,
+                                quantity_index: unit.quantity_index,
+                                generated_tick: tick,
+                            },
+                        );
+                        let item_name = self.item_prototype_for(&item_id)?.name.clone();
+                        generated_roots.push(item_id.clone());
+                        generated_events.push(DomainEvent::Gameplay {
+                            event: GameplayEvent::LootDropped {
+                                npc_id: npc_id.to_owned(),
+                                npc_name: npc_name.clone(),
+                                item_id,
+                                item_name,
+                                room_id: room_id.to_owned(),
+                            },
+                        });
+                    }
+                    self.reserve_ground_loot(
+                        drop_id,
+                        &generated_roots,
+                        &encounter,
+                        rights,
+                        room_id,
+                        tick,
+                    )?;
+                    let fits = serde_json::to_vec(&self.runtime_snapshot())
+                        .map_err(|_| WorldError::InvalidDomainTransition)?
+                        .len()
+                        <= MAX_WORLD_RUNTIME_SNAPSHOT_BYTES;
+                    if fits {
+                        generated_events.push(DomainEvent::Gameplay {
+                            event: GameplayEvent::LootGenerated {
+                                drop_id,
+                                npc_id: npc_id.to_owned(),
+                                npc_name: npc_name.clone(),
+                                item_ids: generated_roots,
+                                room_id: room_id.to_owned(),
+                            },
+                        });
+                        events.extend(generated_events);
+                    } else {
+                        self.restore_checkpoint(checkpoint);
+                        events.push(DomainEvent::Gameplay {
+                            event: GameplayEvent::LootGenerationSuppressed {
+                                drop_id,
+                                npc_id: npc_id.to_owned(),
+                                npc_name: npc_name.clone(),
+                                reason: "snapshot_bytes".into(),
+                                room_id: room_id.to_owned(),
+                            },
+                        });
+                    }
+                }
             }
         }
         let total = {
@@ -6207,6 +7297,14 @@ impl World {
     /// snapshots are the authority for locations.
     pub fn replay_persisted_event(&mut self, event: &DomainEvent) -> Result<(), WorldError> {
         match event {
+            DomainEvent::Gameplay {
+                event:
+                    GameplayEvent::LootGenerated { .. }
+                    | GameplayEvent::LootRightsChanged { .. }
+                    | GameplayEvent::LootGenerationSuppressed { .. }
+                    | GameplayEvent::LootDespawned { .. }
+                    | GameplayEvent::LootEncounterCancelled { .. },
+            } => Err(WorldError::InvalidDomainTransition),
             DomainEvent::CharacterMoved { .. }
             | DomainEvent::CharacterRelocated { .. }
             | DomainEvent::Gameplay { .. }
@@ -6841,12 +7939,17 @@ impl World {
                 // pending effects as well, so damage-over-time cannot award
                 // progress only in memory after the durable character is no
                 // longer part of the tick commit.
+                let mut abandoned_encounters = Vec::new();
                 for npc in self.npcs.values_mut() {
                     if npc.engaged_character == Some(character_id) {
                         npc.engaged_character = None;
+                        abandoned_encounters.push(npc.stable_id.clone());
                     }
                     npc.statuses
                         .retain(|status| status.source_character_id != Some(character_id));
+                }
+                for npc_id in abandoned_encounters {
+                    self.loot_encounters.remove(&npc_id);
                 }
             }
             self.entities.remove(character);
@@ -6989,7 +8092,29 @@ impl World {
             from_room_id,
             to_room_id: to_room_id.clone(),
         };
-        self.bump_view_revisions(&event)?;
+        let mut events = vec![event];
+        let mut released_npcs = Vec::new();
+        for npc in self.npcs.values_mut() {
+            if npc.engaged_character == Some(actor_id) {
+                npc.engaged_character = None;
+                released_npcs.push((
+                    npc.stable_id.clone(),
+                    npc.name.clone(),
+                    npc.spawn_room_id.clone(),
+                ));
+            }
+        }
+        for (npc_id, npc_name, room_id) in released_npcs {
+            self.loot_encounters.remove(&npc_id);
+            events.push(DomainEvent::Gameplay {
+                event: GameplayEvent::LootEncounterCancelled {
+                    npc_id,
+                    npc_name,
+                    room_id,
+                },
+            });
+        }
+        self.bump_view_revisions_for_events(&events)?;
         self.observer_views
             .get_mut(&moving)
             .ok_or(WorldError::InvalidEntity)?
@@ -7001,7 +8126,7 @@ impl World {
             trade_contents: None,
             output: Some(output.to_owned()),
             changed_character: Some(self.character_snapshot(moving)?),
-            domain_events: vec![event],
+            domain_events: events,
         })
     }
 
@@ -7032,10 +8157,15 @@ impl World {
         gameplay.ability_cooldowns.clear();
         gameplay.ability_global_ready_tick = self.logical_tick;
         gameplay.recovery_at_tick = None;
+        let mut released_npcs = Vec::new();
         for npc in self.npcs.values_mut() {
             if npc.engaged_character == Some(character_id) {
                 npc.engaged_character = None;
+                released_npcs.push(npc.stable_id.clone());
             }
+        }
+        for npc_id in released_npcs {
+            self.loot_encounters.remove(&npc_id);
         }
         self.revision = self.revision.wrapping_add(1).max(1);
         let event = DomainEvent::Gameplay {
@@ -7084,6 +8214,140 @@ impl World {
                 Ok(())
             }
             _ => Err(WorldError::InvalidEntity),
+        }
+    }
+
+    fn apply_loot(
+        &mut self,
+        session: SessionId,
+        action: LootAction,
+    ) -> Result<ActionOutcome, WorldError> {
+        let character = self.character(session)?;
+        let actor_id = character.id;
+        let room_id = room_checked(&self.entities, character.location)?
+            .stable_id
+            .clone();
+        match action {
+            LootAction::Status => {
+                const MAX_STATUS_ROWS: usize = 20;
+                let observer = self.observer(session)?;
+                let mut claims = self
+                    .ground_loot
+                    .iter()
+                    .filter(|(_, reservation)| {
+                        reservation.room_id == room_id
+                            && reservation.claim_until_tick > self.logical_tick
+                            && reservation.beneficiary == Some(actor_id)
+                    })
+                    .collect::<Vec<_>>();
+                claims.sort_by(|(left, _), (right, _)| left.cmp(right));
+                let omitted = claims.len().saturating_sub(MAX_STATUS_ROWS);
+                let mut output = String::from("Your reserved loot in this room:\r\n");
+                if claims.is_empty() {
+                    output.push_str("- none\r\n");
+                } else {
+                    for (item_id, reservation) in claims.into_iter().take(MAX_STATUS_ROWS) {
+                        let item = self.item_prototype_for(item_id)?;
+                        let selector = opaque_id(observer.salt, "item", item_id.as_str());
+                        let remaining = reservation
+                            .claim_until_tick
+                            .saturating_sub(self.logical_tick);
+                        output.push_str(&format!(
+                            "- {} ({} ticks; ref {})\r\n",
+                            item.name, remaining, selector
+                        ));
+                    }
+                    if omitted > 0 {
+                        output.push_str(&format!("- and {omitted} more\r\n"));
+                    }
+                }
+                Ok(ActionOutcome {
+                    scene: self.scene_for(session)?,
+                    container_contents: None,
+                    trade_contents: None,
+                    output: Some(output),
+                    changed_character: None,
+                    domain_events: Vec::new(),
+                })
+            }
+            LootAction::Pass(query) => {
+                let candidates = self
+                    .ground_loot
+                    .iter()
+                    .filter_map(|(item_id, reservation)| {
+                        (reservation.room_id == room_id
+                            && reservation.claim_until_tick > self.logical_tick
+                            && (reservation.beneficiary == Some(actor_id)
+                                || reservation.passed.contains(&actor_id)))
+                        .then_some(item_id)
+                    });
+                let item_id = resolve_item_query(
+                    &self.item_instances,
+                    &self.item_prototypes,
+                    candidates,
+                    &query,
+                    self.observer(session)?.salt,
+                )
+                .map_err(|_| WorldError::LootUnavailable)?;
+                let reservation = self
+                    .ground_loot
+                    .get(&item_id)
+                    .cloned()
+                    .ok_or(WorldError::LootUnavailable)?;
+                let item_name = self.item_prototype_for(&item_id)?.name.clone();
+                if reservation.passed.contains(&actor_id) {
+                    return Ok(ActionOutcome {
+                        scene: self.scene_for(session)?,
+                        container_contents: None,
+                        trade_contents: None,
+                        output: Some(format!("You have already passed on {item_name}.\r\n")),
+                        changed_character: None,
+                        domain_events: Vec::new(),
+                    });
+                }
+                if reservation.beneficiary != Some(actor_id) {
+                    return Err(WorldError::LootUnavailable);
+                }
+                let actor_index = reservation
+                    .cohort
+                    .iter()
+                    .position(|member| *member == actor_id)
+                    .ok_or(WorldError::LootUnavailable)?;
+                let mut passed = reservation.passed.clone();
+                passed.insert(actor_id);
+                let beneficiary = (1..=reservation.cohort.len())
+                    .map(|offset| {
+                        reservation.cohort[(actor_index + offset) % reservation.cohort.len()]
+                    })
+                    .find(|candidate| !passed.contains(candidate));
+                let claim = self
+                    .ground_loot
+                    .get_mut(&item_id)
+                    .ok_or(WorldError::LootUnavailable)?;
+                claim.passed = passed;
+                claim.beneficiary = beneficiary;
+                self.revision = self.revision.wrapping_add(1).max(1);
+                let summary = beneficiary.map_or_else(
+                    || format!("{item_name} is now public loot."),
+                    |_| format!("The reservation for {item_name} passes to the next member."),
+                );
+                let event = DomainEvent::Gameplay {
+                    event: GameplayEvent::LootRightsChanged {
+                        item_id,
+                        room_id,
+                        summary: summary.clone(),
+                    },
+                };
+                self.bump_view_revisions(&event)?;
+                Ok(ActionOutcome {
+                    scene: self.scene_for(session)?,
+                    container_contents: None,
+                    trade_contents: None,
+                    output: Some(format!("{summary}\r\n")),
+                    changed_character: None,
+                    domain_events: vec![event],
+                })
+            }
         }
     }
 
@@ -7994,6 +9258,7 @@ impl World {
                     | PlayerAction::Inventory
                     | PlayerAction::Examine(_)
                     | PlayerAction::Contents { .. }
+                    | PlayerAction::Loot(_)
                     | PlayerAction::Party(_)
                     | PlayerAction::Quest(_)
                     | PlayerAction::Economy(EconomyAction::Balance)
@@ -8010,6 +9275,7 @@ impl World {
                     | PlayerAction::Inventory
                     | PlayerAction::Examine(_)
                     | PlayerAction::Contents { .. }
+                    | PlayerAction::Loot(_)
                     | PlayerAction::Weather
                     | PlayerAction::Time
             )
@@ -8063,6 +9329,7 @@ impl World {
                 selection,
                 recipient,
             } => self.give_item(session, &selection, &recipient),
+            PlayerAction::Loot(action) => self.apply_loot(session, action),
             PlayerAction::Trade(action) => self.apply_trade(session, action),
             PlayerAction::Attack(query) => self.start_combat(session, &query),
             PlayerAction::Ability { ability_id, target } => {
@@ -8139,7 +9406,29 @@ impl World {
                     to_room_id: to_room_id.clone(),
                     direction,
                 };
-                self.bump_view_revisions(&event)?;
+                let mut events = vec![event];
+                let mut released_npcs = Vec::new();
+                for npc in self.npcs.values_mut() {
+                    if npc.engaged_character == Some(actor_id) {
+                        npc.engaged_character = None;
+                        released_npcs.push((
+                            npc.stable_id.clone(),
+                            npc.name.clone(),
+                            npc.spawn_room_id.clone(),
+                        ));
+                    }
+                }
+                for (npc_id, npc_name, room_id) in released_npcs {
+                    self.loot_encounters.remove(&npc_id);
+                    events.push(DomainEvent::Gameplay {
+                        event: GameplayEvent::LootEncounterCancelled {
+                            npc_id,
+                            npc_name,
+                            room_id,
+                        },
+                    });
+                }
+                self.bump_view_revisions_for_events(&events)?;
                 self.observer_views
                     .get_mut(&session)
                     .ok_or(WorldError::InvalidEntity)?
@@ -8151,7 +9440,7 @@ impl World {
                     trade_contents: None,
                     output: None,
                     changed_character: Some(self.character_snapshot(session)?),
-                    domain_events: vec![event],
+                    domain_events: events,
                 })
             }
         }
@@ -8159,6 +9448,7 @@ impl World {
 
     pub fn scene_for(&self, session: SessionId) -> Result<SceneView, WorldError> {
         let current_room = room_checked(&self.entities, self.character(session)?.location)?;
+        let character_id = self.character(session)?.id;
         let observer = self.observer(session)?;
         let visual_scene = self.can_receive_visual_scene(session)?;
         let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
@@ -8198,70 +9488,120 @@ impl World {
             .flatten()
             .cloned()
             .collect::<Vec<_>>();
-        let mut items = derive_stack_groups(
-            &self.item_instances,
-            &self.item_prototypes,
-            visible_item_ids.iter(),
-        )?
-        .into_iter()
-        .map(|group| {
-            let item = self
-                .item_prototypes
-                .get(&group.prototype_id)
-                .ok_or(WorldError::InvalidEntity)?;
-            let selector = group.members.first().ok_or(WorldError::InvalidEntity)?;
-            let view_item_id = opaque_id(observer.salt, "item", selector.as_str());
-            let quantity =
-                u16::try_from(group.members.len()).map_err(|_| WorldError::InvalidEntity)?;
-            let total_weight_grams = group.members.iter().try_fold(0_u64, |total, item_id| {
-                total
-                    .checked_add(item_graph.subtree_weight(item_id)?)
-                    .ok_or(WorldError::InvalidEntity)
-            })?;
-            let mut actions = vec![
-                SceneAction {
+        let mut item_buckets = BTreeMap::<(u8, Option<u64>), Vec<ItemInstanceId>>::new();
+        for item_id in visible_item_ids {
+            let key = match self.scene_loot_access(character_id, &item_id)? {
+                None => (0, None),
+                Some(SceneLootAccessView {
+                    access: LootAccessView::Yours,
+                    expires_in_ticks,
+                }) => (1, expires_in_ticks),
+                Some(SceneLootAccessView {
+                    access: LootAccessView::Reserved,
+                    expires_in_ticks,
+                }) => (2, expires_in_ticks),
+            };
+            item_buckets.entry(key).or_default().push(item_id);
+        }
+        let mut visible_groups = Vec::new();
+        for ((access, expires_in_ticks), item_ids) in item_buckets {
+            let loot = match access {
+                0 => None,
+                1 => Some(SceneLootAccessView {
+                    access: LootAccessView::Yours,
+                    expires_in_ticks,
+                }),
+                2 => Some(SceneLootAccessView {
+                    access: LootAccessView::Reserved,
+                    expires_in_ticks,
+                }),
+                _ => return Err(WorldError::InvalidEntity),
+            };
+            for group in
+                derive_stack_groups(&self.item_instances, &self.item_prototypes, item_ids.iter())?
+            {
+                visible_groups.push((group, loot.clone()));
+            }
+        }
+        let mut items = visible_groups
+            .into_iter()
+            .map(|(group, loot)| {
+                let item = self
+                    .item_prototypes
+                    .get(&group.prototype_id)
+                    .ok_or(WorldError::InvalidEntity)?;
+                let selector = group.members.first().ok_or(WorldError::InvalidEntity)?;
+                let view_item_id = opaque_id(observer.salt, "item", selector.as_str());
+                let quantity =
+                    u16::try_from(group.members.len()).map_err(|_| WorldError::InvalidEntity)?;
+                let total_weight_grams =
+                    group.members.iter().try_fold(0_u64, |total, item_id| {
+                        total
+                            .checked_add(item_graph.subtree_weight(item_id)?)
+                            .ok_or(WorldError::InvalidEntity)
+                    })?;
+                let mut actions = vec![SceneAction {
                     label: "Examine".into(),
                     command: format!("examine {view_item_id}"),
-                },
-                SceneAction {
-                    label: "Take".into(),
-                    command: format!("take {view_item_id}"),
-                },
-            ];
-            if item.container.is_some() {
-                actions.push(SceneAction {
-                    label: "Contents".into(),
-                    command: format!("contents {view_item_id}"),
-                });
-            }
-            Ok(SceneItem {
-                id: view_item_id.clone(),
-                label: item.name.clone(),
-                description: item.description.clone(),
-                rarity: item.rarity.as_str().into(),
-                item_level: item.item_level,
-                weight_grams: item.weight_grams,
-                quantity,
-                stack_slots: stack_slots(item, group.members.len())?,
-                total_weight_grams,
-                transfer_policy: item.transfer_policy,
-                bound_to_you: false,
-                container_capacity: item
-                    .container
-                    .as_ref()
-                    .map(|_| {
-                        container_usage(
-                            selector,
-                            &self.item_instances,
-                            &self.item_prototypes,
-                            &item_graph,
-                        )
-                    })
-                    .transpose()?,
-                actions,
+                }];
+                if !matches!(
+                    loot.as_ref().map(|loot| loot.access),
+                    Some(LootAccessView::Reserved)
+                ) {
+                    actions.push(SceneAction {
+                        label: "Take".into(),
+                        command: format!("take {view_item_id}"),
+                    });
+                }
+                if matches!(
+                    loot.as_ref().map(|loot| loot.access),
+                    Some(LootAccessView::Yours)
+                ) {
+                    actions.push(SceneAction {
+                        label: "Pass".into(),
+                        command: format!("loot pass {view_item_id}"),
+                    });
+                }
+                if item.container.is_some()
+                    && !matches!(
+                        loot.as_ref().map(|loot| loot.access),
+                        Some(LootAccessView::Reserved)
+                    )
+                {
+                    actions.push(SceneAction {
+                        label: "Contents".into(),
+                        command: format!("contents {view_item_id}"),
+                    });
+                }
+                Ok(SceneItem {
+                    id: view_item_id.clone(),
+                    label: item.name.clone(),
+                    description: item.description.clone(),
+                    rarity: item.rarity.as_str().into(),
+                    item_level: item.item_level,
+                    weight_grams: item.weight_grams,
+                    quantity,
+                    stack_slots: stack_slots(item, group.members.len())?,
+                    total_weight_grams,
+                    transfer_policy: item.transfer_policy,
+                    bound_to_you: false,
+                    container_capacity: item
+                        .container
+                        .as_ref()
+                        .map(|_| {
+                            container_usage(
+                                selector,
+                                &self.item_instances,
+                                &self.item_prototypes,
+                                &item_graph,
+                            )
+                        })
+                        .transpose()?,
+                    loot,
+                    actions,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, WorldError>>()?;
+            .collect::<Result<Vec<_>, WorldError>>()?;
         items.sort_by(|left, right| {
             left.label
                 .cmp(&right.label)
@@ -9307,6 +10647,8 @@ impl World {
         event: AdventureEvent,
     ) -> Result<ActionOutcome, WorldError> {
         let event = DomainEvent::Adventure { event };
+        self.party_loot_cursors
+            .retain(|party_id, _| self.adventure.parties.contains_key(party_id));
         self.revision = self.revision.wrapping_add(1).max(1);
         self.bump_view_revisions(&event)?;
         Ok(ActionOutcome {
@@ -9380,6 +10722,61 @@ impl World {
             .map(|character| character.name.clone())
     }
 
+    fn freeze_loot_encounter(
+        &mut self,
+        npc_id: &str,
+        character_id: CharacterId,
+        room_id: &str,
+    ) -> Result<(), WorldError> {
+        if self.loot_encounters.contains_key(npc_id) {
+            return Ok(());
+        }
+        if self.loot_encounters.len() >= MAX_LOOT_ENCOUNTERS {
+            return Err(WorldError::LootUnavailable);
+        }
+        let party_id = self.party_for_member(character_id);
+        let mut peers = Vec::new();
+        if let Some(party_id) = party_id {
+            let party = self
+                .adventure
+                .parties
+                .get(&party_id)
+                .ok_or(WorldError::PartyUnavailable)?;
+            for connected in self.connected_characters()? {
+                if connected.character_id != character_id
+                    && connected.room_id == room_id
+                    && party.members.contains(&connected.character_id)
+                    && self
+                        .character_gameplay
+                        .get(&connected.character_id)
+                        .is_some_and(|state| {
+                            state.vitals.health > 0 && state.recovery_at_tick.is_none()
+                        })
+                {
+                    peers.push(connected.character_id);
+                }
+            }
+        }
+        peers.sort_unstable();
+        peers.dedup();
+        peers.truncate(5);
+        let mut cohort = peers;
+        cohort.push(character_id);
+        cohort.sort_unstable();
+        self.loot_encounters.insert(
+            npc_id.to_owned(),
+            LootEncounter {
+                npc_spawn_id: npc_id.to_owned(),
+                initiator: character_id,
+                party_id,
+                cohort,
+                room_id: room_id.to_owned(),
+                started_tick: self.logical_tick,
+            },
+        );
+        Ok(())
+    }
+
     fn start_combat(
         &mut self,
         session: SessionId,
@@ -9405,15 +10802,19 @@ impl World {
             .stable_id
             .clone();
         let npc_id = self.resolve_visible_npc(session, query)?;
-        let npc = self.npcs.get_mut(&npc_id).ok_or(WorldError::NpcNotFound)?;
-        if !npc.alive()
-            || npc.spawn_room_id != room_id
-            || npc
-                .engaged_character
-                .is_some_and(|engaged| engaged != character_id)
         {
-            return Err(WorldError::CombatUnavailable);
+            let npc = self.npcs.get(&npc_id).ok_or(WorldError::NpcNotFound)?;
+            if !npc.alive()
+                || npc.spawn_room_id != room_id
+                || npc
+                    .engaged_character
+                    .is_some_and(|engaged| engaged != character_id)
+            {
+                return Err(WorldError::CombatUnavailable);
+            }
         }
+        self.freeze_loot_encounter(&npc_id, character_id, &room_id)?;
+        let npc = self.npcs.get_mut(&npc_id).ok_or(WorldError::NpcNotFound)?;
         npc.engaged_character = Some(character_id);
         let npc_name = npc.name.clone();
         let event = DomainEvent::Gameplay {
@@ -9569,6 +10970,7 @@ impl World {
             if self.npcs[npc_id].statuses.len() + target_statuses > MAX_ACTIVE_STATUSES {
                 return Err(WorldError::AbilityUnavailable);
             }
+            self.freeze_loot_encounter(npc_id, character_id, &room_id)?;
         }
 
         let npc_name = npc_target
@@ -9743,10 +11145,15 @@ impl World {
             }
         };
         if collapsed {
+            let mut released_npcs = Vec::new();
             for npc in self.npcs.values_mut() {
                 if npc.engaged_character == Some(character_id) {
                     npc.engaged_character = None;
+                    released_npcs.push(npc.stable_id.clone());
                 }
+            }
+            for npc_id in released_npcs {
+                self.loot_encounters.remove(&npc_id);
             }
             events.push(DomainEvent::Gameplay {
                 event: GameplayEvent::CharacterCollapsed {
@@ -10160,8 +11567,27 @@ impl World {
         } else {
             ItemScope::Carried
         };
-        let candidates = self.item_candidates(session, scope, None)?;
-        let item_ids = self.resolve_item_selection(session, selection, candidates)?;
+        let all_candidates = self.item_candidates(session, scope, None)?;
+        let mut candidates = all_candidates.clone();
+        if take {
+            let character_id = self.character(session)?.id;
+            candidates.retain(|item_id| {
+                self.can_take_ground_loot(character_id, item_id)
+                    .unwrap_or(false)
+            });
+        }
+        let item_ids = match self.resolve_item_selection(session, selection, candidates) {
+            Ok(item_ids) => item_ids,
+            Err(_)
+                if take
+                    && self
+                        .resolve_item_selection(session, selection, all_candidates)
+                        .is_ok() =>
+            {
+                return Err(WorldError::LootUnavailable);
+            }
+            Err(error) => return Err(error),
+        };
         self.ensure_items_unreserved(&item_ids)?;
         let first_item_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
         let item = self.item_prototype_for(first_item_id)?;
@@ -10187,6 +11613,11 @@ impl World {
         self.apply_item_ownership_transitions(&mut prospective, &item_ids)?;
         self.validate_prospective_item_locations(&prospective, [actor_id])?;
         self.item_instances = prospective;
+        if take {
+            for item_id in &item_ids {
+                self.ground_loot.remove(item_id);
+            }
+        }
         self.revision = self.revision.wrapping_add(1).max(1);
         let event = if let [item_id] = item_ids.as_slice() {
             if take {
@@ -10467,11 +11898,83 @@ impl World {
         Err(WorldError::InvalidEntity)
     }
 
+    fn ground_loot_root_for(
+        &self,
+        item_id: &ItemInstanceId,
+    ) -> Result<Option<ItemInstanceId>, WorldError> {
+        let mut current = item_id;
+        for _ in 0..=MAX_CONTAINER_DEPTH {
+            if self.ground_loot.contains_key(current) {
+                return Ok(Some(current.clone()));
+            }
+            let instance = self
+                .item_instances
+                .get(current)
+                .ok_or(WorldError::InvalidEntity)?;
+            match &instance.location {
+                SharedItemLocation::Contained(parent) => current = parent,
+                _ => return Ok(None),
+            }
+        }
+        Err(WorldError::InvalidEntity)
+    }
+
+    fn loot_reservation_for_item(
+        &self,
+        item_id: &ItemInstanceId,
+    ) -> Result<Option<&GroundLootReservation>, WorldError> {
+        self.ground_loot_root_for(item_id)
+            .map(|root| root.and_then(|root| self.ground_loot.get(&root)))
+    }
+
+    fn can_take_ground_loot(
+        &self,
+        character_id: CharacterId,
+        item_id: &ItemInstanceId,
+    ) -> Result<bool, WorldError> {
+        Ok(self
+            .loot_reservation_for_item(item_id)?
+            .is_none_or(|reservation| {
+                self.logical_tick >= reservation.claim_until_tick
+                    || reservation.beneficiary.is_none()
+                    || reservation.beneficiary == Some(character_id)
+            }))
+    }
+
+    fn scene_loot_access(
+        &self,
+        character_id: CharacterId,
+        item_id: &ItemInstanceId,
+    ) -> Result<Option<SceneLootAccessView>, WorldError> {
+        let Some(reservation) = self.loot_reservation_for_item(item_id)? else {
+            return Ok(None);
+        };
+        if self.logical_tick >= reservation.claim_until_tick || reservation.beneficiary.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(if reservation.beneficiary == Some(character_id) {
+            SceneLootAccessView {
+                access: LootAccessView::Yours,
+                expires_in_ticks: Some(
+                    reservation
+                        .claim_until_tick
+                        .saturating_sub(self.logical_tick),
+                ),
+            }
+        } else {
+            SceneLootAccessView {
+                access: LootAccessView::Reserved,
+                expires_in_ticks: None,
+            }
+        }))
+    }
+
     fn resolve_accessible_container(
         &self,
         session: SessionId,
         query: &str,
     ) -> Result<ItemInstanceId, WorldError> {
+        let character_id = self.character(session)?.id;
         let candidates = self
             .item_instances
             .iter()
@@ -10480,8 +11983,13 @@ impl World {
                     .item_prototypes
                     .get(&instance.prototype_id)
                     .is_some_and(|prototype| prototype.container.is_some());
+                let reserved_descendant =
+                    matches!(&instance.location, SharedItemLocation::Contained(_))
+                        && !self.can_take_ground_loot(character_id, item_id)?;
                 self.item_accessible_as_container(session, item_id)
-                    .map(|accessible| (is_container && accessible).then_some(item_id))
+                    .map(|accessible| {
+                        (is_container && accessible && !reserved_descendant).then_some(item_id)
+                    })
             })
             .collect::<Result<Vec<_>, WorldError>>()?;
         resolve_item_query(
@@ -10503,8 +12011,11 @@ impl World {
             return Err(WorldError::GameplayUnavailable);
         }
         let container_id = self.resolve_accessible_container(session, query)?;
-        let observer = self.observer(session)?;
         let character_id = self.character(session)?.id;
+        if !self.can_take_ground_loot(character_id, &container_id)? {
+            return Err(WorldError::LootUnavailable);
+        }
+        let observer = self.observer(session)?;
         let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
         let reserved_item_ids = reserved_item_ids_with_graph(&self.trades, &item_graph)?;
         let container_reserved = reserved_item_ids.contains(&container_id);
@@ -10679,6 +12190,10 @@ impl World {
     ) -> Result<ActionOutcome, WorldError> {
         let container_id = self.resolve_accessible_container(session, container_query)?;
         self.ensure_items_unreserved(std::iter::once(&container_id))?;
+        let actor_id = self.character(session)?.id;
+        if !self.can_take_ground_loot(actor_id, &container_id)? {
+            return Err(WorldError::LootUnavailable);
+        }
         let candidates = if put {
             self.item_candidates(session, ItemScope::Carried, None)?
         } else {
@@ -10686,6 +12201,15 @@ impl World {
         };
         let item_ids = self.resolve_item_selection(session, selection, candidates)?;
         self.ensure_items_unreserved(&item_ids)?;
+        if !put
+            && item_ids.iter().any(|item_id| {
+                !self
+                    .can_take_ground_loot(actor_id, item_id)
+                    .unwrap_or(false)
+            })
+        {
+            return Err(WorldError::LootUnavailable);
+        }
         let first_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
         let item_name = self.item_prototype_for(first_id)?.name.clone();
         let character = self.character(session)?;
@@ -10770,7 +12294,8 @@ impl World {
                         matches!(location, SharedItemLocation::Carried(owner) if *owner == character.id)
                             || matches!(location, SharedItemLocation::Room(item_room) if item_room == room_id)
                             || (matches!(location, SharedItemLocation::Contained(_))
-                                && self.item_accessible_as_container(session, item_id)?)
+                                && self.item_accessible_as_container(session, item_id)?
+                                && self.can_take_ground_loot(character.id, item_id)?)
                     }
                 };
                 let visible = match location {
@@ -10780,6 +12305,7 @@ impl World {
                     SharedItemLocation::Contained(_) => {
                         scope == ItemScope::Accessible
                             && self.item_accessible_as_container(session, item_id)?
+                            && self.can_take_ground_loot(character.id, item_id)?
                     }
                     SharedItemLocation::Staged
                     | SharedItemLocation::Equipped(_, _)
@@ -11144,6 +12670,134 @@ impl World {
                 reason: TradeCancellationReason::Expired,
             })
             .collect())
+    }
+
+    pub fn loot_identity_ids(&self) -> BTreeSet<CharacterId> {
+        self.loot_encounters
+            .values()
+            .flat_map(|encounter| encounter.cohort.iter().copied())
+            .chain(
+                self.ground_loot
+                    .values()
+                    .flat_map(|reservation| reservation.cohort.iter().copied()),
+            )
+            .collect()
+    }
+
+    pub fn cancel_all_loot_encounters_for_restart(
+        &mut self,
+    ) -> Result<Vec<DomainEvent>, WorldError> {
+        let encounters = std::mem::take(&mut self.loot_encounters);
+        let mut events = Vec::with_capacity(encounters.len());
+        for (npc_id, _) in encounters {
+            let npc = self
+                .npcs
+                .get_mut(&npc_id)
+                .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+            npc.engaged_character = None;
+            npc.statuses.clear();
+            npc.ability_cooldowns.clear();
+            events.push(DomainEvent::Gameplay {
+                event: GameplayEvent::LootEncounterCancelled {
+                    npc_id,
+                    npc_name: npc.name.clone(),
+                    room_id: npc.spawn_room_id.clone(),
+                },
+            });
+        }
+        if !events.is_empty() {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(WorldError::InvalidDomainTransition)?;
+        }
+        Ok(events)
+    }
+
+    pub fn expire_ground_loot(&mut self) -> Result<Vec<DomainEvent>, WorldError> {
+        let tick = self.logical_tick;
+        let mut events = Vec::new();
+        let roots = self.ground_loot.keys().cloned().collect::<Vec<_>>();
+        for root in roots {
+            let reservation = self
+                .ground_loot
+                .get(&root)
+                .cloned()
+                .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+            if tick >= reservation.despawn_at_tick {
+                let graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+                let subtree = graph.subtree_ids(&root)?;
+                let mut preserved = BTreeSet::new();
+                for item_id in &subtree {
+                    // Legacy v1-v5 snapshots deliberately label every
+                    // restored unit as LegacySnapshot because those DTOs did
+                    // not carry provenance. Identity still tells us whether a
+                    // unit belongs to the current WorldPack. Preserve/stage
+                    // those authored identities as tombstones too, otherwise
+                    // omitting them from the next snapshot would make restore
+                    // recreate fixed NPC loot at its authored location.
+                    if self.initial_item_prototypes.contains_key(item_id)
+                        || matches!(
+                            self.item_provenance.get(item_id),
+                            Some(ItemProvenance::AuthoredInitial)
+                        )
+                    {
+                        preserved.extend(graph.subtree_ids(item_id)?);
+                    }
+                }
+                let removed = subtree
+                    .iter()
+                    .filter(|item_id| !preserved.contains(*item_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let reserved = self.reserved_item_ids()?;
+                if removed.iter().any(|item_id| reserved.contains(item_id)) {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+                let detached = preserved
+                    .iter()
+                    .filter(|item_id| {
+                        *item_id == &root
+                            || self.item_instances.get(*item_id).is_some_and(|instance| {
+                                matches!(
+                                    &instance.location,
+                                    SharedItemLocation::Contained(parent) if !preserved.contains(parent)
+                                )
+                            })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for item_id in detached {
+                    self.set_item_location(&item_id, SharedItemLocation::Staged)?;
+                }
+                for item_id in &removed {
+                    self.item_instances.remove(item_id);
+                    self.item_provenance.remove(item_id);
+                }
+                self.ground_loot.remove(&root);
+                events.push(DomainEvent::Gameplay {
+                    event: GameplayEvent::LootDespawned {
+                        item_ids: subtree,
+                        room_id: reservation.room_id,
+                    },
+                });
+            } else if tick >= reservation.claim_until_tick && reservation.beneficiary.is_some() {
+                self.ground_loot
+                    .get_mut(&root)
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?
+                    .beneficiary = None;
+                events.push(DomainEvent::Gameplay {
+                    event: GameplayEvent::LootRightsChanged {
+                        item_id: root,
+                        room_id: reservation.room_id,
+                        summary: "The loot is now public.".into(),
+                    },
+                });
+            }
+        }
+        self.party_loot_cursors
+            .retain(|party_id, _| self.adventure.parties.contains_key(party_id));
+        Ok(events)
     }
 
     pub fn cancel_trades(
@@ -13515,6 +15169,14 @@ fn validate_portable_trade_state(
     if reserved_roots.len() > MAX_RESERVED_TRADE_ROOTS {
         return Err(WorldError::InvalidRuntimeSnapshot);
     }
+    let mut ground_subtrees = BTreeSet::new();
+    for root in snapshot.ground_loot.keys() {
+        for member in portable_subtree_ids(root, children)? {
+            if !ground_subtrees.insert(member.clone()) || reserved_subtrees.contains(&member) {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -14280,6 +15942,11 @@ fn gameplay_event_room(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::CharacterDamaged { room_id, .. }
         | GameplayEvent::NpcDefeated { room_id, .. }
         | GameplayEvent::LootDropped { room_id, .. }
+        | GameplayEvent::LootGenerated { room_id, .. }
+        | GameplayEvent::LootRightsChanged { room_id, .. }
+        | GameplayEvent::LootGenerationSuppressed { room_id, .. }
+        | GameplayEvent::LootDespawned { room_id, .. }
+        | GameplayEvent::LootEncounterCancelled { room_id, .. }
         | GameplayEvent::ExperienceGained { room_id, .. }
         | GameplayEvent::CharacterLeveled { room_id, .. }
         | GameplayEvent::CharacterPromoted { room_id, .. }
@@ -14323,6 +15990,11 @@ fn gameplay_event_character(event: &GameplayEvent) -> Option<CharacterId> {
         GameplayEvent::TickAdvanced { .. }
         | GameplayEvent::NpcSpawned { .. }
         | GameplayEvent::LootDropped { .. }
+        | GameplayEvent::LootGenerated { .. }
+        | GameplayEvent::LootRightsChanged { .. }
+        | GameplayEvent::LootGenerationSuppressed { .. }
+        | GameplayEvent::LootDespawned { .. }
+        | GameplayEvent::LootEncounterCancelled { .. }
         | GameplayEvent::NpcRespawned { .. } => None,
     }
 }
@@ -14337,6 +16009,9 @@ fn gameplay_event_npc(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::CharacterDamaged { npc_id, .. }
         | GameplayEvent::NpcDefeated { npc_id, .. }
         | GameplayEvent::LootDropped { npc_id, .. }
+        | GameplayEvent::LootGenerated { npc_id, .. }
+        | GameplayEvent::LootGenerationSuppressed { npc_id, .. }
+        | GameplayEvent::LootEncounterCancelled { npc_id, .. }
         | GameplayEvent::CharacterDefeated { npc_id, .. }
         | GameplayEvent::NpcRespawned { npc_id, .. } => Some(npc_id),
         GameplayEvent::TickAdvanced { .. }
@@ -14344,6 +16019,8 @@ fn gameplay_event_npc(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::CharacterLeveled { .. }
         | GameplayEvent::CharacterPromoted { .. }
         | GameplayEvent::TalentRankAcquired { .. }
+        | GameplayEvent::LootRightsChanged { .. }
+        | GameplayEvent::LootDespawned { .. }
         | GameplayEvent::CharacterCollapsed { .. }
         | GameplayEvent::CharacterRecovered { .. }
         | GameplayEvent::ItemEquipped { .. }
@@ -14359,6 +16036,7 @@ fn gameplay_event_npc(event: &GameplayEvent) -> Option<&str> {
 fn gameplay_event_item(event: &GameplayEvent) -> Option<&ItemInstanceId> {
     match event {
         GameplayEvent::LootDropped { item_id, .. }
+        | GameplayEvent::LootRightsChanged { item_id, .. }
         | GameplayEvent::ItemEquipped { item_id, .. }
         | GameplayEvent::ItemUnequipped { item_id, .. }
         | GameplayEvent::ItemUsed { item_id, .. } => Some(item_id),
@@ -14370,6 +16048,10 @@ fn gameplay_event_item(event: &GameplayEvent) -> Option<&ItemInstanceId> {
         | GameplayEvent::NpcDamaged { .. }
         | GameplayEvent::CharacterDamaged { .. }
         | GameplayEvent::NpcDefeated { .. }
+        | GameplayEvent::LootGenerated { .. }
+        | GameplayEvent::LootGenerationSuppressed { .. }
+        | GameplayEvent::LootDespawned { .. }
+        | GameplayEvent::LootEncounterCancelled { .. }
         | GameplayEvent::ExperienceGained { .. }
         | GameplayEvent::CharacterLeveled { .. }
         | GameplayEvent::CharacterPromoted { .. }
@@ -14526,6 +16208,52 @@ fn project_gameplay_event(
             None,
             format!("{npc_name} drops {item_name}."),
             Some(item_id(item)),
+        ),
+        GameplayEvent::LootGenerated {
+            npc_id: npc,
+            npc_name,
+            item_ids,
+            ..
+        } => (
+            npc_id(npc),
+            None,
+            format!(
+                "{npc_name} yields {} generated loot unit(s).",
+                item_ids.len()
+            ),
+            None,
+        ),
+        GameplayEvent::LootRightsChanged {
+            item_id: item,
+            summary,
+            ..
+        } => (item_id(item), None, summary.clone(), None),
+        GameplayEvent::LootGenerationSuppressed {
+            npc_id: npc,
+            npc_name,
+            reason,
+            ..
+        } => (
+            npc_id(npc),
+            None,
+            format!("Loot from {npc_name} is suppressed: {reason}."),
+            None,
+        ),
+        GameplayEvent::LootDespawned { item_ids, room_id } => (
+            opaque_id(salt, "room", room_id),
+            None,
+            format!("{} unclaimed loot unit(s) fade away.", item_ids.len()),
+            None,
+        ),
+        GameplayEvent::LootEncounterCancelled {
+            npc_id: npc,
+            npc_name,
+            ..
+        } => (
+            npc_id(npc),
+            None,
+            format!("The loot encounter with {npc_name} is cancelled."),
+            None,
         ),
         GameplayEvent::ExperienceGained {
             character_id: character,
@@ -14852,6 +16580,14 @@ mod tests {
             root.remove("nextTradeId");
             root.remove("trades");
         }
+        if version <= 5 {
+            let root = value.as_object_mut().unwrap();
+            root.remove("nextLootDropId");
+            root.remove("itemProvenance");
+            root.remove("lootEncounters");
+            root.remove("groundLoot");
+            root.remove("partyLootCursors");
+        }
         match version {
             1 => {
                 let instances = value
@@ -14874,8 +16610,8 @@ mod tests {
                     instance.as_object_mut().unwrap().remove("binding");
                 }
             }
-            4 | 5 => {}
-            _ => panic!("test helper only supports runtime snapshot v1-v5"),
+            4..=6 => {}
+            _ => panic!("test helper only supports runtime snapshot v1-v6"),
         }
         value
     }
@@ -18414,10 +20150,10 @@ mod tests {
         let (world, _) = connected_world();
         let json = serde_json::to_string(&world.runtime_snapshot()).unwrap();
         assert_eq!(
-            decode_world_runtime_snapshot(5, &json)
+            decode_world_runtime_snapshot(6, &json)
                 .unwrap()
                 .snapshot_version,
-            5
+            6
         );
         assert!(decode_world_runtime_snapshot(4, &json).is_err());
         let legacy_v3 = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 3);
@@ -18426,7 +20162,7 @@ mod tests {
             decode_world_runtime_snapshot(3, &legacy_v3_json)
                 .unwrap()
                 .snapshot_version,
-            5
+            6
         );
         let mut v3_binding_smuggling = legacy_v3;
         v3_binding_smuggling["itemInstances"]
@@ -18460,7 +20196,7 @@ mod tests {
         let mut unknown_root: serde_json::Value = serde_json::from_str(&json).unwrap();
         unknown_root["quantity"] = serde_json::json!(1);
         assert!(
-            decode_world_runtime_snapshot(5, &serde_json::to_string(&unknown_root).unwrap())
+            decode_world_runtime_snapshot(6, &serde_json::to_string(&unknown_root).unwrap())
                 .is_err()
         );
 
@@ -18473,7 +20209,7 @@ mod tests {
             .unwrap();
         instance["quantity"] = serde_json::json!(1);
         assert!(
-            decode_world_runtime_snapshot(5, &serde_json::to_string(&unknown_instance).unwrap())
+            decode_world_runtime_snapshot(6, &serde_json::to_string(&unknown_instance).unwrap())
                 .is_err()
         );
 
@@ -18486,14 +20222,14 @@ mod tests {
             .unwrap()["location"];
         location["containerId"] = serde_json::json!("demo:blue-lantern");
         assert!(
-            decode_world_runtime_snapshot(5, &serde_json::to_string(&unknown_location).unwrap())
+            decode_world_runtime_snapshot(6, &serde_json::to_string(&unknown_location).unwrap())
                 .is_err()
         );
 
         let legacy_v4 = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 4);
         let upgraded =
             decode_world_runtime_snapshot(4, &serde_json::to_string(&legacy_v4).unwrap()).unwrap();
-        assert_eq!(upgraded.snapshot_version, 5);
+        assert_eq!(upgraded.snapshot_version, 6);
         assert_eq!(upgraded.next_trade_id, TradeId(1));
         assert!(upgraded.trades.is_empty());
         let mut smuggled_v4 = legacy_v4;
@@ -18510,7 +20246,7 @@ mod tests {
             .remove("trades");
         assert!(
             decode_world_runtime_snapshot(
-                5,
+                6,
                 &serde_json::to_string(&missing_trade_fields).unwrap()
             )
             .is_err()
@@ -18532,12 +20268,12 @@ mod tests {
         })
         .unwrap();
         assert!(
-            decode_world_runtime_snapshot(5, &serde_json::to_string(&nested_trade).unwrap())
+            decode_world_runtime_snapshot(6, &serde_json::to_string(&nested_trade).unwrap())
                 .is_ok()
         );
         nested_trade["trades"]["1"]["futureTradeField"] = serde_json::json!(true);
         assert!(
-            decode_world_runtime_snapshot(5, &serde_json::to_string(&nested_trade).unwrap())
+            decode_world_runtime_snapshot(6, &serde_json::to_string(&nested_trade).unwrap())
                 .is_err()
         );
 
@@ -19512,7 +21248,7 @@ mod tests {
             requested.domain_events.as_slice(),
             [DomainEvent::TradeRequested { trade }] if trade.state_revision == 1
         ));
-        assert_eq!(world.runtime_snapshot().snapshot_version, 5);
+        assert_eq!(world.runtime_snapshot().snapshot_version, 6);
         assert_eq!(world.runtime_snapshot().next_trade_id, TradeId(2));
         let mut replay_events = requested.domain_events.clone();
         let opened = world
@@ -20719,7 +22455,7 @@ mod tests {
             .unwrap();
         let snapshot = world.runtime_snapshot();
         let encoded = serde_json::to_string(&snapshot).unwrap();
-        assert!(encoded.contains("\"snapshotVersion\":5"));
+        assert!(encoded.contains("\"snapshotVersion\":6"));
         assert!(encoded.contains("\"binding\":{\"kind\":\"character\",\"characterId\":701}"));
         let mut restored = World::from_definition(policy_definition()).unwrap();
         restored.restore_runtime_snapshot(snapshot.clone()).unwrap();
@@ -20897,5 +22633,744 @@ mod tests {
         let mut multiline = item_prototype("test:item", "safe", "Safe.", &["item"]);
         multiline.description = "First line.\n\tSecond line.".into();
         assert!(World::from_definition(definition_for(multiline)).is_ok());
+    }
+
+    #[test]
+    fn offensive_ability_freezes_a_bounded_cohort_without_dropping_the_initiator() {
+        let (mut world, initiator_session) = phase_two_world(9, 1, 100);
+        world
+            .spawn_npc(NpcDefinition {
+                stable_id: "game:training-target".into(),
+                name: "training target".into(),
+                description: "A target sturdy enough to retain an encounter.".into(),
+                room_id: "game:start".into(),
+                level: 1,
+                max_health: 100,
+                strength: 1,
+                defence: 0,
+                experience_reward: 0,
+                loot_item_ids: Vec::new(),
+                respawn_ticks: 1,
+            })
+            .unwrap();
+        for id in 1..=6 {
+            world
+                .connect(
+                    SessionId(1_000 + id as u64),
+                    CharacterSnapshot {
+                        id: CharacterId(id),
+                        account_id: AccountId(id),
+                        name: format!("Peer {id}"),
+                        room_id: "game:start".into(),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+        world.adventure.next_party_id = 78;
+        world.adventure.parties.insert(
+            77,
+            PartySnapshot {
+                id: 77,
+                leader: CharacterId(900),
+                members: vec![
+                    CharacterId(1),
+                    CharacterId(2),
+                    CharacterId(3),
+                    CharacterId(4),
+                    CharacterId(5),
+                    CharacterId(6),
+                    CharacterId(900),
+                ],
+                invitations: BTreeMap::new(),
+            },
+        );
+        world.abilities.insert(
+            "game:jab".into(),
+            AbilityDefinition {
+                id: "game:jab".into(),
+                name: "Jab".into(),
+                description: "A controlled strike.".into(),
+                category: AbilityCategory::Martial,
+                resource_costs: BTreeMap::new(),
+                cooldown_ticks: 0,
+                targeting: AbilityTargeting::SingleEnemy,
+                damage: Some(AbilityDamageDefinition {
+                    target: AbilityEffectTarget::Target,
+                    damage_type: DamageType::Physical,
+                    base_amount: 1,
+                    scaling_attribute: None,
+                    scaling_percent: 0,
+                }),
+                heal: None,
+                status_effects: Vec::new(),
+            },
+        );
+        world
+            .character_gameplay
+            .get_mut(&CharacterId(900))
+            .unwrap()
+            .ability_ids
+            .push("game:jab".into());
+
+        world
+            .apply(
+                initiator_session,
+                PlayerAction::Ability {
+                    ability_id: "game:jab".into(),
+                    target: Some("training target".into()),
+                },
+            )
+            .unwrap();
+        let encounter = &world.loot_encounters["game:training-target"];
+        assert_eq!(encounter.initiator, CharacterId(900));
+        assert_eq!(encounter.cohort.len(), 6);
+        assert!(encounter.cohort.contains(&CharacterId(900)));
+        assert_eq!(
+            encounter.cohort,
+            vec![
+                CharacterId(1),
+                CharacterId(2),
+                CharacterId(3),
+                CharacterId(4),
+                CharacterId(5),
+                CharacterId(900),
+            ]
+        );
+    }
+
+    #[test]
+    fn loot_definition_caps_include_fixed_roots_and_source_ids() {
+        let (mut world, _) = phase_two_world(1, 1, 10);
+        let table = LootTableDefinition {
+            id: "game:oversized".into(),
+            digest_sha256: "a".repeat(64),
+            guaranteed: vec![
+                LootGuaranteedDefinition {
+                    id: "game:first".into(),
+                    item_prototype_id: "game:potion".into(),
+                    quantity: 32,
+                },
+                LootGuaranteedDefinition {
+                    id: "game:second".into(),
+                    item_prototype_id: "game:potion".into(),
+                    quantity: 32,
+                },
+            ],
+            pools: Vec::new(),
+        };
+        assert!(matches!(
+            world.configure_loot(
+                vec![table],
+                vec![LootSourceDefinition {
+                    kind: LootSourceKind::NpcSpawn,
+                    id: "game:guardian-source".into(),
+                    npc_spawn_id: "game:guardian".into(),
+                    loot_table_id: "game:oversized".into(),
+                    rights: LootRightsPolicy::CreditedCharacter,
+                }],
+            ),
+            Err(WorldError::InvalidGameplayDefinition)
+        ));
+
+        let mut roots = Vec::new();
+        for _ in 0..=MAX_LOOT_UNITS_PER_RESOLUTION {
+            roots.push(world.create_staged_item_instance("game:sword").unwrap());
+        }
+        assert!(matches!(
+            world.spawn_npc(NpcDefinition {
+                stable_id: "game:too-much-fixed-loot".into(),
+                name: "overburdened target".into(),
+                description: "An invalid fixed-loot source.".into(),
+                room_id: "game:start".into(),
+                level: 1,
+                max_health: 1,
+                strength: 1,
+                defence: 0,
+                experience_reward: 0,
+                loot_item_ids: roots,
+                respawn_ticks: 1,
+            }),
+            Err(WorldError::InvalidGameplayDefinition)
+        ));
+    }
+
+    #[test]
+    fn fixed_loot_wins_the_last_claim_and_random_capacity_never_blocks_defeat() {
+        let (mut world, _) = phase_two_world(3, 1, 1);
+        world
+            .configure_loot(
+                vec![LootTableDefinition {
+                    id: "game:guardian-table".into(),
+                    digest_sha256: "b".repeat(64),
+                    guaranteed: vec![LootGuaranteedDefinition {
+                        id: "game:potion-drop".into(),
+                        item_prototype_id: "game:potion".into(),
+                        quantity: 1,
+                    }],
+                    pools: Vec::new(),
+                }],
+                vec![LootSourceDefinition {
+                    kind: LootSourceKind::NpcSpawn,
+                    id: "game:guardian-source".into(),
+                    npc_spawn_id: "game:guardian".into(),
+                    loot_table_id: "game:guardian-table".into(),
+                    rights: LootRightsPolicy::CreditedCharacter,
+                }],
+            )
+            .unwrap();
+        world.next_loot_drop_id = LootDropId(2);
+        for _ in 0..MAX_GROUND_LOOT_RESERVATIONS - 1 {
+            let item_id = world.create_staged_item_instance("game:sword").unwrap();
+            world
+                .set_item_location(&item_id, SharedItemLocation::Room("game:arena".into()))
+                .unwrap();
+            world.ground_loot.insert(
+                item_id.clone(),
+                GroundLootReservation {
+                    drop_id: LootDropId(1),
+                    root_item_id: item_id,
+                    room_id: "game:arena".into(),
+                    cohort: vec![CharacterId(900)],
+                    beneficiary: Some(CharacterId(900)),
+                    passed: BTreeSet::new(),
+                    created_tick: 0,
+                    claim_until_tick: LOOT_EXCLUSIVE_TICKS,
+                    despawn_at_tick: LOOT_DESPAWN_TICKS,
+                },
+            );
+        }
+        assert!(
+            serde_json::to_vec(&world.runtime_snapshot()).unwrap().len()
+                <= MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+        );
+        let mut events = Vec::new();
+        world
+            .resolve_npc_defeat(
+                0,
+                "game:guardian",
+                CharacterId(900),
+                "Adventurer",
+                "game:arena",
+                &mut events,
+            )
+            .unwrap();
+        let fang = ItemInstanceId("game:fang".into());
+        assert_eq!(
+            world.item_location(&fang),
+            Some(&SharedItemLocation::Room("game:arena".into()))
+        );
+        assert!(world.ground_loot.contains_key(&fang));
+        assert_eq!(world.ground_loot.len(), MAX_GROUND_LOOT_RESERVATIONS);
+        assert_eq!(world.next_loot_drop_id, LootDropId(3));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DomainEvent::Gameplay {
+                event: GameplayEvent::NpcDefeated { .. }
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DomainEvent::Gameplay {
+                event: GameplayEvent::LootGenerationSuppressed { reason, .. }
+            } if reason == "capacity"
+        )));
+        assert_eq!(world.character_gameplay[&CharacterId(900)].experience, 120);
+    }
+
+    #[test]
+    fn random_loot_is_suppressed_atomically_at_the_exact_snapshot_byte_budget() {
+        let (mut world, _) = phase_two_world(11, 1, 10);
+        world
+            .spawn_npc(NpcDefinition {
+                stable_id: "game:byte-target".into(),
+                name: "byte target".into(),
+                description: "A target for durable admission testing.".into(),
+                room_id: "game:start".into(),
+                level: 1,
+                max_health: 1,
+                strength: 1,
+                defence: 0,
+                experience_reward: 7,
+                loot_item_ids: Vec::new(),
+                respawn_ticks: 2,
+            })
+            .unwrap();
+        world
+            .configure_loot(
+                vec![LootTableDefinition {
+                    id: "game:byte-table".into(),
+                    digest_sha256: "c".repeat(64),
+                    guaranteed: Vec::new(),
+                    pools: vec![LootPoolDefinition {
+                        id: "game:byte-pool".into(),
+                        rolls: 1,
+                        entries: vec![LootEntryDefinition {
+                            kind: LootEntryKind::Item,
+                            id: "game:byte-entry".into(),
+                            weight: 1,
+                            item_prototype_id: Some("game:potion".into()),
+                            min_quantity: Some(32),
+                            max_quantity: Some(32),
+                        }],
+                    }],
+                }],
+                vec![LootSourceDefinition {
+                    kind: LootSourceKind::NpcSpawn,
+                    id: "game:byte-source".into(),
+                    npc_spawn_id: "game:byte-target".into(),
+                    loot_table_id: "game:byte-table".into(),
+                    rights: LootRightsPolicy::CreditedCharacter,
+                }],
+            )
+            .unwrap();
+        let mut encoded_len = serde_json::to_vec(&world.runtime_snapshot()).unwrap().len();
+        while encoded_len < MAX_WORLD_RUNTIME_SNAPSHOT_BYTES - 40_000 {
+            for _ in 0..100 {
+                world.create_staged_item_instance("game:sword").unwrap();
+            }
+            encoded_len = serde_json::to_vec(&world.runtime_snapshot()).unwrap().len();
+        }
+        while encoded_len < MAX_WORLD_RUNTIME_SNAPSHOT_BYTES - 8_000 {
+            world.create_staged_item_instance("game:sword").unwrap();
+            encoded_len = serde_json::to_vec(&world.runtime_snapshot()).unwrap().len();
+        }
+        assert!(encoded_len <= MAX_WORLD_RUNTIME_SNAPSHOT_BYTES);
+        let before_rng = world.rng.state;
+        let mut events = Vec::new();
+        world
+            .resolve_npc_defeat(
+                0,
+                "game:byte-target",
+                CharacterId(900),
+                "Adventurer",
+                "game:start",
+                &mut events,
+            )
+            .unwrap();
+
+        assert_eq!(world.next_loot_drop_id, LootDropId(2));
+        assert_ne!(world.rng.state, before_rng);
+        assert!(!world.item_provenance.values().any(|provenance| matches!(
+            provenance,
+            ItemProvenance::NpcLoot {
+                npc_spawn_id, ..
+            } if npc_spawn_id == "game:byte-target"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DomainEvent::Gameplay {
+                event: GameplayEvent::LootGenerationSuppressed { reason, .. }
+            } if reason == "snapshot_bytes"
+        )));
+        assert!(
+            serde_json::to_vec(&world.runtime_snapshot()).unwrap().len()
+                <= MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+        );
+        assert_eq!(world.character_gameplay[&CharacterId(900)].experience, 7);
+    }
+
+    #[test]
+    fn near_limit_v5_snapshot_upgrades_losslessly_below_the_v6_byte_budget() {
+        let (mut world, _) = phase_two_world(13, 1, 10);
+        let mut legacy = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 5);
+        let mut encoded_len = serde_json::to_vec(&legacy).unwrap().len();
+        while encoded_len < MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES - 40_000 {
+            for _ in 0..100 {
+                world.create_staged_item_instance("game:sword").unwrap();
+            }
+            legacy = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 5);
+            encoded_len = serde_json::to_vec(&legacy).unwrap().len();
+        }
+        while encoded_len < MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES - 8_000 {
+            world.create_staged_item_instance("game:sword").unwrap();
+            legacy = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 5);
+            encoded_len = serde_json::to_vec(&legacy).unwrap().len();
+        }
+        assert!(encoded_len <= MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES);
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        let upgraded = decode_world_runtime_snapshot(5, &legacy_json).unwrap();
+        assert_eq!(upgraded.snapshot_version, WORLD_RUNTIME_SNAPSHOT_VERSION);
+        assert_eq!(
+            upgraded.item_provenance.len(),
+            upgraded.item_instances.len()
+        );
+        assert!(upgraded.item_provenance.values().all(|provenance| matches!(
+            provenance,
+            ItemProvenance::LegacySnapshot { source_version: 5 }
+        )));
+        assert!(serde_json::to_vec(&upgraded).unwrap().len() <= MAX_WORLD_RUNTIME_SNAPSHOT_BYTES);
+    }
+
+    #[test]
+    fn loot_views_and_pass_keep_reserved_ground_items_enforced_server_side() {
+        let (mut world, actor) = connected_world();
+        let other = SessionId(8);
+        world
+            .connect(
+                other,
+                CharacterSnapshot {
+                    id: CharacterId(102),
+                    account_id: AccountId(11),
+                    name: "Other".into(),
+                    room_id: world.start_room_id().to_owned(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let item_id = ItemInstanceId("demo:blue-lantern".into());
+        world.next_loot_drop_id = LootDropId(2);
+        world.ground_loot.insert(
+            item_id.clone(),
+            GroundLootReservation {
+                drop_id: LootDropId(1),
+                root_item_id: item_id,
+                room_id: world.start_room_id().to_owned(),
+                cohort: vec![CharacterId(101), CharacterId(102)],
+                beneficiary: Some(CharacterId(101)),
+                passed: BTreeSet::new(),
+                created_tick: 0,
+                claim_until_tick: LOOT_EXCLUSIVE_TICKS,
+                despawn_at_tick: LOOT_DESPAWN_TICKS,
+            },
+        );
+        let own = world.scene_for(actor).unwrap().items.remove(0);
+        assert_eq!(
+            own.loot.as_ref().map(|loot| loot.access),
+            Some(LootAccessView::Yours)
+        );
+        assert!(own.actions.iter().any(|action| action.label == "Pass"));
+        let reserved = world.scene_for(other).unwrap().items.remove(0);
+        assert_eq!(
+            reserved.loot.as_ref().map(|loot| loot.access),
+            Some(LootAccessView::Reserved)
+        );
+        assert!(!reserved.actions.iter().any(|action| action.label == "Take"));
+        assert!(matches!(
+            world.apply(other, PlayerAction::Take(ItemSelection::one("lantern"))),
+            Err(WorldError::LootUnavailable)
+        ));
+
+        world
+            .apply(actor, PlayerAction::Loot(LootAction::Pass(own.id)))
+            .unwrap();
+        assert_eq!(
+            world.ground_loot[&ItemInstanceId("demo:blue-lantern".into())].beneficiary,
+            Some(CharacterId(102))
+        );
+        world
+            .apply(other, PlayerAction::Take(ItemSelection::one("lantern")))
+            .unwrap();
+        assert!(world.ground_loot.is_empty());
+    }
+
+    #[test]
+    fn reserved_ground_container_contents_are_private_to_the_beneficiary() {
+        let (mut world, beneficiary) = connect_definition(policy_definition());
+        world
+            .item_prototypes
+            .get_mut("policy:clasp")
+            .unwrap()
+            .container = Some(ItemContainerDefinition {
+            max_slots: 2,
+            max_weight_grams: 100,
+        });
+        let other = SessionId(72);
+        world
+            .connect(
+                other,
+                CharacterSnapshot {
+                    id: CharacterId(702),
+                    account_id: AccountId(71),
+                    name: "Other".into(),
+                    room_id: "test:start".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        let bag_id = ItemInstanceId("policy:bag-instance".into());
+        world.next_loot_drop_id = LootDropId(2);
+        world.ground_loot.insert(
+            bag_id.clone(),
+            GroundLootReservation {
+                drop_id: LootDropId(1),
+                root_item_id: bag_id,
+                room_id: "test:start".into(),
+                cohort: vec![CharacterId(701), CharacterId(702)],
+                beneficiary: Some(CharacterId(701)),
+                passed: BTreeSet::new(),
+                created_tick: 0,
+                claim_until_tick: LOOT_EXCLUSIVE_TICKS,
+                despawn_at_tick: LOOT_DESPAWN_TICKS,
+            },
+        );
+
+        let own = world
+            .apply(
+                beneficiary,
+                PlayerAction::Contents {
+                    container: "bag".into(),
+                    page: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            own.container_contents.as_ref().unwrap().items[0].label,
+            "wolf clasp"
+        );
+        assert!(
+            world
+                .apply(beneficiary, PlayerAction::Examine("clasp".into()))
+                .unwrap()
+                .output
+                .unwrap()
+                .contains("character-bound clasp")
+        );
+        assert!(
+            world
+                .apply(
+                    beneficiary,
+                    PlayerAction::Contents {
+                        container: "clasp".into(),
+                        page: 1,
+                    },
+                )
+                .is_ok()
+        );
+        assert!(matches!(
+            world.apply(
+                other,
+                PlayerAction::Contents {
+                    container: "bag".into(),
+                    page: 1,
+                },
+            ),
+            Err(WorldError::LootUnavailable)
+        ));
+        assert!(matches!(
+            world.apply(
+                other,
+                PlayerAction::Contents {
+                    container: "clasp".into(),
+                    page: 1,
+                },
+            ),
+            Err(WorldError::ItemNotFound(_))
+        ));
+        assert!(matches!(
+            world.apply(
+                other,
+                PlayerAction::Contents {
+                    container: "not-there".into(),
+                    page: 1,
+                },
+            ),
+            Err(WorldError::ItemNotFound(_))
+        ));
+        assert!(matches!(
+            world.apply(
+                other,
+                PlayerAction::Get {
+                    selection: ItemSelection::one("clasp"),
+                    container: "bag".into(),
+                },
+            ),
+            Err(WorldError::LootUnavailable)
+        ));
+        assert!(matches!(
+            world.apply(
+                other,
+                PlayerAction::Get {
+                    selection: ItemSelection::one("not-there"),
+                    container: "bag".into(),
+                },
+            ),
+            Err(WorldError::LootUnavailable)
+        ));
+        assert!(matches!(
+            world.apply(
+                other,
+                PlayerAction::Put {
+                    selection: ItemSelection::one("not-there"),
+                    container: "bag".into(),
+                },
+            ),
+            Err(WorldError::LootUnavailable)
+        ));
+        assert!(matches!(
+            world.apply(other, PlayerAction::Examine("clasp".into())),
+            Err(WorldError::ItemNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn despawning_runtime_root_preserves_authored_descendants_as_tombstones() {
+        let (mut world, _) = connect_definition(policy_definition());
+        let root = world.create_staged_item_instance("policy:bag").unwrap();
+        world
+            .set_item_location(&root, SharedItemLocation::Room("test:start".into()))
+            .unwrap();
+        let authored = ItemInstanceId("policy:clasp-instance".into());
+        world.item_instances.get_mut(&authored).unwrap().location =
+            SharedItemLocation::Contained(root.clone());
+        world.next_loot_drop_id = LootDropId(2);
+        world.ground_loot.insert(
+            root.clone(),
+            GroundLootReservation {
+                drop_id: LootDropId(1),
+                root_item_id: root.clone(),
+                room_id: "test:start".into(),
+                cohort: vec![CharacterId(701)],
+                beneficiary: Some(CharacterId(701)),
+                passed: BTreeSet::new(),
+                created_tick: 0,
+                claim_until_tick: LOOT_EXCLUSIVE_TICKS,
+                despawn_at_tick: LOOT_DESPAWN_TICKS,
+            },
+        );
+        world.logical_tick = LOOT_DESPAWN_TICKS;
+
+        world.expire_ground_loot().unwrap();
+        assert!(!world.item_instances.contains_key(&root));
+        assert_eq!(
+            world.item_location(&authored),
+            Some(&SharedItemLocation::Staged)
+        );
+        assert_eq!(
+            world.item_provenance.get(&authored),
+            Some(&ItemProvenance::AuthoredInitial)
+        );
+    }
+
+    #[test]
+    fn legacy_fixed_loot_despawn_stays_staged_after_the_next_restart() {
+        let (source, _) = phase_two_world(17, 1, 10);
+        let legacy = runtime_snapshot_json_for_version(&source.runtime_snapshot(), 5);
+        let upgraded = decode_world_runtime_snapshot(5, &legacy.to_string()).unwrap();
+        let fang = ItemInstanceId("game:fang".into());
+        assert_eq!(
+            upgraded.item_provenance.get(&fang),
+            Some(&ItemProvenance::LegacySnapshot { source_version: 5 })
+        );
+
+        let (mut restored, _) = phase_two_world(17, 1, 10);
+        restored.restore_runtime_snapshot(upgraded).unwrap();
+        restored
+            .set_item_location(&fang, SharedItemLocation::Room("game:start".into()))
+            .unwrap();
+        restored.next_loot_drop_id = LootDropId(2);
+        restored.ground_loot.insert(
+            fang.clone(),
+            GroundLootReservation {
+                drop_id: LootDropId(1),
+                root_item_id: fang.clone(),
+                room_id: "game:start".into(),
+                cohort: vec![CharacterId(900)],
+                beneficiary: Some(CharacterId(900)),
+                passed: BTreeSet::new(),
+                created_tick: 0,
+                claim_until_tick: LOOT_EXCLUSIVE_TICKS,
+                despawn_at_tick: LOOT_DESPAWN_TICKS,
+            },
+        );
+        restored.logical_tick = LOOT_DESPAWN_TICKS;
+        restored.expire_ground_loot().unwrap();
+        assert_eq!(
+            restored.item_location(&fang),
+            Some(&SharedItemLocation::Staged)
+        );
+        assert!(restored.ground_loot.is_empty());
+
+        let post_despawn = restored.runtime_snapshot();
+        let (mut restarted, _) = phase_two_world(17, 1, 10);
+        restarted.restore_runtime_snapshot(post_despawn).unwrap();
+        assert_eq!(
+            restarted.item_location(&fang),
+            Some(&SharedItemLocation::Staged),
+            "restart must not resurrect fixed loot at its authored NPC"
+        );
+        assert_eq!(
+            restarted.item_provenance.get(&fang),
+            Some(&ItemProvenance::LegacySnapshot { source_version: 5 })
+        );
+    }
+
+    #[test]
+    fn restart_cancellation_clears_lethal_npc_status_before_the_next_tick() {
+        let (mut source, session) = phase_two_world(5, 1, 10);
+        source
+            .apply(session, PlayerAction::Move(Direction::North))
+            .unwrap();
+        source
+            .apply(session, PlayerAction::Attack("guardian".into()))
+            .unwrap();
+        source.npcs.get_mut("game:guardian").unwrap().statuses = vec![ActiveStatusEffect {
+            source_ability_id: "game:old-dot".into(),
+            source_character_id: Some(CharacterId(900)),
+            source_npc_id: None,
+            kind: ActiveStatusKind::DamageOverTime,
+            magnitude: 100,
+            remaining_ticks: 1,
+            attribute: None,
+            damage_type: Some(DamageType::Physical),
+        }];
+        let snapshot = source.runtime_snapshot();
+        let (mut restored, _) = phase_two_world(5, 1, 10);
+        restored.restore_runtime_snapshot(snapshot).unwrap();
+
+        let cancelled = restored.cancel_all_loot_encounters_for_restart().unwrap();
+        assert_eq!(cancelled.len(), 1);
+        assert!(restored.loot_encounters.is_empty());
+        assert!(restored.npcs["game:guardian"].statuses.is_empty());
+        let events = restored.advance_tick().unwrap();
+        assert!(restored.npcs["game:guardian"].alive());
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            DomainEvent::Gameplay {
+                event: GameplayEvent::NpcDefeated { .. }
+            }
+        )));
+    }
+
+    #[test]
+    fn cold_replay_fails_closed_for_every_snapshot_v6_loot_ledger_event() {
+        let (mut world, _) = connected_world();
+        let item_id = ItemInstanceId("demo:blue-lantern".into());
+        let events = vec![
+            GameplayEvent::LootGenerated {
+                drop_id: LootDropId(1),
+                npc_id: "demo:npc".into(),
+                npc_name: "npc".into(),
+                item_ids: vec![item_id.clone()],
+                room_id: "demo:lantern-square".into(),
+            },
+            GameplayEvent::LootRightsChanged {
+                item_id: item_id.clone(),
+                room_id: "demo:lantern-square".into(),
+                summary: "changed".into(),
+            },
+            GameplayEvent::LootGenerationSuppressed {
+                drop_id: LootDropId(1),
+                npc_id: "demo:npc".into(),
+                npc_name: "npc".into(),
+                reason: "capacity".into(),
+                room_id: "demo:lantern-square".into(),
+            },
+            GameplayEvent::LootDespawned {
+                item_ids: vec![item_id],
+                room_id: "demo:lantern-square".into(),
+            },
+            GameplayEvent::LootEncounterCancelled {
+                npc_id: "demo:npc".into(),
+                npc_name: "npc".into(),
+                room_id: "demo:lantern-square".into(),
+            },
+        ];
+        for event in events {
+            assert!(matches!(
+                world.replay_persisted_event(&DomainEvent::Gameplay { event }),
+                Err(WorldError::InvalidDomainTransition)
+            ));
+        }
     }
 }

@@ -1,7 +1,7 @@
 # Autoría, validación y publicación de mundos
 
-Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v5**
-como artefacto canónico de ejecución, **AreaPack v4** como módulo de autoría y
+Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v6**
+como artefacto canónico de ejecución, **AreaPack v5** como módulo de autoría y
 `WorldProjectManifest` v2 como composición fuera de línea. La autoridad exacta
 son los tipos y validadores de `crates/world-pack`; el ejemplo revisado es
 [`worlds/lantern-square.world.json`](../worlds/lantern-square.world.json).
@@ -12,7 +12,7 @@ variantes, scripts y pruebas de contenido.
 
 ## Frontera de ejecución
 
-El servidor valida y carga un único `WorldPackDocument` v5 completo antes de
+El servidor valida y carga un único `WorldPackDocument` v6 completo antes de
 abrir sus listeners. `TIAMUD_WORLD_PACK` permite seleccionar un artefacto
 externo revisado; si no se define, se usa Lantern Square embebido.
 
@@ -34,9 +34,9 @@ flowchart LR
     accDescr: Las áreas se componen y validan fuera de línea para producir un solo WorldPack canónico que el servidor carga al arrancar. No existe carga caliente.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
-    Areas[AreaPack v4<br/>1..=256 módulos] --> Compose
+    Areas[AreaPack v5<br/>1..=256 módulos] --> Compose
     Compose --> Validate[Validación global<br/>referencias · límites · Lua]
-    Validate --> Artifact[WorldPack v5 canónico]
+    Validate --> Artifact[WorldPack v6 canónico]
     Artifact --> Server[Servidor único<br/>carga al arrancar]
     Hot[Catálogo caliente/LRU] -. futuro .-> Server
 ```
@@ -45,16 +45,22 @@ flowchart LR
 
 | Entrada | Tratamiento |
 | --- | --- |
-| WorldPack v5 | Formato canónico nativo. |
-| WorldPack v4/v3/v2 | Se normaliza de forma determinista a v5 antes de validar. |
-| AreaPack v4 | Formato modular nativo. |
-| AreaPack v3/v2/v1 | Se normaliza a v4 antes de componer. |
+| WorldPack v6 | Formato canónico nativo. |
+| WorldPack v5/v4/v3/v2 | Se normaliza de forma determinista a v6 antes de validar, sin inventar tablas ni fuentes de botín. |
+| AreaPack v5 | Formato modular nativo. |
+| AreaPack v4/v3/v2/v1 | Se normaliza a v5 antes de componer, sin inventar tablas ni fuentes de botín. |
 | Envy/Merc | Solo pasa por `envy-import`; los programas históricos nunca se ejecutan. |
 
 La compatibilidad antigua no permite escribir vocabulario legado en un
-documento nativo. WorldPack v5 y AreaPack v4 rechazan `items`, `room.items`,
+documento nativo. WorldPack v6 y AreaPack v5 rechazan `items`, `room.items`,
 `itemRules` y `lootItemIds`: usan `itemPrototypes` e
 `initialItemInstances`.
+
+`lootTables` y `lootSources` nacen en WorldPack v6 y AreaPack v5. Declararlos,
+aunque estén vacíos, en WorldPack v2-v5 o AreaPack v1-v4 se rechaza como mezcla
+de esquemas. La conversión de esos formatos crea colecciones vacías: ni el
+normalizador ni `envy-import` deducen probabilidades a partir de resets o listas
+históricas ambiguas.
 
 WorldPack v4 y AreaPack v3 reciben por normalización `maxStackUnits: 1`, sin
 contenedor y con `transferPolicy: transferable`. En esas versiones la política
@@ -109,15 +115,15 @@ Ejemplo:
 }
 ```
 
-## AreaPack v4
+## AreaPack v5
 
 Cada área reutiliza los mismos registros del WorldPack; no crea una segunda
 representación de salas, objetos o NPC. Solo añade `id` y `dependsOn` como
 frontera de propiedad.
 
 ```text
-AreaPack v4
-├── schemaVersion! = 4
+AreaPack v5
+├── schemaVersion! = 5
 ├── id!
 ├── dependsOn[]?
 ├── itemPrototypes[]?
@@ -125,6 +131,8 @@ AreaPack v4
 ├── rooms[]?
 ├── npcPrototypes[]?
 ├── npcSpawns[]?
+├── lootTables[]?
+├── lootSources[]?
 ├── levelThresholds[]?
 ├── lineages[]?
 ├── backgrounds[]?
@@ -148,6 +156,7 @@ declarar su `id` en `dependsOn`. Esto incluye:
 - salidas a salas ajenas;
 - instancia→prototipo y ubicación de instancia en sala, spawn o contenedor ajenos;
 - spawn→prototipo NPC y spawn→sala;
+- tabla de botín→prototipo y fuente de botín→spawn/tabla ajenos;
 - concesiones/requisitos de progresión y habilidades;
 - multimedia, percepción, variantes, scripts y pruebas.
 
@@ -160,7 +169,7 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "id": "plaza",
   "dependsOn": ["puerta"],
   "itemPrototypes": [
@@ -206,7 +215,7 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "id": "puerta",
   "dependsOn": ["plaza"],
   "rooms": [
@@ -270,18 +279,20 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 }
 ```
 
-El botín no vive en `npcPrototypes`. La ubicación `npc_spawn` de la instancia
-es la asignación inicial, única y validada.
+El botín no vive en `npcPrototypes`. La ubicación `npc_spawn` de una instancia
+es botín fijo authored, asignado una sola vez y validado. El botín repetible se
+declara por separado mediante `lootTables` y `lootSources`, como se detalla más
+abajo.
 
-## WorldPack v5
+## WorldPack v6
 
 El artefacto plano conserva identidad, catálogos de objeto, salas y gameplay.
 Las extensiones de multimedia/percepción/scripts se aplanan en el documento
 por `WorldPackDocument` aunque la estructura Rust separa el núcleo del mundo.
 
 ```text
-WorldPack v5
-├── schemaVersion! = 5
+WorldPack v6
+├── schemaVersion! = 6
 ├── id!
 ├── name!
 ├── startRoomId!
@@ -295,7 +306,9 @@ WorldPack v5
 │   ├── npcSpawns[]?
 │   ├── characterProgression?
 │   ├── abilities[]?
-│   └── npcAbilitySets[]?
+│   ├── npcAbilitySets[]?
+│   ├── lootTables[]?
+│   └── lootSources[]?
 ├── roomMedia[]?
 ├── entityMedia[]?
 ├── roomPerception[]?
@@ -308,7 +321,7 @@ Un mundo mínimo sin objetos:
 
 ```json
 {
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "id": "ejemplo",
   "name": "Mundo de ejemplo",
   "startRoomId": "ejemplo:entrada",
@@ -321,6 +334,12 @@ Un mundo mínimo sin objetos:
   ]
 }
 ```
+
+Cada sala y variante exige un `title` de 1..=128 bytes UTF-8 seguros, sin
+caracteres de control, y una `description` de 1..=8.192 bytes UTF-8 seguros. Los saltos de
+línea y tabulaciones revisados son válidos en la descripción; una cadena vacía,
+solo whitespace, una secuencia de control insegura o un exceso de bytes se
+rechazan. Los límites cuentan bytes, no caracteres Unicode.
 
 ## Prototipos e instancias de objeto
 
@@ -422,7 +441,7 @@ ubicaciones relativas de todo su subárbol.
 
 ### Propiedad efectiva y transferencia
 
-WorldPack v5 y AreaPack v4 aceptan las tres políticas. La vinculación no se
+WorldPack v6 y AreaPack v5 aceptan las tres políticas. La vinculación no se
 escribe en autoría: pertenece a cada instancia runtime y se crea, valida y
 persiste cuando el personaje adquiere el objeto.
 
@@ -459,7 +478,103 @@ La fase 3D implementa intercambio confirmado como estado runtime, no como
 autoría del WorldPack. Solo reserva raíces `Carried` cuyo subárbol completo es
 `transferable`; no añade campos de trade, escrow ni propietario a
 `ItemPrototype` o `InitialItemInstance`. Siguen ausentes entrega offline/remota,
-afijos, elegibilidad o reparto, procedencia de drops y tablas aleatorias.
+afijos y los repartos need/greed, master-loot o por contribución.
+
+## Botín fijo y repetible
+
+Una aparición de NPC puede combinar dos fuentes que convergen en la misma
+resolución autoritativa:
+
+- cada raíz inicial con ubicación `npc_spawn` es botín fijo authored y solo se
+  entrega una vez; y
+- una `lootSource` enlaza esa aparición con una `lootTable`, que se resuelve de
+  nuevo en cada derrota.
+
+La tabla procesa primero `guaranteed` y después `pools`, ambos ordenados por ID
+canónico. Cada pool realiza `rolls` selecciones con reemplazo. Una entrada
+`item` usa un peso entero positivo y una cantidad uniforme inclusiva entre
+`minQuantity` y `maxQuantity`; una entrada `nothing` consume la tirada sin crear
+una instancia y no admite prototipo ni cantidades. El runtime usa rejection
+sampling, no porcentajes flotantes ni módulo sesgado.
+
+AreaPack v5 declara ambas colecciones en su nivel superior; WorldPack v6 las
+sitúa dentro de `gameplay`. El fragmento siguiente muestra su forma común:
+
+```json
+{
+  "lootTables": [
+    {
+      "id": "tiamud:gate-stalker-drops",
+      "guaranteed": [
+        {
+          "id": "tiamud:drop:road-token",
+          "itemPrototypeId": "tiamud:road-token",
+          "quantity": 1
+        }
+      ],
+      "pools": [
+        {
+          "id": "tiamud:drop:trophy",
+          "rolls": 1,
+          "entries": [
+            {
+              "kind": "item",
+              "id": "tiamud:drop:wolf-clasp",
+              "weight": 6000,
+              "itemPrototypeId": "tiamud:wolf-clasp",
+              "minQuantity": 1,
+              "maxQuantity": 1
+            },
+            {
+              "kind": "nothing",
+              "id": "tiamud:drop:nothing",
+              "weight": 4000
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "lootSources": [
+    {
+      "kind": "npc_spawn",
+      "id": "tiamud:gate-stalker-loot",
+      "npcSpawnId": "tiamud:gate-stalker-1",
+      "lootTableId": "tiamud:gate-stalker-drops",
+      "rights": "party_round_robin"
+    }
+  ]
+}
+```
+
+En la demostración, cada derrota produce un `tiamud:road-token` garantizado y
+realiza una tirada: `tiamud:wolf-clasp` tiene peso 6000 y `nothing` 4000, es
+decir, 60 % frente a 40 %. Además, la instancia inicial
+`tiamud:stormglass-talon` permanece como botín fijo de la primera derrota. La
+política `party_round_robin` reparte cada raíz sucesiva por una cohorte de hasta
+seis personajes; `credited_character` reservaría todas al iniciador. La
+selección inicial no es discrecional del líder.
+
+Reglas de referencias y capacidad:
+
+- IDs de tabla, fuente, entrada garantizada, pool y entrada ponderada son
+  canónicos, únicos en su ámbito y ocupan 1..=128 bytes;
+- cada prototipo, aparición de NPC y tabla referenciados debe existir;
+- una aparición admite como máximo una fuente y toda tabla debe estar usada;
+- una tabla admite hasta 8 entradas garantizadas y 8 pools; cada pool, 1..=8
+  tiradas y 1..=64 entradas;
+- el WorldPack admite 256 tablas, 1.024 fuentes y 4.096 entradas ponderadas;
+- cada peso está en `1..=1.000.000` y cada cantidad en `1..=32`; y
+- el peor caso de raíces fijas más unidades repetibles para una aparición no
+  puede superar 64 por derrota.
+
+El SHA-256 de la forma canónica exacta de cada tabla viaja al dominio. Cada
+instancia generada conserva procedencia durable con drop, aparición, tabla,
+digest, entrada, pool opcional, índices y tick. Las instancias iniciales se
+marcan como authored; las creadas por la API general conservan procedencia
+runtime propia. Esta metadata vive en `WorldRuntimeSnapshot` v6 y nunca se
+expone a clientes. Cambiar una tabla después no reescribe la procedencia de los
+objetos ya generados.
 
 ## Composición, validación y digest
 
@@ -485,12 +600,13 @@ La composición:
 - produce bytes y reportes deterministas; y
 - escribe el destino completo de forma atómica sin sobreescribirlo.
 
-Lantern Square se compone desde tres áreas y produce nueve prototipos y diez
-instancias iniciales. El artefacto de 49.603 bytes es byte a byte idéntico al
-WorldPack canónico y su SHA-256 es:
+Lantern Square se compone desde tres áreas y produce tres salas, nueve
+prototipos, nueve instancias iniciales, una tabla de botín y una fuente. El
+artefacto de 50.498 bytes es byte a byte idéntico al WorldPack canónico y su
+SHA-256 es:
 
 ```text
-f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8
+3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816
 ```
 
 La demostración conserva `tiamud:road-token` y `tiamud:wolf-clasp` como
@@ -498,7 +614,9 @@ La demostración conserva `tiamud:road-token` y `tiamud:wolf-clasp` como
 casos 3C son nuevas identidades: `tiamud:rain-writ`, consumible con
 `healAmount: 1` y `non_transferable`, comienza en `demo:north-gate`; y
 `tiamud:stormglass-talon`, `character_bound`, es botín fijo de
-`tiamud:gate-stalker-1`.
+`tiamud:gate-stalker-1`. Esa misma aparición usa reparto round-robin de party
+para el `tiamud:road-token` garantizado y la tirada 60 %
+`tiamud:wolf-clasp`/40 % `nothing` de su tabla repetible.
 
 Límites principales:
 
@@ -510,6 +628,8 @@ Límites principales:
 | Total de fuentes de área | 16 MiB |
 | WorldPack compuesto | 16 MiB |
 | Ruta relativa | 4096 bytes |
+| Título de sala | 1..=128 bytes seguros, sin controles |
+| Descripción de sala | 1..=8.192 bytes seguros |
 | Prototipos de objeto por WorldPack | 1.024 |
 | Instancias iniciales por WorldPack | 8.192 |
 | Bytes por ID de instancia | 1..=128 |
@@ -523,6 +643,12 @@ Límites principales:
 | Profundidad de contención | 4 aristas |
 | Unidades movidas por acción | 256 |
 | Grupos por página de `contents` | 20 |
+| Tablas/fuentes de botín | 256 / 1.024 |
+| Garantizados/pools por tabla | 8 / 8 |
+| Tiradas/entradas por pool | 8 / 64 |
+| Entradas ponderadas globales | 4.096 |
+| Peso/cantidad de una entrada | 1..=1.000.000 / 1..=32 |
+| Raíces fijas + repetibles por derrota | 64 |
 
 ## Flujo editorial
 
@@ -558,32 +684,42 @@ validación y revisión humana.
 
 ## Persistencia y evolución del formato
 
-WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v5 define dónde están
+WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v6 define dónde están
 las instancias después de jugar, su `binding` obligatorio, los contadores de
-identidad y las reservas de trade. El decoder elige primero por
-`snapshotVersion` y compara esa versión original con la columna SQL; las
-conversiones desde v1, v2 y v3 usan DTO explícitos y producen
-`binding: { kind: "unbound" }`; v4 produce `nextTradeId: 1` y `trades: {}`.
+identidad, las reservas de trade, la procedencia, los encuentros de botín, los
+derechos sobre suelo y los cursores round-robin. El decoder elige primero por
+`snapshotVersion` y compara esa versión original con la columna SQL. DTO
+explícitos v1-v5 convierten de forma estricta: v1-v3 producen
+`binding: { kind: "unbound" }` y v4 añade trade vacío. Al llegar a v6, cada
+origen v1-v5 añade botín vacío y procedencia
+`legacy_snapshot { sourceVersion }` para todas sus instancias.
 Todas fallan cerradas ante campos cruzados. En particular, inyectar `binding`
-en v3 o campos de trade en v4 no adelanta su versión. También se rechazan
-referencias, ciclos, profundidad, capacidad, contador, propietario, vínculo,
-participante o reserva inválidos. Al restaurar un
-snapshot anterior, las instancias iniciales nuevas del WorldPack se conservan y
-el estado durable se superpone; una instancia creada en runtime que no figure
-en el snapshot no reaparece. Antes de abrir listeners se validan por lotes los
-propietarios de objetos siguiendo padres `Contained` hasta la raíz y todos los
-`CharacterId` ligados, incluidos los de objetos consumidos. Se comprueban sus
-fichas, equipos, el grafo, los vínculos y la capacidad, incluidos personajes
-desconectados. Los participantes de trade que no sean ya propietarios se
-cargan con un presupuesto adicional cerrado; después se validan y cancelan
-todas las reservas restauradas antes de readiness. Esos agregados temporales
-no quedan en el mundo activo.
-El runtime admite hasta 65.536 instancias; tanto el snapshot como la suma de
-fichas inspeccionadas en esa barrera están limitados a 1 MiB, y cada ficha a
-64 KiB. SQLite y
-PostgreSQL guardan ese snapshot acotado como `TEXT` opaco dentro de la
-transacción existente de esquema v10. No hay tabla espejo/escrow, doble
-escritura ni esquema v11.
+en v3, trade en v4 o procedencia/derechos v6 en v5 no adelanta su versión.
+También se rechazan referencias, ciclos, profundidad, capacidad, contador,
+propietario, vínculo, participante, reserva, cohorte o procedencia inválidos.
+
+Al restaurar un snapshot anterior, las instancias iniciales nuevas del
+WorldPack se conservan y el estado durable se superpone; una instancia creada
+en runtime que no figure en el snapshot no reaparece. Antes de abrir listeners
+se validan por lotes los propietarios de objetos siguiendo padres `Contained`
+hasta la raíz y todos los `CharacterId` ligados, incluidos los de objetos
+consumidos. Se comprueban sus fichas, equipos, el grafo, los vínculos y la
+capacidad, también para personajes desconectados. Los participantes de trade
+que no sean ya propietarios se cargan con un presupuesto adicional cerrado;
+las identidades que solo aparecen en cohortes o derechos de botín se comprueban
+mediante consultas de existencia por lotes. Se cancelan trades y encuentros de
+botín abiertos antes de readiness, pero los derechos ya generados sobreviven al
+reinicio. Esos agregados temporales no quedan en el mundo activo.
+
+El runtime admite hasta 65.536 instancias. Los snapshots raw heredados v1-v5
+conservan el límite físico de 1 MiB; el snapshot v6 actual y cada nueva
+admisión/confirmación admiten hasta 2 MiB. La suma de fichas de propietarios
+inspeccionadas sigue limitada a 1 MiB y cada ficha a 64 KiB. SQLite y
+PostgreSQL esquema v11 guardan el snapshot como `TEXT` opaco dentro de la
+transacción existente. La migración v10→v11 aumenta de forma transaccional la
+restricción física del singleton runtime a 2 MiB y conserva versión, JSON,
+secuencia cubierta y fecha; no convierte el JSON ni crea otra autoridad. No hay
+tabla espejo/escrow/loot, doble escritura ni `jsonb`.
 
 Tras una futura release estable, renombrar un ID requerirá alias, tombstone o
 migración explícita. Nunca recicles un ID publicado para otro significado.

@@ -6,7 +6,7 @@ use world_pack::{
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 #[test]
-fn reviewed_runtime_fixture_matches_world_pack_v5() {
+fn reviewed_runtime_fixture_matches_world_pack_v6() {
     let document = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap();
     let pack = document.world;
 
@@ -15,7 +15,7 @@ fn reviewed_runtime_fixture_matches_world_pack_v5() {
     assert_eq!(pack.start_room_id, "demo:lantern-square");
     assert!(pack.rooms.iter().any(|room| room.id == pack.start_room_id));
     assert_eq!(pack.item_prototypes.len(), 9);
-    assert_eq!(pack.initial_item_instances.len(), 10);
+    assert_eq!(pack.initial_item_instances.len(), 9);
     assert!(
         pack.item_prototypes
             .iter()
@@ -127,6 +127,22 @@ fn reviewed_runtime_fixture_matches_world_pack_v5() {
     assert!(pack.gameplay.archetypes.is_empty());
     assert_eq!(pack.gameplay.abilities.len(), 3);
     assert_eq!(pack.gameplay.npc_ability_sets.len(), 1);
+    assert_eq!(pack.gameplay.loot_tables.len(), 1);
+    assert_eq!(pack.gameplay.loot_sources.len(), 1);
+    let loot_table = &pack.gameplay.loot_tables[0];
+    assert_eq!(loot_table.id, "tiamud:gate-stalker-drops");
+    assert_eq!(
+        loot_table.guaranteed[0].item_prototype_id,
+        "tiamud:road-token"
+    );
+    assert_eq!(loot_table.pools[0].entries.len(), 2);
+    assert_eq!(loot_table.canonical_sha256().len(), 64);
+    let loot_source = &pack.gameplay.loot_sources[0];
+    assert_eq!(loot_source.npc_spawn_id, "tiamud:gate-stalker-1");
+    assert_eq!(
+        loot_source.rights,
+        world_pack::LootRightsPolicy::PartyRoundRobin
+    );
     let progression = pack.gameplay.character_progression.as_ref().unwrap();
     assert_eq!(progression.defaults.base_class_id, "tiamud:wanderer");
     assert_eq!(progression.lineages.len(), 3);
