@@ -38,7 +38,7 @@ pub use progression::{
     RequirementPredicate, TalentGraphDefinition, TalentNodeDefinition, TalentRankDefinition,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 pub const MAX_ROOM_TITLE_BYTES: usize = 128;
 pub const MAX_ROOM_DESCRIPTION_BYTES: usize = 8_192;
 pub const MAX_ITEM_PROTOTYPES: usize = 1_024;
@@ -87,6 +87,11 @@ pub const MAX_ABILITY_RESOURCE_COSTS: usize = 4;
 pub const MAX_ABILITY_STATUS_EFFECTS: usize = 8;
 pub const MAX_COMMUNICATION_ABILITIES: usize = 32;
 pub const MAX_COMMUNICATION_BLOCKED_ROOMS: usize = 64;
+pub const MAX_SOCIAL_EMOTES: usize = 32;
+pub const MAX_SOCIAL_EMOTE_ID_BYTES: usize = 64;
+pub const MAX_SOCIAL_EMOTE_COMMAND_BYTES: usize = 32;
+pub const MAX_SOCIAL_EMOTE_NAME_BYTES: usize = 64;
+pub const MAX_SOCIAL_EMOTE_RENDERED_BYTES: usize = 512;
 pub const MAX_ABILITY_COOLDOWN_TICKS: u32 = 10_000;
 pub const MAX_ABILITY_EFFECT_DURATION_TICKS: u32 = 10_000;
 pub const MAX_ABILITY_EFFECT_MAGNITUDE: i32 = 100_000;
@@ -245,6 +250,10 @@ pub struct GameplayDefinition {
     pub archetypes: Vec<ArchetypeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abilities: Vec<AbilityDefinition>,
+    /// Closed, author-controlled room emotes. Templates are validated before
+    /// the runtime receives them and may only interpolate actor/target names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub social_emotes: Vec<SocialEmoteDefinition>,
     /// Ability loadouts remain separate from [`NpcPrototype`] and reusable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_ability_sets: Vec<NpcAbilitySet>,
@@ -267,12 +276,62 @@ impl GameplayDefinition {
             && self.default_archetype_id.is_none()
             && self.archetypes.is_empty()
             && self.abilities.is_empty()
+            && self.social_emotes.is_empty()
             && self.npc_ability_sets.is_empty()
             && self.loot_tables.is_empty()
             && self.loot_sources.is_empty()
             && self.affixes.is_empty()
             && self.affix_pools.is_empty()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SocialEmoteDefinition {
+    pub id: String,
+    pub command: String,
+    pub name: String,
+    pub audience: SocialEmoteAudience,
+    pub targeting: SocialEmoteTargeting,
+    pub templates: SocialEmoteTemplates,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocialEmoteAudience {
+    Room,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocialEmoteTargeting {
+    None,
+    OptionalCharacter,
+    RequiredCharacter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SocialEmoteTemplates {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untargeted: Option<SocialEmoteUntargetedTemplates>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targeted: Option<SocialEmoteTargetedTemplates>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SocialEmoteUntargetedTemplates {
+    pub actor: String,
+    pub others: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SocialEmoteTargetedTemplates {
+    pub actor: String,
+    pub target: String,
+    pub others: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1063,6 +1122,7 @@ impl WorldPack {
             }
         }
 
+        validate_social_emotes(&self.gameplay.social_emotes, &mut errors);
         validate_character_and_abilities(&self.gameplay, &prototypes, &room_ids, &mut errors);
         if let Some(progression) = &self.gameplay.character_progression {
             progression::validate_character_progression(
@@ -2105,6 +2165,186 @@ fn authored_item_total_weight<'a>(
         }
     }
     Some(weight)
+}
+
+fn validate_social_emotes(emotes: &[SocialEmoteDefinition], errors: &mut Vec<ValidationError>) {
+    if emotes.len() > MAX_SOCIAL_EMOTES {
+        invalid_gameplay(
+            errors,
+            format!(
+                "world declares {} social emotes; the maximum is {MAX_SOCIAL_EMOTES}",
+                emotes.len()
+            ),
+        );
+    }
+
+    let mut ids = HashSet::new();
+    let mut commands = HashSet::new();
+    for emote in emotes {
+        if emote.id.len() > MAX_SOCIAL_EMOTE_ID_BYTES || !valid_gameplay_identifier(&emote.id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "social emote id {:?} must contain 1..={MAX_SOCIAL_EMOTE_ID_BYTES} lowercase namespaced identifier bytes",
+                    emote.id
+                ),
+            );
+        } else if !ids.insert(emote.id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!("social emote id {:?} appears more than once", emote.id),
+            );
+        }
+        if !valid_social_emote_command(&emote.command) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "social emote {:?} command must match [a-z][a-z0-9-]* in 1..={MAX_SOCIAL_EMOTE_COMMAND_BYTES} ASCII bytes",
+                    emote.id
+                ),
+            );
+        } else if !commands.insert(emote.command.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "social emote command {:?} appears more than once",
+                    emote.command
+                ),
+            );
+        }
+        if !safe_social_emote_plain_text(&emote.name, MAX_SOCIAL_EMOTE_NAME_BYTES) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "social emote {:?} name must contain 1..={MAX_SOCIAL_EMOTE_NAME_BYTES} safe bytes",
+                    emote.id
+                ),
+            );
+        }
+
+        let required_shape = match emote.targeting {
+            SocialEmoteTargeting::None => {
+                emote.templates.untargeted.is_some() && emote.templates.targeted.is_none()
+            }
+            SocialEmoteTargeting::OptionalCharacter => {
+                emote.templates.untargeted.is_some() && emote.templates.targeted.is_some()
+            }
+            SocialEmoteTargeting::RequiredCharacter => {
+                emote.templates.untargeted.is_none() && emote.templates.targeted.is_some()
+            }
+        };
+        if !required_shape {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "social emote {:?} templates do not match its targeting mode",
+                    emote.id
+                ),
+            );
+        }
+
+        if let Some(templates) = &emote.templates.untargeted {
+            validate_social_emote_template(
+                &emote.id,
+                "untargeted.actor",
+                &templates.actor,
+                0,
+                0,
+                errors,
+            );
+            validate_social_emote_template(
+                &emote.id,
+                "untargeted.others",
+                &templates.others,
+                1,
+                0,
+                errors,
+            );
+        }
+        if let Some(templates) = &emote.templates.targeted {
+            validate_social_emote_template(
+                &emote.id,
+                "targeted.actor",
+                &templates.actor,
+                0,
+                1,
+                errors,
+            );
+            validate_social_emote_template(
+                &emote.id,
+                "targeted.target",
+                &templates.target,
+                1,
+                0,
+                errors,
+            );
+            validate_social_emote_template(
+                &emote.id,
+                "targeted.others",
+                &templates.others,
+                1,
+                1,
+                errors,
+            );
+        }
+    }
+}
+
+fn valid_social_emote_command(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_SOCIAL_EMOTE_COMMAND_BYTES
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn safe_social_emote_plain_text(value: &str, maximum_bytes: usize) -> bool {
+    !value.is_empty()
+        && value == value.trim()
+        && value.len() <= maximum_bytes
+        && !value.chars().any(char::is_control)
+        && !value.contains(['<', '>', '&'])
+}
+
+fn validate_social_emote_template(
+    emote_id: &str,
+    field: &str,
+    template: &str,
+    expected_actor: usize,
+    expected_target: usize,
+    errors: &mut Vec<ValidationError>,
+) {
+    const ACTOR: &str = "{actor}";
+    const TARGET: &str = "{target}";
+
+    let actor_count = template.matches(ACTOR).count();
+    let target_count = template.matches(TARGET).count();
+    let without_known_placeholders = template.replace(ACTOR, "").replace(TARGET, "");
+    let unsafe_text = template.trim().is_empty()
+        || template != template.trim()
+        || template.chars().any(char::is_control)
+        || template.contains(['<', '>', '&'])
+        || without_known_placeholders.contains(['{', '}']);
+    let rendered_bytes = template
+        .len()
+        .checked_sub(actor_count.saturating_mul(ACTOR.len()))
+        .and_then(|bytes| bytes.checked_sub(target_count.saturating_mul(TARGET.len())))
+        .and_then(|bytes| bytes.checked_add(actor_count.saturating_mul(64)))
+        .and_then(|bytes| bytes.checked_add(target_count.saturating_mul(64)));
+    if unsafe_text
+        || actor_count != expected_actor
+        || target_count != expected_target
+        || rendered_bytes.is_none_or(|bytes| bytes > MAX_SOCIAL_EMOTE_RENDERED_BYTES)
+    {
+        invalid_gameplay(
+            errors,
+            format!(
+                "social emote {emote_id:?} template {field} has unsafe text, invalid placeholders, or exceeds {MAX_SOCIAL_EMOTE_RENDERED_BYTES} rendered bytes"
+            ),
+        );
+    }
 }
 
 fn validate_character_and_abilities(

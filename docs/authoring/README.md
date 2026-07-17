@@ -1,8 +1,8 @@
 # World authoring
 
 This is the current English entry point for creating Tiamud content. The
-runtime consumes one canonical **WorldPack v8**. Authors can maintain that
-world as strict **AreaPack v7** modules under a **WorldProjectManifest v2** and
+runtime consumes one canonical **WorldPack v9**. Authors can maintain that
+world as strict **AreaPack v8** modules under a **WorldProjectManifest v2** and
 compose them offline; areas are not services and are not loaded independently
 at runtime.
 
@@ -67,7 +67,7 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   `staged` location. Fungible stacks remain derived from individual instances;
   do not author or persist stack IDs/quantities. Do not restore v3 `items`,
   `itemRules` or `lootItemIds` fields.
-- Native WorldPack v8 and AreaPack v7 accept `transferable`,
+- Native WorldPack v9 and AreaPack v8 accept `transferable`,
   `character_bound` and `non_transferable`. Character binding is runtime state,
   not an authoring field: it is created on first acquisition and persisted in
   WorldRuntimeSnapshot v7. Legacy WorldPack v4/AreaPack v3 inputs must remain
@@ -88,7 +88,7 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   inferring probabilities. The canonical table digest becomes durable drop
   provenance; IDs, weights, quantities and references are validated strictly.
 - Sealed earned rewards and affixes were introduced by WorldPack v7/AreaPack
-  v6 and remain valid in v8/v7. A sealed prototype is unique, consumable, `character_bound`, has no
+  v6 and remain valid in v9/v8. A sealed prototype is unique, consumable, `character_bound`, has no
   equipment/container/effect payload and names one table whose minimum and
   maximum guarantee 1..=16 units and expands to at most 1,024 visible odds
   rows. It cannot be an initial instance or a direct NPC `lootSource`, must
@@ -104,12 +104,18 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   These are encounter rewards, not paid boxes, keys or purchasable random
   rolls. Pity, need/greed, master-loot and contribution sharing are not part of
   this contract.
-- WorldPack v8/AreaPack v7 add closed communication abilities. Telepathy is an
+- WorldPack v9/AreaPack v8 preserve the closed communication abilities added
+  in WorldPack v8/AreaPack v7. Telepathy is an
   ordinary known ability with a positive resource cost and cooldown, a single
   online ally target and up to 64 unique existing blocked rooms. It cannot
   damage, heal, apply statuses or belong to an NPC ability set. A world may
   define at most 32 such abilities; v7/v6 and older inputs reject rather than
   ignore this later field.
+- WorldPack v9/AreaPack v8 add up to 32 closed room emotes. Commands are unique
+  bounded lowercase ASCII, targeting determines the exact template set, and
+  only the exact `{actor}`/`{target}` placeholders are accepted. Rendered text
+  must remain within 512 bytes for worst-case 64-byte names. Older packs and
+  `envy-import` normalize to an empty emote catalog rather than inventing one.
 - WorldRuntimeSnapshot v7 is the single durable authority for item location,
   binding, trade reservations, loot provenance, ground rights, applied affixes
   and sealed-open counters. SQLite and PostgreSQL schema v11 store it as opaque
@@ -144,18 +150,21 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
 - [Confirmed trade reservations](../decisions/0012-confirmed-trade-reservations.md)
 - [Repeatable loot, rights and provenance](../decisions/0013-repeatable-loot-rights-and-provenance.md)
 - [Earned sealed rewards and deterministic affixes](../decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md)
+- [Authored direct-online telepathy](../decisions/0015-authored-online-telepathy.md)
+- [Authored room emotes](../decisions/0016-authored-room-emotes.md)
 - [Scene compositor decision](../decisions/0008-optional-scene-compositor.md)
 - [Asset compiler](../../crates/asset-pipeline/README.md)
 - [Lua runtime](../../crates/scripting/README.md)
 - [Optional editorial AI](../../crates/editorial-ai/README.md)
 - [Historical Envy/Merc importer](../../tools/envy-import/README.md)
 
-The [Spanish WorldPack v8/AreaPack v7 guide](../world-authoring.md) is the
+The [Spanish WorldPack v9/AreaPack v8 guide](../world-authoring.md) is the
 current compact schema and workflow reference. Its reviewed Lantern Square
 example has three rooms, ten item prototypes, nine initial instances, two
-loot tables and one loot source. The 53,040-byte
+loot tables, one loot source, one affix, one affix pool, one authored
+direct-online telepathy ability and one authored room emote. The 53,567-byte
 canonical artifact has SHA-256
-`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
+`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
 It keeps the published `tiamud:road-token` and `tiamud:wolf-clasp` semantics
 transferable, and demonstrates phase 3C with the non-transferable consumable
 `tiamud:rain-writ` in `demo:north-gate` and the character-bound fixed loot
@@ -166,3 +175,5 @@ the talon yielded by breaking the bound oath make one 60% `storm-bitten`
 prefix roll (40% unchanged), demonstrating that affixes are not limited to
 sealed rewards. The default Wanderer also receives the resource-costed
 `tiamud:mind-whisper`; `demo:archive` demonstrates an authored telepathy block.
+`tiamud:smile` demonstrates optional character targeting and exact
+observer-specific templates.

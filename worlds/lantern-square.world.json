@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 8,
+  "schemaVersion": 9,
   "id": "lantern-square",
   "name": "Tiamud: Lantern Square",
   "startRoomId": "demo:lantern-square",
@@ -1612,6 +1612,26 @@
           "blockedRoomIds": [
             "demo:archive"
           ]
+        }
+      }
+    ],
+    "socialEmotes": [
+      {
+        "id": "tiamud:smile",
+        "command": "smile",
+        "name": "Sonreír",
+        "audience": "room",
+        "targeting": "optional_character",
+        "templates": {
+          "untargeted": {
+            "actor": "Sonríes.",
+            "others": "{actor} sonríe."
+          },
+          "targeted": {
+            "actor": "Sonríes a {target}.",
+            "target": "{actor} te sonríe.",
+            "others": "{actor} sonríe a {target}."
+          }
         }
       }
     ],

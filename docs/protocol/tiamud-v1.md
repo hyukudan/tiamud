@@ -272,6 +272,7 @@ economy.balance, economy.shop, economy.buy, economy.sell
 weather, time
 social.say, social.tell, social.reply, social.channel.list,
 social.channel.join, social.channel.leave, social.channel.say, social.telepathy,
+social.emote.list, social.emote,
 social.who, social.help
 social.ignore, social.unignore, social.block, social.unblock, social.report
 moderation.mute, moderation.unmute, moderation.ban, moderation.unban,
@@ -293,6 +294,11 @@ authored ocupa como máximo 64 bytes, el personaje 64 y el pensamiento UTF-8
 visible 512. No acepta campos de combate, canal ni persistencia, aunque un
 campo adicional conocido llegue como `null`. Una habilidad cuyo propósito es
 `telepathy` se rechaza en `combat.ability`; no existe una segunda ruta genérica.
+`social.emote.list` no admite campos de acción. `social.emote` exige `emote`,
+un comando authored ASCII de 1–32 bytes con patrón `[a-z][a-z0-9-]*`, y admite únicamente `target`, un
+nombre UTF-8 de hasta 64 bytes. No acepta `message`: la frase procede de las
+plantillas revisadas del WorldPack y el objetivo, cuando el gesto lo admite o
+exige, debe ser otro personaje conectado y no ambiguo de la misma sala.
 Los campos inesperados y objetivos ausentes/prohibidos se rechazan. Se aplican
 las mismas reglas de autorización y percepción; una acción estructurada no es
 un atajo confiable. Accept/revoke/kick/transfer resuelven `target` como nombre
@@ -406,8 +412,9 @@ Los comandos equivalentes son `trade request`, `trade accept|decline|status|canc
 depender de Web ni GMCP.
 
 Los equivalentes de texto usan `party say` (`gsay`/`gtell`), `party revoke`,
-`party kick`, `party transfer`, `party disband`, `reply`, `telepathy`, `channel(s)`,
-`channel join`, `channel leave` y `channel say`. Los alias `gossip`, `newbie` y
+`party kick`, `party transfer`, `party disband`, `reply`, `telepathy`, `emotes`,
+`emote <comando> [personaje]`, `channel(s)`, `channel join`, `channel leave` y
+`channel say`. Los alias `gossip`, `newbie` y
 `wiznet` envían a `general`, `newbie`, `staff`. Unirse, enviar o recibir
 `staff` exige perfil `moderator`, `administrator` o `implementor`.
 
@@ -520,7 +527,7 @@ traffic.
 | `reward.odds` | Página privada de probabilidades exactas de una recompensa sellada portada. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
-| `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `telepathy`, `party`, `general`, `newbie` o `staff`. |
+| `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `telepathy`, `emote`, `party`, `general`, `newbie` o `staff`. |
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
@@ -995,7 +1002,7 @@ y receptor reciben listas de inventario regeneradas independientemente con su
 propia sal; el observador de sala no recibe una lista ajena.
 
 `chat.message.data` contiene `channel` (`announcement`, `say`, `tell`,
-`telepathy`, `party`, `general`, `newbie` o `staff`), `sender` y texto plano
+`telepathy`, `emote`, `party`, `general`, `newbie` o `staff`), `sender` y texto plano
 acotado. Ignore y block
 por cualquiera de las partes se aplican antes de entregar. Mute/ban y rate
 limit se aplican en servidor. `general`, `newbie` y `staff` requieren
@@ -1013,10 +1020,21 @@ estado privado del receptor pueden suprimir la entrega sin cambiar la
 confirmación del emisor. El cuerpo, destino y `abilityId` no se incluyen en
 eventos durables; la recepción no modifica el destinatario de `reply`.
 
+`emote` procede de `social.emote`: `sender` identifica al actor y `text`
+contiene la frase completa ya renderizada para ese observador. El cliente no
+antepone otra vez el remitente. El comando y nombre son descubribles mediante
+el listado, pero la plantilla, el objetivo y los IDs no se exponen como campos
+estructurados del mensaje; el nombre visible del objetivo puede formar parte
+del texto renderizado. Ignore/block puede suprimir receptores sin
+cambiar la confirmación del actor ni la percepción autorizada de terceros.
+No crea historial, `reply`, evento durable, snapshot o fila SQL.
+
 Telnet representa el mismo `SocialMessage` autorizado como texto acotado. Si
 negoció GMCP `Comm`, recibe también `Comm.Channel.Text` con el mismo alcance,
 incluido `announcement`, y los campos `talker` y `text`; GMCP no evita
-autorización ni crea otra fuente de verdad.
+autorización ni crea otra fuente de verdad. Cuando MXP está negociado, texto,
+remitentes y narrativa de dominio se escapan como datos exactamente una vez;
+texto plano y el JSON GMCP conservan el contenido original.
 
 Audio messages are sent only when `client.hello.capabilities.audio` is true:
 

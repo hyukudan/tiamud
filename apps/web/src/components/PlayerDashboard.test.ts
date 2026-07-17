@@ -223,6 +223,7 @@ describe('PlayerDashboard', () => {
       'Invite or manage an adventurer', 'Revoke invitation', 'Remove from party',
       'Transfer leadership', 'Disband party', 'Message to party',
       'Reply to your latest direct message', 'World channels', 'Channel',
+      'Authored emotes', 'Emote command', 'Nearby character', 'Perform emote',
       'General', 'Newbie', 'Staff', 'Nearby recipient', 'Transferable',
       'Bound to this character', 'Non-transferable',
       'Mind to reach with Mind Thread', 'Private thought', 'Direct online message',
@@ -272,12 +273,14 @@ describe('PlayerDashboard', () => {
       'party.say', 'party.revoke', 'party.kick', 'party.transfer', 'party.disband',
       'social.reply', 'social.channel.list', 'social.channel.join',
       'social.channel.leave', 'social.channel.say',
-      'social.telepathy',
+      'social.telepathy', 'social.emote.list', 'social.emote',
     ]) {
       expect(dashboardSource).toContain(action);
     }
     expect(dashboardSource).toContain('{ channel: communityChannel, message }');
     expect(dashboardSource).toContain('{ target }');
+    expect(dashboardSource).toContain('target ? { emote, target } : { emote }');
+    expect(dashboardSource).not.toContain("'social.emote', { message");
     expect(dashboardSource).toContain("'item.contents'");
     expect(dashboardSource).toContain("'item.put'");
     expect(dashboardSource).toContain("'item.get'");

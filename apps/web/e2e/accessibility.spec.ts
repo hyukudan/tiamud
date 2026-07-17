@@ -915,6 +915,30 @@ test('telepathy ability reaches an online mind through an exact structured actio
   });
 });
 
+test('authored emotes send only a command and optional nearby target', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+
+  await page.getByRole('button', { name: 'List emotes' }).click();
+  await page.getByLabel('Emote command').fill('smile');
+  await page.getByLabel('Nearby character').selectOption({ label: 'Bram' });
+  await page.getByRole('button', { name: 'Perform emote' }).click();
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.map((entry) => entry.data);
+  })).toEqual([
+    expect.objectContaining({ action: 'social.emote.list' }),
+    {
+      requestId: expect.any(String),
+      action: 'social.emote',
+      emote: 'smile',
+      target: 'Bram',
+    },
+  ]);
+});
+
 test('inventory gives only to a selected nearby opaque recipient', async ({ page }) => {
   await installMockWorld(page);
   await page.goto('/');

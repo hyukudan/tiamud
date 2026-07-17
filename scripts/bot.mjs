@@ -17,7 +17,7 @@ const MAX_SCENE_PRESENTATION_ENTITIES = 12;
 const MAX_SCENE_PRESENTATION_POSES = 32;
 const MAX_ENTITY_SOURCE_REFERENCES = 2;
 const SOCIAL_CHANNELS = new Set([
-  'announcement', 'say', 'tell', 'telepathy', 'party', 'general', 'newbie', 'staff',
+  'announcement', 'say', 'tell', 'telepathy', 'emote', 'party', 'general', 'newbie', 'staff',
 ]);
 const MEDIA_CHANNELS = new Set(['music', 'ambience', 'effects']);
 

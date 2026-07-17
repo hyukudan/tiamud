@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "id": "square",
   "dependsOn": [
     "archive",
@@ -580,6 +580,26 @@
         "blockedRoomIds": [
           "demo:archive"
         ]
+      }
+    }
+  ],
+  "socialEmotes": [
+    {
+      "id": "tiamud:smile",
+      "command": "smile",
+      "name": "Sonreír",
+      "audience": "room",
+      "targeting": "optional_character",
+      "templates": {
+        "untargeted": {
+          "actor": "Sonríes.",
+          "others": "{actor} sonríe."
+        },
+        "targeted": {
+          "actor": "Sonríes a {target}.",
+          "target": "{actor} te sonríe.",
+          "others": "{actor} sonríe a {target}."
+        }
       }
     }
   ],

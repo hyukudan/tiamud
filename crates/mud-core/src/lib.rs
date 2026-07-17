@@ -1,9 +1,11 @@
 //! Transport-independent world model for Tiamud.
 
 mod ability;
+mod emote;
 mod progression;
 
 pub use ability::*;
+pub use emote::*;
 pub use progression::*;
 
 use rand_core::{OsRng, RngCore};
@@ -525,6 +527,11 @@ pub enum SocialAction {
         channel: SocialChannelName,
         message: String,
     },
+    EmoteList,
+    Emote {
+        command: String,
+        target: Option<String>,
+    },
     Who,
     Help(Option<String>),
     Ignore(String),
@@ -795,6 +802,28 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if normalised == "reply" {
         return Err(ParseActionError::MissingTarget { command: "reply" });
+    }
+    if normalised == "emotes" {
+        return Ok(PlayerAction::Social(SocialAction::EmoteList));
+    }
+    if normalised == "emote" {
+        return Err(ParseActionError::MissingTarget { command: "emote" });
+    }
+    if let Some(rest) = command_tail(input, "emote") {
+        let (command, target) = rest
+            .split_once(char::is_whitespace)
+            .map_or((rest.as_str(), None), |(command, target)| {
+                (command.trim(), Some(target.trim()))
+            });
+        if !emote::valid_command(command)
+            || target.is_some_and(|target| !emote::valid_target_query(target))
+        {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        }
+        return Ok(PlayerAction::Social(SocialAction::Emote {
+            command: command.to_owned(),
+            target: target.map(str::to_owned),
+        }));
     }
     if matches!(
         normalised.as_str(),
@@ -4320,6 +4349,12 @@ pub enum WorldError {
     InvalidAbilityTarget,
     #[error("That telepathic message is not valid.")]
     InvalidTelepathyRequest,
+    #[error("The authored social-emote configuration is invalid.")]
+    InvalidEmoteDefinition,
+    #[error("That social emote is not available.")]
+    EmoteUnavailable,
+    #[error("That social-emote target is not available.")]
+    EmoteTargetUnavailable,
     #[error("The persisted world runtime snapshot is invalid or incompatible.")]
     InvalidRuntimeSnapshot,
     #[error("That party action is not available.")]
@@ -4746,6 +4781,7 @@ pub struct World {
     secret_exits: HashMap<(String, Direction), u16>,
     npcs: BTreeMap<String, Npc>,
     abilities: BTreeMap<String, AbilityDefinition>,
+    social_emotes: BTreeMap<String, SocialEmoteDefinition>,
     progression: ProgressionCatalog,
     progression_catalog: CharacterCreationCatalogView,
     world_progression_flags: BTreeSet<String>,
@@ -5064,6 +5100,7 @@ impl World {
             secret_exits: HashMap::new(),
             npcs: BTreeMap::new(),
             abilities: BTreeMap::new(),
+            social_emotes: BTreeMap::new(),
             progression,
             progression_catalog,
             world_progression_flags: BTreeSet::new(),
@@ -5216,6 +5253,48 @@ impl World {
         self.progression = progression;
         self.abilities = ability_map;
         Ok(())
+    }
+
+    /// Atomically installs the reviewed, bounded local-emote catalog.
+    ///
+    /// The catalog is immutable authored configuration. It is deliberately
+    /// absent from runtime snapshots and checkpoints, and no template is
+    /// accepted unless every perspective has a bounded worst-case rendering.
+    pub fn configure_social_emotes(
+        &mut self,
+        definitions: Vec<SocialEmoteDefinition>,
+    ) -> Result<(), WorldError> {
+        if definitions.len() > MAX_SOCIAL_EMOTES
+            || definitions
+                .iter()
+                .any(|definition| !emote::validate_definition(definition))
+        {
+            return Err(WorldError::InvalidEmoteDefinition);
+        }
+        let definition_count = definitions.len();
+        let unique_ids = definitions
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect::<BTreeSet<_>>();
+        if unique_ids.len() != definition_count {
+            return Err(WorldError::InvalidEmoteDefinition);
+        }
+        let catalog = definitions
+            .into_iter()
+            .map(|definition| (definition.command.clone(), definition))
+            .collect::<BTreeMap<_, _>>();
+        if catalog.len() != definition_count {
+            return Err(WorldError::InvalidEmoteDefinition);
+        }
+        self.social_emotes = catalog;
+        Ok(())
+    }
+
+    /// Returns command-discovery metadata in deterministic command order.
+    ///
+    /// Authored templates never leave core through this view.
+    pub fn social_emotes(&self) -> Vec<SocialEmoteView> {
+        self.social_emotes.values().map(emote::view).collect()
     }
 
     pub fn progression_catalog(&self) -> &CharacterCreationCatalogView {
@@ -13926,6 +14005,151 @@ impl World {
                 })
             })
             .collect()
+    }
+
+    /// Resolves one authored local emote without mutating or persisting state.
+    ///
+    /// The returned room audience is a transient routing plan. A target must
+    /// be a distinct, connected character in the actor's current room and is
+    /// selected only by an exact, case-insensitive, unambiguous name.
+    pub fn emote_preflight(
+        &self,
+        session: SessionId,
+        command: &str,
+        target: Option<&str>,
+    ) -> Result<SocialEmotePlan, WorldError> {
+        if !emote::valid_command(command)
+            || target.is_some_and(|target| !emote::valid_target_query(target))
+        {
+            return Err(WorldError::EmoteUnavailable);
+        }
+        let definition = self
+            .social_emotes
+            .get(command)
+            .ok_or(WorldError::EmoteUnavailable)?;
+        match (definition.targeting, target) {
+            (SocialEmoteTargeting::None, Some(_))
+            | (SocialEmoteTargeting::RequiredCharacter, None) => {
+                return Err(WorldError::EmoteTargetUnavailable);
+            }
+            (SocialEmoteTargeting::None | SocialEmoteTargeting::OptionalCharacter, None)
+            | (
+                SocialEmoteTargeting::OptionalCharacter | SocialEmoteTargeting::RequiredCharacter,
+                Some(_),
+            ) => {}
+        }
+
+        let actor = self.character(session)?;
+        if !emote::valid_character_name(&actor.name) {
+            return Err(WorldError::EmoteUnavailable);
+        }
+        let room_id = room_checked(&self.entities, actor.location)?
+            .stable_id
+            .clone();
+        let connected = self.connected_characters()?;
+        let target = if let Some(query) = target {
+            let matches = connected
+                .iter()
+                .filter(|candidate| {
+                    candidate.session_id != session
+                        && candidate.room_id == room_id
+                        && candidate.name.eq_ignore_ascii_case(query)
+                })
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [target] if emote::valid_character_name(&target.name) => Some((*target).clone()),
+                _ => return Err(WorldError::EmoteTargetUnavailable),
+            }
+        } else {
+            None
+        };
+        let target_session_id = target.as_ref().map(|target| target.session_id);
+        Ok(SocialEmotePlan {
+            emote_id: definition.id.clone(),
+            actor_session_id: session,
+            actor_character_id: actor.id,
+            actor_name: actor.name.clone(),
+            target_session_id,
+            target_character_id: target.as_ref().map(|target| target.character_id),
+            target_name: target.as_ref().map(|target| target.name.clone()),
+            room_id: room_id.clone(),
+            other_session_ids: emote::other_sessions(
+                &connected,
+                &room_id,
+                session,
+                target_session_id,
+            ),
+        })
+    }
+
+    /// Renders a preflighted emote into bounded plain text per perspective.
+    ///
+    /// The plan is revalidated against current connections and room placement,
+    /// so a stale or caller-forged destination cannot create cross-room output.
+    pub fn render_emote(&self, plan: &SocialEmotePlan) -> Result<SocialEmoteRender, WorldError> {
+        let definition = self
+            .social_emotes
+            .values()
+            .find(|definition| definition.id == plan.emote_id)
+            .ok_or(WorldError::EmoteUnavailable)?;
+        let actor = self.character(plan.actor_session_id)?;
+        let actor_room_id = room_checked(&self.entities, actor.location)?
+            .stable_id
+            .as_str();
+        if actor.id != plan.actor_character_id
+            || actor.name != plan.actor_name
+            || actor_room_id != plan.room_id
+        {
+            return Err(WorldError::EmoteUnavailable);
+        }
+        let target_fields_present = usize::from(plan.target_session_id.is_some())
+            + usize::from(plan.target_character_id.is_some())
+            + usize::from(plan.target_name.is_some());
+        if !matches!(target_fields_present, 0 | 3) {
+            return Err(WorldError::EmoteTargetUnavailable);
+        }
+        let target_session_id = match (
+            plan.target_session_id,
+            plan.target_character_id,
+            plan.target_name.as_deref(),
+        ) {
+            (Some(target_session_id), Some(target_character_id), Some(target_name)) => {
+                let target = self.character(target_session_id)?;
+                let target_room_id = room_checked(&self.entities, target.location)?
+                    .stable_id
+                    .as_str();
+                if target_session_id == plan.actor_session_id
+                    || target.id != target_character_id
+                    || target.name != target_name
+                    || target_room_id != plan.room_id
+                {
+                    return Err(WorldError::EmoteTargetUnavailable);
+                }
+                Some(target_session_id)
+            }
+            (None, None, None) => None,
+            _ => return Err(WorldError::EmoteTargetUnavailable),
+        };
+        match (definition.targeting, target_session_id) {
+            (SocialEmoteTargeting::None, None)
+            | (SocialEmoteTargeting::OptionalCharacter, _)
+            | (SocialEmoteTargeting::RequiredCharacter, Some(_)) => {}
+            (SocialEmoteTargeting::None, Some(_))
+            | (SocialEmoteTargeting::RequiredCharacter, None) => {
+                return Err(WorldError::EmoteTargetUnavailable);
+            }
+        }
+        let connected = self.connected_characters()?;
+        if emote::other_sessions(
+            &connected,
+            &plan.room_id,
+            plan.actor_session_id,
+            target_session_id,
+        ) != plan.other_session_ids
+        {
+            return Err(WorldError::EmoteUnavailable);
+        }
+        emote::render(definition, plan)
     }
 
     /// Validates one telepathy attempt without mutating resources or timers.

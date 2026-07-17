@@ -167,6 +167,15 @@ describe('protocol messages', () => {
         abilityId: 'mind-thread', target: 'Bram', message: 'Meet beyond the archive.',
       },
     });
+    expect(createActionPerform(
+      'social.emote',
+      { emote: 'smile', target: 'Bram' },
+      'request-emote',
+    )).toMatchObject({
+      data: {
+        requestId: 'request-emote', action: 'social.emote', emote: 'smile', target: 'Bram',
+      },
+    });
     expect(createSyncRequest(12)).toEqual({
       v: 1,
       type: 'sync.request',
@@ -221,6 +230,28 @@ describe('protocol messages', () => {
       .toThrow('bounded visible UTF-8 text');
     expect(() => createActionPerform('social.telepathy', { ...fields, message: 'é'.repeat(257) }, 'bytes'))
       .toThrow('bounded visible UTF-8 text');
+  });
+
+  it('creates only exact authored emote actions', () => {
+    expect(createActionPerform('social.emote.list', undefined, 'emotes')).toMatchObject({
+      data: { action: 'social.emote.list', requestId: 'emotes' },
+    });
+    expect(createActionPerform('social.emote', { emote: 'smile' }, 'smile')).toMatchObject({
+      data: { action: 'social.emote', emote: 'smile' },
+    });
+    expect(createActionPerform(
+      'social.emote', { emote: 'bow-deeply', target: 'Éowyn' }, 'bow',
+    )).toMatchObject({ data: { emote: 'bow-deeply', target: 'Éowyn' } });
+    expect(() => createActionPerform('social.emote.list', { target: 'Bram' }, 'extra'))
+      .toThrow('accepts no fields');
+    expect(() => createActionPerform('social.emote', { emote: 'Smile' }, 'case'))
+      .toThrow('lowercase ASCII');
+    expect(() => createActionPerform(
+      'social.emote', { emote: 'smile', message: 'invented prose' }, 'prose',
+    )).toThrow('optional target only');
+    expect(() => createActionPerform(
+      'social.emote', { emote: 'smile', target: 'é'.repeat(33) }, 'bytes',
+    )).toThrow('visible UTF-8');
   });
 
   it('creates only the exact closed loot action forms', () => {
@@ -1625,7 +1656,7 @@ describe('protocol messages', () => {
     if (additive?.type !== 'chat.message') throw new Error('expected chat message');
     expect('blocked' in additive.data).toBe(false);
 
-    for (const channel of ['announcement', 'telepathy', 'party', 'general', 'newbie', 'staff'] as const) {
+    for (const channel of ['announcement', 'telepathy', 'emote', 'party', 'general', 'newbie', 'staff'] as const) {
       expect(parseServerMessage(JSON.stringify({
         v: 1,
         type: 'chat.message',

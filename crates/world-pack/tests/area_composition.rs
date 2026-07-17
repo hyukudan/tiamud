@@ -239,7 +239,7 @@ fn real_three_area_project_has_no_semantic_or_canonical_drift() {
 fn communication_blocked_rooms_require_declared_area_dependencies() {
     let temp = tempfile::tempdir().unwrap();
     let communication_area = json!({
-        "schemaVersion": 7,
+        "schemaVersion": 8,
         "id": "a",
         "rooms": [room("a:start", None)],
         "abilities": [{
@@ -258,7 +258,7 @@ fn communication_blocked_rooms_require_declared_area_dependencies() {
         }]
     });
     let blocked_area = json!({
-        "schemaVersion": 7,
+        "schemaVersion": 8,
         "id": "b",
         "rooms": [room("b:silence", None)]
     });
@@ -645,7 +645,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
     }
 
     for bad_area in [
-        json!({"schemaVersion":8,"id":"a","rooms":[room("a:start", None)]}),
+        json!({"schemaVersion":9,"id":"a","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","rooms":[room("a:start", None)],"unknown":true}),
         json!({"schemaVersion":1,"id":"wrong","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","dependsOn":["missing"],"rooms":[room("a:start", None)]}),
@@ -660,7 +660,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
 }
 
 #[test]
-fn area_v3_normalizes_to_v7_but_rejects_v4_schema_smuggling() {
+fn area_v3_normalizes_to_current_but_rejects_v4_schema_smuggling() {
     let legacy = json!({
         "schemaVersion": 3,
         "id": "a",
@@ -902,9 +902,9 @@ fn area_v1_through_v6_normalize_without_inventing_communication_and_reject_smugg
 }
 
 #[test]
-fn area_v7_rejects_unknown_nested_communication_fields() {
+fn area_v8_rejects_unknown_nested_communication_fields() {
     let value = json!({
-        "schemaVersion": 7,
+        "schemaVersion": 8,
         "id": "a",
         "abilities": [{
             "id": "a:whisper",
@@ -1410,7 +1410,7 @@ fn compose_is_present_in_top_level_and_subcommand_help() {
     let help = String::from_utf8_lossy(&compose.stdout);
     assert!(help.contains("world.project.json") || help.contains("<PROJECT>"));
     assert!(help.contains("--output"));
-    assert!(help.contains("AreaPack v7"));
+    assert!(help.contains("AreaPack v8"));
 }
 
 #[test]

@@ -42,6 +42,12 @@ use tiamud_core::{
     RequirementDefinition as CoreRequirementDefinition,
     RequirementDisclosure as CoreRequirementDisclosure,
     RequirementPredicate as CoreRequirementPredicate, RoomDefinition, SceneAudio, SceneImage,
+    SocialEmoteAudience as CoreSocialEmoteAudience,
+    SocialEmoteDefinition as CoreSocialEmoteDefinition,
+    SocialEmoteTargetedTemplates as CoreSocialEmoteTargetedTemplates,
+    SocialEmoteTargeting as CoreSocialEmoteTargeting,
+    SocialEmoteTemplates as CoreSocialEmoteTemplates,
+    SocialEmoteUntargetedTemplates as CoreSocialEmoteUntargetedTemplates,
     TalentGraphDefinition as CoreTalentGraphDefinition,
     TalentNodeDefinition as CoreTalentNodeDefinition,
     TalentRankDefinition as CoreTalentRankDefinition, World, WorldBuildError, WorldDefinition,
@@ -70,6 +76,7 @@ pub struct LoadedWorldDefinition {
     pub rng_seed: Option<u64>,
     pub character_progression: CoreCharacterProgressionDefinition,
     pub abilities: Vec<CoreAbilityDefinition>,
+    pub social_emotes: Vec<CoreSocialEmoteDefinition>,
     pub npcs: Vec<NpcDefinition>,
     pub npc_ability_sets: Vec<CoreNpcAbilitySetDefinition>,
     pub loot_tables: Vec<CoreLootTableDefinition>,
@@ -114,6 +121,7 @@ pub fn build_loaded_world(
         loaded.character_progression.clone(),
         loaded.abilities.clone(),
     )?;
+    world.configure_social_emotes(loaded.social_emotes.clone())?;
     for npc in &loaded.npcs {
         world.spawn_npc(npc.clone())?;
     }
@@ -227,6 +235,7 @@ fn convert_pack(
         npc_spawns,
         character_progression,
         abilities: pack_abilities,
+        social_emotes: pack_social_emotes,
         npc_ability_sets: pack_npc_ability_sets,
         loot_tables: pack_loot_tables,
         loot_sources: pack_loot_sources,
@@ -372,6 +381,10 @@ fn convert_pack(
         .map(map_character_progression)
         .ok_or(WorldLoadError::MissingCharacterProgression)?;
     let abilities = pack_abilities.into_iter().map(map_ability).collect();
+    let social_emotes = pack_social_emotes
+        .into_iter()
+        .map(map_social_emote)
+        .collect();
     let loot_tables = pack_loot_tables.into_iter().map(map_loot_table).collect();
     let loot_sources = pack_loot_sources.into_iter().map(map_loot_source).collect();
     let affixes = pack_affixes.into_iter().map(map_affix).collect();
@@ -440,6 +453,7 @@ fn convert_pack(
         rng_seed,
         character_progression,
         abilities,
+        social_emotes,
         npcs,
         npc_ability_sets,
         loot_tables,
@@ -839,6 +853,41 @@ fn map_ability(definition: world_pack::AbilityDefinition) -> CoreAbilityDefiniti
                     .collect::<BTreeSet<_>>(),
             }
         }),
+    }
+}
+
+fn map_social_emote(definition: world_pack::SocialEmoteDefinition) -> CoreSocialEmoteDefinition {
+    CoreSocialEmoteDefinition {
+        id: definition.id,
+        command: definition.command,
+        name: definition.name,
+        audience: match definition.audience {
+            world_pack::SocialEmoteAudience::Room => CoreSocialEmoteAudience::Room,
+        },
+        targeting: match definition.targeting {
+            world_pack::SocialEmoteTargeting::None => CoreSocialEmoteTargeting::None,
+            world_pack::SocialEmoteTargeting::OptionalCharacter => {
+                CoreSocialEmoteTargeting::OptionalCharacter
+            }
+            world_pack::SocialEmoteTargeting::RequiredCharacter => {
+                CoreSocialEmoteTargeting::RequiredCharacter
+            }
+        },
+        templates: CoreSocialEmoteTemplates {
+            untargeted: definition.templates.untargeted.map(|templates| {
+                CoreSocialEmoteUntargetedTemplates {
+                    actor: templates.actor,
+                    others: templates.others,
+                }
+            }),
+            targeted: definition.templates.targeted.map(|templates| {
+                CoreSocialEmoteTargetedTemplates {
+                    actor: templates.actor,
+                    target: templates.target,
+                    others: templates.others,
+                }
+            }),
+        },
     }
 }
 
@@ -1313,6 +1362,17 @@ mod tests {
         assert_eq!(loaded.character_progression.base_classes.len(), 3);
         assert_eq!(loaded.character_progression.advanced_classes.len(), 4);
         assert_eq!(loaded.abilities.len(), 4);
+        assert_eq!(loaded.social_emotes.len(), 1);
+        let smile = &loaded.social_emotes[0];
+        assert_eq!(smile.id, "tiamud:smile");
+        assert_eq!(smile.command, "smile");
+        assert_eq!(smile.name, "Sonreír");
+        assert_eq!(smile.audience, CoreSocialEmoteAudience::Room);
+        assert_eq!(smile.targeting, CoreSocialEmoteTargeting::OptionalCharacter);
+        assert_eq!(
+            smile.templates.targeted.as_ref().unwrap().target,
+            "{actor} te sonríe."
+        );
         let whisper = loaded
             .abilities
             .iter()

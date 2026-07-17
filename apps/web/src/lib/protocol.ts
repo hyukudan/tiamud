@@ -276,6 +276,7 @@ export type SocialMessageChannel =
   | 'say'
   | 'tell'
   | 'telepathy'
+  | 'emote'
   | 'party'
   | CommunityChannel;
 
@@ -655,6 +656,7 @@ export type CommandSubmit = Envelope<
 
 export interface ActionPerformFields {
   abilityId?: string;
+  emote?: string;
   target?: string;
   recipient?: string;
   container?: string;
@@ -2393,6 +2395,7 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
           channel !== 'say' &&
           channel !== 'tell' &&
           channel !== 'telepathy' &&
+          channel !== 'emote' &&
           channel !== 'party' &&
           channel !== 'general' &&
           channel !== 'newbie' &&
@@ -2463,6 +2466,9 @@ export function createActionPerform(
   requestId: string,
 ): ActionPerform {
   if (action === 'social.telepathy') validateTelepathyActionFields(fields);
+  if (action === 'social.emote' || action === 'social.emote.list') {
+    validateEmoteActionFields(action, fields);
+  }
   if (action.startsWith('trade.')) validateTradeActionFields(action, fields);
   if (action.startsWith('loot.')) validateLootActionFields(action, fields);
   if (action.startsWith('reward.')) validateRewardActionFields(action, fields);
@@ -2526,6 +2532,34 @@ function validateTelepathyActionFields(fields: ActionPerformFields | undefined):
       new TextEncoder().encode(value).length > maximum || /[\u0000-\u001f\u007f]/.test(value)) {
       throw new RangeError(`telepathy ${label} must be bounded visible UTF-8 text`);
     }
+  }
+}
+
+function validateEmoteActionFields(
+  action: 'social.emote' | 'social.emote.list',
+  fields: ActionPerformFields | undefined,
+): void {
+  const actual = Object.keys(fields ?? {}).toSorted();
+  if (action === 'social.emote.list') {
+    if (actual.length !== 0) {
+      throw new RangeError('social.emote.list accepts no fields');
+    }
+    return;
+  }
+  const exact = actual.length === 1 && actual[0] === 'emote';
+  const targeted = actual.length === 2 && actual[0] === 'emote' && actual[1] === 'target';
+  if (!exact && !targeted) {
+    throw new RangeError('social.emote requires emote and optional target only');
+  }
+  if (typeof fields?.emote !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(fields.emote)) {
+    throw new RangeError('emote command must be bounded lowercase ASCII');
+  }
+  if (fields.target !== undefined && (
+    fields.target.trim() !== fields.target || fields.target.length === 0 ||
+    new TextEncoder().encode(fields.target).length > 64 ||
+    /[\u0000-\u001f\u007f]/.test(fields.target)
+  )) {
+    throw new RangeError('emote target must be bounded visible UTF-8 text');
   }
 }
 

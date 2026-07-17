@@ -1,6 +1,6 @@
 # Progression, abilities and combat
 
-The v3 character model, carried by WorldPack v8, separates character identity from role:
+The v3 character model, carried by WorldPack v9, separates character identity from role:
 
 - a lineage is an inherited or supernatural origin;
 - an optional background is learned personal history;
@@ -53,7 +53,8 @@ Abilities are stable, reusable definitions. They declare:
 - optional typed damage or healing with bounded attribute scaling;
 - bounded regeneration, damage-over-time, stun or attribute status effects.
 
-WorldPack v8/AreaPack v7 may instead attach one closed `communication` effect:
+WorldPack v9/AreaPack v8 may attach the closed `communication` effect introduced
+in WorldPack v8/AreaPack v7:
 `telepathy` with `direct_online` scope. It must be a `spell` or `utility`,
 target `single_ally`, spend at least one positive resource cost and use a
 positive authored cooldown. It cannot also damage, heal or apply a status, and
@@ -71,7 +72,7 @@ NPC ability sets attach resources, regeneration, resistances and known
 abilities. Reusable item prototypes attach equipment slots, attack bonuses,
 healing, consumption, weight, slot cost, rarity, item level, transfer/stack
 policy, optional bounded-container capacity and short regeneration or strength
-effects. Native WorldPack v8/AreaPack v7 accept `transferable`,
+effects. Native WorldPack v9/AreaPack v8 accept `transferable`,
 `character_bound` and `non_transferable`. Fungible stacks are derived from
 durable units and never author a quantity or stack ID. A container must be
 unique and non-consumable.
@@ -89,7 +90,7 @@ durable cursor; it is not a discretionary leader choice. The runtime records
 the table's canonical SHA-256 with per-instance provenance and resolves RNG,
 creation, rights, NPC defeat and XP in one checkpointed commit. Need/greed,
 master-loot and contribution-based sharing are not authoring features. Native
-v8/v7 preserves the earned sealed rewards introduced in v7/v6, with exact visible odds and a single
+v9/v8 preserves the earned sealed rewards introduced in v7/v6, with exact visible odds and a single
 bounded, unbiased affix roll for a unique non-sealed loot unit, whether it
 comes from normal or sealed loot. A sealed table yields 1..=16 units and at
 most 1,024 visible odds rows; `open` commits consumption, RNG, counters,

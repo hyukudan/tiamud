@@ -18,7 +18,7 @@ use super::{
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 1_024;
 
-/// A WorldPack v8 plus optional authoring data ignored by older runtime readers.
+/// A WorldPack v9 plus optional authoring data ignored by older runtime readers.
 ///
 /// Keeping the additions at the top level preserves Rust source compatibility for
 /// existing `WorldPack` and `Room` struct literals. Serde's default unknown-field
@@ -1385,14 +1385,14 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
             .get("gameplay")
             .is_some_and(|gameplay| gameplay.get("itemRules").is_some())
     {
-        return Err("WorldPack v8 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("WorldPack v9 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("WorldPack v8 rooms cannot declare legacy items".to_owned());
+        return Err("WorldPack v9 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("gameplay")
@@ -1404,7 +1404,7 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("WorldPack v8 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("WorldPack v9 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
     Ok(())
 }
@@ -1496,6 +1496,21 @@ fn reject_legacy_communication_fields(
     Ok(())
 }
 
+fn reject_legacy_social_emote_fields(
+    value: &serde_json::Value,
+    schema_version: u64,
+) -> Result<(), String> {
+    if value
+        .get("gameplay")
+        .is_some_and(|gameplay| gameplay.get("socialEmotes").is_some())
+    {
+        return Err(format!(
+            "WorldPack v{schema_version} cannot declare v9 socialEmotes"
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_v6_rewards(value: &mut serde_json::Value) -> Result<(), String> {
     reject_native_legacy_item_fields(value)?;
     let root = value
@@ -1574,6 +1589,10 @@ impl WorldPackDocument {
             .unwrap_or_default();
         let legacy_schema = schema_version == 2 || schema_version == 3;
         if (2..u64::from(crate::CURRENT_SCHEMA_VERSION)).contains(&schema_version) {
+            reject_legacy_social_emote_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
+        }
+        if (2..=7).contains(&schema_version) {
             reject_legacy_communication_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
         }
@@ -1599,7 +1618,7 @@ impl WorldPackDocument {
             reject_legacy_reward_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
             normalize_v6_rewards(&mut value).map_err(DocumentToolError::LegacyItems)?;
-        } else if schema_version == 7 {
+        } else if schema_version == 7 || schema_version == 8 {
             normalize_v6_rewards(&mut value).map_err(DocumentToolError::LegacyItems)?;
         } else if schema_version == u64::from(crate::CURRENT_SCHEMA_VERSION) {
             reject_native_legacy_item_fields(&value).map_err(DocumentToolError::LegacyItems)?;
@@ -2223,6 +2242,19 @@ impl WorldPackDocument {
                     .iter()
                     .map(|ability| (&ability.id, ability)),
             ),
+            social_emotes: diff_entities(
+                self.world
+                    .gameplay
+                    .social_emotes
+                    .iter()
+                    .map(|emote| (&emote.id, emote)),
+                other
+                    .world
+                    .gameplay
+                    .social_emotes
+                    .iter()
+                    .map(|emote| (&emote.id, emote)),
+            ),
             npc_ability_sets: diff_entities(
                 self.world
                     .gameplay
@@ -2359,6 +2391,11 @@ impl WorldPackDocument {
                 communication.blocked_room_ids.sort();
             }
         }
+        document
+            .world
+            .gameplay
+            .social_emotes
+            .sort_by(|left, right| left.id.cmp(&right.id));
         document
             .world
             .gameplay
@@ -2836,6 +2873,7 @@ pub struct WorldPackDiff {
     pub npc_spawns: EntityDiff,
     pub archetypes: EntityDiff,
     pub abilities: EntityDiff,
+    pub social_emotes: EntityDiff,
     pub npc_ability_sets: EntityDiff,
     pub loot_tables: EntityDiff,
     pub loot_sources: EntityDiff,
@@ -2859,6 +2897,7 @@ impl WorldPackDiff {
             && self.npc_spawns.is_empty()
             && self.archetypes.is_empty()
             && self.abilities.is_empty()
+            && self.social_emotes.is_empty()
             && self.npc_ability_sets.is_empty()
             && self.loot_tables.is_empty()
             && self.loot_sources.is_empty()
@@ -2892,6 +2931,7 @@ impl fmt::Display for WorldPackDiff {
         write_entity_diff(formatter, "NPC spawns", &self.npc_spawns)?;
         write_entity_diff(formatter, "archetypes", &self.archetypes)?;
         write_entity_diff(formatter, "abilities", &self.abilities)?;
+        write_entity_diff(formatter, "social emotes", &self.social_emotes)?;
         write_entity_diff(formatter, "NPC ability sets", &self.npc_ability_sets)?;
         write_entity_diff(formatter, "loot tables", &self.loot_tables)?;
         write_entity_diff(formatter, "loot sources", &self.loot_sources)?;

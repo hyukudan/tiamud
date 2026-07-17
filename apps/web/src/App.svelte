@@ -342,6 +342,8 @@
         return `${message.sender} tells you`;
       case 'telepathy':
         return `${message.sender} reaches your mind`;
+      case 'emote':
+        return 'Emote';
       case 'party':
         return `${message.sender} to the party`;
       default:

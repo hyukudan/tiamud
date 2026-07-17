@@ -38,6 +38,8 @@
   let abilityTargetById = $state<Record<string, string>>({});
   let telepathyTargetById = $state<Record<string, string>>({});
   let telepathyMessageById = $state<Record<string, string>>({});
+  let emoteCommand = $state('');
+  let emoteTarget = $state('');
   let itemQuantity = $state(1);
   let destinationContainer = $state('');
   let giveRecipient = $state('');
@@ -363,6 +365,18 @@
       `telepathy with ${ability.name} to ${target}`,
     );
     telepathyMessageById = { ...telepathyMessageById, [ability.id]: '' };
+  }
+
+  function sendEmote(): void {
+    const emote = emoteCommand.trim();
+    const target = emoteTarget.trim();
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(emote)) return;
+    onaction(
+      'social.emote',
+      target ? { emote, target } : { emote },
+      target ? `emote ${emote} to ${target}` : `emote ${emote}`,
+    );
+    emoteTarget = '';
   }
 </script>
 
@@ -1277,6 +1291,32 @@
           <label for="reply-text">Reply to your latest direct message</label>
           <div><input id="reply-text" maxlength="512" bind:value={replyMessage} /><button type="submit" disabled={!replyMessage.trim()}>Reply</button></div>
         </form>
+        <section class="channel-controls" aria-labelledby="emote-controls-title">
+          <div class="panel-heading-row">
+            <h3 id="emote-controls-title">Authored emotes</h3>
+            <button type="button" onclick={() => onaction('social.emote.list', undefined, 'list emotes')}>List emotes</button>
+          </div>
+          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendEmote(); }}>
+            <label for="emote-command">Emote command</label>
+            <input
+              id="emote-command"
+              maxlength="32"
+              pattern="[a-z][a-z0-9-]*"
+              bind:value={emoteCommand}
+              placeholder="smile"
+              aria-describedby="emote-help"
+            />
+            <label for="emote-target">Nearby character <span>(optional)</span></label>
+            <select id="emote-target" bind:value={emoteTarget}>
+              <option value="">No target</option>
+              {#each nearbyRecipients as recipient (recipient.id)}
+                <option value={recipient.name}>{recipient.name}</option>
+              {/each}
+            </select>
+            <small id="emote-help">The world supplies the safe wording; emotes do not accept free text.</small>
+            <button type="submit" disabled={!/^[a-z][a-z0-9-]{0,31}$/.test(emoteCommand.trim())}>Perform emote</button>
+          </form>
+        </section>
         <section class="channel-controls" aria-labelledby="channel-controls-title">
           <div class="panel-heading-row">
             <h3 id="channel-controls-title">World channels</h3>

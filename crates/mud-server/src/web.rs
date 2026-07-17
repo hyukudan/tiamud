@@ -198,6 +198,8 @@ struct ActionPerformData {
     request_id: String,
     action: String,
     #[serde(default)]
+    emote: Option<String>,
+    #[serde(default)]
     ability_id: Option<String>,
     #[serde(default)]
     class_id: Option<String>,
@@ -2364,7 +2366,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
         }
         "action.perform" => {
             if trade_action_contains_null(&envelope.data)
-                || !telepathy_action_has_exact_fields(&envelope.data)
+                || !special_social_action_has_exact_fields(&envelope.data)
             {
                 return Err(ClientMessageError::InvalidEnvelope);
             }
@@ -2374,6 +2376,10 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 || data.action.is_empty()
                 || data.action.len() > 64
                 || data.action.chars().any(char::is_control)
+                || data
+                    .emote
+                    .as_deref()
+                    .is_some_and(|emote| !valid_social_emote_command(emote))
                 || data.ability_id.as_deref().is_some_and(|ability_id| {
                     !valid_definition_id(ability_id, MAX_ABILITY_ID_BYTES)
                 })
@@ -2392,6 +2398,11 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         || target.len() > MAX_ACTION_TARGET_BYTES
                         || target.chars().any(char::is_control)
                 })
+                || (data.action == "social.emote"
+                    && data
+                        .target
+                        .as_deref()
+                        .is_some_and(|target| target.len() > MAX_SOCIAL_TARGET_BYTES))
                 || data.recipient.as_deref().is_some_and(|recipient| {
                     recipient.is_empty()
                         || recipient.len() > MAX_SOCIAL_TARGET_BYTES
@@ -2449,6 +2460,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 (
                     (
                         &data.action,
+                        &data.emote,
                         &data.ability_id,
                         &data.class_id,
                         &data.graph_id,
@@ -2565,18 +2577,37 @@ fn trade_action_contains_null(data: &Value) -> bool {
         && fields.values().any(Value::is_null)
 }
 
-fn telepathy_action_has_exact_fields(data: &Value) -> bool {
+fn special_social_action_has_exact_fields(data: &Value) -> bool {
     let Some(fields) = data.as_object() else {
         return true;
     };
-    if fields.get("action").and_then(Value::as_str) != Some("social.telepathy") {
-        return true;
+    match fields.get("action").and_then(Value::as_str) {
+        Some("social.telepathy") => {
+            const EXACT_FIELDS: [&str; 5] =
+                ["requestId", "action", "abilityId", "target", "message"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+        }
+        Some("social.emote.list") => {
+            const EXACT_FIELDS: [&str; 2] = ["requestId", "action"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+        }
+        Some("social.emote") => {
+            const EXACT_FIELDS: [&str; 4] = ["requestId", "action", "emote", "target"];
+            (fields.len() == 3 || fields.len() == 4)
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && fields.get("emote").is_some_and(Value::is_string)
+                && fields.get("target").is_none_or(Value::is_string)
+        }
+        _ => !fields.contains_key("emote"),
     }
-    const EXACT_FIELDS: [&str; 5] = ["requestId", "action", "abilityId", "target", "message"];
-    fields.len() == EXACT_FIELDS.len()
-        && fields
-            .keys()
-            .all(|field| EXACT_FIELDS.contains(&field.as_str()))
 }
 
 fn valid_definition_id(value: &str, maximum: usize) -> bool {
@@ -2592,8 +2623,21 @@ fn valid_definition_id(value: &str, maximum: usize) -> bool {
         })
 }
 
+fn valid_social_emote_command(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 32
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
+    if !matches!(action, "social.emote" | "social.emote.list") && data.emote.is_some() {
+        return Err(format!("Action {action:?} has unexpected fields."));
+    }
     let trade_action = action.starts_with("trade.");
     if action != "item.give" && action != "trade.request" && data.recipient.is_some() {
         return Err(format!("Action {action:?} has unexpected fields."));
@@ -3144,6 +3188,14 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 message,
             })
         }
+        "social.emote.list" => Ok(PlayerAction::Social(SocialAction::EmoteList)),
+        "social.emote" => Ok(PlayerAction::Social(SocialAction::Emote {
+            command: data
+                .emote
+                .clone()
+                .ok_or_else(|| "Social emote requires emote.".to_owned())?,
+            target: data.target.clone(),
+        })),
         "social.reply" => {
             no_target()?;
             if has_progression_fields()
@@ -3494,6 +3546,8 @@ fn public_game_error(error: &GameError) -> String {
         | GameError::World(WorldError::AbilityUnavailable)
         | GameError::World(WorldError::InsufficientResource)
         | GameError::World(WorldError::InvalidAbilityTarget)
+        | GameError::World(WorldError::EmoteUnavailable)
+        | GameError::World(WorldError::EmoteTargetUnavailable)
         | GameError::World(WorldError::ClassNotFound)
         | GameError::World(WorldError::PromotionUnavailable)
         | GameError::World(WorldError::TalentUnavailable)
@@ -3947,6 +4001,10 @@ mod tests {
         assert_eq!(
             public_game_error(&GameError::World(WorldError::LootUnavailable)),
             "That loot is not available."
+        );
+        assert_eq!(
+            public_game_error(&GameError::World(WorldError::EmoteTargetUnavailable)),
+            "That social-emote target is not available."
         );
     }
 
@@ -4738,6 +4796,63 @@ mod tests {
             .unwrap_err(),
             ClientMessageError::InvalidEnvelope
         );
+    }
+
+    #[test]
+    fn structured_emotes_accept_only_the_exact_optional_target_wire_shapes() {
+        let list = r#"{"v":1,"type":"action.perform","data":{"requestId":"emotes","action":"social.emote.list"}}"#;
+        assert_eq!(
+            requested_action(list).action,
+            Ok(PlayerAction::Social(SocialAction::EmoteList))
+        );
+
+        let untargeted = r#"{"v":1,"type":"action.perform","data":{"requestId":"wave","action":"social.emote","emote":"wave"}}"#;
+        assert_eq!(
+            requested_action(untargeted).action,
+            Ok(PlayerAction::Social(SocialAction::Emote {
+                command: "wave".into(),
+                target: None,
+            }))
+        );
+        let targeted = r#"{"v":1,"type":"action.perform","data":{"requestId":"salute","action":"social.emote","emote":"salute","target":"Aria"}}"#;
+        assert_eq!(
+            requested_action(targeted).action,
+            Ok(PlayerAction::Social(SocialAction::Emote {
+                command: "salute".into(),
+                target: Some("Aria".into()),
+            }))
+        );
+        assert_ne!(
+            requested_action(untargeted).signature,
+            requested_action(targeted).signature
+        );
+        let authored_name_characters = r#"{"v":1,"type":"action.perform","data":{"requestId":"ampersand-name","action":"social.emote","emote":"salute","target":"A&B"}}"#;
+        assert_eq!(
+            requested_action(authored_name_characters).action,
+            Ok(PlayerAction::Social(SocialAction::Emote {
+                command: "salute".into(),
+                target: Some("A&B".into()),
+            }))
+        );
+
+        for message in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"missing","action":"social.emote"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null-emote","action":"social.emote","emote":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"null-target","action":"social.emote","emote":"wave","target":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"extra","action":"social.emote","emote":"wave","message":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"list-extra","action":"social.emote.list","target":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"foreign-extra","action":"look","emote":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"uppercase","action":"social.emote","emote":"Smile"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"non-ascii","action":"social.emote","emote":"sonreír"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"too-long","action":"social.emote","emote":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"target-too-long","action":"social.emote","emote":"smile","target":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+        ] {
+            assert_eq!(
+                parse_client_message(message).unwrap_err(),
+                ClientMessageError::InvalidEnvelope,
+                "{message}"
+            );
+        }
     }
 
     #[test]

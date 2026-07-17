@@ -1092,7 +1092,7 @@ fn append_reference_diagnostics(
                     Some(reset.line),
                     reset.arguments.first().copied(),
                     "P reset container placement is preserved inert and was not converted",
-                    "author an explicit WorldPack v8 container instance after reviewing reset limits and ordering",
+                    "author an explicit WorldPack v9 container instance after reviewing reset limits and ordering",
                 ));
             }
             "G" | "E" => {

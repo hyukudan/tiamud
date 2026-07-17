@@ -18,7 +18,10 @@ sobre la aceptación de la especificación histórica.
   `staff`; este último exige perfil `moderator`, `administrator` o
   `implementor`. También existe telepatía directa online como habilidad
   authored con recurso, cooldown, interferencia por sala y supresión privada.
-  No existen correo sin conexión ni historial durable de conversación.
+  También existen emotes de sala authored, con plantillas cerradas por
+  perspectiva y targeting local cerrado: sin objetivo, opcional u obligatorio.
+  No existen correo sin conexión ni
+  historial durable de conversación.
 - Sí existen los perfiles `helper`, `builder`, `moderator`, `administrator` e
   `implementor`, doce capacidades cerradas y un título narrativo opcional. La
   XP, la ficha, WorldPack, el perfil visible y el rol legado nunca sustituyen
@@ -45,7 +48,8 @@ Las fases 1, comunicación/grupo, 2, staff por capacidades, 3A, fundamento de
 objetos, 3B, pilas/contenedores, 3C, entrega/políticas, y 3D, trade confirmado,
 están implementadas. También están implementadas 4A, botín repetible con
 derechos y procedencia, y 4B, sellos ganados y afijos deterministas.
-La fase 5A, telepatía directa authored, también está implementada.
+Las fases 5A, telepatía directa authored, y 5B, emotes de sala authored,
+también están implementadas.
 
 ## Estado verificado en el código
 
@@ -55,7 +59,7 @@ La fase 5A, telepatía directa authored, también está implementada.
 de canal, `Who`, `Help`, ignore/block, reportes, mute/ban, reversión de
 sanciones y cambio de rol. `PlayerAction::Telepathy` separa la mutación de
 habilidad del chat ordinario. `SocialChannel` contiene `Announcement`, `Say`,
-`Tell`, `Telepathy`, `Party`, `General`, `Newbie` y `Staff`.
+`Tell`, `Telepathy`, `Emote`, `Party`, `General`, `Newbie` y `Staff`.
 
 - `say` se entrega a otros personajes conectados en la misma sala;
 - `tell` se entrega a un personaje conectado, aunque esté en otra sala;
@@ -177,7 +181,7 @@ capa de operador.
 
 ### Inventario y botín
 
-WorldPack v8/AreaPack v7 separan `itemPrototypes` de
+WorldPack v9/AreaPack v8 separan `itemPrototypes` de
 `initialItemInstances`. El prototipo contiene nombre, descripción, aliases,
 equipo/ataque/curación/efecto, peso, coste de slot, rareza, nivel y políticas
 cerradas. Cada instancia durable referencia un prototipo y comienza en una
@@ -347,10 +351,10 @@ flowchart LR
    `moderator`, `administrator` o `implementor`.
 5. Pendiente `shout`/`yell` como propagación espacial definida por el mundo y
    acotada, no como otro nombre para el canal global.
-6. Pendientes emotes/sociales con plantillas estrictas que nunca conviertan
-   texto del jugador en ANSI, HTML, MXP o instrucciones evaluables.
+6. Implementados emotes de sala authored con plantillas estrictas que nunca
+   convierten texto del jugador en ANSI, HTML, MXP o instrucciones evaluables.
 
-Web usa acciones estructuradas y representa los ocho valores de
+Web usa acciones estructuradas y representa los nueve valores de
 `SocialMessage`; Telnet comparte los comandos de texto y proyecta cada entrega
 como texto y como `Comm.Channel.Text` cuando GMCP `Comm` está negociado. Esta
 paridad no convierte GMCP en una segunda autoridad.
@@ -377,6 +381,26 @@ su resultado nunca cambia la confirmación del emisor. No hay `DomainEvent` con
 texto/destino, no se enlaza `reply` y no existe entrega offline o grupal. El
 contrato aceptado está en
 [ADR 0015](../decisions/0015-authored-online-telepathy.md).
+
+### Fase 5B — emotes de sala authored — implementada
+
+WorldPack v9/AreaPack v8 admiten hasta 32 emotes de audiencia `room`. Cada
+definición fija comando, nombre, targeting
+`none|optional_character|required_character` y plantillas cerradas para actor,
+objetivo y observadores. Solo existen `{actor}` y `{target}`; la sustitución se
+hace en una pasada y no reinterpreta marcadores dentro de los nombres
+insertados.
+
+`emotes` lista sin consumir el bucket. `emote <comando> [personaje]` comparte
+mute y rate limit con chat y resuelve únicamente otro personaje conectado y no
+ambiguo de la misma sala. Ignore/block se aplica por receptor: no cambia la
+confirmación del actor ni la copia de terceros autorizados. `OnTalk` se ejecuta
+de forma acotada y la entrega Web/Telnet/GMCP empieza solo después del commit;
+un rollback publica cero copias.
+
+No hay texto libre, IDs authored en transporte, `DomainEvent`, `reply`,
+historial, snapshot o SQL. El contrato está en
+[ADR 0016](../decisions/0016-authored-room-emotes.md).
 
 ## Staff: rango visible, capacidad real
 
@@ -624,7 +648,7 @@ diseño adicional. Cajas, llaves y tiradas pagadas permanecen fuera.
 ### Fase 5 — comunidad y contenido — en curso
 
 - 5A telepatía directa authored: implementada;
-- 5B emotes authored con plantillas y audiencias seguras: pendiente;
+- 5B emotes authored con plantillas y audiencias seguras: implementada;
 - 5C correo offline con cuotas/retención/moderación: pendiente;
 - 5D tablones moderables: pendiente;
 - guilds según necesidades observadas;

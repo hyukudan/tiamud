@@ -77,6 +77,7 @@ fn only_unconditional_room_object_resets_become_world_pack_items() {
     assert!(result.world_pack.gameplay.loot_tables.is_empty());
     assert!(result.world_pack.gameplay.loot_sources.is_empty());
     assert!(result.world_pack.gameplay.abilities.is_empty());
+    assert!(result.world_pack.gameplay.social_emotes.is_empty());
     assert!(
         result
             .world_pack

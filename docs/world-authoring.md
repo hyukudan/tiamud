@@ -1,7 +1,7 @@
 # Autoría, validación y publicación de mundos
 
-Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v8**
-como artefacto canónico de ejecución, **AreaPack v7** como módulo de autoría y
+Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v9**
+como artefacto canónico de ejecución, **AreaPack v8** como módulo de autoría y
 `WorldProjectManifest` v2 como composición fuera de línea. La autoridad exacta
 son los tipos y validadores de `crates/world-pack`; el ejemplo revisado es
 [`worlds/lantern-square.world.json`](../worlds/lantern-square.world.json).
@@ -12,7 +12,7 @@ variantes, scripts y pruebas de contenido.
 
 ## Frontera de ejecución
 
-El servidor valida y carga un único `WorldPackDocument` v8 completo antes de
+El servidor valida y carga un único `WorldPackDocument` v9 completo antes de
 abrir sus listeners. `TIAMUD_WORLD_PACK` permite seleccionar un artefacto
 externo revisado; si no se define, se usa Lantern Square embebido.
 
@@ -34,9 +34,9 @@ flowchart LR
     accDescr: Las áreas se componen y validan fuera de línea para producir un solo WorldPack canónico que el servidor carga al arrancar. No existe carga caliente.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
-    Areas[AreaPack v7<br/>1..=256 módulos] --> Compose
+    Areas[AreaPack v8<br/>1..=256 módulos] --> Compose
     Compose --> Validate[Validación global<br/>referencias · límites · Lua]
-    Validate --> Artifact[WorldPack v8 canónico]
+    Validate --> Artifact[WorldPack v9 canónico]
     Artifact --> Server[Servidor único<br/>carga al arrancar]
     Hot[Catálogo caliente/LRU] -. futuro .-> Server
 ```
@@ -45,14 +45,14 @@ flowchart LR
 
 | Entrada | Tratamiento |
 | --- | --- |
-| WorldPack v8 | Formato canónico nativo. |
-| WorldPack v7/v6/v5/v4/v3/v2 | Se normaliza de forma determinista a v8 antes de validar, sin inventar comunicación; v2-v6 tampoco inventan sellos ni afijos y v2-v5 tampoco inventan tablas ni fuentes de botín. |
-| AreaPack v7 | Formato modular nativo. |
-| AreaPack v6/v5/v4/v3/v2/v1 | Se normaliza a v7 antes de componer, sin inventar comunicación; v1-v5 tampoco inventan sellos ni afijos y v1-v4 tampoco inventan tablas ni fuentes de botín. |
+| WorldPack v9 | Formato canónico nativo. |
+| WorldPack v8/v7/v6/v5/v4/v3/v2 | Se normaliza de forma determinista a v9 antes de validar, sin inventar emotes; v2-v7 tampoco inventan comunicación, v2-v6 tampoco inventan sellos ni afijos y v2-v5 tampoco inventan tablas ni fuentes de botín. |
+| AreaPack v8 | Formato modular nativo. |
+| AreaPack v7/v6/v5/v4/v3/v2/v1 | Se normaliza a v8 antes de componer, sin inventar emotes; v1-v6 tampoco inventan comunicación, v1-v5 tampoco inventan sellos ni afijos y v1-v4 tampoco inventan tablas ni fuentes de botín. |
 | Envy/Merc | Solo pasa por `envy-import`; los programas históricos nunca se ejecutan. |
 
 La compatibilidad antigua no permite escribir vocabulario legado en un
-documento nativo. WorldPack v8 y AreaPack v7 rechazan `items`, `room.items`,
+documento nativo. WorldPack v9 y AreaPack v8 rechazan `items`, `room.items`,
 `itemRules` y `lootItemIds`: usan `itemPrototypes` e
 `initialItemInstances`.
 
@@ -73,6 +73,11 @@ La comunicación authored nace en WorldPack v8 y AreaPack v7. Un campo
 WorldPack v2-v7 y AreaPack v1-v6 en vez de interpretarse como una habilidad
 ordinaria. La normalización deja `communication` ausente y `envy-import` no lo
 deduce de prosa, programas o flags históricos.
+
+Los emotes authored nacen en WorldPack v9 y AreaPack v8. `socialEmotes`,
+aunque sea un array vacío, se rechaza en WorldPack v2-v8 y AreaPack v1-v7.
+La normalización produce una colección vacía y `envy-import` nunca convierte
+sociales, programas o prosa histórica en plantillas ejecutables.
 
 WorldPack v4 y AreaPack v3 reciben por normalización `maxStackUnits: 1`, sin
 contenedor y con `transferPolicy: transferable`. En esas versiones la política
@@ -127,15 +132,15 @@ Ejemplo:
 }
 ```
 
-## AreaPack v7
+## AreaPack v8
 
 Cada área reutiliza los mismos registros del WorldPack; no crea una segunda
 representación de salas, objetos o NPC. Solo añade `id` y `dependsOn` como
 frontera de propiedad.
 
 ```text
-AreaPack v7
-├── schemaVersion! = 7
+AreaPack v8
+├── schemaVersion! = 8
 ├── id!
 ├── dependsOn[]?
 ├── itemPrototypes[]?
@@ -154,6 +159,7 @@ AreaPack v7
 ├── advancedClasses[]?
 ├── talentGraphs[]?
 ├── abilities[]?
+├── socialEmotes[]?
 ├── npcAbilitySets[]?
 ├── roomMedia[]?
 ├── entityMedia[]?
@@ -183,7 +189,7 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 
 ```json
 {
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "id": "plaza",
   "dependsOn": ["puerta"],
   "itemPrototypes": [
@@ -298,15 +304,15 @@ es botín fijo authored, asignado una sola vez y validado. El botín repetible s
 declara por separado mediante `lootTables` y `lootSources`, como se detalla más
 abajo.
 
-## WorldPack v8
+## WorldPack v9
 
 El artefacto plano conserva identidad, catálogos de objeto, salas y gameplay.
 Las extensiones de multimedia/percepción/scripts se aplanan en el documento
 por `WorldPackDocument` aunque la estructura Rust separa el núcleo del mundo.
 
 ```text
-WorldPack v8
-├── schemaVersion! = 8
+WorldPack v9
+├── schemaVersion! = 9
 ├── id!
 ├── name!
 ├── startRoomId!
@@ -320,6 +326,7 @@ WorldPack v8
 │   ├── npcSpawns[]?
 │   ├── characterProgression?
 │   ├── abilities[]?
+│   ├── socialEmotes[]?
 │   ├── npcAbilitySets[]?
 │   ├── lootTables[]?
 │   ├── lootSources[]?
@@ -337,7 +344,7 @@ Un mundo mínimo sin objetos:
 
 ```json
 {
-  "schemaVersion": 8,
+  "schemaVersion": 9,
   "id": "ejemplo",
   "name": "Mundo de ejemplo",
   "startRoomId": "ejemplo:entrada",
@@ -359,7 +366,8 @@ rechazan. Los límites cuentan bytes, no caracteres Unicode.
 
 ## Habilidades de comunicación y telepatía
 
-WorldPack v8/AreaPack v7 reutiliza `AbilityDefinition`: la telepatía no es un
+WorldPack v9/AreaPack v8 conserva la comunicación introducida por WorldPack
+v8/AreaPack v7 y reutiliza `AbilityDefinition`: la telepatía no es un
 canal global ni un `tell` renombrado. El personaje debe conocer la habilidad,
 tener su recurso disponible y pagar un coste positivo; la habilidad tiene un
 cooldown authored positivo y conserva el cooldown global de habilidades.
@@ -393,6 +401,44 @@ Lantern Square concede `tiamud:mind-whisper` a `tiamud:wanderer`, la clase
 predeterminada, cuyo pool de stamina permite pagarla desde nivel 1. El Archivo
 demuestra un bloqueo authored. El mensaje y el destinatario son input runtime:
 no se escriben en el WorldPack.
+
+## Emotes sociales authored
+
+WorldPack v9 declara `gameplay.socialEmotes`; AreaPack v8 usa `socialEmotes`
+en su raíz. Hay como máximo 32 por mundo. Cada definición contiene un `id`
+namespaced de hasta 64 bytes, un `command` ASCII único que cumple
+`[a-z][a-z0-9-]*` (hasta 32 bytes), un nombre seguro de hasta 64 bytes,
+`audience: room` y `targeting: none|optional_character|required_character`.
+
+```json
+{
+  "id": "tiamud:smile",
+  "command": "smile",
+  "name": "Sonreír",
+  "audience": "room",
+  "targeting": "optional_character",
+  "templates": {
+    "untargeted": {
+      "actor": "Sonríes.",
+      "others": "{actor} sonríe."
+    },
+    "targeted": {
+      "actor": "Sonríes a {target}.",
+      "target": "{actor} te sonríe.",
+      "others": "{actor} sonríe a {target}."
+    }
+  }
+}
+```
+
+`none` exige solo `untargeted`, `required_character` solo `targeted` y
+`optional_character` ambos. Sin objetivo, `actor` no admite placeholder y
+`others` exige `{actor}` exactamente una vez. Con objetivo, `actor` exige solo
+`{target}`, `target` solo `{actor}` y `others` uno de cada. Se rechazan llaves
+o placeholders adicionales, controles, ESC, CR/LF, `<`, `>` y `&`; el
+resultado de sustituir nombres de 64 bytes debe caber en 512 bytes. Las
+plantillas no conceden autoridad ni visibilidad: el runtime calcula la
+audiencia de la sala.
 
 ## Prototipos e instancias de objeto
 
@@ -494,7 +540,7 @@ ubicaciones relativas de todo su subárbol.
 
 ### Propiedad efectiva y transferencia
 
-WorldPack v8 y AreaPack v7 aceptan las tres políticas. WorldPack v5 y AreaPack
+WorldPack v9 y AreaPack v8 aceptan las tres políticas. WorldPack v5 y AreaPack
 v4 también las aceptaban en su frontera histórica. La vinculación no se escribe
 en autoría: pertenece a cada instancia runtime y se crea, valida y persiste
 cuando el personaje adquiere el objeto.
@@ -551,7 +597,7 @@ canónico. Cada pool realiza `rolls` selecciones con reemplazo. Una entrada
 una instancia y no admite prototipo ni cantidades. El runtime usa rejection
 sampling, no porcentajes flotantes ni módulo sesgado.
 
-AreaPack v7 declara ambas colecciones en su nivel superior; WorldPack v8 las
+AreaPack v8 declara ambas colecciones en su nivel superior; WorldPack v9 las
 sitúa dentro de `gameplay`. El botín normal se introdujo en AreaPack v5 y
 WorldPack v6. El fragmento siguiente muestra su forma común actual:
 
@@ -631,7 +677,7 @@ Reglas de referencias y capacidad:
 
 ## Sellos ganados y afijos (fase 4B)
 
-WorldPack v8 y AreaPack v7 conservan las recompensas selladas obtenidas jugando
+WorldPack v9 y AreaPack v8 conservan las recompensas selladas obtenidas jugando
 y un único afijo opcional por unidad de botín `unique`, introducidos en v7/v6.
 La decisión autoritativa es
 el [ADR 0014](decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
@@ -763,12 +809,14 @@ La composición:
 - escribe el destino completo de forma atómica sin sobreescribirlo.
 
 Lantern Square se compone desde tres áreas y produce tres salas, diez
-prototipos, nueve instancias iniciales, dos tablas de botín y una fuente. El
-artefacto de 53.040 bytes es byte a byte idéntico al WorldPack canónico y su
+prototipos, nueve instancias iniciales, dos tablas de botín, una fuente, un
+afijo, un pool, una habilidad de telepatía directa y un emote social authored.
+El artefacto de 53.567 bytes es byte a byte idéntico al
+WorldPack canónico y su
 SHA-256 es:
 
 ```text
-109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6
+9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75
 ```
 
 La demostración conserva `tiamud:road-token` y `tiamud:wolf-clasp` como

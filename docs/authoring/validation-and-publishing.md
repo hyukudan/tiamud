@@ -41,13 +41,21 @@ affix for exactly one unique, non-sealed item, and its effective statistics
 must remain within runtime caps. Injecting any of these fields into v6/v5 or
 older input also fails closed.
 
-WorldPack v8/AreaPack v7 additionally accept the closed telepathy definition.
+WorldPack v9/AreaPack v8 preserve the closed telepathy definition introduced
+in WorldPack v8/AreaPack v7.
 Validation requires category `spell|utility`, `single_ally`, a non-empty
 positive resource cost, positive cooldown, no damage/heal/status payload and
 exclusion from every NPC ability set. The world admits at most 32 communication
 abilities, each with at most 64 unique existing blocked rooms. WorldPack v2-v7
 and AreaPack v1-v6 reject a smuggled `communication` field instead of silently
 normalizing it.
+
+WorldPack v9/AreaPack v8 additionally validate at most 32 authored room emotes,
+globally unique lowercase ASCII commands, exact targeting/template shapes,
+exact `{actor}` and `{target}` placeholder counts and a 512-byte worst-case
+render bound. Control characters, CR/LF, ESC, `<`, `>` and `&` fail closed.
+WorldPack v2-v8 and AreaPack v1-v7 reject `socialEmotes` even when empty;
+normalization and `envy-import` produce an empty catalog.
 
 `test` runs the document's embedded content expectations. Run both explicitly;
 publishing does not replace content tests or human play review.
@@ -75,9 +83,11 @@ Review hidden-state cases separately. Preview and tests must not expose variant
 IDs, secret predicates, hidden entities or undiscovered asset paths.
 
 For the reviewed Lantern Square sources, composition must reproduce three
-rooms, ten item prototypes, nine initial instances, two loot tables and one
-loot source. The canonical file is 53,040 bytes with SHA-256
-`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
+rooms, ten item prototypes, nine initial instances, two loot tables, one loot
+source, one affix, one affix pool, one authored direct-online telepathy ability
+and one authored room emote. The canonical file is 53,567 bytes with
+SHA-256
+`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
 Its gate-stalker combines a fixed stormglass talon, a guaranteed road token,
 an earned sealed oath and one 60% wolf-clasp/40% nothing roll under party
 round-robin rights. The ordinary clasp drop and the oath's one talon each use

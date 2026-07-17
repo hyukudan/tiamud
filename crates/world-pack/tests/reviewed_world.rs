@@ -7,7 +7,7 @@ use world_pack::{
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 #[test]
-fn reviewed_runtime_fixture_matches_world_pack_v8() {
+fn reviewed_runtime_fixture_matches_current_world_pack() {
     let document = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap();
     let pack = document.world;
 
@@ -17,6 +17,10 @@ fn reviewed_runtime_fixture_matches_world_pack_v8() {
     assert!(pack.rooms.iter().any(|room| room.id == pack.start_room_id));
     assert_eq!(pack.item_prototypes.len(), 10);
     assert_eq!(pack.initial_item_instances.len(), 9);
+    assert_eq!(pack.gameplay.social_emotes.len(), 1);
+    let smile = &pack.gameplay.social_emotes[0];
+    assert_eq!(smile.id, "tiamud:smile");
+    assert_eq!(smile.command, "smile");
     assert!(
         pack.item_prototypes
             .iter()

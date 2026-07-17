@@ -95,9 +95,9 @@ matriz, memoria y documentación pública a la vez.
 
 ### Mundo, personajes y juego
 
-- WorldPack v8 es canónico; AreaPack v7 es la autoría modular nativa y
-  WorldProject permanece en v2. WorldPack v7/v6/v5/v4/v3/v2,
-  AreaPack v6/v5/v4/v3/v2/v1 y Envy/Merc solo entran por
+- WorldPack v9 es canónico; AreaPack v8 es la autoría modular nativa y
+  WorldProject permanece en v2. WorldPack v8/v7/v6/v5/v4/v3/v2,
+  AreaPack v7/v6/v5/v4/v3/v2/v1 y Envy/Merc solo entran por
   normalización/importación.
 - Se valida y carga un WorldPack completo antes de abrir listeners.
   `TIAMUD_WORLD_PACK` selecciona uno externo revisado; si no, se usa el
@@ -109,7 +109,7 @@ matriz, memoria y documentación pública a la vez.
   1..=8.192; rechaza controles inseguros y normaliza entradas legacy antes de
   validar. No subas estos topes para hacer caber prosa generada.
 - El modelo de personaje v3 funciona de extremo a extremo dentro de WorldPack
-  v8: linaje, trasfondo opcional, clase
+  v9: linaje, trasfondo opcional, clase
   base/avanzada, XP global, clase activa, historial, reservas, talentos con
   rango y promoción atómica.
 - `archetype` no es identidad canónica. Normalízalo en la frontera; no crees un
@@ -142,7 +142,7 @@ matriz, memoria y documentación pública a la vez.
   `contents` pagina 20 grupos; Web, Telnet y GMCP reciben cantidad, slots, peso
   total, capacidad, política de transferencia y estado de vínculo mediante
   referencias opacas.
-- WorldPack v8 y AreaPack v7 aceptan el vocabulario cerrado `transferable`,
+- WorldPack v9 y AreaPack v8 aceptan el vocabulario cerrado `transferable`,
   `character_bound` y `non_transferable`, igual que WorldPack v6/v5 y AreaPack
   v5/v4;
   WorldPack v4/AreaPack v3 y anteriores solo normalizan `transferable`. La primera adquisición liga
@@ -199,7 +199,7 @@ matriz, memoria y documentación pública a la vez.
   destinatario siga conectado, chat de grupo y canales `general`, `newbie` y
   `staff`. Suscripciones son durables en v11; `staff` requiere perfil
   `moderator`, `administrator` o `implementor` al unirse, enviar y recibir;
-  `helper` y `builder` no acceden. WorldPack v8/AreaPack v7 permiten una
+  `helper` y `builder` no acceden. WorldPack v9/AreaPack v8 conservan una
   comunicación `telepathy/direct_online` en habilidades `spell|utility`
   `single_ally`: exige al menos un coste, cooldown positivo y conocimiento;
   no admite daño/curación/estados ni uso por NPC, y puede bloquear hasta 64
@@ -208,7 +208,12 @@ matriz, memoria y documentación pública a la vez.
   receptor suprimen la entrega sin revelarlo. No actualiza `reply`, no guarda
   cuerpo/destino y comparte mute/bucket. Web, Telnet y `Comm.Channel.Text`
   GMCP comparten política. No hay correo/historial durable, shout/yell,
-  telepatía de grupo/offline, emotes o tablones.
+  telepatía de grupo/offline o tablones. WorldPack v9/AreaPack v8 añaden hasta
+  32 emotes locales authored: `emotes` lista y `emote <comando> [personaje]`
+  renderiza plantillas cerradas por perspectiva, sin texto libre, persistencia
+  ni reevaluación de placeholders insertados. El objetivo es otro personaje
+  conectado de la misma sala; ignore/block suprime por receptor y el commit de
+  `OnTalk` precede a Web/Telnet/GMCP.
 - La autoridad ejecutable de staff usa capacidades cerradas y nunca procede de
   XP, nivel, clase, talentos o WorldPack. Los perfiles `helper`, `builder`,
   `moderator`, `administrator` e `implementor` siembran bundles revisados y
@@ -381,6 +386,21 @@ WorldPack y 124 restantes), formato/diff/clippy; check web 0/0, 113/113
 Vitest, build, 86/86 Node/bot y 42/42 Playwright soportado (21 Chromium y 21
 Firefox). También pasan `cargo-deny` y licencias/avisos 307 Rust/76 web. No se
 ejecutaron PostgreSQL real v11, WebKit, lector manual ni soak de 24 h.
+
+### Evidencia integrada de emotes authored 5B
+
+La fase 5B usa WorldPack v9, AreaPack v8, WorldProject v2, snapshot v7 y
+esquema SQL v11. `tiamud:smile` demuestra plantillas cerradas y objetivo local
+opcional. La recomposición canónica es byte a byte idéntica, mide 53.567 bytes
+y tiene SHA-256
+`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
+El árbol integrado pasa 652/652 pruebas Rust (139 core, 257 servidor, 132
+WorldPack y 124 restantes), formato/diff/clippy; check web 0/0, 114/114
+Vitest, build, 86/86 Node/bot y 44/44 Playwright soportado (22 Chromium y 22
+Firefox). También pasan `cargo-deny` y licencias/avisos 307 Rust/76 web. La
+auditoría adversarial cerró render recursivo, divergencia validador/runtime y
+escape MXP incompleto; quedan 0 P1/P2/P3 abiertos. No se ejecutaron PostgreSQL
+real v11, WebKit, lector manual, carga/soak ni soak de 24 h.
 
 ### Evidencia histórica retenida
 
@@ -571,8 +591,9 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
   verificada;
 - sin entrenamiento general, migración general de IDs, multiclase, sprite de
   jugador, heal cue del servidor ni lápida de derrota;
-- fases social 1 y telepatía 5A implementadas; sin correo/historial,
-  shout/yell, telepatía de grupo/offline, emotes o tablones;
+- fases social 1, telepatía 5A y emotes authored 5B implementadas; sin
+  correo/historial, shout/yell, telepatía de grupo/offline, emotes globales/de
+  grupo o tablones;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
 - fase 4B de inventario/botín implementada: prototipos/instancias, creación durable,

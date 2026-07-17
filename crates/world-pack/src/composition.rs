@@ -1,8 +1,8 @@
 //! Strict, bounded, offline composition of modular authoring areas.
 //!
-//! AreaPack v7 is deliberately an authoring format, not a runtime hot-load
+//! AreaPack v8 is deliberately an authoring format, not a runtime hot-load
 //! protocol. Composition resolves and validates the complete graph, then emits
-//! one validated [`WorldPackDocument`] v8 consumed by the runtime.
+//! one validated [`WorldPackDocument`] v9 consumed by the runtime.
 //! Area identities, source digests, ownership and cross-area edges are exposed
 //! in [`CompositionReport`] so a later catalog/activation design can build on
 //! stable facts without weakening today's all-or-nothing runtime validation.
@@ -26,11 +26,12 @@ use crate::{
     LevelThresholdDefinition, LineageDefinition, LootSourceDefinition, LootTableDefinition,
     NpcAbilitySet, NpcPrototype, NpcSpawn, RequirementDefinition, RequirementPredicate, Room,
     RoomMediaDefinition, RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition,
-    SourceMetadata, TalentGraphDefinition, ValidationErrors, WorldPack, WorldPackDocument,
+    SocialEmoteDefinition, SourceMetadata, TalentGraphDefinition, ValidationErrors, WorldPack,
+    WorldPackDocument,
 };
 
 pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 2;
-pub const AREA_PACK_SCHEMA_VERSION: u32 = 7;
+pub const AREA_PACK_SCHEMA_VERSION: u32 = 8;
 pub const MAX_PROJECT_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_AREA_COUNT: usize = 256;
 pub const MAX_AREA_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -158,6 +159,8 @@ pub struct AreaPack {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abilities: Vec<AbilityDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub social_emotes: Vec<SocialEmoteDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_ability_sets: Vec<NpcAbilitySet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub room_media: Vec<RoomMediaDefinition>,
@@ -251,6 +254,8 @@ impl<'de> Deserialize<'de> for AreaPack {
             #[serde(default)]
             abilities: Vec<AbilityDefinition>,
             #[serde(default)]
+            social_emotes: Vec<SocialEmoteDefinition>,
+            #[serde(default)]
             npc_ability_sets: Vec<NpcAbilitySet>,
             #[serde(default)]
             room_media: Vec<RoomMediaDefinition>,
@@ -272,8 +277,12 @@ impl<'de> Deserialize<'de> for AreaPack {
             .get("schemaVersion")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| D::Error::custom("AreaPack schemaVersion is required"))?;
-        if (1..u64::from(AREA_PACK_SCHEMA_VERSION)).contains(&schema_version) {
+        if (1..=6).contains(&schema_version) {
             reject_legacy_area_communication_fields(&value, schema_version)
+                .map_err(D::Error::custom)?;
+        }
+        if (1..u64::from(AREA_PACK_SCHEMA_VERSION)).contains(&schema_version) {
+            reject_legacy_area_social_emote_fields(&value, schema_version)
                 .map_err(D::Error::custom)?;
         }
         if schema_version == 1 || schema_version == 2 {
@@ -291,7 +300,7 @@ impl<'de> Deserialize<'de> for AreaPack {
         } else if schema_version == 5 {
             reject_legacy_area_reward_fields(&value, schema_version).map_err(D::Error::custom)?;
             normalize_v5_area_rewards(&mut value).map_err(D::Error::custom)?;
-        } else if schema_version == 6 {
+        } else if schema_version == 6 || schema_version == 7 {
             normalize_v5_area_rewards(&mut value).map_err(D::Error::custom)?;
         } else if schema_version == u64::from(AREA_PACK_SCHEMA_VERSION) {
             reject_native_area_legacy_item_fields(&value).map_err(D::Error::custom)?;
@@ -303,6 +312,7 @@ impl<'de> Deserialize<'de> for AreaPack {
             && raw.schema_version != 4
             && raw.schema_version != 5
             && raw.schema_version != 6
+            && raw.schema_version != 7
             && raw.schema_version != AREA_PACK_SCHEMA_VERSION
         {
             return Err(D::Error::custom(format!(
@@ -350,6 +360,7 @@ impl<'de> Deserialize<'de> for AreaPack {
             advanced_classes: raw.advanced_classes,
             talent_graphs: raw.talent_graphs,
             abilities: raw.abilities,
+            social_emotes: raw.social_emotes,
             npc_ability_sets: raw.npc_ability_sets,
             room_media: raw.room_media,
             entity_media: raw.entity_media,
@@ -366,14 +377,14 @@ fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<()
         return Ok(());
     };
     if root.contains_key("items") || root.contains_key("itemRules") {
-        return Err("AreaPack v7 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("AreaPack v8 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("AreaPack v7 rooms cannot declare legacy items".to_owned());
+        return Err("AreaPack v8 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("npcPrototypes")
@@ -384,7 +395,7 @@ fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<()
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("AreaPack v7 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("AreaPack v8 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
     Ok(())
 }
@@ -471,6 +482,18 @@ fn reject_legacy_area_communication_fields(
     if has_communication {
         return Err(format!(
             "AreaPack v{schema_version} cannot declare v7 communication abilities"
+        ));
+    }
+    Ok(())
+}
+
+fn reject_legacy_area_social_emote_fields(
+    value: &serde_json::Value,
+    schema_version: u64,
+) -> Result<(), String> {
+    if value.get("socialEmotes").is_some() {
+        return Err(format!(
+            "AreaPack v{schema_version} cannot declare v8 socialEmotes"
         ));
     }
     Ok(())
@@ -577,6 +600,7 @@ pub struct AreaOwnership {
     pub talent_graphs: Vec<String>,
     pub talent_nodes: Vec<String>,
     pub abilities: Vec<String>,
+    pub social_emotes: Vec<String>,
     pub npc_ability_sets: Vec<String>,
     pub room_media: Vec<String>,
     pub entity_media: Vec<String>,
@@ -1094,6 +1118,12 @@ fn compose_loaded(
         )?;
         register_entities(
             &mut global_ids,
+            "social emote",
+            &pack.id,
+            pack.social_emotes.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
             "script",
             &pack.id,
             pack.scripts.iter().map(|v| &v.id),
@@ -1199,6 +1229,12 @@ fn compose_loaded(
                         .map(|value| value.id.clone())
                         .collect(),
                 ),
+                social_emotes: sorted(
+                    pack.social_emotes
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
                 npc_ability_sets: sorted(
                     pack.npc_ability_sets
                         .iter()
@@ -1290,6 +1326,11 @@ fn compose_loaded(
             .gameplay
             .abilities
             .extend(pack.abilities.clone());
+        document
+            .world
+            .gameplay
+            .social_emotes
+            .extend(pack.social_emotes.clone());
         document
             .world
             .gameplay
@@ -1399,7 +1440,7 @@ fn compose_loaded(
                 unreachable!("artifact generation does not resolve scenes: {error}")
             }
             crate::DocumentToolError::LegacyProgression(error) => {
-                unreachable!("composed artifacts are already WorldPack v8: {error}")
+                unreachable!("composed artifacts are already WorldPack v9: {error}")
             }
             crate::DocumentToolError::LegacyItems(error) => {
                 unreachable!("composed artifacts already use native v5 items: {error}")
@@ -2372,7 +2413,7 @@ fn safe_identifier(value: &str) -> bool {
 }
 
 /// Existing runtime WorldPack readers intentionally tolerate future fields.
-/// AreaPack v7 does not: this format-specific key audit makes every structured
+/// AreaPack v8 does not: this format-specific key audit makes every structured
 /// authoring record fail closed without changing runtime deserialization.
 fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionError> {
     let Some(area) = audit_object(
@@ -2400,6 +2441,7 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
             "advancedClasses",
             "talentGraphs",
             "abilities",
+            "socialEmotes",
             "npcAbilitySets",
             "roomMedia",
             "entityMedia",
@@ -2438,6 +2480,11 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
     audit_array(area.get("affixPools"), "$.affixPools", audit_affix_pool)?;
     audit_array(area.get("archetypes"), "$.archetypes", audit_archetype)?;
     audit_array(area.get("abilities"), "$.abilities", audit_ability)?;
+    audit_array(
+        area.get("socialEmotes"),
+        "$.socialEmotes",
+        audit_social_emote,
+    )?;
     audit_array(
         area.get("npcAbilitySets"),
         "$.npcAbilitySets",
@@ -2729,6 +2776,50 @@ fn audit_ability(value: &serde_json::Value, path: &str) -> Result<(), Compositio
         &format!("{path}.statusEffects"),
         audit_ability_status,
     )?;
+    Ok(())
+}
+
+fn audit_social_emote(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    let Some(emote) = audit_object(
+        value,
+        &[
+            "id",
+            "command",
+            "name",
+            "audience",
+            "targeting",
+            "templates",
+        ],
+        path,
+    )?
+    else {
+        return Ok(());
+    };
+    let Some(templates) = emote.get("templates") else {
+        return Ok(());
+    };
+    let Some(templates) = audit_object(
+        templates,
+        &["untargeted", "targeted"],
+        &format!("{path}.templates"),
+    )?
+    else {
+        return Ok(());
+    };
+    if let Some(untargeted) = templates.get("untargeted") {
+        audit_object(
+            untargeted,
+            &["actor", "others"],
+            &format!("{path}.templates.untargeted"),
+        )?;
+    }
+    if let Some(targeted) = templates.get("targeted") {
+        audit_object(
+            targeted,
+            &["actor", "target", "others"],
+            &format!("{path}.templates.targeted"),
+        )?;
+    }
     Ok(())
 }
 

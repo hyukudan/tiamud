@@ -29,6 +29,7 @@ pub enum SocialChannel {
     Say,
     Tell,
     Telepathy,
+    Emote,
     Party,
     General,
     Newbie,
@@ -326,6 +327,83 @@ pub async fn apply_social(
                     "You tell the {} channel, \"{message}\"\r\n",
                     channel.as_str()
                 ),
+            })
+        }
+        SocialAction::EmoteList => {
+            let emotes = world.social_emotes();
+            if emotes.is_empty() {
+                Ok(SocialOutcome {
+                    output: "No authored emotes are available.\r\n".to_owned(),
+                })
+            } else {
+                let lines = emotes
+                    .into_iter()
+                    .map(|emote| {
+                        let targeting = match emote.targeting {
+                            tiamud_core::SocialEmoteTargeting::None => "no target",
+                            tiamud_core::SocialEmoteTargeting::OptionalCharacter => {
+                                "optional character"
+                            }
+                            tiamud_core::SocialEmoteTargeting::RequiredCharacter => {
+                                "character required"
+                            }
+                        };
+                        format!("- {}: {} ({targeting})", emote.command, emote.name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\r\n");
+                Ok(SocialOutcome {
+                    output: format!("Authored emotes:\r\n{lines}\r\n"),
+                })
+            }
+        }
+        SocialAction::Emote { command, target } => {
+            let plan = world.emote_preflight(session, &command, target.as_deref())?;
+            let rendered = world.render_emote(&plan)?;
+            ensure_chat_allowed(runtime, store, actor.id).await?;
+
+            let connected = world.connected_characters()?;
+            if let (Some(target_session_id), Some(target_character_id), Some(target_text)) = (
+                plan.target_session_id,
+                plan.target_character_id,
+                rendered.target,
+            ) && let Some(recipient) = connected.iter().find(|candidate| {
+                candidate.session_id == target_session_id
+                    && candidate.character_id == target_character_id
+            }) && store
+                .social_delivery_allowed(actor.id, recipient.character_id)
+                .await?
+            {
+                deliveries.push(PlannedSocialDelivery {
+                    session_id: recipient.session_id,
+                    recipient_id: recipient.character_id,
+                    message: SocialMessage {
+                        channel: SocialChannel::Emote,
+                        sender: plan.actor_name.clone(),
+                        text: target_text,
+                    },
+                    reply_from: None,
+                });
+            }
+
+            let other_session_ids = plan.other_session_ids.into_iter().collect::<HashSet<_>>();
+            plan_allowed(
+                &mut deliveries,
+                store,
+                actor.id,
+                connected
+                    .iter()
+                    .filter(|candidate| other_session_ids.contains(&candidate.session_id)),
+                SocialMessage {
+                    channel: SocialChannel::Emote,
+                    sender: plan.actor_name,
+                    text: rendered.others,
+                },
+                None,
+            )
+            .await?;
+            Ok(SocialOutcome {
+                output: format!("{}\r\n", rendered.actor),
             })
         }
         SocialAction::Who => {
@@ -730,6 +808,7 @@ fn help_text(topic: Option<&str>) -> String {
         Some(topic) if topic.eq_ignore_ascii_case("social") => concat!(
             "Social: say <message>, tell <name> <message>, reply <message>, who.\r\n",
             "Telepathy: telepathy <ability-id> <name> <message> when the world grants it.\r\n",
+            "Emotes: emotes lists authored gestures; emote <command> [character] performs one.\r\n",
             "Party: party say/invite/accept/revoke/kick/transfer/disband/leave/status.\r\n",
             "Channels: channel list, channel join/leave <general|newbie|staff>, ",
             "channel say <channel> <message>. Staff requires a moderator, administrator or implementor profile.\r\n",
@@ -749,7 +828,7 @@ fn help_text(topic: Option<&str>) -> String {
             "Movement: north/east/south/west/up/down, look.\r\n",
             "Items: inventory, take/drop/give [quantity], contents, put/get [quantity], examine, use, equip, unequip.\r\n",
             "Trade: request, offer, review and double-confirm a same-room exchange; help trade.\r\n",
-            "Social: say, tell, reply, telepathy, party say, channels, who, ignore, block, report.\r\n",
+            "Social: say, tell, reply, telepathy, emotes, party say, channels, who, ignore, block, report.\r\n",
             "More: help social, help trade.\r\n"
         )
         .to_owned(),
@@ -793,6 +872,15 @@ mod tests {
             })
             .unwrap(),
             json!({"channel": "telepathy", "sender": "Aria", "text": "A private thought."})
+        );
+        assert_eq!(
+            serde_json::to_value(SocialMessage {
+                channel: SocialChannel::Emote,
+                sender: "Aria".into(),
+                text: "Aria salutes Borin.".into(),
+            })
+            .unwrap(),
+            json!({"channel": "emote", "sender": "Aria", "text": "Aria salutes Borin."})
         );
     }
 

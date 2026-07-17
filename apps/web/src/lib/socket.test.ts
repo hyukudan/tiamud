@@ -185,6 +185,16 @@ describe('TiamudConnection', () => {
         target: 'Bram', message: 'Meet at the gate.',
       },
     });
+    expect(connection.perform(
+      'social.emote',
+      { emote: 'smile', target: 'Bram' },
+      'emote-1',
+    )).toBe(true);
+    expect(lastSent(socket)).toMatchObject({
+      data: {
+        requestId: 'emote-1', action: 'social.emote', emote: 'smile', target: 'Bram',
+      },
+    });
     expect(connection.promote('stormcaller', 'promote-1')).toBe(true);
     expect(lastSent(socket)).toMatchObject({
       data: { requestId: 'promote-1', action: 'progression.promote', classId: 'stormcaller' },

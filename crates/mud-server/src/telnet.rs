@@ -1004,6 +1004,8 @@ fn public_error(error: &GameError) -> String {
             | tiamud_core::WorldError::AbilityUnavailable
             | tiamud_core::WorldError::InsufficientResource
             | tiamud_core::WorldError::InvalidAbilityTarget
+            | tiamud_core::WorldError::EmoteUnavailable
+            | tiamud_core::WorldError::EmoteTargetUnavailable
             | tiamud_core::WorldError::ClassNotFound
             | tiamud_core::WorldError::PromotionUnavailable
             | tiamud_core::WorldError::TalentUnavailable
@@ -1156,9 +1158,11 @@ async fn serve_entered(
                                 .into_iter()
                                 .take(MAX_PROJECTED_EVENTS_PER_BATCH)
                             {
-                                bytes.extend_from_slice(b"\r\n");
-                                bytes.extend_from_slice(event.event.text.as_bytes());
-                                bytes.extend_from_slice(b"\r\n");
+                                append_negotiated_mxp_line(
+                                    &mut bytes,
+                                    input,
+                                    &event.event.text,
+                                );
                             }
                             if event_count > MAX_PROJECTED_EVENTS_PER_BATCH {
                                 bytes.extend_from_slice(
@@ -1234,7 +1238,8 @@ async fn serve_entered(
                                 Ok(outcome) => {
                                     last_revision = outcome.scene.revision;
                                     if let Some(text) = outcome.output {
-                                        let mut bytes = text.into_bytes();
+                                        let mut bytes =
+                                            escape_negotiated_mxp_text(input, &text).into_bytes();
                                         bytes.extend_from_slice(b"\r\n");
                                         output_queue_bytes(output, bytes)?;
                                     }
@@ -1293,11 +1298,12 @@ fn output_queue_bytes(output: &TelnetOutputQueue, bytes: Vec<u8>) -> io::Result<
     output.bytes(OutputPriority::Interactive, bytes)
 }
 
-const SOCIAL_CHANNEL_NAMES: [&str; 8] = [
+const SOCIAL_CHANNEL_NAMES: [&str; 9] = [
     "announcement",
     "say",
     "tell",
     "telepathy",
+    "emote",
     "party",
     "general",
     "newbie",
@@ -1310,6 +1316,7 @@ fn social_channel_name(channel: SocialChannel) -> &'static str {
         SocialChannel::Say => "say",
         SocialChannel::Tell => "tell",
         SocialChannel::Telepathy => "telepathy",
+        SocialChannel::Emote => "emote",
         SocialChannel::Party => "party",
         SocialChannel::General => "general",
         SocialChannel::Newbie => "newbie",
@@ -1323,13 +1330,32 @@ fn write_social_message(
     message: &SocialMessage,
 ) -> io::Result<()> {
     let channel = social_channel_name(message.channel);
-    let mut bytes =
-        format!("\r\n[{channel}] {}: {}\r\n", message.sender, message.text).into_bytes();
+    let rendered = if message.channel == SocialChannel::Emote {
+        message.text.clone()
+    } else {
+        format!("{}: {}", message.sender, message.text)
+    };
+    let rendered = escape_negotiated_mxp_text(input, &rendered);
+    let mut bytes = format!("\r\n[{channel}] {rendered}\r\n").into_bytes();
     let gmcp = input.negotiation.social_gmcp(message);
     if !gmcp.is_empty() {
         bytes.extend_from_slice(&gmcp);
     }
     output.bytes(OutputPriority::Interactive, bytes)
+}
+
+fn escape_negotiated_mxp_text(input: &TelnetInput, value: &str) -> String {
+    if input.negotiation.negotiated_link_mode() == LinkMode::Mxp {
+        escape_mxp(value)
+    } else {
+        value.to_owned()
+    }
+}
+
+fn append_negotiated_mxp_line(bytes: &mut Vec<u8>, input: &TelnetInput, value: &str) {
+    bytes.extend_from_slice(b"\r\n");
+    bytes.extend_from_slice(escape_negotiated_mxp_text(input, value).as_bytes());
+    bytes.extend_from_slice(b"\r\n");
 }
 
 fn write_scene(
@@ -3502,6 +3528,12 @@ mod tests {
             "You cannot send chat while your account is muted."
         );
         assert_eq!(
+            public_error(&GameError::World(
+                tiamud_core::WorldError::EmoteTargetUnavailable
+            )),
+            "That social-emote target is not available."
+        );
+        assert_eq!(
             public_error(&GameError::World(tiamud_core::WorldError::InvalidEntity)),
             "The world is temporarily unavailable."
         );
@@ -3904,7 +3936,7 @@ mod tests {
             .expect("Comm support must advertise the complete channel list");
         assert_eq!(
             String::from_utf8(channel_list.clone()).unwrap(),
-            r#"Comm.Channel.List {"channels":["announcement","say","tell","telepathy","party","general","newbie","staff"]}"#
+            r#"Comm.Channel.List {"channels":["announcement","say","tell","telepathy","emote","party","general","newbie","staff"]}"#
         );
         assert!(
             payloads
@@ -4627,12 +4659,13 @@ mod tests {
     }
 
     #[test]
-    fn telnet_social_text_names_all_eight_channels() {
+    fn telnet_social_text_names_all_nine_channels_and_renders_emotes_as_complete_text() {
         let cases = [
             (SocialChannel::Announcement, "announcement"),
             (SocialChannel::Say, "say"),
             (SocialChannel::Tell, "tell"),
             (SocialChannel::Telepathy, "telepathy"),
+            (SocialChannel::Emote, "emote"),
             (SocialChannel::Party, "party"),
             (SocialChannel::General, "general"),
             (SocialChannel::Newbie, "newbie"),
@@ -4654,16 +4687,136 @@ mod tests {
             .unwrap();
 
             let state = output.shared.state.lock().unwrap();
+            let expected = if channel == SocialChannel::Emote {
+                "\r\n[emote] Hold the gate.\r\n".to_owned()
+            } else {
+                format!("\r\n[{name}] Mara: Hold the gate.\r\n")
+            };
             assert!(matches!(
                 &state.frames[0],
                 OutputFrame::Bytes { priority: OutputPriority::Interactive, bytes }
-                    if bytes == format!("\r\n[{name}] Mara: Hold the gate.\r\n").as_bytes()
+                    if bytes == expected.as_bytes()
             ));
         }
     }
 
     #[test]
-    fn gmcp_social_delivery_is_bounded_for_all_eight_channels() {
+    fn negotiated_mxp_escapes_all_plain_domain_text_exactly_once() {
+        let message = SocialMessage {
+            channel: SocialChannel::Emote,
+            sender: "A&B <Guide \"O'Neil\">".to_owned(),
+            text: "A&B <Guide \"O'Neil\"> sonríe.".to_owned(),
+        };
+        let actor_confirmation = "Sonríes a Target <& \"O'Neil\">.\r\n";
+        let say = SocialMessage {
+            channel: SocialChannel::Say,
+            sender: "A&B <Guide \"O'Neil\">".to_owned(),
+            text: "<SEND HREF=\"quit\">go</SEND> &".to_owned(),
+        };
+        let world_text = "<SEND HREF=\"quit\">Mara leaves</SEND> &";
+
+        let plain_output = TelnetOutputQueue::new(1, 1_024);
+        let plain_input = TelnetInput::default();
+        assert_eq!(
+            escape_negotiated_mxp_text(&plain_input, actor_confirmation),
+            actor_confirmation
+        );
+        write_social_message(&plain_output, &plain_input, &message).unwrap();
+        let plain = plain_output.shared.state.lock().unwrap();
+        assert!(matches!(
+            &plain.frames[0],
+            OutputFrame::Bytes { bytes, .. }
+                if bytes == b"\r\n[emote] A&B <Guide \"O'Neil\"> sonr\xc3\xade.\r\n"
+        ));
+        drop(plain);
+
+        let plain_say_output = TelnetOutputQueue::new(1, 1_024);
+        write_social_message(&plain_say_output, &plain_input, &say).unwrap();
+        let plain_say = plain_say_output.shared.state.lock().unwrap();
+        assert!(matches!(
+            &plain_say.frames[0],
+            OutputFrame::Bytes { bytes, .. }
+                if bytes == b"\r\n[say] A&B <Guide \"O'Neil\">: <SEND HREF=\"quit\">go</SEND> &\r\n"
+        ));
+        let mut plain_world = Vec::new();
+        append_negotiated_mxp_line(&mut plain_world, &plain_input, world_text);
+        assert_eq!(
+            plain_world,
+            b"\r\n<SEND HREF=\"quit\">Mara leaves</SEND> &\r\n"
+        );
+
+        let mut input = TelnetInput::default();
+        input.negotiation.begin_initial_negotiation();
+        input.negotiation.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        input.negotiation.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Tiamud.Client 1"]"#.to_vec(),
+        }]);
+        input.negotiation.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Tiamud.Client.Set {"links":"mxp"}"#.to_vec(),
+        }]);
+        input.negotiation.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_MXP,
+        }]);
+        assert_eq!(input.negotiation.negotiated_link_mode(), LinkMode::Mxp);
+        assert_eq!(
+            escape_negotiated_mxp_text(&input, actor_confirmation),
+            "Sonríes a Target &lt;&amp; &quot;O&apos;Neil&quot;&gt;.\r\n"
+        );
+
+        let mxp_output = TelnetOutputQueue::new(1, 1_024);
+        write_social_message(&mxp_output, &input, &message).unwrap();
+        let mxp = mxp_output.shared.state.lock().unwrap();
+        assert!(matches!(
+            &mxp.frames[0],
+            OutputFrame::Bytes { bytes, .. }
+                if bytes == b"\r\n[emote] A&amp;B &lt;Guide &quot;O&apos;Neil&quot;&gt; sonr\xc3\xade.\r\n"
+        ));
+        let OutputFrame::Bytes { bytes, .. } = &mxp.frames[0] else {
+            panic!("emote text must use an ordinary Telnet output frame");
+        };
+        let escaped = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!escaped.contains("&amp;amp;"));
+        assert!(!escaped.contains("&amp;lt;"));
+        drop(mxp);
+
+        let mut mxp_world = Vec::new();
+        append_negotiated_mxp_line(&mut mxp_world, &input, world_text);
+        assert_eq!(
+            String::from_utf8(mxp_world).unwrap(),
+            "\r\n&lt;SEND HREF=&quot;quit&quot;&gt;Mara leaves&lt;/SEND&gt; &amp;\r\n"
+        );
+
+        input.negotiation.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Tiamud.Client 1","Comm 1"]"#.to_vec(),
+        }]);
+        let mxp_say_output = TelnetOutputQueue::new(1, 2_048);
+        write_social_message(&mxp_say_output, &input, &say).unwrap();
+        let mxp_say = mxp_say_output.shared.state.lock().unwrap();
+        let OutputFrame::Bytes { bytes, .. } = &mxp_say.frames[0] else {
+            panic!("social text and GMCP must share an ordinary Telnet output frame");
+        };
+        let gmcp_start = bytes
+            .windows(2)
+            .position(|window| window == [IAC, SB])
+            .expect("Comm negotiation must append GMCP after visible text");
+        assert_eq!(
+            String::from_utf8(bytes[..gmcp_start].to_vec()).unwrap(),
+            "\r\n[say] A&amp;B &lt;Guide &quot;O&apos;Neil&quot;&gt;: &lt;SEND HREF=&quot;quit&quot;&gt;go&lt;/SEND&gt; &amp;\r\n"
+        );
+        let gmcp = String::from_utf8_lossy(&bytes[gmcp_start..]);
+        assert!(gmcp.contains(r#""talker":"A&B <Guide \"O'Neil\">""#));
+        assert!(gmcp.contains(r#""text":"<SEND HREF=\"quit\">go</SEND> &""#));
+    }
+
+    #[test]
+    fn gmcp_social_delivery_is_bounded_for_all_nine_channels() {
         let mut session = TelnetSession::default();
         session.begin_initial_negotiation();
         session.handle(vec![TelnetEvent::Negotiation {
@@ -4680,6 +4833,7 @@ mod tests {
             (SocialChannel::Say, "say"),
             (SocialChannel::Tell, "tell"),
             (SocialChannel::Telepathy, "telepathy"),
+            (SocialChannel::Emote, "emote"),
             (SocialChannel::Party, "party"),
             (SocialChannel::General, "general"),
             (SocialChannel::Newbie, "newbie"),

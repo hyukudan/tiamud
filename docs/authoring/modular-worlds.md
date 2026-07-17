@@ -1,8 +1,8 @@
 # Projects, areas and composition
 
 The current modular source format is a **WorldProject manifest v2** containing
-strict **AreaPack v7** files. `tiamud-world compose` validates the complete
-graph and produces one canonical **WorldPack v8** document.
+strict **AreaPack v8** files. `tiamud-world compose` validates the complete
+graph and produces one canonical **WorldPack v9** document.
 
 Use [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json)
 and [`worlds/areas/square.area.json`](../../worlds/areas/square.area.json) as
@@ -11,7 +11,7 @@ reviewed examples.
 ## Ownership and dependencies
 
 An area owns every room, item prototype, initial item instance, NPC, loot table,
-loot source, affix, affix pool, ability, progression entry, media record, script and content test
+loot source, affix, affix pool, ability, social emote, progression entry, media record, script and content test
 it declares. Stable IDs are globally unique across the composed project. A legacy-normalized
 prototype/instance pair may preserve the same historical string because the
 two IDs occupy distinct typed namespaces.
@@ -43,7 +43,7 @@ review.
 
 ```json
 {
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "id": "north-gate",
   "dependsOn": ["square"],
   "itemPrototypes": [],
@@ -56,6 +56,7 @@ review.
   "affixes": [],
   "affixPools": [],
   "abilities": [],
+  "socialEmotes": [],
   "entityMedia": []
 }
 ```
@@ -63,7 +64,8 @@ review.
 Unknown fields fail closed in modular authoring. Keep an AreaPack focused on a
 coherent ownership boundary, not on a deployment boundary.
 
-AreaPack v1-v6 normalize to v7 without inventing communication abilities.
+AreaPack v1-v7 normalize to v8 without inventing emotes; v1-v6 also do not
+invent communication abilities.
 AreaPack v1-v5 also normalize without inventing sealed rewards or affixes.
 AreaPack v1-v4 also normalize without inventing loot. Declaring
 `lootTables` or `lootSources`, even empty ones, in an older schema is rejected
@@ -95,13 +97,14 @@ areas, resolve dependencies during play, hot-add modules or evict them through
 LRU. Runtime hot-loading remains future architecture.
 
 Lantern Square currently composes three areas into three rooms, ten item
-prototypes, nine initial instances, two loot tables and one loot source. The
-canonical 53,040-byte artifact has SHA-256
-`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
+prototypes, nine initial instances, two loot tables, one loot source, one
+affix, one affix pool, one direct-online telepathy ability and one room emote.
+The canonical 53,567-byte artifact has SHA-256
+`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
 
 ## Direct WorldPack authoring
 
-A monolithic WorldPack v8 remains valid, but AreaPacks are preferable once
+A monolithic WorldPack v9 remains valid, but AreaPacks are preferable once
 multiple builders or regions are involved. Use `tiamud-world build` to validate
 and canonicalize a direct document:
 

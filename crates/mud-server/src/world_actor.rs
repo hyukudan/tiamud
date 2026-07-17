@@ -1418,6 +1418,7 @@ async fn apply(
                 | tiamud_core::SocialAction::Tell { .. }
                 | tiamud_core::SocialAction::Reply(_)
                 | tiamud_core::SocialAction::ChannelSay { .. }
+                | tiamud_core::SocialAction::Emote { .. }
         );
         let actor_access = session_staff_accesses
             .get(&session)
@@ -2239,8 +2240,10 @@ mod tests {
         AccountRole, ActiveEffect, CharacterGameplaySnapshot, Direction, EconomyAction, EffectKind,
         EquipmentSlot, InitialItemInstanceDefinition, InitialItemLocation, ItemInstanceId,
         ItemPrototypeDefinition, ItemRarity, ItemStackPolicy, ItemTransferPolicy, NpcDefinition,
-        PartyAction, QuestAction, RoomDefinition, SocialAction, SocialChannelName, WorldDefinition,
-        WorldRuntimeSnapshot,
+        PartyAction, QuestAction, RoomDefinition, SocialAction, SocialChannelName,
+        SocialEmoteAudience, SocialEmoteDefinition, SocialEmoteTargetedTemplates,
+        SocialEmoteTargeting, SocialEmoteTemplates, SocialEmoteUntargetedTemplates,
+        WorldDefinition, WorldRuntimeSnapshot,
     };
     use tiamud_scripting::{ScriptCapability, ScriptLimits};
 
@@ -5938,9 +5941,48 @@ mod tests {
         .expect("social delivery timed out")
     }
 
+    async fn has_no_social(inbox: &mut DeliveryInbox) -> bool {
+        tokio::time::timeout(Duration::from_millis(20), async {
+            loop {
+                match inbox.recv().await {
+                    Some(crate::delivery::SessionDelivery::Social(_)) => break false,
+                    Some(_) => continue,
+                    None => break true,
+                }
+            }
+        })
+        .await
+        .unwrap_or(true)
+    }
+
     fn telepathy_test_world() -> World {
         let loaded = crate::world_loader::default_loaded_world().unwrap();
         crate::world_loader::build_loaded_world(&loaded).unwrap()
+    }
+
+    fn emote_test_world() -> World {
+        let mut world = World::demo();
+        world
+            .configure_social_emotes(vec![SocialEmoteDefinition {
+                id: "test:smile".into(),
+                command: "smile".into(),
+                name: "Sonreír".into(),
+                audience: SocialEmoteAudience::Room,
+                targeting: SocialEmoteTargeting::OptionalCharacter,
+                templates: SocialEmoteTemplates {
+                    untargeted: Some(SocialEmoteUntargetedTemplates {
+                        actor: "Sonríes.".into(),
+                        others: "{actor} sonríe.".into(),
+                    }),
+                    targeted: Some(SocialEmoteTargetedTemplates {
+                        actor: "Sonríes a {target}.".into(),
+                        target: "{actor} te sonríe.".into(),
+                        others: "{actor} sonríe a {target}.".into(),
+                    }),
+                },
+            }])
+            .unwrap();
+        world
     }
 
     async fn create_telepathy_character(
@@ -6458,6 +6500,218 @@ mod tests {
             next_social(&mut recipient.deliveries).await.text,
             "committed"
         );
+    }
+
+    #[tokio::test]
+    async fn authored_emotes_list_without_spending_chat_and_route_distinct_local_perspectives() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(emote_test_world(), store.clone())
+            .await
+            .unwrap();
+        let sender = world.enter("Sender".into()).await.unwrap();
+        let mut target = world.enter("Target".into()).await.unwrap();
+        let mut observer = world.enter("Observer".into()).await.unwrap();
+        let mut remote = world.enter("Remote".into()).await.unwrap();
+        world
+            .apply(remote.session_id, PlayerAction::Move(Direction::North))
+            .await
+            .unwrap();
+
+        for _ in 0..8 {
+            let listed = world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Social(SocialAction::EmoteList),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                listed.output.as_deref(),
+                Some("Authored emotes:\r\n- smile: Sonreír (optional character)\r\n")
+            );
+        }
+        let events_before = store.state.lock().unwrap().domain_events.len();
+        let applied = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Social(SocialAction::Emote {
+                    command: "smile".into(),
+                    target: Some("target".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.output.as_deref(), Some("Sonríes a Target.\r\n"));
+
+        assert_eq!(
+            next_social(&mut target.deliveries).await,
+            SocialMessage {
+                channel: SocialChannel::Emote,
+                sender: "Sender".into(),
+                text: "Sender te sonríe.".into(),
+            }
+        );
+        assert_eq!(
+            next_social(&mut observer.deliveries).await,
+            SocialMessage {
+                channel: SocialChannel::Emote,
+                sender: "Sender".into(),
+                text: "Sender sonríe a Target.".into(),
+            }
+        );
+        assert!(has_no_social(&mut remote.deliveries).await);
+        assert_eq!(
+            store.state.lock().unwrap().domain_events.len(),
+            events_before
+        );
+        assert!(matches!(
+            world
+                .apply(
+                    target.session_id,
+                    PlayerAction::Social(SocialAction::Reply("No plain reply target".into())),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::SocialTargetNotFound))
+        ));
+
+        for unavailable_target in ["Sender", "Remote", "Nobody"] {
+            assert!(
+                world
+                    .apply(
+                        sender.session_id,
+                        PlayerAction::Social(SocialAction::Emote {
+                            command: "smile".into(),
+                            target: Some(unavailable_target.into()),
+                        }),
+                    )
+                    .await
+                    .is_err(),
+                "{unavailable_target}"
+            );
+        }
+        assert!(has_no_social(&mut target.deliveries).await);
+        assert!(has_no_social(&mut observer.deliveries).await);
+    }
+
+    #[tokio::test]
+    async fn private_emote_suppression_does_not_change_actor_confirmation_or_other_observers() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(emote_test_world(), store.clone())
+            .await
+            .unwrap();
+        let sender = world.enter("Sender".into()).await.unwrap();
+        let mut target = world.enter("Target".into()).await.unwrap();
+        let mut observer = world.enter("Observer".into()).await.unwrap();
+        let (sender_id, target_id) = {
+            let state = store.state.lock().unwrap();
+            let id = |name: &str| {
+                state
+                    .characters
+                    .values()
+                    .find(|character| character.name == name)
+                    .unwrap()
+                    .id
+            };
+            (id("Sender"), id("Target"))
+        };
+        store
+            .state
+            .lock()
+            .unwrap()
+            .ignores
+            .insert((target_id, sender_id));
+
+        let applied = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Social(SocialAction::Emote {
+                    command: "smile".into(),
+                    target: Some("Target".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.output.as_deref(), Some("Sonríes a Target.\r\n"));
+        assert!(has_no_social(&mut target.deliveries).await);
+        assert_eq!(
+            next_social(&mut observer.deliveries).await.text,
+            "Sender sonríe a Target."
+        );
+
+        store.state.lock().unwrap().muted.insert(sender.account_id);
+        assert!(matches!(
+            world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Social(SocialAction::Emote {
+                        command: "smile".into(),
+                        target: None,
+                    }),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::ChatMuted))
+        ));
+        assert!(has_no_social(&mut target.deliveries).await);
+        assert!(has_no_social(&mut observer.deliveries).await);
+    }
+
+    #[tokio::test]
+    async fn emote_on_talk_is_inert_on_script_rejection_but_commit_failure_delivers_nothing() {
+        for (source, commit_fails) in [
+            (
+                "function on_talk(ctx) tiamud.emit('set_flag', 'another', 'rejected') end",
+                false,
+            ),
+            (
+                "function on_talk(ctx) tiamud.emit('set_flag', 'self', 'emoted') end",
+                true,
+            ),
+        ] {
+            let store = Arc::new(MemoryStore::default());
+            let content = RuntimeContent::new(
+                Vec::new(),
+                vec![RuntimeScript {
+                    id: "script:emote-talk".into(),
+                    room_id: "demo:lantern-square".into(),
+                    hooks: BTreeSet::from([ScriptHook::OnTalk]),
+                    capabilities: BTreeSet::from([ScriptCapability::SetFlag]),
+                    limits: ScriptLimits::default(),
+                    source: source.into(),
+                }],
+                23,
+            );
+            let world = WorldHandle::spawn_with_scheduler_and_content(
+                emote_test_world(),
+                store.clone(),
+                WorldSchedulerConfig::default(),
+                content,
+            )
+            .await
+            .unwrap();
+            let sender = world.enter("Sender".into()).await.unwrap();
+            let mut observer = world.enter("Observer".into()).await.unwrap();
+            store.fail_saves.store(commit_fails, Ordering::SeqCst);
+
+            let result = world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Social(SocialAction::Emote {
+                        command: "smile".into(),
+                        target: None,
+                    }),
+                )
+                .await;
+            if commit_fails {
+                assert!(matches!(result, Err(GameError::Persistence(_))));
+                assert!(has_no_social(&mut observer.deliveries).await);
+            } else {
+                assert_eq!(result.unwrap().output.as_deref(), Some("Sonríes.\r\n"));
+                assert_eq!(
+                    next_social(&mut observer.deliveries).await.text,
+                    "Sender sonríe."
+                );
+            }
+        }
     }
 
     #[tokio::test]
