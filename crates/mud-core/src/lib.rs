@@ -139,6 +139,7 @@ pub enum PlayerAction {
     Time,
     Social(SocialAction),
     Mail(MailAction),
+    Board(BoardAction),
     Staff(StaffAction),
 }
 
@@ -597,6 +598,62 @@ pub enum MailAction {
     },
 }
 
+pub const MAX_BOARD_SUBJECT_BYTES: usize = 128;
+pub const MAX_BOARD_BODY_BYTES: usize = 4_096;
+pub const MAX_BOARD_REPORT_REASON_BYTES: usize = 2_048;
+pub const MAX_BOARD_PAGE: u16 = 100;
+pub const BOARD_PUBLIC_ID_BYTES: usize = 33;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardKey {
+    General,
+    Newbie,
+}
+
+impl BoardKey {
+    pub const ALL: [Self; 2] = [Self::General, Self::Newbie];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Newbie => "newbie",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "general" => Some(Self::General),
+            "newbie" => Some(Self::Newbie),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BoardAction {
+    Catalog,
+    List {
+        board: BoardKey,
+        page: u16,
+    },
+    Read {
+        post_id: String,
+    },
+    Post {
+        board: BoardKey,
+        subject: String,
+        body: String,
+    },
+    Delete {
+        post_id: String,
+    },
+    Report {
+        post_id: String,
+        reason: String,
+    },
+}
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ParseActionError {
     #[error("Please enter a command.")]
@@ -832,6 +889,83 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if normalised == "reply" {
         return Err(ParseActionError::MissingTarget { command: "reply" });
+    }
+    if normalised == "board" {
+        return Ok(PlayerAction::Board(BoardAction::Catalog));
+    }
+    if normalised == "board list" {
+        return Err(ParseActionError::MissingTarget { command: "board" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "board list") {
+        let mut fields = rest.split_whitespace();
+        let board = fields.next().and_then(BoardKey::parse);
+        let page = fields.next().map_or(Some(1), |page| {
+            page.parse::<u16>()
+                .ok()
+                .filter(|page| (1..=MAX_BOARD_PAGE).contains(page))
+        });
+        if fields.next().is_some() || board.is_none() || page.is_none() {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        }
+        return Ok(PlayerAction::Board(BoardAction::List {
+            board: board.expect("checked above"),
+            page: page.expect("checked above"),
+        }));
+    }
+    for (command, read) in [("board read", true), ("board delete", false)] {
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget { command: "board" });
+        }
+        if let Some(post_id) = command_tail_phrase(input, command) {
+            if !valid_board_public_id(&post_id) {
+                return Err(ParseActionError::Unknown(input.to_owned()));
+            }
+            return Ok(PlayerAction::Board(if read {
+                BoardAction::Read { post_id }
+            } else {
+                BoardAction::Delete { post_id }
+            }));
+        }
+    }
+    if normalised == "board post" {
+        return Err(ParseActionError::MissingTarget { command: "board" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "board post") {
+        let fields = rest.splitn(3, '|').map(str::trim).collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return Err(ParseActionError::MissingTarget { command: "board" });
+        }
+        let Some(board) = BoardKey::parse(fields[0]) else {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        };
+        let (subject, body) = (fields[1], fields[2]);
+        if !valid_board_subject(subject) || !valid_board_visible_text(body, MAX_BOARD_BODY_BYTES) {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        }
+        return Ok(PlayerAction::Board(BoardAction::Post {
+            board,
+            subject: subject.to_owned(),
+            body: body.to_owned(),
+        }));
+    }
+    if normalised == "board report" {
+        return Err(ParseActionError::MissingTarget { command: "board" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "board report") {
+        let Some((post_id, reason)) = rest.split_once('|') else {
+            return Err(ParseActionError::MissingTarget { command: "board" });
+        };
+        let post_id = post_id.trim();
+        let reason = reason.trim();
+        if !valid_board_public_id(post_id)
+            || !valid_board_visible_text(reason, MAX_BOARD_REPORT_REASON_BYTES)
+        {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        }
+        return Ok(PlayerAction::Board(BoardAction::Report {
+            post_id: post_id.to_owned(),
+            reason: reason.to_owned(),
+        }));
     }
     if matches!(normalised.as_str(), "mail" | "mail list") {
         return Ok(PlayerAction::Mail(MailAction::List { page: 1 }));
@@ -10915,6 +11049,7 @@ impl World {
             PlayerAction::Telepathy { .. }
             | PlayerAction::Social(_)
             | PlayerAction::Mail(_)
+            | PlayerAction::Board(_)
             | PlayerAction::Staff(_) => Err(WorldError::GameplayUnavailable),
             PlayerAction::Move(direction) => {
                 let location = self.character(session)?.location;
@@ -17604,6 +17739,27 @@ pub fn valid_mail_target(value: &str) -> bool {
 
 pub fn valid_mail_subject(value: &str) -> bool {
     valid_mail_visible_text(value, MAX_MAIL_SUBJECT_BYTES) && !value.contains('|')
+}
+
+pub fn valid_board_public_id(value: &str) -> bool {
+    value.len() == BOARD_PUBLIC_ID_BYTES
+        && value.starts_with('b')
+        && value.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+pub fn valid_board_visible_text(value: &str, maximum_bytes: usize) -> bool {
+    value == value.trim()
+        && !value.is_empty()
+        && value.len() <= maximum_bytes
+        && !value
+            .chars()
+            .any(|character| character.is_control() || is_bidi_formatting(character))
+}
+
+pub fn valid_board_subject(value: &str) -> bool {
+    valid_board_visible_text(value, MAX_BOARD_SUBJECT_BYTES) && !value.contains('|')
 }
 
 fn is_bidi_formatting(character: char) -> bool {

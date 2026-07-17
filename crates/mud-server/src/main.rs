@@ -1,4 +1,5 @@
 mod auth;
+mod boards;
 mod delivery;
 mod operations;
 mod persistence;

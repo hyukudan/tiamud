@@ -100,4 +100,14 @@ describe('Tiamud entry flow', () => {
       expect(appSource.slice(start, start + 800)).toContain('containerContents = undefined;');
     }
   });
+
+  it('applies board mutations only after correlated success and bounds pending metadata', () => {
+    expect(appSource).toContain('const pendingStructuredActions = new Map');
+    expect(appSource).toContain('pendingStructuredActions.size >= MAX_SCROLLBACK_ENTRIES');
+    expect(appSource).toContain('if (result.ok && pending)');
+    expect(appSource).toContain("pending.action === 'board.post'");
+    expect(appSource).toContain("pending.action === 'board.delete'");
+    expect(appSource).toContain("pending.action === 'board.report'");
+    expect(appSource).not.toContain("if (sent && action === 'board.delete') boardEntry = undefined");
+  });
 });

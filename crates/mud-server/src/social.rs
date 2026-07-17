@@ -957,6 +957,7 @@ fn help_text(topic: Option<&str>) -> String {
             "Telepathy: telepathy <ability-id> <name> <message> when the world grants it.\r\n",
             "Emotes: emotes lists authored gestures; emote <command> [character] performs one.\r\n",
             "Mail: mail list [page], mail read/delete <id>, mail send <name> | <subject> | <body>, mail report <id> | <reason>.\r\n",
+            "Boards: board, board list/read/post/delete/report; posts are public and retained for 90 days.\r\n",
             "Party: party say/invite/accept/revoke/kick/transfer/disband/leave/status.\r\n",
             "Channels: channel list, channel join/leave <general|newbie|staff>, ",
             "channel say <channel> <message>. Staff requires a moderator, administrator or implementor profile.\r\n",
@@ -976,7 +977,7 @@ fn help_text(topic: Option<&str>) -> String {
             "Movement: north/east/south/west/up/down, look.\r\n",
             "Items: inventory, take/drop/give [quantity], contents, put/get [quantity], examine, use, equip, unequip.\r\n",
             "Trade: request, offer, review and double-confirm a same-room exchange; help trade.\r\n",
-            "Social: say, tell, reply, telepathy, emotes, mail, party say, channels, who, ignore, block, report.\r\n",
+            "Social: say, tell, reply, telepathy, emotes, mail, boards, party say, channels, who, ignore, block, report.\r\n",
             "More: help social, help trade.\r\n"
         )
         .to_owned(),

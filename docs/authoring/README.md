@@ -118,7 +118,7 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   `envy-import` normalize to an empty emote catalog rather than inventing one.
 - WorldRuntimeSnapshot v7 is the single durable authority for item location,
   binding, trade reservations, loot provenance, ground rights, applied affixes
-  and sealed-open counters. SQLite and PostgreSQL schema v12 store it as opaque
+  and sealed-open counters. SQLite and PostgreSQL schema v13 store it as opaque
   `TEXT`; legacy raw v1-v5 snapshots retain a 1 MiB physical cap while v6 and
   v7 admission and commits use 2 MiB. Strict v6 upgrade adds empty affix state
   and starts the sealed-open counter at one. There is no mirror loot/escrow

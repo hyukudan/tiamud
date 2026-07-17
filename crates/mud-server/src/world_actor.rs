@@ -1,9 +1,10 @@
 use crate::{
     auth::AuthenticatedSession,
+    boards::{BoardDescriptor, apply_board},
     delivery::{DeliveryInbox, DeliveryRouter},
     persistence::{
-        CharacterStore, DurableCharacterGameplay, MailMessage, MailPage, StaffAccess,
-        StartupGameplayLoadLimits, StoreError,
+        BoardEntry, BoardPage, CharacterStore, DurableCharacterGameplay, MailMessage, MailPage,
+        StaffAccess, StartupGameplayLoadLimits, StoreError,
     },
     runtime_content::{RuntimeContent, ScenePresentation},
     social::{
@@ -33,7 +34,7 @@ use tracing::error;
 
 const WORLD_COMMAND_QUEUE_CAPACITY: usize = 256;
 const PERSIST_TICK_SCRIPT_WALL_BUDGET: Duration = Duration::from_millis(100);
-const MAIL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const SOCIAL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Error)]
 pub enum GameError {
@@ -86,6 +87,9 @@ pub struct AppliedAction {
     pub reward_odds: Option<RewardOddsView>,
     pub mail_page: Option<MailPage>,
     pub mail_message: Option<MailMessage>,
+    pub board_catalog: Option<Vec<BoardDescriptor>>,
+    pub board_page: Option<BoardPage>,
+    pub board_entry: Option<BoardEntry>,
     pub events: Vec<ProjectedViewEvent>,
 }
 
@@ -246,6 +250,15 @@ impl WorldHandle {
                     startup_reply,
                     GameError::Startup {
                         stage: "purge_expired_mail",
+                        reason: error.to_string(),
+                    },
+                );
+            }
+            if let Err(error) = actor_store.purge_expired_boards().await {
+                return report_startup_failure(
+                    startup_reply,
+                    GameError::Startup {
+                        stage: "purge_expired_boards",
                         reason: error.to_string(),
                     },
                 );
@@ -476,12 +489,12 @@ impl WorldHandle {
                 interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 interval.tick().await;
             }
-            let mut mail_maintenance = tokio::time::interval(MAIL_MAINTENANCE_INTERVAL);
-            mail_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut social_maintenance = tokio::time::interval(SOCIAL_MAINTENANCE_INTERVAL);
+            social_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
             // Tokio intervals fire immediately. Startup already performed the
             // fail-closed purge, so consume that first instant and schedule
             // subsequent bounded maintenance runs one hour apart.
-            mail_maintenance.tick().await;
+            social_maintenance.tick().await;
 
             loop {
                 let command = if let Some(interval) = interval.as_mut() {
@@ -501,16 +514,16 @@ impl WorldHandle {
                             }
                             continue;
                         }
-                        _ = mail_maintenance.tick() => {
-                            maintain_expired_mail(actor_store.as_ref()).await;
+                        _ = social_maintenance.tick() => {
+                            maintain_expired_social_content(actor_store.as_ref()).await;
                             continue;
                         }
                     }
                 } else {
                     tokio::select! {
                         command = rx.recv() => command,
-                        _ = mail_maintenance.tick() => {
-                            maintain_expired_mail(actor_store.as_ref()).await;
+                        _ = social_maintenance.tick() => {
+                            maintain_expired_social_content(actor_store.as_ref()).await;
                             continue;
                         }
                     }
@@ -1028,7 +1041,7 @@ impl WorldHandle {
     }
 }
 
-async fn maintain_expired_mail(store: &dyn CharacterStore) {
+async fn maintain_expired_social_content(store: &dyn CharacterStore) {
     match store.purge_expired_mail().await {
         Ok(0) => {}
         Ok(purged) => tracing::debug!(purged, "purged expired offline mail"),
@@ -1037,6 +1050,15 @@ async fn maintain_expired_mail(store: &dyn CharacterStore) {
             // Maintenance failure is therefore operationally visible but does
             // not weaken world availability or expose expired content.
             tracing::warn!(%error, "could not purge expired offline mail");
+        }
+    }
+    match store.purge_expired_boards().await {
+        Ok(0) => {}
+        Ok(purged) => tracing::debug!(purged, "purged expired community-board content"),
+        Err(error) => {
+            // Board reads and capacity checks filter expired rows even if a
+            // bounded physical purge has to be retried later.
+            tracing::warn!(%error, "could not purge expired community-board content");
         }
     }
 }
@@ -1397,6 +1419,9 @@ async fn apply(
             reward_odds: None,
             mail_page: None,
             mail_message: None,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             events,
         });
     }
@@ -1414,6 +1439,29 @@ async fn apply(
             reward_odds: None,
             mail_page: applied.page,
             mail_message: applied.message,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
+            events: Vec::new(),
+        });
+    }
+    if let PlayerAction::Board(action) = &action {
+        let applied = apply_board(social, world, store, session, action.clone()).await?;
+        let mut scene = world.current_scene(session)?;
+        runtime_content.resolve_scene(world, session, role, &mut scene);
+        return Ok(AppliedAction {
+            scene,
+            presentation: runtime_content.resolve_entity_presentation(world, session),
+            player: world.player_state_view(session)?,
+            output: Some(applied.output),
+            container_contents: None,
+            trade_contents: None,
+            reward_odds: None,
+            mail_page: None,
+            mail_message: None,
+            board_catalog: applied.catalog,
+            board_page: applied.page,
+            board_entry: applied.entry,
             events: Vec::new(),
         });
     }
@@ -1470,6 +1518,9 @@ async fn apply(
                 reward_odds: None,
                 mail_page: None,
                 mail_message: None,
+                board_catalog: None,
+                board_page: None,
+                board_entry: None,
                 events,
             });
         }
@@ -1616,6 +1667,9 @@ async fn apply(
             reward_odds: None,
             mail_page: None,
             mail_message: None,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             events,
         });
     }
@@ -1732,6 +1786,9 @@ async fn apply(
         reward_odds: outcome.reward_odds,
         mail_page: None,
         mail_message: None,
+        board_catalog: None,
+        board_page: None,
+        board_entry: None,
         events,
     })
 }
@@ -2335,6 +2392,8 @@ mod tests {
         channel_subscriptions: BTreeSet<(CharacterId, SocialChannelName)>,
         mail: Vec<MemoryMail>,
         reported_mail: HashSet<String>,
+        boards: Vec<MemoryBoardPost>,
+        reported_board_posts: HashSet<String>,
         audit: Vec<crate::persistence::AuditEntry>,
         staff_profiles: HashMap<AccountId, (tiamud_core::StaffProfileKey, Option<String>)>,
         staff_capabilities: HashMap<AccountId, BTreeSet<tiamud_core::StaffCapability>>,
@@ -2349,6 +2408,18 @@ mod tests {
         sender: CharacterId,
         recipient: CharacterId,
         message: crate::persistence::MailMessage,
+    }
+
+    #[derive(Clone)]
+    struct MemoryBoardPost {
+        author: CharacterId,
+        public_id: String,
+        board: tiamud_core::BoardKey,
+        author_name: String,
+        subject: String,
+        body: String,
+        created_at: i64,
+        expires_at: i64,
     }
 
     #[derive(Default)]
@@ -2491,6 +2562,29 @@ mod tests {
                 .copied()
                 .unwrap_or(tiamud_core::AccountRole::Player),
             muted: state.muted.contains(&character.account_id),
+        })
+    }
+
+    fn memory_board_entry(
+        state: &MemoryState,
+        actor: CharacterId,
+        post: &MemoryBoardPost,
+    ) -> Result<crate::persistence::BoardEntry, StoreError> {
+        let actor_profile = memory_social_profile(state, actor)?;
+        let author_profile = memory_social_profile(state, post.author)?;
+        Ok(crate::persistence::BoardEntry {
+            summary: crate::persistence::BoardPostSummary {
+                public_id: post.public_id.clone(),
+                board: post.board,
+                author_name: post.author_name.clone(),
+                subject: post.subject.clone(),
+                created_at: post.created_at,
+                expires_at: post.expires_at,
+                can_delete: actor == post.author,
+                can_report: actor_profile.account_id != author_profile.account_id
+                    && !state.reported_board_posts.contains(&post.public_id),
+            },
+            body: post.body.clone(),
         })
     }
 
@@ -3206,12 +3300,164 @@ mod tests {
                     created_at: 1,
                     expires_at: 2_592_001,
                 }),
+                board_evidence: None,
             });
             state.reported_mail.insert(public_id.to_owned());
             Ok(report_id)
         }
 
         async fn purge_expired_mail(&self) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+
+        async fn list_board_posts(
+            &self,
+            actor: CharacterId,
+            board: tiamud_core::BoardKey,
+            page: u32,
+        ) -> Result<crate::persistence::BoardPage, StoreError> {
+            if !(1..=u32::from(tiamud_core::MAX_BOARD_PAGE)).contains(&page) {
+                return Err(StoreError::InvalidBoardInput);
+            }
+            let state = self.state.lock().unwrap();
+            memory_social_profile(&state, actor)?;
+            let posts = state
+                .boards
+                .iter()
+                .rev()
+                .filter(|post| post.board == board)
+                .collect::<Vec<_>>();
+            let total_posts = u32::try_from(posts.len()).unwrap_or(u32::MAX);
+            let total_pages = total_posts.div_ceil(10).max(1);
+            let offset = usize::try_from((page - 1).saturating_mul(10)).unwrap_or(usize::MAX);
+            let posts = posts
+                .into_iter()
+                .skip(offset)
+                .take(10)
+                .map(|post| memory_board_entry(&state, actor, post).map(|entry| entry.summary))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(crate::persistence::BoardPage {
+                board,
+                page,
+                total_pages,
+                total_posts,
+                capacity: 1_000,
+                posts,
+            })
+        }
+
+        async fn read_board_post(
+            &self,
+            actor: CharacterId,
+            public_id: &str,
+        ) -> Result<crate::persistence::BoardEntry, StoreError> {
+            let state = self.state.lock().unwrap();
+            let post = state
+                .boards
+                .iter()
+                .find(|post| post.public_id == public_id)
+                .ok_or(StoreError::BoardPostUnavailable)?;
+            memory_board_entry(&state, actor, post)
+        }
+
+        async fn publish_board_post(
+            &self,
+            actor: CharacterId,
+            board: tiamud_core::BoardKey,
+            public_id: &str,
+            subject: &str,
+            body: &str,
+        ) -> Result<crate::persistence::BoardEntry, StoreError> {
+            if !tiamud_core::valid_board_public_id(public_id)
+                || !tiamud_core::valid_board_subject(subject)
+                || !tiamud_core::valid_board_visible_text(body, tiamud_core::MAX_BOARD_BODY_BYTES)
+            {
+                return Err(StoreError::InvalidBoardInput);
+            }
+            let mut state = self.state.lock().unwrap();
+            let profile = memory_social_profile(&state, actor)?;
+            if state.boards.iter().any(|post| post.public_id == public_id) {
+                return Err(StoreError::InvalidBoardInput);
+            }
+            state.boards.push(MemoryBoardPost {
+                author: actor,
+                public_id: public_id.to_owned(),
+                board,
+                author_name: profile.character_name,
+                subject: subject.to_owned(),
+                body: body.to_owned(),
+                created_at: 1,
+                expires_at: 7_776_001,
+            });
+            let post = state.boards.last().expect("the post was just inserted");
+            memory_board_entry(&state, actor, post)
+        }
+
+        async fn delete_board_post(
+            &self,
+            actor: CharacterId,
+            public_id: &str,
+        ) -> Result<(), StoreError> {
+            let mut state = self.state.lock().unwrap();
+            memory_social_profile(&state, actor)?;
+            let before = state.boards.len();
+            state
+                .boards
+                .retain(|post| post.public_id != public_id || post.author != actor);
+            (state.boards.len() < before)
+                .then_some(())
+                .ok_or(StoreError::BoardPostUnavailable)
+        }
+
+        async fn report_board_post(
+            &self,
+            actor: CharacterId,
+            public_id: &str,
+            reason: &str,
+        ) -> Result<i64, StoreError> {
+            let mut state = self.state.lock().unwrap();
+            if state.reported_board_posts.contains(public_id) {
+                return Err(StoreError::BoardAlreadyReported);
+            }
+            let post = state
+                .boards
+                .iter()
+                .find(|post| post.public_id == public_id)
+                .cloned()
+                .ok_or(StoreError::BoardPostUnavailable)?;
+            let reporter = memory_social_profile(&state, actor)?;
+            let author = memory_social_profile(&state, post.author)?;
+            if reporter.account_id == author.account_id {
+                return Err(StoreError::BoardPostUnavailable);
+            }
+            state.next_staff_report += 1;
+            let report_id = state.next_staff_report;
+            state.staff_reports.push(crate::persistence::StaffReport {
+                id: report_id,
+                reporter_character_id: actor,
+                reporter_name: reporter.character_name,
+                target_character_id: post.author,
+                target_account_id: author.account_id,
+                target_name: author.character_name,
+                reason: reason.to_owned(),
+                created_at: 1,
+                mail_evidence: None,
+                board_evidence: Some(crate::persistence::BoardReportEvidence {
+                    board: post.board,
+                    post_public_id: post.public_id.clone(),
+                    author_name: post.author_name,
+                    subject: post.subject,
+                    body: post.body,
+                    posted_at: post.created_at,
+                    created_at: 1,
+                    expires_at: 7_776_001,
+                }),
+            });
+            state.reported_board_posts.insert(post.public_id);
+            Ok(report_id)
+        }
+
+        async fn purge_expired_boards(&self) -> Result<u64, StoreError> {
             Ok(0)
         }
 
@@ -3242,6 +3488,7 @@ mod tests {
                 reason: reason.trim().to_owned(),
                 created_at: 1,
                 mail_evidence: None,
+                board_evidence: None,
             });
             memory_audit(
                 &mut state,
@@ -3366,7 +3613,7 @@ mod tests {
         async fn resolve_staff_report(
             &self,
             report_id: i64,
-            _resolution: tiamud_core::StaffReportResolution,
+            resolution: tiamud_core::StaffReportResolution,
             resolution_reason: &str,
             mut audit: crate::persistence::StaffAuditRecord,
         ) -> Result<(), StoreError> {
@@ -3379,12 +3626,13 @@ mod tests {
                 return Err(StoreError::InvalidStaffInput);
             }
             let mut state = self.state.lock().unwrap();
-            let target_account = state
+            let report = state
                 .staff_reports
                 .iter()
                 .find(|report| report.id == report_id)
-                .map(|report| report.target_account_id)
+                .cloned()
                 .ok_or(StoreError::StaffReportUnavailable(report_id))?;
+            let target_account = report.target_account_id;
             if state.resolved_staff_reports.contains(&report_id) {
                 return Err(StoreError::StaffReportUnavailable(report_id));
             }
@@ -3396,6 +3644,13 @@ mod tests {
             }
             audit.target_account_id = Some(target_account);
             memory_append_staff_audit(&mut state, audit)?;
+            if resolution == tiamud_core::StaffReportResolution::ActionTaken
+                && let Some(evidence) = report.board_evidence
+            {
+                state
+                    .boards
+                    .retain(|post| post.public_id != evidence.post_public_id);
+            }
             state.resolved_staff_reports.insert(report_id);
             Ok(())
         }
@@ -6248,6 +6503,165 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn boards_are_bounded_pull_only_public_and_do_not_become_chat_history() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let author = world.enter("Board Author".into()).await.unwrap();
+        let mut reader = world.enter("Board Reader".into()).await.unwrap();
+        let events_before = store.state.lock().unwrap().domain_events.len();
+
+        let catalog = world
+            .apply(
+                author.session_id,
+                PlayerAction::Board(tiamud_core::BoardAction::Catalog),
+            )
+            .await
+            .unwrap();
+        assert_eq!(catalog.board_catalog.as_ref().map(Vec::len), Some(2));
+        assert!(
+            catalog
+                .board_catalog
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|board| board.can_post)
+        );
+
+        let published = world
+            .apply(
+                author.session_id,
+                PlayerAction::Board(tiamud_core::BoardAction::Post {
+                    board: tiamud_core::BoardKey::General,
+                    subject: "Gate <&>".into(),
+                    body: "Meet | beyond the gate.".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        let post_id = published
+            .board_entry
+            .as_ref()
+            .map(|entry| entry.summary.public_id.clone())
+            .expect("published entry");
+        assert!(tiamud_core::valid_board_public_id(&post_id));
+        assert!(published.events.is_empty());
+        assert_eq!(
+            store.state.lock().unwrap().domain_events.len(),
+            events_before
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reader.deliveries.recv())
+                .await
+                .is_err(),
+            "board publication must not fan out as chat"
+        );
+
+        store.state.lock().unwrap().muted.insert(author.account_id);
+        let muted_catalog = world
+            .apply(
+                author.session_id,
+                PlayerAction::Board(tiamud_core::BoardAction::Catalog),
+            )
+            .await
+            .unwrap();
+        assert!(
+            muted_catalog
+                .board_catalog
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|board| !board.can_post)
+        );
+        assert!(matches!(
+            world
+                .apply(
+                    author.session_id,
+                    PlayerAction::Board(tiamud_core::BoardAction::Post {
+                        board: tiamud_core::BoardKey::Newbie,
+                        subject: "Muted".into(),
+                        body: "This cannot be published.".into(),
+                    }),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::ChatMuted))
+        ));
+
+        world
+            .apply(
+                reader.session_id,
+                PlayerAction::Social(SocialAction::Block("Board Author".into())),
+            )
+            .await
+            .unwrap();
+        let listed = world
+            .apply(
+                reader.session_id,
+                PlayerAction::Board(tiamud_core::BoardAction::List {
+                    board: tiamud_core::BoardKey::General,
+                    page: 1,
+                }),
+            )
+            .await
+            .unwrap();
+        let page = listed.board_page.expect("board page");
+        assert_eq!(page.total_posts, 1);
+        assert_eq!(page.posts[0].public_id, post_id);
+        assert!(page.posts[0].can_report);
+        assert!(!page.posts[0].can_delete);
+
+        let read = world
+            .apply(
+                reader.session_id,
+                PlayerAction::Board(tiamud_core::BoardAction::Read {
+                    post_id: post_id.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            read.board_entry.as_ref().map(|entry| entry.body.as_str()),
+            Some("Meet | beyond the gate.")
+        );
+        assert!(matches!(
+            world
+                .apply(
+                    reader.session_id,
+                    PlayerAction::Social(SocialAction::Reply("Not board state".into())),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::SocialTargetNotFound))
+        ));
+
+        let reported = world
+            .apply(
+                reader.session_id,
+                PlayerAction::Board(tiamud_core::BoardAction::Report {
+                    post_id: post_id.clone(),
+                    reason: "Unsafe public content".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(reported.output.unwrap().contains("report 1"));
+        world
+            .apply(
+                author.session_id,
+                PlayerAction::Board(tiamud_core::BoardAction::Delete {
+                    post_id: post_id.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let state = store.state.lock().unwrap();
+        assert!(state.boards.is_empty());
+        let evidence = state.staff_reports[0].board_evidence.as_ref().unwrap();
+        assert_eq!(evidence.post_public_id, post_id);
+        assert_eq!(evidence.body, "Meet | beyond the gate.");
     }
 
     #[tokio::test]

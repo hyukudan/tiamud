@@ -544,6 +544,37 @@ export interface MailMessageData extends MailMessageSummary {
   body: string;
 }
 
+export type BoardKey = 'general' | 'newbie';
+
+export interface BoardCatalogData {
+  boards: Array<{ key: BoardKey; label: string; description: string; canPost: boolean }>;
+  retentionDays: 90;
+}
+
+export interface BoardPostSummary {
+  postId: string;
+  board: BoardKey;
+  author: string;
+  subject: string;
+  createdAt: number;
+  expiresAt: number;
+  canDelete: boolean;
+  canReport: boolean;
+}
+
+export interface BoardListData {
+  board: BoardKey;
+  page: number;
+  totalPages: number;
+  totalPosts: number;
+  capacity: 1000;
+  posts: BoardPostSummary[];
+}
+
+export interface BoardEntryData extends BoardPostSummary {
+  body: string;
+}
+
 export interface PlayerStateSnapshot {
   revision: number;
   character: PlayerCharacterSnapshot;
@@ -638,6 +669,9 @@ export type ServerMessage =
   | Envelope<'reward.odds', RewardOddsData>
   | Envelope<'mail.list', MailListData>
   | Envelope<'mail.message', MailMessageData>
+  | Envelope<'board.catalog', BoardCatalogData>
+  | Envelope<'board.list', BoardListData>
+  | Envelope<'board.entry', BoardEntryData>
   | Envelope<'map.snapshot', MapSnapshotData>
   | Envelope<'action.result', ActionResultData>
   | Envelope<'server.notice', ServerNoticeData>
@@ -693,6 +727,8 @@ export interface ActionPerformFields {
   channel?: CommunityChannel;
   reason?: string;
   mailId?: string;
+  postId?: string;
+  board?: BoardKey;
   subject?: string;
   body?: string;
   reportId?: number;
@@ -1063,6 +1099,7 @@ const parseRewardOdds = (value: unknown): RewardOddsData | undefined => {
 };
 
 const MAIL_ID = /^m[0-9a-f]{32}$/;
+const BOARD_POST_ID = /^b[0-9a-f]{32}$/;
 const UNSAFE_VISIBLE_TEXT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
 
 const boundedVisibleUtf8 = (value: unknown, maximum: number): string | undefined => {
@@ -1129,6 +1166,114 @@ const parseMailMessage = (value: unknown): MailMessageData | undefined => {
   });
   const body = boundedVisibleUtf8(value.body, 2_048);
   return summary && summary.read && body ? { ...summary, body } : undefined;
+};
+
+const boardKeyOrUndefined = (value: unknown): BoardKey | undefined =>
+  value === 'general' || value === 'newbie' ? value : undefined;
+
+const parseBoardCatalog = (value: unknown): BoardCatalogData | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['boards', 'retentionDays']) ||
+    value.retentionDays !== 90 || !Array.isArray(value.boards) || value.boards.length !== 2) {
+    return undefined;
+  }
+  const expected = {
+    general: { label: 'General', description: 'Conversación comunitaria deliberada.' },
+    newbie: {
+      label: 'Personas nuevas',
+      description: 'Preguntas y orientación para empezar.',
+    },
+  } as const;
+  const boards: BoardCatalogData['boards'] = [];
+  const keys = new Set<BoardKey>();
+  for (const entry of value.boards) {
+    if (!isRecord(entry) || !hasOnlyKeys(entry, ['key', 'label', 'description', 'canPost'])) {
+      return undefined;
+    }
+    const key = boardKeyOrUndefined(entry.key);
+    if (!key || keys.has(key) || entry.label !== expected[key].label ||
+      entry.description !== expected[key].description || typeof entry.canPost !== 'boolean') {
+      return undefined;
+    }
+    keys.add(key);
+    boards.push({
+      key,
+      label: expected[key].label,
+      description: expected[key].description,
+      canPost: entry.canPost,
+    });
+  }
+  if (keys.size !== 2) return undefined;
+  return { boards, retentionDays: 90 };
+};
+
+const parseBoardSummary = (value: unknown): BoardPostSummary | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'postId', 'board', 'author', 'subject', 'createdAt', 'expiresAt', 'canDelete', 'canReport',
+  ])) return undefined;
+  const postId = typeof value.postId === 'string' && BOARD_POST_ID.test(value.postId)
+    ? value.postId
+    : undefined;
+  const board = boardKeyOrUndefined(value.board);
+  const author = boundedVisibleUtf8(value.author, 64);
+  const subject = boundedVisibleUtf8(value.subject, 128);
+  const createdAt = positiveIntegerOrUndefined(value.createdAt);
+  const expiresAt = positiveIntegerOrUndefined(value.expiresAt);
+  if (!postId || !board || !author || !subject || subject.includes('|') ||
+    createdAt === undefined || expiresAt === undefined || expiresAt !== createdAt + 7_776_000 ||
+    typeof value.canDelete !== 'boolean' || typeof value.canReport !== 'boolean' ||
+    (value.canDelete && value.canReport)) return undefined;
+  return {
+    postId,
+    board,
+    author,
+    subject,
+    createdAt,
+    expiresAt,
+    canDelete: value.canDelete,
+    canReport: value.canReport,
+  };
+};
+
+const parseBoardList = (value: unknown): BoardListData | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'board', 'page', 'totalPages', 'totalPosts', 'capacity', 'posts',
+  ]) || !Array.isArray(value.posts) || value.posts.length > 10) return undefined;
+  const board = boardKeyOrUndefined(value.board);
+  const page = positiveIntegerOrUndefined(value.page);
+  const totalPages = positiveIntegerOrUndefined(value.totalPages);
+  const totalPosts = nonNegativeIntegerOrUndefined(value.totalPosts);
+  if (!board || page === undefined || page > 100 || totalPages === undefined || totalPages > 100 ||
+    totalPosts === undefined || totalPosts > 1_000 || value.capacity !== 1_000 ||
+    totalPages !== Math.max(1, Math.ceil(totalPosts / 10))) return undefined;
+  const posts: BoardPostSummary[] = [];
+  const ids = new Set<string>();
+  for (const candidate of value.posts) {
+    const post = parseBoardSummary(candidate);
+    if (!post || post.board !== board || ids.has(post.postId)) return undefined;
+    ids.add(post.postId);
+    posts.push(post);
+  }
+  if (posts.length > totalPosts || (page > totalPages && posts.length !== 0)) return undefined;
+  return { board, page, totalPages, totalPosts, capacity: 1000, posts };
+};
+
+const parseBoardEntry = (value: unknown): BoardEntryData | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'postId', 'board', 'author', 'subject', 'body', 'createdAt', 'expiresAt', 'canDelete',
+    'canReport',
+  ])) return undefined;
+  const summary = parseBoardSummary({
+    postId: value.postId,
+    board: value.board,
+    author: value.author,
+    subject: value.subject,
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+    canDelete: value.canDelete,
+    canReport: value.canReport,
+  });
+  const body = boundedVisibleUtf8(value.body, 4_096);
+  return summary && body ? { ...summary, body } : undefined;
 };
 
 const parseTradeOffer = (value: unknown): TradeOfferSnapshot | undefined => {
@@ -2341,6 +2486,18 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const mail = parseMailMessage(candidate.data);
       return mail ? { ...base, type: candidate.type, data: mail } : undefined;
     }
+    case 'board.catalog': {
+      const catalog = parseBoardCatalog(candidate.data);
+      return catalog ? { ...base, type: candidate.type, data: catalog } : undefined;
+    }
+    case 'board.list': {
+      const board = parseBoardList(candidate.data);
+      return board ? { ...base, type: candidate.type, data: board } : undefined;
+    }
+    case 'board.entry': {
+      const entry = parseBoardEntry(candidate.data);
+      return entry ? { ...base, type: candidate.type, data: entry } : undefined;
+    }
     case 'map.snapshot': {
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       if (revision === undefined) return undefined;
@@ -2577,6 +2734,7 @@ export function createActionPerform(
   if (action.startsWith('loot.')) validateLootActionFields(action, fields);
   if (action.startsWith('reward.')) validateRewardActionFields(action, fields);
   if (action.startsWith('mail.')) validateMailActionFields(action, fields);
+  if (action.startsWith('board.')) validateBoardActionFields(action, fields);
   if (fields?.reportId !== undefined &&
     (!Number.isSafeInteger(fields.reportId) || fields.reportId <= 0)) {
     throw new RangeError('reportId must be a positive safe integer');
@@ -2651,6 +2809,44 @@ function validateMailActionFields(action: string, fields: ActionPerformFields | 
   }
   if (action === 'mail.report' && !boundedVisibleUtf8(fields?.reason, 2_048)) {
     throw new RangeError('mail report reason must be bounded visible UTF-8 text');
+  }
+}
+
+function validateBoardActionFields(action: string, fields: ActionPerformFields | undefined): void {
+  const expectedByAction: Record<string, readonly (keyof ActionPerformFields)[]> = {
+    'board.catalog': [],
+    'board.list': ['board', 'page'],
+    'board.read': ['postId'],
+    'board.delete': ['postId'],
+    'board.post': ['board', 'body', 'subject'],
+    'board.report': ['postId', 'reason'],
+  };
+  const expected = expectedByAction[action];
+  if (!expected) throw new RangeError('unknown board action');
+  const actual = Object.keys(fields ?? {}).toSorted();
+  const keys = [...expected].toSorted();
+  if (actual.length !== keys.length || actual.some((key, index) => key !== keys[index])) {
+    throw new RangeError(`${action} requires its exact closed field set`);
+  }
+  if ((action === 'board.read' || action === 'board.delete' || action === 'board.report') &&
+    (typeof fields?.postId !== 'string' || !BOARD_POST_ID.test(fields.postId))) {
+    throw new RangeError('postId must be an opaque board selector');
+  }
+  if ((action === 'board.list' || action === 'board.post') &&
+    fields?.board !== 'general' && fields?.board !== 'newbie') {
+    throw new RangeError('board must be general or newbie');
+  }
+  if (action === 'board.list' &&
+    (!Number.isSafeInteger(fields?.page) || (fields?.page ?? 0) < 1 || (fields?.page ?? 0) > 100)) {
+    throw new RangeError('board page must be an integer between 1 and 100');
+  }
+  if (action === 'board.post' &&
+    (!boundedVisibleUtf8(fields?.subject, 128) || fields?.subject?.includes('|') ||
+      !boundedVisibleUtf8(fields?.body, 4_096))) {
+    throw new RangeError('board post fields must be bounded visible UTF-8 text');
+  }
+  if (action === 'board.report' && !boundedVisibleUtf8(fields?.reason, 2_048)) {
+    throw new RangeError('board report reason must be bounded visible UTF-8 text');
   }
 }
 

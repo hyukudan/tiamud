@@ -96,6 +96,12 @@ token buckets:
 These application controls complement, but do not replace, host-level firewall
 and reverse-proxy connection and request limits.
 
+WebSocket `command.submit` permanece limitado a 1.024 bytes; una línea Telnet
+admite hasta 8 KiB para que `board post` pueda transportar el asunto y cuerpo
+máximos y descarta entera cualquier línea mayor. El ingreso JSON WebSocket
+rechaza claves duplicadas a cualquier profundidad. No eleves los límites del
+proxy o listener para eludir esos controles de aplicación.
+
 Prometheus-format metrics are available only from the server's loopback
 listener in the reference deployment:
 
@@ -172,21 +178,23 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v12, both SQLite and PostgreSQL retain the v8
+In current schema v13, both SQLite and PostgreSQL retain the v8
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
 snapshot is never compacted. This keeps normal runtime storage bounded without
 weakening snapshot/event atomicity.
 
-Offline mail uses a separate physical-retention loop. Startup must complete one
-purge batch before readiness; failure blocks startup. A live actor then retries
-once per hour, deleting at most 256 expired messages/evidence rows per run. A
-periodic failure is warned without stopping play because every list/read,
-capacity and evidence query filters expiry independently; delayed maintenance
-never makes expired content visible or count against a live limit. Repeated
-errors or a growing expired-row backlog are operational alerts, not a reason to
-raise the batch without measurement.
+Offline mail and community boards use separate physical-retention loops.
+Startup must complete one purge batch for each surface before readiness;
+failure blocks startup. A live actor then retries once per hour. Mail deletes
+at most 256 expired messages/evidence rows per run; the board purge similarly
+combines at most 256 expired posts/evidence rows. A periodic failure is warned
+without stopping play because every list/read, capacity and evidence query
+filters expiry independently; delayed maintenance never makes expired content
+visible or count against a live limit. Repeated errors or a growing expired-row
+backlog are operational alerts, not a reason to raise a batch without
+measurement.
 
 SQLite normally places deleted rows on its internal free-page list and reuses
 those pages for later writes. The database file therefore may not become
@@ -227,6 +235,15 @@ body retention. The v11→v12 step is additive in both backends. Keep the
 pre-migration backup until inbox, quota, report resolution, restart and the
 selected backend's integrity checks pass.
 
+Schema v13 adds the two closed public boards without changing the runtime
+snapshot: `social_board_posts`, per-account `social_board_usage`, retained
+`social_board_report_evidence` and `report_kind='board'`. SQLite rebuilds
+`social_reports` plus both mail child tables transactionally to widen the
+closed `CHECK`; it copies parents before children, checks foreign keys before
+commit and preserves all v12 IDs, links and bytes. PostgreSQL replaces its
+named constraint. Keep the v12 safety backup until catalog/list/read/post/
+delete/report, staff resolution, expiry, restart and integrity checks pass.
+
 The decoder applies a dual admission rule: raw legacy snapshots v1-v5 remain
 limited to 1 MiB, while v6 and current v7 snapshots and new commits may use up
 to 2 MiB. This prevents an oversized old document from using migration as a
@@ -257,7 +274,7 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires schema v12 and refuses to run while any operational
+The command requires schema v13 and refuses to run while any operational
 `administrator` or `implementor` profile exists. A legacy `admin` role alone
 does not count as executable authority. Recovery replaces the target's profile
 with `implementor`, clears its lore title and previous direct assignments,
@@ -269,7 +286,7 @@ commit in one transaction; any failure rolls all of them back.
 `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
 verify the installation's normal `pg_dump` or physical backup, then run
 `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
-equivalent schema-v12 transaction:
+equivalent schema-v13 transaction:
 
 ```sql
 BEGIN;
@@ -281,8 +298,8 @@ DECLARE
     target_id BIGINT;
     recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 12 THEN
-        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 12';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 13 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 13';
     END IF;
     IF EXISTS (
         SELECT 1 FROM staff_profiles
@@ -395,10 +412,10 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v12, including durable social
+The mover requires the current SQLite schema v13, including durable social
 channel subscriptions, staff profiles, capability assignments, report
 resolutions, staff audit, offline mail usage/messages and retained mail-report
-evidence. It refuses a non-empty target and commits schema
+evidence, and board posts, usage and retained evidence. It refuses a non-empty target and commits schema
 plus rows in one PostgreSQL transaction. Configure exactly one line in the
 service environment and remove/comment the other:
 
@@ -408,18 +425,29 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 ```
 
 Exercise registration, login, movement, combat and social state before deleting
-or archiving the SQLite rollback copy. For schema v12 explicitly send, list,
+or archiving the SQLite rollback copy. For schema v13 explicitly send, list,
 read, delete and report mail, restart, and confirm that the moved PostgreSQL
-state retains the inbox, usage quota and report evidence. Then resolve a test
-report and verify readiness again.
+state retains the inbox, usage quota and report evidence. Also publish, list,
+read, delete and report one board post; confirm post quota/evidence survive the
+move, resolve the report and verify readiness again.
+
+En la comprobación Telnet/GMCP, confirma por separado que una línea máxima de
+publicación conserva el cuerpo textual completo y que todo paquete negociado
+permanece bajo 8 KiB. Un `Tiamud.Board.Entry` cuyo escape JSON no quepa debe
+seguir siendo el mismo paquete, con resumen, prefijo UTF-8 de `body`,
+`truncated: true` y `overflow` con paquete, máximo y bytes originales. El
+fallback equivalente de `Tiamud.Mail.Message` es defensivo: el cuerpo canónico
+de correo de 2.048 bytes normalmente cabe completo.
 The repository's retained [PostgreSQL 18 schema-v8 acceptance
 run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the earlier v8 adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
-authenticated restart against a separate disposable server process. It does
-not prove or claim a schema-v12 acceptance run. Focused v11/v12 migration,
-store and transfer tests cover the runtime-snapshot cap, subscriptions,
-additive staff tables and bounded mail tables, but they do not replace this
-exercise or establish monitoring,
+authenticated restart against a separate disposable server process. Separately,
+an isolated checksummed PostgreSQL 18.4 instance passes the v13 adapter suite
+19/19 after correcting a v6 fixture defect. That validates real schema/store
+paths but does not yet prove the server board flow or a real v13 mover. Focused
+v11/v12/v13 migration, store and transfer tests cover the runtime-snapshot cap,
+subscriptions, additive staff tables, bounded mail and bounded board tables,
+but they do not replace this exercise or establish monitoring,
 TLS, PostgreSQL backup/restore or point-in-time recovery for a production
 installation.
 

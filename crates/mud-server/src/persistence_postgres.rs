@@ -14,11 +14,12 @@ use std::{
 use async_trait::async_trait;
 use postgres::{Client, GenericClient};
 use tiamud_core::{
-    AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
-    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, MAX_MAIL_BODY_BYTES,
+    AccountId, AccountRole, AccountSnapshot, BoardKey, CharacterGameplaySnapshot, CharacterId,
+    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, MAX_BOARD_BODY_BYTES,
+    MAX_BOARD_REPORT_REASON_BYTES, MAX_BOARD_SUBJECT_BYTES, MAX_MAIL_BODY_BYTES,
     MAX_MAIL_REPORT_REASON_BYTES, MAX_MAIL_SUBJECT_BYTES, SocialChannelName, StaffCapability,
-    StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot, valid_mail_public_id,
-    valid_mail_visible_text,
+    StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot, valid_board_public_id,
+    valid_board_subject, valid_board_visible_text, valid_mail_public_id, valid_mail_visible_text,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -31,11 +32,13 @@ use crate::{
         SessionToken, digest_token, validate_password,
     },
     persistence::{
-        CharacterStore, DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, MailMessage,
-        MailMessageSummary, MailPage, MailReportEvidence, MailSendResult, ModerationAction,
-        PreparedLogin, Request, SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry,
-        StaffAuditRecord, StaffReport, StartupGameplayLoadLimits, StoreError,
-        decode_runtime_snapshot, decode_startup_gameplay, ensure_all_character_ids_exist,
+        BOARD_ACCOUNT_CAPACITY, BOARD_CAPACITY_PER_BOARD, BOARD_MAX_PAGES, BOARD_PAGE_SIZE,
+        BoardEntry, BoardPage, BoardPostSummary, BoardReportEvidence, CharacterStore,
+        DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, MailMessage, MailMessageSummary,
+        MailPage, MailReportEvidence, MailSendResult, ModerationAction, PreparedLogin, Request,
+        SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry, StaffAuditRecord,
+        StaffReport, StartupGameplayLoadLimits, StoreError, decode_runtime_snapshot,
+        decode_startup_gameplay, ensure_all_character_ids_exist,
         ensure_all_startup_characters_loaded, normalise_character_identity_ids,
         normalise_startup_character_ids,
     },
@@ -70,6 +73,17 @@ const MAIL_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
 const MAIL_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
 const MAIL_PURGE_LIMIT: i64 = 256;
 const MAIL_TRANSACTION_LOCK_ID: i64 = 0x5449_414d_4d41_494c;
+const BOARD_BYTE_CAPACITY_PER_BOARD: i64 = 4 * 1_024 * 1_024;
+const BOARD_GLOBAL_CAPACITY: i64 = 2_000;
+const BOARD_GLOBAL_BYTE_CAPACITY: i64 = 8 * 1_024 * 1_024;
+const BOARD_HOURLY_CAPACITY: i64 = 5;
+const BOARD_DAILY_CAPACITY: i64 = 20;
+const BOARD_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
+const BOARD_REPORT_EVIDENCE_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
+const BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
+const BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
+const BOARD_PURGE_LIMIT: i64 = 256;
+const BOARD_TRANSACTION_LOCK_ID: i64 = 0x5449_414d_424f_4152;
 const MAX_MODERATION_DURATION_SECONDS: i64 = 365 * 24 * 60 * 60;
 const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
 const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -399,6 +413,80 @@ impl PostgresCharacterStore {
                         Request::PurgeExpiredMail { reply } => {
                             let _ =
                                 reply.send(purge_expired_mail(&mut connection, unix_timestamp()));
+                        }
+                        Request::ListBoardPosts {
+                            actor,
+                            board,
+                            page,
+                            reply,
+                        } => {
+                            let _ = reply.send(list_board_posts(
+                                &mut connection,
+                                actor,
+                                board,
+                                page,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ReadBoardPost {
+                            actor,
+                            public_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(read_board_post(
+                                &mut connection,
+                                actor,
+                                &public_id,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::PublishBoardPost {
+                            actor,
+                            board,
+                            public_id,
+                            subject,
+                            body,
+                            reply,
+                        } => {
+                            let _ = reply.send(publish_board_post(
+                                &mut connection,
+                                actor,
+                                board,
+                                &public_id,
+                                &subject,
+                                &body,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::DeleteBoardPost {
+                            actor,
+                            public_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(delete_board_post(
+                                &mut connection,
+                                actor,
+                                &public_id,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ReportBoardPost {
+                            actor,
+                            public_id,
+                            reason,
+                            reply,
+                        } => {
+                            let _ = reply.send(report_board_post(
+                                &mut connection,
+                                actor,
+                                &public_id,
+                                &reason,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::PurgeExpiredBoards { reply } => {
+                            let _ =
+                                reply.send(purge_expired_boards(&mut connection, unix_timestamp()));
                         }
                         Request::ReportCharacter {
                             actor,
@@ -999,6 +1087,107 @@ impl CharacterStore for PostgresCharacterStore {
     async fn purge_expired_mail(&self) -> Result<u64, StoreError> {
         let (reply, receive) = oneshot::channel();
         self.request_commit(Request::PurgeExpiredMail { reply }, receive)
+            .await
+    }
+
+    async fn list_board_posts(
+        &self,
+        actor: CharacterId,
+        board: BoardKey,
+        page: u32,
+    ) -> Result<BoardPage, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ListBoardPosts {
+                actor,
+                board,
+                page,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn read_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+    ) -> Result<BoardEntry, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ReadBoardPost {
+                actor,
+                public_id: public_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn publish_board_post(
+        &self,
+        actor: CharacterId,
+        board: BoardKey,
+        public_id: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<BoardEntry, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::PublishBoardPost {
+                actor,
+                board,
+                public_id: public_id.to_owned(),
+                subject: subject.to_owned(),
+                body: body.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn delete_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::DeleteBoardPost {
+                actor,
+                public_id: public_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn report_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+        reason: &str,
+    ) -> Result<i64, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::ReportBoardPost {
+                actor,
+                public_id: public_id.to_owned(),
+                reason: reason.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn purge_expired_boards(&self) -> Result<u64, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::PurgeExpiredBoards { reply }, receive)
             .await
     }
 
@@ -2612,6 +2801,498 @@ fn purge_expired_mail_rows<C: GenericClient>(
     Ok(message_count + i64::try_from(evidence_rows.len()).expect("purge batch fits i64"))
 }
 
+fn normalise_board_text(value: &str, maximum: usize) -> Result<String, StoreError> {
+    if valid_board_visible_text(value, maximum) {
+        Ok(value.to_owned())
+    } else {
+        Err(StoreError::InvalidBoardInput)
+    }
+}
+
+fn check_board_capacity(
+    account_count: i64,
+    board_count: i64,
+    board_bytes: i64,
+    global_count: i64,
+    global_bytes: i64,
+    added_bytes: i64,
+) -> Result<(), StoreError> {
+    if account_count >= i64::from(BOARD_ACCOUNT_CAPACITY)
+        || board_count >= i64::from(BOARD_CAPACITY_PER_BOARD)
+        || board_bytes.saturating_add(added_bytes) > BOARD_BYTE_CAPACITY_PER_BOARD
+        || global_count >= BOARD_GLOBAL_CAPACITY
+        || global_bytes.saturating_add(added_bytes) > BOARD_GLOBAL_BYTE_CAPACITY
+    {
+        Err(StoreError::BoardCapacity)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_board_report_capacity(open_reports: i64, evidence_count: i64) -> Result<(), StoreError> {
+    if open_reports >= BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT {
+        Err(StoreError::BoardReportLimit)
+    } else if evidence_count >= BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY {
+        Err(StoreError::BoardEvidenceLimit)
+    } else {
+        Ok(())
+    }
+}
+
+fn consume_board_usage<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    now: i64,
+) -> Result<(), StoreError> {
+    let usage = connection.query_opt(
+        "SELECT hour_started_at, hour_count, day_started_at, day_count
+         FROM social_board_usage WHERE account_id = $1 FOR UPDATE",
+        &[&account_id.0],
+    )?;
+    let (hour_started_at, hour_count, day_started_at, day_count) =
+        usage.map_or((now, 0_i64, now, 0_i64), |row| {
+            let stored_hour: i64 = row.get(0);
+            let stored_hour_count: i32 = row.get(1);
+            let stored_day: i64 = row.get(2);
+            let stored_day_count: i32 = row.get(3);
+            let hour_expired =
+                now < stored_hour || now.saturating_sub(stored_hour) >= MAIL_HOUR_SECONDS;
+            let day_expired =
+                now < stored_day || now.saturating_sub(stored_day) >= MAIL_DAY_SECONDS;
+            (
+                if hour_expired { now } else { stored_hour },
+                if hour_expired {
+                    0
+                } else {
+                    i64::from(stored_hour_count)
+                },
+                if day_expired { now } else { stored_day },
+                if day_expired {
+                    0
+                } else {
+                    i64::from(stored_day_count)
+                },
+            )
+        });
+    if hour_count >= BOARD_HOURLY_CAPACITY || day_count >= BOARD_DAILY_CAPACITY {
+        return Err(StoreError::BoardRateLimited);
+    }
+    let next_hour_count = i32::try_from(hour_count + 1).expect("board hourly cap fits i32");
+    let next_day_count = i32::try_from(day_count + 1).expect("board daily cap fits i32");
+    connection.execute(
+        "INSERT INTO social_board_usage
+             (account_id, hour_started_at, hour_count,
+              day_started_at, day_count, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT(account_id) DO UPDATE SET
+             hour_started_at = excluded.hour_started_at,
+             hour_count = excluded.hour_count,
+             day_started_at = excluded.day_started_at,
+             day_count = excluded.day_count,
+             updated_at = excluded.updated_at",
+        &[
+            &account_id.0,
+            &hour_started_at,
+            &next_hour_count,
+            &day_started_at,
+            &next_day_count,
+            &now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn list_board_posts(
+    connection: &mut Client,
+    actor: CharacterId,
+    board: BoardKey,
+    page: u32,
+    now: i64,
+) -> Result<BoardPage, StoreError> {
+    if !(1..=BOARD_MAX_PAGES).contains(&page) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let actor_profile = social_profile(connection, actor, now)?;
+    let total: i64 = connection
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM social_board_posts
+             WHERE board_key = $1 AND expires_at > $2",
+            &[&board.as_str(), &now],
+        )?
+        .get(0);
+    let total_posts = u32::try_from(total).map_err(|_| StoreError::InvalidBoardInput)?;
+    let total_pages = total_posts.div_ceil(BOARD_PAGE_SIZE).max(1);
+    if total_pages > BOARD_MAX_PAGES {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let limit = i64::from(BOARD_PAGE_SIZE);
+    let offset = i64::from((page - 1).saturating_mul(BOARD_PAGE_SIZE));
+    let posts = connection
+        .query(
+            "SELECT posts.public_id, posts.author_character_id, authors.account_id,
+                    posts.author_name, posts.subject, posts.created_at, posts.expires_at,
+                    posts.report_id
+             FROM social_board_posts AS posts
+             JOIN characters AS authors ON authors.id = posts.author_character_id
+             WHERE posts.board_key = $1 AND posts.expires_at > $2
+             ORDER BY posts.created_at DESC, posts.id DESC
+             LIMIT $3 OFFSET $4",
+            &[&board.as_str(), &now, &limit, &offset],
+        )?
+        .into_iter()
+        .map(|row| {
+            let author_character = CharacterId(row.get(1));
+            let author_account = AccountId(row.get(2));
+            let report_id: Option<i64> = row.get(7);
+            BoardPostSummary {
+                public_id: row.get(0),
+                board,
+                author_name: row.get(3),
+                subject: row.get(4),
+                created_at: row.get(5),
+                expires_at: row.get(6),
+                can_delete: author_character == actor,
+                can_report: author_account != actor_profile.account_id && report_id.is_none(),
+            }
+        })
+        .collect();
+    Ok(BoardPage {
+        board,
+        page,
+        total_pages,
+        total_posts,
+        capacity: BOARD_CAPACITY_PER_BOARD,
+        posts,
+    })
+}
+
+fn read_board_post(
+    connection: &mut Client,
+    actor: CharacterId,
+    public_id: &str,
+    now: i64,
+) -> Result<BoardEntry, StoreError> {
+    if !valid_board_public_id(public_id) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let actor_profile = social_profile(connection, actor, now)?;
+    let row = connection
+        .query_opt(
+            "SELECT posts.board_key, posts.author_character_id, authors.account_id,
+                    posts.author_name, posts.subject, posts.body,
+                    posts.created_at, posts.expires_at, posts.report_id
+             FROM social_board_posts AS posts
+             JOIN characters AS authors ON authors.id = posts.author_character_id
+             WHERE posts.public_id = $1 AND posts.expires_at > $2",
+            &[&public_id, &now],
+        )?
+        .ok_or(StoreError::BoardPostUnavailable)?;
+    let board_key: String = row.get(0);
+    let board = BoardKey::parse(&board_key).ok_or(StoreError::InvalidBoardInput)?;
+    let author_character = CharacterId(row.get(1));
+    let author_account = AccountId(row.get(2));
+    let report_id: Option<i64> = row.get(8);
+    Ok(BoardEntry {
+        summary: BoardPostSummary {
+            public_id: public_id.to_owned(),
+            board,
+            author_name: row.get(3),
+            subject: row.get(4),
+            created_at: row.get(6),
+            expires_at: row.get(7),
+            can_delete: author_character == actor,
+            can_report: author_account != actor_profile.account_id && report_id.is_none(),
+        },
+        body: row.get(5),
+    })
+}
+
+fn publish_board_post(
+    connection: &mut Client,
+    actor: CharacterId,
+    board: BoardKey,
+    public_id: &str,
+    subject: &str,
+    body: &str,
+    now: i64,
+) -> Result<BoardEntry, StoreError> {
+    if !valid_board_public_id(public_id) || !valid_board_subject(subject) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let subject = normalise_board_text(subject, MAX_BOARD_SUBJECT_BYTES)?;
+    let body = normalise_board_text(body, MAX_BOARD_BODY_BYTES)?;
+    let expires_at = now
+        .checked_add(BOARD_RETENTION_SECONDS)
+        .ok_or(StoreError::InvalidBoardInput)?;
+    let mut transaction = connection.transaction()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&BOARD_TRANSACTION_LOCK_ID],
+    )?;
+    let profile = social_profile(&mut transaction, actor, now)?;
+    if profile.muted {
+        return Err(StoreError::ChatMuted);
+    }
+    if account_is_banned(&mut transaction, profile.account_id, now)? {
+        return Err(StoreError::AccountBanned);
+    }
+    transaction.query(
+        "SELECT id FROM accounts WHERE id = $1 FOR UPDATE",
+        &[&profile.account_id.0],
+    )?;
+    consume_board_usage(&mut transaction, profile.account_id, now)?;
+    let duplicate: bool = transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM social_board_posts WHERE public_id = $1)",
+            &[&public_id],
+        )?
+        .get(0);
+    if duplicate {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let account_count: i64 = transaction
+        .query_one(
+            "SELECT COUNT(*)::BIGINT
+             FROM social_board_posts AS posts
+             JOIN characters AS authors ON authors.id = posts.author_character_id
+             WHERE authors.account_id = $1 AND posts.expires_at > $2",
+            &[&profile.account_id.0, &now],
+        )?
+        .get(0);
+    let board_totals = transaction.query_one(
+        "SELECT COUNT(*)::BIGINT,
+                COALESCE(SUM(octet_length(subject) + octet_length(body)), 0)::BIGINT
+         FROM social_board_posts WHERE board_key = $1 AND expires_at > $2",
+        &[&board.as_str(), &now],
+    )?;
+    let board_count: i64 = board_totals.get(0);
+    let board_bytes: i64 = board_totals.get(1);
+    let global_totals = transaction.query_one(
+        "SELECT COUNT(*)::BIGINT,
+                COALESCE(SUM(octet_length(subject) + octet_length(body)), 0)::BIGINT
+         FROM social_board_posts WHERE expires_at > $1",
+        &[&now],
+    )?;
+    let global_count: i64 = global_totals.get(0);
+    let global_bytes: i64 = global_totals.get(1);
+    let added_bytes =
+        i64::try_from(subject.len() + body.len()).map_err(|_| StoreError::InvalidBoardInput)?;
+    if let Err(error) = check_board_capacity(
+        account_count,
+        board_count,
+        board_bytes,
+        global_count,
+        global_bytes,
+        added_bytes,
+    ) {
+        transaction.commit()?;
+        return Err(error);
+    }
+    transaction.execute(
+        "INSERT INTO social_board_posts
+             (public_id, board_key, author_character_id, author_name,
+              subject, body, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        &[
+            &public_id,
+            &board.as_str(),
+            &actor.0,
+            &profile.character_name,
+            &subject,
+            &body,
+            &now,
+            &expires_at,
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(BoardEntry {
+        summary: BoardPostSummary {
+            public_id: public_id.to_owned(),
+            board,
+            author_name: profile.character_name,
+            subject,
+            created_at: now,
+            expires_at,
+            can_delete: true,
+            can_report: false,
+        },
+        body,
+    })
+}
+
+fn delete_board_post(
+    connection: &mut Client,
+    actor: CharacterId,
+    public_id: &str,
+    now: i64,
+) -> Result<(), StoreError> {
+    if !valid_board_public_id(public_id) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let mut transaction = connection.transaction()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&BOARD_TRANSACTION_LOCK_ID],
+    )?;
+    social_profile(&mut transaction, actor, now)?;
+    let deleted = transaction.execute(
+        "DELETE FROM social_board_posts
+         WHERE public_id = $1 AND author_character_id = $2 AND expires_at > $3",
+        &[&public_id, &actor.0, &now],
+    )?;
+    if deleted != 1 {
+        return Err(StoreError::BoardPostUnavailable);
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn report_board_post(
+    connection: &mut Client,
+    actor: CharacterId,
+    public_id: &str,
+    reason: &str,
+    now: i64,
+) -> Result<i64, StoreError> {
+    if !valid_board_public_id(public_id) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let reason = normalise_board_text(reason, MAX_BOARD_REPORT_REASON_BYTES)?;
+    let evidence_expires_at = now
+        .checked_add(BOARD_REPORT_EVIDENCE_RETENTION_SECONDS)
+        .ok_or(StoreError::InvalidBoardInput)?;
+    let mut transaction = connection.transaction()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&BOARD_TRANSACTION_LOCK_ID],
+    )?;
+    let reporter = social_profile(&mut transaction, actor, now)?;
+    let post = transaction
+        .query_opt(
+            "SELECT posts.author_character_id, authors.account_id, posts.board_key,
+                    posts.author_name, posts.subject, posts.body,
+                    posts.created_at, posts.report_id
+             FROM social_board_posts AS posts
+             JOIN characters AS authors ON authors.id = posts.author_character_id
+             WHERE posts.public_id = $1 AND posts.expires_at > $2
+             FOR UPDATE OF posts",
+            &[&public_id, &now],
+        )?
+        .ok_or(StoreError::BoardPostUnavailable)?;
+    let author_character = CharacterId(post.get(0));
+    let author_account = AccountId(post.get(1));
+    let report_id: Option<i64> = post.get(7);
+    if report_id.is_some() {
+        return Err(StoreError::BoardAlreadyReported);
+    }
+    if author_account == reporter.account_id {
+        return Err(StoreError::BoardPostUnavailable);
+    }
+    let open_reports: i64 = transaction
+        .query_one(
+            "SELECT COUNT(*)::BIGINT
+             FROM social_reports AS reports
+             JOIN characters AS reporter ON reporter.id = reports.reporter_character_id
+             WHERE reporter.account_id = $1 AND reports.report_kind = 'board'
+               AND reports.status = 'open'",
+            &[&reporter.account_id.0],
+        )?
+        .get(0);
+    check_board_report_capacity(open_reports, 0)?;
+    let evidence_count: i64 = transaction
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM social_board_report_evidence
+             WHERE expires_at > $1",
+            &[&now],
+        )?
+        .get(0);
+    check_board_report_capacity(open_reports, evidence_count)?;
+    let report_id: i64 = transaction
+        .query_one(
+            "INSERT INTO social_reports
+                 (reporter_character_id, target_character_id, report_kind, reason, created_at)
+             VALUES ($1, $2, 'board', $3, $4) RETURNING id",
+            &[&actor.0, &author_character.0, &reason, &now],
+        )?
+        .get(0);
+    let board_key: String = post.get(2);
+    let author_name: String = post.get(3);
+    let subject: String = post.get(4);
+    let body: String = post.get(5);
+    let posted_at: i64 = post.get(6);
+    transaction.execute(
+        "INSERT INTO social_board_report_evidence
+             (report_id, board_key, post_public_id, author_name,
+              subject, body, posted_at, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        &[
+            &report_id,
+            &board_key,
+            &public_id,
+            &author_name,
+            &subject,
+            &body,
+            &posted_at,
+            &now,
+            &evidence_expires_at,
+        ],
+    )?;
+    let linked = transaction.execute(
+        "UPDATE social_board_posts SET report_id = $1
+         WHERE public_id = $2 AND report_id IS NULL AND expires_at > $3",
+        &[&report_id, &public_id, &now],
+    )?;
+    if linked != 1 {
+        return Err(StoreError::BoardAlreadyReported);
+    }
+    append_audit(
+        &mut transaction,
+        reporter.account_id,
+        Some(author_account),
+        "board_report",
+        serde_json::json!({"reportId": report_id}),
+        now,
+    )?;
+    transaction.commit()?;
+    Ok(report_id)
+}
+
+fn purge_expired_boards(connection: &mut Client, now: i64) -> Result<u64, StoreError> {
+    let mut transaction = connection.transaction()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&BOARD_TRANSACTION_LOCK_ID],
+    )?;
+    let post_rows = transaction.query(
+        "WITH expired AS (
+             SELECT id FROM social_board_posts
+             WHERE expires_at <= $1 ORDER BY expires_at, id LIMIT $2
+         )
+         DELETE FROM social_board_posts AS posts
+         USING expired WHERE posts.id = expired.id RETURNING posts.id",
+        &[&now, &BOARD_PURGE_LIMIT],
+    )?;
+    let post_count = i64::try_from(post_rows.len()).expect("board purge batch fits i64");
+    let remaining = BOARD_PURGE_LIMIT - post_count;
+    let evidence_count = if remaining > 0 {
+        let rows = transaction.query(
+            "WITH expired AS (
+                 SELECT report_id FROM social_board_report_evidence
+                 WHERE expires_at <= $1 ORDER BY expires_at, report_id LIMIT $2
+             )
+             DELETE FROM social_board_report_evidence AS evidence
+             USING expired WHERE evidence.report_id = expired.report_id
+             RETURNING evidence.report_id",
+            &[&now, &remaining],
+        )?;
+        i64::try_from(rows.len()).expect("board evidence purge batch fits i64")
+    } else {
+        0
+    };
+    transaction.commit()?;
+    u64::try_from(post_count + evidence_count).map_err(|_| StoreError::InvalidBoardInput)
+}
+
 fn report_character(
     connection: &mut Client,
     actor: CharacterId,
@@ -2828,7 +3509,7 @@ fn staff_reports(
         Some(StaffCapability::ReportsView),
         None,
     )?;
-    let actor_rank = i16::from(
+    let actor_rank = i32::from(
         actor
             .profile
             .ok_or(StoreError::StaffForbidden)?
@@ -2842,7 +3523,11 @@ fn staff_reports(
                     target.id, target.account_id, target.name,
                     reports.reason, reports.created_at,
                     evidence.sender_name, evidence.subject, evidence.body,
-                    evidence.sent_at, evidence.created_at, evidence.expires_at
+                    evidence.sent_at, evidence.created_at, evidence.expires_at,
+                    board_evidence.board_key, board_evidence.post_public_id,
+                    board_evidence.author_name, board_evidence.subject,
+                    board_evidence.body, board_evidence.posted_at,
+                    board_evidence.created_at, board_evidence.expires_at
              FROM social_reports AS reports
              JOIN characters AS reporter ON reporter.id = reports.reporter_character_id
              JOIN characters AS target ON target.id = reports.target_character_id
@@ -2850,6 +3535,9 @@ fn staff_reports(
                     ON target_staff.account_id = target.account_id
              LEFT JOIN social_mail_report_evidence AS evidence
                     ON evidence.report_id = reports.id AND evidence.expires_at > $3
+             LEFT JOIN social_board_report_evidence AS board_evidence
+                    ON board_evidence.report_id = reports.id
+                   AND board_evidence.expires_at > $3
              WHERE reports.status = 'open'
                AND CASE target_staff.profile_key
                        WHEN 'helper' THEN 10
@@ -2866,6 +3554,7 @@ fn staff_reports(
         .into_iter()
         .map(|row| {
             let evidence_sender: Option<String> = row.get(8);
+            let board_key: Option<String> = row.get(14);
             StaffReport {
                 id: row.get(0),
                 reporter_character_id: CharacterId(row.get(1)),
@@ -2882,6 +3571,16 @@ fn staff_reports(
                     sent_at: row.get(11),
                     created_at: row.get(12),
                     expires_at: row.get(13),
+                }),
+                board_evidence: board_key.map(|board_key| BoardReportEvidence {
+                    board: BoardKey::parse(&board_key).expect("schema limits board keys"),
+                    post_public_id: row.get(15),
+                    author_name: row.get(16),
+                    subject: row.get(17),
+                    body: row.get(18),
+                    posted_at: row.get(19),
+                    created_at: row.get(20),
+                    expires_at: row.get(21),
                 }),
             }
         })
@@ -2946,6 +3645,10 @@ fn resolve_staff_report(
     if resolution == StaffReportResolution::ActionTaken {
         transaction.execute(
             "DELETE FROM social_mail_messages WHERE report_id = $1 AND expires_at > $2",
+            &[&report_id, &now],
+        )?;
+        transaction.execute(
+            "DELETE FROM social_board_posts WHERE report_id = $1 AND expires_at > $2",
             &[&report_id, &now],
         )?;
     }
@@ -3450,6 +4153,70 @@ mod tests {
     }
 
     #[test]
+    fn postgres_board_contract_keeps_exact_limits_and_validation() {
+        assert_eq!(BOARD_ACCOUNT_CAPACITY, 64);
+        assert_eq!(BOARD_CAPACITY_PER_BOARD, 1_000);
+        assert_eq!(BOARD_BYTE_CAPACITY_PER_BOARD, 4 * 1_024 * 1_024);
+        assert_eq!(BOARD_GLOBAL_CAPACITY, 2_000);
+        assert_eq!(BOARD_GLOBAL_BYTE_CAPACITY, 8 * 1_024 * 1_024);
+        assert_eq!(BOARD_PAGE_SIZE, 10);
+        assert_eq!(BOARD_MAX_PAGES, 100);
+        assert_eq!(BOARD_HOURLY_CAPACITY, 5);
+        assert_eq!(BOARD_DAILY_CAPACITY, 20);
+        assert_eq!(BOARD_PURGE_LIMIT, 256);
+        assert_eq!(BOARD_RETENTION_SECONDS, 90 * MAIL_DAY_SECONDS);
+        assert!(valid_board_public_id("b0123456789abcdef0123456789abcdef"));
+        assert!(!valid_board_public_id("B0123456789abcdef0123456789abcdef"));
+        assert!(valid_board_subject("Visible subject"));
+        assert!(!valid_board_subject("Bad | subject"));
+        assert!(matches!(
+            normalise_board_text(" padded ", MAX_BOARD_SUBJECT_BYTES),
+            Err(StoreError::InvalidBoardInput)
+        ));
+        assert!(
+            check_board_capacity(
+                i64::from(BOARD_ACCOUNT_CAPACITY) - 1,
+                i64::from(BOARD_CAPACITY_PER_BOARD) - 1,
+                BOARD_BYTE_CAPACITY_PER_BOARD - 2,
+                BOARD_GLOBAL_CAPACITY - 1,
+                BOARD_GLOBAL_BYTE_CAPACITY - 2,
+                2,
+            )
+            .is_ok()
+        );
+        for result in [
+            check_board_capacity(i64::from(BOARD_ACCOUNT_CAPACITY), 0, 0, 0, 0, 2),
+            check_board_capacity(0, i64::from(BOARD_CAPACITY_PER_BOARD), 0, 0, 0, 2),
+            check_board_capacity(0, 0, BOARD_BYTE_CAPACITY_PER_BOARD - 1, 0, 0, 2),
+            check_board_capacity(0, 0, 0, BOARD_GLOBAL_CAPACITY, 0, 2),
+            check_board_capacity(0, 0, 0, 0, BOARD_GLOBAL_BYTE_CAPACITY - 1, 2),
+        ] {
+            assert!(matches!(result, Err(StoreError::BoardCapacity)));
+        }
+        assert!(
+            check_board_report_capacity(
+                BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT - 1,
+                BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY - 1,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            check_board_report_capacity(
+                BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT,
+                BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY - 1,
+            ),
+            Err(StoreError::BoardReportLimit)
+        ));
+        assert!(matches!(
+            check_board_report_capacity(
+                BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT - 1,
+                BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY,
+            ),
+            Err(StoreError::BoardEvidenceLimit)
+        ));
+    }
+
+    #[test]
     fn postgres_runtime_decoder_accepts_current_and_upgrades_strict_v3_v4_v6() {
         let mut current = World::demo().runtime_snapshot();
         let item_id = current.item_instances.keys().next().unwrap().clone();
@@ -3570,6 +4337,157 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_board_advisory_lock_serializes_concurrent_quota() {
+        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("tiamud_board_lock_test_{}_{}", process::id(), nonce);
+        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
+        let scoped_url = scoped_url(&base_url, &schema);
+        let first_store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
+        let account = first_store
+            .register_account("Concurrent Board", "correct horse battery staple")
+            .await
+            .unwrap();
+        let character = first_store
+            .load_or_create_character(account.account.id, "Quill", "room:start")
+            .await
+            .unwrap();
+        let second_store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
+
+        let (first, second, third, fourth, fifth, sixth) = tokio::join!(
+            first_store.publish_board_post(
+                character.id,
+                BoardKey::General,
+                "b00000000000000000000000000000001",
+                "Concurrent one",
+                "Body",
+            ),
+            second_store.publish_board_post(
+                character.id,
+                BoardKey::General,
+                "b00000000000000000000000000000002",
+                "Concurrent two",
+                "Body",
+            ),
+            first_store.publish_board_post(
+                character.id,
+                BoardKey::General,
+                "b00000000000000000000000000000003",
+                "Concurrent three",
+                "Body",
+            ),
+            second_store.publish_board_post(
+                character.id,
+                BoardKey::General,
+                "b00000000000000000000000000000004",
+                "Concurrent four",
+                "Body",
+            ),
+            first_store.publish_board_post(
+                character.id,
+                BoardKey::General,
+                "b00000000000000000000000000000005",
+                "Concurrent five",
+                "Body",
+            ),
+            second_store.publish_board_post(
+                character.id,
+                BoardKey::General,
+                "b00000000000000000000000000000006",
+                "Concurrent six",
+                "Body",
+            ),
+        );
+        let results = [first, second, third, fourth, fifth, sixth];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 5);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(StoreError::BoardRateLimited)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_board_posts"),
+            )
+            .await,
+            5
+        );
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!(
+                    "SELECT hour_count::BIGINT FROM {schema}.social_board_usage
+                     WHERE account_id = {}",
+                    account.account.id.0
+                ),
+            )
+            .await,
+            BOARD_HOURLY_CAPACITY
+        );
+
+        let now = unix_timestamp();
+        admin_batch(
+            &base_url,
+            format!(
+                "UPDATE {schema}.social_board_usage
+                 SET hour_started_at = {now}, hour_count = 0,
+                     day_started_at = {now}, day_count = 20, updated_at = {now}
+                 WHERE account_id = {}",
+                account.account.id.0
+            ),
+        )
+        .await;
+        assert!(matches!(
+            first_store
+                .publish_board_post(
+                    character.id,
+                    BoardKey::General,
+                    "b00000000000000000000000000000007",
+                    "Daily limit",
+                    "Body",
+                )
+                .await,
+            Err(StoreError::BoardRateLimited)
+        ));
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!(
+                    "SELECT day_count::BIGINT FROM {schema}.social_board_usage
+                     WHERE account_id = {}",
+                    account.account.id.0
+                ),
+            )
+            .await,
+            BOARD_DAILY_CAPACITY
+        );
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_board_posts"),
+            )
+            .await,
+            5,
+            "the daily rejection must not create a sixth post"
+        );
+
+        first_store.shutdown().await.unwrap();
+        second_store.shutdown().await.unwrap();
+        drop(first_store);
+        drop(second_store);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
     }
 
     #[tokio::test]
@@ -3875,6 +4793,120 @@ mod tests {
             )
             .await,
             1
+        );
+        let board_public_id = "b0123456789abcdef0123456789abcdef";
+        let board_entry = store
+            .publish_board_post(
+                keeper_character.id,
+                BoardKey::General,
+                board_public_id,
+                "Lantern board",
+                "A durable public entry.",
+            )
+            .await
+            .unwrap();
+        assert!(board_entry.summary.can_delete);
+        let board_page = store
+            .list_board_posts(player_character.id, BoardKey::General, 1)
+            .await
+            .unwrap();
+        assert_eq!(board_page.total_posts, 1);
+        assert!(board_page.posts[0].can_report);
+        assert_eq!(
+            store
+                .read_board_post(player_character.id, board_public_id)
+                .await
+                .unwrap()
+                .body,
+            "A durable public entry."
+        );
+        store
+            .report_board_post(
+                player_character.id,
+                board_public_id,
+                "Public board evidence",
+            )
+            .await
+            .unwrap();
+        store
+            .delete_board_post(keeper_character.id, board_public_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_board_report_evidence"),
+            )
+            .await,
+            1
+        );
+
+        let actionable_id = "bfedcba9876543210fedcba9876543210";
+        store
+            .publish_board_post(
+                player_character.id,
+                BoardKey::Newbie,
+                actionable_id,
+                "Actionable board entry",
+                "Remove this after staff review.",
+            )
+            .await
+            .unwrap();
+        let board_report_id = store
+            .report_board_post(keeper_character.id, actionable_id, "Requires staff action")
+            .await
+            .unwrap();
+        let reports = store
+            .staff_reports(StaffAuditRecord {
+                actor_account_id: keeper.account.id,
+                target_account_id: None,
+                capability: StaffCapability::ReportsView,
+                action: "reports.list".into(),
+                reason: "review board evidence".into(),
+                details: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            reports
+                .iter()
+                .find(|report| report.id == board_report_id)
+                .unwrap()
+                .board_evidence
+                .as_ref()
+                .unwrap()
+                .subject,
+            "Actionable board entry"
+        );
+        store
+            .resolve_staff_report(
+                board_report_id,
+                StaffReportResolution::ActionTaken,
+                "board post removed",
+                StaffAuditRecord {
+                    actor_account_id: keeper.account.id,
+                    target_account_id: None,
+                    capability: StaffCapability::ReportsResolve,
+                    action: "reports.resolve".into(),
+                    reason: "review completed".into(),
+                    details: serde_json::json!({"reportId": board_report_id}),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .read_board_post(keeper_character.id, actionable_id)
+                .await,
+            Err(StoreError::BoardPostUnavailable)
+        ));
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_board_report_evidence"),
+            )
+            .await,
+            2
         );
         store
             .set_social_relation(

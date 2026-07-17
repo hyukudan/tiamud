@@ -635,6 +635,71 @@ test('strict bot validates bounded private mail DTOs and rejects smuggling', () 
   }));
 });
 
+test('strict bot validates bounded community board DTOs and rejects smuggling', () => {
+  const postId = 'b0123456789abcdef0123456789abcdef';
+  const summary = {
+    postId,
+    board: 'general',
+    author: 'Mara <&>',
+    subject: 'Puerta <Norte> & Sur',
+    createdAt: 1_700_000_000,
+    expiresAt: 1_707_776_000,
+    canDelete: false,
+    canReport: true,
+  };
+  const catalog = {
+    boards: [
+      {
+        key: 'general', label: 'General',
+        description: 'Conversación comunitaria deliberada.', canPost: true,
+      },
+      {
+        key: 'newbie', label: 'Personas nuevas',
+        description: 'Preguntas y orientación para empezar.', canPost: false,
+      },
+    ],
+    retentionDays: 90,
+  };
+  const list = {
+    board: 'general', page: 1, totalPages: 1, totalPosts: 1, capacity: 1000, posts: [summary],
+  };
+  assert.equal(parseEnvelope('board.catalog', catalog).data.boards[0].key, 'general');
+  assert.equal(parseEnvelope('board.list', list).data.posts[0].postId, postId);
+  assert.equal(parseEnvelope('board.list', {
+    ...list, page: 100, posts: [],
+  }).data.page, 100);
+  assert.equal(parseEnvelope('board.entry', {
+    ...summary, body: 'Nos vemos | al alba. <&>',
+  }).data.body, 'Nos vemos | al alba. <&>');
+
+  assert.throws(() => parseEnvelope('board.catalog', { ...catalog, retentionDays: 30 }));
+  assert.throws(() => parseEnvelope('board.catalog', {
+    ...catalog, boards: [{ ...catalog.boards[0], accountId: 42 }, catalog.boards[1]],
+  }));
+  assert.throws(() => parseEnvelope('board.list', { ...list, capacity: 999 }));
+  assert.throws(() => parseEnvelope('board.list', {
+    ...list, totalPosts: 11, totalPages: 1,
+  }));
+  assert.throws(() => parseEnvelope('board.list', {
+    ...list, posts: [{ ...summary, board: 'newbie' }],
+  }));
+  assert.throws(() => parseEnvelope('board.list', {
+    ...list, page: 100,
+  }));
+  assert.throws(() => parseEnvelope('board.entry', {
+    ...summary, expiresAt: summary.expiresAt + 1, body: 'Visible.',
+  }));
+  assert.throws(() => parseEnvelope('board.entry', {
+    ...summary, body: '\u202ehidden',
+  }));
+  assert.throws(() => parseEnvelope('board.entry', {
+    ...summary, canDelete: true, body: 'Conflicting permissions.',
+  }));
+  assert.throws(() => parseEnvelope('board.entry', {
+    ...summary, body: 'é'.repeat(2049),
+  }));
+});
+
 test('strict bot accepts only the public item-affix projection', () => {
   const affix = {
     label: 'charged',

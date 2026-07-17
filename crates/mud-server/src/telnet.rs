@@ -1,10 +1,11 @@
 use crate::{
+    boards::BoardDescriptor,
     delivery::SessionDelivery,
     operations::{
         ActiveSessionLimit, ActiveSessionLimiter, AuthRateLimiter, CommandRateLimiter,
         OutputTransport, RuntimeMetrics,
     },
-    persistence::{MailMessage, MailPage, StoreError},
+    persistence::{BoardEntry, BoardPage, MailMessage, MailPage, StoreError},
     social::{SocialChannel, SocialMessage},
     telnet_transport::{TelnetStream, TelnetTransport},
     world_actor::{CharacterBackgroundSelection, GameError, WorldHandle},
@@ -20,8 +21,8 @@ use std::{
 };
 use tiamud_cell_frame::{AnsiProfile, Cell, CellAttributes, CellFrame, NativeProtocol, RgbColor};
 use tiamud_core::{
-    CharacterSnapshot, ContainerContentsView, PlayerStateView, RewardOddsView, SceneAudio,
-    SceneView, TradeContentsView, parse_action,
+    BoardKey, CharacterSnapshot, ContainerContentsView, PlayerStateView, RewardOddsView,
+    SceneAudio, SceneView, TradeContentsView, parse_action,
 };
 use tiamud_telnet_codec::{DO, DONT, IAC, SB, SE, TelnetEvent, TelnetParser, WILL, WONT};
 use tokio::{
@@ -53,7 +54,7 @@ const CHARSET_REQUEST: u8 = 1;
 const CHARSET_ACCEPTED: u8 = 2;
 const CHARSET_REJECTED: u8 = 3;
 
-const MAX_COMMAND_BYTES: usize = 4096;
+const MAX_COMMAND_BYTES: usize = 8 * 1024;
 const MAX_GMCP_BYTES: usize = 8 * 1024;
 const MAX_GMCP_PACKAGE_BYTES: usize = 64;
 const MAX_GMCP_SUPPORTS: usize = 64;
@@ -1064,6 +1065,24 @@ fn public_error(error: &GameError) -> String {
         GameError::Persistence(StoreError::MailReportLimit | StoreError::MailEvidenceLimit) => {
             "Mail reporting is temporarily unavailable.".to_owned()
         }
+        GameError::Persistence(StoreError::InvalidBoardInput) => {
+            "The board action is invalid or exceeds its limits.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardRateLimited) => {
+            "Board post quota exceeded; wait before publishing more posts.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardCapacity) => {
+            "That board is currently at capacity.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardPostUnavailable) => {
+            "That board post is not available.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardAlreadyReported) => {
+            "That board post has already been reported.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardReportLimit | StoreError::BoardEvidenceLimit) => {
+            "Board reporting is temporarily unavailable.".to_owned()
+        }
         GameError::Persistence(StoreError::InvalidStaffInput) => {
             "The staff action is invalid or exceeds its limits.".to_owned()
         }
@@ -1294,6 +1313,24 @@ async fn serve_entered(
                                     }
                                     if let Some(message) = &outcome.mail_message {
                                         let gmcp = input.negotiation.mail_message_gmcp(message);
+                                        if !gmcp.is_empty() {
+                                            output_queue_bytes(output, gmcp)?;
+                                        }
+                                    }
+                                    if let Some(catalog) = &outcome.board_catalog {
+                                        let gmcp = input.negotiation.board_catalog_gmcp(catalog);
+                                        if !gmcp.is_empty() {
+                                            output_queue_bytes(output, gmcp)?;
+                                        }
+                                    }
+                                    if let Some(page) = &outcome.board_page {
+                                        let gmcp = input.negotiation.board_page_gmcp(page);
+                                        if !gmcp.is_empty() {
+                                            output_queue_bytes(output, gmcp)?;
+                                        }
+                                    }
+                                    if let Some(entry) = &outcome.board_entry {
+                                        let gmcp = input.negotiation.board_entry_gmcp(entry);
                                         if !gmcp.is_empty() {
                                             output_queue_bytes(output, gmcp)?;
                                         }
@@ -2709,20 +2746,110 @@ impl TelnetSession {
         }
         let summary = &message.summary;
         let mut output = Vec::new();
-        if !append_gmcp(
+        if !append_bounded_text_gmcp(
             &mut output,
             "Tiamud.Mail.Message",
-            &json!({
+            json!({
                 "id": summary.public_id,
                 "sender": summary.sender_name,
                 "subject": summary.subject,
-                "body": message.body,
                 "createdAt": summary.created_at,
                 "expiresAt": summary.expires_at,
                 "read": summary.read,
             }),
+            "body",
+            &message.body,
         ) {
             warn!("failed to encode bounded Tiamud.Mail.Message");
+        }
+        output
+    }
+
+    fn board_summary_json(summary: &crate::persistence::BoardPostSummary) -> Value {
+        json!({
+            "postId": summary.public_id,
+            "board": summary.board,
+            "author": summary.author_name,
+            "subject": summary.subject,
+            "createdAt": summary.created_at,
+            "expiresAt": summary.expires_at,
+            "canDelete": summary.can_delete,
+            "canReport": summary.can_report,
+        })
+    }
+
+    fn board_catalog_gmcp(&self, catalog: &[BoardDescriptor]) -> Vec<u8> {
+        if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("tiamud.board") {
+            return Vec::new();
+        }
+        let boards = catalog
+            .iter()
+            .map(|descriptor| {
+                let (label, description) = match descriptor.board {
+                    BoardKey::General => ("General", "Conversación comunitaria deliberada."),
+                    BoardKey::Newbie => {
+                        ("Personas nuevas", "Preguntas y orientación para empezar.")
+                    }
+                };
+                json!({
+                    "key": descriptor.board,
+                    "label": label,
+                    "description": description,
+                    "canPost": descriptor.can_post,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut output = Vec::new();
+        if !append_gmcp(
+            &mut output,
+            "Tiamud.Board.Catalog",
+            &json!({"boards": boards, "retentionDays": 90}),
+        ) {
+            warn!("failed to encode bounded Tiamud.Board.Catalog");
+        }
+        output
+    }
+
+    fn board_page_gmcp(&self, page: &BoardPage) -> Vec<u8> {
+        if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("tiamud.board") {
+            return Vec::new();
+        }
+        let posts = page
+            .posts
+            .iter()
+            .map(Self::board_summary_json)
+            .collect::<Vec<_>>();
+        let mut output = Vec::new();
+        if !append_gmcp(
+            &mut output,
+            "Tiamud.Board.List",
+            &json!({
+                "board": page.board,
+                "page": page.page,
+                "totalPages": page.total_pages,
+                "totalPosts": page.total_posts,
+                "capacity": page.capacity,
+                "posts": posts,
+            }),
+        ) {
+            warn!("failed to encode bounded Tiamud.Board.List page");
+        }
+        output
+    }
+
+    fn board_entry_gmcp(&self, entry: &BoardEntry) -> Vec<u8> {
+        if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("tiamud.board") {
+            return Vec::new();
+        }
+        let mut output = Vec::new();
+        if !append_bounded_text_gmcp(
+            &mut output,
+            "Tiamud.Board.Entry",
+            Self::board_summary_json(&entry.summary),
+            "body",
+            &entry.body,
+        ) {
+            warn!("failed to encode bounded Tiamud.Board.Entry");
         }
         output
     }
@@ -2868,6 +2995,7 @@ const GMCP_PACKAGES: &[&str] = &[
     "Char.Trade 1",
     "Char.Reward 1",
     "Tiamud.Mail 1",
+    "Tiamud.Board 1",
     "Tiamud.Scene 1",
     "Tiamud.Character 1",
     "Tiamud.Assets 1",
@@ -2901,6 +3029,64 @@ fn append_gmcp(output: &mut Vec<u8>, package: &str, data: &Value) -> bool {
     append_telnet_escaped(output, &json);
     output.extend_from_slice(&[IAC, SE]);
     true
+}
+
+fn append_bounded_text_gmcp(
+    output: &mut Vec<u8>,
+    package: &str,
+    mut data: Value,
+    field: &str,
+    text: &str,
+) -> bool {
+    let Some(fields) = data.as_object_mut() else {
+        return false;
+    };
+    fields.insert(field.to_owned(), json!(text));
+    if append_gmcp(output, package, &data) {
+        return true;
+    }
+
+    let mut boundaries = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if boundaries.last().copied() != Some(text.len()) {
+        boundaries.push(text.len());
+    }
+    let mut lower = 0_usize;
+    let mut upper = boundaries.len();
+    let mut best = None;
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        let end = boundaries[middle];
+        let mut fallback = data.clone();
+        let fields = fallback
+            .as_object_mut()
+            .expect("the original GMCP projection was an object");
+        fields.insert(field.to_owned(), json!(&text[..end]));
+        fields.insert("truncated".into(), json!(true));
+        fields.insert(
+            "overflow".into(),
+            json!({
+                "package": package,
+                "maximumBytes": MAX_GMCP_BYTES,
+                "originalBytes": text.len(),
+            }),
+        );
+        let mut candidate = Vec::new();
+        if append_gmcp(&mut candidate, package, &fallback) {
+            best = Some(candidate);
+            lower = middle + 1;
+        } else {
+            upper = middle;
+        }
+    }
+    if let Some(candidate) = best {
+        output.extend(candidate);
+        true
+    } else {
+        false
+    }
 }
 
 fn bounded_gmcp_fallback_title(value: &str) -> (String, bool) {
@@ -4814,6 +5000,155 @@ mod tests {
         assert!(!encoded.contains("recipientCharacterId"));
         assert!(!encoded.contains("senderCharacterId"));
         assert!(!encoded.contains("accountId"));
+
+        let defensive_message = MailMessage {
+            summary,
+            body: "\"".repeat(MAX_GMCP_BYTES),
+        };
+        let fallback_payloads = gmcp_payloads(&session.mail_message_gmcp(&defensive_message));
+        assert_eq!(fallback_payloads.len(), 1);
+        assert!(fallback_payloads[0].len() <= MAX_GMCP_BYTES);
+        let fallback: Value = serde_json::from_slice(
+            fallback_payloads[0]
+                .strip_prefix(b"Tiamud.Mail.Message ")
+                .expect("mail fallback package"),
+        )
+        .unwrap();
+        assert_eq!(fallback["truncated"], true);
+        assert_eq!(fallback["overflow"]["package"], "Tiamud.Mail.Message");
+        assert_eq!(fallback["overflow"]["maximumBytes"], MAX_GMCP_BYTES);
+        assert_eq!(fallback["overflow"]["originalBytes"], MAX_GMCP_BYTES);
+        assert!(
+            defensive_message
+                .body
+                .starts_with(fallback["body"].as_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn board_gmcp_is_opt_in_exact_bounded_and_minimal() {
+        let catalog = vec![
+            BoardDescriptor {
+                board: BoardKey::General,
+                can_post: true,
+            },
+            BoardDescriptor {
+                board: BoardKey::Newbie,
+                can_post: false,
+            },
+        ];
+        let summary = crate::persistence::BoardPostSummary {
+            public_id: "b0123456789abcdef0123456789abcdef".into(),
+            board: BoardKey::General,
+            author_name: "A&B <author>".into(),
+            subject: "Plan <&>".into(),
+            created_at: 10,
+            expires_at: 7_776_010,
+            can_delete: false,
+            can_report: true,
+        };
+        let page = BoardPage {
+            board: BoardKey::General,
+            page: 1,
+            total_pages: 1,
+            total_posts: 1,
+            capacity: 1_000,
+            posts: vec![summary.clone()],
+        };
+        let entry = BoardEntry {
+            summary: summary.clone(),
+            body: "Meet | beyond the gate. <&>".into(),
+        };
+
+        let unnegotiated = TelnetSession::default();
+        assert!(unnegotiated.board_catalog_gmcp(&catalog).is_empty());
+        assert!(unnegotiated.board_page_gmcp(&page).is_empty());
+        assert!(unnegotiated.board_entry_gmcp(&entry).is_empty());
+
+        let mut session = TelnetSession::default();
+        session.begin_initial_negotiation();
+        session.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        session.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Tiamud.Board 1"]"#.to_vec(),
+        }]);
+
+        let catalog_payloads = gmcp_payloads(&session.board_catalog_gmcp(&catalog));
+        assert_eq!(catalog_payloads.len(), 1);
+        assert!(catalog_payloads[0].len() <= MAX_GMCP_BYTES);
+        let catalog_data: Value = serde_json::from_slice(
+            catalog_payloads[0]
+                .strip_prefix(b"Tiamud.Board.Catalog ")
+                .expect("board catalog package"),
+        )
+        .unwrap();
+        assert_eq!(catalog_data["retentionDays"], 90);
+        assert_eq!(catalog_data["boards"][0]["key"], "general");
+        assert_eq!(catalog_data["boards"][0]["canPost"], true);
+        assert_eq!(catalog_data["boards"][1]["key"], "newbie");
+        assert_eq!(catalog_data["boards"][1]["canPost"], false);
+
+        let list_payloads = gmcp_payloads(&session.board_page_gmcp(&page));
+        assert_eq!(list_payloads.len(), 1);
+        assert!(list_payloads[0].len() <= MAX_GMCP_BYTES);
+        let list: Value = serde_json::from_slice(
+            list_payloads[0]
+                .strip_prefix(b"Tiamud.Board.List ")
+                .expect("board list package"),
+        )
+        .unwrap();
+        assert_eq!(list["capacity"], 1_000);
+        assert_eq!(list["posts"][0]["postId"], summary.public_id);
+        assert_eq!(list["posts"][0]["author"], "A&B <author>");
+        assert_eq!(list["posts"][0]["subject"], "Plan <&>");
+        assert!(list["posts"][0].get("body").is_none());
+
+        let entry_payloads = gmcp_payloads(&session.board_entry_gmcp(&entry));
+        assert_eq!(entry_payloads.len(), 1);
+        assert!(entry_payloads[0].len() <= MAX_GMCP_BYTES);
+        let detail: Value = serde_json::from_slice(
+            entry_payloads[0]
+                .strip_prefix(b"Tiamud.Board.Entry ")
+                .expect("board entry package"),
+        )
+        .unwrap();
+        assert_eq!(detail["postId"], summary.public_id);
+        assert_eq!(detail["body"], entry.body);
+        for payload in [catalog_data, list, detail] {
+            let encoded = payload.to_string();
+            assert!(!encoded.contains("authorCharacterId"));
+            assert!(!encoded.contains("reporterCharacterId"));
+            assert!(!encoded.contains("accountId"));
+            assert!(!encoded.contains("bodySnapshot"));
+        }
+
+        let maximal_entry = BoardEntry {
+            summary,
+            body: "\"".repeat(tiamud_core::MAX_BOARD_BODY_BYTES),
+        };
+        let fallback_payloads = gmcp_payloads(&session.board_entry_gmcp(&maximal_entry));
+        assert_eq!(fallback_payloads.len(), 1);
+        assert!(fallback_payloads[0].len() <= MAX_GMCP_BYTES);
+        let fallback: Value = serde_json::from_slice(
+            fallback_payloads[0]
+                .strip_prefix(b"Tiamud.Board.Entry ")
+                .expect("board entry fallback package"),
+        )
+        .unwrap();
+        assert_eq!(fallback["truncated"], true);
+        assert_eq!(fallback["overflow"]["package"], "Tiamud.Board.Entry");
+        assert_eq!(fallback["overflow"]["maximumBytes"], MAX_GMCP_BYTES);
+        assert_eq!(
+            fallback["overflow"]["originalBytes"],
+            tiamud_core::MAX_BOARD_BODY_BYTES
+        );
+        let body = fallback["body"].as_str().unwrap();
+        assert!(!body.is_empty());
+        assert!(body.len() < maximal_entry.body.len());
+        assert!(maximal_entry.body.starts_with(body));
     }
 
     #[test]
@@ -5416,6 +5751,23 @@ mod tests {
                 assert_eq!(event, LineEvent::Command(b"look".to_vec()));
             }
         }
+    }
+
+    #[test]
+    fn accepts_a_maximal_board_post_inside_the_bounded_command_line() {
+        let command = format!(
+            "board post general | {} | {}",
+            "s".repeat(tiamud_core::MAX_BOARD_SUBJECT_BYTES),
+            "b".repeat(tiamud_core::MAX_BOARD_BODY_BYTES),
+        );
+        assert!(command.len() < MAX_COMMAND_BYTES);
+
+        let mut commands = CommandBuffer::default();
+        let mut event = None;
+        for byte in command.bytes().chain(b"\r\n".iter().copied()) {
+            event = commands.push(byte).or(event);
+        }
+        assert_eq!(event, Some(LineEvent::Command(command.into_bytes())));
     }
 
     #[tokio::test]

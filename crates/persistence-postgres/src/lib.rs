@@ -47,10 +47,10 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 12;
+pub const SCHEMA_VERSION: i32 = 13;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
-pub(crate) const APPLICATION_TABLES: [&str; 20] = [
+pub(crate) const APPLICATION_TABLES: [&str; 23] = [
     "accounts",
     "characters",
     "auth_sessions",
@@ -60,11 +60,14 @@ pub(crate) const APPLICATION_TABLES: [&str; 20] = [
     "social_blocks",
     "social_channel_subscriptions",
     "social_mail_usage",
+    "social_board_usage",
     "moderation_mutes",
     "account_bans",
     "social_reports",
     "social_mail_messages",
     "social_mail_report_evidence",
+    "social_board_posts",
+    "social_board_report_evidence",
     "moderation_audit",
     "staff_profiles",
     "staff_capability_assignments",
@@ -175,6 +178,16 @@ CREATE TABLE social_mail_usage (
     CHECK (updated_at >= hour_started_at AND updated_at >= day_started_at)
 );
 
+CREATE TABLE social_board_usage (
+    account_id BIGINT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    hour_started_at BIGINT NOT NULL,
+    hour_count INTEGER NOT NULL CHECK (hour_count BETWEEN 0 AND 5),
+    day_started_at BIGINT NOT NULL,
+    day_count INTEGER NOT NULL CHECK (day_count BETWEEN 0 AND 20),
+    updated_at BIGINT NOT NULL,
+    CHECK (updated_at >= hour_started_at AND updated_at >= day_started_at)
+);
+
 CREATE TABLE moderation_mutes (
     id BIGSERIAL PRIMARY KEY,
     account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -208,7 +221,8 @@ CREATE TABLE social_reports (
     reporter_character_id BIGINT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
     target_character_id BIGINT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
     report_kind TEXT NOT NULL DEFAULT 'character'
-        CHECK (report_kind IN ('character', 'mail')),
+        CONSTRAINT social_reports_report_kind_check
+        CHECK (report_kind IN ('character', 'mail', 'board')),
     reason TEXT NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 2048),
     created_at BIGINT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open'
@@ -278,6 +292,47 @@ CREATE TABLE social_mail_report_evidence (
 );
 CREATE INDEX social_mail_report_evidence_expires_idx
     ON social_mail_report_evidence (expires_at, report_id);
+
+CREATE TABLE social_board_posts (
+    id BIGSERIAL PRIMARY KEY,
+    public_id TEXT NOT NULL UNIQUE
+        CHECK (public_id ~ '^b[0-9a-f]{32}$'),
+    board_key TEXT NOT NULL CHECK (board_key IN ('general', 'newbie')),
+    author_character_id BIGINT NOT NULL
+        REFERENCES characters(id) ON DELETE CASCADE,
+    author_name TEXT NOT NULL
+        CHECK (octet_length(author_name) BETWEEN 1 AND 64),
+    subject TEXT NOT NULL
+        CHECK (octet_length(subject) BETWEEN 1 AND 128 AND position('|' IN subject) = 0),
+    body TEXT NOT NULL CHECK (octet_length(body) BETWEEN 1 AND 4096),
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    report_id BIGINT UNIQUE REFERENCES social_reports(id) ON DELETE SET NULL,
+    CHECK (expires_at = created_at + 7776000)
+);
+CREATE INDEX social_board_posts_board_idx
+    ON social_board_posts (board_key, created_at DESC, id DESC);
+CREATE INDEX social_board_posts_author_idx
+    ON social_board_posts (author_character_id, created_at DESC, id DESC);
+CREATE INDEX social_board_posts_expires_idx
+    ON social_board_posts (expires_at, id);
+
+CREATE TABLE social_board_report_evidence (
+    report_id BIGINT PRIMARY KEY REFERENCES social_reports(id) ON DELETE CASCADE,
+    board_key TEXT NOT NULL CHECK (board_key IN ('general', 'newbie')),
+    post_public_id TEXT NOT NULL CHECK (post_public_id ~ '^b[0-9a-f]{32}$'),
+    author_name TEXT NOT NULL
+        CHECK (octet_length(author_name) BETWEEN 1 AND 64),
+    subject TEXT NOT NULL CHECK (octet_length(subject) BETWEEN 1 AND 128),
+    body TEXT NOT NULL CHECK (octet_length(body) BETWEEN 1 AND 4096),
+    posted_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    CHECK (created_at >= posted_at),
+    CHECK (expires_at = created_at + 7776000)
+);
+CREATE INDEX social_board_report_evidence_expires_idx
+    ON social_board_report_evidence (expires_at, report_id);
 
 CREATE TABLE moderation_audit (
     sequence BIGSERIAL PRIMARY KEY,
@@ -377,7 +432,7 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 12);
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 13);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -615,6 +670,68 @@ SET version = 12, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 11;
 "#;
 
+const UPGRADE_V12_TO_V13_SQL: &str = r#"
+ALTER TABLE social_reports
+    DROP CONSTRAINT social_reports_report_kind_check,
+    ADD CONSTRAINT social_reports_report_kind_check
+        CHECK (report_kind IN ('character', 'mail', 'board'));
+
+CREATE TABLE social_board_usage (
+    account_id BIGINT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    hour_started_at BIGINT NOT NULL,
+    hour_count INTEGER NOT NULL CHECK (hour_count BETWEEN 0 AND 5),
+    day_started_at BIGINT NOT NULL,
+    day_count INTEGER NOT NULL CHECK (day_count BETWEEN 0 AND 20),
+    updated_at BIGINT NOT NULL,
+    CHECK (updated_at >= hour_started_at AND updated_at >= day_started_at)
+);
+
+CREATE TABLE social_board_posts (
+    id BIGSERIAL PRIMARY KEY,
+    public_id TEXT NOT NULL UNIQUE
+        CHECK (public_id ~ '^b[0-9a-f]{32}$'),
+    board_key TEXT NOT NULL CHECK (board_key IN ('general', 'newbie')),
+    author_character_id BIGINT NOT NULL
+        REFERENCES characters(id) ON DELETE CASCADE,
+    author_name TEXT NOT NULL
+        CHECK (octet_length(author_name) BETWEEN 1 AND 64),
+    subject TEXT NOT NULL
+        CHECK (octet_length(subject) BETWEEN 1 AND 128 AND position('|' IN subject) = 0),
+    body TEXT NOT NULL CHECK (octet_length(body) BETWEEN 1 AND 4096),
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    report_id BIGINT UNIQUE REFERENCES social_reports(id) ON DELETE SET NULL,
+    CHECK (expires_at = created_at + 7776000)
+);
+CREATE INDEX social_board_posts_board_idx
+    ON social_board_posts (board_key, created_at DESC, id DESC);
+CREATE INDEX social_board_posts_author_idx
+    ON social_board_posts (author_character_id, created_at DESC, id DESC);
+CREATE INDEX social_board_posts_expires_idx
+    ON social_board_posts (expires_at, id);
+
+CREATE TABLE social_board_report_evidence (
+    report_id BIGINT PRIMARY KEY REFERENCES social_reports(id) ON DELETE CASCADE,
+    board_key TEXT NOT NULL CHECK (board_key IN ('general', 'newbie')),
+    post_public_id TEXT NOT NULL CHECK (post_public_id ~ '^b[0-9a-f]{32}$'),
+    author_name TEXT NOT NULL
+        CHECK (octet_length(author_name) BETWEEN 1 AND 64),
+    subject TEXT NOT NULL CHECK (octet_length(subject) BETWEEN 1 AND 128),
+    body TEXT NOT NULL CHECK (octet_length(body) BETWEEN 1 AND 4096),
+    posted_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    CHECK (created_at >= posted_at),
+    CHECK (expires_at = created_at + 7776000)
+);
+CREATE INDEX social_board_report_evidence_expires_idx
+    ON social_board_report_evidence (expires_at, report_id);
+
+UPDATE tiamud_schema
+SET version = 13, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 12;
+"#;
+
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
 WITH candidate AS (
     SELECT id FROM accounts
@@ -653,18 +770,17 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v12 schema or migration from v6/v7/v8/v9/v10/v11"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v13 schema or migration from v6/v7/v8/v9/v10/v11/v12"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v12 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v13 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6/v7/v8/v9/v10/v11 are upgraded to v12, and v12 is
-/// verified.
+/// at the current version, v6-v12 are upgraded to v13, and v13 is verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
     let report = migrate_in_transaction(&mut transaction)?;
@@ -735,8 +851,12 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
             client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
         }
         11 => client.batch_execute(UPGRADE_V11_TO_V12_SQL)?,
+        12 => {}
         SCHEMA_VERSION => {}
         _ => return Err(SchemaError::UnsupportedVersion { found }),
+    }
+    if (6..=12).contains(&found) {
+        client.batch_execute(UPGRADE_V12_TO_V13_SQL)?;
     }
     for &table in &APPLICATION_TABLES {
         let exists: bool = client
@@ -783,6 +903,9 @@ mod tests {
             "social_mail_messages",
             "social_mail_usage",
             "social_mail_report_evidence",
+            "social_board_posts",
+            "social_board_usage",
+            "social_board_report_evidence",
             "moderation_mutes",
             "account_bans",
             "social_reports",
@@ -798,7 +921,7 @@ mod tests {
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 12)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 13)"));
         assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
@@ -898,6 +1021,26 @@ mod tests {
         assert!(UPGRADE_V11_TO_V12_SQL.contains("'character', 'mail'"));
         assert!(!UPGRADE_V11_TO_V12_SQL.contains("world_runtime"));
         assert!(!UPGRADE_V11_TO_V12_SQL.contains("DELETE FROM"));
+    }
+
+    #[test]
+    fn v13_upgrade_adds_bounded_boards_without_snapshot_changes() {
+        for table in [
+            "social_board_posts",
+            "social_board_usage",
+            "social_board_report_evidence",
+        ] {
+            assert!(UPGRADE_V12_TO_V13_SQL.contains(&format!("CREATE TABLE {table}")));
+            assert!(SCHEMA_SQL.contains(&format!("CREATE TABLE {table}")));
+        }
+        for limit in ["5", "20", "128", "4096", "7776000"] {
+            assert!(UPGRADE_V12_TO_V13_SQL.contains(limit));
+            assert!(SCHEMA_SQL.contains(limit));
+        }
+        assert!(UPGRADE_V12_TO_V13_SQL.contains("SET version = 13"));
+        assert!(UPGRADE_V12_TO_V13_SQL.contains("'character', 'mail', 'board'"));
+        assert!(!UPGRADE_V12_TO_V13_SQL.contains("world_runtime"));
+        assert!(!UPGRADE_V12_TO_V13_SQL.contains("DELETE FROM"));
     }
 
     #[test]

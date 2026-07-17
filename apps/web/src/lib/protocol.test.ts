@@ -1924,6 +1924,110 @@ describe('bounded offline mail protocol', () => {
   });
 });
 
+describe('bounded community board protocol', () => {
+  const postId = 'b0123456789abcdef0123456789abcdef';
+  const summary = {
+    postId,
+    board: 'general',
+    author: 'Ágata <&>',
+    subject: 'La puerta del norte',
+    createdAt: 1_700_000_000,
+    expiresAt: 1_707_776_000,
+    canDelete: false,
+    canReport: true,
+  } as const;
+
+  it('accepts the closed catalog, paginated summaries and a complete text entry', () => {
+    const catalog = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'board.catalog',
+      seq: 95,
+      data: {
+        boards: [
+          {
+            key: 'general', label: 'General',
+            description: 'Conversación comunitaria deliberada.', canPost: true,
+          },
+          {
+            key: 'newbie', label: 'Personas nuevas',
+            description: 'Preguntas y orientación para empezar.', canPost: false,
+          },
+        ],
+        retentionDays: 90,
+      },
+    }));
+    const list = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'board.list',
+      seq: 96,
+      data: { board: 'general', page: 1, totalPages: 1, totalPosts: 1, capacity: 1000, posts: [summary] },
+    }));
+    const entry = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'board.entry',
+      seq: 97,
+      data: { ...summary, body: 'Nos vemos | junto al faro. <&>' },
+    }));
+    expect(catalog).toMatchObject({ type: 'board.catalog', data: { retentionDays: 90 } });
+    expect(list).toMatchObject({ type: 'board.list', data: { totalPosts: 1 } });
+    expect(entry).toMatchObject({ type: 'board.entry', data: { postId, canReport: true } });
+  });
+
+  it('rejects forged identity, DTO smuggling, invalid TTL and inconsistent pagination', () => {
+    const list = {
+      board: 'general', page: 1, totalPages: 1, totalPosts: 1, capacity: 1000, posts: [summary],
+    };
+    for (const data of [
+      { ...list, capacity: 999 },
+      { ...list, totalPosts: 11, totalPages: 1 },
+      { ...list, posts: [{ ...summary, postId: 'bBAD' }] },
+      { ...list, posts: [{ ...summary, board: 'newbie' }] },
+      { ...list, posts: [{ ...summary, subject: 'oculto\u202e' }] },
+      { ...list, posts: [{ ...summary, expiresAt: summary.expiresAt + 1 }] },
+      { ...list, accountId: 42 },
+    ]) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1, type: 'board.list', seq: 98, data,
+      }))).toBeUndefined();
+    }
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'board.entry', seq: 99, data: { ...summary, body: ' texto' },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'board.catalog',
+      seq: 100,
+      data: { boards: [], retentionDays: 90 },
+    }))).toBeUndefined();
+  });
+
+  it('builds only exact closed board action shapes', () => {
+    expect(createActionPerform('board.catalog', undefined, 'board-1').data).toMatchObject({
+      action: 'board.catalog', requestId: 'board-1',
+    });
+    expect(createActionPerform('board.list', { board: 'newbie', page: 100 }, 'board-2').data)
+      .toMatchObject({ action: 'board.list', board: 'newbie', page: 100 });
+    expect(() => createActionPerform('board.list', { board: 'general' }, 'board-no-page'))
+      .toThrow(RangeError);
+    expect(createActionPerform('board.post', {
+      board: 'general', subject: 'Asunto <&>', body: 'Contenido | visible.',
+    }, 'board-3').data).toMatchObject({ action: 'board.post', board: 'general' });
+    expect(createActionPerform('board.report', {
+      postId, reason: 'Contenido abusivo.',
+    }, 'board-4').data).toMatchObject({ action: 'board.report', postId });
+
+    expect(() => createActionPerform('board.read', { postId: 'bBAD' }, 'board-5')).toThrow();
+    expect(() => createActionPerform('board.list', { board: 'general', page: 101 }, 'board-6'))
+      .toThrow();
+    expect(() => createActionPerform('board.post', {
+      board: 'general', subject: 'Asunto | ambiguo', body: 'Visible.',
+    }, 'board-7')).toThrow();
+    expect(() => createActionPerform('board.report', {
+      postId, reason: 'abuso', target: 'extra',
+    }, 'board-8')).toThrow();
+  });
+});
+
 describe('websocket URL', () => {
   it('uses the Tiamud WebSocket subprotocol', () => {
     expect(WEBSOCKET_SUBPROTOCOL).toBe('tiamud.v1');

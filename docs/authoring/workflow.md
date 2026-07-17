@@ -67,7 +67,7 @@ ports. Area hot-loading remains future architecture, not part of the current
 authoring or deployment path.
 
 The current artifact contract is WorldPack v9/AreaPack v8/Project v2. The
-selected persistence backend is prepared as schema v12 before readiness;
+selected persistence backend is prepared as schema v13 before readiness;
 legacy raw runtime snapshots v1-v5 keep their 1 MiB physical limit, while
 v6 and current v7 admission and commits allow 2 MiB. Strict v6 upgrade adds
 empty applied-affix state and initializes the sealed-open counter at one. This

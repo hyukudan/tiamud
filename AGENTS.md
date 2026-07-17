@@ -62,13 +62,13 @@ matriz, memoria y documentación pública a la vez.
 - Mundo y conversación usan buzones acotados de 256 entradas por sesión,
   encaminados por `SessionId`. Conserva el fan-out O(S), recuperación por lag y
   limpieza segura ante cancelación.
-- PostgreSQL esquema v12 es el perfil recomendado para un host público nuevo.
-  SQLite esquema v12 es la ruta local/predeterminada sin servicios. Se abre un
+- PostgreSQL esquema v13 es el perfil recomendado para un host público nuevo.
+  SQLite esquema v13 es la ruta local/predeterminada sin servicios. Se abre un
   único sistema autoritativo; no hay doble escritura.
 - `tiamud-migrate-postgres` traslada sin conexión una instantánea SQLite actual
   a PostgreSQL vacío en una transacción, incluidas suscripciones, perfiles,
   capacidades, reportes resueltos, auditoría de staff, mensajes/cuotas de
-  correo y evidencia denunciada.
+  correo, tablones, cuotas y evidencia denunciada.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
@@ -76,7 +76,7 @@ matriz, memoria y documentación pública a la vez.
   instancias, reservas de trade, procedencia y derechos de botín, afijos por
   instancia y contador de aperturas. SQLite y
   PostgreSQL la confirman con personajes/eventos en su transacción existente;
-  ambos adaptadores usan esquema v12 y no hay tabla espejo ni custodia SQL de
+  ambos adaptadores usan esquema v13 y no hay tabla espejo ni custodia SQL de
   trade o botín. DTO exactos v1-v7 se seleccionan por `snapshotVersion`;
   snapshots v1-v5 conservan su límite legado de 1 MiB y v6-v7 admiten hasta
   2 MiB. El DTO v6 estricto rechaza campos v7 y normaliza a afijos vacíos y
@@ -198,7 +198,7 @@ matriz, memoria y documentación pública a la vez.
   administración dirigida de un líder/invitado/miembro desconectado.
 - La conversación incluye `say` local, `tell`, `reply` en memoria mientras el
   destinatario siga conectado, chat de grupo y canales `general`, `newbie` y
-  `staff`. Suscripciones son durables en v12; `staff` requiere perfil
+  `staff`. Suscripciones son durables en v13; `staff` requiere perfil
   `moderator`, `administrator` o `implementor` al unirse, enviar y recibir;
   `helper` y `builder` no acceden. WorldPack v9/AreaPack v8 conservan una
   comunicación `telepathy/direct_online` en habilidades `spell|utility`
@@ -212,8 +212,22 @@ matriz, memoria y documentación pública a la vez.
   `mail list/read/delete/send/report`, 64 mensajes y 128 KiB por buzón,
   caducidad de 30 días, cuotas por cuenta 20/h y 50/día, aceptación opaca ante
   ignore/block/capacidad y evidencia denunciada durante 90 días. Web publica
-  `mail.list`/`mail.message`; Telnet y `Tiamud.Mail 1` son equivalentes. No hay
-  historial general durable, shout/yell, telepatía de grupo/offline o tablones.
+  `mail.list`/`mail.message`; Telnet y `Tiamud.Mail 1` son equivalentes. Los
+  tablones públicos `general` y `newbie` son otra superficie pull-only:
+  `board catalog/list/read/post/delete/report`, diez entradas por página,
+  retención de 90 días, cuota de cuenta 5/h y 20/día, 64 publicaciones vivas
+  por cuenta, 1.000/4 MiB por tablón y 2.000/8 MiB globales. Borrar exige el
+  mismo personaje autor; una cuenta distinta puede crear la única denuncia
+  global de un post. La evidencia dura 90 días y staff la resuelve mediante
+  `reports.view`/`reports.resolve`. Web `board.catalog/list/entry`, texto
+  Telnet y `Tiamud.Board 1` son equivalentes; no hay fan-out, notificación,
+  edición, hilos, búsqueda ni vínculo con sala/AreaPack. La línea Telnet máxima
+  es 8 KiB y el detalle GMCP que crece por escape JSON conserva resumen,
+  prefijo UTF-8 del cuerpo y metadatos de overflow bajo el mismo tope; texto
+  conserva el cuerpo completo. Web rechaza claves JSON duplicadas a cualquier
+  profundidad y solo aplica post/delete/report tras `action.result`
+  correlacionado, conservando borradores en fallo. No hay historial
+  general durable, shout/yell o telepatía de grupo/offline.
   WorldPack v9/AreaPack v8 añaden hasta
   32 emotes locales authored: `emotes` lista y `emote <comando> [personaje]`
   renderiza plantillas cerradas por perspectiva, sin texto libre, persistencia
@@ -273,6 +287,10 @@ matriz, memoria y documentación pública a la vez.
 - Telnet es cliente textual completo. `tiamud-telnet-codec` es el parser de
   producción compartido con fuzzing. Conserva RFC 1143, TTYPE/MTTS, NAWS,
   CHARSET, GMCP, MSSP, MCCP2 y salida enriquecida opt-in.
+- La línea Telnet se acota a 8 KiB y se descarta entera al excederse. Cada GMCP
+  se acota a 8 KiB; `Tiamud.Board.Entry` y, defensivamente,
+  `Tiamud.Mail.Message` conservan campos no textuales, prefijo UTF-8 del cuerpo
+  y `truncated`/`overflow` cuando el JSON escapado no cabe.
 - Telnet TLS 1.2/1.3 directo es predeterminado y fail-closed. `plaintext` solo
   es excepción explícita para desarrollo/privado y nunca debe llevar
   credenciales públicas.
@@ -426,6 +444,32 @@ ejecutaron PostgreSQL real v12/mover, WebKit, lector manual, carga/soak ni soak
 de 24 h. Véase el
 [registro 5C](docs/project/log/2026-07-17-bounded-offline-mail-phase-5c.md).
 
+### Evidencia integrada de tablones comunitarios 5D
+
+La fase 5D mantiene WorldPack v9, AreaPack v8, WorldProject v2 y snapshot v7,
+pero avanza SQLite/PostgreSQL al esquema v13. `general` y `newbie` son
+tablones globales públicos, acotados, consultables bajo demanda y separados de
+chat y correo. La implementación incluye cuota y capacidad transaccionales,
+purga fail-closed al arrancar, denuncia única con evidencia temporal,
+resolución mediante la cola staff, paridad Web/Telnet/`Tiamud.Board 1` y panel
+accesible sin HTML/Markdown remoto. La auditoría cerró pérdida silenciosa del
+detalle GMCP, línea Telnet insuficiente, claves JSON duplicadas y mutación Web
+optimista: ahora hay fallback UTF-8 explícito, límite de línea 8 KiB, rechazo
+recursivo y confirmación correlacionada que preserva borradores.
+
+El árbol final pasa formato/diff/clippy estricto y 691/691 pruebas Rust: 146
+core, 283 servidor, 132 WorldPack y 130 restantes. PostgreSQL 18.4 real pasa
+19/19 en adaptador+mover v13, incluida migración de una base actual
+representativa; las 283 de servidor incluyen flujo board/runtime y lock
+advisory concurrente reales, además de 5/5 focused PostgreSQL. Web pasa check
+0/0, 122 Vitest, build y 46/46 Playwright soportado (23 Chromium y 23 Firefox);
+Node pasa 88, además de humo, advisories/sources y licencias/avisos 307 Rust/76
+web. La auditoría deja 0 P1/P2/P3 abiertos. No se ejecutaron WebKit por faltar
+bibliotecas del host, lector manual, carga/soak mixtos ni soak de 24 h. TLS,
+backup/restore, monitorización y recuperación PostgreSQL de producción siguen
+siendo responsabilidad de cada instalación. Véase el
+[registro 5D](docs/project/log/2026-07-17-bounded-moderable-community-boards-phase-5d.md).
+
 ### Evidencia histórica retenida
 
 La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
@@ -485,8 +529,8 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 | --- | --- |
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
-| `crates/persistence-sqlite/` | SQLite esquema v12 y almacenamiento local |
-| `crates/persistence-postgres/` | PostgreSQL esquema v12, adaptador y mover |
+| `crates/persistence-sqlite/` | SQLite esquema v13 y almacenamiento local |
+| `crates/persistence-postgres/` | PostgreSQL esquema v13, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
@@ -615,9 +659,9 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
   verificada;
 - sin entrenamiento general, migración general de IDs, multiclase, sprite de
   jugador, heal cue del servidor ni lápida de derrota;
-- fases social 1, telepatía 5A, emotes authored 5B y correo offline 5C
-  implementadas; sin historial general, shout/yell, telepatía de grupo/offline,
-  emotes globales/de grupo o tablones;
+- fases social 1, telepatía 5A, emotes authored 5B, correo offline 5C y
+  tablones comunitarios 5D implementadas; sin historial general, shout/yell,
+  telepatía de grupo/offline ni emotes globales/de grupo;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
 - fase 4B de inventario/botín implementada: prototipos/instancias, creación durable,

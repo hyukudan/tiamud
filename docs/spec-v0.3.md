@@ -36,14 +36,15 @@ PostgreSQL se recomienda para instalaciones públicas nuevas; SQLite es la
 alternativa local sin servicio. Se selecciona uno y nunca se hace doble
 escritura.
 
-Ambos adaptadores implementan el esquema v12. Conserva las relaciones sociales
+Ambos adaptadores implementan el esquema v13. Conserva las relaciones sociales
 y de staff de v9/v10 y amplía de forma transaccional el límite físico del
 snapshot opaco actual a 2 MiB. Los snapshots legacy v1–v5 continúan limitados a
 1 MiB al decodificarse; v6 y v7 admiten 2 MiB. El traslado
 SQLite→PostgreSQL copia estas relaciones y
-el runtime en una transacción. La aceptación PostgreSQL real retenida es v8;
-no se relabela como aceptación v12 y aún falta ejecutar v12 contra un servidor
-PostgreSQL real.
+el runtime en una transacción. La aceptación runtime histórica retenida es v8
+y no se relabela como v13. PostgreSQL 18.4 real pasa 19/19 en adaptador+mover
+v13, incluida migración representativa; servidor cubre flujo board/runtime y
+concurrencia advisory reales.
 
 La operación está en [single-host.md](operations/single-host.md). Microservicios
 y orquestación no son objetivo sin carga medida que lo justifique.
@@ -209,7 +210,7 @@ aparecen en botín se realiza una consulta `existence-only`. Después se cancela
 los encuentros de botín aún abiertos y su estado de combate en un commit previo
 a readiness; los derechos `groundLoot` ya resueltos sobreviven intactos. SQLite
 y PostgreSQL confirman el snapshot como única autoridad en su transacción de
-esquema v12; no hay tabla espejo de loot o escrow ni doble escritura.
+esquema v13; no hay tabla espejo de loot o escrow ni doble escritura.
 
 Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
 WorldPack, 65.536 instancias runtime, 1 MiB para un snapshot legacy v1–v5 y 2
@@ -389,6 +390,37 @@ entrar en eventos, `reply`, snapshots, auditoría, historial o SQL.
 El contrato durable y de privacidad de 5C se fija en
 [ADR 0017](decisions/0017-bounded-offline-mail.md).
 
+La fase 5D añade dos tablones globales públicos, `general` y `newbie`, sin
+convertir canales o correo en un historial. Texto ofrece `board`, `board list`,
+`read`, `post`, `delete` y `report`; Web usa acciones `board.*` exactas y GMCP
+negocia `Tiamud.Board 1`. Catálogo, páginas y detalle solo regresan a la sesión
+solicitante: no hay fan-out, notificación ni `Comm.Channel.Text`.
+
+Telnet acepta líneas acotadas a 8 KiB para alojar el comando de publicación y
+un cuerpo máximo; una línea mayor se descarta entera. Cada paquete GMCP sigue
+acotado a 8 KiB. Si el JSON escapado de `Tiamud.Board.Entry` no cabe, el mismo
+paquete conserva el resumen, un prefijo UTF-8 del cuerpo y metadatos
+`truncated`/`overflow`; el texto Telnet conserva el cuerpo completo.
+
+Cada página contiene diez resúmenes y admite páginas 1..=100; cada post vive 90
+días. Una cuenta mantiene hasta 64 posts y consume una cuota transaccional de
+5/h y 20/día. Cada tablón admite 1.000 posts/4 MiB y el conjunto 2.000/8 MiB.
+Mute, ban y el bucket social impiden publicar; ignore/block no alteran un
+contenido deliberadamente público. El mismo personaje autor puede borrar y
+otra cuenta puede presentar la única denuncia global del post. La evidencia
+vive 90 días, con máximo de ocho reportes abiertos de tablón por cuenta
+denunciante y 10.000 evidencias globales, y se resuelve con las capacidades
+staff existentes; `action_taken` elimina el post vivo.
+
+SQLite/PostgreSQL v13 añaden `social_board_posts`, `social_board_usage` y
+`social_board_report_evidence`, y `report_kind='board'`. La purga combinada
+trabaja en lotes de hasta 256, falla cerrada al arrancar y es no fatal pero
+observable cada hora. El mover copia padre, hijos, posts, evidencia y cuota en
+orden. WorldPack v9, AreaPack v8, WorldProject v2 y snapshot v7 no cambian. No
+hay edición, hilos, búsqueda, markup, adjuntos, suscripciones, push ni tablones
+de party/guild/staff/sala/área. El contrato está en
+[ADR 0018](decisions/0018-bounded-moderable-community-boards.md).
+
 La autoridad ejecutable de staff es independiente de la ficha y usa una de
 doce capacidades cerradas: `reports.view`, `reports.resolve`,
 `moderation.mute`, `moderation.ban`, `staff.assign`, `staff.inspect`,
@@ -501,6 +533,8 @@ y secuencias por sesión. Texto y percepción preceden cada representación.
 Salvaguardas implementadas:
 
 - 16 KiB compactos por frame WebSocket de salida;
+- rechazo recursivo de claves JSON duplicadas en cualquier objeto WebSocket
+  antes de deserializarlo;
 - ventana semántica determinista de escena de 14 KiB en Web y 48 KiB en
   Telnet, priorizando botín propio, público y reservado ajeno antes de truncar
   entidades/prosa con un aviso explícito;
@@ -525,6 +559,9 @@ secuencia ni se infieren de prosa. Referencia:
 - Parsers, subnegociaciones, profundidad JSON, colas, scripts, recursos y
   descompresión tienen límites.
 - Entidades ocultas, salas secretas y variantes no resueltas no se precargan.
+- El navegador no aplica optimistamente publicación, borrado o denuncia de
+  tablón: espera `action.result` correlacionado, acota pendientes, conserva
+  borradores ante fallo e invalida vistas solo tras éxito.
 
 ## Estado de implementación
 
@@ -541,11 +578,12 @@ secuencia ni se infieren de prosa. Referencia:
 | Perfil de sprite transparente | WebP alfa + PNG implementado |
 | Sidecar de entidades seguro | Implementado; sin sprites de muestra |
 | Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
-| Social fase 1 y esquema v12 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v12 aún no retenida |
+| Social fase 1 y esquema v13 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; PostgreSQL v13 real adaptador+mover 19/19 y flujo board/runtime servidor cubierto |
 | Comunicación fase 5A | Telepatía directa online authored con coste/cooldowns, bloqueo por sala, supresión privada, commit antes de entrega y paridad Web/Telnet/GMCP; la telepatía no persiste ni entrega offline/grupal |
 | Comunicación fase 5B | Emotes locales authored con plantillas cerradas y render no recursivo, targeting local cerrado sin objetivo/opcional/obligatorio, ignore/block por receptor, commit antes de entrega y paridad Web/Telnet/GMCP; sin texto libre, persistencia ni emotes globales/de grupo |
 | Comunicación fase 5C | Correo offline explícito con cuotas por cuenta, buzón/caducidad/paginación acotados, referencias opacas, aceptación que no filtra política/capacidad, denuncia con evidencia de 90 días y paridad Web/Telnet/`Tiamud.Mail 1`; sin historial general, outbox, adjuntos ni correo grupal |
-| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v12 aún no retenida |
+| Comunicación fase 5D | Tablones públicos `general`/`newbie` con páginas, cuota, capacidad, retención, borrado propio, denuncia única y evidencia staff acotados; paridad Web/Telnet/`Tiamud.Board 1`, fallback GMCP UTF-8 y confirmación Web correlacionada; gate final superado |
+| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; PostgreSQL v13 real cubierto, operación de producción específica de instalación |
 | Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3C | Snapshot v4 con vínculo durable y migración v1-v3, tres políticas, `give` atómico, opacidad y paridad Web/Telnet/GMCP implementados; puertas locales soportadas superadas |
@@ -612,6 +650,13 @@ bytes y tiene SHA-256
 `9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
 No se ejecutaron PostgreSQL real v11, WebKit, lector manual, carga/soak ni soak
 de 24 h.
+
+En el árbol final de fase 5D pasan formato/diff/clippy estricto y 691 pruebas
+Rust (146 core, 283 servidor, 132 WorldPack, 130 restantes). PostgreSQL 18.4
+real pasa adaptador+mover 19/19 y servidor focused 5/5. Web pasa check 0/0, 122
+Vitest, build y 46/46 Playwright soportado (23 Chromium, 23 Firefox); pasan 88
+Node, humo, advisories/sources y licencias/avisos 307 Rust/76 web. Auditoría: 0
+P1/P2/P3. No se ejecutaron WebKit, lector manual, carga/soak mixtos ni soak 24h.
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
 cuando las puertas de integración cambien.
@@ -719,6 +764,30 @@ Botín 4B:
 6. Web, Telnet y GMCP comparten acciones, límites, páginas y referencias opacas.
 7. Pity, need/greed, master-loot, reparto por contribución y recompensas pagadas
    no forman parte de esta fase.
+
+Comunicación 5D:
+
+1. Catálogo cerrado, páginas 1..=100 de diez, IDs públicos opacos y DTO exactos
+   funcionan igual en texto, Web y `Tiamud.Board 1`, siempre pull-only.
+2. Texto visible y campos respetan 128/4.096/2.048 bytes; controles peligrosos,
+   marcas bidi y `|` en asunto fallan antes de persistir.
+3. Cuotas 5/h y 20/día, cap 64 por cuenta, 1.000/4 MiB por tablón y 2.000/8
+   MiB globales se calculan sobre posts vivos y no admiten carreras de exceso.
+4. Mute/ban/bucket bloquean publicación; leer, borrar propio y denunciar siguen
+   disponibles, e ignore/block nunca modifican visibilidad o paginación pública.
+5. Solo el mismo personaje autor borra; una cuenta distinta crea como máximo
+   una denuncia global, con caps 8/10.000 y evidencia independiente de 90 días.
+6. SQLite/PostgreSQL v13, migración v12→v13, restore y mover conservan FKs,
+   reportes, cuota, publicaciones y evidencia; la purga nunca es necesaria para
+   aplicar expiración lógica.
+7. El navegador presenta texto seguro en un panel accesible separado, sin
+   `{@html}`, Markdown, autolinks, recursos remotos ni estado leído/no leído.
+8. Telnet admite el post máximo dentro de 8 KiB; `Tiamud.Board.Entry` conserva
+   resumen, prefijo UTF-8 y metadatos de overflow si el JSON escapado supera 8
+   KiB, mientras texto conserva el cuerpo completo.
+9. JSON Web con claves duplicadas falla a cualquier profundidad; post/delete/
+   report solo cambian la UI tras `action.result` correlacionado, sin perder
+   borradores en rechazo ni aceptar duplicados pendientes.
 
 ## Trabajo aplazado o rechazado
 

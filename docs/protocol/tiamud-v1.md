@@ -247,6 +247,11 @@ ignore/block.
 
 ### Acción estructurada
 
+El servidor analiza el JSON WebSocket con detección recursiva de claves
+duplicadas. Dos apariciones de una clave en cualquier objeto, también anidado,
+rechazan el frame antes de construir el payload tipado; ninguna acción depende
+de la semántica last-key-wins del parser.
+
 ```json
 {
   "v": 1,
@@ -274,6 +279,7 @@ social.say, social.tell, social.reply, social.channel.list,
 social.channel.join, social.channel.leave, social.channel.say, social.telepathy,
 social.emote.list, social.emote,
 mail.list, mail.read, mail.delete, mail.send, mail.report,
+board.catalog, board.list, board.read, board.post, board.delete, board.report,
 social.who, social.help
 social.ignore, social.unignore, social.block, social.unblock, social.report
 moderation.mute, moderation.unmute, moderation.ban, moderation.unban,
@@ -328,6 +334,38 @@ textuales equivalentes son `mail [list [página]]`, `mail read/delete <ref>`,
 `mail report <ref> | <motivo>`. Enviar comparte mute y bucket social; las
 demás operaciones no. Un `requestId` repetido solo reproduce la misma firma
 exacta y la respuesta estructurada privada pertenece a esa sesión.
+
+Los tablones usan formas cerradas separadas:
+
+| Acción | Campos exactos adicionales |
+| --- | --- |
+| `board.catalog` | Ninguno |
+| `board.list` | `board`, `page` |
+| `board.read` | `postId` |
+| `board.post` | `board`, `subject`, `body` |
+| `board.delete` | `postId` |
+| `board.report` | `postId`, `reason` |
+
+`board` es `general` o `newbie`; `postId` es `b` seguido de 32 dígitos
+hexadecimales minúsculos y `page` está en `1..=100`. Asunto, cuerpo y motivo
+ocupan como máximo 128/4.096/2.048 bytes UTF-8 visibles. Controles C0/C1, DEL y
+marcas bidi se rechazan. `|` se prohíbe en asunto porque separa el comando de
+texto, pero cuerpo y motivo pueden conservarlo. Las formas textuales exactas
+son `board`, `board list <general|newbie> [página]`, `board read/delete <ref>`,
+`board post <tablón> | <asunto> | <cuerpo>` y
+`board report <ref> | <motivo>`.
+
+Catálogo, lista y lectura no mutan ni se publican a otras sesiones. `post`
+comparte mute, ban y bucket social antes de la cuota durable propia; las demás
+acciones no. Un `requestId` repetido exige la misma firma, incluido todo el
+cuerpo, y solo reproduce la respuesta de aquella sesión.
+
+El navegador registra de forma acotada `board.post`, `board.delete` y
+`board.report` pendientes y no aplica su efecto al mero envío. Espera el
+`action.result` cuyo `requestId` coincida: solo `ok: true` invalida la lista,
+retira el detalle borrado o marca la entrada como denunciada. Un fallo conserva
+la vista y los borradores; los formularios de publicación/denuncia bloquean un
+segundo envío mientras su solicitud siga pendiente.
 
 Salvo `staff.status`, que solo muestra la asignación propia, cada acción
 `staff.*` exige una capacidad concreta y `reason`; las acciones dirigidas
@@ -552,6 +590,9 @@ traffic.
 | `reward.odds` | Página privada de probabilidades exactas de una recompensa sellada portada. |
 | `mail.list` | Página privada de hasta diez cabeceras del buzón offline. |
 | `mail.message` | Carta privada completa marcada como leída. |
+| `board.catalog` | Dos descriptores públicos de tablón y permiso actual de publicación. |
+| `board.list` | Página pública de hasta diez resúmenes, solo para quien la solicita. |
+| `board.entry` | Publicación pública completa, solo para quien la solicita. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
 | `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `telepathy`, `emote`, `party`, `general`, `newbie` o `staff`. |
@@ -991,7 +1032,33 @@ selectores, filas, deltas ni numeradores/denominadores.
 entra en la lista. Referencias y campos están acotados antes de serializar y
 no exponen cuentas, personajes o claves SQL. Telnet ofrece texto equivalente;
 si negocia `Tiamud.Mail 1`, recibe `Tiamud.Mail.List` o
-`Tiamud.Mail.Message`, cada paquete bajo el límite GMCP de 8 KiB.
+`Tiamud.Mail.Message`, cada paquete bajo el límite GMCP de 8 KiB. Como defensa
+en profundidad, si un valor interno no canónico hiciera crecer el JSON
+escapado, `Tiamud.Mail.Message` conserva cabecera, prefijo UTF-8 del cuerpo,
+`truncated: true` y el mismo objeto `overflow` descrito para tablones; el input
+canónico de correo limita el cuerpo a 2.048 bytes y normalmente cabe completo.
+
+`board.catalog` contiene `retentionDays: 90` y exactamente dos filas
+`{key,label,description,canPost}` para `general` y `newbie`. `board.list`
+contiene `board`, `page`, `totalPages`, `totalPosts`, `capacity: 1000` y hasta
+diez resúmenes `{postId,board,author,subject,createdAt,expiresAt,canDelete,
+canReport}`. `totalPages` nunca es menor que uno; una página válida posterior
+al total contiene `posts: []`. `board.entry` contiene el mismo resumen más
+`body`. `canDelete` se calcula para el mismo personaje autor y `canReport` para
+otra cuenta mientras no exista la denuncia global.
+
+Las respuestas no contienen cuenta, personaje durable, PK SQL, estado de
+ignore/block ni cuerpo en el listado. Svelte inserta sus cadenas como texto,
+sin HTML, Markdown o autolinks. Telnet ofrece el equivalente textual; si
+negocia `Tiamud.Board 1`, recibe `Tiamud.Board.Catalog`, `.List` o `.Entry`,
+cada paquete bajo 8 KiB contando paquete, espacio y JSON. Si el detalle
+completo excede ese máximo por escape JSON, `Tiamud.Board.Entry` conserva el
+resumen y el mayor prefijo UTF-8 de `body` que quepa, añade
+`truncated: true` y
+`overflow: {package:"Tiamud.Board.Entry",maximumBytes:8192,originalBytes}`.
+`originalBytes` mide el cuerpo UTF-8 previo al escape. El texto Telnet conserva
+el cuerpo completo. Los tablones no producen `chat.message`, `message.append`
+ni notificación online.
 
 `vitals.update`, `inventory.patch` and `map.snapshot` replace their complete
 corresponding fragment at the stated revision. Other player changes use a new
@@ -1041,7 +1108,7 @@ propia sal; el observador de sala no recibe una lista ajena.
 acotado. Ignore y block
 por cualquiera de las partes se aplican antes de entregar. Mute/ban y rate
 limit se aplican en servidor. `general`, `newbie` y `staff` requieren
-suscripción durable en esquema v12; `staff` exige además perfil `moderator`,
+suscripción durable en esquema v13; `staff` exige además perfil `moderator`,
 `administrator` o `implementor` al unirse, enviar y recibir. `helper`,
 `builder` y los roles legados `Player`/`Moderator`/`Admin` no conceden ese
 acceso. `announcement` es entrega del servidor, no un canal suscribible. La
@@ -1133,9 +1200,13 @@ rendering remains authoritative and is never removed by this fallback.
   `tiamud_outbound_budget_exceeded_total{transport="websocket",message="frame"}`
   increment rather than emitting an invalid frame.
 - JSON nesting: 16.
-- command: 1024 bytes; request ID: 128; action target: 256; `recipient`: 64.
+- `command.submit` WebSocket: 1.024 bytes; línea de comando Telnet: 8 KiB,
+  descartada completa si excede el máximo; request ID: 128; action target: 256;
+  `recipient`: 64.
 - chat: 512 bytes; mail target/subject/body/report reason: 64/128/2,048/2,048
-  bytes; reason fields and all projected arrays/strings are bounded.
+  bytes; board subject/body/report reason: 128/4,096/2,048 bytes, diez posts
+  por página y páginas 1..=100; reason fields and all projected arrays/strings
+  are bounded.
 - initial hello timeout: 10 seconds; WebSocket write timeout: 5 seconds.
 - three consecutive protocol/rate violations close the game session.
 - `tiamud.v1` is required; browser `Origin`, when present, must exactly match

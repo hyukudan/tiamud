@@ -1092,9 +1092,24 @@ main {
   resize: vertical;
 }
 
-.mail-body {
+.mail-body,
+.board-body {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.board-entry {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border: 1px solid #30352a;
+  border-radius: 0.4rem;
+  background: rgb(12 15 11 / 62%);
+}
+
+.board-selector p {
+  margin: 0.2rem 0;
+  color: #aaa99e;
+  font-size: 0.72rem;
 }
 
 .inline-form small {

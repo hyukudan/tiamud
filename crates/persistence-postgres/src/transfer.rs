@@ -8,7 +8,7 @@ use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transact
 
 const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 
-const TABLES: [&str; 20] = APPLICATION_TABLES;
+const TABLES: [&str; 23] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -121,6 +121,10 @@ pub fn copy_sqlite_to_postgres(
         rows: copy_social_mail_usage(&source, &mut target)?,
     });
     tables.push(TableCount {
+        table: "social_board_usage",
+        rows: copy_social_board_usage(&source, &mut target)?,
+    });
+    tables.push(TableCount {
         table: "moderation_mutes",
         rows: copy_moderation_decisions(&source, &mut target, "moderation_mutes")?,
     });
@@ -139,6 +143,14 @@ pub fn copy_sqlite_to_postgres(
     tables.push(TableCount {
         table: "social_mail_report_evidence",
         rows: copy_social_mail_report_evidence(&source, &mut target)?,
+    });
+    tables.push(TableCount {
+        table: "social_board_posts",
+        rows: copy_social_board_posts(&source, &mut target)?,
+    });
+    tables.push(TableCount {
+        table: "social_board_report_evidence",
+        rows: copy_social_board_report_evidence(&source, &mut target)?,
     });
     tables.push(TableCount {
         table: "moderation_audit",
@@ -185,8 +197,10 @@ fn lock_target_tables<C: GenericClient>(target: &mut C) -> Result<(), postgres::
         "LOCK TABLE accounts, characters, auth_sessions, domain_events,
                     world_runtime, social_ignores, social_blocks,
                     social_channel_subscriptions,
-                    social_mail_usage, social_mail_messages,
+                    social_mail_usage, social_board_usage,
+                    social_mail_messages,
                     social_mail_report_evidence,
+                    social_board_posts, social_board_report_evidence,
                     moderation_mutes, account_bans, social_reports,
                     moderation_audit, staff_profiles,
                     staff_capability_assignments, staff_audit,
@@ -516,6 +530,43 @@ fn copy_social_mail_usage<C: GenericClient>(
     Ok(count)
 }
 
+fn copy_social_board_usage<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT account_id, hour_started_at, hour_count,
+                day_started_at, day_count, updated_at
+         FROM social_board_usage ORDER BY account_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let account_id: i64 = row.get(0)?;
+        let hour_started_at: i64 = row.get(1)?;
+        let hour_count: i32 = row.get(2)?;
+        let day_started_at: i64 = row.get(3)?;
+        let day_count: i32 = row.get(4)?;
+        let updated_at: i64 = row.get(5)?;
+        target.execute(
+            "INSERT INTO social_board_usage
+                 (account_id, hour_started_at, hour_count,
+                  day_started_at, day_count, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &account_id,
+                &hour_started_at,
+                &hour_count,
+                &day_started_at,
+                &day_count,
+                &updated_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn copy_moderation_decisions<C: GenericClient>(
     source: &Connection,
     target: &mut C,
@@ -691,6 +742,94 @@ fn copy_social_mail_report_evidence<C: GenericClient>(
                 &subject,
                 &body,
                 &sent_at,
+                &created_at,
+                &expires_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn copy_social_board_posts<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT id, public_id, board_key, author_character_id, author_name,
+                subject, body, created_at, expires_at, report_id
+         FROM social_board_posts ORDER BY id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let public_id: String = row.get(1)?;
+        let board_key: String = row.get(2)?;
+        let author_character_id: i64 = row.get(3)?;
+        let author_name: String = row.get(4)?;
+        let subject: String = row.get(5)?;
+        let body: String = row.get(6)?;
+        let created_at: i64 = row.get(7)?;
+        let expires_at: i64 = row.get(8)?;
+        let report_id: Option<i64> = row.get(9)?;
+        target.execute(
+            "INSERT INTO social_board_posts
+                 (id, public_id, board_key, author_character_id, author_name,
+                  subject, body, created_at, expires_at, report_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &id,
+                &public_id,
+                &board_key,
+                &author_character_id,
+                &author_name,
+                &subject,
+                &body,
+                &created_at,
+                &expires_at,
+                &report_id,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn copy_social_board_report_evidence<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT report_id, board_key, post_public_id, author_name,
+                subject, body, posted_at, created_at, expires_at
+         FROM social_board_report_evidence ORDER BY report_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let report_id: i64 = row.get(0)?;
+        let board_key: String = row.get(1)?;
+        let post_public_id: String = row.get(2)?;
+        let author_name: String = row.get(3)?;
+        let subject: String = row.get(4)?;
+        let body: String = row.get(5)?;
+        let posted_at: i64 = row.get(6)?;
+        let created_at: i64 = row.get(7)?;
+        let expires_at: i64 = row.get(8)?;
+        target.execute(
+            "INSERT INTO social_board_report_evidence
+                 (report_id, board_key, post_public_id, author_name,
+                  subject, body, posted_at, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            &[
+                &report_id,
+                &board_key,
+                &post_public_id,
+                &author_name,
+                &subject,
+                &body,
+                &posted_at,
                 &created_at,
                 &expires_at,
             ],
@@ -912,6 +1051,8 @@ fn reset_sequences<C: GenericClient>(target: &mut C) -> Result<(), postgres::Err
                        COALESCE(MAX(id), 1), COUNT(*) > 0) FROM social_reports;
          SELECT setval(pg_get_serial_sequence('social_mail_messages', 'id')::regclass,
                        COALESCE(MAX(id), 1), COUNT(*) > 0) FROM social_mail_messages;
+         SELECT setval(pg_get_serial_sequence('social_board_posts', 'id')::regclass,
+                       COALESCE(MAX(id), 1), COUNT(*) > 0) FROM social_board_posts;
          SELECT setval(pg_get_serial_sequence('moderation_audit', 'sequence')::regclass,
                        COALESCE(MAX(sequence), 1), COUNT(*) > 0) FROM moderation_audit;
          SELECT setval(pg_get_serial_sequence('staff_audit', 'sequence')::regclass,
@@ -1114,7 +1255,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 12
+                required: 13
             }
         ));
         assert_eq!(
@@ -1153,7 +1294,20 @@ mod tests {
     fn transfer_manifest_is_parent_before_child_and_complete() {
         assert_eq!(TABLES[0], "accounts");
         assert_eq!(TABLES[1], "characters");
-        assert_eq!(TABLES.len(), 20);
+        assert_eq!(TABLES.len(), 23);
+        let reports = TABLES
+            .iter()
+            .position(|table| *table == "social_reports")
+            .unwrap();
+        let posts = TABLES
+            .iter()
+            .position(|table| *table == "social_board_posts")
+            .unwrap();
+        let evidence = TABLES
+            .iter()
+            .position(|table| *table == "social_board_report_evidence")
+            .unwrap();
+        assert!(reports < posts && posts < evidence);
         assert_eq!(TABLES.last(), Some(&"world_adventure"));
     }
 }

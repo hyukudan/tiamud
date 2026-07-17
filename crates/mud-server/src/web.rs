@@ -1,12 +1,13 @@
 use crate::{
+    boards::BoardDescriptor,
     delivery::SessionDelivery,
     operations::{
         ActiveSessionLimit, ActiveSessionLimiter, AuthRateLimiter, CommandRateLimiter,
         OutputTransport, RuntimeMetrics,
     },
     persistence::{
-        CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, MailMessage, MailPage,
-        StoreError,
+        BoardEntry, BoardPage, CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES,
+        MailMessage, MailPage, StoreError,
     },
     social::{MAX_CHAT_MESSAGE_BYTES, MAX_SOCIAL_TARGET_BYTES},
     world_actor::{
@@ -24,7 +25,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rust_embed::RustEmbed;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{Error as _, MapAccess, SeqAccess, Visitor},
+};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -33,12 +37,15 @@ use std::{
     time::Instant,
 };
 use tiamud_core::{
-    AccountRole, CharacterId, CharacterSnapshot, ContainerContentsView, EconomyAction,
-    ItemSelection, LootAction, MAX_MAIL_BODY_BYTES, MAX_MAIL_PAGE, MAX_MAIL_REPORT_REASON_BYTES,
-    MailAction, PartyAction, PlayerAction, PlayerStateView, QuestAction, RewardOddsView, SceneView,
-    SessionId, SocialAction, SocialChannelName, StaffAction, StaffCapability, StaffProfileKey,
-    StaffReportResolution, TradeAction, TradeContentsView, WorldError, parse_action,
-    valid_mail_public_id, valid_mail_subject, valid_mail_target, valid_mail_visible_text,
+    AccountRole, BoardAction, BoardKey, CharacterId, CharacterSnapshot, ContainerContentsView,
+    EconomyAction, ItemSelection, LootAction, MAX_BOARD_BODY_BYTES, MAX_BOARD_PAGE,
+    MAX_BOARD_REPORT_REASON_BYTES, MAX_MAIL_BODY_BYTES, MAX_MAIL_PAGE,
+    MAX_MAIL_REPORT_REASON_BYTES, MailAction, PartyAction, PlayerAction, PlayerStateView,
+    QuestAction, RewardOddsView, SceneView, SessionId, SocialAction, SocialChannelName,
+    StaffAction, StaffCapability, StaffProfileKey, StaffReportResolution, TradeAction,
+    TradeContentsView, WorldError, parse_action, valid_board_public_id, valid_board_subject,
+    valid_board_visible_text, valid_mail_public_id, valid_mail_subject, valid_mail_target,
+    valid_mail_visible_text,
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
@@ -205,6 +212,10 @@ struct ActionPerformData {
     emote: Option<String>,
     #[serde(default)]
     mail_id: Option<String>,
+    #[serde(default)]
+    post_id: Option<String>,
+    #[serde(default)]
+    board: Option<BoardKey>,
     #[serde(default)]
     subject: Option<String>,
     #[serde(default)]
@@ -537,6 +548,9 @@ struct CachedActionResult {
     reward_odds: Option<RewardOddsView>,
     mail_page: Option<MailPage>,
     mail_message: Option<MailMessage>,
+    board_catalog: Option<Vec<BoardDescriptor>>,
+    board_page: Option<BoardPage>,
+    board_entry: Option<BoardEntry>,
     projection_session: SessionId,
 }
 
@@ -579,6 +593,24 @@ impl CachedActionResult {
     fn mail_message_for(&self, session: SessionId) -> Option<&MailMessage> {
         (self.projection_session == session)
             .then_some(self.mail_message.as_ref())
+            .flatten()
+    }
+
+    fn board_catalog_for(&self, session: SessionId) -> Option<&[BoardDescriptor]> {
+        (self.projection_session == session)
+            .then_some(self.board_catalog.as_deref())
+            .flatten()
+    }
+
+    fn board_page_for(&self, session: SessionId) -> Option<&BoardPage> {
+        (self.projection_session == session)
+            .then_some(self.board_page.as_ref())
+            .flatten()
+    }
+
+    fn board_entry_for(&self, session: SessionId) -> Option<&BoardEntry> {
+        (self.projection_session == session)
+            .then_some(self.board_entry.as_ref())
             .flatten()
     }
 }
@@ -1240,6 +1272,12 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 !queue_mail_page(&outbound, &mut sequence, page)
                             }) || cached.mail_message_for(entered.session_id).is_some_and(|message| {
                                 !queue_mail_message(&outbound, &mut sequence, message)
+                            }) || cached.board_catalog_for(entered.session_id).is_some_and(|catalog| {
+                                !queue_board_catalog(&outbound, &mut sequence, catalog)
+                            }) || cached.board_page_for(entered.session_id).is_some_and(|page| {
+                                !queue_board_page(&outbound, &mut sequence, page)
+                            }) || cached.board_entry_for(entered.session_id).is_some_and(|entry| {
+                                !queue_board_entry(&outbound, &mut sequence, entry)
                             }) || !queue_scene(
                                 &outbound,
                                 &mut sequence,
@@ -1284,6 +1322,9 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             reward_odds,
                             mail_page,
                             mail_message,
+                            board_catalog,
+                            board_page,
+                            board_entry,
                         ) = match requested.action {
                             Ok(_) if !trade_selector_matches => {
                                 state.metrics.action_finished(action_started.elapsed(), false);
@@ -1291,6 +1332,9 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                     false,
                                     Some("That trade is not available.".to_owned()),
                                     Vec::new(),
+                                    None,
+                                    None,
+                                    None,
                                     None,
                                     None,
                                     None,
@@ -1316,6 +1360,9 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                         outcome.reward_odds,
                                         outcome.mail_page,
                                         outcome.mail_message,
+                                        outcome.board_catalog,
+                                        outcome.board_page,
+                                        outcome.board_entry,
                                     )
                                 }
                                 Err(error) => {
@@ -1330,12 +1377,27 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                         None,
                                         None,
                                         None,
+                                        None,
+                                        None,
+                                        None,
                                     )
                                 }
                             },
                             Err(error) => {
                                 state.metrics.action_finished(action_started.elapsed(), false);
-                                (false, Some(error), Vec::new(), None, None, None, None, None)
+                                (
+                                    false,
+                                    Some(error),
+                                    Vec::new(),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                )
                             }
                         };
                         state
@@ -1353,6 +1415,9 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                     reward_odds: reward_odds.clone(),
                                     mail_page: mail_page.clone(),
                                     mail_message: mail_message.clone(),
+                                    board_catalog: board_catalog.clone(),
+                                    board_page: board_page.clone(),
+                                    board_entry: board_entry.clone(),
                                     projection_session: entered.session_id,
                                 },
                             );
@@ -1387,6 +1452,21 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         }
                         if let Some(message) = &mail_message
                             && !queue_mail_message(&outbound, &mut sequence, message)
+                        {
+                            break;
+                        }
+                        if let Some(catalog) = &board_catalog
+                            && !queue_board_catalog(&outbound, &mut sequence, catalog)
+                        {
+                            break;
+                        }
+                        if let Some(page) = &board_page
+                            && !queue_board_page(&outbound, &mut sequence, page)
+                        {
+                            break;
+                        }
+                        if let Some(entry) = &board_entry
+                            && !queue_board_entry(&outbound, &mut sequence, entry)
                         {
                             break;
                         }
@@ -2257,6 +2337,87 @@ fn queue_mail_message(
     )
 }
 
+fn board_summary_json(summary: &crate::persistence::BoardPostSummary) -> Value {
+    json!({
+        "postId": summary.public_id,
+        "board": summary.board,
+        "author": summary.author_name,
+        "subject": summary.subject,
+        "createdAt": summary.created_at,
+        "expiresAt": summary.expires_at,
+        "canDelete": summary.can_delete,
+        "canReport": summary.can_report,
+    })
+}
+
+fn queue_board_catalog(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    catalog: &[BoardDescriptor],
+) -> bool {
+    let boards = catalog
+        .iter()
+        .map(|descriptor| {
+            let (label, description) = match descriptor.board {
+                BoardKey::General => ("General", "Conversación comunitaria deliberada."),
+                BoardKey::Newbie => ("Personas nuevas", "Preguntas y orientación para empezar."),
+            };
+            json!({
+                "key": descriptor.board,
+                "label": label,
+                "description": description,
+                "canPost": descriptor.can_post,
+            })
+        })
+        .collect::<Vec<_>>();
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        "board.catalog",
+        json!({"boards": boards, "retentionDays": 90}),
+    )
+}
+
+fn queue_board_page(outbound: &OutboundHandle, sequence: &mut u64, page: &BoardPage) -> bool {
+    let posts = page
+        .posts
+        .iter()
+        .map(board_summary_json)
+        .collect::<Vec<_>>();
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        "board.list",
+        json!({
+            "board": page.board,
+            "page": page.page,
+            "totalPages": page.total_pages,
+            "totalPosts": page.total_posts,
+            "capacity": page.capacity,
+            "posts": posts,
+        }),
+    )
+}
+
+fn queue_board_entry(outbound: &OutboundHandle, sequence: &mut u64, entry: &BoardEntry) -> bool {
+    let mut data = board_summary_json(&entry.summary);
+    data.as_object_mut()
+        .expect("board summaries serialize as objects")
+        .insert("body".into(), json!(entry.body));
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        "board.entry",
+        data,
+    )
+}
+
 fn queue_notice(outbound: &OutboundHandle, sequence: &mut u64, message: &str) -> bool {
     queue_sequenced(
         outbound,
@@ -2421,7 +2582,7 @@ fn parse_client_hello(text: &str) -> Option<ClientHelloCredentials> {
     if text.len() > MAX_WS_MESSAGE_BYTES || !json_depth_within(text, MAX_JSON_DEPTH) {
         return None;
     }
-    let message = serde_json::from_str::<ClientHello>(text).ok()?;
+    let message = serde_json::from_value::<ClientHello>(parse_unique_json(text).ok()?).ok()?;
     (message.v == 1
         && message.message_type == "client.hello"
         && message.data.client == "web"
@@ -2447,8 +2608,10 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
     if text.len() > MAX_WS_MESSAGE_BYTES || !json_depth_within(text, MAX_JSON_DEPTH) {
         return Err(ClientMessageError::InvalidEnvelope);
     }
-    let envelope = serde_json::from_str::<ClientEnvelope>(text)
-        .map_err(|_| ClientMessageError::MalformedJson)?;
+    let envelope = serde_json::from_value::<ClientEnvelope>(
+        parse_unique_json(text).map_err(|_| ClientMessageError::MalformedJson)?,
+    )
+    .map_err(|_| ClientMessageError::MalformedJson)?;
     if envelope.v != 1 {
         return Err(ClientMessageError::UnsupportedVersion);
     }
@@ -2498,13 +2661,23 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                     .as_deref()
                     .is_some_and(|mail_id| !valid_mail_public_id(mail_id))
                 || data
-                    .subject
+                    .post_id
                     .as_deref()
-                    .is_some_and(|subject| !valid_mail_subject(subject))
-                || data
-                    .body
-                    .as_deref()
-                    .is_some_and(|body| !valid_mail_visible_text(body, MAX_MAIL_BODY_BYTES))
+                    .is_some_and(|post_id| !valid_board_public_id(post_id))
+                || data.subject.as_deref().is_some_and(|subject| {
+                    if data.action == "board.post" {
+                        !valid_board_subject(subject)
+                    } else {
+                        !valid_mail_subject(subject)
+                    }
+                })
+                || data.body.as_deref().is_some_and(|body| {
+                    if data.action == "board.post" {
+                        !valid_board_visible_text(body, MAX_BOARD_BODY_BYTES)
+                    } else {
+                        !valid_mail_visible_text(body, MAX_MAIL_BODY_BYTES)
+                    }
+                })
                 || data.ability_id.as_deref().is_some_and(|ability_id| {
                     !valid_definition_id(ability_id, MAX_ABILITY_ID_BYTES)
                 })
@@ -2544,6 +2717,8 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 || data.page == Some(0)
                 || (data.action == "mail.list"
                     && data.page.is_some_and(|page| page > MAX_MAIL_PAGE))
+                || (data.action == "board.list"
+                    && data.page.is_some_and(|page| page > MAX_BOARD_PAGE))
                 || data
                     .trade_id
                     .as_deref()
@@ -2575,6 +2750,10 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 || (data.action == "mail.report"
                     && data.reason.as_deref().is_some_and(|reason| {
                         !valid_mail_visible_text(reason, MAX_MAIL_REPORT_REASON_BYTES)
+                    }))
+                || (data.action == "board.report"
+                    && data.reason.as_deref().is_some_and(|reason| {
+                        !valid_board_visible_text(reason, MAX_BOARD_REPORT_REASON_BYTES)
                     }))
                 || (data.action == "mail.send"
                     && data
@@ -2625,6 +2804,8 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         data.capability,
                         data.enabled,
                         &data.mail_id,
+                        &data.post_id,
+                        data.board,
                         &data.subject,
                         &data.body,
                     ),
@@ -2656,6 +2837,97 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
         }
         _ => Err(ClientMessageError::UnknownType),
     }
+}
+
+struct UniqueJsonValue(Value);
+
+impl<'de> Deserialize<'de> for UniqueJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(UniqueJsonVisitor)
+    }
+}
+
+struct UniqueJsonVisitor;
+
+impl<'de> Visitor<'de> for UniqueJsonVisitor {
+    type Value = UniqueJsonValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JSON without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .map(UniqueJsonValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(UniqueJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<UniqueJsonValue>()? {
+            values.push(value.0);
+        }
+        Ok(UniqueJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = Map::new();
+        while let Some(key) = object.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(A::Error::custom(format!("duplicate JSON key: {key}")));
+            }
+            values.insert(key, object.next_value::<UniqueJsonValue>()?.0);
+        }
+        Ok(UniqueJsonValue(Value::Object(values)))
+    }
+}
+
+fn parse_unique_json(text: &str) -> Result<Value, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let value = UniqueJsonValue::deserialize(&mut deserializer)?.0;
+    deserializer.end()?;
+    Ok(value)
 }
 
 fn json_depth_within(text: &str, maximum: usize) -> bool {
@@ -2780,9 +3052,54 @@ fn special_social_action_has_exact_fields(data: &Value) -> bool {
                 && fields.get("mailId").is_some_and(Value::is_string)
                 && fields.get("reason").is_some_and(Value::is_string)
         }
+        Some("board.catalog") => {
+            const EXACT_FIELDS: [&str; 2] = ["requestId", "action"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+        }
+        Some("board.list") => {
+            const EXACT_FIELDS: [&str; 4] = ["requestId", "action", "board", "page"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && fields.get("board").is_some_and(Value::is_string)
+                && fields.get("page").is_some_and(Value::is_number)
+        }
+        Some("board.read" | "board.delete") => {
+            const EXACT_FIELDS: [&str; 3] = ["requestId", "action", "postId"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && fields.get("postId").is_some_and(Value::is_string)
+        }
+        Some("board.post") => {
+            const EXACT_FIELDS: [&str; 5] = ["requestId", "action", "board", "subject", "body"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && ["board", "subject", "body"]
+                    .into_iter()
+                    .all(|field| fields.get(field).is_some_and(Value::is_string))
+        }
+        Some("board.report") => {
+            const EXACT_FIELDS: [&str; 4] = ["requestId", "action", "postId", "reason"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && fields.get("postId").is_some_and(Value::is_string)
+                && fields.get("reason").is_some_and(Value::is_string)
+        }
         _ => {
             !fields.contains_key("emote")
                 && !fields.contains_key("mailId")
+                && !fields.contains_key("postId")
+                && !fields.contains_key("board")
                 && !fields.contains_key("subject")
                 && !fields.contains_key("body")
         }
@@ -2814,10 +3131,18 @@ fn valid_social_emote_command(value: &str) -> bool {
 
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
+    if action.starts_with("board.") {
+        return structured_board_action(data);
+    }
     if action.starts_with("mail.") {
         return structured_mail_action(data);
     }
-    if data.mail_id.is_some() || data.subject.is_some() || data.body.is_some() {
+    if data.mail_id.is_some()
+        || data.post_id.is_some()
+        || data.board.is_some()
+        || data.subject.is_some()
+        || data.body.is_some()
+    {
         return Err(format!("Action {action:?} has unexpected fields."));
     }
     if !matches!(action, "social.emote" | "social.emote.list") && data.emote.is_some() {
@@ -3711,9 +4036,142 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     }
 }
 
+fn structured_board_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
+    let action = data.action.as_str();
+    let common_extras = data.emote.is_some()
+        || data.mail_id.is_some()
+        || data.ability_id.is_some()
+        || data.class_id.is_some()
+        || data.graph_id.is_some()
+        || data.node_id.is_some()
+        || data.target.is_some()
+        || data.recipient.is_some()
+        || data.container.is_some()
+        || data.quantity.is_some()
+        || data.trade_id.is_some()
+        || data.coins.is_some()
+        || data.state_revision.is_some()
+        || data.message.is_some()
+        || data.channel.is_some()
+        || data.duration_seconds.is_some()
+        || data.role.is_some()
+        || data.report_id.is_some()
+        || data.resolution.is_some()
+        || !matches!(data.profile, NullableField::Missing)
+        || !matches!(data.lore_title, NullableField::Missing)
+        || data.capability.is_some()
+        || data.enabled.is_some();
+    if common_extras {
+        return Err(format!("Action {action:?} has unexpected fields."));
+    }
+    match action {
+        "board.catalog" => {
+            if data.board.is_some()
+                || data.post_id.is_some()
+                || data.subject.is_some()
+                || data.body.is_some()
+                || data.page.is_some()
+                || data.reason.is_some()
+            {
+                return Err("Board catalog has unexpected fields.".to_owned());
+            }
+            Ok(PlayerAction::Board(BoardAction::Catalog))
+        }
+        "board.list" => {
+            if data.post_id.is_some()
+                || data.subject.is_some()
+                || data.body.is_some()
+                || data.reason.is_some()
+            {
+                return Err("Board list has unexpected fields.".to_owned());
+            }
+            let board = data
+                .board
+                .ok_or_else(|| "Board list requires board.".to_owned())?;
+            let page = data
+                .page
+                .ok_or_else(|| "Board list requires page.".to_owned())?;
+            if !(1..=MAX_BOARD_PAGE).contains(&page) {
+                return Err("Board page is not available.".to_owned());
+            }
+            Ok(PlayerAction::Board(BoardAction::List { board, page }))
+        }
+        "board.read" | "board.delete" => {
+            if data.board.is_some()
+                || data.subject.is_some()
+                || data.body.is_some()
+                || data.page.is_some()
+                || data.reason.is_some()
+            {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            let post_id = data
+                .post_id
+                .as_deref()
+                .filter(|post_id| valid_board_public_id(post_id))
+                .ok_or_else(|| "Board action requires a valid postId.".to_owned())?
+                .to_owned();
+            Ok(PlayerAction::Board(if action == "board.read" {
+                BoardAction::Read { post_id }
+            } else {
+                BoardAction::Delete { post_id }
+            }))
+        }
+        "board.post" => {
+            if data.post_id.is_some() || data.page.is_some() || data.reason.is_some() {
+                return Err("Board post has unexpected fields.".to_owned());
+            }
+            let board = data
+                .board
+                .ok_or_else(|| "Board post requires board.".to_owned())?;
+            let subject = data
+                .subject
+                .as_deref()
+                .filter(|value| valid_board_subject(value))
+                .ok_or_else(|| "Board post requires subject.".to_owned())?;
+            let body = data
+                .body
+                .as_deref()
+                .filter(|value| valid_board_visible_text(value, MAX_BOARD_BODY_BYTES))
+                .ok_or_else(|| "Board post requires body.".to_owned())?;
+            Ok(PlayerAction::Board(BoardAction::Post {
+                board,
+                subject: subject.to_owned(),
+                body: body.to_owned(),
+            }))
+        }
+        "board.report" => {
+            if data.board.is_some()
+                || data.subject.is_some()
+                || data.body.is_some()
+                || data.page.is_some()
+            {
+                return Err("Board report has unexpected fields.".to_owned());
+            }
+            let post_id = data
+                .post_id
+                .as_deref()
+                .filter(|post_id| valid_board_public_id(post_id))
+                .ok_or_else(|| "Board report requires a valid postId.".to_owned())?;
+            let reason = data
+                .reason
+                .as_deref()
+                .filter(|reason| valid_board_visible_text(reason, MAX_BOARD_REPORT_REASON_BYTES))
+                .ok_or_else(|| "Board report requires reason.".to_owned())?;
+            Ok(PlayerAction::Board(BoardAction::Report {
+                post_id: post_id.to_owned(),
+                reason: reason.to_owned(),
+            }))
+        }
+        _ => Err(format!("Unknown structured action: {action}")),
+    }
+}
+
 fn structured_mail_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
     let common_extras = data.emote.is_some()
+        || data.post_id.is_some()
+        || data.board.is_some()
         || data.ability_id.is_some()
         || data.class_id.is_some()
         || data.graph_id.is_some()
@@ -3910,6 +4368,24 @@ fn public_game_error(error: &GameError) -> String {
         }
         GameError::Persistence(StoreError::MailReportLimit | StoreError::MailEvidenceLimit) => {
             "Mail reporting is temporarily unavailable.".to_owned()
+        }
+        GameError::Persistence(StoreError::InvalidBoardInput) => {
+            "The board action is invalid or exceeds its limits.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardRateLimited) => {
+            "Board post quota exceeded; wait before publishing more posts.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardCapacity) => {
+            "That board is currently at capacity.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardPostUnavailable) => {
+            "That board post is not available.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardAlreadyReported) => {
+            "That board post has already been reported.".to_owned()
+        }
+        GameError::Persistence(StoreError::BoardReportLimit | StoreError::BoardEvidenceLimit) => {
+            "Board reporting is temporarily unavailable.".to_owned()
         }
         GameError::Persistence(StoreError::InvalidStaffInput) => {
             "The staff action is invalid or exceeds its limits.".to_owned()
@@ -4248,6 +4724,11 @@ mod tests {
             "ab".repeat(32)
         );
         assert!(parse_client_hello(&malformed_auth).is_none());
+        let duplicate_auth = format!(
+            r#"{{"v":1,"type":"client.hello","data":{{"client":"web","capabilities":{{"images":[],"reducedMotion":false,"audio":false}},"auth":{{"token":"{}","characterId":7,"characterId":8}}}}}}"#,
+            "a".repeat(64),
+        );
+        assert!(parse_client_hello(&duplicate_auth).is_none());
     }
 
     #[test]
@@ -5119,6 +5600,120 @@ mod tests {
     }
 
     #[test]
+    fn structured_board_actions_accept_only_the_exact_bounded_wire_shapes() {
+        let post_id = "b0123456789abcdef0123456789abcdef";
+        let cases = [
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"board-catalog","action":"board.catalog"}}"#,
+                PlayerAction::Board(BoardAction::Catalog),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"board-list","action":"board.list","board":"general","page":1}}"#,
+                PlayerAction::Board(BoardAction::List {
+                    board: BoardKey::General,
+                    page: 1,
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"board-list-100","action":"board.list","board":"newbie","page":100}}"#,
+                PlayerAction::Board(BoardAction::List {
+                    board: BoardKey::Newbie,
+                    page: 100,
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"board-read","action":"board.read","postId":"b0123456789abcdef0123456789abcdef"}}"#,
+                PlayerAction::Board(BoardAction::Read {
+                    post_id: post_id.into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"board-delete","action":"board.delete","postId":"b0123456789abcdef0123456789abcdef"}}"#,
+                PlayerAction::Board(BoardAction::Delete {
+                    post_id: post_id.into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"board-post","action":"board.post","board":"general","subject":"Plan <&>","body":"Meet | beyond the gate."}}"#,
+                PlayerAction::Board(BoardAction::Post {
+                    board: BoardKey::General,
+                    subject: "Plan <&>".into(),
+                    body: "Meet | beyond the gate.".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"board-report","action":"board.report","postId":"b0123456789abcdef0123456789abcdef","reason":"Abuse | repeated"}}"#,
+                PlayerAction::Board(BoardAction::Report {
+                    post_id: post_id.into(),
+                    reason: "Abuse | repeated".into(),
+                }),
+            ),
+        ];
+
+        for (message, expected) in cases {
+            assert_eq!(requested_action(message).action, Ok(expected), "{message}");
+        }
+
+        for message in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-catalog-extra","action":"board.catalog","board":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-list-missing-page","action":"board.list","board":"general"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-list-null","action":"board.list","board":"general","page":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-list-zero","action":"board.list","board":"general","page":0}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-list-101","action":"board.list","board":"general","page":101}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-list-unknown","action":"board.list","board":"staff"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-read-null","action":"board.read","postId":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-read-uppercase","action":"board.read","postId":"b0123456789ABCDEF0123456789abcdef"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-post-pipe","action":"board.post","board":"general","subject":"bad | subject","body":"Body"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-post-control","action":"board.post","board":"general","subject":"Subject","body":"line one\nline two"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-report-bidi","action":"board.report","postId":"b0123456789abcdef0123456789abcdef","reason":"safe\u202eunsafe"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-report-extra","action":"board.report","postId":"b0123456789abcdef0123456789abcdef","reason":"Abuse","target":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-smuggle","action":"look","postId":null}}"#,
+        ] {
+            assert_eq!(
+                parse_client_message(message).unwrap_err(),
+                ClientMessageError::InvalidEnvelope,
+                "{message}"
+            );
+        }
+
+        for message in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-duplicate","action":"board.list","board":"general","board":"newbie","page":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"board-duplicate-page","action":"board.list","board":"general","page":1,"page":2}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"first","requestId":"second","action":"board.catalog"}}"#,
+        ] {
+            assert_eq!(
+                parse_client_message(message).unwrap_err(),
+                ClientMessageError::MalformedJson,
+                "{message}"
+            );
+        }
+
+        let oversized_body = serde_json::json!({
+            "v": 1,
+            "type": "action.perform",
+            "data": {
+                "requestId": "board-oversized-utf8",
+                "action": "board.post",
+                "board": "general",
+                "subject": "Plan",
+                "body": "é".repeat(MAX_BOARD_BODY_BYTES / 2 + 1),
+            }
+        });
+        assert_eq!(
+            parse_client_message(&oversized_body.to_string()).unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
+
+        let general = requested_action(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same-request","action":"board.list","board":"general","page":1}}"#,
+        );
+        let newbie = requested_action(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"same-request","action":"board.list","board":"newbie","page":1}}"#,
+        );
+        assert_ne!(general.signature, newbie.signature);
+    }
+
+    #[test]
     fn structured_telepathy_accepts_only_the_exact_wire_fields() {
         let exact = r#"{"v":1,"type":"action.perform","data":{"requestId":"telepathy-1","action":"social.telepathy","abilityId":"tiamud:mind-whisper","target":"Aria","message":"Meet beyond the gate."}}"#;
         assert_eq!(
@@ -5435,6 +6030,9 @@ mod tests {
             reward_odds: None,
             mail_page: None,
             mail_message: None,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             projection_session: SessionId(1),
         };
         cache.insert("request-1".to_owned(), result("look"));
@@ -5460,6 +6058,9 @@ mod tests {
             reward_odds: None,
             mail_page: None,
             mail_message: None,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             projection_session: SessionId(11),
         };
         shared.lock().unwrap().insert(first.clone(), cached.clone());
@@ -5492,6 +6093,9 @@ mod tests {
             reward_odds: None,
             mail_page: None,
             mail_message: None,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             projection_session: SessionId(11),
         };
 
@@ -5533,6 +6137,9 @@ mod tests {
             reward_odds: None,
             mail_page: None,
             mail_message: None,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             projection_session: SessionId(11),
         };
 
@@ -5584,6 +6191,9 @@ mod tests {
             reward_odds: Some(odds.clone()),
             mail_page: None,
             mail_message: None,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             projection_session: SessionId(31),
         };
 
@@ -5647,6 +6257,9 @@ mod tests {
             reward_odds: None,
             mail_page: Some(page.clone()),
             mail_message: Some(message.clone()),
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             projection_session: SessionId(41),
         };
         assert_eq!(cached.mail_page_for(SessionId(41)), Some(&page));
@@ -5676,6 +6289,101 @@ mod tests {
     }
 
     #[test]
+    fn board_frames_are_exact_bounded_minimal_and_never_cross_sessions() {
+        let catalog = vec![
+            BoardDescriptor {
+                board: BoardKey::General,
+                can_post: true,
+            },
+            BoardDescriptor {
+                board: BoardKey::Newbie,
+                can_post: false,
+            },
+        ];
+        let summary = crate::persistence::BoardPostSummary {
+            public_id: "b0123456789abcdef0123456789abcdef".into(),
+            board: BoardKey::General,
+            author_name: "A&B <author>".into(),
+            subject: "Plan <&>".into(),
+            created_at: 10,
+            expires_at: 7_776_010,
+            can_delete: false,
+            can_report: true,
+        };
+        let page = BoardPage {
+            board: BoardKey::General,
+            page: 1,
+            total_pages: 1,
+            total_posts: 1,
+            capacity: 1_000,
+            posts: vec![summary.clone()],
+        };
+        let entry = BoardEntry {
+            summary: summary.clone(),
+            body: "Meet | beyond the gate. <&>".into(),
+        };
+        let cached = CachedActionResult {
+            signature: "board.read".into(),
+            ok: true,
+            message: Some("Board post follows.".into()),
+            container_contents: None,
+            trade_contents: None,
+            reward_odds: None,
+            mail_page: None,
+            mail_message: None,
+            board_catalog: Some(catalog.clone()),
+            board_page: Some(page.clone()),
+            board_entry: Some(entry.clone()),
+            projection_session: SessionId(51),
+        };
+        assert_eq!(
+            cached.board_catalog_for(SessionId(51)),
+            Some(catalog.as_slice())
+        );
+        assert_eq!(cached.board_page_for(SessionId(51)), Some(&page));
+        assert_eq!(cached.board_entry_for(SessionId(51)), Some(&entry));
+        assert!(cached.board_catalog_for(SessionId(52)).is_none());
+        assert!(cached.board_page_for(SessionId(52)).is_none());
+        assert!(cached.board_entry_for(SessionId(52)).is_none());
+
+        let outbound = OutboundHandle::new(4, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_board_catalog(&outbound, &mut sequence, &catalog));
+        assert!(queue_board_page(&outbound, &mut sequence, &page));
+        assert!(queue_board_entry(&outbound, &mut sequence, &entry));
+        let catalog_frame = outbound.pop().unwrap();
+        let list_frame = outbound.pop().unwrap();
+        let entry_frame = outbound.pop().unwrap();
+        assert_eq!(catalog_frame.value["type"], "board.catalog");
+        assert_eq!(catalog_frame.value["data"]["retentionDays"], 90);
+        assert_eq!(catalog_frame.value["data"]["boards"][0]["key"], "general");
+        assert_eq!(catalog_frame.value["data"]["boards"][0]["canPost"], true);
+        assert_eq!(catalog_frame.value["data"]["boards"][1]["key"], "newbie");
+        assert_eq!(catalog_frame.value["data"]["boards"][1]["canPost"], false);
+        assert_eq!(list_frame.value["type"], "board.list");
+        assert_eq!(list_frame.value["data"]["capacity"], 1_000);
+        assert_eq!(
+            list_frame.value["data"]["posts"][0]["postId"],
+            summary.public_id
+        );
+        assert_eq!(
+            list_frame.value["data"]["posts"][0]["author"],
+            "A&B <author>"
+        );
+        assert!(list_frame.value["data"]["posts"][0].get("body").is_none());
+        assert_eq!(entry_frame.value["type"], "board.entry");
+        assert_eq!(entry_frame.value["data"]["body"], entry.body);
+        for frame in [catalog_frame, list_frame, entry_frame] {
+            assert!(serde_json::to_vec(&frame.value).unwrap().len() <= MAX_WS_MESSAGE_BYTES);
+            let encoded = frame.value.to_string();
+            assert!(!encoded.contains("authorCharacterId"));
+            assert!(!encoded.contains("reporterCharacterId"));
+            assert!(!encoded.contains("accountId"));
+            assert!(!encoded.contains("bodySnapshot"));
+        }
+    }
+
+    #[test]
     fn cached_inventory_text_never_crosses_session_salts() {
         let cached = CachedActionResult {
             signature: "inventory".into(),
@@ -5686,6 +6394,9 @@ mod tests {
             reward_odds: None,
             mail_page: None,
             mail_message: None,
+            board_catalog: None,
+            board_page: None,
+            board_entry: None,
             projection_session: SessionId(21),
         };
 

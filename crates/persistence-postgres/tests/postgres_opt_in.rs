@@ -68,7 +68,9 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
                  (id, reporter_character_id, target_character_id, report_kind, reason, created_at,
                   status, resolution, resolution_reason, resolved_by_account_id, resolved_at)
              VALUES (20, 11, 10, 'mail', 'Repeated harassment', 910, 'resolved', 'action_taken',
-                     'Reviewed and moderated', 1, 960);
+                     'Reviewed and moderated', 1, 960),
+                    (21, 11, 10, 'board', 'Public harassment', 920, 'open', NULL,
+                     NULL, NULL, NULL);
              INSERT INTO social_mail_usage
                  (account_id, hour_started_at, hour_count,
                   day_started_at, day_count, updated_at)
@@ -85,6 +87,22 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
                   created_at, expires_at)
              VALUES (20, 'Aster', 'Lanterns', 'Meet beneath the arch.',
                      900, 910, 7776910);
+             INSERT INTO social_board_usage
+                 (account_id, hour_started_at, hour_count,
+                  day_started_at, day_count, updated_at)
+             VALUES (1, 900, 1, 900, 1, 900);
+             INSERT INTO social_board_posts
+                 (id, public_id, board_key, author_character_id, author_name,
+                  subject, body, created_at, expires_at, report_id)
+             VALUES (31, 'b0123456789abcdef0123456789abcdef', 'general',
+                     10, 'Aster', 'Lanterns', 'A public board entry.',
+                     900, 7776900, 21);
+             INSERT INTO social_board_report_evidence
+                 (report_id, board_key, post_public_id, author_name,
+                  subject, body, posted_at, created_at, expires_at)
+             VALUES (21, 'general', 'b0123456789abcdef0123456789abcdef',
+                     'Aster', 'Lanterns', 'A public board entry.',
+                     900, 920, 7776920);
              INSERT INTO staff_audit
                  (sequence, actor_account_id, target_account_id, capability, action,
                   reason, details_json, created_at)
@@ -113,7 +131,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     let report =
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres).unwrap();
-    assert_eq!(report.total_rows, 18);
+    assert_eq!(report.total_rows, 22);
     assert_eq!(
         postgres
             .query_one("SELECT COUNT(*)::BIGINT FROM characters", &[])
@@ -162,7 +180,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 12, to: 12 }
+        tiamud_persistence_postgres::MigrationReport { from: 13, to: 13 }
     );
     assert_eq!(
         postgres
@@ -203,6 +221,21 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .unwrap()
             .get::<_, String>(0),
         "mail"
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT posts.body, evidence.body, reports.report_kind
+                 FROM social_board_posts AS posts
+                 JOIN social_reports AS reports ON reports.id = posts.report_id
+                 JOIN social_board_report_evidence AS evidence
+                   ON evidence.report_id = reports.id
+                 WHERE posts.id = 31",
+                &[],
+            )
+            .unwrap()
+            .get::<_, String>(1),
+        "A public board entry."
     );
     assert!(
         postgres
@@ -246,7 +279,10 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     postgres
         .batch_execute(
-            "DROP TABLE social_mail_report_evidence;
+            "DROP TABLE social_board_report_evidence;
+             DROP TABLE social_board_posts;
+             DROP TABLE social_board_usage;
+             DROP TABLE social_mail_report_evidence;
              DROP TABLE social_mail_messages;
              DROP TABLE social_mail_usage;
              DROP INDEX social_reports_mail_open_idx;
@@ -260,7 +296,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 10, to: 12 }
+        tiamud_persistence_postgres::MigrationReport { from: 10, to: 13 }
     );
     let constraint: String = postgres
         .query_one(
@@ -297,6 +333,9 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             "DROP TABLE character_adventure;
              DROP TABLE world_adventure;
              DROP TABLE social_channel_subscriptions;
+             DROP TABLE social_board_report_evidence;
+             DROP TABLE social_board_posts;
+             DROP TABLE social_board_usage;
              DROP TABLE social_mail_report_evidence;
              DROP TABLE social_mail_messages;
              DROP TABLE social_mail_usage;
@@ -306,7 +345,9 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
              DROP TABLE staff_capability_assignments;
              DROP TABLE staff_profiles;
              DROP FUNCTION tiamud_reject_staff_audit_mutation();
-             UPDATE social_reports SET status = 'open';
+             UPDATE social_reports
+             SET status = 'open', resolution = NULL, resolution_reason = NULL,
+                 resolved_by_account_id = NULL, resolved_at = NULL;
              ALTER TABLE social_reports
                  DROP CONSTRAINT social_reports_status_check,
                  DROP COLUMN resolution CASCADE,
@@ -321,7 +362,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 12 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 13 }
     );
     assert!(
         postgres
@@ -364,25 +405,25 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 13 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 14 WHERE singleton = 1",
             &[],
         )
         .unwrap();
     assert!(matches!(
         tiamud_persistence_postgres::migrate(&mut postgres),
-        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 13 })
+        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 14 })
     ));
     assert_eq!(
         postgres
             .query_one("SELECT version FROM tiamud_schema WHERE singleton = 1", &[])
             .unwrap()
             .get::<_, i32>(0),
-        13,
+        14,
         "future metadata must remain untouched after rejection"
     );
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 12 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 13 WHERE singleton = 1",
             &[],
         )
         .unwrap();

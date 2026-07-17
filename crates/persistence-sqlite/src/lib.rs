@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MigrationReport {
@@ -17,6 +17,8 @@ pub enum SchemaError {
     Sqlite(#[from] rusqlite::Error),
     #[error("database schema version {found} is newer than supported version {supported}")]
     UnsupportedVersion { found: i64, supported: i64 },
+    #[error("database schema migration left foreign-key violations")]
+    ForeignKeyViolations,
 }
 
 /// Bring an existing database (including the empty v0 database and the
@@ -86,6 +88,9 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
 
     if from < 10 && table_exists(&transaction, "social_reports")? {
         migrate_social_reports_v10(&transaction)?;
+    }
+    if from == 12 && table_exists(&transaction, "social_reports")? {
+        migrate_social_reports_v13(&transaction)?;
     }
 
     transaction.execute_batch(
@@ -167,7 +172,7 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              reporter_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
              target_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
              report_kind TEXT NOT NULL DEFAULT 'character'
-                 CHECK(report_kind IN ('character', 'mail')),
+                 CHECK(report_kind IN ('character', 'mail', 'board')),
              reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 2048),
              created_at INTEGER NOT NULL,
              status TEXT NOT NULL DEFAULT 'open'
@@ -248,6 +253,63 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
          );
          CREATE INDEX IF NOT EXISTS social_mail_report_evidence_expiry_idx
              ON social_mail_report_evidence(expires_at, report_id);
+         CREATE TABLE IF NOT EXISTS social_board_usage (
+             account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+             hour_started_at INTEGER NOT NULL,
+             hour_count INTEGER NOT NULL CHECK(hour_count BETWEEN 0 AND 5),
+             day_started_at INTEGER NOT NULL,
+             day_count INTEGER NOT NULL CHECK(day_count BETWEEN 0 AND 20),
+             updated_at INTEGER NOT NULL,
+             CHECK(updated_at >= hour_started_at AND updated_at >= day_started_at)
+         );
+         CREATE TABLE IF NOT EXISTS social_board_posts (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             public_id TEXT NOT NULL UNIQUE
+                 CHECK(length(public_id) = 33
+                       AND substr(public_id, 1, 1) = 'b'
+                       AND substr(public_id, 2) NOT GLOB '*[^0-9a-f]*'),
+             board_key TEXT NOT NULL CHECK(board_key IN ('general', 'newbie')),
+             author_character_id INTEGER NOT NULL
+                 REFERENCES characters(id) ON DELETE CASCADE,
+             author_name TEXT NOT NULL
+                 CHECK(length(CAST(author_name AS BLOB)) BETWEEN 1 AND 64),
+             subject TEXT NOT NULL
+                 CHECK(length(CAST(subject AS BLOB)) BETWEEN 1 AND 128
+                       AND instr(subject, '|') = 0),
+             body TEXT NOT NULL
+                 CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 4096),
+             created_at INTEGER NOT NULL,
+             expires_at INTEGER NOT NULL,
+             report_id INTEGER UNIQUE REFERENCES social_reports(id) ON DELETE SET NULL,
+             CHECK(expires_at = created_at + 7776000)
+         );
+         CREATE INDEX IF NOT EXISTS social_board_posts_board_idx
+             ON social_board_posts(board_key, created_at DESC, id DESC);
+         CREATE INDEX IF NOT EXISTS social_board_posts_author_idx
+             ON social_board_posts(author_character_id, created_at DESC, id DESC);
+         CREATE INDEX IF NOT EXISTS social_board_posts_expiry_idx
+             ON social_board_posts(expires_at, id);
+         CREATE TABLE IF NOT EXISTS social_board_report_evidence (
+             report_id INTEGER PRIMARY KEY REFERENCES social_reports(id) ON DELETE CASCADE,
+             board_key TEXT NOT NULL CHECK(board_key IN ('general', 'newbie')),
+             post_public_id TEXT NOT NULL
+                 CHECK(length(post_public_id) = 33
+                       AND substr(post_public_id, 1, 1) = 'b'
+                       AND substr(post_public_id, 2) NOT GLOB '*[^0-9a-f]*'),
+             author_name TEXT NOT NULL
+                 CHECK(length(CAST(author_name AS BLOB)) BETWEEN 1 AND 64),
+             subject TEXT NOT NULL
+                 CHECK(length(CAST(subject AS BLOB)) BETWEEN 1 AND 128),
+             body TEXT NOT NULL
+                 CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 4096),
+             posted_at INTEGER NOT NULL,
+             created_at INTEGER NOT NULL,
+             expires_at INTEGER NOT NULL,
+             CHECK(created_at >= posted_at),
+             CHECK(expires_at = created_at + 7776000)
+         );
+         CREATE INDEX IF NOT EXISTS social_board_report_evidence_expiry_idx
+             ON social_board_report_evidence(expires_at, report_id);
          CREATE TABLE IF NOT EXISTS moderation_audit (
              sequence INTEGER PRIMARY KEY AUTOINCREMENT,
              actor_account_id INTEGER NOT NULL REFERENCES accounts(id),
@@ -338,12 +400,12 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              state_json TEXT NOT NULL CHECK(length(state_json) <= 1048576),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         PRAGMA user_version = 12;",
+         PRAGMA user_version = 13;",
     )?;
     if !column_exists(&transaction, "social_reports", "report_kind")? {
         transaction.execute_batch(
             "ALTER TABLE social_reports ADD COLUMN report_kind TEXT NOT NULL
-                 DEFAULT 'character' CHECK(report_kind IN ('character', 'mail'));",
+                 DEFAULT 'character' CHECK(report_kind IN ('character', 'mail', 'board'));",
         )?;
     }
     transaction.execute_batch(
@@ -420,6 +482,121 @@ fn migrate_world_runtime_v11(transaction: &Transaction<'_>) -> rusqlite::Result<
     )
 }
 
+fn migrate_social_reports_v13(transaction: &Transaction<'_>) -> Result<(), SchemaError> {
+    transaction.execute_batch(
+        "PRAGMA defer_foreign_keys = ON;
+         DROP INDEX IF EXISTS social_reports_status_idx;
+         DROP INDEX IF EXISTS social_reports_mail_open_idx;
+         DROP INDEX IF EXISTS social_mail_messages_recipient_idx;
+         DROP INDEX IF EXISTS social_mail_messages_expiry_idx;
+         DROP INDEX IF EXISTS social_mail_report_evidence_expiry_idx;
+         ALTER TABLE social_mail_messages RENAME TO social_mail_messages_v12;
+         ALTER TABLE social_mail_report_evidence RENAME TO social_mail_report_evidence_v12;
+         ALTER TABLE social_reports RENAME TO social_reports_v12;
+         CREATE TABLE social_reports (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             reporter_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+             target_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+             report_kind TEXT NOT NULL DEFAULT 'character'
+                 CHECK(report_kind IN ('character', 'mail', 'board')),
+             reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 2048),
+             created_at INTEGER NOT NULL,
+             status TEXT NOT NULL DEFAULT 'open'
+                 CHECK(status IN ('open', 'resolved')),
+             resolution TEXT
+                 CHECK(resolution IS NULL OR resolution IN ('dismissed', 'action_taken', 'no_action')),
+             resolution_reason TEXT
+                 CHECK(resolution_reason IS NULL OR length(resolution_reason) BETWEEN 1 AND 2048),
+             resolved_by_account_id INTEGER REFERENCES accounts(id),
+             resolved_at INTEGER,
+             CHECK(
+                 (status = 'open'
+                  AND resolution IS NULL
+                  AND resolution_reason IS NULL
+                  AND resolved_by_account_id IS NULL
+                  AND resolved_at IS NULL)
+                 OR
+                 (status = 'resolved'
+                  AND resolution IS NOT NULL
+                  AND resolution_reason IS NOT NULL
+                  AND resolved_by_account_id IS NOT NULL
+                  AND resolved_at IS NOT NULL
+                  AND resolved_at >= created_at)
+             ),
+             CHECK(reporter_character_id != target_character_id)
+         );
+         CREATE TABLE social_mail_messages (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             public_id TEXT NOT NULL UNIQUE
+                 CHECK(length(public_id) = 33
+                       AND substr(public_id, 1, 1) = 'm'
+                       AND substr(public_id, 2) NOT GLOB '*[^0-9a-f]*'),
+             sender_character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+             sender_name TEXT NOT NULL
+                 CHECK(length(CAST(sender_name AS BLOB)) BETWEEN 1 AND 64),
+             recipient_character_id INTEGER NOT NULL
+                 REFERENCES characters(id) ON DELETE CASCADE,
+             subject TEXT NOT NULL
+                 CHECK(length(CAST(subject AS BLOB)) BETWEEN 1 AND 128),
+             body TEXT NOT NULL
+                 CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 2048),
+             created_at INTEGER NOT NULL,
+             expires_at INTEGER NOT NULL,
+             read_at INTEGER,
+             report_id INTEGER UNIQUE REFERENCES social_reports(id) ON DELETE SET NULL,
+             CHECK(sender_character_id IS NULL OR sender_character_id != recipient_character_id),
+             CHECK(expires_at = created_at + 2592000),
+             CHECK(read_at IS NULL OR read_at BETWEEN created_at AND expires_at)
+         );
+         CREATE TABLE social_mail_report_evidence (
+             report_id INTEGER PRIMARY KEY REFERENCES social_reports(id) ON DELETE CASCADE,
+             sender_name TEXT NOT NULL
+                 CHECK(length(CAST(sender_name AS BLOB)) BETWEEN 1 AND 64),
+             subject TEXT NOT NULL
+                 CHECK(length(CAST(subject AS BLOB)) BETWEEN 1 AND 128),
+             body TEXT NOT NULL
+                 CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 2048),
+             sent_at INTEGER NOT NULL,
+             created_at INTEGER NOT NULL,
+             expires_at INTEGER NOT NULL,
+             CHECK(created_at >= sent_at),
+             CHECK(expires_at = created_at + 7776000)
+         );
+         INSERT INTO social_reports
+             (id, reporter_character_id, target_character_id, report_kind, reason,
+              created_at, status, resolution, resolution_reason,
+              resolved_by_account_id, resolved_at)
+         SELECT id, reporter_character_id, target_character_id, report_kind, reason,
+                created_at, status, resolution, resolution_reason,
+                resolved_by_account_id, resolved_at
+         FROM social_reports_v12 ORDER BY id;
+         INSERT INTO social_mail_messages
+             (id, public_id, sender_character_id, sender_name,
+              recipient_character_id, subject, body, created_at, expires_at,
+              read_at, report_id)
+         SELECT id, public_id, sender_character_id, sender_name,
+                recipient_character_id, subject, body, created_at, expires_at,
+                read_at, report_id
+         FROM social_mail_messages_v12 ORDER BY id;
+         INSERT INTO social_mail_report_evidence
+             (report_id, sender_name, subject, body, sent_at, created_at, expires_at)
+         SELECT report_id, sender_name, subject, body, sent_at, created_at, expires_at
+         FROM social_mail_report_evidence_v12 ORDER BY report_id;
+         DROP TABLE social_mail_report_evidence_v12;
+         DROP TABLE social_mail_messages_v12;
+         DROP TABLE social_reports_v12;",
+    )?;
+    let violation = transaction
+        .query_row("SELECT 1 FROM pragma_foreign_key_check LIMIT 1", [], |_| {
+            Ok(())
+        })
+        .optional()?;
+    if violation.is_some() {
+        return Err(SchemaError::ForeignKeyViolations);
+    }
+    Ok(())
+}
+
 fn migrate_social_reports_v10(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
     transaction.execute_batch(
         "DROP INDEX IF EXISTS social_reports_status_idx;
@@ -429,7 +606,7 @@ fn migrate_social_reports_v10(transaction: &Transaction<'_>) -> rusqlite::Result
              reporter_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
              target_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
              report_kind TEXT NOT NULL DEFAULT 'character'
-                 CHECK(report_kind IN ('character', 'mail')),
+                 CHECK(report_kind IN ('character', 'mail', 'board')),
              reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 2048),
              created_at INTEGER NOT NULL,
              status TEXT NOT NULL DEFAULT 'open'
@@ -567,12 +744,12 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let report = migrate(&mut connection).unwrap();
 
-        assert_eq!(report, MigrationReport { from: 0, to: 12 });
+        assert_eq!(report, MigrationReport { from: 0, to: 13 });
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
         assert!(
             connection
@@ -583,6 +760,9 @@ mod tests {
             "social_mail_messages",
             "social_mail_usage",
             "social_mail_report_evidence",
+            "social_board_posts",
+            "social_board_usage",
+            "social_board_report_evidence",
         ] {
             assert!(
                 connection
@@ -699,7 +879,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 11, to: 12 }
+            MigrationReport { from: 11, to: 13 }
         );
         for table in [
             "social_mail_messages",
@@ -736,6 +916,135 @@ mod tests {
                 )
                 .is_err(),
             "report_kind must remain a closed vocabulary"
+        );
+    }
+
+    #[test]
+    fn upgrades_v12_without_losing_mail_report_links_or_evidence() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO accounts (id, name) VALUES (1, 'Sender'), (2, 'Recipient');
+                 INSERT INTO characters (id, account_id, name, room_id)
+                 VALUES (10, 1, 'Aster', 'room:start'),
+                        (20, 2, 'Bryn', 'room:start');
+                 INSERT INTO social_reports
+                     (id, reporter_character_id, target_character_id, report_kind,
+                      reason, created_at)
+                 VALUES (30, 20, 10, 'mail', 'Evidence', 200);
+                 INSERT INTO social_mail_messages
+                     (id, public_id, sender_character_id, sender_name,
+                      recipient_character_id, subject, body, created_at,
+                      expires_at, report_id)
+                 VALUES (40, 'm0123456789abcdef0123456789abcdef', 10, 'Aster',
+                         20, 'Subject', 'Exact body', 100, 2592100, 30);
+                 INSERT INTO social_mail_report_evidence
+                     (report_id, sender_name, subject, body, sent_at,
+                      created_at, expires_at)
+                 VALUES (30, 'Aster', 'Subject', 'Exact body', 100, 200, 7776200);
+                 DROP TABLE social_board_report_evidence;
+                 DROP TABLE social_board_posts;
+                 DROP TABLE social_board_usage;
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 12, to: 13 }
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT messages.id, messages.report_id, evidence.body
+                     FROM social_mail_messages AS messages
+                     JOIN social_mail_report_evidence AS evidence
+                       ON evidence.report_id = messages.report_id",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (40, 30, "Exact body".to_owned())
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        connection
+            .execute(
+                "INSERT INTO social_reports
+                     (reporter_character_id, target_character_id, report_kind,
+                      reason, created_at)
+                 VALUES (20, 10, 'board', 'Board evidence', 300)",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn board_schema_enforces_closed_keys_ids_bytes_quota_and_retention() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO accounts (id, name) VALUES (1, 'Author');
+                 INSERT INTO characters (id, account_id, name, room_id)
+                 VALUES (10, 1, 'Aster', 'room:start');
+                 INSERT INTO social_board_posts
+                     (public_id, board_key, author_character_id, author_name,
+                      subject, body, created_at, expires_at)
+                 VALUES ('b0123456789abcdef0123456789abcdef', 'general', 10, 'Aster',
+                         'Subject', 'Body', 100, 7776100);",
+            )
+            .unwrap();
+        for invalid in [
+            "INSERT INTO social_board_posts
+                 (public_id, board_key, author_character_id, author_name,
+                  subject, body, created_at, expires_at)
+             VALUES ('bABCDEF00000000000000000000000000', 'general', 10, 'Aster',
+                     'Subject', 'Body', 100, 7776100)",
+            "INSERT INTO social_board_posts
+                 (public_id, board_key, author_character_id, author_name,
+                  subject, body, created_at, expires_at)
+             VALUES ('b11111111111111111111111111111111', 'staff', 10, 'Aster',
+                     'Subject', 'Body', 100, 7776100)",
+            "INSERT INTO social_board_posts
+                 (public_id, board_key, author_character_id, author_name,
+                  subject, body, created_at, expires_at)
+             VALUES ('b22222222222222222222222222222222', 'newbie', 10, 'Aster',
+                     'Bad | subject', 'Body', 100, 7776100)",
+            "INSERT INTO social_board_posts
+                 (public_id, board_key, author_character_id, author_name,
+                  subject, body, created_at, expires_at)
+             VALUES ('b33333333333333333333333333333333', 'newbie', 10, 'Aster',
+                     'Subject', 'Body', 100, 7776101)",
+        ] {
+            assert!(connection.execute(invalid, []).is_err());
+        }
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO social_board_usage
+                         (account_id, hour_started_at, hour_count,
+                          day_started_at, day_count, updated_at)
+                     VALUES (1, 100, 6, 100, 1, 100)",
+                    [],
+                )
+                .is_err()
         );
     }
 
@@ -840,7 +1149,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 10, to: 12 }
+            MigrationReport { from: 10, to: 13 }
         );
         assert_eq!(
             connection
@@ -905,7 +1214,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 3, to: 12 }
+            MigrationReport { from: 3, to: 13 }
         );
         assert_eq!(
             connection
@@ -949,7 +1258,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 4, to: 12 }
+            MigrationReport { from: 4, to: 13 }
         );
         let gameplay: String = connection
             .query_row(
@@ -1014,7 +1323,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 5, to: 12 }
+            MigrationReport { from: 5, to: 13 }
         );
         assert_eq!(
             connection
@@ -1071,7 +1380,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 6, to: 12 }
+            MigrationReport { from: 6, to: 13 }
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
@@ -1123,7 +1432,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 7, to: 12 }
+            MigrationReport { from: 7, to: 13 }
         );
         assert_eq!(
             connection
@@ -1212,7 +1521,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 8, to: 12 }
+            MigrationReport { from: 8, to: 13 }
         );
         assert_eq!(
             connection
@@ -1254,7 +1563,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 12, to: 12 }
+            MigrationReport { from: 13, to: 13 }
         );
         assert_eq!(
             connection
@@ -1322,7 +1631,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 9, to: 12 }
+            MigrationReport { from: 9, to: 13 }
         );
         assert_eq!(
             connection

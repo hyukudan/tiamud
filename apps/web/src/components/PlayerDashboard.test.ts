@@ -230,6 +230,47 @@ describe('PlayerDashboard', () => {
           expiresAt: 1_702_592_000,
           read: true,
         },
+        boardCatalog: {
+          boards: [
+            {
+              key: 'general', label: 'General',
+              description: 'Conversación comunitaria deliberada.', canPost: true,
+            },
+            {
+              key: 'newbie', label: 'Personas nuevas',
+              description: 'Preguntas y orientación para empezar.', canPost: false,
+            },
+          ],
+          retentionDays: 90,
+        },
+        boardList: {
+          board: 'general',
+          page: 1,
+          totalPages: 1,
+          totalPosts: 1,
+          capacity: 1000,
+          posts: [{
+            postId: 'b0123456789abcdef0123456789abcdef',
+            board: 'general',
+            author: 'Nara <&>',
+            subject: 'Festival de faroles',
+            createdAt: 1_700_000_000,
+            expiresAt: 1_707_776_000,
+            canDelete: false,
+            canReport: true,
+          }],
+        },
+        boardEntry: {
+          postId: 'b0123456789abcdef0123456789abcdef',
+          board: 'general',
+          author: 'Nara <&>',
+          subject: 'Festival de faroles',
+          body: 'Nos vemos | en la plaza. <&>',
+          createdAt: 1_700_000_000,
+          expiresAt: 1_707_776_000,
+          canDelete: false,
+          canReport: true,
+        },
         abilityTargets: [{ id: 'owolf000000000001', label: 'rain wolf' }],
         oncommand: () => undefined,
         onaction: () => undefined,
@@ -253,6 +294,8 @@ describe('PlayerDashboard', () => {
       'Mind to reach with Mind Thread', 'Private thought', 'Direct online message',
       'Offline mail', 'Inbox', 'The northern gate', 'Meet me by the lighthouse.',
       'Send offline mail', 'Report this message',
+      'Tablones', 'Community boards', 'Festival de faroles', 'Nos vemos | en la plaza.',
+      'Report this post', 'Publish to General',
     ]) {
       expect(body).toContain(label);
     }
@@ -301,6 +344,7 @@ describe('PlayerDashboard', () => {
       'social.channel.leave', 'social.channel.say',
       'social.telepathy', 'social.emote.list', 'social.emote',
       'mail.list', 'mail.read', 'mail.delete', 'mail.send', 'mail.report',
+      'board.catalog', 'board.list', 'board.read', 'board.delete', 'board.post', 'board.report',
     ]) {
       expect(dashboardSource).toContain(action);
     }
@@ -318,6 +362,8 @@ describe('PlayerDashboard', () => {
     expect(dashboardSource).toContain('recipient: recipient.id');
     expect(dashboardSource).toContain('<option value="staff">');
     expect(dashboardSource).not.toContain('<option value="announcement">');
+    expect(dashboardSource).not.toContain('{@html');
+    expect(dashboardSource).not.toContain('marked(');
   });
 
   it('renders private offers, reservations, and revision-bound double confirmation', () => {
@@ -374,5 +420,19 @@ describe('PlayerDashboard', () => {
       'trade.contents', 'trade.confirm',
     ]) expect(dashboardSource).toContain(action);
     expect(dashboardSource).toContain('`trade.${action}`');
+  });
+
+  it('keeps board drafts until correlated success and blocks duplicate submissions', () => {
+    expect(dashboardSource).toContain('pendingBoardPostRequest');
+    expect(dashboardSource).toContain('pendingBoardReportRequest');
+    expect(dashboardSource).toContain('result.requestId === pendingBoardPostRequest');
+    expect(dashboardSource).toContain('result.requestId === pendingBoardReportRequest');
+    expect(dashboardSource).toContain('if (result.ok)');
+    expect(dashboardSource).toContain('disabled={Boolean(pendingBoardPostRequest)');
+    expect(dashboardSource).toContain('disabled={Boolean(pendingBoardReportRequest)');
+    expect(dashboardSource).toContain("if (connectionState === 'connected') return");
+    expect(dashboardSource).toMatch(
+      /connectionState === 'connected'[\s\S]*?pendingBoardPostRequest = undefined;[\s\S]*?pendingBoardReportRequest = undefined;/,
+    );
   });
 });

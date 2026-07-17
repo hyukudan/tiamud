@@ -537,6 +537,15 @@ export function parseServerMessage(raw) {
     case 'mail.message':
       validateMailMessage(message.data);
       break;
+    case 'board.catalog':
+      validateBoardCatalog(message.data);
+      break;
+    case 'board.list':
+      validateBoardList(message.data);
+      break;
+    case 'board.entry':
+      validateBoardEntry(message.data);
+      break;
     case 'map.snapshot':
       validateMapSnapshot(message.data);
       break;
@@ -678,6 +687,108 @@ function validateMailMessage(data) {
   validateMailSummary(summary, 'mail message');
   if (summary.read !== true) throw new Error('mail.message must already be marked read.');
   assertMailText(body, 2048, 'mail message body');
+}
+
+const BOARD_LABELS = new Map([
+  ['general', ['General', 'Conversación comunitaria deliberada.']],
+  ['newbie', ['Personas nuevas', 'Preguntas y orientación para empezar.']],
+]);
+
+function validateBoardKey(value, label) {
+  if (!BOARD_LABELS.has(value)) throw new Error(`${label} is not a valid board.`);
+}
+
+function validateBoardPostId(value, label) {
+  if (typeof value !== 'string' || !/^b[0-9a-f]{32}$/.test(value)) {
+    throw new Error(`${label} is not a valid board post id.`);
+  }
+}
+
+function assertBoardText(value, maximumBytes, label) {
+  requiredString(value, label);
+  if (value.trim() !== value || Buffer.byteLength(value, 'utf8') > maximumBytes ||
+      /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value)) {
+    throw new Error(`${label} is invalid or exceeds ${maximumBytes} UTF-8 bytes.`);
+  }
+}
+
+function validateBoardCatalog(data) {
+  assertOnlyKeys(data, ['boards', 'retentionDays'], 'board.catalog.data');
+  if (data.retentionDays !== 90) throw new Error('board.catalog retention is invalid.');
+  assertArrayMax(data.boards, 2, 'board catalog boards');
+  if (data.boards.length !== 2) throw new Error('board.catalog is incomplete.');
+  const seen = new Set();
+  for (const board of data.boards) {
+    assertRecord(board, 'board catalog entry');
+    assertOnlyKeys(board, ['key', 'label', 'description', 'canPost'], 'board catalog entry');
+    validateBoardKey(board.key, 'board catalog key');
+    const expected = BOARD_LABELS.get(board.key);
+    if (seen.has(board.key) || board.label !== expected[0] || board.description !== expected[1] ||
+        typeof board.canPost !== 'boolean') throw new Error('board catalog entry is invalid.');
+    seen.add(board.key);
+  }
+}
+
+function validateBoardSummary(summary, label = 'board post summary') {
+  assertRecord(summary, label);
+  assertOnlyKeys(
+    summary,
+    ['postId', 'board', 'author', 'subject', 'createdAt', 'expiresAt', 'canDelete', 'canReport'],
+    label,
+  );
+  validateBoardPostId(summary.postId, `${label} postId`);
+  validateBoardKey(summary.board, `${label} board`);
+  assertBoardText(summary.author, 64, `${label} author`);
+  assertBoardText(summary.subject, 128, `${label} subject`);
+  if (summary.subject.includes('|')) throw new Error(`${label} subject contains a delimiter.`);
+  assertPositiveInteger(summary.createdAt, `${label} createdAt`);
+  assertPositiveInteger(summary.expiresAt, `${label} expiresAt`);
+  if (summary.expiresAt !== summary.createdAt + 7_776_000) {
+    throw new Error(`${label} expiry is invalid.`);
+  }
+  assertBoolean(summary.canDelete, `${label} canDelete`);
+  assertBoolean(summary.canReport, `${label} canReport`);
+  if (summary.canDelete && summary.canReport) throw new Error(`${label} permissions conflict.`);
+}
+
+function validateBoardList(data) {
+  assertOnlyKeys(
+    data,
+    ['board', 'page', 'totalPages', 'totalPosts', 'capacity', 'posts'],
+    'board.list.data',
+  );
+  validateBoardKey(data.board, 'board list board');
+  assertPositiveInteger(data.page, 'board list page');
+  assertPositiveInteger(data.totalPages, 'board list total pages');
+  assertNonNegativeInteger(data.totalPosts, 'board list total posts');
+  if (data.page > 100 || data.totalPages > 100 || data.totalPosts > 1000 ||
+      data.capacity !== 1000 || data.totalPages !== Math.max(1, Math.ceil(data.totalPosts / 10))) {
+    throw new Error('board.list counts are inconsistent.');
+  }
+  assertArrayMax(data.posts, 10, 'board list posts');
+  if (data.page > data.totalPages && data.posts.length !== 0) {
+    throw new Error('board.list beyond the last page must be empty.');
+  }
+  const ids = new Set();
+  for (const summary of data.posts) {
+    validateBoardSummary(summary);
+    if (summary.board !== data.board || ids.has(summary.postId)) {
+      throw new Error('board.list contains an inconsistent post.');
+    }
+    ids.add(summary.postId);
+  }
+  if (data.posts.length > data.totalPosts) throw new Error('board.list contains too many posts.');
+}
+
+function validateBoardEntry(data) {
+  assertOnlyKeys(
+    data,
+    ['postId', 'board', 'author', 'subject', 'body', 'createdAt', 'expiresAt', 'canDelete', 'canReport'],
+    'board.entry.data',
+  );
+  const { body, ...summary } = data;
+  validateBoardSummary(summary, 'board entry');
+  assertBoardText(body, 4096, 'board entry body');
 }
 
 function validateScenePatch(patch) {

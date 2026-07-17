@@ -28,6 +28,9 @@ async function installMockWorld(
       emitMockTrade?: () => void;
       emitMockTradeStep?: (step: 'initial' | 'changed' | 'settled') => void;
       emitMockRewardOdds?: (page: 1 | 2) => void;
+      emitMockBoard?: (view: 'catalog' | 'list' | 'entry' | 'entry-owned') => void;
+      emitMockActionResult?: (requestId: string, ok: boolean) => void;
+      disconnectMockSocket?: () => void;
     };
     mockState.mockHellos = [];
     mockState.mockActions = [];
@@ -299,6 +302,7 @@ async function installMockWorld(
     }
 
     Object.defineProperty(window, 'WebSocket', { value: MockWebSocket, configurable: true });
+    mockState.disconnectMockSocket = () => activeSocket?.close();
     mockState.emitMockEvents = (count: number) => {
       for (let index = 0; index < count; index += 1) {
         serverSequence += 1;
@@ -353,6 +357,71 @@ async function installMockWorld(
             conditionalProbabilityNumerator: 7, conditionalProbabilityDenominator: 10,
           }] : [],
         },
+      }) }));
+    };
+    mockState.emitMockActionResult = (requestId, ok) => {
+      serverSequence += 1;
+      activeSocket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+        v: 1,
+        type: 'action.result',
+        seq: serverSequence,
+        data: { requestId, ok, message: ok ? 'Done.' : 'Rejected.' },
+      }) }));
+    };
+    mockState.emitMockBoard = (view) => {
+      serverSequence += 1;
+      const summary = {
+        postId: 'b0123456789abcdef0123456789abcdef',
+        board: 'general',
+        author: 'Bram <&>',
+        subject: 'Festival <&>',
+        createdAt: 1_800_000_000,
+        expiresAt: 1_807_776_000,
+        canDelete: false,
+        canReport: true,
+      };
+      const frames = {
+        catalog: {
+          type: 'board.catalog',
+          data: {
+            boards: [
+              {
+                key: 'general', label: 'General',
+                description: 'Conversación comunitaria deliberada.', canPost: true,
+              },
+              {
+                key: 'newbie', label: 'Personas nuevas',
+                description: 'Preguntas y orientación para empezar.', canPost: false,
+              },
+            ],
+            retentionDays: 90,
+          },
+        },
+        list: {
+          type: 'board.list',
+          data: {
+            board: 'general', page: 1, totalPages: 1, totalPosts: 1, capacity: 1_000,
+            posts: [summary],
+          },
+        },
+        entry: {
+          type: 'board.entry',
+          data: { ...summary, body: 'Nos vemos | <script>alert(1)</script>' },
+        },
+        'entry-owned': {
+          type: 'board.entry',
+          data: {
+            ...summary,
+            canDelete: true,
+            canReport: false,
+            body: 'Nos vemos | <script>alert(1)</script>',
+          },
+        },
+      } as const;
+      activeSocket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+        v: 1,
+        seq: serverSequence,
+        ...frames[view],
       }) }));
     };
   }, sceneImage ?? null);
@@ -688,6 +757,219 @@ test('authenticated mobile play exposes complete accessible panels and a fixed c
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
   const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test('community boards are pull-only, keyboard-operable, text-safe and accessible', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+
+  const panel = page.locator('details.board-panel');
+  const summary = panel.locator('summary');
+  await summary.focus();
+  await page.keyboard.press('Enter');
+  await expect(panel).toHaveAttribute('open', '');
+
+  const load = panel.getByRole('button', { name: 'Load boards' });
+  await load.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toEqual({ requestId: expect.any(String), action: 'board.catalog' });
+  await page.evaluate(() => {
+    (window as Window & { emitMockBoard?: (view: 'catalog') => void })
+      .emitMockBoard?.('catalog');
+  });
+
+  await expect(panel.getByLabel('Board')).toHaveValue('general');
+  await expect(panel).toContainText('Posts are public, text-only and retained for 90 days.');
+  await expect(panel).toContainText('Conversación comunitaria deliberada.');
+  const open = panel.getByRole('button', { name: 'Open board' });
+  await open.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toEqual({
+    requestId: expect.any(String), action: 'board.list', board: 'general', page: 1,
+  });
+  await page.evaluate(() => {
+    (window as Window & { emitMockBoard?: (view: 'list') => void })
+      .emitMockBoard?.('list');
+  });
+
+  await expect(panel).toContainText('Festival <&>');
+  await expect(panel).toContainText('Bram <&>');
+  await expect(panel.getByText('Nos vemos | <script>alert(1)</script>', { exact: true }))
+    .toHaveCount(0);
+  const read = panel.getByRole('button', { name: 'Read' });
+  await read.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toEqual({
+    requestId: expect.any(String), action: 'board.read',
+    postId: 'b0123456789abcdef0123456789abcdef',
+  });
+  await page.evaluate(() => {
+    (window as Window & { emitMockBoard?: (view: 'entry') => void })
+      .emitMockBoard?.('entry');
+  });
+  await expect(panel.getByText('Nos vemos | <script>alert(1)</script>', { exact: true }))
+    .toBeVisible();
+  await expect(panel.locator('script')).toHaveCount(0);
+
+  await panel.getByLabel('Subject').fill('Respuesta <&>');
+  await panel.getByLabel('Post', { exact: true }).fill('Contenido público | literal.');
+  const publish = panel.getByRole('button', { name: 'Publish post' });
+  await publish.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toEqual({
+    requestId: expect.any(String), action: 'board.post', board: 'general',
+    subject: 'Respuesta <&>', body: 'Contenido público | literal.',
+  });
+
+  await expect(panel.getByLabel('Subject')).toHaveValue('Respuesta <&>');
+  await expect(panel.getByLabel('Post', { exact: true })).toHaveValue('Contenido público | literal.');
+  await expect(publish).toBeDisabled();
+  await page.evaluate(() => {
+    (window as Window & { disconnectMockSocket?: () => void }).disconnectMockSocket?.();
+  });
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible();
+  await panel.getByRole('button', { name: 'Load boards' }).click();
+  await page.evaluate(() => {
+    const state = window as Window & {
+      emitMockBoard?: (view: 'catalog' | 'list' | 'entry') => void;
+    };
+    state.emitMockBoard?.('catalog');
+    state.emitMockBoard?.('list');
+    state.emitMockBoard?.('entry');
+  });
+  await expect(publish).toBeEnabled();
+  await expect(panel.getByLabel('Subject')).toHaveValue('Respuesta <&>');
+  await expect(panel.getByLabel('Post', { exact: true })).toHaveValue('Contenido público | literal.');
+
+  await publish.click();
+  const rejectedPostId = await page.evaluate(() => {
+    const state = window as Window & {
+      mockActions?: Array<{ data?: { requestId?: string } }>;
+    };
+    return state.mockActions?.at(-1)?.data?.requestId ?? '';
+  });
+  await page.evaluate((requestId) => {
+    (window as Window & { emitMockActionResult?: (id: string, ok: boolean) => void })
+      .emitMockActionResult?.(requestId, false);
+  }, rejectedPostId);
+  await expect(publish).toBeEnabled();
+  await expect(panel.getByLabel('Subject')).toHaveValue('Respuesta <&>');
+  await expect(panel.getByLabel('Post', { exact: true })).toHaveValue('Contenido público | literal.');
+
+  await publish.click();
+  const acceptedPostId = await page.evaluate(() => {
+    const state = window as Window & {
+      mockActions?: Array<{ data?: { requestId?: string } }>;
+    };
+    return state.mockActions?.at(-1)?.data?.requestId ?? '';
+  });
+  await page.evaluate((requestId) => {
+    (window as Window & { emitMockActionResult?: (id: string, ok: boolean) => void })
+      .emitMockActionResult?.(requestId, true);
+  }, acceptedPostId);
+  await expect(panel.getByLabel('Subject')).toHaveValue('');
+  await expect(panel.getByLabel('Post', { exact: true })).toHaveValue('');
+  await expect(panel.getByRole('list', { name: 'General posts' })).toHaveCount(0);
+
+  await panel.getByLabel('Report this post').fill('Contenido abusivo | reiterado.');
+  const report = panel.getByRole('button', { name: 'Send report' });
+  await report.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toEqual({
+    requestId: expect.any(String), action: 'board.report',
+    postId: 'b0123456789abcdef0123456789abcdef',
+    reason: 'Contenido abusivo | reiterado.',
+  });
+
+  const rejectedReportId = await page.evaluate(() => {
+    const state = window as Window & {
+      mockActions?: Array<{ data?: { requestId?: string } }>;
+    };
+    return state.mockActions?.at(-1)?.data?.requestId ?? '';
+  });
+  await page.evaluate((requestId) => {
+    (window as Window & { emitMockActionResult?: (id: string, ok: boolean) => void })
+      .emitMockActionResult?.(requestId, false);
+  }, rejectedReportId);
+  await expect(panel.getByText('Nos vemos | <script>alert(1)</script>', { exact: true }))
+    .toBeVisible();
+  await expect(panel.getByLabel('Report this post')).toBeVisible();
+
+  await panel.getByRole('button', { name: 'Send report' }).click();
+  const acceptedReportId = await page.evaluate(() => {
+    const state = window as Window & {
+      mockActions?: Array<{ data?: { requestId?: string } }>;
+    };
+    return state.mockActions?.at(-1)?.data?.requestId ?? '';
+  });
+  await page.evaluate((requestId) => {
+    (window as Window & { emitMockActionResult?: (id: string, ok: boolean) => void })
+      .emitMockActionResult?.(requestId, true);
+  }, acceptedReportId);
+  await expect(panel.getByLabel('Report this post')).toHaveCount(0);
+
+  await page.evaluate(() => {
+    (window as Window & { emitMockBoard?: (view: 'list') => void })
+      .emitMockBoard?.('list');
+  });
+  await expect(panel.getByRole('list', { name: 'General posts' }).getByText('Festival <&>'))
+    .toBeVisible();
+  await page.evaluate(() => {
+    (window as Window & { emitMockBoard?: (view: 'entry-owned') => void })
+      .emitMockBoard?.('entry-owned');
+  });
+  const remove = panel.getByRole('button', { name: 'Delete this post' });
+  await remove.click();
+  const rejectedDeleteId = await page.evaluate(() => {
+    const state = window as Window & {
+      mockActions?: Array<{ data?: { requestId?: string } }>;
+    };
+    return state.mockActions?.at(-1)?.data?.requestId ?? '';
+  });
+  await expect(panel.getByText('Nos vemos | <script>alert(1)</script>', { exact: true }))
+    .toBeVisible();
+  await page.evaluate((requestId) => {
+    (window as Window & { emitMockActionResult?: (id: string, ok: boolean) => void })
+      .emitMockActionResult?.(requestId, false);
+  }, rejectedDeleteId);
+  await expect(remove).toBeVisible();
+
+  await remove.click();
+  const acceptedDeleteId = await page.evaluate(() => {
+    const state = window as Window & {
+      mockActions?: Array<{ data?: { requestId?: string } }>;
+    };
+    return state.mockActions?.at(-1)?.data?.requestId ?? '';
+  });
+  await page.evaluate((requestId) => {
+    (window as Window & { emitMockActionResult?: (id: string, ok: boolean) => void })
+      .emitMockActionResult?.(requestId, true);
+  }, acceptedDeleteId);
+  await expect(panel.getByText('Festival <&>')).toHaveCount(0);
+  await expect(panel.getByText('Nos vemos | <script>alert(1)</script>', { exact: true }))
+    .toHaveCount(0);
+
+  const results = await new AxeBuilder({ page })
+    .include('.board-panel')
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
     .analyze();
   expect(results.violations).toEqual([]);

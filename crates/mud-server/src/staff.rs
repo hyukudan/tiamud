@@ -524,6 +524,18 @@ fn reports_output(reports: &[StaffReport]) -> String {
                 ),
             );
         }
+        if let Some(evidence) = &report.board_evidence {
+            push_bounded_line(
+                &mut output,
+                &format!(
+                    "  board {} · author: {} · subject: {} · excerpt: {}",
+                    evidence.board.as_str(),
+                    single_line(&evidence.author_name),
+                    single_line(&evidence.subject),
+                    mail_excerpt(&evidence.body),
+                ),
+            );
+        }
     }
     bounded_output(output)
 }

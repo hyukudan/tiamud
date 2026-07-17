@@ -3,6 +3,9 @@
   import type {
     ActionResultData,
     ActionPerformFields,
+    BoardCatalogData,
+    BoardEntryData,
+    BoardListData,
     ConnectionState,
     ContainerContentsData,
     LiveServerMessage,
@@ -78,6 +81,11 @@
     response?: string;
   }
 
+  interface PendingStructuredAction {
+    action: string;
+    fields?: ActionPerformFields;
+  }
+
   type VisualSceneEntity = ReturnType<typeof mapVisibleScenePresentation>[number];
 
   interface RenderedVisualEntity {
@@ -96,6 +104,10 @@
   let rewardOdds = $state<RewardOddsData>();
   let mailList = $state<MailListData>();
   let mailMessage = $state<MailMessageData>();
+  let boardCatalog = $state<BoardCatalogData>();
+  let boardList = $state<BoardListData>();
+  let boardEntry = $state<BoardEntryData>();
+  let lastActionResult = $state<ActionResultData>();
   let manifestImage = $state<SceneSnapshot['image']>();
   let activeAssetKey: string | undefined;
   let failedImageUrls = $state<string[]>([]);
@@ -109,6 +121,7 @@
   let eventCounter = 0;
   let activeVisualCues = $state<Record<string, ActiveScenePresentationCue>>({});
   const visualCueTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const pendingStructuredActions = new Map<string, PendingStructuredAction>();
   const seenMessageCueKeys: string[] = [];
   let connection: TiamudConnection | undefined;
   let selectedAccess = $state<CharacterSelection>();
@@ -307,6 +320,7 @@
   }
 
   function markPendingInterrupted(): void {
+    pendingStructuredActions.clear();
     if (!history.some((entry) => entry.state === 'pending')) return;
     replaceHistory(history.map((entry) => entry.state === 'pending'
       ? {
@@ -325,6 +339,13 @@
       return;
     }
 
+    const pending = pendingStructuredActions.get(result.requestId);
+    pendingStructuredActions.delete(result.requestId);
+    lastActionResult = result;
+    if (result.ok && pending) {
+      applyConfirmedStructuredAction(pending);
+    }
+
     replaceHistory(history.map((entry) =>
       entry.id === result.requestId
         ? {
@@ -334,6 +355,32 @@
           }
         : entry,
     ));
+  }
+
+  function applyConfirmedStructuredAction(pending: PendingStructuredAction): void {
+    if (pending.action === 'board.post') {
+      boardList = undefined;
+      return;
+    }
+    const postId = pending.fields?.postId;
+    if (pending.action === 'board.delete' && postId) {
+      if (boardEntry?.postId === postId) boardEntry = undefined;
+      if (boardList?.posts.some((entry) => entry.postId === postId)) boardList = undefined;
+      return;
+    }
+    if (pending.action === 'board.report' && postId) {
+      if (boardEntry?.postId === postId) {
+        boardEntry = { ...boardEntry, canReport: false };
+      }
+      if (boardList) {
+        boardList = {
+          ...boardList,
+          posts: boardList.posts.map((entry) => entry.postId === postId
+            ? { ...entry, canReport: false }
+            : entry),
+        };
+      }
+    }
   }
 
   function socialHistoryLabel(message: SocialMessageData): string {
@@ -546,6 +593,35 @@
           };
         }
         break;
+      case 'board.catalog':
+        boardCatalog = message.data;
+        break;
+      case 'board.list':
+        boardList = message.data;
+        if (boardEntry && !message.data.posts.some((entry) => entry.postId === boardEntry?.postId)) {
+          boardEntry = undefined;
+        }
+        break;
+      case 'board.entry':
+        boardEntry = message.data;
+        if (boardList?.board === message.data.board) {
+          boardList = {
+            ...boardList,
+            posts: boardList.posts.map((entry) => entry.postId === message.data.postId
+              ? {
+                  postId: message.data.postId,
+                  board: message.data.board,
+                  author: message.data.author,
+                  subject: message.data.subject,
+                  createdAt: message.data.createdAt,
+                  expiresAt: message.data.expiresAt,
+                  canDelete: message.data.canDelete,
+                  canReport: message.data.canReport,
+                }
+              : entry),
+          };
+        }
+        break;
       case 'map.snapshot':
         if (player && player.revision <= message.data.revision) {
           player = { ...player, revision: message.data.revision, map: message.data.map };
@@ -606,6 +682,9 @@
     rewardOdds = undefined;
     mailList = undefined;
     mailMessage = undefined;
+    boardCatalog = undefined;
+    boardList = undefined;
+    boardEntry = undefined;
   }
 
   function submitCommand(value = command): void {
@@ -619,7 +698,11 @@
     recordSubmission(submitted, id, sent);
   }
 
-  function submitAction(action: string, fields: ActionPerformFields | undefined, label: string): void {
+  function submitAction(
+    action: string,
+    fields: ActionPerformFields | undefined,
+    label: string,
+  ): string | undefined {
     const id = createRequestId();
     const sent = connection?.perform(action, fields, id) ?? false;
     if (sent && [
@@ -633,7 +716,15 @@
     }
     if (sent && action === 'reward.open') rewardOdds = undefined;
     if (sent && action === 'mail.delete') mailMessage = undefined;
+    if (sent && ['board.post', 'board.delete', 'board.report'].includes(action)) {
+      if (pendingStructuredActions.size >= MAX_SCROLLBACK_ENTRIES) {
+        const oldest = pendingStructuredActions.keys().next().value;
+        if (oldest) pendingStructuredActions.delete(oldest);
+      }
+      pendingStructuredActions.set(id, { action, fields });
+    }
     recordSubmission(label, id, sent);
+    return sent ? id : undefined;
   }
 
   function submitAbility(abilityId: string, target: string | undefined, label: string): void {
@@ -709,6 +800,9 @@
     rewardOdds = undefined;
     mailList = undefined;
     mailMessage = undefined;
+    boardCatalog = undefined;
+    boardList = undefined;
+    boardEntry = undefined;
     accessError = undefined;
     selectedAccess = selection;
     if (!connection) {
@@ -732,6 +826,9 @@
               rewardOdds = undefined;
               mailList = undefined;
               mailMessage = undefined;
+              boardCatalog = undefined;
+              boardList = undefined;
+              boardEntry = undefined;
             }
           },
           onProtocolError: () => {
@@ -765,6 +862,9 @@
     rewardOdds = undefined;
     mailList = undefined;
     mailMessage = undefined;
+    boardCatalog = undefined;
+    boardList = undefined;
+    boardEntry = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -789,6 +889,9 @@
     rewardOdds = undefined;
     mailList = undefined;
     mailMessage = undefined;
+    boardCatalog = undefined;
+    boardList = undefined;
+    boardEntry = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -1077,6 +1180,11 @@
         {rewardOdds}
         {mailList}
         {mailMessage}
+        {boardCatalog}
+        {boardList}
+        {boardEntry}
+        actionResult={lastActionResult}
+        {connectionState}
         abilityTargets={scene?.npcs ?? []}
         oncommand={submitCommand}
         onaction={submitAction}

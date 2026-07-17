@@ -50,6 +50,10 @@ exposes:
   ignore controls;
 - a separate offline-mail inbox with bounded paging, read/delete, send and
   report controls; it does not merge durable correspondence into chat history;
+- a separate “Tablones” panel for the closed `general` and `newbie` community
+  boards, with bounded public summaries, text-only detail, 90-day retention,
+  author deletion and evidence-backed reporting; it never interprets HTML,
+  Markdown, links or remote content;
 - persistent validated command history (100 entries), suggestions and
   up/down keyboard recall;
 - responsive panels and a fixed reachable command form on narrow screens;
@@ -124,7 +128,7 @@ selection and temporary operational rejections retain the reusable account
 session.
 
 It accepts complete scene/player snapshots and typed scene/entity/vitals/
-inventory/map/chat/mail/media updates. Server messages are bounded and validated;
+inventory/map/chat/mail/board/media updates. Server messages are bounded and validated;
 opaque view/entity IDs are required where appropriate. It discards duplicate
 or backwards sequence numbers, requests `sync.snapshot` after a gap and answers
 unsequenced server heartbeats. A 45-second silence watchdog closes the socket so

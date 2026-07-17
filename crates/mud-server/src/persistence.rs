@@ -18,11 +18,11 @@ use std::{
 };
 use thiserror::Error;
 use tiamud_core::{
-    AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
+    AccountId, AccountRole, AccountSnapshot, BoardKey, CharacterGameplaySnapshot, CharacterId,
     CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, MAX_ITEM_INSTANCES,
     SocialChannelName, StaffCapability, StaffProfileKey, StaffReportResolution,
-    WorldRuntimeSnapshot, valid_mail_public_id, valid_mail_subject, valid_mail_target,
-    valid_mail_visible_text,
+    WorldRuntimeSnapshot, valid_board_public_id, valid_board_subject, valid_board_visible_text,
+    valid_mail_public_id, valid_mail_subject, valid_mail_target, valid_mail_visible_text,
 };
 use tiamud_persistence_sqlite::{SchemaError, migrate};
 use tokio::{
@@ -67,6 +67,20 @@ const MAIL_REPORT_EVIDENCE_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
 const MAIL_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
 const MAIL_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
 const MAIL_PURGE_LIMIT: i64 = 256;
+pub const BOARD_PAGE_SIZE: u32 = 10;
+pub const BOARD_MAX_PAGES: u32 = 100;
+pub const BOARD_ACCOUNT_CAPACITY: u32 = 64;
+pub const BOARD_CAPACITY_PER_BOARD: u32 = 1_000;
+const BOARD_BYTE_CAPACITY_PER_BOARD: i64 = 4 * 1_024 * 1_024;
+const BOARD_GLOBAL_CAPACITY: i64 = 2_000;
+const BOARD_GLOBAL_BYTE_CAPACITY: i64 = 8 * 1_024 * 1_024;
+const BOARD_HOURLY_CAPACITY: i64 = 5;
+const BOARD_DAILY_CAPACITY: i64 = 20;
+const BOARD_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
+const BOARD_REPORT_EVIDENCE_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
+const BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
+const BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
+const BOARD_PURGE_LIMIT: i64 = 256;
 const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
 const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -178,6 +192,46 @@ pub struct MailReportEvidence {
     pub expires_at: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoardPostSummary {
+    pub public_id: String,
+    pub board: BoardKey,
+    pub author_name: String,
+    pub subject: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub can_delete: bool,
+    pub can_report: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoardPage {
+    pub board: BoardKey,
+    pub page: u32,
+    pub total_pages: u32,
+    pub total_posts: u32,
+    pub capacity: u32,
+    pub posts: Vec<BoardPostSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoardEntry {
+    pub summary: BoardPostSummary,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoardReportEvidence {
+    pub board: BoardKey,
+    pub post_public_id: String,
+    pub author_name: String,
+    pub subject: String,
+    pub body: String,
+    pub posted_at: i64,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SocialRelationKind {
     Ignore,
@@ -226,6 +280,7 @@ pub struct StaffReport {
     pub reason: String,
     pub created_at: i64,
     pub mail_evidence: Option<MailReportEvidence>,
+    pub board_evidence: Option<BoardReportEvidence>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -346,6 +401,20 @@ pub enum StoreError {
     MailReportLimit,
     #[error("mail report evidence capacity is exhausted")]
     MailEvidenceLimit,
+    #[error("invalid or oversized board input")]
+    InvalidBoardInput,
+    #[error("board publication quota exceeded")]
+    BoardRateLimited,
+    #[error("board publication capacity is exhausted")]
+    BoardCapacity,
+    #[error("that board post is not available")]
+    BoardPostUnavailable,
+    #[error("that board post has already been reported")]
+    BoardAlreadyReported,
+    #[error("the account has too many open board reports")]
+    BoardReportLimit,
+    #[error("board report evidence capacity is exhausted")]
+    BoardEvidenceLimit,
     #[error("invalid or oversized staff input")]
     InvalidStaffInput,
     #[error("persisted staff state is invalid: {0}")]
@@ -358,6 +427,8 @@ pub enum StoreError {
     StaffReportUnavailable(i64),
     #[error("database schema version {found} is newer than supported version {supported}")]
     UnsupportedSchemaVersion { found: i64, supported: i64 },
+    #[error("database schema migration left foreign-key violations")]
+    SchemaForeignKeyViolations,
 }
 
 /// Mutable identity and character state behind the transport-independent actor.
@@ -541,6 +612,43 @@ pub trait CharacterStore: Send + Sync {
     ) -> Result<i64, StoreError>;
 
     async fn purge_expired_mail(&self) -> Result<u64, StoreError>;
+
+    async fn list_board_posts(
+        &self,
+        actor: CharacterId,
+        board: BoardKey,
+        page: u32,
+    ) -> Result<BoardPage, StoreError>;
+
+    async fn read_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+    ) -> Result<BoardEntry, StoreError>;
+
+    async fn publish_board_post(
+        &self,
+        actor: CharacterId,
+        board: BoardKey,
+        public_id: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<BoardEntry, StoreError>;
+
+    async fn delete_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+    ) -> Result<(), StoreError>;
+
+    async fn report_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+        reason: &str,
+    ) -> Result<i64, StoreError>;
+
+    async fn purge_expired_boards(&self) -> Result<u64, StoreError>;
 
     async fn report_character(
         &self,
@@ -945,6 +1053,61 @@ impl CharacterStore for MeasuredCharacterStore {
         self.transaction(self.inner.purge_expired_mail()).await
     }
 
+    async fn list_board_posts(
+        &self,
+        actor: CharacterId,
+        board: BoardKey,
+        page: u32,
+    ) -> Result<BoardPage, StoreError> {
+        self.inner.list_board_posts(actor, board, page).await
+    }
+
+    async fn read_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+    ) -> Result<BoardEntry, StoreError> {
+        self.inner.read_board_post(actor, public_id).await
+    }
+
+    async fn publish_board_post(
+        &self,
+        actor: CharacterId,
+        board: BoardKey,
+        public_id: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<BoardEntry, StoreError> {
+        self.transaction(
+            self.inner
+                .publish_board_post(actor, board, public_id, subject, body),
+        )
+        .await
+    }
+
+    async fn delete_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.delete_board_post(actor, public_id))
+            .await
+    }
+
+    async fn report_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+        reason: &str,
+    ) -> Result<i64, StoreError> {
+        self.transaction(self.inner.report_board_post(actor, public_id, reason))
+            .await
+    }
+
+    async fn purge_expired_boards(&self) -> Result<u64, StoreError> {
+        self.transaction(self.inner.purge_expired_boards()).await
+    }
+
     async fn report_character(
         &self,
         actor: CharacterId,
@@ -1144,6 +1307,39 @@ pub(super) enum Request {
         reply: oneshot::Sender<Result<i64, StoreError>>,
     },
     PurgeExpiredMail {
+        reply: oneshot::Sender<Result<u64, StoreError>>,
+    },
+    ListBoardPosts {
+        actor: CharacterId,
+        board: BoardKey,
+        page: u32,
+        reply: oneshot::Sender<Result<BoardPage, StoreError>>,
+    },
+    ReadBoardPost {
+        actor: CharacterId,
+        public_id: String,
+        reply: oneshot::Sender<Result<BoardEntry, StoreError>>,
+    },
+    PublishBoardPost {
+        actor: CharacterId,
+        board: BoardKey,
+        public_id: String,
+        subject: String,
+        body: String,
+        reply: oneshot::Sender<Result<BoardEntry, StoreError>>,
+    },
+    DeleteBoardPost {
+        actor: CharacterId,
+        public_id: String,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    ReportBoardPost {
+        actor: CharacterId,
+        public_id: String,
+        reason: String,
+        reply: oneshot::Sender<Result<i64, StoreError>>,
+    },
+    PurgeExpiredBoards {
         reply: oneshot::Sender<Result<u64, StoreError>>,
     },
     ReportCharacter {
@@ -1518,6 +1714,80 @@ impl SqliteCharacterStore {
                         Request::PurgeExpiredMail { reply } => {
                             let _ =
                                 reply.send(purge_expired_mail(&mut connection, unix_timestamp()));
+                        }
+                        Request::ListBoardPosts {
+                            actor,
+                            board,
+                            page,
+                            reply,
+                        } => {
+                            let _ = reply.send(list_board_posts(
+                                &connection,
+                                actor,
+                                board,
+                                page,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ReadBoardPost {
+                            actor,
+                            public_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(read_board_post(
+                                &connection,
+                                actor,
+                                &public_id,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::PublishBoardPost {
+                            actor,
+                            board,
+                            public_id,
+                            subject,
+                            body,
+                            reply,
+                        } => {
+                            let _ = reply.send(publish_board_post(
+                                &mut connection,
+                                actor,
+                                board,
+                                &public_id,
+                                &subject,
+                                &body,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::DeleteBoardPost {
+                            actor,
+                            public_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(delete_board_post(
+                                &mut connection,
+                                actor,
+                                &public_id,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ReportBoardPost {
+                            actor,
+                            public_id,
+                            reason,
+                            reply,
+                        } => {
+                            let _ = reply.send(report_board_post(
+                                &mut connection,
+                                actor,
+                                &public_id,
+                                &reason,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::PurgeExpiredBoards { reply } => {
+                            let _ =
+                                reply.send(purge_expired_boards(&mut connection, unix_timestamp()));
                         }
                         Request::ReportCharacter {
                             actor,
@@ -2122,6 +2392,107 @@ impl CharacterStore for SqliteCharacterStore {
             .await
     }
 
+    async fn list_board_posts(
+        &self,
+        actor: CharacterId,
+        board: BoardKey,
+        page: u32,
+    ) -> Result<BoardPage, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ListBoardPosts {
+                actor,
+                board,
+                page,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn read_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+    ) -> Result<BoardEntry, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ReadBoardPost {
+                actor,
+                public_id: public_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn publish_board_post(
+        &self,
+        actor: CharacterId,
+        board: BoardKey,
+        public_id: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<BoardEntry, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::PublishBoardPost {
+                actor,
+                board,
+                public_id: public_id.to_owned(),
+                subject: subject.to_owned(),
+                body: body.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn delete_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::DeleteBoardPost {
+                actor,
+                public_id: public_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn report_board_post(
+        &self,
+        actor: CharacterId,
+        public_id: &str,
+        reason: &str,
+    ) -> Result<i64, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::ReportBoardPost {
+                actor,
+                public_id: public_id.to_owned(),
+                reason: reason.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn purge_expired_boards(&self) -> Result<u64, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::PurgeExpiredBoards { reply }, receive)
+            .await
+    }
+
     async fn report_character(
         &self,
         actor: CharacterId,
@@ -2317,6 +2688,7 @@ fn initialise(connection: &mut Connection) -> Result<(), StoreError> {
         Err(SchemaError::UnsupportedVersion { found, supported }) => {
             Err(StoreError::UnsupportedSchemaVersion { found, supported })
         }
+        Err(SchemaError::ForeignKeyViolations) => Err(StoreError::SchemaForeignKeyViolations),
     }
 }
 
@@ -3527,6 +3899,479 @@ fn purge_expired_mail(connection: &mut Connection, now: i64) -> Result<u64, Stor
     u64::try_from(messages.saturating_add(evidence)).map_err(|_| StoreError::InvalidMailInput)
 }
 
+fn normalise_board_text(value: &str, maximum: usize) -> Result<String, StoreError> {
+    if valid_board_visible_text(value, maximum) {
+        Ok(value.to_owned())
+    } else {
+        Err(StoreError::InvalidBoardInput)
+    }
+}
+
+fn check_board_capacity(
+    account_count: i64,
+    board_count: i64,
+    board_bytes: i64,
+    global_count: i64,
+    global_bytes: i64,
+    added_bytes: i64,
+) -> Result<(), StoreError> {
+    if account_count >= i64::from(BOARD_ACCOUNT_CAPACITY)
+        || board_count >= i64::from(BOARD_CAPACITY_PER_BOARD)
+        || board_bytes.saturating_add(added_bytes) > BOARD_BYTE_CAPACITY_PER_BOARD
+        || global_count >= BOARD_GLOBAL_CAPACITY
+        || global_bytes.saturating_add(added_bytes) > BOARD_GLOBAL_BYTE_CAPACITY
+    {
+        Err(StoreError::BoardCapacity)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_board_report_capacity(open_reports: i64, evidence_count: i64) -> Result<(), StoreError> {
+    if open_reports >= BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT {
+        Err(StoreError::BoardReportLimit)
+    } else if evidence_count >= BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY {
+        Err(StoreError::BoardEvidenceLimit)
+    } else {
+        Ok(())
+    }
+}
+
+fn consume_board_usage(
+    connection: &Connection,
+    account_id: AccountId,
+    now: i64,
+) -> Result<(), StoreError> {
+    let stored = connection
+        .query_row(
+            "SELECT hour_started_at, hour_count, day_started_at, day_count
+             FROM social_board_usage WHERE account_id = ?1",
+            [account_id.0],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((stored_hour_start, stored_hour_count, stored_day_start, stored_day_count)) = stored
+    else {
+        connection.execute(
+            "INSERT INTO social_board_usage
+                 (account_id, hour_started_at, hour_count,
+                  day_started_at, day_count, updated_at)
+             VALUES (?1, ?2, 1, ?2, 1, ?2)",
+            params![account_id.0, now],
+        )?;
+        return Ok(());
+    };
+    let hour_expired =
+        now < stored_hour_start || now.saturating_sub(stored_hour_start) >= MAIL_HOUR_SECONDS;
+    let day_expired =
+        now < stored_day_start || now.saturating_sub(stored_day_start) >= MAIL_DAY_SECONDS;
+    let hour_start = if hour_expired { now } else { stored_hour_start };
+    let day_start = if day_expired { now } else { stored_day_start };
+    let hour_count = if hour_expired { 0 } else { stored_hour_count };
+    let day_count = if day_expired { 0 } else { stored_day_count };
+    if hour_count >= BOARD_HOURLY_CAPACITY || day_count >= BOARD_DAILY_CAPACITY {
+        return Err(StoreError::BoardRateLimited);
+    }
+    connection.execute(
+        "UPDATE social_board_usage
+         SET hour_started_at = ?1, hour_count = ?2,
+             day_started_at = ?3, day_count = ?4, updated_at = ?5
+         WHERE account_id = ?6",
+        params![
+            hour_start,
+            hour_count + 1,
+            day_start,
+            day_count + 1,
+            now,
+            account_id.0
+        ],
+    )?;
+    Ok(())
+}
+
+fn list_board_posts(
+    connection: &Connection,
+    actor: CharacterId,
+    board: BoardKey,
+    page: u32,
+    now: i64,
+) -> Result<BoardPage, StoreError> {
+    if !(1..=BOARD_MAX_PAGES).contains(&page) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let actor_profile = social_profile(connection, actor, now)?;
+    let total = connection.query_row(
+        "SELECT COUNT(*) FROM social_board_posts
+         WHERE board_key = ?1 AND expires_at > ?2",
+        params![board.as_str(), now],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let total_posts = u32::try_from(total).map_err(|_| StoreError::InvalidBoardInput)?;
+    let total_pages = total_posts.div_ceil(BOARD_PAGE_SIZE).max(1);
+    if total_pages > BOARD_MAX_PAGES {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let offset = i64::from((page - 1).saturating_mul(BOARD_PAGE_SIZE));
+    let mut statement = connection.prepare(
+        "SELECT posts.public_id, posts.author_character_id, authors.account_id,
+                posts.author_name, posts.subject, posts.created_at, posts.expires_at,
+                posts.report_id
+         FROM social_board_posts AS posts
+         JOIN characters AS authors ON authors.id = posts.author_character_id
+         WHERE posts.board_key = ?1 AND posts.expires_at > ?2
+         ORDER BY posts.created_at DESC, posts.id DESC
+         LIMIT ?3 OFFSET ?4",
+    )?;
+    let posts = statement
+        .query_map(
+            params![board.as_str(), now, i64::from(BOARD_PAGE_SIZE), offset],
+            |row| {
+                let author_character = CharacterId(row.get(1)?);
+                let author_account = AccountId(row.get(2)?);
+                let report_id = row.get::<_, Option<i64>>(7)?;
+                Ok(BoardPostSummary {
+                    public_id: row.get(0)?,
+                    board,
+                    author_name: row.get(3)?,
+                    subject: row.get(4)?,
+                    created_at: row.get(5)?,
+                    expires_at: row.get(6)?,
+                    can_delete: author_character == actor,
+                    can_report: author_account != actor_profile.account_id && report_id.is_none(),
+                })
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(BoardPage {
+        board,
+        page,
+        total_pages,
+        total_posts,
+        capacity: BOARD_CAPACITY_PER_BOARD,
+        posts,
+    })
+}
+
+fn read_board_post(
+    connection: &Connection,
+    actor: CharacterId,
+    public_id: &str,
+    now: i64,
+) -> Result<BoardEntry, StoreError> {
+    if !valid_board_public_id(public_id) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let actor_profile = social_profile(connection, actor, now)?;
+    connection
+        .query_row(
+            "SELECT posts.board_key, posts.author_character_id, authors.account_id,
+                    posts.author_name, posts.subject, posts.body,
+                    posts.created_at, posts.expires_at, posts.report_id
+             FROM social_board_posts AS posts
+             JOIN characters AS authors ON authors.id = posts.author_character_id
+             WHERE posts.public_id = ?1 AND posts.expires_at > ?2",
+            params![public_id, now],
+            |row| {
+                let board_key: String = row.get(0)?;
+                let board = BoardKey::parse(&board_key).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        Type::Text,
+                        Box::new(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid board key",
+                        )),
+                    )
+                })?;
+                let author_character = CharacterId(row.get(1)?);
+                let author_account = AccountId(row.get(2)?);
+                let report_id = row.get::<_, Option<i64>>(8)?;
+                Ok(BoardEntry {
+                    summary: BoardPostSummary {
+                        public_id: public_id.to_owned(),
+                        board,
+                        author_name: row.get(3)?,
+                        subject: row.get(4)?,
+                        created_at: row.get(6)?,
+                        expires_at: row.get(7)?,
+                        can_delete: author_character == actor,
+                        can_report: author_account != actor_profile.account_id
+                            && report_id.is_none(),
+                    },
+                    body: row.get(5)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::BoardPostUnavailable)
+}
+
+fn publish_board_post(
+    connection: &mut Connection,
+    actor: CharacterId,
+    board: BoardKey,
+    public_id: &str,
+    subject: &str,
+    body: &str,
+    now: i64,
+) -> Result<BoardEntry, StoreError> {
+    if !valid_board_public_id(public_id) || !valid_board_subject(subject) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let subject = normalise_board_text(subject, tiamud_core::MAX_BOARD_SUBJECT_BYTES)?;
+    let body = normalise_board_text(body, tiamud_core::MAX_BOARD_BODY_BYTES)?;
+    let expires_at = now
+        .checked_add(BOARD_RETENTION_SECONDS)
+        .ok_or(StoreError::InvalidBoardInput)?;
+    let transaction = connection.transaction()?;
+    let profile = social_profile(&transaction, actor, now)?;
+    if profile.muted {
+        return Err(StoreError::ChatMuted);
+    }
+    if account_is_banned(&transaction, profile.account_id, now)? {
+        return Err(StoreError::AccountBanned);
+    }
+    consume_board_usage(&transaction, profile.account_id, now)?;
+    let duplicate = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM social_board_posts WHERE public_id = ?1)",
+        [public_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if duplicate {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let account_count = transaction.query_row(
+        "SELECT COUNT(*)
+         FROM social_board_posts AS posts
+         JOIN characters AS authors ON authors.id = posts.author_character_id
+         WHERE authors.account_id = ?1 AND posts.expires_at > ?2",
+        params![profile.account_id.0, now],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let (board_count, board_bytes) = transaction.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(length(CAST(subject AS BLOB))
+                             + length(CAST(body AS BLOB))), 0)
+         FROM social_board_posts WHERE board_key = ?1 AND expires_at > ?2",
+        params![board.as_str(), now],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let (global_count, global_bytes) = transaction.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(length(CAST(subject AS BLOB))
+                             + length(CAST(body AS BLOB))), 0)
+         FROM social_board_posts WHERE expires_at > ?1",
+        [now],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let added_bytes = i64::try_from(subject.len().saturating_add(body.len()))
+        .map_err(|_| StoreError::InvalidBoardInput)?;
+    if let Err(error) = check_board_capacity(
+        account_count,
+        board_count,
+        board_bytes,
+        global_count,
+        global_bytes,
+        added_bytes,
+    ) {
+        transaction.commit()?;
+        return Err(error);
+    }
+    transaction.execute(
+        "INSERT INTO social_board_posts
+             (public_id, board_key, author_character_id, author_name,
+              subject, body, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            public_id,
+            board.as_str(),
+            actor.0,
+            profile.character_name,
+            subject,
+            body,
+            now,
+            expires_at
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(BoardEntry {
+        summary: BoardPostSummary {
+            public_id: public_id.to_owned(),
+            board,
+            author_name: profile.character_name,
+            subject,
+            created_at: now,
+            expires_at,
+            can_delete: true,
+            can_report: false,
+        },
+        body,
+    })
+}
+
+fn delete_board_post(
+    connection: &mut Connection,
+    actor: CharacterId,
+    public_id: &str,
+    now: i64,
+) -> Result<(), StoreError> {
+    if !valid_board_public_id(public_id) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let transaction = connection.transaction()?;
+    social_profile(&transaction, actor, now)?;
+    let deleted = transaction.execute(
+        "DELETE FROM social_board_posts
+         WHERE public_id = ?1 AND author_character_id = ?2 AND expires_at > ?3",
+        params![public_id, actor.0, now],
+    )?;
+    if deleted != 1 {
+        return Err(StoreError::BoardPostUnavailable);
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn report_board_post(
+    connection: &mut Connection,
+    actor: CharacterId,
+    public_id: &str,
+    reason: &str,
+    now: i64,
+) -> Result<i64, StoreError> {
+    if !valid_board_public_id(public_id) {
+        return Err(StoreError::InvalidBoardInput);
+    }
+    let reason = normalise_board_text(reason, tiamud_core::MAX_BOARD_REPORT_REASON_BYTES)?;
+    let evidence_expires_at = now
+        .checked_add(BOARD_REPORT_EVIDENCE_RETENTION_SECONDS)
+        .ok_or(StoreError::InvalidBoardInput)?;
+    let transaction = connection.transaction()?;
+    let reporter = social_profile(&transaction, actor, now)?;
+    let post = transaction
+        .query_row(
+            "SELECT posts.author_character_id, authors.account_id, posts.board_key,
+                    posts.author_name, posts.subject, posts.body,
+                    posts.created_at, posts.report_id
+             FROM social_board_posts AS posts
+             JOIN characters AS authors ON authors.id = posts.author_character_id
+             WHERE posts.public_id = ?1 AND posts.expires_at > ?2",
+            params![public_id, now],
+            |row| {
+                Ok((
+                    CharacterId(row.get(0)?),
+                    AccountId(row.get(1)?),
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::BoardPostUnavailable)?;
+    if post.7.is_some() {
+        return Err(StoreError::BoardAlreadyReported);
+    }
+    if post.1 == reporter.account_id {
+        return Err(StoreError::BoardPostUnavailable);
+    }
+    let open_reports = transaction.query_row(
+        "SELECT COUNT(*)
+         FROM social_reports AS reports
+         JOIN characters AS reporter ON reporter.id = reports.reporter_character_id
+         WHERE reporter.account_id = ?1 AND reports.report_kind = 'board'
+           AND reports.status = 'open'",
+        [reporter.account_id.0],
+        |row| row.get::<_, i64>(0),
+    )?;
+    check_board_report_capacity(open_reports, 0)?;
+    let evidence_count = transaction.query_row(
+        "SELECT COUNT(*) FROM social_board_report_evidence WHERE expires_at > ?1",
+        [now],
+        |row| row.get::<_, i64>(0),
+    )?;
+    check_board_report_capacity(open_reports, evidence_count)?;
+    transaction.execute(
+        "INSERT INTO social_reports
+             (reporter_character_id, target_character_id, report_kind, reason, created_at)
+         VALUES (?1, ?2, 'board', ?3, ?4)",
+        params![actor.0, post.0.0, reason, now],
+    )?;
+    let report_id = transaction.last_insert_rowid();
+    transaction.execute(
+        "INSERT INTO social_board_report_evidence
+             (report_id, board_key, post_public_id, author_name,
+              subject, body, posted_at, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            report_id,
+            post.2,
+            public_id,
+            post.3,
+            post.4,
+            post.5,
+            post.6,
+            now,
+            evidence_expires_at
+        ],
+    )?;
+    let linked = transaction.execute(
+        "UPDATE social_board_posts SET report_id = ?1
+         WHERE public_id = ?2 AND report_id IS NULL AND expires_at > ?3",
+        params![report_id, public_id, now],
+    )?;
+    if linked != 1 {
+        return Err(StoreError::BoardAlreadyReported);
+    }
+    append_audit(
+        &transaction,
+        reporter.account_id,
+        Some(post.1),
+        "board_report",
+        serde_json::json!({"reportId": report_id}),
+        now,
+    )?;
+    transaction.commit()?;
+    Ok(report_id)
+}
+
+fn purge_expired_boards(connection: &mut Connection, now: i64) -> Result<u64, StoreError> {
+    let transaction = connection.transaction()?;
+    let posts = transaction.execute(
+        "DELETE FROM social_board_posts
+         WHERE id IN (
+             SELECT id FROM social_board_posts
+             WHERE expires_at <= ?1 ORDER BY expires_at, id LIMIT ?2
+         )",
+        params![now, BOARD_PURGE_LIMIT],
+    )?;
+    let remaining = BOARD_PURGE_LIMIT.saturating_sub(i64::try_from(posts).unwrap_or(i64::MAX));
+    let evidence = if remaining > 0 {
+        transaction.execute(
+            "DELETE FROM social_board_report_evidence
+             WHERE report_id IN (
+                 SELECT report_id FROM social_board_report_evidence
+                 WHERE expires_at <= ?1 ORDER BY expires_at, report_id LIMIT ?2
+             )",
+            params![now, remaining],
+        )?
+    } else {
+        0
+    };
+    transaction.commit()?;
+    u64::try_from(posts.saturating_add(evidence)).map_err(|_| StoreError::InvalidBoardInput)
+}
+
 fn report_character(
     connection: &mut Connection,
     actor: CharacterId,
@@ -3587,12 +4432,19 @@ fn staff_reports(
                     target.id, target.account_id, target.name,
                     reports.reason, reports.created_at,
                     evidence.sender_name, evidence.subject, evidence.body,
-                    evidence.sent_at, evidence.created_at, evidence.expires_at
+                    evidence.sent_at, evidence.created_at, evidence.expires_at,
+                    board_evidence.board_key, board_evidence.post_public_id,
+                    board_evidence.author_name, board_evidence.subject,
+                    board_evidence.body, board_evidence.posted_at,
+                    board_evidence.created_at, board_evidence.expires_at
              FROM social_reports AS reports
              JOIN characters AS reporter ON reporter.id = reports.reporter_character_id
              JOIN characters AS target ON target.id = reports.target_character_id
              LEFT JOIN social_mail_report_evidence AS evidence
                     ON evidence.report_id = reports.id AND evidence.expires_at > ?3
+             LEFT JOIN social_board_report_evidence AS board_evidence
+                    ON board_evidence.report_id = reports.id
+                   AND board_evidence.expires_at > ?3
              LEFT JOIN staff_profiles AS target_staff
                     ON target_staff.account_id = target.account_id
              WHERE reports.status = 'open'
@@ -3612,6 +4464,7 @@ fn staff_reports(
                 params![i64::from(actor_rank), STAFF_LIST_LIMIT, now],
                 |row| {
                     let evidence_sender = row.get::<_, Option<String>>(8)?;
+                    let board_key = row.get::<_, Option<String>>(14)?;
                     Ok(StaffReport {
                         id: row.get(0)?,
                         reporter_character_id: CharacterId(row.get(1)?),
@@ -3629,6 +4482,28 @@ fn staff_reports(
                                 sent_at: row.get(11)?,
                                 created_at: row.get(12)?,
                                 expires_at: row.get(13)?,
+                            }),
+                            None => None,
+                        },
+                        board_evidence: match board_key {
+                            Some(board_key) => Some(BoardReportEvidence {
+                                board: BoardKey::parse(&board_key).ok_or_else(|| {
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        14,
+                                        Type::Text,
+                                        Box::new(io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            "invalid board key",
+                                        )),
+                                    )
+                                })?,
+                                post_public_id: row.get(15)?,
+                                author_name: row.get(16)?,
+                                subject: row.get(17)?,
+                                body: row.get(18)?,
+                                posted_at: row.get(19)?,
+                                created_at: row.get(20)?,
+                                expires_at: row.get(21)?,
                             }),
                             None => None,
                         },
@@ -3698,6 +4573,11 @@ fn resolve_staff_report(
     if resolution == StaffReportResolution::ActionTaken {
         transaction.execute(
             "DELETE FROM social_mail_messages
+             WHERE report_id = ?1 AND expires_at > ?2",
+            params![report_id, now],
+        )?;
+        transaction.execute(
+            "DELETE FROM social_board_posts
              WHERE report_id = ?1 AND expires_at > ?2",
             params![report_id, now],
         )?;
@@ -7145,6 +8025,680 @@ mod tests {
         format!("m{sequence:032x}")
     }
 
+    fn board_id(sequence: u128) -> String {
+        format!("b{sequence:032x}")
+    }
+
+    fn seed_board_posts(
+        connection: &mut Connection,
+        author: CharacterId,
+        board: BoardKey,
+        first_sequence: u128,
+        count: u32,
+        subject: &str,
+        body: &str,
+    ) {
+        let created_at = 100;
+        let transaction = connection.transaction().unwrap();
+        for offset in 0..count {
+            transaction
+                .execute(
+                    "INSERT INTO social_board_posts
+                         (public_id, board_key, author_character_id, author_name,
+                          subject, body, created_at, expires_at)
+                     VALUES (?1, ?2, ?3, 'Seed Author', ?4, ?5, ?6, ?7)",
+                    params![
+                        board_id(first_sequence + u128::from(offset)),
+                        board.as_str(),
+                        author.0,
+                        subject,
+                        body,
+                        created_at,
+                        created_at + BOARD_RETENTION_SECONDS
+                    ],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn board_publish_list_read_delete_and_quota_are_account_bounded() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let (author, reader, _) = mail_fixture(&connection);
+        let entry = publish_board_post(
+            &mut connection,
+            author,
+            BoardKey::General,
+            &board_id(1),
+            "Lantern meeting",
+            "Meet beneath the arch.",
+            1_000,
+        )
+        .unwrap();
+        assert!(entry.summary.can_delete);
+        assert!(!entry.summary.can_report);
+        assert_eq!(entry.summary.expires_at, 1_000 + BOARD_RETENTION_SECONDS);
+
+        let reader_page =
+            list_board_posts(&connection, reader, BoardKey::General, 1, 1_001).unwrap();
+        assert_eq!(reader_page.total_posts, 1);
+        assert!(reader_page.posts[0].can_report);
+        assert!(!reader_page.posts[0].can_delete);
+        assert!(
+            list_board_posts(&connection, reader, BoardKey::General, 100, 1_001)
+                .unwrap()
+                .posts
+                .is_empty()
+        );
+        assert_eq!(
+            read_board_post(&connection, reader, &board_id(1), 1_001)
+                .unwrap()
+                .body,
+            "Meet beneath the arch."
+        );
+        assert!(matches!(
+            delete_board_post(&mut connection, reader, &board_id(1), 1_002),
+            Err(StoreError::BoardPostUnavailable)
+        ));
+        delete_board_post(&mut connection, author, &board_id(1), 1_002).unwrap();
+
+        for sequence in 0_u128..u128::from(BOARD_ACCOUNT_CAPACITY) {
+            connection
+                .execute(
+                    "INSERT INTO social_board_posts
+                         (public_id, board_key, author_character_id, author_name,
+                          subject, body, created_at, expires_at)
+                     VALUES (?1, 'general', ?2, 'Aster', 'Cap', 'Body', ?3, ?4)",
+                    params![
+                        board_id(100 + sequence),
+                        author.0,
+                        1_003,
+                        1_003 + BOARD_RETENTION_SECONDS
+                    ],
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            publish_board_post(
+                &mut connection,
+                author,
+                BoardKey::Newbie,
+                &board_id(1_000),
+                "Account full",
+                "A valid attempt still consumes quota.",
+                1_003,
+            ),
+            Err(StoreError::BoardCapacity)
+        ));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT hour_count FROM social_board_usage WHERE account_id = 101",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        connection
+            .execute("DELETE FROM social_board_posts", [])
+            .unwrap();
+
+        connection
+            .execute(
+                "UPDATE social_board_usage
+                 SET hour_count = 5, day_count = 5, updated_at = 1002
+                 WHERE account_id = 101",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            publish_board_post(
+                &mut connection,
+                author,
+                BoardKey::Newbie,
+                &board_id(2),
+                "Rate limited",
+                "This attempt is rejected.",
+                1_003,
+            ),
+            Err(StoreError::BoardRateLimited)
+        ));
+    }
+
+    #[test]
+    fn board_reporting_copies_evidence_once_and_purge_is_bounded() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let (author, reader, same_account_alt) = mail_fixture(&connection);
+        publish_board_post(
+            &mut connection,
+            author,
+            BoardKey::Newbie,
+            &board_id(10),
+            "Reported subject",
+            "Evidence body",
+            5_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            report_board_post(
+                &mut connection,
+                same_account_alt,
+                &board_id(10),
+                "Same account",
+                5_001,
+            ),
+            Err(StoreError::BoardPostUnavailable)
+        ));
+        let report_id = report_board_post(
+            &mut connection,
+            reader,
+            &board_id(10),
+            "Public abuse",
+            5_002,
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT report_kind FROM social_reports WHERE id = ?1",
+                    [report_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "board"
+        );
+        delete_board_post(&mut connection, author, &board_id(10), 5_003).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT body FROM social_board_report_evidence WHERE report_id = ?1",
+                    [report_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Evidence body"
+        );
+
+        for sequence in 0_u128..300 {
+            let created_at = 10_000 + i64::try_from(sequence).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO social_board_posts
+                         (public_id, board_key, author_character_id, author_name,
+                          subject, body, created_at, expires_at)
+                     VALUES (?1, 'general', ?2, 'Aster', 'Old', 'Expired', ?3, ?4)",
+                    params![
+                        board_id(1_000 + sequence),
+                        author.0,
+                        created_at,
+                        created_at + BOARD_RETENTION_SECONDS
+                    ],
+                )
+                .unwrap();
+        }
+        let expiry = 10_299 + BOARD_RETENTION_SECONDS;
+        assert!(
+            list_board_posts(&connection, reader, BoardKey::General, 1, expiry)
+                .unwrap()
+                .posts
+                .is_empty()
+        );
+        assert_eq!(purge_expired_boards(&mut connection, expiry).unwrap(), 256);
+        assert_eq!(purge_expired_boards(&mut connection, expiry).unwrap(), 45);
+        assert_eq!(purge_expired_boards(&mut connection, expiry).unwrap(), 0);
+    }
+
+    #[test]
+    fn board_count_caps_accept_the_exact_board_and_global_boundaries() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let (publisher, seeded_author, _) = mail_fixture(&connection);
+        let now = 20_000;
+
+        seed_board_posts(
+            &mut connection,
+            seeded_author,
+            BoardKey::General,
+            10_000,
+            BOARD_CAPACITY_PER_BOARD - 1,
+            "S",
+            "B",
+        );
+        publish_board_post(
+            &mut connection,
+            publisher,
+            BoardKey::General,
+            &board_id(11_000),
+            "S",
+            "B",
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM social_board_posts WHERE board_key = 'general'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            i64::from(BOARD_CAPACITY_PER_BOARD)
+        );
+        assert!(matches!(
+            publish_board_post(
+                &mut connection,
+                publisher,
+                BoardKey::General,
+                &board_id(11_001),
+                "S",
+                "B",
+                now,
+            ),
+            Err(StoreError::BoardCapacity)
+        ));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM social_board_posts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            i64::from(BOARD_CAPACITY_PER_BOARD)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT hour_count FROM social_board_usage WHERE account_id = 101",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "a valid capacity rejection consumes exactly one quota unit"
+        );
+
+        connection
+            .execute_batch("DELETE FROM social_board_posts; DELETE FROM social_board_usage;")
+            .unwrap();
+        seed_board_posts(
+            &mut connection,
+            seeded_author,
+            BoardKey::General,
+            20_000,
+            BOARD_CAPACITY_PER_BOARD - 1,
+            "S",
+            "B",
+        );
+        seed_board_posts(
+            &mut connection,
+            seeded_author,
+            BoardKey::Newbie,
+            21_000,
+            BOARD_CAPACITY_PER_BOARD,
+            "S",
+            "B",
+        );
+        publish_board_post(
+            &mut connection,
+            publisher,
+            BoardKey::General,
+            &board_id(22_000),
+            "S",
+            "B",
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM social_board_posts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            BOARD_GLOBAL_CAPACITY
+        );
+        assert!(matches!(
+            publish_board_post(
+                &mut connection,
+                publisher,
+                BoardKey::Newbie,
+                &board_id(22_001),
+                "S",
+                "B",
+                now,
+            ),
+            Err(StoreError::BoardCapacity)
+        ));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM social_board_posts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            BOARD_GLOBAL_CAPACITY
+        );
+    }
+
+    #[test]
+    fn board_byte_caps_accept_exact_boundaries_and_reject_one_more_post() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let (publisher, seeded_author, _) = mail_fixture(&connection);
+        let now = 30_000;
+        let maximum_subject = "S".repeat(tiamud_core::MAX_BOARD_SUBJECT_BYTES);
+        let maximum_body = "B".repeat(tiamud_core::MAX_BOARD_BODY_BYTES);
+        let remainder_body = "R".repeat(4_093);
+
+        for (board, first_sequence) in [
+            (BoardKey::General, 30_000_u128),
+            (BoardKey::Newbie, 40_000_u128),
+        ] {
+            seed_board_posts(
+                &mut connection,
+                seeded_author,
+                board,
+                first_sequence,
+                992,
+                &maximum_subject,
+                &maximum_body,
+            );
+            seed_board_posts(
+                &mut connection,
+                seeded_author,
+                board,
+                first_sequence + 992,
+                1,
+                "S",
+                &remainder_body,
+            );
+        }
+
+        publish_board_post(
+            &mut connection,
+            publisher,
+            BoardKey::General,
+            &board_id(50_000),
+            "S",
+            "B",
+            now,
+        )
+        .unwrap();
+        publish_board_post(
+            &mut connection,
+            publisher,
+            BoardKey::Newbie,
+            &board_id(50_001),
+            "S",
+            "B",
+            now,
+        )
+        .unwrap();
+        let (general_bytes, newbie_bytes, global_bytes) = connection
+            .query_row(
+                "SELECT
+                     SUM(CASE WHEN board_key = 'general'
+                              THEN length(CAST(subject AS BLOB)) + length(CAST(body AS BLOB))
+                              ELSE 0 END),
+                     SUM(CASE WHEN board_key = 'newbie'
+                              THEN length(CAST(subject AS BLOB)) + length(CAST(body AS BLOB))
+                              ELSE 0 END),
+                     SUM(length(CAST(subject AS BLOB)) + length(CAST(body AS BLOB)))
+                 FROM social_board_posts",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(general_bytes, BOARD_BYTE_CAPACITY_PER_BOARD);
+        assert_eq!(newbie_bytes, BOARD_BYTE_CAPACITY_PER_BOARD);
+        assert_eq!(global_bytes, BOARD_GLOBAL_BYTE_CAPACITY);
+        let count_before = connection
+            .query_row("SELECT COUNT(*) FROM social_board_posts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert!(matches!(
+            publish_board_post(
+                &mut connection,
+                publisher,
+                BoardKey::General,
+                &board_id(50_002),
+                "S",
+                "B",
+                now,
+            ),
+            Err(StoreError::BoardCapacity)
+        ));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM social_board_posts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            count_before
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT hour_count FROM social_board_usage WHERE account_id = 101",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn board_daily_quota_stops_the_twenty_first_attempt_without_mutation() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let (publisher, _, _) = mail_fixture(&connection);
+        let day_started_at = 40_000;
+        for sequence in 0_u128..20 {
+            let hour = i64::try_from(sequence / 5).unwrap();
+            publish_board_post(
+                &mut connection,
+                publisher,
+                BoardKey::General,
+                &board_id(60_000 + sequence),
+                "S",
+                "B",
+                day_started_at + hour * MAIL_HOUR_SECONDS,
+            )
+            .unwrap();
+        }
+        let rejected_at = day_started_at + 4 * MAIL_HOUR_SECONDS;
+        assert!(matches!(
+            publish_board_post(
+                &mut connection,
+                publisher,
+                BoardKey::General,
+                &board_id(60_020),
+                "S",
+                "B",
+                rejected_at,
+            ),
+            Err(StoreError::BoardRateLimited)
+        ));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM social_board_posts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            BOARD_DAILY_CAPACITY
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT day_count FROM social_board_usage WHERE account_id = 101",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            BOARD_DAILY_CAPACITY,
+            "a rate-limited attempt must not increment durable usage"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM social_board_posts WHERE public_id = ?1",
+                    [board_id(60_020)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn board_report_caps_reject_without_linking_or_creating_evidence() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let (author, reporter, _) = mail_fixture(&connection);
+        let now = 50_000;
+        seed_board_posts(
+            &mut connection,
+            author,
+            BoardKey::General,
+            70_000,
+            9,
+            "Reported",
+            "Evidence",
+        );
+        for sequence in 0_u128..8 {
+            report_board_post(
+                &mut connection,
+                reporter,
+                &board_id(70_000 + sequence),
+                "Open report cap",
+                now + 1,
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            report_board_post(
+                &mut connection,
+                reporter,
+                &board_id(70_008),
+                "One report too many",
+                now + 1,
+            ),
+            Err(StoreError::BoardReportLimit)
+        ));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM social_reports
+                     WHERE report_kind = 'board' AND status = 'open'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM social_board_report_evidence",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM social_board_posts
+                     WHERE public_id = ?1 AND report_id IS NULL",
+                    [board_id(70_008)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let mut full_evidence = Connection::open_in_memory().unwrap();
+        initialise(&mut full_evidence).unwrap();
+        let (author, reporter, _) = mail_fixture(&full_evidence);
+        full_evidence
+            .execute_batch(
+                "WITH RECURSIVE sequence(value) AS (
+                     VALUES(1) UNION ALL SELECT value + 1 FROM sequence WHERE value < 10000
+                 )
+                 INSERT INTO social_reports
+                     (reporter_character_id, target_character_id, report_kind, reason, created_at)
+                 SELECT 1001, 1002, 'board', 'seed evidence capacity', value
+                 FROM sequence;
+                 INSERT INTO social_board_report_evidence
+                     (report_id, board_key, post_public_id, author_name,
+                      subject, body, posted_at, created_at, expires_at)
+                 SELECT id, 'general', 'bffffffffffffffffffffffffffffffff', 'Seed Author',
+                        'Seed', 'Evidence', 0, 100, 7776100
+                 FROM social_reports WHERE reason = 'seed evidence capacity';",
+            )
+            .unwrap();
+        seed_board_posts(
+            &mut full_evidence,
+            author,
+            BoardKey::General,
+            80_000,
+            1,
+            "Reported",
+            "Evidence",
+        );
+        assert!(matches!(
+            report_board_post(
+                &mut full_evidence,
+                reporter,
+                &board_id(80_000),
+                "Global evidence full",
+                1_001,
+            ),
+            Err(StoreError::BoardEvidenceLimit)
+        ));
+        assert_eq!(
+            full_evidence
+                .query_row(
+                    "SELECT COUNT(*) FROM social_board_report_evidence",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY
+        );
+        assert_eq!(
+            full_evidence
+                .query_row(
+                    "SELECT COUNT(*) FROM social_reports WHERE report_kind = 'board'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY
+        );
+        assert_eq!(
+            full_evidence
+                .query_row(
+                    "SELECT COUNT(*) FROM social_board_posts
+                     WHERE public_id = ?1 AND report_id IS NULL",
+                    [board_id(80_000)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
     #[test]
     fn mail_send_list_read_delete_and_private_suppression_are_atomic() {
         let mut connection = Connection::open_in_memory().unwrap();
@@ -7783,6 +9337,80 @@ mod tests {
                 .unwrap(),
             1,
             "resolution removes live mail but keeps bounded report evidence"
+        );
+
+        publish_board_post(
+            &mut connection,
+            sender.id,
+            BoardKey::General,
+            &board_id(31),
+            "Reported board entry",
+            "Remove this post when action is taken.",
+            7_020,
+        )
+        .unwrap();
+        let board_report_id = report_board_post(
+            &mut connection,
+            recipient.id,
+            &board_id(31),
+            "Requires moderator action",
+            7_021,
+        )
+        .unwrap();
+        let reports = staff_reports(
+            &mut connection,
+            StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: None,
+                capability: StaffCapability::ReportsView,
+                action: "reports.list".into(),
+                reason: "review board evidence".into(),
+                details: serde_json::json!({}),
+            },
+            7_022,
+        )
+        .unwrap();
+        assert_eq!(
+            reports
+                .iter()
+                .find(|report| report.id == board_report_id)
+                .unwrap()
+                .board_evidence
+                .as_ref()
+                .unwrap()
+                .subject,
+            "Reported board entry"
+        );
+        resolve_staff_report(
+            &mut connection,
+            board_report_id,
+            StaffReportResolution::ActionTaken,
+            "board post removed after review",
+            StaffAuditRecord {
+                actor_account_id: admin.account.id,
+                target_account_id: None,
+                capability: StaffCapability::ReportsResolve,
+                action: "reports.resolve".into(),
+                reason: "review completed".into(),
+                details: serde_json::json!({"report_id": board_report_id}),
+            },
+            7_023,
+        )
+        .unwrap();
+        assert!(matches!(
+            read_board_post(&connection, recipient.id, &board_id(31), 7_024),
+            Err(StoreError::BoardPostUnavailable)
+        ));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM social_board_report_evidence WHERE report_id = ?1",
+                    [board_report_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "resolution removes the live board post but keeps bounded evidence"
         );
         assert_eq!(
             staff_access(&connection, admin_character.id)
