@@ -47,15 +47,16 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
-pub(crate) const APPLICATION_TABLES: [&str; 23] = [
+pub(crate) const APPLICATION_TABLES: [&str; 24] = [
     "accounts",
     "characters",
     "auth_sessions",
     "domain_events",
     "world_runtime",
+    "world_area_generation",
     "social_ignores",
     "social_blocks",
     "social_channel_subscriptions",
@@ -141,6 +142,20 @@ CREATE TABLE world_runtime (
     last_event_sequence BIGINT
         CHECK (last_event_sequence IS NULL OR last_event_sequence >= 0),
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
+);
+
+CREATE TABLE world_area_generation (
+    singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
+    world_id TEXT NOT NULL CHECK (octet_length(world_id) BETWEEN 1 AND 256),
+    active_catalog_sha256 TEXT NOT NULL
+        CHECK (active_catalog_sha256 ~ '^[0-9a-f]{64}$'),
+    previous_catalog_sha256 TEXT
+        CHECK (previous_catalog_sha256 IS NULL
+               OR previous_catalog_sha256 ~ '^[0-9a-f]{64}$'),
+    activation_sequence BIGINT NOT NULL CHECK (activation_sequence > 0),
+    updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
+    CHECK (previous_catalog_sha256 IS NULL
+           OR previous_catalog_sha256 <> active_catalog_sha256)
 );
 
 CREATE TABLE social_ignores (
@@ -432,7 +447,7 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 13);
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 14);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -732,6 +747,25 @@ SET version = 13, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 12;
 "#;
 
+const UPGRADE_V13_TO_V14_SQL: &str = r#"
+CREATE TABLE world_area_generation (
+    singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
+    world_id TEXT NOT NULL CHECK (octet_length(world_id) BETWEEN 1 AND 256),
+    active_catalog_sha256 TEXT NOT NULL
+        CHECK (active_catalog_sha256 ~ '^[0-9a-f]{64}$'),
+    previous_catalog_sha256 TEXT
+        CHECK (previous_catalog_sha256 IS NULL
+               OR previous_catalog_sha256 ~ '^[0-9a-f]{64}$'),
+    activation_sequence BIGINT NOT NULL CHECK (activation_sequence > 0),
+    updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT),
+    CHECK (previous_catalog_sha256 IS NULL
+           OR previous_catalog_sha256 <> active_catalog_sha256)
+);
+UPDATE tiamud_schema
+SET version = 14, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 13;
+"#;
+
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
 WITH candidate AS (
     SELECT id FROM accounts
@@ -770,17 +804,17 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v13 schema or migration from v6/v7/v8/v9/v10/v11/v12"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v14 schema or migration from v6/v7/v8/v9/v10/v11/v12/v13"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v13 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v14 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6-v12 are upgraded to v13, and v13 is verified.
+/// at the current version, v6-v13 are upgraded to v14, and v14 is verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
     let report = migrate_in_transaction(&mut transaction)?;
@@ -851,12 +885,15 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
             client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
         }
         11 => client.batch_execute(UPGRADE_V11_TO_V12_SQL)?,
-        12 => {}
+        12 | 13 => {}
         SCHEMA_VERSION => {}
         _ => return Err(SchemaError::UnsupportedVersion { found }),
     }
     if (6..=12).contains(&found) {
         client.batch_execute(UPGRADE_V12_TO_V13_SQL)?;
+    }
+    if (6..=13).contains(&found) {
+        client.batch_execute(UPGRADE_V13_TO_V14_SQL)?;
     }
     for &table in &APPLICATION_TABLES {
         let exists: bool = client
@@ -897,6 +934,7 @@ mod tests {
             "auth_sessions",
             "domain_events",
             "world_runtime",
+            "world_area_generation",
             "social_ignores",
             "social_blocks",
             "social_channel_subscriptions",
@@ -921,7 +959,7 @@ mod tests {
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 13)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 14)"));
         assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
@@ -1041,6 +1079,17 @@ mod tests {
         assert!(UPGRADE_V12_TO_V13_SQL.contains("'character', 'mail', 'board'"));
         assert!(!UPGRADE_V12_TO_V13_SQL.contains("world_runtime"));
         assert!(!UPGRADE_V12_TO_V13_SQL.contains("DELETE FROM"));
+    }
+
+    #[test]
+    fn v14_upgrade_adds_only_the_durable_area_generation_pointer() {
+        assert!(UPGRADE_V13_TO_V14_SQL.contains("CREATE TABLE world_area_generation"));
+        assert!(UPGRADE_V13_TO_V14_SQL.contains("active_catalog_sha256"));
+        assert!(UPGRADE_V13_TO_V14_SQL.contains("previous_catalog_sha256"));
+        assert!(UPGRADE_V13_TO_V14_SQL.contains("activation_sequence"));
+        assert!(UPGRADE_V13_TO_V14_SQL.contains("SET version = 14"));
+        assert!(!UPGRADE_V13_TO_V14_SQL.contains("world_runtime"));
+        assert!(!UPGRADE_V13_TO_V14_SQL.contains("DELETE FROM"));
     }
 
     #[test]

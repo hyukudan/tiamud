@@ -1,45 +1,39 @@
-# Projects, areas and composition
+# Proyectos, áreas y composición
 
-The current modular source format is a **WorldProject manifest v2** containing
-strict **AreaPack v8** files. `tiamud-world compose` validates the complete
-graph and produces one canonical **WorldPack v9** document.
+La fuente modular vigente es un manifiesto **WorldProject v2** con ficheros
+**AreaPack v8** estrictos. `tiamud-world compose` valida el grafo completo y
+produce un documento **WorldPack v9** canónico.
 
-Use [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json)
-and [`worlds/areas/square.area.json`](../../worlds/areas/square.area.json) as
-reviewed examples.
+Usa [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json)
+y [`worlds/areas/square.area.json`](../../worlds/areas/square.area.json) como
+ejemplos revisados.
 
-## Ownership and dependencies
+## Ownership y dependencias
 
-An area owns every room, item prototype, initial item instance, NPC, loot table,
-loot source, affix, affix pool, ability, social emote, progression entry, media record, script and content test
-it declares. Stable IDs are globally unique across the composed project. A legacy-normalized
-prototype/instance pair may preserve the same historical string because the
-two IDs occupy distinct typed namespaces.
+Un área posee cada sala, prototipo e instancia inicial de objeto, NPC, tabla y
+fuente de botín, afijo/pool, habilidad, emote, entrada de progresión, medio,
+script y prueba que declara. Los IDs estables son únicos globalmente en el
+proyecto compuesto. Un par prototipo/instancia normalizado desde legacy puede
+conservar la misma cadena porque ocupa espacios tipados distintos.
 
-An item `entityMedia` record depends on the area that owns its prototype.
-`roomPerception.hiddenItems` instead depends on the area that owns the concrete
-initial instance. This distinction lets all visible units reuse one sprite
-definition while visibility remains instance-specific.
+Un `entityMedia` de objeto depende del área propietaria del prototipo.
+`roomPerception.hiddenItems` depende del área propietaria de la instancia
+inicial concreta. Así todas las unidades visibles reutilizan una presentación
+sin confundirla con visibilidad por instancia.
 
-`dependsOn` must name every other area referenced by structured data. Cycles
-are allowed: two areas may contain exits to each other. An undeclared edge,
-missing target, duplicate owner or cross-kind ID collision fails composition.
-Lua source is opaque to the graph checker and cannot establish a verified
-dependency.
+`dependsOn` debe nombrar cada área referenciada por datos estructurados. Se
+permiten ciclos, por ejemplo dos salidas recíprocas. Una arista no declarada,
+un destino ausente, doble ownership o colisión entre clases de ID impide
+componer. El código Lua es opaco para el analizador y no crea una dependencia
+verificable.
 
-For loot, cross-area dependencies include a table entry's item prototype and a
-source's NPC spawn and table. A table and source have separate ownership even
-when they are declared in the same area. Each spawn may have at most one
-source, every table must be used, and fixed `npc_spawn` instances plus that
-table's repeatable worst case may not exceed 64 roots per defeat.
-Sealed prototypes add an edge to their reward table. Loot entries with an
-`affixPoolId` add an edge to that pool, and each pool entry adds an edge to its
-affix definition. A sealed reward table cannot be attached directly to an NPC
-loot source: the NPC-sourced normal table must award the sealed prototype.
-Every cross-area edge still requires `dependsOn`.
-An ability's `communication.blockedRoomIds` creates the same audited edge to
-each owning area; a blocked-room reference cannot bypass modular dependency
-review.
+En botín, las dependencias cruzadas incluyen el prototipo de cada entrada, el
+NPC de una fuente y su tabla. Tabla y fuente tienen ownership separado. Cada
+spawn admite una sola fuente, toda tabla debe usarse y las instancias fijas
+`npc_spawn` más el peor caso repetible no superan 64 raíces por derrota. Un
+sello añade arista a su tabla; `affixPoolId`, al pool; y cada fila de pool, al
+afijo. Una tabla sellada no puede ser fuente NPC directa. Las salas bloqueadas
+por una habilidad de comunicación también crean aristas auditadas.
 
 ```json
 {
@@ -61,18 +55,15 @@ review.
 }
 ```
 
-Unknown fields fail closed in modular authoring. Keep an AreaPack focused on a
-coherent ownership boundary, not on a deployment boundary.
+Los campos desconocidos fallan cerrados. Mantén un AreaPack como frontera
+coherente de ownership, no como servicio o shard.
 
-AreaPack v1-v7 normalize to v8 without inventing emotes; v1-v6 also do not
-invent communication abilities.
-AreaPack v1-v5 also normalize without inventing sealed rewards or affixes.
-AreaPack v1-v4 also normalize without inventing loot. Declaring
-`lootTables` or `lootSources`, even empty ones, in an older schema is rejected
-rather than silently reinterpreted. Native base/variant room titles are limited
-to 128 safe UTF-8 bytes and base/variant descriptions to 8,192 safe UTF-8 bytes.
+AreaPack v1–v7 normaliza a v8 sin inventar emotes; v1–v6 tampoco inventa
+comunicación, v1–v5 sellos/afijos y v1–v4 botín. Declarar campos posteriores en
+un esquema anterior se rechaza. Títulos nativos y variantes admiten hasta 128
+bytes UTF-8 seguros; descripciones, hasta 8.192.
 
-## Compose
+## Composición
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- compose \
@@ -80,38 +71,35 @@ cargo run --locked -p world-pack --bin tiamud-world -- compose \
   --output build/worlds/lantern-square.candidate.world.json
 ```
 
-Composition checks bounded file sizes, safe regular paths, project-local asset
-resolution, source digests, declared dependencies, global references and the
-finished WorldPack. It writes atomically and refuses to replace an existing
-output.
+La composición comprueba tamaños, rutas regulares seguras, assets locales,
+digests de fuente, dependencias declaradas, referencias globales y WorldPack
+final. Escribe atómicamente y no reemplaza una salida existente.
 
-The `CompositionReport` records area source digests, ownership and audited
-cross-area references; the flat runtime artifact does not retain area identity.
-Semantically irrelevant source ordering is canonicalized, making diffs and
-reproducibility checks useful.
+`CompositionReport` registra digests, ownership y referencias cruzadas. El
+artefacto plano no conserva identidad de área. El orden sin semántica se
+canoniza para que diff y reproducibilidad sean útiles.
 
-This is a multipack authoring boundary, not runtime sharding. The complete area
-graph is read from reviewed local files, composed and validated offline, then
-the server loads one flat WorldPack at startup. It does not download missing
-areas, resolve dependencies during play, hot-add modules or evict them through
-LRU. Runtime hot-loading remains future architecture.
+Esto es autoría multipack, no sharding. La ruta monolítica compone todo sin
+conexión y carga un WorldPack. La ruta local 6A publica bundles; 6B carga áreas
+bajo demanda dentro de una generación; 6C puede sustituir solo la generación
+completa mediante staging privado, cero sesiones/leases y CAS durable. No
+existen despliegue por área, descarga, LRU ni servicios independientes.
 
-Lantern Square currently composes three areas into three rooms, ten item
-prototypes, nine initial instances, two loot tables, one loot source, one
-affix, one affix pool, one direct-online telepathy ability and one room emote.
-The canonical 53,567-byte artifact has SHA-256
+Lantern Square compone tres áreas en tres salas, diez prototipos, nueve
+instancias iniciales, dos tablas, una fuente, un afijo, un pool, una telepatía
+directa y un emote. El artefacto canónico de 53.567 bytes tiene SHA-256
 `9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
 
-## Direct WorldPack authoring
+## Autoría WorldPack directa
 
-A monolithic WorldPack v9 remains valid, but AreaPacks are preferable once
-multiple builders or regions are involved. Use `tiamud-world build` to validate
-and canonicalize a direct document:
+Un WorldPack v9 monolítico sigue siendo válido, pero AreaPack es preferible con
+varios builders o regiones. `tiamud-world build` valida y canoniza un documento
+directo:
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- build \
   draft.world.json --output build/worlds/draft.canonical.world.json
 ```
 
-Do not hand-merge generated artifacts. Change their owning sources, compose a
-new candidate and review its semantic diff.
+No mezcles a mano artefactos generados. Cambia sus fuentes propietarias,
+compón una candidata y revisa el diff semántico.

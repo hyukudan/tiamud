@@ -20,10 +20,16 @@ pub use area_catalog::{
     parse_area_catalog, parse_area_release_manifest, verify_area_release,
 };
 pub use area_registry::{
-    LocalAreaGeneration, LocalAreaRegistryError, MAX_LOCAL_HARD_DEPENDENCY_CLOSURE,
-    local_area_bundle_path, local_area_catalog_path, local_area_world_path,
-    read_bounded_local_registry_file, read_bounded_regular_file,
-    verify_existing_registry_directory,
+    ActiveAreaCatalog, ActiveAreaCatalogIdentity, GenerationReplacementKind, LocalAreaGeneration,
+    LocalAreaRegistryError, MAX_LOCAL_AREA_POINTER_BYTES, MAX_LOCAL_HARD_DEPENDENCY_CLOSURE,
+    StagedLocalAreaGenerationReplacement, local_active_area_catalog_path, local_area_bundle_path,
+    local_area_catalog_path, local_area_publication_lock_path, local_area_world_path,
+    read_bounded_local_registry_file, read_bounded_regular_file, stage_generation_replacement,
+    stage_generation_rollback, validate_generation_replacement, verify_existing_registry_directory,
+};
+#[cfg(unix)]
+pub use area_registry::{
+    LocalAreaPublicationReadGuard, try_acquire_local_area_publication_read_lock,
 };
 pub use authoring::{
     AudioChannel, AudioCue, Condition, ConditionContext, ConditionField, ConditionValidationError,

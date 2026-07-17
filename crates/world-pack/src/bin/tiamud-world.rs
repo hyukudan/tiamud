@@ -23,9 +23,10 @@ use tiamud_editorial_ai::{
     MAX_TIMEOUT, ProviderConfig,
 };
 use world_pack::{
-    AreaCatalog, AreaCatalogError, CompositionError, ConditionContext, DocumentToolError,
-    LocalAreaGeneration, LocalAreaRegistryError, PreviewFormat, TimePeriod, Weather, WorldPack,
-    WorldPackDiagnostic, WorldPackDocument, build_area_release, compose_world_project,
+    ActiveAreaCatalog, AreaCatalog, AreaCatalogError, CompositionError, ConditionContext,
+    DocumentToolError, LocalAreaGeneration, LocalAreaRegistryError, MAX_LOCAL_AREA_POINTER_BYTES,
+    PreviewFormat, TimePeriod, Weather, WorldPack, WorldPackDiagnostic, WorldPackDocument,
+    build_area_release, compose_world_project, local_active_area_catalog_path,
     local_area_bundle_path, local_area_catalog_path, local_area_world_path,
     parse_area_release_manifest, read_bounded_local_registry_file,
     read_bounded_regular_file as read_bounded_local_file, verify_area_release,
@@ -39,7 +40,6 @@ const MAX_AREA_RELEASE_INPUT_BYTES: usize = 256 * 1024;
 const MAX_AREA_CATALOG_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_AREA_BUNDLE_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_AREA_WORLD_INPUT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_AREA_POINTER_BYTES: usize = 16 * 1024;
 #[cfg(feature = "editorial-ai")]
 const MAX_EDITORIAL_ARTIFACT_BYTES: usize = 512 * 1024;
 #[cfg(feature = "editorial-ai")]
@@ -126,6 +126,13 @@ enum Command {
     },
     /// Verify one content-addressed area catalog and every referenced local blob.
     AreaVerify {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        registry: PathBuf,
+    },
+    /// Select an already published exact area catalog for activation or rollback.
+    AreaSelect {
         #[arg(long)]
         catalog: PathBuf,
         #[arg(long)]
@@ -425,15 +432,6 @@ struct ActivePublication {
     artifact: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ActiveAreaCatalog {
-    schema: u8,
-    world_id: String,
-    catalog_sha256: String,
-    catalog: String,
-}
-
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -623,6 +621,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 digest,
                 catalog.entries.len()
             );
+        }
+        Command::AreaSelect { catalog, registry } => {
+            let selection = select_area_catalog(&catalog, &registry)?;
+            println!("{}", area_selection_success_message(&selection));
         }
         #[cfg(feature = "editorial-ai")]
         Command::AiDraft(arguments) => {
@@ -1291,11 +1293,162 @@ fn area_publish_success_message(catalog: &AreaCatalog, digest: &str, path: &Path
     )
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum AreaSelectionKind {
+    Initial,
+    Activate,
+    Rollback,
+    Noop,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct AreaSelection {
+    kind: AreaSelectionKind,
+    world_id: String,
+    catalog_revision: u64,
+    catalog_sha256: String,
+    previous_revision: Option<u64>,
+    catalog_path: PathBuf,
+}
+
+fn select_area_catalog(catalog_path: &Path, registry: &Path) -> Result<AreaSelection, CliError> {
+    select_area_catalog_with_observer(catalog_path, registry, || {})
+}
+
+fn select_area_catalog_with_observer(
+    catalog_path: &Path,
+    registry: &Path,
+    after_candidate_verified: impl FnOnce(),
+) -> Result<AreaSelection, CliError> {
+    // Verify before waiting for the per-world lock so malformed or incomplete
+    // releases never occupy the publication critical section.
+    let observed = LocalAreaGeneration::open_exact(registry, catalog_path)
+        .map_err(map_local_area_registry_error)?;
+    observed
+        .verify_complete_release()
+        .map_err(map_local_area_registry_error)?;
+    let world_id = observed.catalog().world_id.clone();
+    let observed_digest = observed.generation_id().to_owned();
+    after_candidate_verified();
+
+    // `area-select` and `area-publish` are cooperating writers of the same
+    // mutable editorial pointer. Re-open both the candidate and current
+    // pointer only after this lock is held so a queued selector cannot act on
+    // stale bytes or revision state.
+    let lock_path = area_publication_lock_path(registry, &world_id);
+    let lock_file = open_area_publication_lock(registry, &lock_path)?;
+    let mut publication_lock = RwLock::new(lock_file);
+    let _publication_guard =
+        publication_lock
+            .write()
+            .map_err(|source| CliError::AreaPublicationLock {
+                path: lock_path,
+                source,
+            })?;
+
+    let candidate = LocalAreaGeneration::open_exact(registry, catalog_path)
+        .map_err(map_local_area_registry_error)?;
+    candidate
+        .verify_complete_release()
+        .map_err(map_local_area_registry_error)?;
+    if candidate.catalog().world_id != world_id || candidate.generation_id() != observed_digest {
+        return Err(CliError::InvalidAreaRegistry(
+            "area catalog changed while selection waited for its publication lock".into(),
+        ));
+    }
+
+    let current = load_active_area_generation(registry, &world_id)?;
+    let previous_revision = current
+        .as_ref()
+        .map(|generation| generation.catalog().catalog_revision);
+    let kind = match current.as_ref() {
+        None => AreaSelectionKind::Initial,
+        Some(current) if current.generation_id() == candidate.generation_id() => {
+            AreaSelectionKind::Noop
+        }
+        Some(current) => match candidate
+            .catalog()
+            .catalog_revision
+            .cmp(&current.catalog().catalog_revision)
+        {
+            std::cmp::Ordering::Greater => AreaSelectionKind::Activate,
+            std::cmp::Ordering::Less => AreaSelectionKind::Rollback,
+            std::cmp::Ordering::Equal => {
+                return Err(CliError::InvalidAreaRegistry(
+                    "different area catalogs reuse one catalog revision; activation direction is ambiguous"
+                        .into(),
+                ));
+            }
+        },
+    };
+    let selection = AreaSelection {
+        kind,
+        world_id,
+        catalog_revision: candidate.catalog().catalog_revision,
+        catalog_sha256: candidate.generation_id().to_owned(),
+        previous_revision,
+        catalog_path: catalog_path.to_owned(),
+    };
+    if kind != AreaSelectionKind::Noop {
+        activate_area_catalog(
+            registry,
+            candidate.catalog(),
+            candidate.generation_id(),
+            catalog_path,
+        )?;
+    }
+    Ok(selection)
+}
+
+fn area_selection_success_message(selection: &AreaSelection) -> String {
+    match selection.kind {
+        AreaSelectionKind::Initial => format!(
+            "selected initial area catalog {:?} revision {} as sha256:{} at {:?}",
+            selection.world_id,
+            selection.catalog_revision,
+            selection.catalog_sha256,
+            selection.catalog_path
+        ),
+        AreaSelectionKind::Activate => format!(
+            "selected area catalog {:?} for activation from revision {} to {} as sha256:{} at {:?}",
+            selection.world_id,
+            selection
+                .previous_revision
+                .expect("activation has a prior revision"),
+            selection.catalog_revision,
+            selection.catalog_sha256,
+            selection.catalog_path
+        ),
+        AreaSelectionKind::Rollback => format!(
+            "selected area catalog {:?} for rollback from revision {} to {} as sha256:{} at {:?}",
+            selection.world_id,
+            selection
+                .previous_revision
+                .expect("rollback has a prior revision"),
+            selection.catalog_revision,
+            selection.catalog_sha256,
+            selection.catalog_path
+        ),
+        AreaSelectionKind::Noop => format!(
+            "area catalog {:?} revision {} sha256:{} is already selected (noop)",
+            selection.world_id, selection.catalog_revision, selection.catalog_sha256
+        ),
+    }
+}
+
 fn load_active_area_catalog(
     registry: &Path,
     world_id: &str,
 ) -> Result<Option<AreaCatalog>, CliError> {
-    let pointer_path = active_area_catalog_path(registry, world_id);
+    Ok(load_active_area_generation(registry, world_id)?
+        .map(|generation| generation.catalog().clone()))
+}
+
+fn load_active_area_generation(
+    registry: &Path,
+    world_id: &str,
+) -> Result<Option<LocalAreaGeneration>, CliError> {
+    let pointer_path = local_active_area_catalog_path(registry, world_id);
     match fs::symlink_metadata(&pointer_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
@@ -1306,35 +1459,15 @@ fn load_active_area_catalog(
         }
         Ok(_) => {}
     }
-    let bytes = read_bounded_registry_file(
-        registry,
-        &pointer_path,
-        MAX_AREA_POINTER_BYTES,
-        "active area catalog pointer",
-    )?;
-    let pointer: ActiveAreaCatalog = serde_json::from_slice(&bytes).map_err(|error| {
-        CliError::InvalidAreaRegistry(format!("invalid active catalog pointer JSON: {error}"))
-    })?;
-    if pointer.schema != 1 || pointer.world_id != world_id {
-        return Err(CliError::InvalidAreaRegistry(
-            "active catalog pointer has the wrong schema or world".into(),
-        ));
-    }
-    validate_digest(&pointer.catalog_sha256)?;
-    let catalog_path = area_catalog_blob_path(registry, world_id, &pointer.catalog_sha256);
-    let expected_relative = registry_relative_path(registry, &catalog_path)?;
-    if pointer.catalog != expected_relative {
-        return Err(CliError::InvalidAreaRegistry(
-            "active catalog pointer does not name its content-addressed catalog".into(),
-        ));
-    }
-    let (catalog, digest) = load_verified_area_catalog(&catalog_path, registry)?;
-    if digest != pointer.catalog_sha256 || catalog.world_id != world_id {
-        return Err(CliError::InvalidAreaRegistry(
-            "active catalog pointer digest/world mismatch".into(),
-        ));
-    }
-    Ok(Some(catalog))
+    let generation = LocalAreaGeneration::open_active(registry, world_id)
+        .map_err(map_local_area_registry_error)?;
+    generation
+        .verify_complete_release()
+        .map_err(map_local_area_registry_error)?;
+    generation
+        .revalidate_active_pointer_identity()
+        .map_err(map_local_area_registry_error)?;
+    Ok(Some(generation))
 }
 
 fn load_verified_area_catalog(
@@ -1367,6 +1500,9 @@ fn map_local_area_registry_error(error: LocalAreaRegistryError) -> CliError {
             maximum,
         },
         LocalAreaRegistryError::Invalid(reason) => CliError::InvalidAreaRegistry(reason),
+        LocalAreaRegistryError::PublicationLockBusy => {
+            CliError::InvalidAreaRegistry("area publication lock is busy".into())
+        }
         LocalAreaRegistryError::Catalog(error) => CliError::AreaCatalog(error),
     }
 }
@@ -1378,7 +1514,7 @@ fn activate_area_catalog(
     catalog_path: &Path,
 ) -> Result<(), CliError> {
     validate_digest(digest)?;
-    let pointer_path = active_area_catalog_path(registry, &catalog.world_id);
+    let pointer_path = local_active_area_catalog_path(registry, &catalog.world_id);
     let parent = pointer_path
         .parent()
         .expect("active area catalog pointer has a parent");
@@ -1393,7 +1529,7 @@ fn activate_area_catalog(
         CliError::InvalidAreaRegistry(format!("could not encode active catalog pointer: {error}"))
     })?;
     bytes.push(b'\n');
-    if bytes.len() > MAX_AREA_POINTER_BYTES {
+    if bytes.len() > MAX_LOCAL_AREA_POINTER_BYTES {
         return Err(CliError::InvalidAreaRegistry(
             "active catalog pointer exceeds its byte limit".into(),
         ));
@@ -1437,16 +1573,8 @@ fn area_world_blob_path(registry: &Path, world_id: &str, digest: &str) -> PathBu
     local_area_world_path(registry, world_id, digest)
 }
 
-fn active_area_catalog_path(registry: &Path, world_id: &str) -> PathBuf {
-    registry
-        .join("area-active")
-        .join(format!("{}.json", world_storage_id(world_id)))
-}
-
 fn area_publication_lock_path(registry: &Path, world_id: &str) -> PathBuf {
-    registry
-        .join("area-locks")
-        .join(format!("{}.lock", world_storage_id(world_id)))
+    world_pack::local_area_publication_lock_path(registry, world_id)
 }
 
 fn open_area_publication_lock(registry: &Path, path: &Path) -> Result<fs::File, CliError> {
@@ -2006,6 +2134,19 @@ mod tests {
             .command,
             Command::AreaVerify { .. }
         ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "tiamud-world",
+                "area-select",
+                "--catalog",
+                "registry/area-catalogs/world/catalog.json",
+                "--registry",
+                "registry"
+            ])
+            .unwrap()
+            .command,
+            Command::AreaSelect { .. }
+        ));
         #[cfg(feature = "editorial-ai")]
         assert!(matches!(
             Cli::try_parse_from([
@@ -2201,10 +2342,36 @@ mod tests {
 
     fn published_area_catalog_path(registry: &Path, world_id: &str) -> PathBuf {
         let pointer: ActiveAreaCatalog = serde_json::from_slice(
-            &fs::read(active_area_catalog_path(registry, world_id)).unwrap(),
+            &fs::read(local_active_area_catalog_path(registry, world_id)).unwrap(),
         )
         .unwrap();
         registry.join(pointer.catalog)
+    }
+
+    fn immutable_area_blobs(registry: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn collect(root: &Path, directory: &Path, output: &mut Vec<(PathBuf, Vec<u8>)>) {
+            if !directory.exists() {
+                return;
+            }
+            for entry in fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(root, &path, output);
+                } else {
+                    output.push((
+                        path.strip_prefix(root).unwrap().to_owned(),
+                        fs::read(path).unwrap(),
+                    ));
+                }
+            }
+        }
+
+        let mut blobs = Vec::new();
+        for directory in ["area-catalogs", "area-bundles", "area-worlds"] {
+            collect(registry, &registry.join(directory), &mut blobs);
+        }
+        blobs.sort_by(|left, right| left.0.cmp(&right.0));
+        blobs
     }
 
     #[test]
@@ -2277,6 +2444,186 @@ mod tests {
             },
         })
         .unwrap();
+    }
+
+    #[test]
+    fn area_select_supports_forward_rollback_and_idempotent_noop_without_mutating_blobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        let release = temp.path().join("release.json");
+        write_area_release(&release, 1, 3, "Initial reviewer");
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release: release.clone(),
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+        let first_catalog_path = published_area_catalog_path(&registry, "lantern-square");
+
+        write_area_release(&release, 2, 4, "Second reviewer");
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release,
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+        let second_catalog_path = published_area_catalog_path(&registry, "lantern-square");
+        let immutable_before = immutable_area_blobs(&registry);
+
+        let rollback = select_area_catalog(&first_catalog_path, &registry).unwrap();
+        assert_eq!(rollback.kind, AreaSelectionKind::Rollback);
+        assert_eq!(rollback.previous_revision, Some(2));
+        assert!(area_selection_success_message(&rollback).contains("for rollback"));
+        assert_eq!(
+            published_area_catalog_path(&registry, "lantern-square"),
+            first_catalog_path
+        );
+
+        let activation = select_area_catalog(&second_catalog_path, &registry).unwrap();
+        assert_eq!(activation.kind, AreaSelectionKind::Activate);
+        assert_eq!(activation.previous_revision, Some(1));
+        assert!(area_selection_success_message(&activation).contains("for activation"));
+        assert_eq!(
+            published_area_catalog_path(&registry, "lantern-square"),
+            second_catalog_path
+        );
+
+        let pointer_path = local_active_area_catalog_path(&registry, "lantern-square");
+        let pointer_before_noop = fs::read(&pointer_path).unwrap();
+        let noop = select_area_catalog(&second_catalog_path, &registry).unwrap();
+        assert_eq!(noop.kind, AreaSelectionKind::Noop);
+        assert!(area_selection_success_message(&noop).contains("(noop)"));
+        assert_eq!(fs::read(pointer_path).unwrap(), pointer_before_noop);
+        assert_eq!(immutable_area_blobs(&registry), immutable_before);
+    }
+
+    #[test]
+    fn area_select_rejects_tamper_and_catalog_symlinks_without_changing_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        let release = temp.path().join("release.json");
+        write_area_release(&release, 1, 3, "Initial reviewer");
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release,
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+        let catalog_path = published_area_catalog_path(&registry, "lantern-square");
+        let pointer_path = local_active_area_catalog_path(&registry, "lantern-square");
+        let pointer_before = fs::read(&pointer_path).unwrap();
+        let catalog = parse_area_catalog(&fs::read(&catalog_path).unwrap()).unwrap();
+        let entry = &catalog.entries[0];
+        let bundle_path = area_bundle_blob_path(
+            &registry,
+            &catalog.world_id,
+            &entry.area_id,
+            &entry.bundle_sha256,
+        );
+        let bundle_before = fs::read(&bundle_path).unwrap();
+        fs::write(&bundle_path, [bundle_before.as_slice(), b" "].concat()).unwrap();
+        assert!(select_area_catalog(&catalog_path, &registry).is_err());
+        assert_eq!(fs::read(&pointer_path).unwrap(), pointer_before);
+        fs::write(&bundle_path, bundle_before).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let outside = temp.path().join("outside-catalog.json");
+            fs::write(&outside, fs::read(&catalog_path).unwrap()).unwrap();
+            fs::remove_file(&catalog_path).unwrap();
+            symlink(outside, &catalog_path).unwrap();
+            assert!(matches!(
+                select_area_catalog(&catalog_path, &registry),
+                Err(CliError::InvalidAreaRegistry(_))
+            ));
+            assert_eq!(fs::read(pointer_path).unwrap(), pointer_before);
+        }
+    }
+
+    #[test]
+    fn area_select_waits_for_lock_then_revalidates_pointer_and_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        let release = temp.path().join("release.json");
+        write_area_release(&release, 1, 3, "Initial reviewer");
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release: release.clone(),
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+        let first_catalog_path = published_area_catalog_path(&registry, "lantern-square");
+        let (first_catalog, first_digest) =
+            load_verified_area_catalog(&first_catalog_path, &registry).unwrap();
+        write_area_release(&release, 2, 4, "Second reviewer");
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release,
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+        let second_catalog_path = published_area_catalog_path(&registry, "lantern-square");
+
+        let lock_path = area_publication_lock_path(&registry, "lantern-square");
+        let lock_file = open_area_publication_lock(&registry, &lock_path).unwrap();
+        let mut held_lock = RwLock::new(lock_file);
+        let held_guard = held_lock.write().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let waiting_registry = registry.clone();
+        let waiting_catalog = first_catalog_path.clone();
+        let selector = std::thread::spawn(move || {
+            select_area_catalog_with_observer(&waiting_catalog, &waiting_registry, move || {
+                ready_tx.send(()).unwrap()
+            })
+            .map_err(|error| error.to_string())
+        });
+        ready_rx.recv().unwrap();
+        activate_area_catalog(
+            &registry,
+            &first_catalog,
+            &first_digest,
+            &first_catalog_path,
+        )
+        .unwrap();
+        drop(held_guard);
+        let selection = selector.join().unwrap().unwrap();
+        assert_eq!(selection.kind, AreaSelectionKind::Noop);
+
+        let lock_file = open_area_publication_lock(&registry, &lock_path).unwrap();
+        let mut held_lock = RwLock::new(lock_file);
+        let held_guard = held_lock.write().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let waiting_registry = registry.clone();
+        let waiting_catalog = second_catalog_path.clone();
+        let selector = std::thread::spawn(move || {
+            select_area_catalog_with_observer(&waiting_catalog, &waiting_registry, move || {
+                ready_tx.send(()).unwrap()
+            })
+            .map_err(|error| error.to_string())
+        });
+        ready_rx.recv().unwrap();
+        let mut changed = fs::read(&second_catalog_path).unwrap();
+        changed.push(b' ');
+        fs::write(&second_catalog_path, changed).unwrap();
+        drop(held_guard);
+        let error = selector.join().unwrap().unwrap_err();
+        assert!(error.contains("catalog bytes are not canonical"), "{error}");
+        assert_eq!(
+            published_area_catalog_path(&registry, "lantern-square"),
+            first_catalog_path
+        );
     }
 
     #[test]

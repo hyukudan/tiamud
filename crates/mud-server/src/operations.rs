@@ -251,6 +251,17 @@ pub struct RuntimeMetrics {
     area_load_installation_failed_total: AtomicU64,
     area_load_latency_microseconds: AtomicU64,
     area_bundle_bytes_total: AtomicU64,
+    area_generation_phase: AtomicUsize,
+    area_generation_noop_total: AtomicU64,
+    area_generation_activated_total: AtomicU64,
+    area_generation_rolled_back_total: AtomicU64,
+    area_generation_busy_total: AtomicU64,
+    area_generation_incompatible_total: AtomicU64,
+    area_generation_verification_failed_total: AtomicU64,
+    area_generation_persistence_failed_total: AtomicU64,
+    area_generation_conflict_total: AtomicU64,
+    area_generation_internal_failed_total: AtomicU64,
+    area_generation_latency_microseconds: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -286,6 +297,29 @@ pub enum AreaLoadMetricResult {
     Cancelled,
     PreparationFailed,
     InstallationFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AreaGenerationMetricPhase {
+    Active,
+    Staging,
+    Draining,
+    Committing,
+}
+
+/// Closed outcomes for a local operator reconciliation. Content-controlled
+/// identifiers and digests never become metric labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AreaGenerationMetricResult {
+    Noop,
+    Activated,
+    RolledBack,
+    Busy,
+    Incompatible,
+    VerificationFailed,
+    PersistenceFailed,
+    Conflict,
+    InternalFailed,
 }
 
 impl RuntimeMetrics {
@@ -516,6 +550,42 @@ impl RuntimeMetrics {
             .fetch_add(bundle_bytes, Ordering::Relaxed);
     }
 
+    pub fn set_area_generation_phase(&self, phase: AreaGenerationMetricPhase) {
+        let value = match phase {
+            AreaGenerationMetricPhase::Active => 0,
+            AreaGenerationMetricPhase::Staging => 1,
+            AreaGenerationMetricPhase::Draining => 2,
+            AreaGenerationMetricPhase::Committing => 3,
+        };
+        self.area_generation_phase.store(value, Ordering::Relaxed);
+    }
+
+    pub fn area_generation_finished(&self, elapsed: Duration, result: AreaGenerationMetricResult) {
+        let counter = match result {
+            AreaGenerationMetricResult::Noop => &self.area_generation_noop_total,
+            AreaGenerationMetricResult::Activated => &self.area_generation_activated_total,
+            AreaGenerationMetricResult::RolledBack => &self.area_generation_rolled_back_total,
+            AreaGenerationMetricResult::Busy => &self.area_generation_busy_total,
+            AreaGenerationMetricResult::Incompatible => &self.area_generation_incompatible_total,
+            AreaGenerationMetricResult::VerificationFailed => {
+                &self.area_generation_verification_failed_total
+            }
+            AreaGenerationMetricResult::PersistenceFailed => {
+                &self.area_generation_persistence_failed_total
+            }
+            AreaGenerationMetricResult::Conflict => &self.area_generation_conflict_total,
+            AreaGenerationMetricResult::InternalFailed => {
+                &self.area_generation_internal_failed_total
+            }
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.area_generation_latency_microseconds.fetch_add(
+            elapsed.as_micros().try_into().unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.set_area_generation_phase(AreaGenerationMetricPhase::Active);
+    }
+
     pub fn prometheus(&self, world_queue_depth: usize) -> String {
         format!(
             concat!(
@@ -606,6 +676,23 @@ impl RuntimeMetrics {
                 "tiamud_area_load_latency_seconds_sum {:.6}\n",
                 "# TYPE tiamud_area_bundle_bytes_total counter\n",
                 "tiamud_area_bundle_bytes_total {}\n",
+                "# TYPE tiamud_area_generation_phase gauge\n",
+                "tiamud_area_generation_phase{{state=\"active\"}} {}\n",
+                "tiamud_area_generation_phase{{state=\"staging\"}} {}\n",
+                "tiamud_area_generation_phase{{state=\"draining\"}} {}\n",
+                "tiamud_area_generation_phase{{state=\"committing\"}} {}\n",
+                "# TYPE tiamud_area_generation_transitions_total counter\n",
+                "tiamud_area_generation_transitions_total{{result=\"noop\"}} {}\n",
+                "tiamud_area_generation_transitions_total{{result=\"activated\"}} {}\n",
+                "tiamud_area_generation_transitions_total{{result=\"rolled_back\"}} {}\n",
+                "tiamud_area_generation_transitions_total{{result=\"busy\"}} {}\n",
+                "tiamud_area_generation_transitions_total{{result=\"incompatible\"}} {}\n",
+                "tiamud_area_generation_transitions_total{{result=\"verification_failed\"}} {}\n",
+                "tiamud_area_generation_transitions_total{{result=\"persistence_failed\"}} {}\n",
+                "tiamud_area_generation_transitions_total{{result=\"conflict\"}} {}\n",
+                "tiamud_area_generation_transitions_total{{result=\"internal_failed\"}} {}\n",
+                "# TYPE tiamud_area_generation_latency_seconds_sum counter\n",
+                "tiamud_area_generation_latency_seconds_sum {:.6}\n",
                 "# TYPE process_resident_memory_bytes gauge\n",
                 "process_resident_memory_bytes {}\n",
             ),
@@ -667,6 +754,27 @@ impl RuntimeMetrics {
                 .load(Ordering::Relaxed),
             self.area_load_latency_microseconds.load(Ordering::Relaxed) as f64 / 1_000_000.0,
             self.area_bundle_bytes_total.load(Ordering::Relaxed),
+            (self.area_generation_phase.load(Ordering::Relaxed) == 0) as u8,
+            (self.area_generation_phase.load(Ordering::Relaxed) == 1) as u8,
+            (self.area_generation_phase.load(Ordering::Relaxed) == 2) as u8,
+            (self.area_generation_phase.load(Ordering::Relaxed) == 3) as u8,
+            self.area_generation_noop_total.load(Ordering::Relaxed),
+            self.area_generation_activated_total.load(Ordering::Relaxed),
+            self.area_generation_rolled_back_total
+                .load(Ordering::Relaxed),
+            self.area_generation_busy_total.load(Ordering::Relaxed),
+            self.area_generation_incompatible_total
+                .load(Ordering::Relaxed),
+            self.area_generation_verification_failed_total
+                .load(Ordering::Relaxed),
+            self.area_generation_persistence_failed_total
+                .load(Ordering::Relaxed),
+            self.area_generation_conflict_total.load(Ordering::Relaxed),
+            self.area_generation_internal_failed_total
+                .load(Ordering::Relaxed),
+            self.area_generation_latency_microseconds
+                .load(Ordering::Relaxed) as f64
+                / 1_000_000.0,
             process_resident_memory_bytes(),
         )
     }
@@ -905,5 +1013,38 @@ mod tests {
         assert!(output.contains("tiamud_area_loads_total{result=\"installed\"} 1000"));
         assert!(output.contains("tiamud_area_load_latency_seconds_sum 0.010000"));
         assert!(output.contains("tiamud_area_bundle_bytes_total 4000"));
+    }
+
+    #[test]
+    fn area_generation_metrics_use_only_closed_phase_and_result_labels() {
+        let metrics = RuntimeMetrics::default();
+        metrics.set_area_generation_phase(AreaGenerationMetricPhase::Committing);
+        for result in [
+            AreaGenerationMetricResult::Noop,
+            AreaGenerationMetricResult::Activated,
+            AreaGenerationMetricResult::RolledBack,
+            AreaGenerationMetricResult::Busy,
+            AreaGenerationMetricResult::Incompatible,
+            AreaGenerationMetricResult::VerificationFailed,
+            AreaGenerationMetricResult::PersistenceFailed,
+            AreaGenerationMetricResult::Conflict,
+            AreaGenerationMetricResult::InternalFailed,
+        ] {
+            metrics.area_generation_finished(Duration::from_micros(2), result);
+        }
+
+        let output = metrics.prometheus(0);
+        assert!(output.contains("tiamud_area_generation_phase{state=\"active\"} 1"));
+        assert!(output.contains("tiamud_area_generation_phase{state=\"committing\"} 0"));
+        let results = output
+            .lines()
+            .filter(|line| line.starts_with("tiamud_area_generation_transitions_total{"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 9);
+        assert!(results.iter().all(|line| line.ends_with(" 1")));
+        assert!(output.contains("tiamud_area_generation_latency_seconds_sum 0.000018"));
+        assert!(!output.contains("catalogSha256"));
+        assert!(!output.contains("areaId"));
+        assert!(!output.contains("generationId"));
     }
 }

@@ -21,6 +21,7 @@ exactly one; neither profile requires Kubernetes.
 /etc/tiamud/tiamud.env
 /var/lib/tiamud/
   worlds/lantern-square.world.json
+  area-registry/
   backups/
 
 PostgreSQL data and configuration use the distribution's protected paths.
@@ -178,7 +179,7 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v13, both SQLite and PostgreSQL retain the v8
+In current schema v14, both SQLite and PostgreSQL retain the v8
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
@@ -244,6 +245,41 @@ commit and preserves all v12 IDs, links and bytes. PostgreSQL replaces its
 named constraint. Keep the v12 safety backup until catalog/list/read/post/
 delete/report, staff resolution, expiry, restart and integrity checks pass.
 
+El esquema v14 añade el singleton `world_area_generation`. Guarda el ID del
+mundo, los digests activo y anterior del catálogo, la secuencia de activación y
+el timestamp; no guarda rutas del host ni duplica estado runtime. La migración
+v13→v14 es aditiva. Un corte 6C actualiza esta fila y
+`WorldRuntimeSnapshot` v7 en la misma transacción mediante compare-and-swap.
+Conserva la copia de seguridad hasta que pasen arranque, activación, rollback
+explícito y las comprobaciones de integridad del backend elegido.
+
+Para una instalación 6B existente, la fila v14 nace vacía y no existe forma de
+reconstruir automáticamente qué catálogo v13 estaba ejecutando. Recovery sin
+snapshot/ledger puede contener personajes; por eso el servidor consulta ambas
+autoridades. Si existe recovery compartido o cualquier personaje durable, el
+primer arranque v14 debe usar **exactamente el mismo G0** del último arranque
+v13. Procedimiento obligatorio:
+
+1. detén el servicio y crea/verifica copias del backend y del registro completo;
+2. registra la ruta y SHA-256 exactos de `TIAMUD_AREA_CATALOG` G0;
+3. instala/migra v14 sin publicar ni seleccionar otro catálogo;
+4. configura temporalmente
+   `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>`, arranca todavía con
+   G0 y verifica readiness, logs y la fila `world_area_generation`;
+5. elimina esa variable de la configuración del servicio después de la liga; y
+6. solo después publica o selecciona G1 y usa el SIGHUP de 6C.
+
+No combines actualización de binario/esquema y cambio de catálogo. La primera
+liga v14 acepta G0 como autoridad inicial y no atraviesa compatibilidad/CAS
+contra una identidad anterior ausente; usar G1 en ese momento se saltaría la
+puerta 6C y perdería el rollback durable a G0.
+
+Una base vacía o con cuentas pero sin personajes ni recovery de mundo puede
+ligar su primera generación sin ACK. No uses esta excepción para convertir una
+autoridad monolítica existente a catálogo: 6C no define esa migración. La
+variable falla cerrada en modo monolítico, con liga existente, sin
+recovery/personaje que reconocer o si no coincide con el SHA-256 canónico.
+
 The decoder applies a dual admission rule: raw legacy snapshots v1-v5 remain
 limited to 1 MiB, while v6 and current v7 snapshots and new commits may use up
 to 2 MiB. This prevents an oversized old document from using migration as a
@@ -274,7 +310,7 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires schema v13 and refuses to run while any operational
+The command requires schema v14 and refuses to run while any operational
 `administrator` or `implementor` profile exists. A legacy `admin` role alone
 does not count as executable authority. Recovery replaces the target's profile
 with `implementor`, clears its lore title and previous direct assignments,
@@ -286,7 +322,7 @@ commit in one transaction; any failure rolls all of them back.
 `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
 verify the installation's normal `pg_dump` or physical backup, then run
 `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
-equivalent schema-v13 transaction:
+equivalent schema-v14 transaction:
 
 ```sql
 BEGIN;
@@ -298,8 +334,8 @@ DECLARE
     target_id BIGINT;
     recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 13 THEN
-        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 13';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 14 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 14';
     END IF;
     IF EXISTS (
         SELECT 1 FROM staff_profiles
@@ -419,10 +455,11 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v13, including durable social
+The mover requires the current SQLite schema v14, including durable social
 channel subscriptions, staff profiles, capability assignments, report
 resolutions, staff audit, offline mail usage/messages and retained mail-report
-evidence, and board posts, usage and retained evidence. It refuses a non-empty target and commits schema
+evidence, board posts, usage and retained evidence, and the durable area
+generation row when present. It refuses a non-empty target and commits schema
 plus rows in one PostgreSQL transaction. Configure exactly one line in the
 service environment and remove/comment the other:
 
@@ -432,7 +469,7 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 ```
 
 Exercise registration, login, movement, combat and social state before deleting
-or archiving the SQLite rollback copy. For schema v13 explicitly send, list,
+or archiving the SQLite rollback copy. For schema v14 explicitly send, list,
 read, delete and report mail, restart, and confirm that the moved PostgreSQL
 state retains the inbox, usage quota and report evidence. Also publish, list,
 read, delete and report one board post; confirm post quota/evidence survive the
@@ -457,36 +494,118 @@ establish monitoring,
 TLS, PostgreSQL backup/restore or point-in-time recovery for a production
 installation.
 
-## Binary and world update
+## Sustitución quiescente de generaciones de área
 
-1. Verify the candidate archive checksum and OIDC-signed provenance as described
-   in the [release runbook](releases.md), then extract it into staging.
-2. Create and verify a native PostgreSQL backup, or the `tiamud-admin` backup
-   for an SQLite installation.
-3. Save the current binary and WorldPack under a versioned rollback directory.
-4. Stop Tiamud, install the new binary and reviewed pack, validate the pack with
-   `tiamud-world validate`, and run the integrity procedure for the selected
-   database (`tiamud-admin check` applies only to SQLite).
-5. Start the service and exercise registration, character entry, movement, and
-   inventory against the installed listener, for example:
+Esta operación solo existe cuando el servicio usa
+`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. La primera ejecución liga el
+catálogo verificado en SQL v14 antes de readiness. En reinicios posteriores la
+fila durable prevalece: el servidor deriva la ruta exacta a partir del registro,
+`worldId` y digest aunque `area-active` apunte a una publicación distinta. Una
+base ligada a catálogo no puede arrancar en modo WorldPack monolítico. Si se
+migra desde v13, completa primero la liga de G0 descrita en la sección anterior;
+no uses este flujo para introducir G1 en el mismo primer arranque v14.
+
+Una activación 6C no aplica un parche de área. Verifica y construye **la
+generación completa** fuera del actor. Debe conservar mundo/sala inicial, RNG,
+gameplay, objetos e instancias iniciales, NPC, botín, afijos, conjunto de áreas,
+ownership, IDs de sala y VNUM; no admite migración persistente. Solo prosa,
+salidas y capas de presentación/percepción/Lua síncrono validadas pueden cambiar.
+
+Flujo de activación creciente:
+
+1. crea y verifica la copia del backend conforme a este runbook;
+2. publica con `tiamud-world area-publish` y conserva la ruta exacta del
+   catálogo anterior;
+3. espera una ventana sin usuarios y envía SIGHUP; y
+4. inspecciona `journalctl -u tiamud` y ejecuta readiness/smoke.
+
+```sh
+sudo systemctl kill --signal=HUP tiamud
+curl --fail http://127.0.0.1:8080/health/ready
+```
+
+SIGHUP solo reconcilia el puntero local; no es una señal de apagado y no existe
+un comando Web, Telnet, GMCP o staff equivalente. El servidor relee el puntero
+para detectar una publicación concurrente, verifica todos los blobs y hace
+staging privado con gauges aislados; las métricas públicas siguen describiendo
+la generación activa. Después cierra admisiones y exige **cero sesiones y cero
+leases**. Si hay un login, acción o carga admitida, devuelve `busy`, reabre
+admisiones y conserva la generación activa sin expulsar, mover o desconectar a
+nadie. El operador debe esperar y reintentar otro SIGHUP. Tras el staging, el
+runtime adquiere el lock cooperativo de lectura del registro usado por
+`area-publish`/`area-select`, revalida entonces el puntero, aborta el intento si
+el lock está ocupado y lo conserva hasta resolver el CAS. Un
+publicador cooperante espera en vez de cambiar `area-active` durante el corte.
+En Solaris, runtime y CLI usan el mismo protocolo de registro `fcntl` compatible
+con `fd-lock`; no dependen de locks de familias distintas.
+
+Con quiescencia, el actor restaura el snapshot v7 actual sobre la candidata,
+confirma snapshot + puntero durable mediante CAS y solo entonces intercambia
+mundo, contenido runtime y coordinador. Verificación, incompatibilidad, restore
+y fallos definitivos antes del commit dejan activa la generación anterior. Una
+caída antes/después del commit recupera respectivamente la identidad
+anterior/nueva.
+
+Un error devuelto por el commit puede ser ambiguo y **no** demuestra rollback.
+El servidor relee `world_area_generation`: si contiene G1 publica la candidata;
+si todavía contiene G0 reabre la anterior. Cualquier otro valor o error de
+lectura deja el router en `Committing`, detiene el actor y mantiene readiness
+503 sin aceptar tráfico hasta reinicio y recuperación de la autoridad durable.
+
+Para rollback, no edites a mano `area-active`. Selecciona un catálogo inmutable
+retenido y solicita el mismo corte:
+
+```sh
+tiamud-world area-select \
+  --catalog /var/lib/tiamud/area-registry/area-catalogs/<world-key>/<digest>.catalog.json \
+  --registry /var/lib/tiamud/area-registry
+sudo systemctl kill --signal=HUP tiamud
+```
+
+La secuencia durable aumenta también al revertir. `previous_catalog_sha256`
+solo conserva la generación inmediatamente anterior; no es un historial ni
+borra blobs. Retén explícitamente los catálogos y bundles necesarios.
+
+6C no soporta jugadores durante drenaje, migraciones directas/inversas,
+reemplazo, checkpoint o descarga por área, LRU, GC, registro remoto,
+compresión o firma. La puerta pasa 774 pruebas Rust —329 del servidor— y la
+reauditoría 0 P1/0 P2. PostgreSQL v14 real no se ejecutó sin
+`TIAMUD_TEST_POSTGRES_URL`. El humo retenido cubre
+liga/noop/activación/rollback, restart, readiness/Web/Telnet, métricas y apagado;
+conserva el mismo procedimiento sobre persistencia y registro desechables antes
+de una instalación propia.
+
+## Actualización del binario y del mundo
+
+1. Verifica checksum y procedencia OIDC del candidato según la
+   [guía de release](releases.md) y extráelo en staging.
+2. Crea y verifica una copia nativa PostgreSQL o la copia `tiamud-admin` de una
+   instalación SQLite.
+3. Conserva binario, WorldPack y, en modo catálogo, el registro/catálogo exacto
+   actuales bajo un directorio de rollback versionado.
+4. Detén Tiamud, instala el binario y artefactos revisados, valida el WorldPack
+   con `tiamud-world validate` y ejecuta la integridad del backend seleccionado
+   (`tiamud-admin check` solo cubre SQLite).
+5. Arranca el servicio y prueba registro, entrada, movimiento e inventario
+   contra el listener instalado, por ejemplo:
 
    ```sh
    node scripts/load.mjs --url http://127.0.0.1:8080 \
      --users 1 --rounds 1 --concurrency 1 --pace-ms 100
    ```
 
-   `scripts/smoke.mjs` is useful in the candidate gate, but it starts its own
-   temporary debug server and therefore is not proof of the installed service.
+   `scripts/smoke.mjs` ayuda en el gate candidato, pero inicia su propio servidor
+   temporal de debug y no demuestra el servicio instalado.
 
-If validation or smoke testing fails, stop the service, restore the prior
-binary and WorldPack, preserve the failed database for diagnosis, and follow
-the selected backend's verified recovery procedure. SQLite restore deliberately
-does not overwrite files, so that path cannot silently destroy forensic data;
-PostgreSQL recovery must provide the equivalent operator-controlled safety.
+Si falla validación o smoke, detén el servicio, restaura el binario y WorldPack
+anteriores, conserva la base fallida para diagnóstico y sigue la recuperación
+verificada del backend. SQLite no sobrescribe al restaurar, para no destruir
+datos forenses; PostgreSQL debe aportar una seguridad equivalente controlada
+por el operador. Un rollback de contenido 6C compatible usa `area-select` y
+SIGHUP; recuperar la base completa es una operación distinta.
 
-This runbook covers the implemented HTTPS/WSS reverse-proxy, systemd, graceful
-shutdown, migration, backup, restore, readiness, metrics, verified release, and
-rollback paths. Load and memory evidence are described separately in the
-[soak runbook](soak-testing.md). A configured 24-hour workflow is not itself a
-successful 24-hour result; retain the completed candidate report before treating
-acceptance criterion 19 as satisfied.
+Esta guía cubre proxy HTTPS/WSS, systemd, apagado ordenado, migración, copia,
+restore, readiness, métricas, release verificada y rollback. La evidencia de
+carga y memoria se describe en la [guía de soak](soak-testing.md). Configurar
+un workflow de 24 horas no equivale a ejecutarlo; conserva el informe completo
+del candidato antes de dar por satisfecho el criterio 19.

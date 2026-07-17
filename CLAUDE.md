@@ -22,13 +22,13 @@ describe el baseline vigente de personajes, inventario y medios.
 
 - Tiamud es el nombre definitivo; `hyukudan/tiamud` es el repositorio canónico
   y `main` la rama de desarrollo.
-- Es un proyecto privado de prelanzamiento `0.1.0`, sin producción pública ni
+- Es un proyecto de código abierto en prelanzamiento `0.1.0`, sin producción pública ni
   protocolo estable.
 - Toolchain Rust 1.93.1, edition 2024, MSRV 1.88. CI usa Node 24 y pnpm 11.11;
   el paquete web admite pnpm 10+.
 - Un servidor Rust posee un actor de mundo con escritor único. Navegador y
   Telnet comparten dominio, persistencia y proyección.
-- PostgreSQL esquema v13 es el perfil público recomendado; SQLite esquema v13 es
+- PostgreSQL esquema v14 es el perfil público recomendado; SQLite esquema v14 es
   la ruta local sin servicios. Cada proceso abre uno y nunca doble-escribe.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
@@ -71,9 +71,40 @@ describe el baseline vigente de personajes, inventario y medios.
   residencia atómicamente y reintenta la acción una vez. Solo persiste si el
   lote crea estado dinámico cubierto por snapshot v7; el cliente recibe un
   error genérico y las métricas nunca etiquetan IDs/digests.
-  Todas las áreas añadidas permanecen residentes. Sustitución, coexistencia de
-  generaciones, drenaje, descarga, LRU, red, compresión y firma remota siguen
-  pendientes para 6C y posteriores.
+  Todas las áreas añadidas permanecen residentes durante esa generación.
+- La fase 6C mínima de ADR 0021 está implementada con puerta final retenida. SIGHUP
+  local resuelve `area-active`, verifica y construye una generación completa
+  fuera del actor. Solo admite el corte con cero sesiones y cero leases; en
+  otro caso devuelve `busy` sin expulsar jugadores. No sustituye áreas sueltas.
+  La compatibilidad mantiene exactos gameplay, RNG, objetos/instancias
+  iniciales, NPC, loot, afijos, áreas, ownership e IDs estables; permite prosa,
+  salidas y presentación/scripts síncronos validados. El staging aísla los
+  gauges de la candidata hasta el swap confirmado.
+  El snapshot sigue en v7. SQL v14 añade `world_area_generation` y confirma
+  snapshot + generación mediante CAS antes del swap de mundo, contenido y
+  coordinador. Startup deriva por digest la autoridad durable aunque cambie el
+  puntero editorial. Activación exige revisiones crecientes; rollback usa
+  `tiamud-world area-select --catalog <path> --registry <dir>` y SIGHUP.
+  Un commit ambiguo se resuelve releyendo SQL: G1 durable se publica, G0 se
+  reabre y cualquier otro valor/error deja `Committing`, detiene el actor y
+  mantiene readiness 503 hasta reinicio/recuperación; no asumas rollback.
+  Al migrar desde 6B/v13 con recovery compartido o personajes, conserva y liga
+  primero el G0 exacto; la fila v14 nace
+  vacía y cambiar catálogo en ese mismo arranque evitaría compatibilidad/CAS.
+  Copia backend/registro, usa
+  `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>`, verifica la liga,
+  retira la variable y solo después introduce G1.
+  Recovery vacío puede coexistir con personajes. Sin liga durable, recovery
+  compartido o cualquier personaje exige el ACK exacto G0; cuentas solas sin
+  personajes ni recovery de mundo pueden ligar sin ACK. Monolítico con
+  autoridad→catálogo no es una migración 6C implícita. La aceptación se rechaza
+  en modo monolítico, con liga, sin recovery/personaje o digest distinto. El
+  corte retiene el lock común con `area-publish`/`area-select` hasta el CAS; en
+  Solaris comparte el protocolo `fcntl` compatible con `fd-lock`.
+  `CharacterStore::has_durable_character_authority` cubre SQLite, PostgreSQL,
+  wrapper medido y memoria de pruebas.
+  Siguen ausentes migraciones de estado, jugadores durante drenaje, reemplazo o
+  checkpoint por área, descarga, LRU, GC, red, compresión y firma remota.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
@@ -81,7 +112,7 @@ describe el baseline vigente de personajes, inventario y medios.
   persiste `WorldRuntimeSnapshot` v7 con DTO exactos v1-v7. v1-v3 se
   convierten a vínculo `unbound`; schema-smuggling, vínculos y políticas
   incoherentes fallan cerrados; v4 normaliza a contador inicial y trades vacíos.
-  SQLite/PostgreSQL conservan el snapshot único en esquema v13, sin tabla
+  SQLite/PostgreSQL conservan el snapshot único en esquema v14, sin tabla
   espejo ni custodia SQL. Los snapshots v1-v5 conservan el límite de 1 MiB y
   v6-v7 admiten 2 MiB; v6 rechaza campos v7 y normaliza a afijos vacíos y
   contador de aperturas inicial. Restore conserva nuevas
@@ -325,6 +356,15 @@ obtiene readiness, confirma dos áreas residentes en bootstrap vacío y cierra
 limpio. La puerta y sus límites exactos están en el
 [registro 6B](docs/project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
 
+La puerta 6C pasa 774 pruebas Rust —329 del servidor—, formato/diff, clippy,
+MSRV, cargo-deny, licencias/avisos 308 Rust/76 web, Svelte 0/0 y 123 Vitest. La
+reauditoría queda en 0 P1/0 P2. PostgreSQL v14 real no se ejecutó porque
+falta `TIAMUD_TEST_POSTGRES_URL` y no se afirma. El humo real liga G0, hace
+`noop`, activa G1, revierte a G0 y recupera por restart con
+readiness/Web/Telnet, métricas exactas y apagado limpio.
+El [registro 6C](docs/project/log/2026-07-17-quiescent-area-generation-cutover-phase-6c.md)
+conserva los comandos, cifras y límites exactos.
+
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
 mixto limpio y 3.081.428 ejecuciones fuzz Telnet. Vincula aquel árbol: no es
@@ -397,9 +437,10 @@ Ante un cambio material:
 6. añade un ADR antes de cambiar arquitectura aceptada.
 
 No reescribas registros históricos para que parezcan actuales. No conviertas
-un workflow configurado en un pase. No confundas la carga aditiva 6B con
-reemplazo/descarga/LRU caliente, ni afirmes producción, lector manual, release
-etiquetada o soak 24 h sin evidencia.
+un workflow configurado en un pase. No confundas la carga aditiva 6B con el
+corte completo 6C, ni presentes 6C como reemplazo por área, descarga o LRU.
+Tampoco afirmes su gate final, producción, lector manual, release etiquetada o
+soak 24 h sin evidencia.
 
 Antes de entregar: revisa `git diff`, ejecuta `git diff --check`, verifica
 enlaces/comandos modificados y declara exactamente qué se validó.

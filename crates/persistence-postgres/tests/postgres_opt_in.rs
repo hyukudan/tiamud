@@ -49,6 +49,13 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
              VALUES (10, 'general', 900);
              INSERT INTO domain_events (sequence, event_json)
              VALUES (7, '{\"type\":\"test\"}');
+             INSERT INTO world_area_generation
+                 (singleton, world_id, active_catalog_sha256,
+                  previous_catalog_sha256, activation_sequence, updated_at)
+             VALUES (1, 'Mundo de Ámbar',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                     7, 975);
              INSERT INTO character_adventure (character_id, state_json)
              VALUES (10, '{\"coins\":40}');
              INSERT INTO world_adventure (singleton, state_json)
@@ -131,7 +138,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     let report =
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres).unwrap();
-    assert_eq!(report.total_rows, 22);
+    assert_eq!(report.total_rows, 23);
     assert_eq!(
         postgres
             .query_one("SELECT COUNT(*)::BIGINT FROM characters", &[])
@@ -180,7 +187,29 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 13, to: 13 }
+        tiamud_persistence_postgres::MigrationReport { from: 14, to: 14 }
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT world_id, active_catalog_sha256,
+                        previous_catalog_sha256, activation_sequence, updated_at
+                 FROM world_area_generation WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, String>(0),
+        "Mundo de Ámbar"
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT activation_sequence FROM world_area_generation WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, i64>(0),
+        7
     );
     assert_eq!(
         postgres
@@ -279,7 +308,37 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     postgres
         .batch_execute(
+            "DROP TABLE world_area_generation;
+             UPDATE tiamud_schema SET version = 13 WHERE singleton = 1",
+        )
+        .unwrap();
+    assert_eq!(
+        tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
+        tiamud_persistence_postgres::MigrationReport { from: 13, to: 14 }
+    );
+    assert_eq!(
+        postgres
+            .query_one(
+                "SELECT snapshot_json FROM world_runtime WHERE singleton = 1",
+                &[],
+            )
+            .unwrap()
+            .get::<_, String>(0),
+        runtime_json,
+        "v13 to v14 must not rewrite the runtime snapshot"
+    );
+    assert_eq!(
+        postgres
+            .query_one("SELECT COUNT(*)::BIGINT FROM world_area_generation", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0,
+        "v13 starts without a selected durable generation"
+    );
+    postgres
+        .batch_execute(
             "DROP TABLE social_board_report_evidence;
+             DROP TABLE world_area_generation;
              DROP TABLE social_board_posts;
              DROP TABLE social_board_usage;
              DROP TABLE social_mail_report_evidence;
@@ -296,7 +355,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 10, to: 13 }
+        tiamud_persistence_postgres::MigrationReport { from: 10, to: 14 }
     );
     let constraint: String = postgres
         .query_one(
@@ -332,6 +391,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .batch_execute(
             "DROP TABLE character_adventure;
              DROP TABLE world_adventure;
+             DROP TABLE world_area_generation;
              DROP TABLE social_channel_subscriptions;
              DROP TABLE social_board_report_evidence;
              DROP TABLE social_board_posts;
@@ -362,7 +422,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 13 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 14 }
     );
     assert!(
         postgres
@@ -405,25 +465,25 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 14 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 15 WHERE singleton = 1",
             &[],
         )
         .unwrap();
     assert!(matches!(
         tiamud_persistence_postgres::migrate(&mut postgres),
-        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 14 })
+        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 15 })
     ));
     assert_eq!(
         postgres
             .query_one("SELECT version FROM tiamud_schema WHERE singleton = 1", &[])
             .unwrap()
             .get::<_, i32>(0),
-        14,
+        15,
         "future metadata must remain untouched after rejection"
     );
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 13 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 14 WHERE singleton = 1",
             &[],
         )
         .unwrap();

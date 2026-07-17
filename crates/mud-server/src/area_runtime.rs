@@ -1,21 +1,26 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 #[cfg(test)]
-use std::sync::{
-    Condvar,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Condvar;
 
 use thiserror::Error;
 use tiamud_core::{
     AreaGenerationId, AreaLoadRequest, PreparedCoreArea, PreparedCoreAreaBatch, World,
 };
 use tokio::sync::{Notify, Semaphore, oneshot};
-use world_pack::{AreaPortalDirection, LocalAreaGeneration};
+use world_pack::{AreaPortalDirection, LocalAreaGeneration, StagedLocalAreaGenerationReplacement};
+#[cfg(unix)]
+use world_pack::{
+    LocalAreaPublicationReadGuard, LocalAreaRegistryError,
+    try_acquire_local_area_publication_read_lock,
+};
 
 use crate::{
     operations::{AreaLoadMetricResult, RuntimeMetrics},
@@ -33,6 +38,430 @@ pub(crate) struct PreparedAreaBatch {
     pub(crate) runtime_by_area: BTreeMap<String, RuntimeContentDelta>,
     pub(crate) bundle_bytes: u64,
     pub(crate) closure_areas: usize,
+}
+
+/// Fully private, full-generation staging result for the quiescent 6C
+/// cutover. Nothing in this value has been published to the actor or storage.
+/// The actor consumes it exactly once after closing admission and proving that
+/// the current world is quiescent.
+pub(crate) struct PreparedGenerationCutover {
+    pub(crate) expected_current_generation: AreaGenerationId,
+    pub(crate) candidate_generation: AreaGenerationId,
+    pub(crate) world: World,
+    pub(crate) runtime_content: crate::runtime_content::RuntimeContent,
+    pub(crate) candidate_coordinator: AreaLoadCoordinator,
+    revalidate_active_pointer: bool,
+}
+
+impl PreparedGenerationCutover {
+    pub(crate) fn candidate_coordinator(&self) -> &AreaLoadCoordinator {
+        &self.candidate_coordinator
+    }
+
+    pub(crate) fn revalidate_candidate_pointer(&self) -> Result<(), AreaPreparationError> {
+        if !self.revalidate_active_pointer {
+            return Ok(());
+        }
+        self.candidate_coordinator
+            .generation()
+            .revalidate_active_pointer_identity()
+            .map_err(|error| AreaPreparationError::Invalid(error.to_string()))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn try_acquire_candidate_publication_lock(
+        &self,
+    ) -> Result<Option<LocalAreaPublicationReadGuard>, LocalAreaRegistryError> {
+        if !self.revalidate_active_pointer {
+            return Ok(None);
+        }
+        let generation = self.candidate_coordinator.generation();
+        try_acquire_local_area_publication_read_lock(
+            generation.registry_path(),
+            &generation.catalog().world_id,
+        )
+        .map(Some)
+    }
+}
+
+/// Low-cardinality lifecycle state for one process-wide generation router.
+/// Generation identities are deliberately exposed separately so this enum is
+/// safe to reuse as a metric label.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AreaGenerationPhase {
+    Active,
+    Staging,
+    Draining,
+    Committing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AreaGenerationStatus {
+    pub(crate) phase: AreaGenerationPhase,
+    pub(crate) active_generation: AreaGenerationId,
+    pub(crate) target_generation: Option<AreaGenerationId>,
+    pub(crate) active_leases: usize,
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub(crate) enum AreaGenerationRouteError {
+    #[error("area generation admission is temporarily closed")]
+    Busy,
+    #[error("area generation precondition does not match the active generation")]
+    WrongGeneration,
+    #[error("the candidate is the already-active area generation")]
+    SameGeneration,
+}
+
+/// Shared routing and admission boundary for 6B loads and 6C cutovers.
+///
+/// A route lease pins the exact active coordinator across every out-of-actor
+/// wait belonging to one admission/action. A cutover can enter `Draining`
+/// only after all such leases have gone away, and its RAII guard restores the
+/// old `Active` state on every pre-commit failure.
+#[derive(Clone)]
+pub(crate) struct AreaGenerationRouter {
+    inner: Arc<AreaGenerationRouterInner>,
+}
+
+struct AreaGenerationRouterInner {
+    state: Mutex<AreaGenerationRouterState>,
+}
+
+struct AreaGenerationRouterState {
+    coordinator: AreaLoadCoordinator,
+    phase: AreaGenerationRouterPhase,
+    active_leases: usize,
+    next_transition: u64,
+}
+
+#[derive(Clone)]
+enum AreaGenerationRouterPhase {
+    Active,
+    Staging {
+        token: u64,
+        base: AreaGenerationId,
+        target: AreaGenerationId,
+    },
+    Draining {
+        token: u64,
+        base: AreaGenerationId,
+        target: AreaGenerationId,
+    },
+    Committing {
+        token: u64,
+        base: AreaGenerationId,
+        target: AreaGenerationId,
+    },
+}
+
+pub(crate) struct AreaGenerationRouteLease {
+    router: AreaGenerationRouter,
+    coordinator: AreaLoadCoordinator,
+    generation: AreaGenerationId,
+    armed: bool,
+}
+
+impl AreaGenerationRouteLease {
+    pub(crate) fn coordinator(&self) -> &AreaLoadCoordinator {
+        &self.coordinator
+    }
+
+    pub(crate) fn generation(&self) -> &AreaGenerationId {
+        &self.generation
+    }
+}
+
+impl Drop for AreaGenerationRouteLease {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self
+            .router
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.active_leases = state.active_leases.saturating_sub(1);
+        self.armed = false;
+    }
+}
+
+/// Exclusive generation transition token. Dropping it before
+/// [`finish_commit`](Self::finish_commit) restores the base generation and
+/// reopens admission. The candidate coordinator is captured at staging time,
+/// so the post-durable-commit publication contains no fallible validation.
+pub(crate) struct AreaGenerationCutoverGuard {
+    router: AreaGenerationRouter,
+    token: u64,
+    base: AreaGenerationId,
+    target: AreaGenerationId,
+    candidate_coordinator: Option<AreaLoadCoordinator>,
+    committed: bool,
+}
+
+impl AreaGenerationCutoverGuard {
+    pub(crate) fn begin_draining(&mut self) -> Result<(), AreaGenerationRouteError> {
+        let mut state = self
+            .router
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &state.phase {
+            AreaGenerationRouterPhase::Staging {
+                token,
+                base,
+                target,
+            } if *token == self.token && base == &self.base && target == &self.target => {}
+            _ => return Err(AreaGenerationRouteError::WrongGeneration),
+        }
+        if state.active_leases != 0 {
+            return Err(AreaGenerationRouteError::Busy);
+        }
+        state.phase = AreaGenerationRouterPhase::Draining {
+            token: self.token,
+            base: self.base.clone(),
+            target: self.target.clone(),
+        };
+        Ok(())
+    }
+
+    pub(crate) fn begin_committing(&mut self) -> Result<(), AreaGenerationRouteError> {
+        let mut state = self
+            .router
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &state.phase {
+            AreaGenerationRouterPhase::Draining {
+                token,
+                base,
+                target,
+            } if *token == self.token && base == &self.base && target == &self.target => {}
+            _ => return Err(AreaGenerationRouteError::WrongGeneration),
+        }
+        state.phase = AreaGenerationRouterPhase::Committing {
+            token: self.token,
+            base: self.base.clone(),
+            target: self.target.clone(),
+        };
+        Ok(())
+    }
+
+    /// Publishes the coordinator captured during staging. Call this only after
+    /// the durable generation CAS has succeeded. All preconditions were
+    /// established by the preceding state transitions, making the swap itself
+    /// infallible.
+    pub(crate) fn finish_commit(mut self) {
+        let coordinator = self
+            .candidate_coordinator
+            .take()
+            .expect("cutover guard retains its candidate until commit");
+        {
+            let mut state = self
+                .router
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            debug_assert!(matches!(
+                &state.phase,
+                AreaGenerationRouterPhase::Committing { token, base, target }
+                    if *token == self.token && base == &self.base && target == &self.target
+            ));
+            state.coordinator = coordinator;
+            state.phase = AreaGenerationRouterPhase::Active;
+        }
+        self.committed = true;
+    }
+
+    /// Permanently closes admission when durable authority cannot be
+    /// reconciled after an ambiguous commit outcome. The world actor must
+    /// stop immediately after sealing the guard; keeping the router in
+    /// `Committing` prevents any request from observing the stale base while
+    /// process supervision takes over.
+    pub(crate) fn seal_fail_stop(mut self) {
+        debug_assert!(matches!(
+            self.router
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .phase,
+            AreaGenerationRouterPhase::Committing { .. }
+        ));
+        self.committed = true;
+    }
+}
+
+impl Drop for AreaGenerationCutoverGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut state = self
+            .router
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let owns_transition = match &state.phase {
+            AreaGenerationRouterPhase::Staging { token, base, .. }
+            | AreaGenerationRouterPhase::Draining { token, base, .. }
+            | AreaGenerationRouterPhase::Committing { token, base, .. } => {
+                *token == self.token && base == &self.base
+            }
+            AreaGenerationRouterPhase::Active => false,
+        };
+        if owns_transition {
+            state.phase = AreaGenerationRouterPhase::Active;
+        }
+    }
+}
+
+impl AreaGenerationRouter {
+    pub(crate) fn new(coordinator: AreaLoadCoordinator) -> Self {
+        Self {
+            inner: Arc::new(AreaGenerationRouterInner {
+                state: Mutex::new(AreaGenerationRouterState {
+                    coordinator,
+                    phase: AreaGenerationRouterPhase::Active,
+                    active_leases: 0,
+                    next_transition: 1,
+                }),
+            }),
+        }
+    }
+
+    pub(crate) fn status(&self) -> AreaGenerationStatus {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let active_generation = coordinator_generation_id(&state.coordinator);
+        let (phase, target_generation) = match &state.phase {
+            AreaGenerationRouterPhase::Active => (AreaGenerationPhase::Active, None),
+            AreaGenerationRouterPhase::Staging { target, .. } => {
+                (AreaGenerationPhase::Staging, Some(target.clone()))
+            }
+            AreaGenerationRouterPhase::Draining { target, .. } => {
+                (AreaGenerationPhase::Draining, Some(target.clone()))
+            }
+            AreaGenerationRouterPhase::Committing { target, .. } => {
+                (AreaGenerationPhase::Committing, Some(target.clone()))
+            }
+        };
+        AreaGenerationStatus {
+            phase,
+            active_generation,
+            target_generation,
+            active_leases: state.active_leases,
+        }
+    }
+
+    /// Pins the active generation for one admission/action. Staging is
+    /// non-blocking; draining and committing close this gate.
+    pub(crate) fn try_route(
+        &self,
+        expected_generation: Option<&AreaGenerationId>,
+    ) -> Result<AreaGenerationRouteLease, AreaGenerationRouteError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if matches!(
+            state.phase,
+            AreaGenerationRouterPhase::Draining { .. }
+                | AreaGenerationRouterPhase::Committing { .. }
+        ) {
+            return Err(AreaGenerationRouteError::Busy);
+        }
+        let generation = coordinator_generation_id(&state.coordinator);
+        if expected_generation.is_some_and(|expected| expected != &generation) {
+            return Err(AreaGenerationRouteError::WrongGeneration);
+        }
+        let coordinator = state.coordinator.clone();
+        state.active_leases = state.active_leases.saturating_add(1);
+        Ok(AreaGenerationRouteLease {
+            router: self.clone(),
+            coordinator,
+            generation,
+            armed: true,
+        })
+    }
+
+    pub(crate) fn begin_staging(
+        &self,
+        prepared: &PreparedGenerationCutover,
+    ) -> Result<AreaGenerationCutoverGuard, AreaGenerationRouteError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !matches!(state.phase, AreaGenerationRouterPhase::Active) {
+            return Err(AreaGenerationRouteError::Busy);
+        }
+        let base = coordinator_generation_id(&state.coordinator);
+        if base != prepared.expected_current_generation {
+            return Err(AreaGenerationRouteError::WrongGeneration);
+        }
+        if base == prepared.candidate_generation {
+            return Err(AreaGenerationRouteError::SameGeneration);
+        }
+        let candidate = coordinator_generation_id(prepared.candidate_coordinator());
+        if candidate != prepared.candidate_generation {
+            return Err(AreaGenerationRouteError::WrongGeneration);
+        }
+        let token = state.next_transition;
+        state.next_transition = state.next_transition.wrapping_add(1).max(1);
+        state.phase = AreaGenerationRouterPhase::Staging {
+            token,
+            base: base.clone(),
+            target: candidate.clone(),
+        };
+        Ok(AreaGenerationCutoverGuard {
+            router: self.clone(),
+            token,
+            base,
+            target: candidate,
+            candidate_coordinator: Some(prepared.candidate_coordinator().clone()),
+            committed: false,
+        })
+    }
+
+    /// Mirrors actor-published residence only into the coordinator which owns
+    /// the exact installed generation. A tardy batch can therefore never
+    /// contaminate the replacement coordinator's additive residence set.
+    pub(crate) fn mark_resident_if_active(
+        &self,
+        generation: &AreaGenerationId,
+        area_ids: &[String],
+    ) -> bool {
+        let coordinator = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if coordinator_generation_id(&state.coordinator) != *generation {
+                return false;
+            }
+            state.coordinator.clone()
+        };
+        coordinator.mark_resident(area_ids);
+        true
+    }
+}
+
+fn coordinator_generation_id(coordinator: &AreaLoadCoordinator) -> AreaGenerationId {
+    AreaGenerationId::from_catalog_sha256(coordinator.generation().generation_id().to_owned())
+        .expect("a LocalAreaGeneration always has a validated SHA-256 identity")
 }
 
 pub(crate) struct CatalogWorldBootstrap {
@@ -67,6 +496,7 @@ struct CoordinatorInner {
     preparation_timeout: Duration,
     state: Mutex<CoordinatorState>,
     metrics: Option<Arc<RuntimeMetrics>>,
+    metrics_suppressed: AtomicBool,
     #[cfg(test)]
     test_worker_gate: Mutex<Option<Arc<TestWorkerGate>>>,
 }
@@ -182,6 +612,7 @@ impl AreaLoadCoordinator {
                 preparation_timeout: AREA_PREPARATION_TIMEOUT,
                 state: Mutex::new(CoordinatorState::default()),
                 metrics,
+                metrics_suppressed: AtomicBool::new(false),
                 #[cfg(test)]
                 test_worker_gate: Mutex::new(None),
             }),
@@ -190,6 +621,61 @@ impl AreaLoadCoordinator {
 
     pub(crate) fn generation(&self) -> &LocalAreaGeneration {
         &self.inner.generation
+    }
+
+    pub(crate) fn set_metrics_suppressed(&self, suppressed: bool) {
+        self.inner
+            .metrics_suppressed
+            .store(suppressed, Ordering::Release);
+    }
+
+    fn metrics(&self) -> Option<&Arc<RuntimeMetrics>> {
+        if self.inner.metrics_suppressed.load(Ordering::Acquire) {
+            None
+        } else {
+            self.inner.metrics.as_ref()
+        }
+    }
+
+    /// Builds an entire candidate generation in private memory for a 6C
+    /// quiescent cutover. The candidate coordinator has its own residence and
+    /// work state; it does not become routable until the actor has durably
+    /// committed and atomically swapped the prepared world.
+    pub(crate) async fn stage_full_generation_replacement(
+        &self,
+        staged: &StagedLocalAreaGenerationReplacement,
+    ) -> Result<PreparedGenerationCutover, AreaPreparationError> {
+        let expected_current_generation = AreaGenerationId::from_catalog_sha256(
+            staged.expected_current_generation_id().to_owned(),
+        )
+        .map_err(|error| AreaPreparationError::Invalid(error.to_string()))?;
+        let candidate_generation = coordinator_generation_id(self);
+        if staged.candidate_generation_id() != candidate_generation.as_str()
+            || staged.candidate().generation_id() != candidate_generation.as_str()
+        {
+            return Err(AreaPreparationError::Invalid(
+                "candidate coordinator does not match compatible registry staging".into(),
+            ));
+        }
+        if candidate_generation == expected_current_generation {
+            return Err(AreaPreparationError::Invalid(
+                "candidate generation is already active".into(),
+            ));
+        }
+        let bootstrap = self.bootstrap_world(true).await?;
+        if bootstrap.world.area_generation() != Some(&candidate_generation) {
+            return Err(AreaPreparationError::Invalid(
+                "candidate world generation does not match its coordinator".into(),
+            ));
+        }
+        Ok(PreparedGenerationCutover {
+            expected_current_generation,
+            candidate_generation,
+            world: bootstrap.world,
+            runtime_content: bootstrap.runtime_content,
+            candidate_coordinator: self.clone(),
+            revalidate_active_pointer: staged.candidate_active_pointer_identity().is_some(),
+        })
     }
 
     #[cfg(test)]
@@ -275,7 +761,7 @@ impl AreaLoadCoordinator {
                 created_dynamic_state |= outcome.created_dynamic_state;
             }
         }
-        if let Some(metrics) = &self.inner.metrics {
+        if let Some(metrics) = self.metrics() {
             metrics.set_resident_areas(world.active_area_count());
             metrics.set_deferred_area_exits(world.deferred_area_exit_count());
         }
@@ -288,11 +774,11 @@ impl AreaLoadCoordinator {
 
     pub(crate) async fn prepare(&self, area_id: impl Into<String>) -> AreaPreparationResult {
         let area_id = area_id.into();
-        if let Some(metrics) = &self.inner.metrics {
+        if let Some(metrics) = self.metrics() {
             metrics.record_area_load_demand();
         }
         if self.inner.generation.entry(&area_id).is_none() {
-            if let Some(metrics) = &self.inner.metrics {
+            if let Some(metrics) = self.metrics() {
                 metrics.record_area_load_rejection();
             }
             return Err(AreaPreparationError::UnknownArea);
@@ -318,14 +804,14 @@ impl AreaLoadCoordinator {
                         id: waiter_id,
                         send,
                     });
-                    if let Some(metrics) = &self.inner.metrics {
+                    if let Some(metrics) = self.metrics() {
                         metrics.record_area_load_coalesced();
                     }
                     (None, false, waiter_id, job_id)
                 }
             } else {
                 if state.jobs.len() >= MAX_ACTIVE_PREPARATIONS + MAX_PENDING_PREPARATIONS {
-                    if let Some(metrics) = &self.inner.metrics {
+                    if let Some(metrics) = self.metrics() {
                         metrics.record_area_load_rejection();
                         metrics.area_load_finished(
                             Duration::ZERO,
@@ -354,7 +840,7 @@ impl AreaLoadCoordinator {
         };
         self.update_queue_metrics();
         if timed_out {
-            if let Some(metrics) = &self.inner.metrics {
+            if let Some(metrics) = self.metrics() {
                 metrics.record_area_load_rejection();
             }
             return Err(AreaPreparationError::Timeout);
@@ -512,7 +998,7 @@ impl AreaLoadCoordinator {
             Err(AreaPreparationError::Cancelled) => (AreaLoadMetricResult::Cancelled, 0),
             Err(_) => (AreaLoadMetricResult::PreparationFailed, 0),
         };
-        if let Some(metrics) = &self.inner.metrics {
+        if let Some(metrics) = self.metrics() {
             if let Ok(batch) = &result {
                 metrics.record_area_closure(batch.closure_areas);
             }
@@ -540,7 +1026,7 @@ impl AreaLoadCoordinator {
                 .map(|waiter| waiter.send)
                 .collect::<Vec<_>>()
         };
-        if let Some(metrics) = &self.inner.metrics {
+        if let Some(metrics) = self.metrics() {
             metrics.area_load_finished(started.elapsed(), 0, AreaLoadMetricResult::Timeout);
         }
         for waiter in waiters {
@@ -576,7 +1062,7 @@ impl AreaLoadCoordinator {
             }
             state.active
         };
-        if let Some(metrics) = &self.inner.metrics {
+        if let Some(metrics) = self.metrics() {
             metrics.set_preparing_areas(active);
         }
         self.update_queue_metrics();
@@ -637,7 +1123,7 @@ impl AreaLoadCoordinator {
             state.resident.extend(area_ids.iter().cloned());
             state.resident.len()
         };
-        if let Some(metrics) = &self.inner.metrics {
+        if let Some(metrics) = self.metrics() {
             metrics.set_resident_areas(count);
         }
     }
@@ -676,7 +1162,7 @@ impl AreaLoadCoordinator {
                 .unwrap_or_else(|error| error.into_inner());
             state.jobs.len().saturating_sub(state.active)
         };
-        if let Some(metrics) = &self.inner.metrics {
+        if let Some(metrics) = self.metrics() {
             metrics.set_pending_areas(pending);
         }
     }
@@ -792,19 +1278,20 @@ fn prepare_area_closure(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, fs::OpenOptions, path::PathBuf};
 
     use tempfile::TempDir;
     use tokio::sync::oneshot;
     use world_pack::{
-        AreaPortalDirection, VerifiedAreaRelease, build_area_release, compose_world_project,
-        local_area_bundle_path, local_area_catalog_path, local_area_world_path,
-        parse_area_release_manifest,
+        ActiveAreaCatalog, AreaPortalDirection, VerifiedAreaRelease, build_area_release,
+        compose_world_project, local_active_area_catalog_path, local_area_bundle_path,
+        local_area_catalog_path, local_area_publication_lock_path, local_area_world_path,
+        parse_area_release_manifest, stage_generation_replacement,
     };
 
     use super::*;
     use crate::{
-        persistence::{CharacterStore, SqliteCharacterStore},
+        persistence::{CharacterStore, DurableAreaGeneration, SqliteCharacterStore},
         world_actor::{WorldHandle, WorldSchedulerConfig},
         world_loader::parse_pinned_world_content,
     };
@@ -874,6 +1361,106 @@ mod tests {
             AreaLoadCoordinator::new(generation, pinned, None)
         }
 
+        fn successor_coordinator(&self) -> AreaLoadCoordinator {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let composed =
+                compose_world_project(root.join("worlds/lantern-square.project.json")).unwrap();
+            let manifest_bytes =
+                fs::read(root.join("worlds/lantern-square.area-release.json")).unwrap();
+            let mut manifest = parse_area_release_manifest(&manifest_bytes).unwrap();
+            manifest.catalog_revision += 1;
+            manifest.areas[0].revision += 1;
+            let release =
+                build_area_release(&composed, &manifest, Some(&self.release.catalog)).unwrap();
+            let world_path = local_area_world_path(
+                &self.registry,
+                &release.catalog.world_id,
+                &release.catalog.world_artifact_sha256,
+            );
+            fs::create_dir_all(world_path.parent().unwrap()).unwrap();
+            fs::write(world_path, &release.world_artifact).unwrap();
+            for (area_id, bytes) in &release.bundles {
+                let entry = release
+                    .catalog
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.area_id == area_id)
+                    .unwrap();
+                let path = local_area_bundle_path(
+                    &self.registry,
+                    &release.catalog.world_id,
+                    area_id,
+                    &entry.bundle_sha256,
+                );
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, bytes).unwrap();
+            }
+            let catalog_path = local_area_catalog_path(
+                &self.registry,
+                &release.catalog.world_id,
+                &release.catalog_sha256,
+            );
+            fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+            fs::write(&catalog_path, &release.catalog_bytes).unwrap();
+            let generation =
+                LocalAreaGeneration::open_exact(&self.registry, &catalog_path).unwrap();
+            let pinned = parse_pinned_world_content(generation.world_artifact()).unwrap();
+            AreaLoadCoordinator::new(generation, pinned, None)
+        }
+
+        fn staged_successor(
+            &self,
+            current: &AreaLoadCoordinator,
+        ) -> (AreaLoadCoordinator, StagedLocalAreaGenerationReplacement) {
+            let candidate = self.successor_coordinator();
+            let staged =
+                stage_generation_replacement(current.generation(), candidate.generation().clone())
+                    .unwrap();
+            (candidate, staged)
+        }
+
+        #[cfg(unix)]
+        fn staged_active_successor(
+            &self,
+            current: &AreaLoadCoordinator,
+        ) -> (AreaLoadCoordinator, StagedLocalAreaGenerationReplacement) {
+            let exact_candidate = self.successor_coordinator();
+            let generation = exact_candidate.generation();
+            let pointer_path =
+                local_active_area_catalog_path(&self.registry, &generation.catalog().world_id);
+            fs::create_dir_all(pointer_path.parent().unwrap()).unwrap();
+            let relative_catalog = generation
+                .catalog_path()
+                .strip_prefix(&self.registry)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let pointer = ActiveAreaCatalog {
+                schema: 1,
+                world_id: generation.catalog().world_id.clone(),
+                catalog_sha256: generation.generation_id().to_owned(),
+                catalog: relative_catalog,
+            };
+            let mut pointer_bytes = serde_json::to_vec_pretty(&pointer).unwrap();
+            pointer_bytes.push(b'\n');
+            fs::write(pointer_path, pointer_bytes).unwrap();
+
+            let lock_path =
+                local_area_publication_lock_path(&self.registry, &generation.catalog().world_id);
+            fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+            fs::File::create(lock_path).unwrap();
+
+            let candidate_generation =
+                LocalAreaGeneration::open_active(&self.registry, &generation.catalog().world_id)
+                    .unwrap();
+            let pinned = parse_pinned_world_content(candidate_generation.world_artifact()).unwrap();
+            let candidate = AreaLoadCoordinator::new(candidate_generation, pinned, None);
+            let staged =
+                stage_generation_replacement(current.generation(), candidate.generation().clone())
+                    .unwrap();
+            (candidate, staged)
+        }
+
         fn bundle_path(&self, area_id: &str) -> PathBuf {
             let entry = self
                 .release
@@ -889,6 +1476,362 @@ mod tests {
                 &entry.bundle_sha256,
             )
         }
+    }
+
+    #[tokio::test]
+    async fn generation_router_closes_admission_and_swaps_exact_coordinator() {
+        let published = PublishedRegistry::real_lantern_square();
+        let current = published.coordinator();
+        let (candidate, staged) = published.staged_successor(&current);
+        let router = AreaGenerationRouter::new(current);
+        let base = router.status().active_generation;
+        let prepared = candidate
+            .stage_full_generation_replacement(&staged)
+            .await
+            .unwrap();
+        let target = prepared.candidate_generation.clone();
+
+        let lease = router.try_route(Some(&base)).unwrap();
+        let mut transition = router.begin_staging(&prepared).unwrap();
+        assert_eq!(router.status().phase, AreaGenerationPhase::Staging);
+        assert_eq!(
+            transition.begin_draining(),
+            Err(AreaGenerationRouteError::Busy)
+        );
+        drop(lease);
+        transition.begin_draining().unwrap();
+        assert_eq!(router.status().phase, AreaGenerationPhase::Draining);
+        assert_eq!(
+            router.try_route(None).err(),
+            Some(AreaGenerationRouteError::Busy)
+        );
+        transition.begin_committing().unwrap();
+        assert_eq!(router.status().phase, AreaGenerationPhase::Committing);
+        transition.finish_commit();
+
+        let status = router.status();
+        assert_eq!(status.phase, AreaGenerationPhase::Active);
+        assert_eq!(status.active_generation, target);
+        assert_eq!(
+            router.try_route(Some(&base)).err(),
+            Some(AreaGenerationRouteError::WrongGeneration)
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_router_rejects_stale_base_and_raii_reopens_old_generation() {
+        let published = PublishedRegistry::real_lantern_square();
+        let current = published.coordinator();
+        let (candidate, staged) = published.staged_successor(&current);
+        let router = AreaGenerationRouter::new(current);
+        let base = router.status().active_generation;
+        let mut prepared = candidate
+            .stage_full_generation_replacement(&staged)
+            .await
+            .unwrap();
+        let correct_base = prepared.expected_current_generation.clone();
+        prepared.expected_current_generation =
+            AreaGenerationId::from_catalog_sha256("f".repeat(64)).unwrap();
+        assert_eq!(
+            router.begin_staging(&prepared).err(),
+            Some(AreaGenerationRouteError::WrongGeneration)
+        );
+
+        prepared.expected_current_generation = correct_base;
+        let mut transition = router.begin_staging(&prepared).unwrap();
+        transition.begin_draining().unwrap();
+        transition.begin_committing().unwrap();
+        drop(transition); // models any restore/CAS failure before publication
+
+        let status = router.status();
+        assert_eq!(status.phase, AreaGenerationPhase::Active);
+        assert_eq!(status.active_generation, base);
+        assert!(router.try_route(Some(&base)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn actor_cutover_requires_zero_sessions_rolls_back_failed_cas_and_rejects_old_batch() {
+        let published = PublishedRegistry::real_lantern_square();
+        let current = published.coordinator();
+        let bootstrap = current.bootstrap_world(false).await.unwrap();
+        let base = coordinator_generation_id(&current);
+        let database = published.registry.join("cutover.sqlite3");
+        let store = Arc::new(SqliteCharacterStore::open(&database).await.unwrap());
+        let durable_base = DurableAreaGeneration {
+            world_id: current.generation().catalog().world_id.clone(),
+            active_catalog_sha256: base.as_str().to_owned(),
+            previous_catalog_sha256: None,
+            activation_sequence: 1,
+        };
+        assert_eq!(
+            store
+                .bind_area_generation_if_absent(durable_base.clone())
+                .await
+                .unwrap(),
+            durable_base
+        );
+        let current_for_late_batch = current.clone();
+        let handle = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
+            bootstrap.world,
+            store.clone(),
+            WorldSchedulerConfig::default(),
+            bootstrap.runtime_content,
+            Some(current),
+            crate::persistence::StartupWorldRecovery::Empty,
+            bootstrap.created_dynamic_state,
+        )
+        .await
+        .unwrap();
+
+        let entered = handle.enter("Cutover Guard".into()).await.unwrap();
+        let (candidate, staged) = published.staged_successor(&current_for_late_batch);
+        let prepared = candidate
+            .stage_full_generation_replacement(&staged)
+            .await
+            .unwrap();
+        let target = prepared.candidate_generation.clone();
+        let durable_target = DurableAreaGeneration {
+            world_id: durable_base.world_id.clone(),
+            active_catalog_sha256: target.as_str().to_owned(),
+            previous_catalog_sha256: Some(base.as_str().to_owned()),
+            activation_sequence: 2,
+        };
+        let busy = handle
+            .activate_prepared_generation(prepared, durable_base.clone(), durable_target.clone())
+            .await;
+        assert!(matches!(
+            busy,
+            Err(crate::world_actor::AreaGenerationActivationError::Busy)
+        ));
+        assert_eq!(
+            handle.area_generation_status().unwrap().active_generation,
+            base
+        );
+
+        handle.leave(entered.session_id).await;
+        assert_eq!(
+            handle
+                .inspect_area_quiescence()
+                .await
+                .unwrap()
+                .connected_sessions,
+            0
+        );
+
+        let (candidate, staged) = published.staged_successor(&current_for_late_batch);
+        let prepared = candidate
+            .stage_full_generation_replacement(&staged)
+            .await
+            .unwrap();
+        let mut invalid_target = durable_target.clone();
+        invalid_target.activation_sequence = 3;
+        let failed = handle
+            .activate_prepared_generation(prepared, durable_base.clone(), invalid_target)
+            .await;
+        assert!(matches!(
+            failed,
+            Err(crate::world_actor::AreaGenerationActivationError::Persistence(_))
+        ));
+        assert_eq!(
+            handle.area_generation_status().unwrap().active_generation,
+            base
+        );
+        assert_eq!(
+            store.load_area_generation().await.unwrap(),
+            Some(durable_base.clone())
+        );
+
+        let old_batch = current_for_late_batch.prepare("archive").await.unwrap();
+        let (candidate, staged) = published.staged_successor(&current_for_late_batch);
+        let prepared = candidate
+            .stage_full_generation_replacement(&staged)
+            .await
+            .unwrap();
+        store.simulate_next_area_generation_commit_ack_loss();
+        handle
+            .activate_prepared_generation(prepared, durable_base.clone(), durable_target.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.area_generation_status().unwrap().active_generation,
+            target
+        );
+        assert_eq!(
+            store.load_area_generation().await.unwrap(),
+            Some(durable_target)
+        );
+        assert!(matches!(
+            handle.install_prepared_area_batch(old_batch).await,
+            Err(crate::world_actor::GameError::World(
+                tiamud_core::WorldError::InvalidAreaLifecycle
+            ))
+        ));
+        assert_eq!(
+            handle.area_generation_status().unwrap().active_generation,
+            target
+        );
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ambiguous_generation_authority_seals_admission_and_stops_the_actor() {
+        let published = PublishedRegistry::real_lantern_square();
+        let current = published.coordinator();
+        let bootstrap = current.bootstrap_world(false).await.unwrap();
+        let base = coordinator_generation_id(&current);
+        let database = published.registry.join("ambiguous-cutover.sqlite3");
+        let store = Arc::new(SqliteCharacterStore::open(&database).await.unwrap());
+        let durable_base = DurableAreaGeneration {
+            world_id: current.generation().catalog().world_id.clone(),
+            active_catalog_sha256: base.as_str().to_owned(),
+            previous_catalog_sha256: None,
+            activation_sequence: 1,
+        };
+        store
+            .bind_area_generation_if_absent(durable_base.clone())
+            .await
+            .unwrap();
+        let (candidate, staged) = published.staged_successor(&current);
+        let prepared = candidate
+            .stage_full_generation_replacement(&staged)
+            .await
+            .unwrap();
+        let target = prepared.candidate_generation.clone();
+        let durable_target = DurableAreaGeneration {
+            world_id: durable_base.world_id.clone(),
+            active_catalog_sha256: target.as_str().to_owned(),
+            previous_catalog_sha256: Some(base.as_str().to_owned()),
+            activation_sequence: 2,
+        };
+        let handle = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
+            bootstrap.world,
+            store.clone(),
+            WorldSchedulerConfig::default(),
+            bootstrap.runtime_content,
+            Some(current),
+            crate::persistence::StartupWorldRecovery::Empty,
+            bootstrap.created_dynamic_state,
+        )
+        .await
+        .unwrap();
+
+        store.simulate_ambiguous_area_generation_commit_failure();
+        assert!(matches!(
+            handle
+                .activate_prepared_generation(prepared, durable_base.clone(), durable_target)
+                .await,
+            Err(crate::world_actor::AreaGenerationActivationError::DurableAuthorityAmbiguous)
+        ));
+        let status = handle.area_generation_status().unwrap();
+        assert_eq!(status.phase, AreaGenerationPhase::Committing);
+        assert_eq!(status.active_generation, base);
+        assert!(matches!(
+            handle.health_check().await,
+            Err(crate::world_actor::GameError::ActorStopped)
+        ));
+        assert_eq!(
+            store.load_area_generation().await.unwrap(),
+            Some(durable_base)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publication_read_lock_remains_held_until_generation_cas_finishes() {
+        let published = PublishedRegistry::real_lantern_square();
+        let current = published.coordinator();
+        let bootstrap = current.bootstrap_world(false).await.unwrap();
+        let base = coordinator_generation_id(&current);
+        let database = published.registry.join("locked-cutover.sqlite3");
+        let store = Arc::new(SqliteCharacterStore::open(&database).await.unwrap());
+        let durable_base = DurableAreaGeneration {
+            world_id: current.generation().catalog().world_id.clone(),
+            active_catalog_sha256: base.as_str().to_owned(),
+            previous_catalog_sha256: None,
+            activation_sequence: 1,
+        };
+        store
+            .bind_area_generation_if_absent(durable_base.clone())
+            .await
+            .unwrap();
+        let (candidate, staged) = published.staged_active_successor(&current);
+        assert!(staged.candidate_active_pointer_identity().is_some());
+        let prepared = candidate
+            .stage_full_generation_replacement(&staged)
+            .await
+            .unwrap();
+        let target = prepared.candidate_generation.clone();
+        let durable_target = DurableAreaGeneration {
+            world_id: durable_base.world_id.clone(),
+            active_catalog_sha256: target.as_str().to_owned(),
+            previous_catalog_sha256: Some(base.as_str().to_owned()),
+            activation_sequence: 2,
+        };
+        let handle = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
+            bootstrap.world,
+            store.clone(),
+            WorldSchedulerConfig::default(),
+            bootstrap.runtime_content,
+            Some(current),
+            crate::persistence::StartupWorldRecovery::Empty,
+            bootstrap.created_dynamic_state,
+        )
+        .await
+        .unwrap();
+
+        store.block_next_area_generation_commit();
+        let activating_handle = handle.clone();
+        let expected = durable_base.clone();
+        let next = durable_target.clone();
+        let activation = tokio::spawn(async move {
+            activating_handle
+                .activate_prepared_generation(prepared, expected, next)
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            store.wait_for_blocked_area_generation_commit(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            handle.area_generation_status().unwrap().phase,
+            AreaGenerationPhase::Committing
+        );
+
+        let lock_path =
+            local_area_publication_lock_path(&published.registry, &durable_base.world_id);
+        let writer_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        let mut writer = fd_lock::RwLock::new(writer_file);
+        assert_eq!(
+            writer.try_write().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the cooperating writer must remain excluded while the CAS is blocked"
+        );
+
+        store.release_blocked_area_generation_commit();
+        tokio::time::timeout(Duration::from_secs(1), activation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let writer_guard = writer
+            .try_write()
+            .expect("the runtime must release its publication guard after the CAS");
+        drop(writer_guard);
+        assert_eq!(
+            store.load_area_generation().await.unwrap(),
+            Some(durable_target)
+        );
+        assert_eq!(
+            handle.area_generation_status().unwrap().active_generation,
+            target
+        );
+        handle.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1190,6 +2133,24 @@ mod tests {
         let error = coordinator.prepare("square").await.unwrap_err();
 
         assert!(matches!(error, AreaPreparationError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn private_generation_staging_does_not_publish_candidate_gauges() {
+        let published = PublishedRegistry::real_lantern_square();
+        let generation =
+            LocalAreaGeneration::open_exact(&published.registry, &published.catalog_path).unwrap();
+        let pinned = parse_pinned_world_content(generation.world_artifact()).unwrap();
+        let metrics = Arc::new(RuntimeMetrics::default());
+        metrics.set_resident_areas(7);
+        metrics.set_deferred_area_exits(9);
+        let coordinator = AreaLoadCoordinator::new(generation, pinned, Some(metrics.clone()));
+
+        coordinator.set_metrics_suppressed(true);
+        coordinator.bootstrap_world(true).await.unwrap();
+        let output = metrics.prometheus(0);
+        assert!(output.contains("tiamud_areas{state=\"resident\"} 7"));
+        assert!(output.contains("tiamud_deferred_area_exits 9"));
     }
 
     #[tokio::test]

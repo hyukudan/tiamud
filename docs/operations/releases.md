@@ -58,6 +58,31 @@ configuration and scripts remain `MIT OR Apache-2.0`; original narrative,
 documentation prose, artwork/audio and derived media renditions retain
 `CC-BY-4.0`. Packaging the categories together does not relicense either one.
 
+## Generaciones de área y release 6C
+
+La procedencia del binario no autentica por sí sola un registro de áreas del
+operador. Catálogo, fallback y bundles conservan sus digests, licencias y
+revisión propios; `unsigned_local` sigue presuponiendo un host confiable y no se
+convierte en firma remota porque el CLI viaje dentro de un archivo atestado.
+
+Antes de actualizar el binario de una instalación en modo catálogo, conserva
+la raíz del registro, el catálogo activo y el anterior y una copia verificada
+del backend. SQL v14 referencia la generación por digest, no por una ruta
+incluida en el paquete: borrar esos blobs puede impedir el siguiente arranque o
+un rollback. `area-select` solo selecciona una generación local ya publicada;
+no descarga contenido ni lo obtiene del release de GitHub.
+
+La sustitución quiescente 6C, su migración v14 y un rollback explícito deben
+probarse como parte del candidato instalado según la
+[guía de un único host](single-host.md#sustitución-quiescente-de-generaciones-de-área).
+Una actualización 6B/v13 sin liga pero con recovery compartido o cualquier
+personaje debe ligar G0 una sola vez mediante
+`TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>` y retirar la variable.
+Cuentas solas no son autoridad de mundo; un release tampoco convierte
+implícitamente una autoridad monolítica existente a catálogo.
+La puerta final 6C está retenida; PostgreSQL real no se abrió sin URL. Esa
+evidencia y una futura atestación remota son pruebas distintas.
+
 ## Consumer verification
 
 Download both archives, `SHA256SUMS`, and the attestation bundle into one clean

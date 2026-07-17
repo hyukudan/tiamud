@@ -40,7 +40,7 @@ matriz, memoria y documentación pública a la vez.
   y la única de desarrollo activa.
 - `envy-import` es solo la herramienta sin conexión para compatibilidad con
   datos EnvyMUD/Merc. Tiamud es una implementación limpia, no un fork.
-- El proyecto privado está en prelanzamiento `0.1.0`; no existe despliegue
+- El proyecto de código abierto está en prelanzamiento `0.1.0`; no existe despliegue
   público de producción ni versión estable del protocolo.
 - Software, pruebas, configuración, scripts y binarios: `MIT OR Apache-2.0`.
   Prosa, documentación, mundos y medios originales: `CC-BY-4.0`. Conserva la
@@ -62,13 +62,14 @@ matriz, memoria y documentación pública a la vez.
 - Mundo y conversación usan buzones acotados de 256 entradas por sesión,
   encaminados por `SessionId`. Conserva el fan-out O(S), recuperación por lag y
   limpieza segura ante cancelación.
-- PostgreSQL esquema v13 es el perfil recomendado para un host público nuevo.
-  SQLite esquema v13 es la ruta local/predeterminada sin servicios. Se abre un
+- PostgreSQL esquema v14 es el perfil recomendado para un host público nuevo.
+  SQLite esquema v14 es la ruta local/predeterminada sin servicios. Se abre un
   único sistema autoritativo; no hay doble escritura.
 - `tiamud-migrate-postgres` traslada sin conexión una instantánea SQLite actual
   a PostgreSQL vacío en una transacción, incluidas suscripciones, perfiles,
   capacidades, reportes resueltos, auditoría de staff, mensajes/cuotas de
-  correo, tablones, cuotas y evidencia denunciada.
+  correo, tablones, cuotas, evidencia denunciada y la identidad durable de la
+  generación de áreas.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
@@ -76,7 +77,7 @@ matriz, memoria y documentación pública a la vez.
   instancias, reservas de trade, procedencia y derechos de botín, afijos por
   instancia y contador de aperturas. SQLite y
   PostgreSQL la confirman con personajes/eventos en su transacción existente;
-  ambos adaptadores usan esquema v13 y no hay tabla espejo ni custodia SQL de
+  ambos adaptadores usan esquema v14 y no hay tabla espejo ni custodia SQL de
   trade o botín. DTO exactos v1-v7 se seleccionan por `snapshotVersion`;
   snapshots v1-v5 conservan su límite legado de 1 MiB y v6-v7 admiten hasta
   2 MiB. El DTO v6 estricto rechaza campos v7 y normaliza a afijos vacíos y
@@ -116,8 +117,8 @@ matriz, memoria y documentación pública a la vez.
   `unsigned_local`, `contentLicense=CC-BY-4.0` para mundo/prosa/medios,
   `scriptLicense=MIT OR Apache-2.0` para Lua/software, blobs inmutables y
   puntero atómico. No deduzcas por 6A la carga runtime: esa frontera pertenece
-  a 6B. Reemplazo, descarga, LRU, red, compresión y firma remota siguen **sin
-  implementar**.
+  a 6B. La sustitución quiescente completa pertenece a 6C; reemplazo por área,
+  descarga, LRU, red, compresión y firma remota siguen ausentes.
 - En 6A, `AreaPack.dependsOn` sigue siendo declaración editorial exhaustiva.
   `hardDependencies` deriva solo de referencias cruzadas no-`RoomExit`; cada
   `RoomExit` cruzado se proyecta como `portals` y no fija residencia.
@@ -156,6 +157,51 @@ matriz, memoria y documentación pública a la vez.
   room ID, revisión, digest o generación. Todas las áreas incorporadas quedan
   residentes hasta apagar: 6B **no** implementa sustitución, coexistencia de
   generaciones, drenaje, descarga, LRU, red, compresión ni firma remota.
+- La fase 6C mínima de
+  [ADR 0021](docs/decisions/0021-quiescent-area-generation-cutover.md) está
+  implementada con puerta final retenida. Sustituye una generación completa,
+  nunca una sola área: SIGHUP local resuelve `area-active`, verifica release y
+  staging completo fuera del actor y aplica una compatibilidad sin migración.
+  Exige reglas de juego, objetos iniciales, NPC/botín/afijos, áreas, ownership e
+  IDs estables idénticos; puede cambiar prosa, salidas y presentación/scripts
+  síncronos validados. La candidata no comparte gauges con la activa; solo el
+  swap confirmado publica sus métricas.
+- 6C cierra admisiones y exige cero sesiones y cero leases; si no, devuelve
+  `busy` sin expulsar ni mover jugadores. `WorldRuntimeSnapshot` continúa en
+  v7. El esquema SQL v14 añade solo `world_area_generation`, sin rutas ni estado
+  de juego duplicado, y confirma snapshot + generación mediante CAS antes del
+  swap en memoria. El primer arranque liga la generación; después recovery abre
+  el digest durable aunque `area-active` haya cambiado. Una activación normal
+  exige revisiones crecientes; `tiamud-world area-select --catalog <path>
+  --registry <dir>` seguido de SIGHUP hace explícito el rollback.
+- Un fallo definitivo antes del commit conserva la generación anterior. Un
+  resultado de commit ambiguo obliga a releer SQL: publica la nueva si quedó
+  durable, reabre la anterior si no y, ante otro valor o error, permanece en
+  `Committing`, detiene el actor y deja readiness 503 hasta reinicio/recuperación
+  durable. Nunca supongas rollback ante un commit ambiguo.
+- Al migrar una instalación 6B/v13 con recovery compartido o personajes, el
+  primer arranque v14 debe conservar el G0 exacto. La fila nueva nace vacía y la liga inicial no puede
+  comparar una identidad anterior inexistente: cambiar binario/esquema y
+  catálogo a G1 a la vez elude compatibilidad/CAS. Exige copia de backend y
+  registro, el mismo catálogo G0 y
+  `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>` solo durante esa liga;
+  verifica y retira la variable antes de publicar/seleccionar G1 + SIGHUP.
+- `StartupWorldRecovery::Empty` no prueba ausencia de autoridad: puede haber
+  personajes sin snapshot/ledger. Sin liga generacional, recovery compartido o
+  cualquier personaje durable exige el ACK exacto del G0 6B. Cuentas sin
+  personajes ni recovery de mundo pueden ligar sin ACK. Convertir una
+  instalación monolítica con autoridad de mundo/personaje a catálogo queda
+  fuera de 6C y requiere migración offline. La aceptación se rechaza en modo
+  monolítico, con liga existente, sin recovery/personaje o ante digest distinto.
+  `CharacterStore::has_durable_character_authority` mantiene la misma consulta
+  acotada en SQLite, PostgreSQL, el wrapper medido y memoria de pruebas.
+- Durante un corte, el runtime retiene el mismo lock cooperativo del registro que
+  `area-publish`/`area-select` desde la selección estable hasta resolver el CAS;
+  no debilites esa frontera entre puntero editorial y autoridad durable. En
+  Solaris usa el mismo locking de registro `fcntl` compatible con `fd-lock`.
+- 6C **no** añade jugadores durante drenaje, migraciones de estado, reemplazo o
+  checkpoint por área, descarga, LRU, GC, red, compresión o firma remota. La
+  matriz solo permanece completa mientras el registro 6C conserve su evidencia.
 - La autoría mide UTF-8 por bytes: título de sala 1..=128 y descripción
   1..=8.192; rechaza controles inseguros y normaliza entradas legacy antes de
   validar. No subas estos topes para hacer caber prosa generada.
@@ -564,6 +610,20 @@ abre Web/Telnet y readiness, deja dos áreas residentes en arranque vacío y
 cierra limpio. La evidencia agregada exacta se conserva en el
 [registro 6B](docs/project/log/2026-07-17-additive-local-area-loading-phase-6b.md).
 
+### Sustitución quiescente de generaciones 6C implementada
+
+[ADR 0021](docs/decisions/0021-quiescent-area-generation-cutover.md) y el árbol
+integrado implementan staging completo, compatibilidad estricta, barrera de
+admisión, corte a cero sesiones/leases, puntero durable SQL v14, CAS conjunto
+con snapshot v7, recovery exacto y rollback explícito. La puerta final pasa 774
+pruebas Rust, 329 del servidor, formato/diff, clippy, MSRV, cargo-deny,
+licencias/avisos 308 Rust/76 web, Svelte 0/0 y 123 Vitest; la reauditoría queda
+en 0 P1/0 P2. PostgreSQL v14 real no se ejecutó sin
+`TIAMUD_TEST_POSTGRES_URL` y no se afirma. El humo real liga G0, ejecuta `noop`,
+activa G1, revierte a G0 y recupera por restart con readiness/Web/Telnet,
+métricas exactas y apagado limpio. La evidencia exacta está en el
+[registro 6C](docs/project/log/2026-07-17-quiescent-area-generation-cutover-phase-6c.md).
+
 ### Evidencia histórica retenida
 
 La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
@@ -624,8 +684,8 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 | --- | --- |
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
-| `crates/persistence-sqlite/` | SQLite esquema v13 y almacenamiento local |
-| `crates/persistence-postgres/` | PostgreSQL esquema v13, adaptador y mover |
+| `crates/persistence-sqlite/` | SQLite esquema v14 y almacenamiento local |
+| `crates/persistence-postgres/` | PostgreSQL esquema v14, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
@@ -749,8 +809,10 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - sin soak de 24 horas retenido;
 - sin WebKit local actual ni auditoría manual con lector real;
 - sin sprites de demostración revisados, aunque el puente técnico existe;
-- carga local aditiva 6B implementada; sin sustitución de revisión, drenaje,
-  descarga, LRU, red, compresión o firma remota;
+- carga local aditiva 6B y sustitución quiescente 6C implementadas; sin
+  sustitución por área,
+  jugadores durante drenaje, migraciones, descarga, LRU, GC, red, compresión o
+  firma remota;
 - sin despliegue/repo público, hito estable, release etiquetada o procedencia
   verificada;
 - sin entrenamiento general, migración general de IDs, multiclase, sprite de

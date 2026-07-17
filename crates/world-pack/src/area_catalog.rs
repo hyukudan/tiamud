@@ -2021,7 +2021,7 @@ fn canonical_json<T: Serialize>(
     serde_json::to_vec(value).map_err(|source| AreaCatalogError::Encode { kind, source })
 }
 
-fn parse_bounded<T: for<'de> Deserialize<'de>>(
+pub(crate) fn parse_bounded<T: for<'de> Deserialize<'de>>(
     bytes: &[u8],
     maximum: usize,
     kind: &'static str,

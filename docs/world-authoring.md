@@ -27,17 +27,18 @@ siendo el módulo de autoría y 6B no compone fuentes durante el juego: consume
 el `CompiledArea` ya publicado y contrastado con el WorldPack monolítico de
 respaldo.
 
-El modo catálogo fija el SHA-256 canónico del catálogo como generación hasta
-apagar. Puede añadir áreas verificadas bajo demanda, pero nunca sustituye ni
-descarga una revisión. Cambiar `area-active` o publicar otro catálogo no afecta
-al proceso en ejecución; usar otra generación exige reiniciar. Los IDs
-publicados continúan siendo identidad durable, no títulos, y perder imagen,
-audio o color nunca elimina prosa o acciones jugables.
+El modo catálogo fija el SHA-256 canónico como identidad de generación. Puede
+añadir áreas verificadas bajo demanda y 6C puede sustituir la generación
+completa mediante SIGHUP local, pero nunca parchea o descarga una sola área.
+La base de datos conserva la generación autoritativa: cambiar `area-active` no
+modifica por sí solo el runtime y un reinicio recupera por digest la autoridad
+durable. Los IDs publicados continúan siendo identidad, no títulos, y perder
+imagen, audio o color nunca elimina prosa o acciones jugables.
 
 ```mermaid
 flowchart LR
-    accTitle: Flujo vigente monolítico y aditivo local de Tiamud
-    accDescr: Las áreas se componen y validan fuera de línea. El servidor elige el WorldPack completo o una generación local fijada cuyos bundles se incorporan de forma aditiva.
+    accTitle: Flujo monolítico y generaciones locales de Tiamud
+    accDescr: Las áreas se componen y validan fuera de línea. El servidor elige el WorldPack completo o una generación local durable, incorpora bundles bajo demanda y puede sustituir solo la generación completa en quiescencia.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
     Areas[AreaPack v8<br/>1..=256 módulos] --> Compose
@@ -46,9 +47,12 @@ flowchart LR
     Artifact --> Monolithic[Servidor<br/>modo monolítico]
     Validate --> Publish[area-publish 6A]
     Publish --> Catalog[Catálogo + bundles<br/>locales e inmutables]
-    Catalog --> Fixed[Generación fijada 6B]
-    Fixed --> Server[Servidor<br/>carga aditiva]
-    Future[Sustitución · descarga · LRU] -. 6C+ .-> Server
+    Catalog --> Durable[Generación durable 6B/6C]
+    Durable --> Server[Servidor<br/>carga aditiva]
+    Catalog --> Stage[Staging completo 6C]
+    Stage --> Quiet[Cero sesiones + leases]
+    Quiet --> Server
+    Future[Descarga · checkpoint por área · LRU] -. fase posterior .-> Server
 ```
 
 ## Versiones y compatibilidad
@@ -874,7 +878,7 @@ Límites principales:
 | Peso/cantidad de una entrada | 1..=1.000.000 / 1..=32 |
 | Raíces fijas + repetibles por derrota | 64 |
 
-## Publicación 6A y ejecución aditiva 6B
+## Publicación 6A, ejecución aditiva 6B y corte 6C
 
 El release revisado declara revisión, propiedad, dependencias, portales,
 procedencia y licencias de cada área. Se publica en un registro local:
@@ -954,10 +958,63 @@ NPC ya residía, valida los límites y marca el lote como dinámico para confirm
 la relación antes de publicarla.
 
 Ni 6A ni 6B permiten que un portal normal cargue transitivamente sus vecinos.
-Tampoco implementan reemplazo de revisiones, generaciones simultáneas,
-drenaje, descarga, LRU, red, compresión o firma remota. Véanse
+La fase 6C mínima sustituye una generación completa sin reiniciar. Después de
+publicar una revisión creciente, SIGHUP solicita reconciliar el puntero local:
+
+```sh
+sudo systemctl kill --signal=HUP tiamud
+```
+
+Para rollback, conserva el catálogo inmutable anterior, selecciónalo de forma
+explícita y envía el mismo SIGHUP:
+
+```sh
+cargo run --locked -p world-pack --bin tiamud-world -- area-select \
+  --catalog <ruta-exacta-del-catalogo-retenido> \
+  --registry build/area-registry
+sudo systemctl kill --signal=HUP tiamud
+```
+
+El servidor abre y verifica el puntero dos veces, verifica catálogo, fallback
+y bundles y construye un mundo/contenido/coordinador privados completos. La
+compatibilidad exige `worldId`, nombre, `startRoomId`, RNG, gameplay, objetos e
+instancias iniciales, NPC, botín, afijos, áreas, ownership, IDs de sala y VNUM
+legacy idénticos, además de `persistentMigrationVersion == 0`. Una activación
+normal exige revisiones crecientes; un rollback recorre la dirección inversa
+solo por la selección explícita. Pueden cambiar títulos, prosa, salidas,
+recursos, percepción, variantes, medios y scripts síncronos validados.
+
+El corte cierra admisiones y requiere cero sesiones y cero leases. Si existe
+actividad devuelve `busy`, no expulsa jugadores y conserva la generación
+anterior. Con quiescencia restaura el snapshot v7 actual sobre la candidata,
+confirma por CAS snapshot + identidad SQL v14 y solo entonces intercambia el
+estado en memoria. La primera ejecución liga la generación; en restart la fila
+durable prevalece sobre un `area-active` más reciente.
+
+Un fallo definitivo antes del commit conserva la generación anterior. Si el
+commit devuelve un resultado ambiguo, el servidor relee SQL: publica G1 si
+quedó durable, reabre G0 si no y, ante otro valor o error, queda fail-stop en
+`Committing` con el actor detenido y readiness 503 hasta recuperación.
+
+Una instalación 6B/v13 con recovery compartido o personajes debe arrancar v14
+con G0 exacto y `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>`. Verifica la
+liga, retira la variable y solo entonces introduce G1. La fila v14 nace vacía;
+cambiar binario/esquema y catálogo a la vez aceptaría G1 como autoridad inicial
+sin compatibilidad/CAS contra el G0 que v13 no retenía.
+
+Recovery sin snapshot/ledger puede coexistir con personajes. Sin liga durable,
+recovery compartido o cualquier personaje obliga al ACK exacto de G0; una base
+vacía o con cuentas sin personajes/recovery de mundo puede ligar sin ACK.
+Monolítico con autoridad→catálogo no pertenece a 6C. El ACK se rechaza en modo
+monolítico, con liga, sin recovery/personaje o ante digest distinto.
+
+6C no implementa reemplazo por área, jugadores durante drenaje, migraciones,
+checkpoint/descarga por área, LRU, GC, red, compresión o firma remota. El
+gate pasa 774 pruebas Rust —329 del servidor— y la reauditoría 0 P1/0 P2. El
+humo está retenido y PostgreSQL real no se abrió sin URL. Véanse
 [ADR 0005](decisions/0005-hot-area-lifecycle.md) y
-[ADR 0020](decisions/0020-additive-local-area-loading.md).
+[ADR 0020](decisions/0020-additive-local-area-loading.md) y
+[ADR 0021](decisions/0021-quiescent-area-generation-cutover.md).
 
 ## Flujo editorial
 
@@ -972,10 +1029,11 @@ cargo run --locked -p world-pack --bin tiamud-world -- diff anterior.json nuevo.
 ```
 
 Publicación y rollback usan artefactos inmutables por digest. El puntero
-`area-active` es selección editorial: un proceso 6B fija la ruta explícita de
-catálogo al arrancar y no sigue el puntero. Cambiar de generación, sustituir
-una revisión o volver a otra publicación exige reiniciar; no existe reemplazo
-en vivo.
+`area-active` es selección editorial y SIGHUP es su única reconciliación local
+en ejecución. La fila SQL v14, no ese fichero mutable, decide recovery. Una
+selección anterior requiere `area-select`; no se interpreta una revisión menor
+accidental como permiso de rollback. El corte retiene el mismo lock cooperativo
+del registro que `area-publish` y `area-select` hasta resolver el CAS durable.
 
 Antes de publicar:
 
@@ -1013,6 +1071,12 @@ v7 en v6 no adelanta su versión.
 También se rechazan referencias, ciclos, profundidad, capacidad, contador,
 propietario, vínculo, participante, reserva, cohorte o procedencia inválidos.
 
+SQLite y PostgreSQL usan esquema v14. `world_area_generation` guarda solo
+`worldId`, digest activo, digest anterior, secuencia de activación y timestamp;
+las rutas se derivan del registro configurado. Una transición 6C actualiza esa
+fila y el snapshot v7 en la misma transacción mediante compare-and-swap. No es
+otra autoridad del mundo y el traslado SQLite→PostgreSQL la conserva.
+
 Al restaurar un snapshot anterior, las instancias iniciales nuevas del
 WorldPack se conservan y el estado durable se superpone; una instancia creada
 en runtime que no figure en el snapshot no reaparece. Antes de abrir listeners
@@ -1032,7 +1096,7 @@ así como
 cada nueva admisión/confirmación, admiten hasta 2 MiB. La suma de fichas de
 propietarios
 inspeccionadas sigue limitada a 1 MiB y cada ficha a 64 KiB. SQLite y
-PostgreSQL esquema v13 guardan el snapshot como `TEXT` opaco dentro de la
+PostgreSQL esquema v14 guardan el snapshot como `TEXT` opaco dentro de la
 transacción existente. La migración v10→v11 aumenta de forma transaccional la
 restricción física del singleton runtime a 2 MiB y conserva versión, JSON,
 secuencia cubierta y fecha; no convierte el JSON ni crea otra autoridad. No hay

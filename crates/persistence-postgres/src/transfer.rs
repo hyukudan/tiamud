@@ -8,7 +8,7 @@ use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transact
 
 const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 
-const TABLES: [&str; 23] = APPLICATION_TABLES;
+const TABLES: [&str; 24] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -105,6 +105,10 @@ pub fn copy_sqlite_to_postgres(
         rows: copy_world_runtime(&source, &mut target)?,
     });
     tables.push(TableCount {
+        table: "world_area_generation",
+        rows: copy_world_area_generation(&source, &mut target)?,
+    });
+    tables.push(TableCount {
         table: "social_ignores",
         rows: copy_social_relation(&source, &mut target, "social_ignores")?,
     });
@@ -195,7 +199,7 @@ fn lock_target_tables<C: GenericClient>(target: &mut C) -> Result<(), postgres::
     // and accidentally turning an offline copy into a merge.
     target.batch_execute(
         "LOCK TABLE accounts, characters, auth_sessions, domain_events,
-                    world_runtime, social_ignores, social_blocks,
+                    world_runtime, world_area_generation, social_ignores, social_blocks,
                     social_channel_subscriptions,
                     social_mail_usage, social_board_usage,
                     social_mail_messages,
@@ -412,6 +416,48 @@ fn copy_world_runtime<C: GenericClient>(
             &snapshot_version,
             &snapshot_json,
             &last_event_sequence,
+            &updated_at,
+        ],
+    )?;
+    Ok(1)
+}
+
+fn copy_world_area_generation<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let row = source
+        .query_row(
+            "SELECT singleton, world_id, active_catalog_sha256,
+                    previous_catalog_sha256, activation_sequence, updated_at
+             FROM world_area_generation WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((singleton, world_id, active, previous, sequence, updated_at)) = row else {
+        return Ok(0);
+    };
+    target.execute(
+        "INSERT INTO world_area_generation
+             (singleton, world_id, active_catalog_sha256,
+              previous_catalog_sha256, activation_sequence, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            &singleton,
+            &world_id,
+            &active,
+            &previous,
+            &sequence,
             &updated_at,
         ],
     )?;
@@ -1255,7 +1301,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 13
+                required: 14
             }
         ));
         assert_eq!(
@@ -1294,7 +1340,7 @@ mod tests {
     fn transfer_manifest_is_parent_before_child_and_complete() {
         assert_eq!(TABLES[0], "accounts");
         assert_eq!(TABLES[1], "characters");
-        assert_eq!(TABLES.len(), 23);
+        assert_eq!(TABLES.len(), 24);
         let reports = TABLES
             .iter()
             .position(|table| *table == "social_reports")

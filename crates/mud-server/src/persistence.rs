@@ -7,6 +7,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Type};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::{
     collections::BTreeSet,
     future::Future,
@@ -25,6 +27,8 @@ use tiamud_core::{
     valid_mail_public_id, valid_mail_subject, valid_mail_target, valid_mail_visible_text,
 };
 use tiamud_persistence_sqlite::{SchemaError, migrate};
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::{
     sync::{mpsc, oneshot},
     time::{Duration, timeout},
@@ -152,6 +156,17 @@ pub enum StartupWorldRecovery {
     Empty,
     Snapshot(WorldRuntimeSnapshot),
     Ledger(Vec<DomainEvent>),
+}
+
+/// Durable, host-independent identity of the catalog generation selected by
+/// the world authority. Registry paths are deliberately excluded: the exact
+/// content-addressed path is derived from the configured registry root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableAreaGeneration {
+    pub world_id: String,
+    pub active_catalog_sha256: String,
+    pub previous_catalog_sha256: Option<String>,
+    pub activation_sequence: u64,
 }
 
 impl StartupWorldRecovery {
@@ -352,6 +367,12 @@ pub enum StoreError {
     InvalidRuntimeSnapshot,
     #[error("the persisted startup domain-event ledger is incomplete or exceeds its limit")]
     InvalidStartupLedger,
+    #[error("the durable area generation is invalid")]
+    InvalidAreaGeneration,
+    #[error("the durable area generation changed concurrently")]
+    AreaGenerationConflict,
+    #[error("this character store does not implement durable area generations")]
+    AreaGenerationUnsupported,
     #[error("serialized {kind} exceeds the {maximum} byte persistence limit")]
     SnapshotTooLarge { kind: &'static str, maximum: usize },
     #[error("durable character count exceeds the {maximum} aggregate startup limit")]
@@ -558,6 +579,33 @@ pub trait CharacterStore: Send + Sync {
     /// transaction. Implementations must fail closed on an invalid snapshot
     /// and must never fall back to the ledger when a snapshot row exists.
     async fn load_startup_world_recovery(&self) -> Result<StartupWorldRecovery, StoreError>;
+
+    /// True when at least one durable character aggregate exists, even if the
+    /// shared runtime snapshot and event ledger are still empty.
+    async fn has_durable_character_authority(&self) -> Result<bool, StoreError>;
+
+    async fn load_area_generation(&self) -> Result<Option<DurableAreaGeneration>, StoreError> {
+        Ok(None)
+    }
+
+    async fn bind_area_generation_if_absent(
+        &self,
+        _generation: DurableAreaGeneration,
+    ) -> Result<DurableAreaGeneration, StoreError> {
+        Err(StoreError::AreaGenerationUnsupported)
+    }
+
+    /// Atomically advances the durable generation pointer and the global
+    /// runtime snapshot. The compare-and-swap precondition prevents two
+    /// operator activations from both publishing.
+    async fn commit_area_generation_activation(
+        &self,
+        _runtime: WorldRuntimeSnapshot,
+        _expected_current: DurableAreaGeneration,
+        _next: DurableAreaGeneration,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::AreaGenerationUnsupported)
+    }
 
     /// Load the retained event suffix in durable sequence order. Before the
     /// first runtime snapshot this is the complete recovery ledger; once a
@@ -974,6 +1022,36 @@ impl CharacterStore for MeasuredCharacterStore {
         self.inner.load_startup_world_recovery().await
     }
 
+    async fn has_durable_character_authority(&self) -> Result<bool, StoreError> {
+        self.inner.has_durable_character_authority().await
+    }
+
+    async fn load_area_generation(&self) -> Result<Option<DurableAreaGeneration>, StoreError> {
+        self.inner.load_area_generation().await
+    }
+
+    async fn bind_area_generation_if_absent(
+        &self,
+        generation: DurableAreaGeneration,
+    ) -> Result<DurableAreaGeneration, StoreError> {
+        self.transaction(self.inner.bind_area_generation_if_absent(generation))
+            .await
+    }
+
+    async fn commit_area_generation_activation(
+        &self,
+        runtime: WorldRuntimeSnapshot,
+        expected_current: DurableAreaGeneration,
+        next: DurableAreaGeneration,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.commit_area_generation_activation(
+            runtime,
+            expected_current,
+            next,
+        ))
+        .await
+    }
+
     async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError> {
         self.inner.load_domain_events().await
     }
@@ -1266,6 +1344,22 @@ pub(super) enum Request {
     LoadStartupWorldRecovery {
         reply: oneshot::Sender<Result<StartupWorldRecovery, StoreError>>,
     },
+    HasDurableCharacterAuthority {
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
+    LoadAreaGeneration {
+        reply: oneshot::Sender<Result<Option<DurableAreaGeneration>, StoreError>>,
+    },
+    BindAreaGenerationIfAbsent {
+        generation: DurableAreaGeneration,
+        reply: oneshot::Sender<Result<DurableAreaGeneration, StoreError>>,
+    },
+    CommitAreaGenerationActivation {
+        runtime: WorldRuntimeSnapshot,
+        expected_current: DurableAreaGeneration,
+        next: DurableAreaGeneration,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     #[allow(dead_code)]
     LoadDomainEvents {
         reply: oneshot::Sender<Result<Vec<DomainEvent>, StoreError>>,
@@ -1451,6 +1545,70 @@ pub(super) struct PreparedLogin {
 pub struct SqliteCharacterStore {
     tx: mpsc::Sender<Request>,
     passwords: PasswordService,
+    #[cfg(test)]
+    area_generation_fault: Arc<AtomicU8>,
+    #[cfg(test)]
+    area_generation_commit_gate: Arc<TestAreaGenerationCommitGate>,
+}
+
+#[cfg(test)]
+struct TestAreaGenerationCommitGate {
+    armed: AtomicBool,
+    started: AtomicBool,
+    released: AtomicBool,
+    changed: Notify,
+}
+
+#[cfg(test)]
+impl TestAreaGenerationCommitGate {
+    fn new() -> Self {
+        Self {
+            armed: AtomicBool::new(false),
+            started: AtomicBool::new(false),
+            released: AtomicBool::new(true),
+            changed: Notify::new(),
+        }
+    }
+
+    fn arm(&self) {
+        self.started.store(false, Ordering::SeqCst);
+        self.released.store(false, Ordering::SeqCst);
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    async fn block_if_armed(&self) {
+        if self
+            .armed
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        self.started.store(true, Ordering::SeqCst);
+        self.changed.notify_waiters();
+        loop {
+            let changed = self.changed.notified();
+            if self.released.load(Ordering::SeqCst) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    async fn wait_until_started(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.started.load(Ordering::SeqCst) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.changed.notify_waiters();
+    }
 }
 
 impl SqliteCharacterStore {
@@ -1592,6 +1750,29 @@ impl SqliteCharacterStore {
                         }
                         Request::LoadStartupWorldRecovery { reply } => {
                             let _ = reply.send(load_startup_world_recovery(&mut connection));
+                        }
+                        Request::HasDurableCharacterAuthority { reply } => {
+                            let _ = reply.send(has_durable_character_authority(&connection));
+                        }
+                        Request::LoadAreaGeneration { reply } => {
+                            let _ = reply.send(load_area_generation(&connection));
+                        }
+                        Request::BindAreaGenerationIfAbsent { generation, reply } => {
+                            let _ = reply
+                                .send(bind_area_generation_if_absent(&mut connection, &generation));
+                        }
+                        Request::CommitAreaGenerationActivation {
+                            runtime,
+                            expected_current,
+                            next,
+                            reply,
+                        } => {
+                            let _ = reply.send(commit_area_generation_activation(
+                                &mut connection,
+                                &runtime,
+                                &expected_current,
+                                &next,
+                            ));
                         }
                         Request::LoadDomainEvents { reply } => {
                             let _ = reply.send(load_domain_events(&connection));
@@ -1942,7 +2123,39 @@ impl SqliteCharacterStore {
             .map_err(StoreError::ThreadSpawn)?;
 
         ready_rx.await.map_err(|_| StoreError::WorkerStopped)??;
-        Ok(Self { tx, passwords })
+        Ok(Self {
+            tx,
+            passwords,
+            #[cfg(test)]
+            area_generation_fault: Arc::new(AtomicU8::new(0)),
+            #[cfg(test)]
+            area_generation_commit_gate: Arc::new(TestAreaGenerationCommitGate::new()),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn simulate_next_area_generation_commit_ack_loss(&self) {
+        self.area_generation_fault.store(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn simulate_ambiguous_area_generation_commit_failure(&self) {
+        self.area_generation_fault.store(2, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn block_next_area_generation_commit(&self) {
+        self.area_generation_commit_gate.arm();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_blocked_area_generation_commit(&self) {
+        self.area_generation_commit_gate.wait_until_started().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_blocked_area_generation_commit(&self) {
+        self.area_generation_commit_gate.release();
     }
 
     async fn request<T>(
@@ -2230,6 +2443,73 @@ impl CharacterStore for SqliteCharacterStore {
         let (reply, receive) = oneshot::channel();
         self.request(Request::LoadStartupWorldRecovery { reply }, receive)
             .await
+    }
+
+    async fn has_durable_character_authority(&self) -> Result<bool, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::HasDurableCharacterAuthority { reply }, receive)
+            .await
+    }
+
+    async fn load_area_generation(&self) -> Result<Option<DurableAreaGeneration>, StoreError> {
+        #[cfg(test)]
+        if self
+            .area_generation_fault
+            .compare_exchange(3, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Err(StoreError::WorkerStopped);
+        }
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::LoadAreaGeneration { reply }, receive)
+            .await
+    }
+
+    async fn bind_area_generation_if_absent(
+        &self,
+        generation: DurableAreaGeneration,
+    ) -> Result<DurableAreaGeneration, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::BindAreaGenerationIfAbsent { generation, reply },
+            receive,
+        )
+        .await
+    }
+
+    async fn commit_area_generation_activation(
+        &self,
+        runtime: WorldRuntimeSnapshot,
+        expected_current: DurableAreaGeneration,
+        next: DurableAreaGeneration,
+    ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        self.area_generation_commit_gate.block_if_armed().await;
+        #[cfg(test)]
+        let injected_fault = self.area_generation_fault.load(Ordering::SeqCst);
+        #[cfg(test)]
+        if injected_fault == 2 {
+            self.area_generation_fault.store(3, Ordering::SeqCst);
+            return Err(StoreError::WorkerStopped);
+        }
+        let (reply, receive) = oneshot::channel();
+        let result = self
+            .request_commit(
+                Request::CommitAreaGenerationActivation {
+                    runtime,
+                    expected_current,
+                    next,
+                    reply,
+                },
+                receive,
+            )
+            .await;
+        #[cfg(test)]
+        if injected_fault == 1 && result.is_ok() {
+            self.area_generation_fault.store(0, Ordering::SeqCst);
+            return Err(StoreError::WorkerStopped);
+        }
+        result
     }
 
     async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError> {
@@ -5434,6 +5714,202 @@ fn load_runtime_snapshot(
         .transpose()
 }
 
+fn has_durable_character_authority(connection: &Connection) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM characters LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+pub(super) fn validate_area_generation(
+    generation: &DurableAreaGeneration,
+) -> Result<(), StoreError> {
+    let valid_world_id = !generation.world_id.is_empty()
+        && generation.world_id.len() <= 256
+        && generation.world_id.trim() == generation.world_id
+        && !generation.world_id.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '\u{061c}'
+                        | '\u{200b}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{feff}'
+                )
+        });
+    let valid_digest = |digest: &str| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if !valid_world_id
+        || !valid_digest(&generation.active_catalog_sha256)
+        || generation
+            .previous_catalog_sha256
+            .as_deref()
+            .is_some_and(|digest| {
+                !valid_digest(digest) || digest == generation.active_catalog_sha256
+            })
+        || generation.activation_sequence == 0
+        || generation.activation_sequence > i64::MAX as u64
+    {
+        return Err(StoreError::InvalidAreaGeneration);
+    }
+    Ok(())
+}
+
+pub(super) fn validate_area_generation_transition(
+    expected: &DurableAreaGeneration,
+    next: &DurableAreaGeneration,
+) -> Result<(), StoreError> {
+    validate_area_generation(expected)?;
+    validate_area_generation(next)?;
+    if next.world_id != expected.world_id
+        || next.previous_catalog_sha256.as_deref() != Some(expected.active_catalog_sha256.as_str())
+        || next.active_catalog_sha256 == expected.active_catalog_sha256
+        || next.activation_sequence != expected.activation_sequence.saturating_add(1)
+    {
+        return Err(StoreError::InvalidAreaGeneration);
+    }
+    Ok(())
+}
+
+fn load_area_generation(
+    connection: &Connection,
+) -> Result<Option<DurableAreaGeneration>, StoreError> {
+    let generation = connection
+        .query_row(
+            "SELECT world_id, active_catalog_sha256, previous_catalog_sha256,
+                    activation_sequence
+             FROM world_area_generation WHERE singleton = 1",
+            [],
+            |row| {
+                let sequence = row.get::<_, i64>(3)?;
+                Ok(DurableAreaGeneration {
+                    world_id: row.get(0)?,
+                    active_catalog_sha256: row.get(1)?,
+                    previous_catalog_sha256: row.get(2)?,
+                    activation_sequence: u64::try_from(sequence).unwrap_or(0),
+                })
+            },
+        )
+        .optional()?;
+    if let Some(generation) = &generation {
+        validate_area_generation(generation)?;
+    }
+    Ok(generation)
+}
+
+fn bind_area_generation_if_absent(
+    connection: &mut Connection,
+    generation: &DurableAreaGeneration,
+) -> Result<DurableAreaGeneration, StoreError> {
+    validate_area_generation(generation)?;
+    if generation.activation_sequence != 1 || generation.previous_catalog_sha256.is_some() {
+        return Err(StoreError::InvalidAreaGeneration);
+    }
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "INSERT INTO world_area_generation
+             (singleton, world_id, active_catalog_sha256,
+              previous_catalog_sha256, activation_sequence, updated_at)
+         VALUES (1, ?1, ?2, NULL, 1, unixepoch())
+         ON CONFLICT(singleton) DO NOTHING",
+        params![generation.world_id, generation.active_catalog_sha256],
+    )?;
+    let actual = load_area_generation(&transaction)?.ok_or(StoreError::InvalidAreaGeneration)?;
+    transaction.commit()?;
+    Ok(actual)
+}
+
+fn commit_area_generation_activation(
+    connection: &mut Connection,
+    runtime: &WorldRuntimeSnapshot,
+    expected: &DurableAreaGeneration,
+    next: &DurableAreaGeneration,
+) -> Result<(), StoreError> {
+    validate_area_generation_transition(expected, next)?;
+    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
+    let world_adventure_json = bounded_json(
+        &runtime.adventure,
+        "world adventure",
+        MAX_RUNTIME_JSON_BYTES,
+    )?;
+    let expected_sequence = i64::try_from(expected.activation_sequence)
+        .map_err(|_| StoreError::InvalidAreaGeneration)?;
+    let next_sequence =
+        i64::try_from(next.activation_sequence).map_err(|_| StoreError::InvalidAreaGeneration)?;
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute(
+        "UPDATE world_area_generation
+         SET active_catalog_sha256 = ?1,
+             previous_catalog_sha256 = ?2,
+             activation_sequence = ?3,
+             updated_at = unixepoch()
+         WHERE singleton = 1
+           AND world_id = ?4
+           AND active_catalog_sha256 = ?5
+           AND previous_catalog_sha256 IS ?6
+           AND activation_sequence = ?7",
+        params![
+            next.active_catalog_sha256,
+            next.previous_catalog_sha256,
+            next_sequence,
+            expected.world_id,
+            expected.active_catalog_sha256,
+            expected.previous_catalog_sha256,
+            expected_sequence,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::AreaGenerationConflict);
+    }
+    transaction.execute(
+        "INSERT INTO world_adventure (singleton, state_json, updated_at)
+         VALUES (1, ?1, unixepoch())
+         ON CONFLICT(singleton) DO UPDATE SET
+             state_json = excluded.state_json,
+             updated_at = excluded.updated_at",
+        [world_adventure_json],
+    )?;
+    let last_event_sequence = transaction.query_row(
+        "SELECT max(
+             COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
+             COALESCE((SELECT last_event_sequence FROM world_runtime
+                       WHERE singleton = 1), 0)
+         )",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO world_runtime
+             (singleton, snapshot_version, snapshot_json,
+              last_event_sequence, updated_at)
+         VALUES (1, ?1, ?2, ?3, unixepoch())
+         ON CONFLICT(singleton) DO UPDATE SET
+             snapshot_version = excluded.snapshot_version,
+             snapshot_json = excluded.snapshot_json,
+             last_event_sequence = excluded.last_event_sequence,
+             updated_at = excluded.updated_at",
+        params![runtime.snapshot_version, runtime_json, last_event_sequence],
+    )?;
+    transaction.execute(
+        "DELETE FROM domain_events
+         WHERE sequence <= ?1 - ?2
+           AND sequence <= ?1",
+        params![last_event_sequence, DOMAIN_EVENT_RETENTION],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn load_startup_world_recovery(
     connection: &mut Connection,
 ) -> Result<StartupWorldRecovery, StoreError> {
@@ -5726,6 +6202,20 @@ mod tests {
 
     async fn account(store: &SqliteCharacterStore, name: &str) -> AccountSnapshot {
         store.load_or_create_account(name).await.unwrap()
+    }
+
+    fn area_generation(
+        world_id: &str,
+        active: char,
+        previous: Option<char>,
+        activation_sequence: u64,
+    ) -> DurableAreaGeneration {
+        DurableAreaGeneration {
+            world_id: world_id.into(),
+            active_catalog_sha256: active.to_string().repeat(64),
+            previous_catalog_sha256: previous.map(|digest| digest.to_string().repeat(64)),
+            activation_sequence,
+        }
     }
 
     struct BlockingVerifyBackend {
@@ -6397,6 +6887,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_area_generation_bind_and_activation_are_restart_safe_and_cas_guarded() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let database_path = temporary.path().join("area-generation.sqlite3");
+        let store = SqliteCharacterStore::open(&database_path).await.unwrap();
+        assert_eq!(store.load_area_generation().await.unwrap(), None);
+
+        let initial = area_generation("tiamud:lantern", 'a', None, 1);
+        assert_eq!(
+            store
+                .bind_area_generation_if_absent(initial.clone())
+                .await
+                .unwrap(),
+            initial
+        );
+        assert_eq!(
+            store
+                .bind_area_generation_if_absent(area_generation("tiamud:lantern", 'b', None, 1,))
+                .await
+                .unwrap(),
+            initial
+        );
+
+        let mut activated_runtime = World::demo().runtime_snapshot();
+        activated_runtime.logical_tick = 41;
+        let activated = area_generation("tiamud:lantern", 'b', Some('a'), 2);
+        store
+            .commit_area_generation_activation(
+                activated_runtime.clone(),
+                initial.clone(),
+                activated.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_area_generation().await.unwrap(),
+            Some(activated.clone())
+        );
+        assert_eq!(
+            store.load_startup_world_recovery().await.unwrap(),
+            StartupWorldRecovery::Snapshot(activated_runtime.clone())
+        );
+
+        let mut stale_runtime = activated_runtime.clone();
+        stale_runtime.logical_tick = 99;
+        assert!(matches!(
+            store
+                .commit_area_generation_activation(
+                    stale_runtime,
+                    initial.clone(),
+                    area_generation("tiamud:lantern", 'c', Some('a'), 2),
+                )
+                .await,
+            Err(StoreError::AreaGenerationConflict)
+        ));
+        assert_eq!(
+            store.load_area_generation().await.unwrap(),
+            Some(activated.clone())
+        );
+        assert_eq!(
+            store.load_startup_world_recovery().await.unwrap(),
+            StartupWorldRecovery::Snapshot(activated_runtime)
+        );
+        store.shutdown().await.unwrap();
+
+        let reopened = SqliteCharacterStore::open(&database_path).await.unwrap();
+        assert_eq!(
+            reopened.load_area_generation().await.unwrap(),
+            Some(activated)
+        );
+    }
+
+    #[test]
+    fn sqlite_area_generation_activation_rolls_back_pointer_with_snapshot_failure() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialise(&mut connection).unwrap();
+        let initial = area_generation("Mundo de Ámbar", 'a', None, 1);
+        assert_eq!(
+            bind_area_generation_if_absent(&mut connection, &initial).unwrap(),
+            initial
+        );
+        let baseline = World::demo().runtime_snapshot();
+        commit_action(&mut connection, &[], &baseline, &[]).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_generation_snapshot
+                 BEFORE UPDATE ON world_runtime
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected snapshot failure');
+                 END;",
+            )
+            .unwrap();
+        let mut replacement = baseline.clone();
+        replacement.logical_tick = 73;
+
+        assert!(
+            commit_area_generation_activation(
+                &mut connection,
+                &replacement,
+                &initial,
+                &area_generation("Mundo de Ámbar", 'b', Some('a'), 2),
+            )
+            .is_err()
+        );
+        assert_eq!(load_area_generation(&connection).unwrap(), Some(initial));
+        assert_eq!(load_runtime_snapshot(&connection).unwrap(), Some(baseline));
+    }
+
+    #[test]
+    fn area_generation_validation_matches_catalog_identity_and_closed_digest_rules() {
+        assert!(validate_area_generation(&area_generation("Mundo de Ámbar", 'a', None, 1)).is_ok());
+        for invalid in [
+            DurableAreaGeneration {
+                world_id: " surrounding space ".into(),
+                active_catalog_sha256: "a".repeat(64),
+                previous_catalog_sha256: None,
+                activation_sequence: 1,
+            },
+            DurableAreaGeneration {
+                world_id: "demo:\u{202e}world".into(),
+                active_catalog_sha256: "a".repeat(64),
+                previous_catalog_sha256: None,
+                activation_sequence: 1,
+            },
+            DurableAreaGeneration {
+                world_id: "demo:world".into(),
+                active_catalog_sha256: "A".repeat(64),
+                previous_catalog_sha256: None,
+                activation_sequence: 1,
+            },
+            area_generation("demo:world", 'a', Some('a'), 2),
+            area_generation("demo:world", 'a', None, 0),
+        ] {
+            assert!(matches!(
+                validate_area_generation(&invalid),
+                Err(StoreError::InvalidAreaGeneration)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn account_ids_are_stable_and_names_are_case_insensitive() {
         let store = SqliteCharacterStore::open(":memory:").await.unwrap();
         let created = account(&store, "  Aria  ").await;
@@ -6404,6 +7034,24 @@ mod tests {
 
         assert_eq!(loaded.id, created.id);
         assert_eq!(loaded.name, "Aria");
+    }
+
+    #[tokio::test]
+    async fn character_authority_is_visible_without_a_runtime_snapshot_or_ledger() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        assert!(!store.has_durable_character_authority().await.unwrap());
+        let owner = account(&store, "Legacy Owner").await;
+        assert!(!store.has_durable_character_authority().await.unwrap());
+        store
+            .load_or_create_character(owner.id, "Legacy Hero", "demo:lantern-square")
+            .await
+            .unwrap();
+
+        assert!(store.has_durable_character_authority().await.unwrap());
+        assert_eq!(
+            store.load_startup_world_recovery().await.unwrap(),
+            StartupWorldRecovery::Empty
+        );
     }
 
     #[tokio::test]

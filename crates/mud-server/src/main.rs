@@ -20,10 +20,15 @@ use axum::{
     extract::DefaultBodyLimit,
     routing::{get, post},
 };
-use operations::{ActiveSessionLimiter, AuthRateLimiter, RuntimeMetrics};
-use persistence::{CharacterStore, MeasuredCharacterStore, SqliteCharacterStore};
+use operations::{
+    ActiveSessionLimiter, AreaGenerationMetricPhase, AreaGenerationMetricResult, AuthRateLimiter,
+    RuntimeMetrics,
+};
+use persistence::{
+    CharacterStore, DurableAreaGeneration, MeasuredCharacterStore, SqliteCharacterStore, StoreError,
+};
 use persistence_postgres::PostgresCharacterStore;
-use std::{env, error::Error, net::SocketAddr, path::Path, sync::Arc};
+use std::{env, error::Error, net::SocketAddr, path::Path, sync::Arc, time::Instant};
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
@@ -35,12 +40,16 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use web::AppState;
-use world_actor::{WorldHandle, WorldSchedulerConfig};
+use world_actor::{AreaGenerationActivationError, WorldHandle, WorldSchedulerConfig};
 use world_loader::{
-    LoadedWorldDefinition, PinnedWorldContent, build_loaded_world, default_loaded_world,
-    load_loaded_world, parse_pinned_world_content,
+    LoadedWorldDefinition, build_loaded_world, default_loaded_world, load_loaded_world,
+    parse_pinned_world_content,
 };
-use world_pack::LocalAreaGeneration;
+use world_pack::{
+    GenerationReplacementKind, LocalAreaGeneration, LocalAreaRegistryError,
+    StagedLocalAreaGenerationReplacement, local_area_catalog_path, stage_generation_replacement,
+    stage_generation_rollback, validate_generation_replacement,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -68,6 +77,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         optional_env("TIAMUD_AREA_REGISTRY")?,
         optional_env("TIAMUD_AREA_CATALOG")?,
     )?;
+    let legacy_area_generation_ack = optional_env("TIAMUD_ACK_LEGACY_AREA_GENERATION")?;
     // Catalog mode must fail before opening a backend because opening either
     // backend may create a database or run migrations. Pin and validate the
     // exact generation, including its verified monolithic fallback, first.
@@ -82,11 +92,31 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let store: Arc<dyn CharacterStore> =
         Arc::new(MeasuredCharacterStore::new(store, metrics.clone()));
     let store_shutdown = store.clone();
+    let durable_generation_before_recovery = store.load_area_generation().await?;
     let recovery = store.load_startup_world_recovery().await?;
+    let has_durable_character_authority = store.has_durable_character_authority().await?;
+    let durable_area_generation = store.load_area_generation().await?;
+    if durable_generation_before_recovery != durable_area_generation {
+        return Err(
+            "the durable area generation changed while startup recovery was read; refusing a mixed authority"
+                .into(),
+        );
+    }
     let tick_millis = env_u32("TIAMUD_TICK_MILLIS", 1_000)?;
     let scheduler = WorldSchedulerConfig::every(Duration::from_millis(u64::from(tick_millis)));
-    let (world, world_pack_source) = match prepared_world {
+    let (world, world_pack_source, catalog_runtime) = match prepared_world {
         PreparedWorldSource::Monolithic { loaded, source } => {
+            if legacy_area_generation_ack.is_some() {
+                return Err(
+                    "TIAMUD_ACK_LEGACY_AREA_GENERATION is valid only for catalog mode".into(),
+                );
+            }
+            if durable_area_generation.is_some() {
+                return Err(
+                    "the database is bound to an area catalog generation but monolithic world mode was selected"
+                        .into(),
+                );
+            }
             let loaded = *loaded;
             let world = build_loaded_world(&loaded)?;
             let runtime_content = loaded
@@ -102,19 +132,74 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 false,
             )
             .await?;
-            (handle, source)
+            (handle, source, None)
         }
         PreparedWorldSource::AreaCatalog {
-            generation,
-            pinned,
-            source,
+            mut generation,
+            registry,
+            ..
         } => {
-            let coordinator = AreaLoadCoordinator::new(*generation, *pinned, Some(metrics.clone()));
+            if let Some(durable) = durable_area_generation.as_ref() {
+                if durable.world_id != generation.catalog().world_id {
+                    return Err(format!(
+                        "the database is bound to world {:?}, not the configured catalog world {:?}",
+                        durable.world_id,
+                        generation.catalog().world_id
+                    )
+                    .into());
+                }
+                if durable.active_catalog_sha256 != generation.generation_id() {
+                    let catalog_path = local_area_catalog_path(
+                        Path::new(&registry),
+                        &durable.world_id,
+                        &durable.active_catalog_sha256,
+                    );
+                    *generation = LocalAreaGeneration::open_exact(&registry, catalog_path)?;
+                }
+            }
+            // A durable pointer must never name a partially available release.
+            // This revalidation leaves runtime residency lazy for an empty
+            // world, but proves every immutable blob before readiness.
+            generation.verify_complete_release()?;
+            let world_id = generation.catalog().world_id.clone();
+            let generation_id = generation.generation_id().to_owned();
+            if !valid_legacy_area_generation_ack(
+                durable_area_generation.is_some(),
+                recovery.requires_full_generation(),
+                has_durable_character_authority,
+                legacy_area_generation_ack.as_deref(),
+                &generation_id,
+            ) {
+                return Err(
+                    "TIAMUD_ACK_LEGACY_AREA_GENERATION is accepted only for a non-empty unbound 6B database and must equal its exact configured catalog SHA-256; remove it after binding, and do not use it for monolithic conversion"
+                        .into(),
+                );
+            }
+            let pinned = parse_pinned_world_content(generation.world_artifact())?;
+            let source = format!("area catalog {generation_id}");
+            let coordinator = AreaLoadCoordinator::new(*generation, pinned, Some(metrics.clone()));
             let bootstrap = coordinator
                 .bootstrap_world(recovery.requires_full_generation())
                 .await?;
             let confirm_initial_dynamic_state =
                 !recovery.requires_full_generation() && bootstrap.created_dynamic_state;
+            if durable_area_generation.is_none() {
+                let proposed = DurableAreaGeneration {
+                    world_id: world_id.clone(),
+                    active_catalog_sha256: generation_id.clone(),
+                    previous_catalog_sha256: None,
+                    activation_sequence: 1,
+                };
+                let actual = store
+                    .bind_area_generation_if_absent(proposed.clone())
+                    .await?;
+                if actual != proposed {
+                    return Err(
+                        "another process bound a different area generation during startup; refusing to start the actor"
+                            .into(),
+                    );
+                }
+            }
             let handle = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
                 bootstrap.world,
                 store.clone(),
@@ -125,7 +210,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 confirm_initial_dynamic_state,
             )
             .await?;
-            (handle, source)
+            (handle, source, Some(CatalogRuntime { registry, world_id }))
         }
     };
     let auth_attempts_per_minute = env_u32("TIAMUD_AUTH_ATTEMPTS_PER_MINUTE", 10)?;
@@ -135,6 +220,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let max_sessions_per_account = env_u32("TIAMUD_MAX_SESSIONS_PER_ACCOUNT", 4)?;
     let max_sessions_per_ip = env_u32("TIAMUD_MAX_SESSIONS_PER_IP", 16)?;
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let area_reconciler_task = catalog_runtime.map(|catalog| {
+        tokio::spawn(run_area_generation_reconciler(
+            catalog,
+            world.clone(),
+            store.clone(),
+            metrics.clone(),
+            shutdown_receiver.clone(),
+        ))
+    });
     let auth_rate_limiter = Arc::new(AuthRateLimiter::per_minute(
         auth_attempts_per_minute,
         auth_burst,
@@ -219,6 +313,17 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if timeout(Duration::from_secs(5), telnet_task).await.is_err() {
         error!("telnet listener shutdown exceeded its five-second timeout");
     }
+    if let Some(mut area_reconciler_task) = area_reconciler_task {
+        match timeout(Duration::from_secs(10), &mut area_reconciler_task).await {
+            Ok(Ok(())) => info!("area generation reconciler stopped"),
+            Ok(Err(error)) => error!(%error, "area generation reconciler task failed"),
+            Err(_) => {
+                error!("area generation reconciler shutdown exceeded ten seconds");
+                area_reconciler_task.abort();
+                let _ = area_reconciler_task.await;
+            }
+        }
+    }
     match timeout(Duration::from_secs(10), world_shutdown.shutdown()).await {
         Ok(Ok(())) => info!("world actor drained and stopped"),
         Ok(Err(error)) => error!(%error, "world actor stopped before shutdown acknowledgement"),
@@ -291,6 +396,12 @@ enum WorldSourceConfig {
     AreaCatalog { registry: String, catalog: String },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CatalogRuntime {
+    registry: String,
+    world_id: String,
+}
+
 enum PreparedWorldSource {
     Monolithic {
         loaded: Box<LoadedWorldDefinition>,
@@ -298,8 +409,7 @@ enum PreparedWorldSource {
     },
     AreaCatalog {
         generation: Box<LocalAreaGeneration>,
-        pinned: Box<PinnedWorldContent>,
-        source: String,
+        registry: String,
     },
 }
 
@@ -342,6 +452,22 @@ fn world_source_config(
     }
 }
 
+fn valid_legacy_area_generation_ack(
+    durable_bound: bool,
+    recovery_requires_full_generation: bool,
+    has_durable_character_authority: bool,
+    acknowledged_generation: Option<&str>,
+    configured_generation: &str,
+) -> bool {
+    match (
+        durable_bound,
+        recovery_requires_full_generation || has_durable_character_authority,
+    ) {
+        (false, true) => acknowledged_generation == Some(configured_generation),
+        _ => acknowledged_generation.is_none(),
+    }
+}
+
 fn prepare_world_source(
     source: WorldSourceConfig,
 ) -> Result<PreparedWorldSource, Box<dyn Error + Send + Sync>> {
@@ -358,12 +484,9 @@ fn prepare_world_source(
         }
         WorldSourceConfig::AreaCatalog { registry, catalog } => {
             let generation = LocalAreaGeneration::open_exact(&registry, &catalog)?;
-            let pinned = parse_pinned_world_content(generation.world_artifact())?;
-            let source = format!("area catalog {}", generation.generation_id());
             Ok(PreparedWorldSource::AreaCatalog {
                 generation: Box::new(generation),
-                pinned: Box::new(pinned),
-                source,
+                registry,
             })
         }
     }
@@ -434,6 +557,243 @@ fn create_database_parent(database_path: &str) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Error)]
+enum AreaGenerationReconcileError {
+    #[error("the world is not quiescent")]
+    Busy,
+    #[error("the published area generation could not be verified: {0}")]
+    Verification(#[source] LocalAreaRegistryError),
+    #[error("the published area generation is incompatible: {0}")]
+    Incompatible(#[source] LocalAreaRegistryError),
+    #[error("area generation persistence failed: {0}")]
+    Persistence(#[source] StoreError),
+    #[error("the durable and in-memory area generations conflict")]
+    Conflict,
+    #[error("area generation activation failed: {0}")]
+    Activation(#[source] AreaGenerationActivationError),
+    #[error("area generation reconciliation failed internally: {0}")]
+    Internal(String),
+}
+
+impl AreaGenerationReconcileError {
+    fn metric_result(&self) -> AreaGenerationMetricResult {
+        match self {
+            Self::Busy | Self::Activation(AreaGenerationActivationError::Busy) => {
+                AreaGenerationMetricResult::Busy
+            }
+            Self::Verification(_)
+            | Self::Activation(AreaGenerationActivationError::InvalidCandidate) => {
+                AreaGenerationMetricResult::VerificationFailed
+            }
+            Self::Incompatible(_) | Self::Activation(AreaGenerationActivationError::Runtime(_)) => {
+                AreaGenerationMetricResult::Incompatible
+            }
+            Self::Persistence(StoreError::AreaGenerationConflict)
+            | Self::Conflict
+            | Self::Activation(AreaGenerationActivationError::WrongGeneration)
+            | Self::Activation(AreaGenerationActivationError::Persistence(
+                StoreError::AreaGenerationConflict,
+            )) => AreaGenerationMetricResult::Conflict,
+            Self::Persistence(_)
+            | Self::Activation(AreaGenerationActivationError::Persistence(_)) => {
+                AreaGenerationMetricResult::PersistenceFailed
+            }
+            Self::Activation(AreaGenerationActivationError::ActorStopped) | Self::Internal(_) => {
+                AreaGenerationMetricResult::InternalFailed
+            }
+            Self::Activation(AreaGenerationActivationError::DurableAuthorityAmbiguous) => {
+                AreaGenerationMetricResult::InternalFailed
+            }
+        }
+    }
+}
+
+async fn run_area_generation_reconciler(
+    catalog: CatalogRuntime,
+    world: WorldHandle,
+    store: Arc<dyn CharacterStore>,
+    metrics: Arc<RuntimeMetrics>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    #[cfg(unix)]
+    {
+        let mut hangup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                error!(%error, "could not install SIGHUP area-generation reconciler");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                received = hangup.recv() => {
+                    if received.is_none() {
+                        return;
+                    }
+                    let started = Instant::now();
+                    match reconcile_area_generation(&catalog, &world, store.as_ref(), &metrics).await {
+                        Ok(kind) => {
+                            let result = match kind {
+                                GenerationReplacementKind::Activate => {
+                                    info!("area catalog generation activated after SIGHUP");
+                                    AreaGenerationMetricResult::Activated
+                                }
+                                GenerationReplacementKind::Rollback => {
+                                    info!("area catalog generation rolled back after SIGHUP");
+                                    AreaGenerationMetricResult::RolledBack
+                                }
+                                GenerationReplacementKind::Noop => {
+                                    info!("SIGHUP area catalog generation is already active");
+                                    AreaGenerationMetricResult::Noop
+                                }
+                            };
+                            metrics.area_generation_finished(started.elapsed(), result);
+                        }
+                        Err(error) => {
+                            let result = error.metric_result();
+                            let authority_is_ambiguous = matches!(
+                                &error,
+                                AreaGenerationReconcileError::Activation(
+                                    AreaGenerationActivationError::DurableAuthorityAmbiguous
+                                )
+                            );
+                            if authority_is_ambiguous {
+                                error!(%error, "area catalog generation reconciliation failed closed");
+                            } else {
+                                warn!(%error, "area catalog generation reconciliation was rejected");
+                            }
+                            metrics.area_generation_finished(started.elapsed(), result);
+                            if authority_is_ambiguous {
+                                metrics.set_area_generation_phase(
+                                    AreaGenerationMetricPhase::Committing,
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (catalog, world, store, metrics);
+        let _ = shutdown.changed().await;
+    }
+}
+
+async fn reconcile_area_generation(
+    catalog: &CatalogRuntime,
+    world: &WorldHandle,
+    store: &dyn CharacterStore,
+    metrics: &Arc<RuntimeMetrics>,
+) -> Result<GenerationReplacementKind, AreaGenerationReconcileError> {
+    let quiescence = world
+        .inspect_area_quiescence()
+        .await
+        .map_err(AreaGenerationReconcileError::Activation)?;
+    if quiescence.connected_sessions != 0 {
+        return Err(AreaGenerationReconcileError::Busy);
+    }
+
+    let durable = store
+        .load_area_generation()
+        .await
+        .map_err(AreaGenerationReconcileError::Persistence)?
+        .ok_or_else(|| {
+            AreaGenerationReconcileError::Internal(
+                "catalog runtime has no durable generation binding".into(),
+            )
+        })?;
+    if durable.world_id != catalog.world_id {
+        return Err(AreaGenerationReconcileError::Conflict);
+    }
+    let status = world
+        .area_generation_status()
+        .ok_or(AreaGenerationReconcileError::Conflict)?;
+    if status.active_generation.as_str() != durable.active_catalog_sha256 {
+        return Err(AreaGenerationReconcileError::Conflict);
+    }
+    tracing::debug!(
+        phase = ?status.phase,
+        active_leases = status.active_leases,
+        has_target = status.target_generation.is_some(),
+        "starting local area generation reconciliation"
+    );
+    metrics.set_area_generation_phase(AreaGenerationMetricPhase::Staging);
+
+    let catalog_for_worker = catalog.clone();
+    let durable_for_worker = durable.clone();
+    let staged = tokio::task::spawn_blocking(move || {
+        stage_active_area_generation(&catalog_for_worker, &durable_for_worker)
+    })
+    .await
+    .map_err(|error| AreaGenerationReconcileError::Internal(error.to_string()))??;
+    let kind = staged.kind();
+    if kind == GenerationReplacementKind::Noop {
+        return Ok(kind);
+    }
+
+    let pinned = parse_pinned_world_content(staged.candidate().world_artifact())
+        .map_err(|error| AreaGenerationReconcileError::Internal(error.to_string()))?;
+    let candidate = AreaLoadCoordinator::new(
+        staged.candidate().clone(),
+        pinned,
+        Some(Arc::clone(metrics)),
+    );
+    candidate.set_metrics_suppressed(true);
+    let prepared = candidate.stage_full_generation_replacement(&staged).await;
+    candidate.set_metrics_suppressed(false);
+    let prepared =
+        prepared.map_err(|error| AreaGenerationReconcileError::Internal(error.to_string()))?;
+    let next_sequence = durable.activation_sequence.checked_add(1).ok_or_else(|| {
+        AreaGenerationReconcileError::Internal("activation sequence overflow".into())
+    })?;
+    let next = DurableAreaGeneration {
+        world_id: durable.world_id.clone(),
+        active_catalog_sha256: staged.candidate_generation_id().to_owned(),
+        previous_catalog_sha256: Some(durable.active_catalog_sha256.clone()),
+        activation_sequence: next_sequence,
+    };
+    metrics.set_area_generation_phase(AreaGenerationMetricPhase::Draining);
+    world
+        .activate_prepared_generation(prepared, durable, next)
+        .await
+        .map_err(AreaGenerationReconcileError::Activation)?;
+    Ok(kind)
+}
+
+fn stage_active_area_generation(
+    catalog: &CatalogRuntime,
+    durable: &DurableAreaGeneration,
+) -> Result<StagedLocalAreaGenerationReplacement, AreaGenerationReconcileError> {
+    let current_path = local_area_catalog_path(
+        Path::new(&catalog.registry),
+        &catalog.world_id,
+        &durable.active_catalog_sha256,
+    );
+    let current = LocalAreaGeneration::open_exact(&catalog.registry, current_path)
+        .map_err(AreaGenerationReconcileError::Verification)?;
+    let candidate = LocalAreaGeneration::open_active(&catalog.registry, &catalog.world_id)
+        .map_err(AreaGenerationReconcileError::Verification)?;
+    let kind = validate_generation_replacement(&current, &candidate)
+        .map_err(AreaGenerationReconcileError::Incompatible)?;
+    match kind {
+        GenerationReplacementKind::Activate | GenerationReplacementKind::Noop => {
+            stage_generation_replacement(&current, candidate)
+                .map_err(AreaGenerationReconcileError::Verification)
+        }
+        GenerationReplacementKind::Rollback => stage_generation_rollback(&current, candidate)
+            .map_err(AreaGenerationReconcileError::Verification),
+    }
 }
 
 async fn shutdown_signal() {
@@ -562,6 +922,67 @@ mod tests {
             world_source_config(Some(" world.json".into()), None, None),
             Err(WorldSourceConfigError::InvalidPath)
         );
+    }
+
+    #[test]
+    fn legacy_area_generation_ack_is_exact_and_single_use() {
+        let generation = "a".repeat(64);
+        assert!(valid_legacy_area_generation_ack(
+            false,
+            true,
+            false,
+            Some(&generation),
+            &generation,
+        ));
+        assert!(!valid_legacy_area_generation_ack(
+            false,
+            true,
+            false,
+            None,
+            &generation,
+        ));
+        assert!(!valid_legacy_area_generation_ack(
+            false,
+            true,
+            false,
+            Some(&"b".repeat(64)),
+            &generation,
+        ));
+        assert!(valid_legacy_area_generation_ack(
+            false,
+            false,
+            false,
+            None,
+            &generation,
+        ));
+        assert!(!valid_legacy_area_generation_ack(
+            false,
+            false,
+            false,
+            Some(&generation),
+            &generation,
+        ));
+        assert!(!valid_legacy_area_generation_ack(
+            true,
+            true,
+            true,
+            Some(&generation),
+            &generation,
+        ));
+        assert!(!valid_legacy_area_generation_ack(
+            false,
+            false,
+            true,
+            None,
+            &generation,
+        ));
+        assert!(valid_legacy_area_generation_ack(
+            false,
+            false,
+            true,
+            Some(&generation),
+            &generation,
+        ));
     }
 
     #[test]

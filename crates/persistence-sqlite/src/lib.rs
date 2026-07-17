@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MigrationReport {
@@ -117,6 +117,23 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              last_event_sequence INTEGER
                  CHECK(last_event_sequence IS NULL OR last_event_sequence >= 0),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+         );
+         CREATE TABLE IF NOT EXISTS world_area_generation (
+             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+             world_id TEXT NOT NULL
+                 CHECK(length(CAST(world_id AS BLOB)) BETWEEN 1 AND 256),
+             active_catalog_sha256 TEXT NOT NULL
+                 CHECK(length(active_catalog_sha256) = 64
+                       AND active_catalog_sha256 NOT GLOB '*[^0-9a-f]*'),
+             previous_catalog_sha256 TEXT
+                 CHECK(previous_catalog_sha256 IS NULL
+                       OR (length(previous_catalog_sha256) = 64
+                           AND previous_catalog_sha256 NOT GLOB '*[^0-9a-f]*')),
+             activation_sequence INTEGER NOT NULL
+                 CHECK(activation_sequence > 0),
+             updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+             CHECK(previous_catalog_sha256 IS NULL
+                   OR previous_catalog_sha256 != active_catalog_sha256)
          );
          CREATE TABLE IF NOT EXISTS social_ignores (
              owner_character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -400,7 +417,7 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              state_json TEXT NOT NULL CHECK(length(state_json) <= 1048576),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         PRAGMA user_version = 13;",
+         PRAGMA user_version = 14;",
     )?;
     if !column_exists(&transaction, "social_reports", "report_kind")? {
         transaction.execute_batch(
@@ -744,12 +761,12 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let report = migrate(&mut connection).unwrap();
 
-        assert_eq!(report, MigrationReport { from: 0, to: 13 });
+        assert_eq!(report, MigrationReport { from: 0, to: 14 });
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            13
+            14
         );
         assert!(
             connection
@@ -812,6 +829,14 @@ mod tests {
                 .prepare("SELECT snapshot_json, last_event_sequence FROM world_runtime")
                 .is_ok()
         );
+        assert!(
+            connection
+                .prepare(
+                    "SELECT world_id, active_catalog_sha256, previous_catalog_sha256,
+                            activation_sequence FROM world_area_generation",
+                )
+                .is_ok()
+        );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
             connection
@@ -836,6 +861,81 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn upgrades_v13_with_an_unbound_durable_area_generation_pointer() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, last_event_sequence)
+                 VALUES (1, 7, '{}', 0);
+                 DROP TABLE world_area_generation;
+                 PRAGMA user_version = 13;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 13, to: 14 }
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM world_area_generation", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT snapshot_json FROM world_runtime WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn durable_area_generation_schema_rejects_invalid_digests_and_sequences() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let digest = "a".repeat(64);
+        connection
+            .execute(
+                "INSERT INTO world_area_generation
+                     (singleton, world_id, active_catalog_sha256, activation_sequence)
+                 VALUES (1, ?1, ?2, 1)",
+                rusqlite::params!["Mundo de Ámbar", digest],
+            )
+            .unwrap();
+        connection
+            .execute("DELETE FROM world_area_generation", [])
+            .unwrap();
+
+        for (active, previous, sequence) in [
+            ("A".repeat(64), None, 1),
+            ("a".repeat(63), None, 1),
+            ("a".repeat(64), Some("a".repeat(64)), 2),
+            ("a".repeat(64), None, 0),
+        ] {
+            assert!(
+                connection
+                    .execute(
+                        "INSERT INTO world_area_generation
+                             (singleton, world_id, active_catalog_sha256,
+                              previous_catalog_sha256, activation_sequence)
+                         VALUES (1, 'demo:world', ?1, ?2, ?3)",
+                        rusqlite::params![active, previous, sequence],
+                    )
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -879,7 +979,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 11, to: 13 }
+            MigrationReport { from: 11, to: 14 }
         );
         for table in [
             "social_mail_messages",
@@ -955,7 +1055,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 12, to: 13 }
+            MigrationReport { from: 12, to: 14 }
         );
         assert_eq!(
             connection
@@ -1149,7 +1249,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 10, to: 13 }
+            MigrationReport { from: 10, to: 14 }
         );
         assert_eq!(
             connection
@@ -1214,7 +1314,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 3, to: 13 }
+            MigrationReport { from: 3, to: 14 }
         );
         assert_eq!(
             connection
@@ -1258,7 +1358,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 4, to: 13 }
+            MigrationReport { from: 4, to: 14 }
         );
         let gameplay: String = connection
             .query_row(
@@ -1323,7 +1423,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 5, to: 13 }
+            MigrationReport { from: 5, to: 14 }
         );
         assert_eq!(
             connection
@@ -1380,7 +1480,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 6, to: 13 }
+            MigrationReport { from: 6, to: 14 }
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
@@ -1432,7 +1532,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 7, to: 13 }
+            MigrationReport { from: 7, to: 14 }
         );
         assert_eq!(
             connection
@@ -1521,7 +1621,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 8, to: 13 }
+            MigrationReport { from: 8, to: 14 }
         );
         assert_eq!(
             connection
@@ -1563,7 +1663,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 13, to: 13 }
+            MigrationReport { from: 14, to: 14 }
         );
         assert_eq!(
             connection
@@ -1631,7 +1731,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 9, to: 13 }
+            MigrationReport { from: 9, to: 14 }
         );
         assert_eq!(
             connection

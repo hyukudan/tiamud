@@ -76,8 +76,10 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   canónico, determinista y revisable. La fase 6A implementa una ruta local
   separada para catalogar revisiones y bundles de área
   verificables. La fase 6B permite arrancar desde un catálogo exacto y añadir
-  bajo demanda áreas locales verificadas, sin sustituir ni descargar ninguna
-  durante ese proceso.
+  bajo demanda áreas locales verificadas. La fase 6C añade sustitución
+  quiescente de una **generación completa** mediante SIGHUP local, staging
+  privado, compatibilidad estricta, identidad durable y rollback explícito.
+  No sustituye áreas individuales ni descarga contenido.
 - **Operación en un host:** adaptadores PostgreSQL/SQLite, credenciales
   Argon2id, sesiones revocables, colas acotadas, salud, métricas Prometheus,
   apagado ordenado, copia/restauración SQLite y traslado explícito a PostgreSQL.
@@ -100,7 +102,7 @@ flowchart LR
     Projection --> Web
     Projection --> TN
     Actor <--> Store[(PostgreSQL<br/>o SQLite)]
-    Pack[WorldPack revisado<br/>o generación local fijada] --> Actor
+    Pack[WorldPack revisado<br/>o generación local durable] --> Actor
 ```
 
 Cuatro límites mantienen el motor flexible:
@@ -195,7 +197,7 @@ board report <referencia> | <motivo>
 | Navegador | HTTP en bucle local | HTTPS/WSS detrás de Caddy |
 | Terminal | `plaintext` explícito en localhost/LAN confiable | Telnet TLS directo |
 | Persistencia | SQLite sin configuración | PostgreSQL en el mismo equipo |
-| Mundo | WorldPack de ejemplo embebido o catálogo local 6B | WorldPack externo revisado o catálogo local fijado |
+| Mundo | WorldPack de ejemplo embebido o catálogo local 6B/6C | WorldPack externo revisado o catálogo local durable |
 
 La [guía de operación](docs/operations/single-host.md) cubre Caddy, systemd,
 Telnet TLS, copias, monitorización, actualización y reversión. Los ejemplos
@@ -210,8 +212,9 @@ revisados están en [`deploy/`](deploy/).
 | `TIAMUD_DB_PATH` | `data/tiamud.db` | Ruta SQLite sin URL de base de datos |
 | `TIAMUD_DATABASE_URL` | — | Perfil PostgreSQL o URL `sqlite://` explícita |
 | `TIAMUD_WORLD_PACK` | paquete embebido | WorldPack externo revisado |
-| `TIAMUD_AREA_REGISTRY` | — | Raíz del registro local 6A/6B |
-| `TIAMUD_AREA_CATALOG` | — | Ruta content-addressed exacta del catálogo fijado |
+| `TIAMUD_AREA_REGISTRY` | — | Raíz del registro local 6A–6C |
+| `TIAMUD_AREA_CATALOG` | — | Catálogo exacto inicial; la autoridad durable prevalece tras la primera liga |
+| `TIAMUD_ACK_LEGACY_AREA_GENERATION` | — | Aceptación de una sola vez del SHA-256 G0 exacto si una base 6B/v13 sin liga conserva recovery compartido o algún personaje |
 | `TIAMUD_TICK_MILLIS` | `1000` | Cadencia del ciclo lógico |
 | `RUST_LOG` | `tiamud_server=info,tower_http=info` | Filtro de registro estructurado |
 
@@ -223,20 +226,47 @@ guardan como texto opaco porque el servidor no consulta su interior.
 `TIAMUD_AREA_REGISTRY` y `TIAMUD_AREA_CATALOG` deben aparecer juntas y son
 excluyentes con `TIAMUD_WORLD_PACK`. Sin ninguna de las tres se usa el
 WorldPack embebido. En modo catálogo, `TIAMUD_AREA_CATALOG` debe señalar la
-ruta exacta bajo `area-catalogs/`; el servidor no resuelve ni vuelve a observar
-`area-active` durante la partida.
+ruta exacta bajo `area-catalogs/`. La primera ejecución liga esa generación en
+la base de datos; los arranques posteriores recuperan por digest la generación
+durable aunque `area-active` señale una publicación más reciente. Durante la
+ejecución, SIGHUP es la única reconciliación local del puntero editorial.
 
-Ambos adaptadores implementan actualmente el **esquema v13**. La migración
+Ambos adaptadores implementan actualmente el **esquema v14**. La migración
 v10→v11 reconstruye de forma transaccional la custodia opaca del runtime y
 v11→v12 añade correo offline, cuotas y evidencia de denuncia. El
 paso v12→v13 añade tablones, cuota de publicación y evidencia moderable, y
 amplía de forma cerrada los tipos de reporte sin cambiar el snapshot. El
-snapshot vigente es v7: los DTO v1–v5 siguen limitados a 1 MiB y v6–v7 admiten
+paso v13→v14 añade el puntero singleton `world_area_generation`: conserva
+`worldId`, digest activo, digest anterior y una secuencia de activación, pero
+no duplica estado de juego ni guarda rutas del host. El snapshot vigente sigue
+siendo v7 y una activación 6C confirma snapshot y puntero mediante un CAS en la
+misma transacción. Los DTO v1–v5 siguen limitados a 1 MiB y v6–v7 admiten
 hasta 2 MiB al decodificarse. Se conservan las relaciones sociales y de
 staff de v9/v10, y el traslado SQLite→PostgreSQL las copia junto con el estado
-actual. PostgreSQL 18.4 real pasa 19/19 pruebas del adaptador y mover v13,
+actual. La evidencia PostgreSQL 18.4 retenida pasa 19/19 pruebas del adaptador
+y mover v13,
 incluida migración de una base actual representativa; el servidor cubre además
 flujo board/runtime y concurrencia advisory dentro de su suite final.
+
+> **Actualización 6B/v13 con recovery compartido o personajes:** conserva el
+> catálogo G0 exacto que ejecutaba el servidor, copia backend y registro, instala v14 y
+> arranca todavía con ese mismo `TIAMUD_AREA_CATALOG` y
+> `TIAMUD_ACK_LEGACY_AREA_GENERATION=<SHA-256 exacto de G0>`. Verifica que la liga
+> durable se creó, elimina la variable de aceptación y solo después
+> publica/selecciona G1 y envía SIGHUP. No cambies
+> binario/esquema y catálogo en el mismo primer arranque: v13 no guardaba la
+> identidad de G0 y la primera liga v14 no puede ejecutar el CAS/compatibilidad
+> entre dos generaciones que desconoce.
+>
+> Una base sin snapshot/ledger aún puede contener personajes. Antes de la
+> primera liga, el servidor comprueba por separado recovery compartido y la
+> existencia de cualquier personaje durable: cualquiera de ambos obliga al ACK
+> exacto de G0. Una base vacía o con cuentas pero sin personajes ni recovery de
+> mundo puede ligar su primera generación sin ACK. Pasar una instalación
+> monolítica con autoridad de mundo/personaje a catálogo no es una migración 6C
+> soportada: exige un procedimiento offline y revisión específica. La variable
+> se rechaza en modo monolítico, si ya existe liga, si no hay recovery/personaje
+> que reconocer o si no coincide exactamente con el catálogo activo.
 
 Si una instalación pierde toda autoridad administrativa, la recuperación
 offline documentada no se limita al rol legado: `tiamud-admin recover-admin`
@@ -546,8 +576,8 @@ carreras TOCTOU que provoque quedan fuera de este modo de confianza.
 
 ```mermaid
 flowchart LR
-    accTitle: Autoría modular y carga local aditiva de áreas
-    accDescr: Los mismos módulos producen un WorldPack monolítico y bundles locales. El servidor elige una ruta al arrancar; el modo catálogo fija una generación y añade áreas verificadas sin reemplazarlas ni descargarlas.
+    accTitle: Autoría modular y generaciones locales de áreas
+    accDescr: Los mismos módulos producen un WorldPack monolítico y bundles locales. El servidor puede añadir áreas de la generación activa y sustituir la generación completa solo durante un corte quiescente; no descarga áreas.
 
     Areas[AreaPack v8<br/>módulos revisados] --> Project[WorldProject v2]
     Project --> Compose[Composición sin conexión]
@@ -555,9 +585,13 @@ flowchart LR
     World --> Runtime[Servidor<br/>modo monolítico]
     Areas --> Bundle[Bundles locales<br/>JSON canónico e inmutable]
     Bundle --> Catalog[Catálogo local<br/>metadatos + digests]
-    Catalog --> Fixed[Generación fijada<br/>SHA-256 del catálogo]
-    Fixed --> Stage[Staging acotado<br/>fuera del actor]
-    Stage --> Actor[Instalación atómica<br/>áreas siempre residentes]
+    Catalog --> Active[Generación durable<br/>SHA-256 del catálogo]
+    Active --> Demand[Demanda 6B<br/>staging acotado]
+    Demand --> Actor[Actor<br/>áreas residentes]
+    Catalog --> FullStage[Staging 6C completo<br/>fuera del actor]
+    FullStage --> Quiet[Cero sesiones<br/>y cero leases]
+    Quiet --> CAS[CAS durable<br/>snapshot + generación]
+    CAS --> Actor
 ```
 
 La fase 6A no carga áreas por sí sola. La fase 6B de
@@ -592,11 +626,52 @@ mientras el estado dinámico inicial se confirma mediante la transacción
 durable existente antes de publicar el lote. Las métricas usan resultados y
 etapas cerradas, nunca IDs de área, sala, revisión o digest como labels.
 
-La generación queda fija hasta apagar: cambiar `area-active` se ignora durante
-el proceso y todas las áreas usadas permanecen residentes. 6B no implementa
-sustitución de revisiones, coexistencia de generaciones, drenaje, descarga,
-LRU, presupuesto de memoria residente, red, compresión ni firma remota. Ese
-trabajo pertenece a 6C y fases posteriores.
+Dentro de una generación, todas las áreas usadas permanecen residentes. 6B no
+sustituye revisiones. La fase 6C mínima de
+[ADR 0021](docs/decisions/0021-quiescent-area-generation-cutover.md) prepara
+fuera del actor una candidata **completa**, vuelve a verificar `area-active` y
+solo intenta el corte cuando no quedan sesiones ni trabajos admitidos. Exige
+igualdad exacta de reglas de juego, prototipos e instancias iniciales, NPC,
+botín y afijos, además de los mismos IDs/ownership de áreas y salas; permite
+cambiar prosa, salidas, medios, percepción, variantes y Lua síncrono ya
+validado. El staging usa métricas aisladas: los gauges públicos siguen
+describiendo G0 hasta el swap confirmado. No hay migración semántica.
+
+El tramo crítico cierra admisiones, restaura el snapshot v7 actual sobre la
+candidata, confirma mediante CAS el snapshot y la identidad SQL v14 y después
+intercambia de forma indivisible mundo, contenido runtime y coordinador. Una
+sesión o carga en vuelo devuelve `busy` sin expulsar a nadie ni modificar la
+generación activa. Una activación normal exige revisiones crecientes; para
+volver a un catálogo inmutable retenido se selecciona de forma explícita:
+
+```sh
+cargo run --locked -p world-pack --bin tiamud-world -- area-select \
+  --catalog <ruta-exacta-del-catalogo-retenido> \
+  --registry build/area-registry
+sudo systemctl kill --signal=HUP tiamud
+```
+
+El mismo SIGHUP después de `area-publish` intenta una activación creciente. El
+servidor adquiere tras el staging el lock cooperativo de lectura compartido con
+`area-publish` y `area-select`, revalida el puntero bajo ese lock y lo conserva
+hasta resolver el CAS; si está ocupado, aborta el intento sin cortar. Un
+fallo definitivo anterior al commit, incluido un CAS rechazado, conserva la
+generación anterior. Si el resultado del commit es ambiguo, el servidor relee
+SQL: publica G1 si quedó durable, reabre G0 si no y, ante otro valor o error de
+lectura, queda en `Committing`, detiene el actor y mantiene readiness en 503 sin
+admitir tráfico hasta reinicio/recuperación durable. 6C no implementa reemplazo
+por área, jugadores durante el drenaje, migraciones, descarga, checkpoint por
+área, LRU, GC, red, compresión, firma remota ni coordinación multiproceso. Es
+un corte local dentro del servidor único. La puerta final pasa 774 pruebas Rust,
+329 del servidor, y la reauditoría queda en 0 P1/0 P2. También pasan formato,
+clippy, MSRV, cargo-deny, licencias/avisos 308 Rust/76 web, Svelte y 123 Vitest.
+PostgreSQL v14 real no se ejecutó porque
+falta `TIAMUD_TEST_POSTGRES_URL` y no se afirma. El humo retenido liga G0, hace `noop`,
+activa G1, revierte a G0, reinicia sobre la autoridad durable y comprueba
+readiness/Web/Telnet, métricas y apagado. La
+[matriz](docs/project/COMPLETION_MATRIX.md) y el
+[registro de fase](docs/project/log/2026-07-17-quiescent-area-generation-cutover-phase-6c.md)
+son la autoridad sobre sus puertas.
 
 La puerta final pasa 144/144 pruebas de `world-pack`, incluidas 10/10 del CLI,
 y 707/707 pruebas Rust del workspace; también pasan formato, `git diff
@@ -661,7 +736,7 @@ campos v7 y migra con afijos vacíos y contador inicial, sin inventar
 procedencia. Al reiniciar se validan por lotes todas las identidades de los derechos,
 se cancelan los encuentros aún abiertos y su combate antes de readiness, y se
 conservan intactos los derechos ya creados. SQLite y PostgreSQL usan esquema
-v11, sin tabla de loot/escrow espejo ni doble escritura.
+v14, sin tabla de loot/escrow espejo ni doble escritura.
 
 El mundo revisado compone tres áreas en 10 prototipos, 9 instancias iniciales,
 2 tablas, 1 fuente de botín, 1 afijo y 1 pool de afijos. Añade la habilidad
@@ -946,7 +1021,7 @@ es un pase ni un fallo de aplicación.
 
 ## Estado y hoja de ruta
 
-Tiamud es un proyecto privado de prelanzamiento `0.1.0`. El protocolo
+Tiamud es un proyecto de código abierto en prelanzamiento `0.1.0`. El protocolo
 WebSocket sigue siendo experimental. La matriz de completitud es la autoridad
 sobre aceptación.
 
@@ -961,9 +1036,8 @@ Puertas externas pendientes:
 
 Siguientes líneas técnicas y de producto:
 
-- evolucionar desde la carga aditiva local 6B ya implementada hacia 6C solo
-  cuando exista necesidad medida: sustitución por generaciones, drenaje y
-  rollback antes de cualquier descarga o LRU;
+- medir 6C antes de diseñar 6D, reemplazo por área, descarga o LRU, y repetir
+  PostgreSQL v14 real cuando exista una URL desechable;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
 - considerar need/greed, master-loot o contribución solo tras modelar sus
@@ -1033,7 +1107,8 @@ deploy/                      ejemplos Caddy, systemd y entorno
   [correo offline acotado](docs/decisions/0017-bounded-offline-mail.md) ·
   [tablones comunitarios acotados](docs/decisions/0018-bounded-moderable-community-boards.md) ·
   [voz espacial acotada](docs/decisions/0019-bounded-spatial-voice.md) ·
-  [carga local aditiva](docs/decisions/0020-additive-local-area-loading.md).
+  [carga local aditiva](docs/decisions/0020-additive-local-area-loading.md) ·
+  [sustitución quiescente durable](docs/decisions/0021-quiescent-area-generation-cutover.md).
 - **Estado:** [matriz](docs/project/COMPLETION_MATRIX.md) ·
   [especificación v0.3](docs/spec-v0.3.md) ·
   [memoria](docs/project/PROJECT_MEMORY.md) ·
@@ -1042,7 +1117,7 @@ deploy/                      ejemplos Caddy, systemd y entorno
 
 ## Contribuir
 
-Las issues y pull requests serán bienvenidas cuando el repositorio sea público.
+Las issues y pull requests son bienvenidas.
 El comportamiento de dominio debe ser neutral al transporte; todo input no
 confiable debe estar acotado y los cambios necesitan pruebas enfocadas y
 documentación honesta.

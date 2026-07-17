@@ -34,13 +34,14 @@ use crate::{
     persistence::{
         BOARD_ACCOUNT_CAPACITY, BOARD_CAPACITY_PER_BOARD, BOARD_MAX_PAGES, BOARD_PAGE_SIZE,
         BoardEntry, BoardPage, BoardPostSummary, BoardReportEvidence, CharacterStore,
-        DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, MailMessage, MailMessageSummary,
-        MailPage, MailReportEvidence, MailSendResult, ModerationAction, PreparedLogin, Request,
-        SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry, StaffAuditRecord,
-        StaffReport, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
+        DOMAIN_EVENT_RETENTION, DurableAreaGeneration, DurableCharacterGameplay, MailMessage,
+        MailMessageSummary, MailPage, MailReportEvidence, MailSendResult, ModerationAction,
+        PreparedLogin, Request, SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry,
+        StaffAuditRecord, StaffReport, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
         decode_runtime_snapshot, decode_startup_domain_events, decode_startup_gameplay,
         ensure_all_character_ids_exist, ensure_all_startup_characters_loaded,
         normalise_character_identity_ids, normalise_startup_character_ids,
+        validate_area_generation, validate_area_generation_transition,
     },
 };
 
@@ -246,6 +247,29 @@ impl PostgresCharacterStore {
                         }
                         Request::LoadStartupWorldRecovery { reply } => {
                             let _ = reply.send(load_startup_world_recovery(&mut connection));
+                        }
+                        Request::HasDurableCharacterAuthority { reply } => {
+                            let _ = reply.send(has_durable_character_authority(&mut connection));
+                        }
+                        Request::LoadAreaGeneration { reply } => {
+                            let _ = reply.send(load_area_generation(&mut connection));
+                        }
+                        Request::BindAreaGenerationIfAbsent { generation, reply } => {
+                            let _ = reply
+                                .send(bind_area_generation_if_absent(&mut connection, &generation));
+                        }
+                        Request::CommitAreaGenerationActivation {
+                            runtime,
+                            expected_current,
+                            next,
+                            reply,
+                        } => {
+                            let _ = reply.send(commit_area_generation_activation(
+                                &mut connection,
+                                &runtime,
+                                &expected_current,
+                                &next,
+                            ));
                         }
                         Request::LoadDomainEvents { reply } => {
                             let _ = reply.send(load_domain_events(&mut connection));
@@ -888,6 +912,49 @@ impl CharacterStore for PostgresCharacterStore {
         let (reply, receive) = oneshot::channel();
         self.request(Request::LoadStartupWorldRecovery { reply }, receive)
             .await
+    }
+
+    async fn has_durable_character_authority(&self) -> Result<bool, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::HasDurableCharacterAuthority { reply }, receive)
+            .await
+    }
+
+    async fn load_area_generation(&self) -> Result<Option<DurableAreaGeneration>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(Request::LoadAreaGeneration { reply }, receive)
+            .await
+    }
+
+    async fn bind_area_generation_if_absent(
+        &self,
+        generation: DurableAreaGeneration,
+    ) -> Result<DurableAreaGeneration, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::BindAreaGenerationIfAbsent { generation, reply },
+            receive,
+        )
+        .await
+    }
+
+    async fn commit_area_generation_activation(
+        &self,
+        runtime: WorldRuntimeSnapshot,
+        expected_current: DurableAreaGeneration,
+        next: DurableAreaGeneration,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::CommitAreaGenerationActivation {
+                runtime,
+                expected_current,
+                next,
+                reply,
+            },
+            receive,
+        )
+        .await
     }
 
     async fn load_domain_events(&self) -> Result<Vec<DomainEvent>, StoreError> {
@@ -1880,6 +1947,155 @@ fn load_runtime_snapshot<C: GenericClient>(
             decode_runtime_snapshot(snapshot_version, &json)
         })
         .transpose()
+}
+
+fn has_durable_character_authority<C: GenericClient>(
+    connection: &mut C,
+) -> Result<bool, StoreError> {
+    connection
+        .query_one("SELECT EXISTS(SELECT 1 FROM characters LIMIT 1)", &[])
+        .map(|row| row.get(0))
+        .map_err(StoreError::from)
+}
+
+fn load_area_generation<C: GenericClient>(
+    connection: &mut C,
+) -> Result<Option<DurableAreaGeneration>, StoreError> {
+    let generation = connection
+        .query_opt(
+            "SELECT world_id, active_catalog_sha256, previous_catalog_sha256,
+                    activation_sequence
+             FROM world_area_generation WHERE singleton = 1",
+            &[],
+        )?
+        .map(|row| DurableAreaGeneration {
+            world_id: row.get(0),
+            active_catalog_sha256: row.get(1),
+            previous_catalog_sha256: row.get(2),
+            activation_sequence: u64::try_from(row.get::<_, i64>(3)).unwrap_or(0),
+        });
+    if let Some(generation) = &generation {
+        validate_area_generation(generation)?;
+    }
+    Ok(generation)
+}
+
+fn bind_area_generation_if_absent(
+    connection: &mut Client,
+    generation: &DurableAreaGeneration,
+) -> Result<DurableAreaGeneration, StoreError> {
+    validate_area_generation(generation)?;
+    if generation.activation_sequence != 1 || generation.previous_catalog_sha256.is_some() {
+        return Err(StoreError::InvalidAreaGeneration);
+    }
+    let mut transaction = connection.transaction()?;
+    transaction.execute(
+        "INSERT INTO world_area_generation
+             (singleton, world_id, active_catalog_sha256,
+              previous_catalog_sha256, activation_sequence, updated_at)
+         VALUES (1, $1, $2, NULL, 1,
+                 floor(extract(epoch FROM now()))::BIGINT)
+         ON CONFLICT(singleton) DO NOTHING",
+        &[&generation.world_id, &generation.active_catalog_sha256],
+    )?;
+    let actual =
+        load_area_generation(&mut transaction)?.ok_or(StoreError::InvalidAreaGeneration)?;
+    transaction.commit()?;
+    Ok(actual)
+}
+
+fn commit_area_generation_activation(
+    connection: &mut Client,
+    runtime: &WorldRuntimeSnapshot,
+    expected: &DurableAreaGeneration,
+    next: &DurableAreaGeneration,
+) -> Result<(), StoreError> {
+    validate_area_generation_transition(expected, next)?;
+    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
+    let world_adventure_json = bounded_json(
+        &runtime.adventure,
+        "world adventure",
+        MAX_RUNTIME_JSON_BYTES,
+    )?;
+    let expected_sequence = i64::try_from(expected.activation_sequence)
+        .map_err(|_| StoreError::InvalidAreaGeneration)?;
+    let next_sequence =
+        i64::try_from(next.activation_sequence).map_err(|_| StoreError::InvalidAreaGeneration)?;
+    let mut transaction = connection.transaction()?;
+    let current = transaction.query_opt(
+        "SELECT world_id, active_catalog_sha256, previous_catalog_sha256,
+                activation_sequence
+         FROM world_area_generation WHERE singleton = 1 FOR UPDATE",
+        &[],
+    )?;
+    let Some(current) = current else {
+        return Err(StoreError::AreaGenerationConflict);
+    };
+    let current = DurableAreaGeneration {
+        world_id: current.get(0),
+        active_catalog_sha256: current.get(1),
+        previous_catalog_sha256: current.get(2),
+        activation_sequence: u64::try_from(current.get::<_, i64>(3)).unwrap_or(0),
+    };
+    if current != *expected {
+        return Err(StoreError::AreaGenerationConflict);
+    }
+    let changed = transaction.execute(
+        "UPDATE world_area_generation
+         SET active_catalog_sha256 = $1,
+             previous_catalog_sha256 = $2,
+             activation_sequence = $3,
+             updated_at = floor(extract(epoch FROM now()))::BIGINT
+         WHERE singleton = 1 AND activation_sequence = $4",
+        &[
+            &next.active_catalog_sha256,
+            &next.previous_catalog_sha256,
+            &next_sequence,
+            &expected_sequence,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::AreaGenerationConflict);
+    }
+    transaction.execute(
+        "INSERT INTO world_adventure (singleton, state_json, updated_at)
+         VALUES (1, $1, floor(extract(epoch FROM now()))::BIGINT)
+         ON CONFLICT(singleton) DO UPDATE SET
+             state_json = excluded.state_json,
+             updated_at = excluded.updated_at",
+        &[&world_adventure_json],
+    )?;
+    let last_event_sequence: i64 = transaction
+        .query_one(
+            "SELECT GREATEST(
+                 COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
+                 COALESCE((SELECT last_event_sequence FROM world_runtime
+                           WHERE singleton = 1), 0)
+             )",
+            &[],
+        )?
+        .get(0);
+    let snapshot_version = i64::from(runtime.snapshot_version);
+    transaction.execute(
+        "INSERT INTO world_runtime
+             (singleton, snapshot_version, snapshot_json,
+              last_event_sequence, updated_at)
+         VALUES (1, $1, $2, $3, floor(extract(epoch FROM now()))::BIGINT)
+         ON CONFLICT(singleton) DO UPDATE SET
+             snapshot_version = excluded.snapshot_version,
+             snapshot_json = excluded.snapshot_json,
+             last_event_sequence = excluded.last_event_sequence,
+             updated_at = excluded.updated_at",
+        &[&snapshot_version, &runtime_json, &last_event_sequence],
+    )?;
+    transaction.execute(
+        "DELETE FROM domain_events
+         WHERE sequence <= ($1::BIGINT - $2::BIGINT)
+           AND sequence <= $1::BIGINT",
+        &[&last_event_sequence, &DOMAIN_EVENT_RETENTION],
+    )?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn load_startup_world_recovery(
@@ -4163,6 +4379,20 @@ mod tests {
         RuntimeItemLocation, WORLD_RUNTIME_SNAPSHOT_VERSION, World, WorldRuntimeSnapshotV3,
     };
 
+    fn area_generation(
+        world_id: &str,
+        active: char,
+        previous: Option<char>,
+        activation_sequence: u64,
+    ) -> DurableAreaGeneration {
+        DurableAreaGeneration {
+            world_id: world_id.into(),
+            active_catalog_sha256: active.to_string().repeat(64),
+            previous_catalog_sha256: previous.map(|digest| digest.to_string().repeat(64)),
+            activation_sequence,
+        }
+    }
+
     #[test]
     fn postgres_mail_contract_keeps_exact_input_and_storage_bounds() {
         assert_eq!(MAILBOX_CAPACITY, 64);
@@ -4479,6 +4709,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_area_generation_bind_and_activation_are_restart_safe_and_cas_guarded() {
+        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("tiamud_generation_test_{}_{}", process::id(), nonce);
+        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
+        let scoped_url = scoped_url(&base_url, &schema);
+        let store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
+        let competing_store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
+        assert_eq!(store.load_area_generation().await.unwrap(), None);
+
+        let initial = area_generation("Mundo de Ámbar", 'a', None, 1);
+        assert_eq!(
+            store
+                .bind_area_generation_if_absent(initial.clone())
+                .await
+                .unwrap(),
+            initial
+        );
+        assert_eq!(
+            competing_store
+                .bind_area_generation_if_absent(area_generation("Mundo de Ámbar", 'b', None, 1,))
+                .await
+                .unwrap(),
+            initial
+        );
+
+        let mut activated_runtime = World::demo().runtime_snapshot();
+        activated_runtime.logical_tick = 41;
+        let activated = area_generation("Mundo de Ámbar", 'b', Some('a'), 2);
+        store
+            .commit_area_generation_activation(
+                activated_runtime.clone(),
+                initial.clone(),
+                activated.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            competing_store.load_area_generation().await.unwrap(),
+            Some(activated.clone())
+        );
+        assert_eq!(
+            store.load_startup_world_recovery().await.unwrap(),
+            StartupWorldRecovery::Snapshot(activated_runtime.clone())
+        );
+
+        let mut stale_runtime = activated_runtime.clone();
+        stale_runtime.logical_tick = 99;
+        assert!(matches!(
+            competing_store
+                .commit_area_generation_activation(
+                    stale_runtime,
+                    initial,
+                    area_generation("Mundo de Ámbar", 'c', Some('a'), 2),
+                )
+                .await,
+            Err(StoreError::AreaGenerationConflict)
+        ));
+        assert_eq!(
+            store.load_area_generation().await.unwrap(),
+            Some(activated.clone())
+        );
+        assert_eq!(
+            store.load_startup_world_recovery().await.unwrap(),
+            StartupWorldRecovery::Snapshot(activated_runtime.clone())
+        );
+
+        admin_batch(
+            &base_url,
+            format!(
+                "CREATE FUNCTION {schema}.reject_generation_snapshot() RETURNS trigger
+                 LANGUAGE plpgsql AS $$
+                 BEGIN
+                     RAISE EXCEPTION 'injected snapshot failure';
+                 END;
+                 CREATE TRIGGER reject_generation_snapshot
+                 BEFORE UPDATE ON {schema}.world_runtime
+                 FOR EACH ROW EXECUTE FUNCTION {schema}.reject_generation_snapshot()"
+            ),
+        )
+        .await;
+        let replacement = {
+            let mut runtime = World::demo().runtime_snapshot();
+            runtime.logical_tick = 73;
+            runtime
+        };
+        assert!(
+            store
+                .commit_area_generation_activation(
+                    replacement,
+                    activated.clone(),
+                    area_generation("Mundo de Ámbar", 'c', Some('b'), 3),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.load_area_generation().await.unwrap(),
+            Some(activated.clone()),
+            "the pointer update must roll back when snapshot persistence fails"
+        );
+        assert_eq!(
+            store.load_startup_world_recovery().await.unwrap(),
+            StartupWorldRecovery::Snapshot(activated_runtime)
+        );
+
+        drop(competing_store);
+        drop(store);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
+    }
+
+    #[tokio::test]
     async fn postgres_board_advisory_lock_serializes_concurrent_quota() {
         let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
             return;
@@ -4645,6 +4993,7 @@ mod tests {
             .await
             .unwrap();
         store.health_check().await.unwrap();
+        assert!(!store.has_durable_character_authority().await.unwrap());
 
         let keeper = store
             .register_account(" Keeper ", "correct horse battery staple")
@@ -4668,6 +5017,7 @@ mod tests {
             .load_or_create_character(keeper.account.id, "Aster", "room:start")
             .await
             .unwrap();
+        assert!(store.has_durable_character_authority().await.unwrap());
         let keeper_staff = store.staff_access(keeper_character.id).await.unwrap();
         assert_eq!(keeper_staff.profile, Some(StaffProfileKey::Implementor));
         assert_eq!(

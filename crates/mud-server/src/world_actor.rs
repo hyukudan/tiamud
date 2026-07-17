@@ -1,12 +1,16 @@
 use crate::{
-    area_runtime::{AreaLoadCoordinator, PreparedAreaBatch},
+    area_runtime::{
+        AreaGenerationCutoverGuard, AreaGenerationRouteError, AreaGenerationRouter,
+        AreaLoadCoordinator, PreparedAreaBatch, PreparedGenerationCutover,
+    },
     auth::AuthenticatedSession,
     boards::{BoardDescriptor, apply_board},
     delivery::{DeliveryInbox, DeliveryRouter},
-    operations::AreaLoadMetricResult,
+    operations::{AreaGenerationMetricPhase, AreaLoadMetricResult},
     persistence::{
-        BoardEntry, BoardPage, CharacterStore, DurableCharacterGameplay, MailMessage, MailPage,
-        StaffAccess, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
+        BoardEntry, BoardPage, CharacterStore, DurableAreaGeneration, DurableCharacterGameplay,
+        MailMessage, MailPage, StaffAccess, StartupGameplayLoadLimits, StartupWorldRecovery,
+        StoreError,
     },
     runtime_content::{RuntimeContent, ScenePresentation},
     social::{
@@ -32,7 +36,9 @@ use tiamud_core::{
 use tiamud_scripting::ScriptHook;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
-use tracing::error;
+use tracing::{error, warn};
+#[cfg(unix)]
+use world_pack::{LocalAreaPublicationReadGuard, LocalAreaRegistryError};
 
 const WORLD_COMMAND_QUEUE_CAPACITY: usize = 256;
 const PERSIST_TICK_SCRIPT_WALL_BUDGET: Duration = Duration::from_millis(100);
@@ -60,6 +66,34 @@ pub enum GameError {
     ScriptHookRejected,
     #[error("world actor startup failed during {stage}: {reason}")]
     Startup { stage: &'static str, reason: String },
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum AreaGenerationActivationError {
+    #[error("another area generation transition or admission is in progress")]
+    Busy,
+    #[error("the area generation activation precondition is stale")]
+    WrongGeneration,
+    #[error("the prepared area generation is invalid")]
+    InvalidCandidate,
+    #[error("the candidate cannot restore the current runtime authority: {0}")]
+    Runtime(#[source] CoreWorldError),
+    #[error("the durable area generation commit failed: {0}")]
+    Persistence(#[source] StoreError),
+    #[error("the durable area generation authority is ambiguous; the world actor stopped")]
+    DurableAuthorityAmbiguous,
+    #[error("the world actor stopped unexpectedly")]
+    ActorStopped,
+}
+
+impl From<AreaGenerationRouteError> for AreaGenerationActivationError {
+    fn from(error: AreaGenerationRouteError) -> Self {
+        match error {
+            AreaGenerationRouteError::Busy => Self::Busy,
+            AreaGenerationRouteError::WrongGeneration
+            | AreaGenerationRouteError::SameGeneration => Self::WrongGeneration,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -188,6 +222,18 @@ enum Command {
         batch: Arc<PreparedAreaBatch>,
         reply: oneshot::Sender<Result<Vec<String>, GameError>>,
     },
+    InspectAreaQuiescence {
+        reply: oneshot::Sender<AreaGenerationQuiescence>,
+    },
+    ActivatePreparedGeneration {
+        prepared: Box<PreparedGenerationCutover>,
+        transition: AreaGenerationCutoverGuard,
+        #[cfg(unix)]
+        publication_guard: Option<LocalAreaPublicationReadGuard>,
+        expected_current: DurableAreaGeneration,
+        next: DurableAreaGeneration,
+        reply: oneshot::Sender<Result<(), AreaGenerationActivationError>>,
+    },
     Leave {
         session: SessionId,
     },
@@ -196,13 +242,27 @@ enum Command {
     },
 }
 
+struct GenerationActivationCommit {
+    prepared: PreparedGenerationCutover,
+    transition: AreaGenerationCutoverGuard,
+    #[cfg(unix)]
+    publication_guard: Option<LocalAreaPublicationReadGuard>,
+    expected_current: DurableAreaGeneration,
+    next: DurableAreaGeneration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AreaGenerationQuiescence {
+    pub(crate) connected_sessions: usize,
+}
+
 #[derive(Clone)]
 pub struct WorldHandle {
     tx: mpsc::Sender<Command>,
     store: Arc<dyn CharacterStore>,
     start_room_id: Arc<str>,
     creation_catalog: Arc<CharacterCreationCatalogView>,
-    area_coordinator: Option<AreaLoadCoordinator>,
+    area_router: Option<AreaGenerationRouter>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -290,7 +350,8 @@ impl WorldHandle {
         let start_room_id: Arc<str> = Arc::from(world.start_room_id());
         let creation_catalog = Arc::new(world.progression_catalog().clone());
         let actor_store = Arc::clone(&store);
-        let actor_area_coordinator = area_coordinator.clone();
+        let area_router = area_coordinator.map(AreaGenerationRouter::new);
+        let actor_area_router = area_router.clone();
         tokio::spawn(async move {
             let mut world = world;
             let mut runtime_content = runtime_content;
@@ -719,16 +780,61 @@ impl WorldHandle {
                             batch.as_ref(),
                         )
                         .await;
-                        if let (Ok(area_ids), Some(coordinator)) =
-                            (&result, &actor_area_coordinator)
-                        {
-                            coordinator.mark_resident(area_ids);
+                        if let (Ok(area_ids), Some(router)) = (&result, &actor_area_router) {
+                            router.mark_resident_if_active(&batch.core.generation_id, area_ids);
                         }
                         if let Some(metrics) = &operational_metrics {
                             metrics.set_resident_areas(world.active_area_count());
                             metrics.set_deferred_area_exits(world.deferred_area_exit_count());
                         }
                         let _ = reply.send(result);
+                    }
+                    Command::InspectAreaQuiescence { reply } => {
+                        let _ = reply.send(AreaGenerationQuiescence {
+                            connected_sessions: world.connected_sessions().len(),
+                        });
+                    }
+                    Command::ActivatePreparedGeneration {
+                        prepared,
+                        transition,
+                        #[cfg(unix)]
+                        publication_guard,
+                        expected_current,
+                        next,
+                        reply,
+                    } => {
+                        let result = activate_prepared_generation(
+                            &mut world,
+                            &mut runtime_content,
+                            actor_store.as_ref(),
+                            GenerationActivationCommit {
+                                prepared: *prepared,
+                                transition,
+                                #[cfg(unix)]
+                                publication_guard,
+                                expected_current,
+                                next,
+                            },
+                        )
+                        .await;
+                        if result.is_ok()
+                            && let Some(metrics) = &operational_metrics
+                        {
+                            metrics.set_resident_areas(world.active_area_count());
+                            metrics.set_deferred_area_exits(world.deferred_area_exit_count());
+                        }
+                        let must_fail_stop = matches!(
+                            &result,
+                            Err(AreaGenerationActivationError::DurableAuthorityAmbiguous)
+                        );
+                        let _ = reply.send(result);
+                        if must_fail_stop {
+                            error!(
+                                "world actor stopped after an ambiguous durable area-generation commit"
+                            );
+                            rx.close();
+                            break;
+                        }
                     }
                     Command::Leave { session } => {
                         let role = session_roles
@@ -810,7 +916,7 @@ impl WorldHandle {
             store,
             start_room_id,
             creation_catalog,
-            area_coordinator,
+            area_router,
         };
         match startup_receive.await {
             Ok(Ok(())) => Ok(handle),
@@ -960,12 +1066,21 @@ impl WorldHandle {
         account_id: AccountId,
         character_id: CharacterId,
     ) -> Result<EnteredWorld, GameError> {
+        // Pin one exact generation before the first storage read. The guard
+        // remains alive through lazy preparation, actor installation and the
+        // final entry response, closing the pre-actor race with a 6C cutover.
+        let area_route = self
+            .area_router
+            .as_ref()
+            .map(|router| router.try_route(None))
+            .transpose()
+            .map_err(|_| GameError::AreaUnavailable)?;
         // All authentication, password work and read-only storage waits happen
         // before the state-owning actor sees the entry command. The actor only
         // receives an authorized, fully loaded snapshot and serializes the
         // world mutation that grants the live character lease.
         let snapshot = self.store.load_character(account_id, character_id).await?;
-        if let Some(coordinator) = &self.area_coordinator {
+        if let Some(coordinator) = area_route.as_ref().map(|route| route.coordinator()) {
             let owner = coordinator
                 .generation()
                 .room_owner(&snapshot.room_id)
@@ -1068,18 +1183,28 @@ impl WorldHandle {
         session: SessionId,
         action: PlayerAction,
     ) -> Result<AppliedAction, GameError> {
+        // One route lease spans the initial actor call, an optional deferred
+        // load and install, and the single retry. An admitted action therefore
+        // cannot observe two catalog generations.
+        let area_route = self
+            .area_router
+            .as_ref()
+            .map(|router| router.try_route(None))
+            .transpose()
+            .map_err(|_| GameError::AreaUnavailable)?;
         let first = self.apply_once(session, action.clone()).await;
         let request = match first {
             Err(GameError::World(CoreWorldError::AreaLoadRequired(request))) => request,
             result => return result,
         };
-        let Some(coordinator) = &self.area_coordinator else {
+        let Some(route) = area_route.as_ref() else {
             return Err(GameError::AreaUnavailable);
         };
-        if coordinator.generation().generation_id() != request.generation_id.as_str() {
+        if route.generation() != &request.generation_id {
             return Err(GameError::AreaUnavailable);
         }
-        let batch = coordinator
+        let batch = route
+            .coordinator()
             .prepare(request.target_area_id)
             .await
             .map_err(|error| {
@@ -1117,7 +1242,7 @@ impl WorldHandle {
         receive.await.map_err(|_| GameError::ActorStopped)?
     }
 
-    async fn install_prepared_area_batch(
+    pub(crate) async fn install_prepared_area_batch(
         &self,
         batch: Arc<PreparedAreaBatch>,
     ) -> Result<(), GameError> {
@@ -1128,6 +1253,100 @@ impl WorldHandle {
             .map_err(|_| GameError::ActorStopped)?;
         let _installed = receive.await.map_err(|_| GameError::ActorStopped)??;
         Ok(())
+    }
+
+    pub(crate) fn area_generation_status(
+        &self,
+    ) -> Option<crate::area_runtime::AreaGenerationStatus> {
+        self.area_router.as_ref().map(AreaGenerationRouter::status)
+    }
+
+    pub(crate) async fn inspect_area_quiescence(
+        &self,
+    ) -> Result<AreaGenerationQuiescence, AreaGenerationActivationError> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(Command::InspectAreaQuiescence { reply })
+            .await
+            .map_err(|_| AreaGenerationActivationError::ActorStopped)?;
+        receive
+            .await
+            .map_err(|_| AreaGenerationActivationError::ActorStopped)
+    }
+
+    /// Activates one already prepared, registry-compatible full generation.
+    ///
+    /// This is an operator-internal boundary: it closes new admissions and
+    /// lazy loads, requires all admitted work to have released its generation
+    /// lease, and lets the actor prove that no sessions remain. The durable
+    /// compare-and-swap is delegated to `CharacterStore`; only after it
+    /// succeeds are the candidate world, runtime content and router published.
+    pub(crate) async fn activate_prepared_generation(
+        &self,
+        prepared: PreparedGenerationCutover,
+        expected_current: DurableAreaGeneration,
+        next: DurableAreaGeneration,
+    ) -> Result<(), AreaGenerationActivationError> {
+        if expected_current.active_catalog_sha256 != prepared.expected_current_generation.as_str()
+            || next.active_catalog_sha256 != prepared.candidate_generation.as_str()
+            || expected_current.world_id != next.world_id
+            || prepared
+                .candidate_coordinator()
+                .generation()
+                .catalog()
+                .world_id
+                != next.world_id
+        {
+            return Err(AreaGenerationActivationError::InvalidCandidate);
+        }
+        let router = self
+            .area_router
+            .as_ref()
+            .ok_or(AreaGenerationActivationError::InvalidCandidate)?;
+        #[cfg(unix)]
+        let publication_guard =
+            prepared
+                .try_acquire_candidate_publication_lock()
+                .map_err(|error| match error {
+                    LocalAreaRegistryError::PublicationLockBusy => {
+                        AreaGenerationActivationError::Busy
+                    }
+                    _ => AreaGenerationActivationError::InvalidCandidate,
+                })?;
+        // The shared publication guard is retained by the actor command until
+        // the durable CAS has a definitive/reconciled outcome. This first read
+        // rejects a candidate that changed while lock acquisition raced.
+        prepared
+            .revalidate_candidate_pointer()
+            .map_err(|_| AreaGenerationActivationError::InvalidCandidate)?;
+        let mut transition = router.begin_staging(&prepared)?;
+        transition.begin_draining()?;
+        // Re-read after admission closes and immediately before enqueueing.
+        // Cooperating writers remain excluded by the shared publication lock.
+        prepared
+            .revalidate_candidate_pointer()
+            .map_err(|_| AreaGenerationActivationError::InvalidCandidate)?;
+        let (reply, receive) = oneshot::channel();
+        match self.tx.try_send(Command::ActivatePreparedGeneration {
+            prepared: Box::new(prepared),
+            transition,
+            #[cfg(unix)]
+            publication_guard,
+            expected_current,
+            next,
+            reply,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return Err(AreaGenerationActivationError::Busy);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return Err(AreaGenerationActivationError::ActorStopped);
+            }
+        }
+        receive
+            .await
+            .map_err(|_| AreaGenerationActivationError::ActorStopped)?
     }
 
     pub async fn current_state(
@@ -1228,6 +1447,102 @@ fn allocate_session(next_session: &mut u64) -> SessionId {
     let session = SessionId(*next_session);
     *next_session = next_session.wrapping_add(1).max(1);
     session
+}
+
+async fn activate_prepared_generation(
+    world: &mut World,
+    runtime_content: &mut RuntimeContent,
+    store: &dyn CharacterStore,
+    activation: GenerationActivationCommit,
+) -> Result<(), AreaGenerationActivationError> {
+    let GenerationActivationCommit {
+        prepared,
+        mut transition,
+        #[cfg(unix)]
+            publication_guard: _publication_guard,
+        expected_current,
+        next,
+    } = activation;
+    if !world.connected_sessions().is_empty()
+        || world.area_generation() != Some(&prepared.expected_current_generation)
+        || prepared.world.area_generation() != Some(&prepared.candidate_generation)
+        || expected_current.active_catalog_sha256 != prepared.expected_current_generation.as_str()
+        || next.active_catalog_sha256 != prepared.candidate_generation.as_str()
+    {
+        return Err(if world.connected_sessions().is_empty() {
+            AreaGenerationActivationError::WrongGeneration
+        } else {
+            AreaGenerationActivationError::Busy
+        });
+    }
+
+    // The registry compatibility gate has already proved that this is a
+    // no-migration replacement. Reusing the ordinary strict restore against a
+    // complete private candidate preserves every dynamic authority while
+    // allowing static room/presentation/script content to change.
+    let snapshot = world.runtime_snapshot();
+    let PreparedGenerationCutover {
+        expected_current_generation: _,
+        candidate_generation: _,
+        world: mut candidate_world,
+        runtime_content: candidate_runtime_content,
+        candidate_coordinator: _,
+        ..
+    } = prepared;
+    candidate_world
+        .restore_runtime_snapshot(snapshot)
+        .map_err(AreaGenerationActivationError::Runtime)?;
+
+    transition.begin_committing()?;
+    if let Some(metrics) = runtime_content.operational_metrics() {
+        metrics.set_area_generation_phase(AreaGenerationMetricPhase::Committing);
+    }
+    let candidate_snapshot = candidate_world.runtime_snapshot();
+    if let Err(commit_error) = store
+        .commit_area_generation_activation(
+            candidate_snapshot,
+            expected_current.clone(),
+            next.clone(),
+        )
+        .await
+    {
+        match store.load_area_generation().await {
+            Ok(Some(actual)) if actual == next => {
+                warn!(
+                    error = %commit_error,
+                    "durable area-generation commit succeeded but its acknowledgement was lost"
+                );
+            }
+            Ok(Some(actual)) if actual == expected_current => {
+                return Err(AreaGenerationActivationError::Persistence(commit_error));
+            }
+            Ok(_) => {
+                error!(
+                    error = %commit_error,
+                    "durable area-generation authority differs from both commit endpoints"
+                );
+                transition.seal_fail_stop();
+                return Err(AreaGenerationActivationError::DurableAuthorityAmbiguous);
+            }
+            Err(reconcile_error) => {
+                error!(
+                    error = %commit_error,
+                    reconciliation_error = %reconcile_error,
+                    "durable area-generation authority could not be reconciled after commit failure"
+                );
+                transition.seal_fail_stop();
+                return Err(AreaGenerationActivationError::DurableAuthorityAmbiguous);
+            }
+        }
+    }
+
+    // Durable authority now names the candidate. These assignments and the
+    // router publication deliberately contain no validation or I/O. A process
+    // failure from this point is recovered from the durable candidate.
+    *world = candidate_world;
+    *runtime_content = candidate_runtime_content;
+    transition.finish_commit();
+    Ok(())
 }
 
 async fn authenticated_roster(
@@ -3337,6 +3652,10 @@ mod tests {
                     crate::persistence::StartupWorldRecovery::Ledger(state.domain_events.clone())
                 }
             })
+        }
+
+        async fn has_durable_character_authority(&self) -> Result<bool, StoreError> {
+            Ok(!self.state.lock().unwrap().characters.is_empty())
         }
 
         async fn load_domain_events(&self) -> Result<Vec<tiamud_core::DomainEvent>, StoreError> {
@@ -8869,7 +9188,7 @@ mod tests {
                 backgrounds: Vec::new(),
                 base_classes: Vec::new(),
             }),
-            area_coordinator: None,
+            area_router: None,
         };
         for _ in 0..WORLD_COMMAND_QUEUE_CAPACITY {
             let (reply, _receive) = oneshot::channel();

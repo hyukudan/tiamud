@@ -36,15 +36,15 @@ PostgreSQL se recomienda para instalaciones públicas nuevas; SQLite es la
 alternativa local sin servicio. Se selecciona uno y nunca se hace doble
 escritura.
 
-Ambos adaptadores implementan el esquema v13. Conserva las relaciones sociales
+Ambos adaptadores implementan el esquema v14. Conserva las relaciones sociales
 y de staff de v9/v10 y amplía de forma transaccional el límite físico del
 snapshot opaco actual a 2 MiB. Los snapshots legacy v1–v5 continúan limitados a
 1 MiB al decodificarse; v6 y v7 admiten 2 MiB. El traslado
-SQLite→PostgreSQL copia estas relaciones y
+SQLite→PostgreSQL copia estas relaciones, la identidad durable de generación y
 el runtime en una transacción. La aceptación runtime histórica retenida es v8
 y no se relabela como v13. PostgreSQL 18.4 real pasa 19/19 en adaptador+mover
-v13, incluida migración representativa; servidor cubre flujo board/runtime y
-concurrencia advisory reales.
+v13, incluida migración representativa; esa evidencia no se relabela como v14.
+El servidor cubre flujo board/runtime y concurrencia advisory reales.
 
 La operación está en [single-host.md](operations/single-host.md). Microservicios
 y orquestación no son objetivo sin carga medida que lo justifique.
@@ -74,7 +74,7 @@ bytes, no de puntos de código.
 Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
 
-### Catálogo y carga local aditiva de áreas 6A–6B
+### Catálogo, carga aditiva y sustitución quiescente 6A–6C
 
 WorldPack monolítico continúa siendo una ruta de ejecución válida. La ruta
 alternativa local requiere juntas `TIAMUD_AREA_REGISTRY` y
@@ -105,11 +105,73 @@ parte de snapshot v7, se confirma su estado mediante la transacción durable
 existente antes de publicar. El resultado público es genérico y las métricas
 no usan IDs, revisiones, digests o generaciones como labels.
 
-La residencia solo crece y dura hasta apagar. Cambiar de catálogo requiere
-reiniciar. Sustitución de revisiones, coexistencia de generaciones, drenaje,
-descarga, LRU, presupuesto de memoria residente, red, compresión y firma remota
-pertenecen a 6C o fases posteriores. El contrato completo está en
-[ADR 0020](decisions/0020-additive-local-area-loading.md).
+Dentro de una generación, la residencia solo crece y dura hasta apagar. 6C
+permite sustituir **la generación completa**, no un área individual. En modo
+catálogo, la primera ejecución liga antes de readiness el `worldId`, digest
+activo y secuencia de activación en el singleton SQL v14
+`world_area_generation`. Un arranque posterior deriva la ruta exacta desde el
+registro y ese digest durable, aunque el puntero editorial `area-active` haya
+cambiado. `WorldRuntimeSnapshot` permanece en v7 y no aparece otra autoridad
+de objetos, NPC, botín o personajes.
+
+Al migrar desde 6B/esquema v13 con recovery compartido o personajes, la fila
+v14 nace vacía: el primer arranque debe conservar el catálogo G0 exacto y
+verificar su liga durable.
+Cambiar a G1 a la vez impediría comparar contra una identidad anterior que v13
+no guardaba y eludiría la puerta de compatibilidad/CAS. G1 se publica o
+selecciona solo después de la liga verificada de G0. Ese primer arranque requiere
+`TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>` coincidente con el
+catálogo; la variable se elimina tras ligar.
+
+`StartupWorldRecovery::Empty` no garantiza que falte autoridad durable: puede
+haber personajes aunque no exista snapshot ni ledger. Sin liga generacional,
+recovery compartido o cualquier personaje durable exige el ACK exacto del G0
+conocido de 6B. Una base vacía o con cuentas pero sin personajes ni recovery de
+mundo puede ligar sin ACK. Monolítico con autoridad de mundo/personaje→catálogo
+no es una migración 6C implícita. El ACK se rechaza en modo monolítico, con liga
+existente, sin recovery/personaje que reconocer o ante digest distinto.
+`CharacterStore::has_durable_character_authority` aplica esa comprobación en
+SQLite, PostgreSQL, el wrapper medido y memoria de pruebas.
+
+Un SIGHUP local abre `area-active`, vuelve a leer sus bytes para detectar una
+publicación cooperante concurrente, verifica la release completa y construye
+fuera del actor un `World`, `RuntimeContent` y coordinador privados. La candidata
+no publica gauges: las métricas siguen describiendo la generación activa hasta
+el swap confirmado. Una activación normal exige `catalogRevision` creciente y
+revisión mayor para cada bundle modificado. El comando
+`tiamud-world area-select --catalog <path> --registry <dir>`
+hace explícita la selección de una generación inmutable anterior; el SIGHUP
+posterior recorre la misma barrera como rollback y siempre incrementa la
+secuencia durable. Tras el staging, el runtime adquiere el lock cooperativo de
+lectura usado por `area-publish`/`area-select`, revalida el puntero bajo ese
+lock y lo retiene hasta resolver el CAS; lock ocupado aborta el intento.
+En Solaris, runtime y publicadores usan el mismo protocolo de registro `fcntl`
+compatible con `fd-lock`, no dos familias de locks que puedan ignorarse.
+
+6C no aporta migración semántica: exige el mismo mundo y `startRoomId`, RNG y
+reglas completas, prototipos/instancias iniciales, NPC/spawns/sets, botín,
+afijos, conjunto de áreas, ownership, IDs de sala y VNUM legacy; todas las
+entradas declaran `persistentMigrationVersion == 0`. Puede cambiar prosa,
+títulos, salidas, recursos, percepción, variantes, presentación y scripts Lua
+síncronos ya validados.
+
+Antes del corte se cierran admisiones y se exigen cero sesiones y cero leases
+de entrada, acción o carga. Si hay actividad, el resultado es `busy`: no se
+expulsa, desconecta ni teletransporta a nadie. El actor captura el snapshot v7
+actual, lo restaura sobre la candidata y confirma mediante compare-and-swap el
+snapshot y el puntero de generación en una sola transacción. Solo entonces
+intercambia en memoria mundo, contenido y coordinador y reabre admisiones. Un
+fallo definitivo anterior al commit, incluido un CAS rechazado, conserva la
+generación anterior. Un resultado de commit ambiguo se resuelve releyendo la
+autoridad SQL: G1 durable se publica, G0 se reabre y cualquier otro valor o
+error de lectura deja el router en `Committing`, detiene el actor y mantiene
+readiness 503 sin admisiones hasta reinicio/recuperación durable.
+
+Siguen fuera el reemplazo por área, jugadores durante drenaje, migraciones de
+estado, checkpoint/descarga por área, presupuesto residente, LRU, histéresis,
+GC, red, compresión y firma remota. Los contratos completos están en
+[ADR 0020](decisions/0020-additive-local-area-loading.md) y
+[ADR 0021](decisions/0021-quiescent-area-generation-cutover.md).
 
 ### Objetos, inventario y botín 3A–4B
 
@@ -247,7 +309,7 @@ aparecen en botín se realiza una consulta `existence-only`. Después se cancela
 los encuentros de botín aún abiertos y su estado de combate en un commit previo
 a readiness; los derechos `groundLoot` ya resueltos sobreviven intactos. SQLite
 y PostgreSQL confirman el snapshot como única autoridad en su transacción de
-esquema v13; no hay tabla espejo de loot o escrow ni doble escritura.
+esquema v14; no hay tabla espejo de loot o escrow ni doble escritura.
 
 Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
 WorldPack, 65.536 instancias runtime, 1 MiB para un snapshot legacy v1–v5 y 2
@@ -631,7 +693,7 @@ secuencia ni se infieren de prosa. Referencia:
 | Combate y habilidades acotadas | Baseline implementado y probado |
 | Límites acumulados y nivel sin relleno | Implementado y probado |
 | WorldPack v9/AreaPack v8/WorldProject v2, validador, normalizador y catálogo | Integrado; entradas WorldPack v8/v7/v6/v5/v4/v3/v2 y AreaPack v7/v6/v5/v4/v3/v2/v1 se normalizan sin inventar sellos, afijos, telepatía, emotes ni loot ausente |
-| Áreas 6A/6B | Catálogo/bundles locales verificables y carga aditiva por generación fijada implementados; `DeferredExit`, staging 2 activos + 8 pendientes, timeout 5 s, cierre 32, instalación/rollback atómicos y recovery completo cubiertos; sin reemplazo, descarga o LRU |
+| Áreas 6A/6B/6C | Catálogo/bundles locales, carga aditiva y sustitución quiescente completa implementados. 6C añade identidad SQL v14, startup exacto, SIGHUP, staging privado, compatibilidad sin migración, cero sesiones/leases, CAS snapshot+puntero y rollback explícito. La puerta pasa 774 pruebas Rust/329 servidor y la reauditoría 0 P1/0 P2; el humo G0→G1→G0/restart está retenido. PostgreSQL real no se ejecutó sin URL. Sin reemplazo/descarga por área ni LRU |
 | Linaje/clase/talento/promoción y persistencia | Implementado y probado |
 | Creación v3 navegador/Telnet | Default/none/explícito implementado |
 | Ficha, talentos y promociones web | Implementado y probado |
@@ -640,7 +702,7 @@ secuencia ni se infieren de prosa. Referencia:
 | Perfil de sprite transparente | WebP alfa + PNG implementado |
 | Sidecar de entidades seguro | Implementado; sin sprites de muestra |
 | Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
-| Social fase 1 y esquema v13 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; PostgreSQL v13 real adaptador+mover 19/19 y flujo board/runtime servidor cubierto |
+| Social fase 1 y esquema v14 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; PostgreSQL v13 real adaptador+mover 19/19 y flujo board/runtime servidor cubierto como evidencia histórica, no como gate v14 |
 | Comunicación fase 5A | Telepatía directa online authored con coste/cooldowns, bloqueo por sala, supresión privada, commit antes de entrega y paridad Web/Telnet/GMCP; la telepatía no persiste ni entrega offline/grupal |
 | Comunicación fase 5B | Emotes locales authored con plantillas cerradas y render no recursivo, targeting local cerrado sin objetivo/opcional/obligatorio, ignore/block por receptor, commit antes de entrega y paridad Web/Telnet/GMCP; sin texto libre, persistencia ni emotes globales/de grupo |
 | Comunicación fase 5C | Correo offline explícito con cuotas por cuenta, buzón/caducidad/paginación acotados, referencias opacas, aceptación que no filtra política/capacidad, denuncia con evidencia de 90 días y paridad Web/Telnet/`Tiamud.Mail 1`; sin historial general, outbox, adjuntos ni correo grupal |
@@ -873,12 +935,41 @@ Comunicación 5E — demostrada sobre el árbol integrado:
 6. No cambian WorldPack/AreaPack/WorldProject, snapshot, esquema SQL, `reply`,
    retención ni suscripciones.
 
+Áreas 6C — implementada con puerta final retenida:
+
+1. Startup liga una primera generación y, después, recupera por digest la
+   autoridad SQL v14 aunque `area-active` anuncie otra; una fuente monolítica
+   no puede abrir una base ya ligada a catálogo.
+2. SIGHUP verifica puntero estable, catálogo, fallback y bundles completos y
+   construye la candidata fuera del actor; tamper o cambio de puntero conserva
+   la generación activa.
+3. Gameplay, RNG, objetos iniciales, NPC, loot, afijos, áreas, ownership, IDs
+   de sala/VNUM y migración cero son incompatibilidades cerradas; los cambios
+   permitidos de prosa, salida y presentación se restauran con el snapshot.
+4. Cero sesiones y cero leases son condición de commit. Actividad devuelve
+   `busy` sin desconectar ni publicar estado parcial; un resultado tardío de la
+   generación anterior no puede instalarse en la nueva.
+5. SQLite/PostgreSQL confirman snapshot v7 y puntero durable por CAS en la misma
+   transacción. Un rechazo definitivo conserva la generación previa; un
+   resultado ambiguo relee SQL y publica G1, reabre G0 o queda fail-stop en
+   `Committing` con readiness 503.
+6. Activación creciente y rollback explícito incrementan la secuencia durable;
+   `area-select` solo selecciona un blob ya publicado, nunca migra datos.
+7. Métricas y errores públicos no exponen mundo, área, revisión, ruta o digest;
+   el staging no sobrescribe gauges de la generación activa. La puerta pasa 774
+   pruebas Rust —329 del servidor—, formato/diff, clippy, MSRV, cargo-deny,
+   licencias/avisos 308 Rust/76 web, Svelte 0/0 y 123 Vitest; la reauditoría
+   queda en 0 P1/0 P2. PostgreSQL v14 real no se ejecutó sin URL. El humo cubre
+   liga/noop/activación/rollback, restart, readiness/Web/Telnet, métricas y
+   shutdown.
+
 ## Trabajo aplazado o rechazado
 
 Aplazado hasta necesidad demostrada: transformaciones, culturas, respec,
 rangos de clase, editor de grafos, simulación de balance, medios animados,
-gráficos raster terminales y sustitución/descarga/LRU caliente de áreas. La
-carga local aditiva 6B ya existe. El compositor necesita sprites
+gráficos raster terminales y sustitución/descarga/LRU **por área**. La carga
+local aditiva 6B y el corte completo quiescente 6C ya existen, aunque 6C aún
+debe cerrar su gate integrado. El compositor necesita sprites
 revisados; avatar, heal cue y lápida son mejoras opcionales. Need/greed,
 master-loot, reparto por contribución y pity requieren diseño adicional.
 

@@ -12,6 +12,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -25,6 +26,42 @@ use crate::{
 };
 
 pub const MAX_LOCAL_HARD_DEPENDENCY_CLOSURE: usize = 32;
+pub const MAX_LOCAL_AREA_POINTER_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActiveAreaCatalog {
+    pub schema: u8,
+    pub world_id: String,
+    pub catalog_sha256: String,
+    pub catalog: String,
+}
+
+/// Exact bytes observed while resolving one cooperative `area-active` update.
+///
+/// The catalog digest is the runtime generation identity. The pointer digest
+/// additionally lets a caller compare-and-swap a candidate acquired through
+/// `open_active` without treating the mutable editorial pointer as authority.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ActiveAreaCatalogIdentity {
+    pointer_path: PathBuf,
+    pointer_sha256: String,
+    catalog_sha256: String,
+}
+
+impl ActiveAreaCatalogIdentity {
+    pub fn pointer_path(&self) -> &Path {
+        &self.pointer_path
+    }
+
+    pub fn pointer_sha256(&self) -> &str {
+        &self.pointer_sha256
+    }
+
+    pub fn catalog_sha256(&self) -> &str {
+        &self.catalog_sha256
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum LocalAreaRegistryError {
@@ -47,8 +84,38 @@ pub enum LocalAreaRegistryError {
     },
     #[error("invalid local area registry: {0}")]
     Invalid(String),
+    #[error("the cooperating area publication lock is busy")]
+    PublicationLockBusy,
     #[error("area catalog verification failed: {0}")]
     Catalog(#[from] AreaCatalogError),
+}
+
+/// Owned shared advisory lock for one world's mutable editorial pointer.
+/// Cooperating `area-publish` and `area-select` writers cannot move
+/// `area-active` until this value is dropped.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct LocalAreaPublicationReadGuard {
+    file: fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for LocalAreaPublicationReadGuard {
+    fn drop(&mut self) {
+        let _ = compatible_unix_lock(&self.file, rustix::fs::FlockOperation::Unlock);
+    }
+}
+
+#[cfg(unix)]
+fn compatible_unix_lock(
+    file: &fs::File,
+    operation: rustix::fs::FlockOperation,
+) -> rustix::io::Result<()> {
+    #[cfg(not(target_os = "solaris"))]
+    return rustix::fs::flock(file, operation);
+
+    #[cfg(target_os = "solaris")]
+    return rustix::fs::fcntl_lock(file, operation);
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +128,54 @@ pub struct LocalAreaGeneration {
     fallback: WorldPackDocument,
     area_index: BTreeMap<String, usize>,
     room_owners: BTreeMap<String, String>,
+    active_pointer_identity: Option<ActiveAreaCatalogIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StagedLocalAreaGenerationReplacement {
+    kind: GenerationReplacementKind,
+    expected_current_generation_id: String,
+    candidate_generation_id: String,
+    candidate_active_pointer_identity: Option<ActiveAreaCatalogIdentity>,
+    changed_area_ids: Vec<String>,
+    candidate: LocalAreaGeneration,
+}
+
+impl StagedLocalAreaGenerationReplacement {
+    pub fn kind(&self) -> GenerationReplacementKind {
+        self.kind
+    }
+
+    pub fn expected_current_generation_id(&self) -> &str {
+        &self.expected_current_generation_id
+    }
+
+    pub fn candidate_generation_id(&self) -> &str {
+        &self.candidate_generation_id
+    }
+
+    pub fn candidate_active_pointer_identity(&self) -> Option<&ActiveAreaCatalogIdentity> {
+        self.candidate_active_pointer_identity.as_ref()
+    }
+
+    pub fn changed_area_ids(&self) -> &[String] {
+        &self.changed_area_ids
+    }
+
+    pub fn candidate(&self) -> &LocalAreaGeneration {
+        &self.candidate
+    }
+
+    pub fn into_candidate(self) -> LocalAreaGeneration {
+        self.candidate
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum GenerationReplacementKind {
+    Activate,
+    Rollback,
+    Noop,
 }
 
 impl LocalAreaGeneration {
@@ -121,6 +236,7 @@ impl LocalAreaGeneration {
             fallback,
             area_index,
             room_owners,
+            active_pointer_identity: None,
         };
         for entry in &generation.catalog.entries {
             generation.hard_dependency_closure(entry.area_id.as_str())?;
@@ -128,8 +244,114 @@ impl LocalAreaGeneration {
         Ok(generation)
     }
 
+    /// Resolves one mutable local `area-active` pointer into an immutable exact
+    /// generation. The pointer is read strictly before and after opening the
+    /// catalog and fallback; a cooperating publication that changes during
+    /// acquisition is rejected rather than mixed with the candidate.
+    pub fn open_active(
+        registry: impl AsRef<Path>,
+        world_id: &str,
+    ) -> Result<Self, LocalAreaRegistryError> {
+        Self::open_active_with_observer(registry.as_ref(), world_id, || {})
+    }
+
+    fn open_active_with_observer(
+        registry: &Path,
+        world_id: &str,
+        after_generation_open: impl FnOnce(),
+    ) -> Result<Self, LocalAreaRegistryError> {
+        let pointer_path = local_active_area_catalog_path(registry, world_id);
+        let pointer_bytes = read_bounded_local_registry_file(
+            registry,
+            &pointer_path,
+            MAX_LOCAL_AREA_POINTER_BYTES,
+            "active area catalog pointer",
+        )?;
+        let pointer: ActiveAreaCatalog = crate::area_catalog::parse_bounded(
+            &pointer_bytes,
+            MAX_LOCAL_AREA_POINTER_BYTES,
+            "active area catalog pointer",
+        )
+        .map_err(|error| LocalAreaRegistryError::Invalid(error.to_string()))?;
+        if pointer.schema != 1 || pointer.world_id != world_id {
+            return Err(LocalAreaRegistryError::Invalid(
+                "active catalog pointer has the wrong schema or world".into(),
+            ));
+        }
+        if !valid_digest(&pointer.catalog_sha256) {
+            return Err(LocalAreaRegistryError::Invalid(
+                "active catalog pointer has an invalid catalog digest".into(),
+            ));
+        }
+        let catalog_path = local_area_catalog_path(registry, world_id, &pointer.catalog_sha256);
+        let expected_relative = registry_relative_path(registry, &catalog_path)?;
+        if pointer.catalog != expected_relative {
+            return Err(LocalAreaRegistryError::Invalid(
+                "active catalog pointer does not name its content-addressed catalog".into(),
+            ));
+        }
+        let mut generation = Self::open_exact(registry, &catalog_path)?;
+        if generation.generation_id != pointer.catalog_sha256
+            || generation.catalog.world_id != world_id
+        {
+            return Err(LocalAreaRegistryError::Invalid(
+                "active catalog pointer digest/world mismatch".into(),
+            ));
+        }
+
+        after_generation_open();
+        let final_pointer_bytes = read_bounded_local_registry_file(
+            registry,
+            &pointer_path,
+            MAX_LOCAL_AREA_POINTER_BYTES,
+            "active area catalog pointer",
+        )?;
+        if final_pointer_bytes != pointer_bytes {
+            return Err(LocalAreaRegistryError::Invalid(
+                "active catalog pointer changed while the generation was opened".into(),
+            ));
+        }
+        generation.active_pointer_identity = Some(ActiveAreaCatalogIdentity {
+            pointer_path,
+            pointer_sha256: sha256_hex(&pointer_bytes),
+            catalog_sha256: pointer.catalog_sha256,
+        });
+        Ok(generation)
+    }
+
     pub fn generation_id(&self) -> &str {
         &self.generation_id
+    }
+
+    pub fn registry_path(&self) -> &Path {
+        &self.registry
+    }
+
+    pub fn active_pointer_identity(&self) -> Option<&ActiveAreaCatalogIdentity> {
+        self.active_pointer_identity.as_ref()
+    }
+
+    /// Confirms that the mutable editorial pointer still contains the exact
+    /// bytes from which this candidate was acquired. Exact-path generations do
+    /// not carry a pointer identity and therefore cannot pass this CAS gate.
+    pub fn revalidate_active_pointer_identity(&self) -> Result<(), LocalAreaRegistryError> {
+        let identity = self.active_pointer_identity.as_ref().ok_or_else(|| {
+            LocalAreaRegistryError::Invalid(
+                "generation was not acquired through an active catalog pointer".into(),
+            )
+        })?;
+        let pointer_bytes = read_bounded_local_registry_file(
+            &self.registry,
+            &identity.pointer_path,
+            MAX_LOCAL_AREA_POINTER_BYTES,
+            "active area catalog pointer",
+        )?;
+        if sha256_hex(&pointer_bytes) != identity.pointer_sha256 {
+            return Err(LocalAreaRegistryError::Invalid(
+                "active catalog pointer changed after candidate acquisition".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn catalog(&self) -> &AreaCatalog {
@@ -254,6 +476,194 @@ impl LocalAreaGeneration {
     }
 }
 
+/// Performs the deliberately narrow 6C full-generation compatibility gate.
+///
+/// Both releases are re-opened completely before comparison. Runtime gameplay,
+/// durable authored items and NPC/loot/affix definitions must remain byte-for-
+/// byte equivalent. A candidate may change room prose/topology/assets plus the
+/// reviewed presentation, perception and script layers, provided stable room
+/// identity and legacy VNUM mapping do not change.
+pub fn validate_generation_replacement(
+    current: &LocalAreaGeneration,
+    next: &LocalAreaGeneration,
+) -> Result<GenerationReplacementKind, LocalAreaRegistryError> {
+    current.verify_complete_release()?;
+    next.verify_complete_release()?;
+    let current_world = &current.fallback.world;
+    let next_world = &next.fallback.world;
+    if current.catalog.world_id != next.catalog.world_id
+        || current_world.id != next_world.id
+        || current_world.name != next_world.name
+        || current_world.start_room_id != next_world.start_room_id
+    {
+        return Err(LocalAreaRegistryError::Invalid(
+            "generation replacement changes world or start-room identity".into(),
+        ));
+    }
+    if current_world.item_prototypes != next_world.item_prototypes
+        || current_world.initial_item_instances != next_world.initial_item_instances
+        || current_world.gameplay != next_world.gameplay
+    {
+        return Err(LocalAreaRegistryError::Invalid(
+            "generation replacement changes durable gameplay content".into(),
+        ));
+    }
+    let current_rooms = room_identity_map(&current_world.rooms)?;
+    let next_rooms = room_identity_map(&next_world.rooms)?;
+    if current_rooms != next_rooms {
+        return Err(LocalAreaRegistryError::Invalid(
+            "generation replacement changes stable room or legacy VNUM identity".into(),
+        ));
+    }
+    let current_areas = current
+        .catalog
+        .entries
+        .iter()
+        .map(|entry| (entry.area_id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let next_areas = next
+        .catalog
+        .entries
+        .iter()
+        .map(|entry| (entry.area_id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    if current_areas.len() != next_areas.len()
+        || current_areas.keys().ne(next_areas.keys())
+        || current_areas.iter().any(|(area_id, current_entry)| {
+            next_areas
+                .get(area_id)
+                .is_none_or(|next_entry| current_entry.ownership != next_entry.ownership)
+        })
+    {
+        return Err(LocalAreaRegistryError::Invalid(
+            "generation replacement changes area or stable-ID ownership".into(),
+        ));
+    }
+    if current
+        .catalog
+        .entries
+        .iter()
+        .chain(next.catalog.entries.iter())
+        .any(|entry| entry.compatibility.persistent_migration_version != 0)
+    {
+        return Err(LocalAreaRegistryError::Invalid(
+            "generation replacement requires a persistent migration".into(),
+        ));
+    }
+
+    let kind = match next
+        .catalog
+        .catalog_revision
+        .cmp(&current.catalog.catalog_revision)
+    {
+        std::cmp::Ordering::Greater => GenerationReplacementKind::Activate,
+        std::cmp::Ordering::Less => GenerationReplacementKind::Rollback,
+        std::cmp::Ordering::Equal if next.generation_id == current.generation_id => {
+            GenerationReplacementKind::Noop
+        }
+        std::cmp::Ordering::Equal => {
+            return Err(LocalAreaRegistryError::Invalid(
+                "different generations reuse one catalog revision".into(),
+            ));
+        }
+    };
+    for (area_id, current_entry) in current_areas {
+        let next_entry = next_areas[area_id];
+        let revision_order = next_entry.revision.cmp(&current_entry.revision);
+        let bundle_changed = next_entry.bundle_sha256 != current_entry.bundle_sha256;
+        let valid = match kind {
+            GenerationReplacementKind::Activate => {
+                (bundle_changed && revision_order.is_gt())
+                    || (!bundle_changed && revision_order.is_eq())
+            }
+            GenerationReplacementKind::Rollback => {
+                (bundle_changed && revision_order.is_lt())
+                    || (!bundle_changed && revision_order.is_eq())
+            }
+            GenerationReplacementKind::Noop => !bundle_changed && revision_order.is_eq(),
+        };
+        if !valid {
+            return Err(LocalAreaRegistryError::Invalid(
+                "area revision/digest does not follow generation direction".into(),
+            ));
+        }
+    }
+    Ok(kind)
+}
+
+/// Verifies and packages all immutable inputs required by a server-side 6C
+/// compare-and-swap. It deliberately returns world-pack pieces rather than
+/// depending on server runtime types.
+pub fn stage_generation_replacement(
+    current: &LocalAreaGeneration,
+    candidate: LocalAreaGeneration,
+) -> Result<StagedLocalAreaGenerationReplacement, LocalAreaRegistryError> {
+    stage_generation_with_kind(current, candidate, GenerationReplacementKind::Activate)
+}
+
+/// Explicit reverse-editorial path. A lower catalog revision is never accepted
+/// through the ordinary activation API.
+pub fn stage_generation_rollback(
+    current: &LocalAreaGeneration,
+    candidate: LocalAreaGeneration,
+) -> Result<StagedLocalAreaGenerationReplacement, LocalAreaRegistryError> {
+    stage_generation_with_kind(current, candidate, GenerationReplacementKind::Rollback)
+}
+
+fn stage_generation_with_kind(
+    current: &LocalAreaGeneration,
+    candidate: LocalAreaGeneration,
+    expected: GenerationReplacementKind,
+) -> Result<StagedLocalAreaGenerationReplacement, LocalAreaRegistryError> {
+    let kind = validate_generation_replacement(current, &candidate)?;
+    if candidate.active_pointer_identity.is_some() {
+        candidate.revalidate_active_pointer_identity()?;
+    }
+    if kind != expected && kind != GenerationReplacementKind::Noop {
+        return Err(LocalAreaRegistryError::Invalid(
+            match kind {
+                GenerationReplacementKind::Activate => {
+                    "newer generation requires the activation staging API"
+                }
+                GenerationReplacementKind::Rollback => {
+                    "older generation requires the explicit rollback staging API"
+                }
+                GenerationReplacementKind::Noop => unreachable!(),
+            }
+            .into(),
+        ));
+    }
+    let current_entries = current
+        .catalog
+        .entries
+        .iter()
+        .map(|entry| (entry.area_id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let candidate_entries = candidate
+        .catalog
+        .entries
+        .iter()
+        .map(|entry| (entry.area_id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let changed_area_ids = current_entries
+        .keys()
+        .chain(candidate_entries.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|area_id| current_entries.get(area_id) != candidate_entries.get(area_id))
+        .map(str::to_owned)
+        .collect();
+    Ok(StagedLocalAreaGenerationReplacement {
+        kind,
+        expected_current_generation_id: current.generation_id.clone(),
+        candidate_generation_id: candidate.generation_id.clone(),
+        candidate_active_pointer_identity: candidate.active_pointer_identity.clone(),
+        changed_area_ids,
+        candidate,
+    })
+}
+
 pub fn local_area_catalog_path(registry: &Path, world_id: &str, digest: &str) -> PathBuf {
     registry
         .join("area-catalogs")
@@ -279,6 +689,92 @@ pub fn local_area_world_path(registry: &Path, world_id: &str, digest: &str) -> P
         .join("area-worlds")
         .join(storage_id(world_id))
         .join(format!("{digest}.world.json"))
+}
+
+pub fn local_active_area_catalog_path(registry: &Path, world_id: &str) -> PathBuf {
+    registry
+        .join("area-active")
+        .join(format!("{}.json", storage_id(world_id)))
+}
+
+pub fn local_area_publication_lock_path(registry: &Path, world_id: &str) -> PathBuf {
+    registry
+        .join("area-locks")
+        .join(format!("{}.lock", storage_id(world_id)))
+}
+
+/// Attempts to pin the cooperative editorial pointer without blocking a
+/// runtime thread. The lock file is created durably by `area-publish`; runtime
+/// reconciliation refuses missing, replaced or symlinked lock identities.
+#[cfg(unix)]
+pub fn try_acquire_local_area_publication_read_lock(
+    registry: &Path,
+    world_id: &str,
+) -> Result<LocalAreaPublicationReadGuard, LocalAreaRegistryError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let path = local_area_publication_lock_path(registry, world_id);
+    let parent = path.parent().ok_or_else(|| {
+        LocalAreaRegistryError::Invalid("area publication lock has no parent".into())
+    })?;
+    verify_existing_registry_directory(registry, parent)?;
+    let before = fs::symlink_metadata(&path).map_err(|source| LocalAreaRegistryError::Inspect {
+        path: path.clone(),
+        source,
+    })?;
+    if before.file_type().is_symlink() || !before.file_type().is_file() {
+        return Err(LocalAreaRegistryError::Invalid(
+            "area publication lock is not a regular non-symlink file".into(),
+        ));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|source| LocalAreaRegistryError::Read {
+            path: path.clone(),
+            source,
+        })?;
+    let opened = file
+        .metadata()
+        .map_err(|source| LocalAreaRegistryError::Inspect {
+            path: path.clone(),
+            source,
+        })?;
+    if !opened.file_type().is_file() || before.dev() != opened.dev() || before.ino() != opened.ino()
+    {
+        return Err(LocalAreaRegistryError::Invalid(
+            "area publication lock changed while it was opened".into(),
+        ));
+    }
+    compatible_unix_lock(&file, rustix::fs::FlockOperation::NonBlockingLockShared).map_err(
+        |error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                LocalAreaRegistryError::PublicationLockBusy
+            } else {
+                LocalAreaRegistryError::Read {
+                    path: path.clone(),
+                    source: error.into(),
+                }
+            }
+        },
+    )?;
+    let current =
+        fs::symlink_metadata(&path).map_err(|source| LocalAreaRegistryError::Inspect {
+            path: path.clone(),
+            source,
+        })?;
+    if current.file_type().is_symlink()
+        || !current.file_type().is_file()
+        || current.dev() != opened.dev()
+        || current.ino() != opened.ino()
+    {
+        let _ = compatible_unix_lock(&file, rustix::fs::FlockOperation::Unlock);
+        return Err(LocalAreaRegistryError::Invalid(
+            "area publication lock changed while it was acquired".into(),
+        ));
+    }
+    Ok(LocalAreaPublicationReadGuard { file })
 }
 
 #[doc(hidden)]
@@ -425,6 +921,45 @@ fn preflight_catalog_read_budget(catalog: &AreaCatalog) -> Result<(), LocalAreaR
     Ok(())
 }
 
+fn registry_relative_path(registry: &Path, path: &Path) -> Result<String, LocalAreaRegistryError> {
+    let relative = path.strip_prefix(registry).map_err(|_| {
+        LocalAreaRegistryError::Invalid("registry pointer path escapes its root".into())
+    })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(LocalAreaRegistryError::Invalid(
+            "registry pointer path contains traversal".into(),
+        ));
+    }
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn room_identity_map(
+    rooms: &[crate::Room],
+) -> Result<BTreeMap<&str, Option<i64>>, LocalAreaRegistryError> {
+    let mut identities = BTreeMap::new();
+    for room in rooms {
+        if identities
+            .insert(room.id.as_str(), room.legacy_vnum)
+            .is_some()
+        {
+            return Err(LocalAreaRegistryError::Invalid(
+                "verified fallback contains duplicate stable room identity".into(),
+            ));
+        }
+    }
+    Ok(identities)
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 fn storage_id(id: &str) -> String {
     sha256_hex(id.as_bytes())
 }
@@ -440,8 +975,8 @@ mod tests {
     use super::*;
     use crate::{
         AREA_RELEASE_SCHEMA_VERSION, AreaOwnership, AreaReleaseEntry, AreaReleaseManifest,
-        ComposedWorld, ReleaseTrustMode, VerifiedAreaRelease, build_area_release,
-        compose_world_project,
+        ComposedWorld, GenerationReplacementKind, ReleaseTrustMode, VerifiedAreaRelease,
+        build_area_release, compose_world_project,
     };
 
     fn project_path() -> PathBuf {
@@ -513,6 +1048,115 @@ mod tests {
         path
     }
 
+    fn write_active_pointer(
+        registry: &Path,
+        catalog_path: &Path,
+        catalog: &AreaCatalog,
+        catalog_sha256: &str,
+    ) -> PathBuf {
+        let path = local_active_area_catalog_path(registry, &catalog.world_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let pointer = ActiveAreaCatalog {
+            schema: 1,
+            world_id: catalog.world_id.clone(),
+            catalog_sha256: catalog_sha256.to_owned(),
+            catalog: registry_relative_path(registry, catalog_path).unwrap(),
+        };
+        let mut bytes = serde_json::to_vec_pretty(&pointer).unwrap();
+        bytes.push(b'\n');
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn finish_changed_release(
+        mut composed: ComposedWorld,
+        changed_area_ids: &[&str],
+        catalog_revision: u64,
+    ) -> VerifiedAreaRelease {
+        composed.artifact = composed.document.deterministic_artifact().unwrap();
+        composed.report.artifact_bytes = composed.artifact.len();
+        composed.report.artifact_sha256 = sha256_hex(&composed.artifact);
+        for area_id in changed_area_ids {
+            let pack = composed
+                .area_packs
+                .iter()
+                .find(|pack| pack.id == *area_id)
+                .unwrap();
+            let report = composed
+                .report
+                .areas
+                .iter_mut()
+                .find(|report| report.id == *area_id)
+                .unwrap();
+            report.source_sha256 = sha256_hex(&serde_json::to_vec(pack).unwrap());
+        }
+        let mut release = release_for(&composed);
+        release.catalog_revision = catalog_revision;
+        for area_id in changed_area_ids {
+            release
+                .areas
+                .iter_mut()
+                .find(|entry| entry.area_id == *area_id)
+                .unwrap()
+                .revision += 1;
+        }
+        build_area_release(&composed, &release, None).unwrap()
+    }
+
+    fn release_with_changed_room_title(catalog_revision: u64) -> VerifiedAreaRelease {
+        let mut composed = compose_world_project(project_path()).unwrap();
+        let room_id = "demo:lantern-square";
+        composed
+            .area_packs
+            .iter_mut()
+            .find(|pack| pack.id == "square")
+            .unwrap()
+            .rooms
+            .iter_mut()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .title = "Lantern Square after the rain".into();
+        composed
+            .document
+            .world
+            .rooms
+            .iter_mut()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .title = "Lantern Square after the rain".into();
+        finish_changed_release(composed, &["square"], catalog_revision)
+    }
+
+    fn release_with_changed_rng() -> VerifiedAreaRelease {
+        let mut composed = compose_world_project(project_path()).unwrap();
+        composed.document.world.gameplay.rng_seed = Some(1);
+        finish_changed_release(composed, &[], 2)
+    }
+
+    fn release_with_changed_room_identity() -> VerifiedAreaRelease {
+        let mut composed = compose_world_project(project_path()).unwrap();
+        let room_id = "demo:lantern-square";
+        composed
+            .area_packs
+            .iter_mut()
+            .find(|pack| pack.id == "square")
+            .unwrap()
+            .rooms
+            .iter_mut()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .legacy_vnum = Some(9_999);
+        composed
+            .document
+            .world
+            .rooms
+            .iter_mut()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .legacy_vnum = Some(9_999);
+        finish_changed_release(composed, &["square"], 2)
+    }
+
     #[test]
     fn opens_lazy_generation_and_indexes_exact_catalog_and_rooms() {
         let temp = tempfile::tempdir().unwrap();
@@ -542,6 +1186,222 @@ mod tests {
         );
         assert!(generation.read_bundle_exact("unknown-area").is_err());
         assert!(generation.hard_dependency_closure("unknown-area").is_err());
+    }
+
+    #[test]
+    fn opens_a_strict_stable_active_pointer_and_exposes_its_cas_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let release = built_release();
+        let catalog_path = write_release(temp.path(), &release);
+        let pointer_path = write_active_pointer(
+            temp.path(),
+            &catalog_path,
+            &release.catalog,
+            &release.catalog_sha256,
+        );
+
+        let generation =
+            LocalAreaGeneration::open_active(temp.path(), &release.catalog.world_id).unwrap();
+        let identity = generation.active_pointer_identity().unwrap();
+        assert_eq!(generation.generation_id(), release.catalog_sha256);
+        assert_eq!(identity.pointer_path(), pointer_path);
+        assert_eq!(identity.catalog_sha256(), release.catalog_sha256);
+        assert_eq!(
+            identity.pointer_sha256(),
+            sha256_hex(&fs::read(identity.pointer_path()).unwrap())
+        );
+    }
+
+    #[test]
+    fn active_pointer_rejects_tamper_recursive_duplicates_wrong_world_and_symlink() {
+        let release = built_release();
+
+        let tampered = tempfile::tempdir().unwrap();
+        let catalog_path = write_release(tampered.path(), &release);
+        write_active_pointer(
+            tampered.path(),
+            &catalog_path,
+            &release.catalog,
+            &release.catalog_sha256,
+        );
+        fs::write(
+            &catalog_path,
+            [release.catalog_bytes.as_slice(), b" "].concat(),
+        )
+        .unwrap();
+        assert!(
+            LocalAreaGeneration::open_active(tampered.path(), &release.catalog.world_id).is_err()
+        );
+
+        let duplicate = tempfile::tempdir().unwrap();
+        let catalog_path = write_release(duplicate.path(), &release);
+        let pointer_path = write_active_pointer(
+            duplicate.path(),
+            &catalog_path,
+            &release.catalog,
+            &release.catalog_sha256,
+        );
+        let relative = registry_relative_path(duplicate.path(), &catalog_path).unwrap();
+        fs::write(
+            &pointer_path,
+            format!(
+                "{{\"schema\":1,\"schema\":1,\"worldId\":\"{}\",\"catalogSha256\":\"{}\",\"catalog\":\"{}\"}}",
+                release.catalog.world_id, release.catalog_sha256, relative
+            ),
+        )
+        .unwrap();
+        let error = LocalAreaGeneration::open_active(duplicate.path(), &release.catalog.world_id)
+            .unwrap_err();
+        assert!(error.to_string().contains("duplicate JSON key"));
+
+        let wrong_world = tempfile::tempdir().unwrap();
+        let catalog_path = write_release(wrong_world.path(), &release);
+        let pointer_path = write_active_pointer(
+            wrong_world.path(),
+            &catalog_path,
+            &release.catalog,
+            &release.catalog_sha256,
+        );
+        let mut pointer: ActiveAreaCatalog =
+            serde_json::from_slice(&fs::read(&pointer_path).unwrap()).unwrap();
+        pointer.world_id = "another-world".into();
+        fs::write(&pointer_path, serde_json::to_vec(&pointer).unwrap()).unwrap();
+        assert!(
+            LocalAreaGeneration::open_active(wrong_world.path(), &release.catalog.world_id)
+                .unwrap_err()
+                .to_string()
+                .contains("wrong schema or world")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let linked = tempfile::tempdir().unwrap();
+            let catalog_path = write_release(linked.path(), &release);
+            let pointer_path = write_active_pointer(
+                linked.path(),
+                &catalog_path,
+                &release.catalog,
+                &release.catalog_sha256,
+            );
+            let outside = linked.path().join("outside-pointer.json");
+            fs::write(&outside, fs::read(&pointer_path).unwrap()).unwrap();
+            fs::remove_file(&pointer_path).unwrap();
+            symlink(outside, &pointer_path).unwrap();
+            assert!(
+                LocalAreaGeneration::open_active(linked.path(), &release.catalog.world_id)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("non-symlink")
+            );
+        }
+    }
+
+    #[test]
+    fn active_pointer_change_during_generation_open_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release = built_release();
+        let catalog_path = write_release(temp.path(), &release);
+        let pointer_path = write_active_pointer(
+            temp.path(),
+            &catalog_path,
+            &release.catalog,
+            &release.catalog_sha256,
+        );
+        let pointer_before = fs::read(&pointer_path).unwrap();
+        let error = LocalAreaGeneration::open_active_with_observer(
+            temp.path(),
+            &release.catalog.world_id,
+            || {
+                let mut changed = pointer_before;
+                changed.push(b'\n');
+                fs::write(&pointer_path, changed).unwrap();
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed while"));
+    }
+
+    #[test]
+    fn replacement_gate_is_symmetric_and_requires_explicit_rollback() {
+        let current_root = tempfile::tempdir().unwrap();
+        let current_release = built_release();
+        let current_path = write_release(current_root.path(), &current_release);
+        let current = LocalAreaGeneration::open_exact(current_root.path(), current_path).unwrap();
+
+        let next_root = tempfile::tempdir().unwrap();
+        let next_release = release_with_changed_room_title(2);
+        let next_path = write_release(next_root.path(), &next_release);
+        write_active_pointer(
+            next_root.path(),
+            &next_path,
+            &next_release.catalog,
+            &next_release.catalog_sha256,
+        );
+        let next =
+            LocalAreaGeneration::open_active(next_root.path(), &next_release.catalog.world_id)
+                .unwrap();
+
+        assert_eq!(
+            validate_generation_replacement(&current, &next).unwrap(),
+            GenerationReplacementKind::Activate
+        );
+        assert_eq!(
+            validate_generation_replacement(&next, &current).unwrap(),
+            GenerationReplacementKind::Rollback
+        );
+        assert_eq!(
+            validate_generation_replacement(&current, &current).unwrap(),
+            GenerationReplacementKind::Noop
+        );
+        let staged = stage_generation_replacement(&current, next.clone()).unwrap();
+        assert_eq!(staged.kind(), GenerationReplacementKind::Activate);
+        assert_eq!(
+            staged.expected_current_generation_id(),
+            current.generation_id()
+        );
+        assert_eq!(staged.candidate_generation_id(), next.generation_id());
+        assert_eq!(
+            staged.changed_area_ids(),
+            ["archive", "north-gate", "square"]
+        );
+        assert!(staged.candidate_active_pointer_identity().is_some());
+        let candidate_pointer = next.active_pointer_identity().unwrap().pointer_path();
+        let mut changed_pointer = fs::read(candidate_pointer).unwrap();
+        changed_pointer.push(b'\n');
+        fs::write(candidate_pointer, changed_pointer).unwrap();
+        assert!(
+            stage_generation_replacement(&current, next.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("changed after candidate acquisition")
+        );
+        assert!(stage_generation_replacement(&next, current.clone()).is_err());
+        assert_eq!(
+            stage_generation_rollback(&next, current).unwrap().kind(),
+            GenerationReplacementKind::Rollback
+        );
+    }
+
+    #[test]
+    fn replacement_gate_rejects_gameplay_room_identity_and_revision_reuse_both_ways() {
+        let current_root = tempfile::tempdir().unwrap();
+        let current_release = built_release();
+        let current_path = write_release(current_root.path(), &current_release);
+        let current = LocalAreaGeneration::open_exact(current_root.path(), current_path).unwrap();
+
+        for incompatible_release in [
+            release_with_changed_rng(),
+            release_with_changed_room_identity(),
+            release_with_changed_room_title(1),
+        ] {
+            let next_root = tempfile::tempdir().unwrap();
+            let next_path = write_release(next_root.path(), &incompatible_release);
+            let next = LocalAreaGeneration::open_exact(next_root.path(), next_path).unwrap();
+            assert!(validate_generation_replacement(&current, &next).is_err());
+            assert!(validate_generation_replacement(&next, &current).is_err());
+        }
     }
 
     #[test]
@@ -724,6 +1584,46 @@ mod tests {
             let error = LocalAreaGeneration::open_exact(temp.path(), &catalog_path).unwrap_err();
             assert!(error.to_string().contains("non-symlink"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_runtime_lock_excludes_cooperating_pointer_writers() {
+        let temp = tempfile::tempdir().unwrap();
+        let lock_path = local_area_publication_lock_path(temp.path(), "lantern-square");
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        fs::File::create(&lock_path).unwrap();
+
+        let read_guard =
+            try_acquire_local_area_publication_read_lock(temp.path(), "lantern-square").unwrap();
+        let writer_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let mut writer = fd_lock::RwLock::new(writer_file);
+        assert_eq!(
+            writer.try_write().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(read_guard);
+        let writer_guard = writer.try_write().unwrap();
+        drop(writer_guard);
+
+        use std::os::unix::fs::symlink;
+        let escaped = tempfile::tempdir().unwrap();
+        let escaped_lock = local_area_publication_lock_path(escaped.path(), "lantern-square");
+        fs::create_dir_all(escaped_lock.parent().unwrap()).unwrap();
+        fs::File::create(&escaped_lock).unwrap();
+        let registry = temp.path().join("symlink-registry");
+        fs::create_dir(&registry).unwrap();
+        symlink(
+            escaped.path().join("area-locks"),
+            registry.join("area-locks"),
+        )
+        .unwrap();
+        assert!(try_acquire_local_area_publication_read_lock(&registry, "lantern-square").is_err());
     }
 
     fn empty_ownership() -> AreaOwnership {
