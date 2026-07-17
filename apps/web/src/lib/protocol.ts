@@ -522,6 +522,28 @@ export interface RewardOddsData {
   affixes: RewardOddsAffixRow[];
 }
 
+export interface MailMessageSummary {
+  id: string;
+  sender: string;
+  subject: string;
+  createdAt: number;
+  expiresAt: number;
+  read: boolean;
+}
+
+export interface MailListData {
+  page: number;
+  totalPages: number;
+  totalMessages: number;
+  unreadCount: number;
+  capacity: number;
+  messages: MailMessageSummary[];
+}
+
+export interface MailMessageData extends MailMessageSummary {
+  body: string;
+}
+
 export interface PlayerStateSnapshot {
   revision: number;
   character: PlayerCharacterSnapshot;
@@ -614,6 +636,8 @@ export type ServerMessage =
   | Envelope<'container.contents', ContainerContentsData>
   | Envelope<'trade.contents', TradeContentsData>
   | Envelope<'reward.odds', RewardOddsData>
+  | Envelope<'mail.list', MailListData>
+  | Envelope<'mail.message', MailMessageData>
   | Envelope<'map.snapshot', MapSnapshotData>
   | Envelope<'action.result', ActionResultData>
   | Envelope<'server.notice', ServerNoticeData>
@@ -668,6 +692,9 @@ export interface ActionPerformFields {
   message?: string;
   channel?: CommunityChannel;
   reason?: string;
+  mailId?: string;
+  subject?: string;
+  body?: string;
   reportId?: number;
   resolution?: StaffReportResolution;
   profile?: StaffProfile | null;
@@ -1033,6 +1060,75 @@ const parseRewardOdds = (value: unknown): RewardOddsData | undefined => {
     });
   }
   return { selector, page, totalPages, guaranteed, weighted, affixes };
+};
+
+const MAIL_ID = /^m[0-9a-f]{32}$/;
+const UNSAFE_VISIBLE_TEXT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+
+const boundedVisibleUtf8 = (value: unknown, maximum: number): string | undefined => {
+  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value ||
+    new TextEncoder().encode(value).length > maximum || UNSAFE_VISIBLE_TEXT.test(value)) {
+    return undefined;
+  }
+  return value;
+};
+
+const parseMailSummary = (value: unknown): MailMessageSummary | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'id', 'sender', 'subject', 'createdAt', 'expiresAt', 'read',
+  ])) return undefined;
+  const id = typeof value.id === 'string' && MAIL_ID.test(value.id) ? value.id : undefined;
+  const sender = boundedVisibleUtf8(value.sender, 64);
+  const subject = boundedVisibleUtf8(value.subject, 128);
+  const createdAt = nonNegativeIntegerOrUndefined(value.createdAt);
+  const expiresAt = positiveIntegerOrUndefined(value.expiresAt);
+  if (!id || !sender || !subject || createdAt === undefined || expiresAt === undefined ||
+    expiresAt !== createdAt + 2_592_000 || typeof value.read !== 'boolean') return undefined;
+  return { id, sender, subject, createdAt, expiresAt, read: value.read };
+};
+
+const parseMailList = (value: unknown): MailListData | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'page', 'totalPages', 'totalMessages', 'unreadCount', 'capacity', 'messages',
+  ]) || !Array.isArray(value.messages) || value.messages.length > 10) return undefined;
+  const page = positiveIntegerOrUndefined(value.page);
+  const totalPages = positiveIntegerOrUndefined(value.totalPages);
+  const totalMessages = nonNegativeIntegerOrUndefined(value.totalMessages);
+  const unreadCount = nonNegativeIntegerOrUndefined(value.unreadCount);
+  const capacity = positiveIntegerOrUndefined(value.capacity);
+  if (page === undefined || page > 7 || totalPages === undefined || totalPages > 7 ||
+    totalMessages === undefined || totalMessages > 64 || unreadCount === undefined ||
+    unreadCount > totalMessages || capacity !== 64) return undefined;
+  const expectedTotalPages = Math.max(1, Math.ceil(totalMessages / 10));
+  if (totalPages !== expectedTotalPages) return undefined;
+  const messages: MailMessageSummary[] = [];
+  const ids = new Set<string>();
+  for (const entry of value.messages) {
+    const message = parseMailSummary(entry);
+    if (!message || ids.has(message.id)) return undefined;
+    ids.add(message.id);
+    messages.push(message);
+  }
+  if (messages.length > totalMessages || (page > totalPages && messages.length !== 0)) {
+    return undefined;
+  }
+  return { page, totalPages, totalMessages, unreadCount, capacity, messages };
+};
+
+const parseMailMessage = (value: unknown): MailMessageData | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'id', 'sender', 'subject', 'body', 'createdAt', 'expiresAt', 'read',
+  ])) return undefined;
+  const summary = parseMailSummary({
+    id: value.id,
+    sender: value.sender,
+    subject: value.subject,
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+    read: value.read,
+  });
+  const body = boundedVisibleUtf8(value.body, 2_048);
+  return summary && summary.read && body ? { ...summary, body } : undefined;
 };
 
 const parseTradeOffer = (value: unknown): TradeOfferSnapshot | undefined => {
@@ -2237,6 +2333,14 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const odds = parseRewardOdds(candidate.data);
       return odds ? { ...base, type: candidate.type, data: odds } : undefined;
     }
+    case 'mail.list': {
+      const mail = parseMailList(candidate.data);
+      return mail ? { ...base, type: candidate.type, data: mail } : undefined;
+    }
+    case 'mail.message': {
+      const mail = parseMailMessage(candidate.data);
+      return mail ? { ...base, type: candidate.type, data: mail } : undefined;
+    }
     case 'map.snapshot': {
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       if (revision === undefined) return undefined;
@@ -2472,6 +2576,7 @@ export function createActionPerform(
   if (action.startsWith('trade.')) validateTradeActionFields(action, fields);
   if (action.startsWith('loot.')) validateLootActionFields(action, fields);
   if (action.startsWith('reward.')) validateRewardActionFields(action, fields);
+  if (action.startsWith('mail.')) validateMailActionFields(action, fields);
   if (fields?.reportId !== undefined &&
     (!Number.isSafeInteger(fields.reportId) || fields.reportId <= 0)) {
     throw new RangeError('reportId must be a positive safe integer');
@@ -2512,6 +2617,41 @@ export function createActionPerform(
     type: 'action.perform',
     data: { requestId, action, ...fields },
   };
+}
+
+function validateMailActionFields(action: string, fields: ActionPerformFields | undefined): void {
+  const expectedByAction: Record<string, readonly (keyof ActionPerformFields)[]> = {
+    'mail.list': fields?.page === undefined ? [] : ['page'],
+    'mail.read': ['mailId'],
+    'mail.delete': ['mailId'],
+    'mail.send': ['body', 'subject', 'target'],
+    'mail.report': ['mailId', 'reason'],
+  };
+  const expected = expectedByAction[action];
+  if (!expected) throw new RangeError('unknown mail action');
+  const actual = Object.keys(fields ?? {}).toSorted();
+  const keys = [...expected].toSorted();
+  if (actual.length !== keys.length || actual.some((key, index) => key !== keys[index])) {
+    throw new RangeError(`${action} requires its exact closed field set`);
+  }
+  if ((action === 'mail.read' || action === 'mail.delete' || action === 'mail.report') &&
+    (typeof fields?.mailId !== 'string' || !MAIL_ID.test(fields.mailId))) {
+    throw new RangeError('mailId must be an opaque mail selector');
+  }
+  if (action === 'mail.list' && fields?.page !== undefined &&
+    (!Number.isSafeInteger(fields.page) || fields.page < 1 || fields.page > 7)) {
+    throw new RangeError('mail page must be an integer between 1 and 7');
+  }
+  if (action === 'mail.send') {
+    if (!boundedVisibleUtf8(fields?.target, 64) || fields?.target?.includes('|') ||
+      !boundedVisibleUtf8(fields?.subject, 128) || fields?.subject?.includes('|') ||
+      !boundedVisibleUtf8(fields?.body, 2_048)) {
+      throw new RangeError('mail send fields must be bounded visible UTF-8 text');
+    }
+  }
+  if (action === 'mail.report' && !boundedVisibleUtf8(fields?.reason, 2_048)) {
+    throw new RangeError('mail report reason must be bounded visible UTF-8 text');
+  }
 }
 
 function validateTelepathyActionFields(fields: ActionPerformFields | undefined): void {

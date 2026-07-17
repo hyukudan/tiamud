@@ -1817,6 +1817,113 @@ describe('protocol messages', () => {
   });
 });
 
+describe('bounded offline mail protocol', () => {
+  const mailId = 'm0123456789abcdef0123456789abcdef';
+
+  it('accepts strict inbox pages and complete messages', () => {
+    const list = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'mail.list',
+      seq: 91,
+      data: {
+        page: 1,
+        totalPages: 1,
+        totalMessages: 1,
+        unreadCount: 1,
+        capacity: 64,
+        messages: [{
+          id: mailId,
+          sender: 'Ágata <&>',
+          subject: 'La puerta del norte',
+          createdAt: 1_700_000_000,
+          expiresAt: 1_702_592_000,
+          read: false,
+        }],
+      },
+    }));
+    const message = parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'mail.message',
+      seq: 92,
+      data: {
+        id: mailId,
+        sender: 'Ágata <&>',
+        subject: 'La puerta del norte',
+        body: 'Nos vemos junto al faro.',
+        createdAt: 1_700_000_000,
+        expiresAt: 1_702_592_000,
+        read: true,
+      },
+    }));
+    expect(list).toMatchObject({ type: 'mail.list', data: { unreadCount: 1 } });
+    expect(message).toMatchObject({ type: 'mail.message', data: { id: mailId, read: true } });
+  });
+
+  it('rejects forged references, inconsistent counts, unsafe text and additive DTO fields', () => {
+    const base = {
+      page: 1,
+      totalPages: 1,
+      totalMessages: 1,
+      unreadCount: 1,
+      capacity: 64,
+      messages: [{
+        id: mailId,
+        sender: 'Ágata',
+        subject: 'Asunto',
+        createdAt: 10,
+        expiresAt: 2_592_010,
+        read: false,
+      }],
+    };
+    for (const data of [
+      { ...base, totalMessages: 0 },
+      { ...base, totalMessages: 11, totalPages: 1 },
+      { ...base, messages: [{ ...base.messages[0], id: 'mnot-a-reference' }] },
+      { ...base, messages: [{ ...base.messages[0], subject: 'oculto\u202e' }] },
+      { ...base, messages: [{ ...base.messages[0], sender: 'control\u0085' }] },
+      { ...base, messages: [{ ...base.messages[0], expiresAt: 21 }] },
+      { ...base, futureMailboxState: true },
+    ]) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1, type: 'mail.list', seq: 93, data,
+      }))).toBeUndefined();
+    }
+    expect(parseServerMessage(JSON.stringify({
+      v: 1,
+      type: 'mail.message',
+      seq: 94,
+      data: { ...base.messages[0], body: 'Visible.', read: false },
+    }))).toBeUndefined();
+  });
+
+  it('builds only the exact closed action shapes', () => {
+    expect(createActionPerform('mail.list', undefined, 'req-1').data).toMatchObject({
+      action: 'mail.list', requestId: 'req-1',
+    });
+    expect(createActionPerform('mail.send', {
+      target: 'Ágata', subject: 'Asunto <&>', body: 'Texto visible.',
+    }, 'req-2').data).toMatchObject({ action: 'mail.send', target: 'Ágata' });
+    expect(createActionPerform('mail.report', {
+      mailId, reason: 'Contenido abusivo.',
+    }, 'req-3').data).toMatchObject({ action: 'mail.report', mailId });
+
+    expect(() => createActionPerform('mail.read', { mailId: 'mBAD' }, 'req-4')).toThrow();
+    expect(() => createActionPerform('mail.list', { page: 8 }, 'req-5')).toThrow();
+    expect(() => createActionPerform('mail.send', {
+      target: 'Ágata', subject: 'Asunto', body: 'texto\ninyectado',
+    }, 'req-6')).toThrow();
+    expect(() => createActionPerform('mail.send', {
+      target: 'Ágata', subject: 'Asunto', body: 'texto\u0085inyectado',
+    }, 'req-6a')).toThrow();
+    expect(() => createActionPerform('mail.send', {
+      target: 'Ágata', subject: 'Asunto | ambiguo', body: 'Texto visible.',
+    }, 'req-6b')).toThrow();
+    expect(() => createActionPerform('mail.report', {
+      mailId, reason: 'abuso', target: 'campo extra',
+    }, 'req-7')).toThrow();
+  });
+});
+
 describe('websocket URL', () => {
   it('uses the Tiamud WebSocket subprotocol', () => {
     expect(WEBSOCKET_SUBPROTOCOL).toBe('tiamud.v1');

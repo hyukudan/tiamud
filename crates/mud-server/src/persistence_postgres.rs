@@ -15,8 +15,10 @@ use async_trait::async_trait;
 use postgres::{Client, GenericClient};
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, CharacterGameplaySnapshot, CharacterId,
-    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, SocialChannelName, StaffCapability,
-    StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot,
+    CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, MAX_MAIL_BODY_BYTES,
+    MAX_MAIL_REPORT_REASON_BYTES, MAX_MAIL_SUBJECT_BYTES, SocialChannelName, StaffCapability,
+    StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot, valid_mail_public_id,
+    valid_mail_visible_text,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -29,7 +31,8 @@ use crate::{
         SessionToken, digest_token, validate_password,
     },
     persistence::{
-        CharacterStore, DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, ModerationAction,
+        CharacterStore, DOMAIN_EVENT_RETENTION, DurableCharacterGameplay, MailMessage,
+        MailMessageSummary, MailPage, MailReportEvidence, MailSendResult, ModerationAction,
         PreparedLogin, Request, SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry,
         StaffAuditRecord, StaffReport, StartupGameplayLoadLimits, StoreError,
         decode_runtime_snapshot, decode_startup_gameplay, ensure_all_character_ids_exist,
@@ -52,6 +55,21 @@ const MAX_AUDIT_DETAILS_BYTES: usize = 4_096;
 const MAX_STAFF_ACTION_BYTES: usize = 64;
 const MAX_STAFF_LORE_TITLE_BYTES: usize = 128;
 const STAFF_LIST_LIMIT: i64 = 10;
+const MAIL_PAGE_SIZE: i64 = 10;
+const MAIL_MAX_PAGES: i64 = 7;
+const MAILBOX_CAPACITY: i64 = 64;
+const MAILBOX_BYTE_CAPACITY: i64 = 128 * 1024;
+const MAIL_GLOBAL_CAPACITY: i64 = 100_000;
+const MAIL_HOURLY_CAPACITY: i64 = 20;
+const MAIL_DAILY_CAPACITY: i64 = 50;
+const MAIL_HOUR_SECONDS: i64 = 60 * 60;
+const MAIL_DAY_SECONDS: i64 = 24 * MAIL_HOUR_SECONDS;
+const MAIL_RETENTION_SECONDS: i64 = 30 * MAIL_DAY_SECONDS;
+const MAIL_REPORT_EVIDENCE_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
+const MAIL_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
+const MAIL_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
+const MAIL_PURGE_LIMIT: i64 = 256;
+const MAIL_TRANSACTION_LOCK_ID: i64 = 0x5449_414d_4d41_494c;
 const MAX_MODERATION_DURATION_SECONDS: i64 = 365 * 24 * 60 * 60;
 const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
 const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -309,6 +327,78 @@ impl PostgresCharacterStore {
                                 subscribed,
                                 unix_timestamp(),
                             ));
+                        }
+                        Request::SendMail {
+                            sender,
+                            target_name,
+                            public_id,
+                            subject,
+                            body,
+                            reply,
+                        } => {
+                            let _ = reply.send(send_mail(
+                                &mut connection,
+                                sender,
+                                &target_name,
+                                &public_id,
+                                &subject,
+                                &body,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::MailboxPage {
+                            recipient,
+                            page,
+                            reply,
+                        } => {
+                            let _ = reply.send(mailbox_page(
+                                &mut connection,
+                                recipient,
+                                page,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ReadMail {
+                            recipient,
+                            public_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(read_mail(
+                                &mut connection,
+                                recipient,
+                                &public_id,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::DeleteMail {
+                            recipient,
+                            public_id,
+                            reply,
+                        } => {
+                            let _ = reply.send(delete_mail(
+                                &mut connection,
+                                recipient,
+                                &public_id,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::ReportMail {
+                            recipient,
+                            public_id,
+                            reason,
+                            reply,
+                        } => {
+                            let _ = reply.send(report_mail(
+                                &mut connection,
+                                recipient,
+                                &public_id,
+                                &reason,
+                                unix_timestamp(),
+                            ));
+                        }
+                        Request::PurgeExpiredMail { reply } => {
+                            let _ =
+                                reply.send(purge_expired_mail(&mut connection, unix_timestamp()));
                         }
                         Request::ReportCharacter {
                             actor,
@@ -817,6 +907,101 @@ impl CharacterStore for PostgresCharacterStore {
         .await
     }
 
+    async fn send_mail(
+        &self,
+        sender: CharacterId,
+        target_name: &str,
+        public_id: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<MailSendResult, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::SendMail {
+                sender,
+                target_name: target_name.to_owned(),
+                public_id: public_id.to_owned(),
+                subject: subject.to_owned(),
+                body: body.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn mailbox_page(
+        &self,
+        recipient: CharacterId,
+        page: u32,
+    ) -> Result<MailPage, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::MailboxPage {
+                recipient,
+                page,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn read_mail(
+        &self,
+        recipient: CharacterId,
+        public_id: &str,
+    ) -> Result<MailMessage, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::ReadMail {
+                recipient,
+                public_id: public_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn delete_mail(&self, recipient: CharacterId, public_id: &str) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::DeleteMail {
+                recipient,
+                public_id: public_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn report_mail(
+        &self,
+        recipient: CharacterId,
+        public_id: &str,
+        reason: &str,
+    ) -> Result<i64, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::ReportMail {
+                recipient,
+                public_id: public_id.to_owned(),
+                reason: reason.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn purge_expired_mail(&self) -> Result<u64, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::PurgeExpiredMail { reply }, receive)
+            .await
+    }
+
     async fn report_character(
         &self,
         actor: CharacterId,
@@ -1000,8 +1185,7 @@ impl CharacterStore for PostgresCharacterStore {
 
 fn normalise_name(name: &str, kind: &'static str) -> Result<String, StoreError> {
     let name = name.trim();
-    if name.is_empty() || name.len() > MAX_IDENTITY_NAME_BYTES || name.chars().any(char::is_control)
-    {
+    if !valid_mail_visible_text(name, MAX_IDENTITY_NAME_BYTES) || name.contains('|') {
         return Err(StoreError::InvalidName { kind });
     }
     Ok(name.to_owned())
@@ -1931,6 +2115,503 @@ fn set_social_channel_subscription(
     Ok(())
 }
 
+fn normalise_mail_text(value: &str, maximum: usize) -> Result<String, StoreError> {
+    if !valid_mail_visible_text(value, maximum) {
+        Err(StoreError::InvalidMailInput)
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn send_mail(
+    connection: &mut Client,
+    sender: CharacterId,
+    target_name: &str,
+    public_id: &str,
+    subject: &str,
+    body: &str,
+    now: i64,
+) -> Result<MailSendResult, StoreError> {
+    let target_name = normalise_mail_text(target_name, tiamud_core::MAX_MAIL_TARGET_BYTES)?;
+    let subject = normalise_mail_text(subject, MAX_MAIL_SUBJECT_BYTES)?;
+    let body = normalise_mail_text(body, MAX_MAIL_BODY_BYTES)?;
+    if !tiamud_core::valid_mail_target(&target_name) || !tiamud_core::valid_mail_subject(&subject) {
+        return Err(StoreError::InvalidMailInput);
+    }
+    if !valid_mail_public_id(public_id) {
+        return Err(StoreError::InvalidMailInput);
+    }
+    let expires_at = now
+        .checked_add(MAIL_RETENTION_SECONDS)
+        .ok_or(StoreError::InvalidMailInput)?;
+    let mut transaction = connection.transaction()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&MAIL_TRANSACTION_LOCK_ID],
+    )?;
+    let sender_row = transaction
+        .query_opt(
+            "SELECT characters.account_id, characters.name,
+                    EXISTS(
+                        SELECT 1 FROM moderation_mutes
+                        WHERE moderation_mutes.account_id = characters.account_id
+                          AND moderation_mutes.revoked_at IS NULL
+                          AND (moderation_mutes.expires_at IS NULL
+                               OR moderation_mutes.expires_at > $2)
+                    )
+             FROM characters WHERE characters.id = $1",
+            &[&sender.0, &now],
+        )?
+        .ok_or(StoreError::SocialTargetNotFound)?;
+    let sender_account: i64 = sender_row.get(0);
+    let sender_name: String = sender_row.get(1);
+    let sender_muted: bool = sender_row.get(2);
+
+    transaction.query(
+        "SELECT id FROM accounts WHERE id = $1 FOR UPDATE",
+        &[&sender_account],
+    )?;
+
+    let usage = transaction.query_opt(
+        "SELECT hour_started_at, hour_count, day_started_at, day_count
+         FROM social_mail_usage WHERE account_id = $1 FOR UPDATE",
+        &[&sender_account],
+    )?;
+    let (hour_started_at, hour_count, day_started_at, day_count) =
+        usage.map_or((now, 0_i64, now, 0_i64), |row| {
+            let stored_hour: i64 = row.get(0);
+            let stored_hour_count: i32 = row.get(1);
+            let stored_day: i64 = row.get(2);
+            let stored_day_count: i32 = row.get(3);
+            let hour_expired =
+                now < stored_hour || now.saturating_sub(stored_hour) >= MAIL_HOUR_SECONDS;
+            let day_expired =
+                now < stored_day || now.saturating_sub(stored_day) >= MAIL_DAY_SECONDS;
+            (
+                if hour_expired { now } else { stored_hour },
+                if hour_expired {
+                    0
+                } else {
+                    i64::from(stored_hour_count)
+                },
+                if day_expired { now } else { stored_day },
+                if day_expired {
+                    0
+                } else {
+                    i64::from(stored_day_count)
+                },
+            )
+        });
+    if hour_count >= MAIL_HOURLY_CAPACITY || day_count >= MAIL_DAILY_CAPACITY {
+        return Err(StoreError::MailRateLimited);
+    }
+    let next_hour_count = i32::try_from(hour_count + 1).expect("mail hourly cap fits i32");
+    let next_day_count = i32::try_from(day_count + 1).expect("mail daily cap fits i32");
+    transaction.execute(
+        "INSERT INTO social_mail_usage
+             (account_id, hour_started_at, hour_count,
+              day_started_at, day_count, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT(account_id) DO UPDATE SET
+             hour_started_at = excluded.hour_started_at,
+             hour_count = excluded.hour_count,
+             day_started_at = excluded.day_started_at,
+             day_count = excluded.day_count,
+             updated_at = excluded.updated_at",
+        &[
+            &sender_account,
+            &hour_started_at,
+            &next_hour_count,
+            &day_started_at,
+            &next_day_count,
+            &now,
+        ],
+    )?;
+
+    if sender_muted {
+        transaction.commit()?;
+        return Err(StoreError::ChatMuted);
+    }
+    if !valid_mail_visible_text(&sender_name, MAX_IDENTITY_NAME_BYTES) {
+        transaction.commit()?;
+        return Ok(MailSendResult::Suppressed);
+    }
+    let duplicate_public_id: bool = transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM social_mail_messages WHERE public_id = $1)",
+            &[&public_id],
+        )?
+        .get(0);
+    if duplicate_public_id {
+        transaction.commit()?;
+        return Ok(MailSendResult::Unavailable);
+    }
+
+    let target_rows = transaction.query(
+        "SELECT characters.id, characters.account_id
+         FROM characters
+         WHERE characters.name = $1
+         ORDER BY characters.id LIMIT 2",
+        &[&target_name],
+    )?;
+    let target = match target_rows.as_slice() {
+        [row] => Some((row.get::<_, i64>(0), row.get::<_, i64>(1))),
+        [] | [_, ..] => None,
+    };
+    let Some((recipient, recipient_account)) = target else {
+        transaction.commit()?;
+        return Ok(MailSendResult::Unavailable);
+    };
+    if recipient == sender.0 {
+        transaction.commit()?;
+        return Ok(MailSendResult::Unavailable);
+    }
+    transaction.query(
+        "SELECT id FROM accounts WHERE id = $1 FOR UPDATE",
+        &[&recipient_account],
+    )?;
+
+    let recipient_banned: bool = transaction
+        .query_one(
+            "SELECT EXISTS(
+                 SELECT 1 FROM account_bans
+                 WHERE account_id = $1 AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > $2)
+             )",
+            &[&recipient_account, &now],
+        )?
+        .get(0);
+    let policy_suppressed: bool = transaction
+        .query_one(
+            "SELECT
+                 EXISTS(SELECT 1 FROM social_ignores
+                        WHERE owner_character_id = $2 AND target_character_id = $1)
+                 OR EXISTS(SELECT 1 FROM social_blocks
+                           WHERE owner_character_id = $2 AND target_character_id = $1)
+                 OR EXISTS(SELECT 1 FROM social_blocks
+                           WHERE owner_character_id = $1 AND target_character_id = $2)",
+            &[&sender.0, &recipient],
+        )?
+        .get(0);
+    let mailbox = transaction.query_one(
+        "SELECT COUNT(*)::BIGINT,
+                COALESCE(SUM(octet_length(subject) + octet_length(body)), 0)::BIGINT
+         FROM social_mail_messages
+         WHERE recipient_character_id = $1 AND expires_at > $2",
+        &[&recipient, &now],
+    )?;
+    let mailbox_count: i64 = mailbox.get(0);
+    let mailbox_bytes: i64 = mailbox.get(1);
+    let added_bytes =
+        i64::try_from(subject.len() + body.len()).map_err(|_| StoreError::InvalidMailInput)?;
+    let global_count: i64 = transaction
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM social_mail_messages WHERE expires_at > $1",
+            &[&now],
+        )?
+        .get(0);
+    let suppressed = recipient_banned
+        || policy_suppressed
+        || mailbox_count >= MAILBOX_CAPACITY
+        || mailbox_bytes.saturating_add(added_bytes) > MAILBOX_BYTE_CAPACITY
+        || global_count >= MAIL_GLOBAL_CAPACITY;
+    if suppressed {
+        transaction.commit()?;
+        return Ok(MailSendResult::Suppressed);
+    }
+
+    transaction.execute(
+        "INSERT INTO social_mail_messages
+             (public_id, sender_character_id, sender_name,
+              recipient_character_id, subject, body, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        &[
+            &public_id,
+            &sender.0,
+            &sender_name,
+            &recipient,
+            &subject,
+            &body,
+            &now,
+            &expires_at,
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(MailSendResult::Stored)
+}
+
+fn mailbox_page(
+    connection: &mut Client,
+    recipient: CharacterId,
+    page: u32,
+    now: i64,
+) -> Result<MailPage, StoreError> {
+    if !(1..=u32::try_from(MAIL_MAX_PAGES).expect("mail page cap fits u32")).contains(&page) {
+        return Err(StoreError::InvalidMailInput);
+    }
+    ensure_social_character_exists(connection, recipient)?;
+    let totals = connection.query_one(
+        "SELECT COUNT(*)::BIGINT,
+                COUNT(*) FILTER (WHERE read_at IS NULL)::BIGINT
+         FROM social_mail_messages
+         WHERE recipient_character_id = $1 AND expires_at > $2",
+        &[&recipient.0, &now],
+    )?;
+    let total: i64 = totals.get(0);
+    let unread: i64 = totals.get(1);
+    let total_pages = ((total + MAIL_PAGE_SIZE - 1) / MAIL_PAGE_SIZE).max(1);
+    if total_pages > MAIL_MAX_PAGES {
+        return Err(StoreError::InvalidMailInput);
+    }
+    let offset = (i64::from(page) - 1) * MAIL_PAGE_SIZE;
+    let messages = connection
+        .query(
+            "SELECT public_id, sender_name, subject, created_at, expires_at,
+                    read_at IS NOT NULL
+             FROM social_mail_messages
+             WHERE recipient_character_id = $1 AND expires_at > $2
+             ORDER BY created_at DESC, id DESC
+             LIMIT $3 OFFSET $4",
+            &[&recipient.0, &now, &MAIL_PAGE_SIZE, &offset],
+        )?
+        .into_iter()
+        .map(|row| MailMessageSummary {
+            public_id: row.get(0),
+            sender_name: row.get(1),
+            subject: row.get(2),
+            created_at: row.get(3),
+            expires_at: row.get(4),
+            read: row.get(5),
+        })
+        .collect();
+    Ok(MailPage {
+        page,
+        total_pages: u32::try_from(total_pages).map_err(|_| StoreError::InvalidMailInput)?,
+        total_messages: u32::try_from(total).map_err(|_| StoreError::InvalidMailInput)?,
+        unread_count: u32::try_from(unread).map_err(|_| StoreError::InvalidMailInput)?,
+        capacity: u32::try_from(MAILBOX_CAPACITY).expect("mailbox cap fits u32"),
+        messages,
+    })
+}
+
+fn read_mail(
+    connection: &mut Client,
+    recipient: CharacterId,
+    public_id: &str,
+    now: i64,
+) -> Result<MailMessage, StoreError> {
+    if !valid_mail_public_id(public_id) {
+        return Err(StoreError::InvalidMailInput);
+    }
+    let mut transaction = connection.transaction()?;
+    ensure_social_character_exists(&mut transaction, recipient)?;
+    let row = transaction
+        .query_opt(
+            "SELECT public_id, sender_name, subject, body, created_at, expires_at
+             FROM social_mail_messages
+             WHERE recipient_character_id = $1 AND public_id = $2 AND expires_at > $3
+             FOR UPDATE",
+            &[&recipient.0, &public_id, &now],
+        )?
+        .ok_or(StoreError::MailNotFound)?;
+    let message = MailMessage {
+        summary: MailMessageSummary {
+            public_id: row.get(0),
+            sender_name: row.get(1),
+            subject: row.get(2),
+            created_at: row.get(4),
+            expires_at: row.get(5),
+            read: true,
+        },
+        body: row.get(3),
+    };
+    transaction.execute(
+        "UPDATE social_mail_messages SET read_at = COALESCE(read_at, $1)
+         WHERE recipient_character_id = $2 AND public_id = $3",
+        &[&now, &recipient.0, &public_id],
+    )?;
+    transaction.commit()?;
+    Ok(message)
+}
+
+fn delete_mail(
+    connection: &mut Client,
+    recipient: CharacterId,
+    public_id: &str,
+    now: i64,
+) -> Result<(), StoreError> {
+    if !valid_mail_public_id(public_id) {
+        return Err(StoreError::InvalidMailInput);
+    }
+    let mut transaction = connection.transaction()?;
+    ensure_social_character_exists(&mut transaction, recipient)?;
+    let deleted = transaction.execute(
+        "DELETE FROM social_mail_messages
+         WHERE recipient_character_id = $1 AND public_id = $2 AND expires_at > $3",
+        &[&recipient.0, &public_id, &now],
+    )?;
+    if deleted != 1 {
+        return Err(StoreError::MailNotFound);
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn report_mail(
+    connection: &mut Client,
+    recipient: CharacterId,
+    public_id: &str,
+    reason: &str,
+    now: i64,
+) -> Result<i64, StoreError> {
+    if !valid_mail_public_id(public_id) {
+        return Err(StoreError::InvalidMailInput);
+    }
+    let reason = normalise_mail_text(reason, MAX_MAIL_REPORT_REASON_BYTES)?;
+    let evidence_expires_at = now
+        .checked_add(MAIL_REPORT_EVIDENCE_RETENTION_SECONDS)
+        .ok_or(StoreError::InvalidMailInput)?;
+    let mut transaction = connection.transaction()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&MAIL_TRANSACTION_LOCK_ID],
+    )?;
+    let reporter = social_profile(&mut transaction, recipient, now)?;
+    let recipient_account = reporter.account_id.0;
+    let row = transaction
+        .query_opt(
+            "SELECT sender_character_id, sender_name, subject, body,
+                    created_at, report_id
+             FROM social_mail_messages
+             WHERE recipient_character_id = $1 AND public_id = $2 AND expires_at > $3
+             FOR UPDATE",
+            &[&recipient.0, &public_id, &now],
+        )?
+        .ok_or(StoreError::MailNotFound)?;
+    let sender: Option<i64> = row.get(0);
+    let sender = sender.ok_or(StoreError::MailNotFound)?;
+    let sender_profile = social_profile(&mut transaction, CharacterId(sender), now)?;
+    let existing_report: Option<i64> = row.get(5);
+    if existing_report.is_some() {
+        return Err(StoreError::MailAlreadyReported);
+    }
+    let open_reports: i64 = transaction
+        .query_one(
+            "SELECT COUNT(*)::BIGINT
+             FROM social_reports AS reports
+             JOIN characters AS reporter ON reporter.id = reports.reporter_character_id
+             WHERE reporter.account_id = $1
+               AND reports.report_kind = 'mail'
+               AND reports.status = 'open'",
+            &[&recipient_account],
+        )?
+        .get(0);
+    if open_reports >= MAIL_OPEN_REPORT_CAPACITY_PER_ACCOUNT {
+        return Err(StoreError::MailReportLimit);
+    }
+    let evidence_count: i64 = transaction
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM social_mail_report_evidence
+             WHERE expires_at > $1",
+            &[&now],
+        )?
+        .get(0);
+    if evidence_count >= MAIL_REPORT_EVIDENCE_GLOBAL_CAPACITY {
+        return Err(StoreError::MailEvidenceLimit);
+    }
+
+    let report_id: i64 = transaction
+        .query_one(
+            "INSERT INTO social_reports
+                 (reporter_character_id, target_character_id, report_kind, reason, created_at)
+             VALUES ($1, $2, 'mail', $3, $4) RETURNING id",
+            &[&recipient.0, &sender, &reason, &now],
+        )?
+        .get(0);
+    let sender_name: String = row.get(1);
+    let subject: String = row.get(2);
+    let body: String = row.get(3);
+    let sent_at: i64 = row.get(4);
+    transaction.execute(
+        "INSERT INTO social_mail_report_evidence
+             (report_id, sender_name, subject, body, sent_at, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        &[
+            &report_id,
+            &sender_name,
+            &subject,
+            &body,
+            &sent_at,
+            &now,
+            &evidence_expires_at,
+        ],
+    )?;
+    let linked = transaction.execute(
+        "UPDATE social_mail_messages SET report_id = $1
+         WHERE recipient_character_id = $2 AND public_id = $3
+           AND report_id IS NULL AND expires_at > $4",
+        &[&report_id, &recipient.0, &public_id, &now],
+    )?;
+    if linked != 1 {
+        return Err(StoreError::MailAlreadyReported);
+    }
+    append_audit(
+        &mut transaction,
+        reporter.account_id,
+        Some(sender_profile.account_id),
+        "mail_report",
+        serde_json::json!({"reportId": report_id}),
+        now,
+    )?;
+    transaction.commit()?;
+    Ok(report_id)
+}
+
+fn purge_expired_mail(connection: &mut Client, now: i64) -> Result<u64, StoreError> {
+    let mut transaction = connection.transaction()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&MAIL_TRANSACTION_LOCK_ID],
+    )?;
+    let deleted = purge_expired_mail_rows(&mut transaction, now, MAIL_PURGE_LIMIT)?;
+    transaction.commit()?;
+    u64::try_from(deleted).map_err(|_| StoreError::InvalidMailInput)
+}
+
+fn purge_expired_mail_rows<C: GenericClient>(
+    connection: &mut C,
+    now: i64,
+    limit: i64,
+) -> Result<i64, StoreError> {
+    debug_assert!(limit > 0);
+    let message_rows = connection.query(
+        "WITH expired AS (
+             SELECT id FROM social_mail_messages
+             WHERE expires_at <= $1 ORDER BY expires_at, id LIMIT $2
+         )
+         DELETE FROM social_mail_messages AS messages
+         USING expired WHERE messages.id = expired.id
+         RETURNING messages.id",
+        &[&now, &limit],
+    )?;
+    let message_count = i64::try_from(message_rows.len()).expect("purge batch fits i64");
+    let remaining = limit - message_count;
+    if remaining == 0 {
+        return Ok(message_count);
+    }
+    let evidence_rows = connection.query(
+        "WITH expired AS (
+             SELECT report_id FROM social_mail_report_evidence
+             WHERE expires_at <= $1 ORDER BY expires_at, report_id LIMIT $2
+         )
+         DELETE FROM social_mail_report_evidence AS evidence
+         USING expired WHERE evidence.report_id = expired.report_id
+         RETURNING evidence.report_id",
+        &[&now, &remaining],
+    )?;
+    Ok(message_count + i64::try_from(evidence_rows.len()).expect("purge batch fits i64"))
+}
+
 fn report_character(
     connection: &mut Client,
     actor: CharacterId,
@@ -2159,12 +2840,16 @@ fn staff_reports(
             "SELECT reports.id,
                     reporter.id, reporter.name,
                     target.id, target.account_id, target.name,
-                    reports.reason, reports.created_at
+                    reports.reason, reports.created_at,
+                    evidence.sender_name, evidence.subject, evidence.body,
+                    evidence.sent_at, evidence.created_at, evidence.expires_at
              FROM social_reports AS reports
              JOIN characters AS reporter ON reporter.id = reports.reporter_character_id
              JOIN characters AS target ON target.id = reports.target_character_id
              LEFT JOIN staff_profiles AS target_staff
                     ON target_staff.account_id = target.account_id
+             LEFT JOIN social_mail_report_evidence AS evidence
+                    ON evidence.report_id = reports.id AND evidence.expires_at > $3
              WHERE reports.status = 'open'
                AND CASE target_staff.profile_key
                        WHEN 'helper' THEN 10
@@ -2176,18 +2861,29 @@ fn staff_reports(
                    END < $1
              ORDER BY reports.created_at, reports.id
              LIMIT $2",
-            &[&actor_rank, &STAFF_LIST_LIMIT],
+            &[&actor_rank, &STAFF_LIST_LIMIT, &now],
         )?
         .into_iter()
-        .map(|row| StaffReport {
-            id: row.get(0),
-            reporter_character_id: CharacterId(row.get(1)),
-            reporter_name: row.get(2),
-            target_character_id: CharacterId(row.get(3)),
-            target_account_id: AccountId(row.get(4)),
-            target_name: row.get(5),
-            reason: row.get(6),
-            created_at: row.get(7),
+        .map(|row| {
+            let evidence_sender: Option<String> = row.get(8);
+            StaffReport {
+                id: row.get(0),
+                reporter_character_id: CharacterId(row.get(1)),
+                reporter_name: row.get(2),
+                target_character_id: CharacterId(row.get(3)),
+                target_account_id: AccountId(row.get(4)),
+                target_name: row.get(5),
+                reason: row.get(6),
+                created_at: row.get(7),
+                mail_evidence: evidence_sender.map(|sender_name| MailReportEvidence {
+                    sender_name,
+                    subject: row.get(9),
+                    body: row.get(10),
+                    sent_at: row.get(11),
+                    created_at: row.get(12),
+                    expires_at: row.get(13),
+                }),
+            }
         })
         .collect();
     transaction.commit()?;
@@ -2246,6 +2942,12 @@ fn resolve_staff_report(
     )?;
     if updated != 1 {
         return Err(StoreError::StaffReportUnavailable(report_id));
+    }
+    if resolution == StaffReportResolution::ActionTaken {
+        transaction.execute(
+            "DELETE FROM social_mail_messages WHERE report_id = $1 AND expires_at > $2",
+            &[&report_id, &now],
+        )?;
     }
     insert_staff_audit(&mut transaction, &audit, now)?;
     transaction.commit()?;
@@ -2714,6 +3416,40 @@ mod tests {
     };
 
     #[test]
+    fn postgres_mail_contract_keeps_exact_input_and_storage_bounds() {
+        assert_eq!(MAILBOX_CAPACITY, 64);
+        assert_eq!(MAILBOX_BYTE_CAPACITY, 128 * 1024);
+        assert_eq!(MAIL_PAGE_SIZE, 10);
+        assert_eq!(MAIL_MAX_PAGES, 7);
+        assert_eq!(MAIL_HOURLY_CAPACITY, 20);
+        assert_eq!(MAIL_DAILY_CAPACITY, 50);
+        assert_eq!(MAIL_GLOBAL_CAPACITY, 100_000);
+        assert_eq!(MAIL_PURGE_LIMIT, 256);
+        assert_eq!(
+            normalise_mail_text("subject", MAX_MAIL_SUBJECT_BYTES).unwrap(),
+            "subject"
+        );
+        assert!(matches!(
+            normalise_mail_text(" subject ", MAX_MAIL_SUBJECT_BYTES),
+            Err(StoreError::InvalidMailInput)
+        ));
+        assert!(matches!(
+            normalise_mail_text("bad\nbody", MAX_MAIL_BODY_BYTES),
+            Err(StoreError::InvalidMailInput)
+        ));
+        assert!(matches!(
+            normalise_name("A\u{202e}B", "character"),
+            Err(StoreError::InvalidName { kind: "character" })
+        ));
+        assert!(matches!(
+            normalise_name("A|B", "character"),
+            Err(StoreError::InvalidName { kind: "character" })
+        ));
+        assert!(valid_mail_public_id("m0123456789abcdef0123456789abcdef"));
+        assert!(!valid_mail_public_id("M0123456789abcdef0123456789abcdef"));
+    }
+
+    #[test]
     fn postgres_runtime_decoder_accepts_current_and_upgrades_strict_v3_v4_v6() {
         let mut current = World::demo().runtime_snapshot();
         let item_id = current.item_instances.keys().next().unwrap().clone();
@@ -3098,6 +3834,48 @@ mod tests {
                 .unwrap(),
             vec![keeper_character.id, player_character.id]
         );
+        let public_id = "m0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            store
+                .send_mail(
+                    keeper_character.id,
+                    &player_character.name,
+                    public_id,
+                    "Lanterns",
+                    "Meet beneath the arch.",
+                )
+                .await
+                .unwrap(),
+            MailSendResult::Stored
+        );
+        let page = store.mailbox_page(player_character.id, 1).await.unwrap();
+        assert_eq!(page.total_messages, 1);
+        assert_eq!(page.unread_count, 1);
+        assert_eq!(page.capacity, 64);
+        assert_eq!(page.messages[0].public_id, public_id);
+        let message = store
+            .read_mail(player_character.id, public_id)
+            .await
+            .unwrap();
+        assert_eq!(message.body, "Meet beneath the arch.");
+        assert!(message.summary.read);
+        let mail_report = store
+            .report_mail(player_character.id, public_id, "Unwanted offline contact")
+            .await
+            .unwrap();
+        assert!(mail_report > 0);
+        store
+            .delete_mail(player_character.id, public_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            admin_count(
+                &base_url,
+                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_mail_report_evidence"),
+            )
+            .await,
+            1
+        );
         store
             .set_social_relation(
                 player_character.id,
@@ -3112,6 +3890,27 @@ mod tests {
                 .social_delivery_allowed(keeper_character.id, player_character.id)
                 .await
                 .unwrap()
+        );
+        assert_eq!(
+            store
+                .send_mail(
+                    keeper_character.id,
+                    &player_character.name,
+                    "mfedcba9876543210fedcba9876543210",
+                    "Suppressed",
+                    "This body must not be stored.",
+                )
+                .await
+                .unwrap(),
+            MailSendResult::Suppressed
+        );
+        assert_eq!(
+            store
+                .mailbox_page(player_character.id, 1)
+                .await
+                .unwrap()
+                .total_messages,
+            0
         );
         store
             .moderate_character(

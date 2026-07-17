@@ -138,6 +138,7 @@ pub enum PlayerAction {
     Weather,
     Time,
     Social(SocialAction),
+    Mail(MailAction),
     Staff(StaffAction),
 }
 
@@ -567,6 +568,35 @@ pub enum SocialAction {
     },
 }
 
+pub const MAX_MAIL_TARGET_BYTES: usize = 64;
+pub const MAX_MAIL_SUBJECT_BYTES: usize = 128;
+pub const MAX_MAIL_BODY_BYTES: usize = 2_048;
+pub const MAX_MAIL_REPORT_REASON_BYTES: usize = 2_048;
+pub const MAX_MAIL_PAGE: u16 = 7;
+pub const MAIL_PUBLIC_ID_BYTES: usize = 33;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MailAction {
+    List {
+        page: u16,
+    },
+    Read {
+        mail_id: String,
+    },
+    Delete {
+        mail_id: String,
+    },
+    Send {
+        target: String,
+        subject: String,
+        body: String,
+    },
+    Report {
+        mail_id: String,
+        reason: String,
+    },
+}
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ParseActionError {
     #[error("Please enter a command.")]
@@ -802,6 +832,72 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if normalised == "reply" {
         return Err(ParseActionError::MissingTarget { command: "reply" });
+    }
+    if matches!(normalised.as_str(), "mail" | "mail list") {
+        return Ok(PlayerAction::Mail(MailAction::List { page: 1 }));
+    }
+    if let Some(page) = normalised.strip_prefix("mail list ").map(str::trim) {
+        let page = page
+            .parse::<u16>()
+            .ok()
+            .filter(|page| (1..=MAX_MAIL_PAGE).contains(page))
+            .ok_or_else(|| ParseActionError::Unknown(input.to_owned()))?;
+        return Ok(PlayerAction::Mail(MailAction::List { page }));
+    }
+    for (command, read) in [("mail read", true), ("mail delete", false)] {
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget { command: "mail" });
+        }
+        if let Some(mail_id) = command_tail_phrase(input, command) {
+            if !valid_mail_public_id(&mail_id) {
+                return Err(ParseActionError::Unknown(input.to_owned()));
+            }
+            return Ok(PlayerAction::Mail(if read {
+                MailAction::Read { mail_id }
+            } else {
+                MailAction::Delete { mail_id }
+            }));
+        }
+    }
+    if normalised == "mail send" {
+        return Err(ParseActionError::MissingTarget { command: "mail" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "mail send") {
+        let fields = rest.splitn(3, '|').map(str::trim).collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return Err(ParseActionError::MissingTarget { command: "mail" });
+        }
+        let (target, subject, body) = (fields[0], fields[1], fields[2]);
+        if !valid_mail_target(target)
+            || !valid_mail_subject(subject)
+            || !valid_mail_visible_text(body, MAX_MAIL_BODY_BYTES)
+        {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        }
+        return Ok(PlayerAction::Mail(MailAction::Send {
+            target: target.to_owned(),
+            subject: subject.to_owned(),
+            body: body.to_owned(),
+        }));
+    }
+    if normalised == "mail report" {
+        return Err(ParseActionError::MissingTarget { command: "mail" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "mail report") {
+        let Some((mail_id, reason)) = rest.split_once('|') else {
+            return Err(ParseActionError::MissingTarget { command: "mail" });
+        };
+        let mail_id = mail_id.trim();
+        let reason = reason.trim();
+        if !valid_mail_public_id(mail_id)
+            || !valid_mail_visible_text(reason, MAX_MAIL_REPORT_REASON_BYTES)
+        {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        }
+        return Ok(PlayerAction::Mail(MailAction::Report {
+            mail_id: mail_id.to_owned(),
+            reason: reason.to_owned(),
+        }));
     }
     if normalised == "emotes" {
         return Ok(PlayerAction::Social(SocialAction::EmoteList));
@@ -10816,9 +10912,10 @@ impl World {
                 changed_character: None,
                 domain_events: Vec::new(),
             }),
-            PlayerAction::Telepathy { .. } | PlayerAction::Social(_) | PlayerAction::Staff(_) => {
-                Err(WorldError::GameplayUnavailable)
-            }
+            PlayerAction::Telepathy { .. }
+            | PlayerAction::Social(_)
+            | PlayerAction::Mail(_)
+            | PlayerAction::Staff(_) => Err(WorldError::GameplayUnavailable),
             PlayerAction::Move(direction) => {
                 let location = self.character(session)?.location;
                 let source_room = room_checked(&self.entities, location)?;
@@ -17482,6 +17579,42 @@ fn valid_telepathy_fields(ability_id: &str, target: &str, message: &str) -> bool
         && message == message.trim()
         && safe_definition_text(target, MAX_TELEPATHY_TARGET_BYTES)
         && safe_definition_text(message, MAX_TELEPATHY_MESSAGE_BYTES)
+}
+
+pub fn valid_mail_public_id(value: &str) -> bool {
+    value.len() == MAIL_PUBLIC_ID_BYTES
+        && value.starts_with('m')
+        && value.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+pub fn valid_mail_visible_text(value: &str, maximum_bytes: usize) -> bool {
+    value == value.trim()
+        && !value.is_empty()
+        && value.len() <= maximum_bytes
+        && !value
+            .chars()
+            .any(|character| character.is_control() || is_bidi_formatting(character))
+}
+
+pub fn valid_mail_target(value: &str) -> bool {
+    valid_mail_visible_text(value, MAX_MAIL_TARGET_BYTES) && !value.contains('|')
+}
+
+pub fn valid_mail_subject(value: &str) -> bool {
+    valid_mail_visible_text(value, MAX_MAIL_SUBJECT_BYTES) && !value.contains('|')
+}
+
+fn is_bidi_formatting(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
 }
 
 fn valid_digest_sha256(value: &str) -> bool {

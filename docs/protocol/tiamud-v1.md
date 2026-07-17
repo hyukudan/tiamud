@@ -273,6 +273,7 @@ weather, time
 social.say, social.tell, social.reply, social.channel.list,
 social.channel.join, social.channel.leave, social.channel.say, social.telepathy,
 social.emote.list, social.emote,
+mail.list, mail.read, mail.delete, mail.send, mail.report,
 social.who, social.help
 social.ignore, social.unignore, social.block, social.unblock, social.report
 moderation.mute, moderation.unmute, moderation.ban, moderation.unban,
@@ -303,6 +304,30 @@ Los campos inesperados y objetivos ausentes/prohibidos se rechazan. Se aplican
 las mismas reglas de autorización y percepción; una acción estructurada no es
 un atajo confiable. Accept/revoke/kick/transfer resuelven `target` como nombre
 de un personaje conectado, no como administración de membresía offline.
+
+El correo usa formas cerradas separadas:
+
+| Acción | Campos exactos adicionales |
+| --- | --- |
+| `mail.list` | Ninguno o `page` |
+| `mail.read` | `mailId` |
+| `mail.delete` | `mailId` |
+| `mail.send` | `target`, `subject`, `body` |
+| `mail.report` | `mailId`, `reason` |
+
+`mailId` es `m` seguido de 32 dígitos hexadecimales minúsculos; `page` está en
+1..7. Pedir una página posterior a `totalPages` es válido y devuelve una lista
+vacía, lo que evita que el total cambiante convierta la navegación en error.
+Objetivo/asunto/cuerpo/motivo ocupan como máximo 64/128/2.048/2.048
+bytes UTF-8 visibles, sin controles ni marcas bidi de formato. El nombre
+objetivo coincide exactamente, incluidas mayúsculas/minúsculas. La barra `|`
+se reserva como separador en objetivo/asunto, pero cuerpo y motivo pueden
+conservarla. Las acciones
+textuales equivalentes son `mail [list [página]]`, `mail read/delete <ref>`,
+`mail send <personaje> | <asunto> | <cuerpo>` y
+`mail report <ref> | <motivo>`. Enviar comparte mute y bucket social; las
+demás operaciones no. Un `requestId` repetido solo reproduce la misma firma
+exacta y la respuesta estructurada privada pertenece a esa sesión.
 
 Salvo `staff.status`, que solo muestra la asignación propia, cada acción
 `staff.*` exige una capacidad concreta y `reason`; las acciones dirigidas
@@ -525,6 +550,8 @@ traffic.
 | `container.contents` | Página autorizada de hasta 20 grupos hijos directos, con capacidad del contenedor. |
 | `trade.contents` | Página privada autorizada de hasta 20 grupos hijos directos de un contenedor ofrecido. |
 | `reward.odds` | Página privada de probabilidades exactas de una recompensa sellada portada. |
+| `mail.list` | Página privada de hasta diez cabeceras del buzón offline. |
+| `mail.message` | Carta privada completa marcada como leída. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
 | `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `telepathy`, `emote`, `party`, `general`, `newbie` o `staff`. |
@@ -958,6 +985,14 @@ de 8 KiB; ante un exceso se acotan solo etiquetas y se añaden
 `truncated: true` y `overflow.reason: "messageTooLarge"`, sin eliminar
 selectores, filas, deltas ni numeradores/denominadores.
 
+`mail.list` contiene `page`, `totalPages`, `totalMessages`, `unreadCount`,
+`capacity: 64` y hasta diez filas `{id,sender,subject,createdAt,expiresAt,read}`.
+`mail.message` añade `body`. Los tiempos son segundos Unix; el cuerpo nunca
+entra en la lista. Referencias y campos están acotados antes de serializar y
+no exponen cuentas, personajes o claves SQL. Telnet ofrece texto equivalente;
+si negocia `Tiamud.Mail 1`, recibe `Tiamud.Mail.List` o
+`Tiamud.Mail.Message`, cada paquete bajo el límite GMCP de 8 KiB.
+
 `vitals.update`, `inventory.patch` and `map.snapshot` replace their complete
 corresponding fragment at the stated revision. Other player changes use a new
 `player.snapshot`. A full scene/player snapshot may follow semantic updates to
@@ -1006,7 +1041,7 @@ propia sal; el observador de sala no recibe una lista ajena.
 acotado. Ignore y block
 por cualquiera de las partes se aplican antes de entregar. Mute/ban y rate
 limit se aplican en servidor. `general`, `newbie` y `staff` requieren
-suscripción durable en esquema v11; `staff` exige además perfil `moderator`,
+suscripción durable en esquema v12; `staff` exige además perfil `moderator`,
 `administrator` o `implementor` al unirse, enviar y recibir. `helper`,
 `builder` y los roles legados `Player`/`Moderator`/`Admin` no conceden ese
 acceso. `announcement` es entrega del servidor, no un canal suscribible. La
@@ -1028,6 +1063,18 @@ estructurados del mensaje; el nombre visible del objetivo puede formar parte
 del texto renderizado. Ignore/block puede suprimir receptores sin
 cambiar la confirmación del actor ni la percepción autorizada de terceros.
 No crea historial, `reply`, evento durable, snapshot o fila SQL.
+
+`mail` no es un `chat.message`: se consulta bajo demanda y persiste hasta 30
+días en un buzón de 64 mensajes/128 KiB. La cuota por cuenta es 20 intentos por
+hora y 50 por día. Una entrega suprimida por ignore/block, ban o capacidad usa
+la misma aceptación que un guardado; un objetivo desconocido, ambiguo o propio
+usa un único error genérico. Solo el destinatario lista, lee, borra o denuncia.
+Una denuncia captura evidencia durante 90 días sin habilitar exploración
+general de buzones por staff. Cada cuenta admite como máximo ocho denuncias de
+correo abiertas y el sistema conserva hasta 10.000 evidencias activas.
+
+La decisión de persistencia, privacidad y retención completa está en
+[ADR 0017](../decisions/0017-bounded-offline-mail.md).
 
 Telnet representa el mismo `SocialMessage` autorizado como texto acotado. Si
 negoció GMCP `Comm`, recibe también `Comm.Channel.Text` con el mismo alcance,
@@ -1087,7 +1134,8 @@ rendering remains authoritative and is never removed by this fallback.
   increment rather than emitting an invalid frame.
 - JSON nesting: 16.
 - command: 1024 bytes; request ID: 128; action target: 256; `recipient`: 64.
-- chat: 512 bytes; reason fields and all projected arrays/strings are bounded.
+- chat: 512 bytes; mail target/subject/body/report reason: 64/128/2,048/2,048
+  bytes; reason fields and all projected arrays/strings are bounded.
 - initial hello timeout: 10 seconds; WebSocket write timeout: 5 seconds.
 - three consecutive protocol/rate violations close the game session.
 - `tiamud.v1` is required; browser `Origin`, when present, must exactly match

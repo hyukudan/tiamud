@@ -935,7 +935,7 @@ así como
 cada nueva admisión/confirmación, admiten hasta 2 MiB. La suma de fichas de
 propietarios
 inspeccionadas sigue limitada a 1 MiB y cada ficha a 64 KiB. SQLite y
-PostgreSQL esquema v11 guardan el snapshot como `TEXT` opaco dentro de la
+PostgreSQL esquema v12 guardan el snapshot como `TEXT` opaco dentro de la
 transacción existente. La migración v10→v11 aumenta de forma transaccional la
 restricción física del singleton runtime a 2 MiB y conserva versión, JSON,
 secuencia cubierta y fecha; no convierte el JSON ni crea otra autoridad. No hay

@@ -36,13 +36,13 @@ PostgreSQL se recomienda para instalaciones públicas nuevas; SQLite es la
 alternativa local sin servicio. Se selecciona uno y nunca se hace doble
 escritura.
 
-Ambos adaptadores implementan el esquema v11. Conserva las relaciones sociales
+Ambos adaptadores implementan el esquema v12. Conserva las relaciones sociales
 y de staff de v9/v10 y amplía de forma transaccional el límite físico del
 snapshot opaco actual a 2 MiB. Los snapshots legacy v1–v5 continúan limitados a
 1 MiB al decodificarse; v6 y v7 admiten 2 MiB. El traslado
 SQLite→PostgreSQL copia estas relaciones y
 el runtime en una transacción. La aceptación PostgreSQL real retenida es v8;
-no se relabela como aceptación v11 y aún falta ejecutar v11 contra un servidor
+no se relabela como aceptación v12 y aún falta ejecutar v12 contra un servidor
 PostgreSQL real.
 
 La operación está en [single-host.md](operations/single-host.md). Microservicios
@@ -209,7 +209,7 @@ aparecen en botín se realiza una consulta `existence-only`. Después se cancela
 los encuentros de botín aún abiertos y su estado de combate en un commit previo
 a readiness; los derechos `groundLoot` ya resueltos sobreviven intactos. SQLite
 y PostgreSQL confirman el snapshot como única autoridad en su transacción de
-esquema v11; no hay tabla espejo de loot o escrow ni doble escritura.
+esquema v12; no hay tabla espejo de loot o escrow ni doble escritura.
 
 Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
 WorldPack, 65.536 instancias runtime, 1 MiB para un snapshot legacy v1–v5 y 2
@@ -366,8 +366,12 @@ estado o sala del receptor suprimen la entrega sin revelarlo; el pensamiento y
 destino no persisten y no actualizan `reply`.
 
 La misma política, rate limit, mute, ignore/block y buzones por sesión sirve a
-acciones web, comandos Telnet y `Comm.Channel.Text` GMCP. No existen correo o
-historial durable, shout/yell espacial, emotes globales/de grupo, telepatía de grupo/offline,
+acciones web, comandos Telnet y `Comm.Channel.Text` GMCP. El correo offline es
+una superficie durable separada: 64 mensajes y 128 KiB por buzón, páginas de
+10, caducidad de 30 días, cuotas por cuenta de 20/h y 50/día y denuncia con
+evidencia de 90 días. Usa `mail.*`, texto Telnet y `Tiamud.Mail 1`; la
+aceptación no revela ignore/block, ban o capacidad. No existen historial
+general durable, shout/yell espacial, emotes globales/de grupo, telepatía de grupo/offline,
 follow/assist/rescue, selección general de aliados ni XP/misión compartida. El
 reparto de botín implementado se limita a la cohorte próxima y round-robin de
 4A.
@@ -381,6 +385,9 @@ sustitución en una pasada que no reinterpreta nombres. `emotes` lista y
 no ambiguo y en la misma sala. Ignore/block suprime por receptor, `OnTalk` se
 confirma antes de entregar y el canal `emote` comparte Web, Telnet y GMCP sin
 entrar en eventos, `reply`, snapshots, auditoría, historial o SQL.
+
+El contrato durable y de privacidad de 5C se fija en
+[ADR 0017](decisions/0017-bounded-offline-mail.md).
 
 La autoridad ejecutable de staff es independiente de la ficha y usa una de
 doce capacidades cerradas: `reports.view`, `reports.resolve`,
@@ -534,10 +541,11 @@ secuencia ni se infieren de prosa. Referencia:
 | Perfil de sprite transparente | WebP alfa + PNG implementado |
 | Sidecar de entidades seguro | Implementado; sin sprites de muestra |
 | Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
-| Social fase 1 y esquema v11 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v11 aún no retenida |
-| Comunicación fase 5A | Telepatía directa online authored con coste/cooldowns, bloqueo por sala, supresión privada, commit antes de entrega y paridad Web/Telnet/GMCP; sin mail/historial ni telepatía offline/grupal |
+| Social fase 1 y esquema v12 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v12 aún no retenida |
+| Comunicación fase 5A | Telepatía directa online authored con coste/cooldowns, bloqueo por sala, supresión privada, commit antes de entrega y paridad Web/Telnet/GMCP; la telepatía no persiste ni entrega offline/grupal |
 | Comunicación fase 5B | Emotes locales authored con plantillas cerradas y render no recursivo, targeting local cerrado sin objetivo/opcional/obligatorio, ignore/block por receptor, commit antes de entrega y paridad Web/Telnet/GMCP; sin texto libre, persistencia ni emotes globales/de grupo |
-| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v11 aún no retenida |
+| Comunicación fase 5C | Correo offline explícito con cuotas por cuenta, buzón/caducidad/paginación acotados, referencias opacas, aceptación que no filtra política/capacidad, denuncia con evidencia de 90 días y paridad Web/Telnet/`Tiamud.Mail 1`; sin historial general, outbox, adjuntos ni correo grupal |
+| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v12 aún no retenida |
 | Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3C | Snapshot v4 con vínculo durable y migración v1-v3, tres políticas, `give` atómico, opacidad y paridad Web/Telnet/GMCP implementados; puertas locales soportadas superadas |

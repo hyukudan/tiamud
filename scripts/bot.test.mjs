@@ -562,6 +562,79 @@ test('strict bot validates exact sealed-reward odds without authoring ids', () =
   }));
 });
 
+test('strict bot validates bounded private mail DTOs and rejects smuggling', () => {
+  const id = 'm0123456789abcdef0123456789abcdef';
+  const summary = {
+    id,
+    sender: 'Mara',
+    subject: 'Puerta <Norte> & Sur',
+    createdAt: 1_700_000_000,
+    expiresAt: 1_702_592_000,
+    read: false,
+  };
+  const list = {
+    page: 1,
+    totalPages: 1,
+    totalMessages: 1,
+    unreadCount: 1,
+    capacity: 64,
+    messages: [summary],
+  };
+  assert.equal(parseEnvelope('mail.list', list).data.messages[0].id, id);
+  assert.equal(parseEnvelope('mail.list', {
+    ...list,
+    page: 7,
+    messages: [],
+  }).data.page, 7);
+  assert.equal(parseEnvelope('mail.message', {
+    ...summary,
+    read: true,
+    body: 'Nos vemos | al alba.',
+  }).data.body, 'Nos vemos | al alba.');
+
+  assert.throws(() => parseEnvelope('mail.list', { ...list, secretRecipientId: 42 }));
+  assert.throws(() => parseEnvelope('mail.list', { ...list, capacity: 65 }));
+  assert.throws(() => parseEnvelope('mail.list', {
+    ...list,
+    totalMessages: 11,
+    totalPages: 1,
+  }));
+  assert.throws(() => parseEnvelope('mail.list', {
+    ...list,
+    messages: [{ ...summary, id: 'm0123' }],
+  }));
+  assert.throws(() => parseEnvelope('mail.list', {
+    ...list,
+    page: 7,
+  }));
+  assert.throws(() => parseEnvelope('mail.list', {
+    ...list,
+    messages: [{ ...summary, expiresAt: summary.expiresAt + 1 }],
+  }));
+  assert.throws(() => parseEnvelope('mail.message', {
+    ...summary,
+    body: 'Unread body.',
+  }));
+  assert.throws(() => parseEnvelope('mail.message', {
+    ...summary,
+    body: '\u202ehidden',
+  }));
+  assert.throws(() => parseEnvelope('mail.message', {
+    ...summary,
+    read: true,
+    body: ' padded',
+  }));
+  assert.throws(() => parseEnvelope('mail.message', {
+    ...summary,
+    read: true,
+    body: 'control\u0085character',
+  }));
+  assert.throws(() => parseEnvelope('mail.message', {
+    ...summary,
+    body: 'é'.repeat(1025),
+  }));
+});
+
 test('strict bot accepts only the public item-affix projection', () => {
   const affix = {
     label: 'charged',

@@ -2,13 +2,14 @@ use crate::{
     auth::AuthenticatedSession,
     delivery::{DeliveryInbox, DeliveryRouter},
     persistence::{
-        CharacterStore, DurableCharacterGameplay, StaffAccess, StartupGameplayLoadLimits,
-        StoreError,
+        CharacterStore, DurableCharacterGameplay, MailMessage, MailPage, StaffAccess,
+        StartupGameplayLoadLimits, StoreError,
     },
     runtime_content::{RuntimeContent, ScenePresentation},
     social::{
         MAX_CHAT_MESSAGE_BYTES, MAX_SOCIAL_TARGET_BYTES, SocialChannel, SocialMessage,
-        SocialRuntime, apply_social, ensure_chat_allowed, normalise_text, resolve_connected,
+        SocialRuntime, apply_mail, apply_social, ensure_chat_allowed, normalise_text,
+        resolve_connected,
     },
     staff::{apply_staff, derived_role},
 };
@@ -32,6 +33,7 @@ use tracing::error;
 
 const WORLD_COMMAND_QUEUE_CAPACITY: usize = 256;
 const PERSIST_TICK_SCRIPT_WALL_BUDGET: Duration = Duration::from_millis(100);
+const MAIL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Error)]
 pub enum GameError {
@@ -47,6 +49,8 @@ pub enum GameError {
     GiveUnavailable,
     #[error("that trade is not available")]
     TradeUnavailable,
+    #[error("that mail recipient is not available")]
+    MailRecipientUnavailable,
     #[error("the action's script hook was rejected")]
     ScriptHookRejected,
     #[error("world actor startup failed during {stage}: {reason}")]
@@ -80,6 +84,8 @@ pub struct AppliedAction {
     pub container_contents: Option<ContainerContentsView>,
     pub trade_contents: Option<TradeContentsView>,
     pub reward_odds: Option<RewardOddsView>,
+    pub mail_page: Option<MailPage>,
+    pub mail_message: Option<MailMessage>,
     pub events: Vec<ProjectedViewEvent>,
 }
 
@@ -235,6 +241,15 @@ impl WorldHandle {
             let mut session_roles = HashMap::new();
             let mut session_staff_accesses = HashMap::new();
 
+            if let Err(error) = actor_store.purge_expired_mail().await {
+                return report_startup_failure(
+                    startup_reply,
+                    GameError::Startup {
+                        stage: "purge_expired_mail",
+                        reason: error.to_string(),
+                    },
+                );
+            }
             let startup = match actor_store.load_runtime_snapshot().await {
                 Ok(Some(snapshot)) => {
                     world
@@ -461,6 +476,12 @@ impl WorldHandle {
                 interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 interval.tick().await;
             }
+            let mut mail_maintenance = tokio::time::interval(MAIL_MAINTENANCE_INTERVAL);
+            mail_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            // Tokio intervals fire immediately. Startup already performed the
+            // fail-closed purge, so consume that first instant and schedule
+            // subsequent bounded maintenance runs one hour apart.
+            mail_maintenance.tick().await;
 
             loop {
                 let command = if let Some(interval) = interval.as_mut() {
@@ -480,9 +501,19 @@ impl WorldHandle {
                             }
                             continue;
                         }
+                        _ = mail_maintenance.tick() => {
+                            maintain_expired_mail(actor_store.as_ref()).await;
+                            continue;
+                        }
                     }
                 } else {
-                    rx.recv().await
+                    tokio::select! {
+                        command = rx.recv() => command,
+                        _ = mail_maintenance.tick() => {
+                            maintain_expired_mail(actor_store.as_ref()).await;
+                            continue;
+                        }
+                    }
                 };
                 let Some(command) = command else {
                     break;
@@ -997,6 +1028,19 @@ impl WorldHandle {
     }
 }
 
+async fn maintain_expired_mail(store: &dyn CharacterStore) {
+    match store.purge_expired_mail().await {
+        Ok(0) => {}
+        Ok(purged) => tracing::debug!(purged, "purged expired offline mail"),
+        Err(error) => {
+            // Expired rows are filtered from every read and capacity check.
+            // Maintenance failure is therefore operationally visible but does
+            // not weaken world availability or expose expired content.
+            tracing::warn!(%error, "could not purge expired offline mail");
+        }
+    }
+}
+
 fn validate_startup_character_aggregates(
     world: &World,
     expected_characters: &BTreeSet<CharacterId>,
@@ -1351,7 +1395,26 @@ async fn apply(
             container_contents: None,
             trade_contents: None,
             reward_odds: None,
+            mail_page: None,
+            mail_message: None,
             events,
+        });
+    }
+    if let PlayerAction::Mail(action) = &action {
+        let applied = apply_mail(social, world, store, session, action.clone()).await?;
+        let mut scene = world.current_scene(session)?;
+        runtime_content.resolve_scene(world, session, role, &mut scene);
+        return Ok(AppliedAction {
+            scene,
+            presentation: runtime_content.resolve_entity_presentation(world, session),
+            player: world.player_state_view(session)?,
+            output: Some(applied.output),
+            container_contents: None,
+            trade_contents: None,
+            reward_odds: None,
+            mail_page: applied.page,
+            mail_message: applied.message,
+            events: Vec::new(),
         });
     }
     let checkpoint = world.checkpoint();
@@ -1405,6 +1468,8 @@ async fn apply(
                 container_contents: None,
                 trade_contents: None,
                 reward_odds: None,
+                mail_page: None,
+                mail_message: None,
                 events,
             });
         }
@@ -1549,6 +1614,8 @@ async fn apply(
             container_contents: None,
             trade_contents: None,
             reward_odds: None,
+            mail_page: None,
+            mail_message: None,
             events,
         });
     }
@@ -1663,6 +1730,8 @@ async fn apply(
         container_contents: outcome.container_contents,
         trade_contents: outcome.trade_contents,
         reward_odds: outcome.reward_odds,
+        mail_page: None,
+        mail_message: None,
         events,
     })
 }
@@ -2264,6 +2333,8 @@ mod tests {
         ignores: HashSet<(CharacterId, CharacterId)>,
         blocks: HashSet<(CharacterId, CharacterId)>,
         channel_subscriptions: BTreeSet<(CharacterId, SocialChannelName)>,
+        mail: Vec<MemoryMail>,
+        reported_mail: HashSet<String>,
         audit: Vec<crate::persistence::AuditEntry>,
         staff_profiles: HashMap<AccountId, (tiamud_core::StaffProfileKey, Option<String>)>,
         staff_capabilities: HashMap<AccountId, BTreeSet<tiamud_core::StaffCapability>>,
@@ -2271,6 +2342,13 @@ mod tests {
         staff_reports: Vec<crate::persistence::StaffReport>,
         resolved_staff_reports: HashSet<i64>,
         staff_audit: Vec<crate::persistence::StaffAuditEntry>,
+    }
+
+    #[derive(Clone)]
+    struct MemoryMail {
+        sender: CharacterId,
+        recipient: CharacterId,
+        message: crate::persistence::MailMessage,
     }
 
     #[derive(Default)]
@@ -2960,6 +3038,183 @@ mod tests {
             Ok(())
         }
 
+        async fn send_mail(
+            &self,
+            sender: CharacterId,
+            target_name: &str,
+            public_id: &str,
+            subject: &str,
+            body: &str,
+        ) -> Result<crate::persistence::MailSendResult, StoreError> {
+            let mut state = self.state.lock().unwrap();
+            memory_social_profile(&state, sender)?;
+            let matches = state
+                .characters
+                .values()
+                .filter(|character| character.name.eq_ignore_ascii_case(target_name))
+                .map(|character| character.id)
+                .collect::<Vec<_>>();
+            let [recipient] = matches.as_slice() else {
+                return Ok(crate::persistence::MailSendResult::Unavailable);
+            };
+            if *recipient == sender {
+                return Ok(crate::persistence::MailSendResult::Unavailable);
+            }
+            if state.ignores.contains(&(*recipient, sender))
+                || state.blocks.contains(&(*recipient, sender))
+                || state.blocks.contains(&(sender, *recipient))
+            {
+                return Ok(crate::persistence::MailSendResult::Suppressed);
+            }
+            if state
+                .mail
+                .iter()
+                .filter(|mail| mail.recipient == *recipient)
+                .count()
+                >= 64
+            {
+                return Ok(crate::persistence::MailSendResult::Suppressed);
+            }
+            let sender_name = state.characters[&sender].name.clone();
+            state.mail.push(MemoryMail {
+                sender,
+                recipient: *recipient,
+                message: crate::persistence::MailMessage {
+                    summary: crate::persistence::MailMessageSummary {
+                        public_id: public_id.to_owned(),
+                        sender_name,
+                        subject: subject.to_owned(),
+                        created_at: 1,
+                        expires_at: 2_592_001,
+                        read: false,
+                    },
+                    body: body.to_owned(),
+                },
+            });
+            Ok(crate::persistence::MailSendResult::Stored)
+        }
+
+        async fn mailbox_page(
+            &self,
+            recipient: CharacterId,
+            page: u32,
+        ) -> Result<crate::persistence::MailPage, StoreError> {
+            memory_social_profile(&self.state.lock().unwrap(), recipient)?;
+            if !(1..=7).contains(&page) {
+                return Err(StoreError::InvalidMailInput);
+            }
+            let state = self.state.lock().unwrap();
+            let messages = state
+                .mail
+                .iter()
+                .rev()
+                .filter(|mail| mail.recipient == recipient)
+                .collect::<Vec<_>>();
+            let total_messages = u32::try_from(messages.len()).unwrap_or(u32::MAX);
+            let unread_count = u32::try_from(
+                messages
+                    .iter()
+                    .filter(|mail| !mail.message.summary.read)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
+            let total_pages = total_messages.div_ceil(10).max(1);
+            let offset = usize::try_from((page - 1) * 10).unwrap_or(usize::MAX);
+            Ok(crate::persistence::MailPage {
+                page,
+                total_pages,
+                total_messages,
+                unread_count,
+                capacity: 64,
+                messages: messages
+                    .into_iter()
+                    .skip(offset)
+                    .take(10)
+                    .map(|mail| mail.message.summary.clone())
+                    .collect(),
+            })
+        }
+
+        async fn read_mail(
+            &self,
+            recipient: CharacterId,
+            public_id: &str,
+        ) -> Result<crate::persistence::MailMessage, StoreError> {
+            let mut state = self.state.lock().unwrap();
+            let mail = state
+                .mail
+                .iter_mut()
+                .find(|mail| {
+                    mail.recipient == recipient && mail.message.summary.public_id == public_id
+                })
+                .ok_or(StoreError::MailNotFound)?;
+            mail.message.summary.read = true;
+            Ok(mail.message.clone())
+        }
+
+        async fn delete_mail(
+            &self,
+            recipient: CharacterId,
+            public_id: &str,
+        ) -> Result<(), StoreError> {
+            let mut state = self.state.lock().unwrap();
+            let before = state.mail.len();
+            state.mail.retain(|mail| {
+                mail.recipient != recipient || mail.message.summary.public_id != public_id
+            });
+            (state.mail.len() < before)
+                .then_some(())
+                .ok_or(StoreError::MailNotFound)
+        }
+
+        async fn report_mail(
+            &self,
+            recipient: CharacterId,
+            public_id: &str,
+            reason: &str,
+        ) -> Result<i64, StoreError> {
+            let mut state = self.state.lock().unwrap();
+            if state.reported_mail.contains(public_id) {
+                return Err(StoreError::MailAlreadyReported);
+            }
+            let mail = state
+                .mail
+                .iter()
+                .find(|mail| {
+                    mail.recipient == recipient && mail.message.summary.public_id == public_id
+                })
+                .cloned()
+                .ok_or(StoreError::MailNotFound)?;
+            let reporter = memory_social_profile(&state, recipient)?;
+            let target = memory_social_profile(&state, mail.sender)?;
+            state.next_staff_report += 1;
+            let report_id = state.next_staff_report;
+            state.staff_reports.push(crate::persistence::StaffReport {
+                id: report_id,
+                reporter_character_id: recipient,
+                reporter_name: reporter.character_name,
+                target_character_id: mail.sender,
+                target_account_id: target.account_id,
+                target_name: target.character_name,
+                reason: reason.to_owned(),
+                created_at: 1,
+                mail_evidence: Some(crate::persistence::MailReportEvidence {
+                    sender_name: mail.message.summary.sender_name,
+                    subject: mail.message.summary.subject,
+                    body: mail.message.body,
+                    sent_at: mail.message.summary.created_at,
+                    created_at: 1,
+                    expires_at: 2_592_001,
+                }),
+            });
+            state.reported_mail.insert(public_id.to_owned());
+            Ok(report_id)
+        }
+
+        async fn purge_expired_mail(&self) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+
         async fn report_character(
             &self,
             actor: CharacterId,
@@ -2986,6 +3241,7 @@ mod tests {
                 target_name: target.character_name.clone(),
                 reason: reason.trim().to_owned(),
                 created_at: 1,
+                mail_evidence: None,
             });
             memory_audit(
                 &mut state,
@@ -5833,6 +6089,165 @@ mod tests {
         ));
         restarted.leave(leader.session_id).await;
         restarted.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mail_is_private_durable_offline_and_does_not_enter_social_or_world_streams() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let sender = world.enter("Mail Sender".into()).await.unwrap();
+        let mut recipient = world.enter("Mail Recipient".into()).await.unwrap();
+        let (sender_id, recipient_id) = {
+            let state = store.state.lock().unwrap();
+            let id_for = |name: &str| {
+                state
+                    .characters
+                    .values()
+                    .find(|character| character.name == name)
+                    .unwrap()
+                    .id
+            };
+            (id_for("Mail Sender"), id_for("Mail Recipient"))
+        };
+        let events_before = store.state.lock().unwrap().domain_events.len();
+
+        let accepted = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Mail(tiamud_core::MailAction::Send {
+                    target: "Mail Recipient".into(),
+                    subject: "Online subject <&>".into(),
+                    body: "Private online body | with a pipe.".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.output.as_deref(), Some("Mail accepted.\r\n"));
+        assert!(accepted.events.is_empty());
+        assert!(accepted.mail_page.is_none());
+        assert!(accepted.mail_message.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                .await
+                .is_err()
+        );
+
+        let recipient_account = recipient.account_id;
+        world.leave(recipient.session_id).await;
+        let accepted_offline = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Mail(tiamud_core::MailAction::Send {
+                    target: "Mail Recipient".into(),
+                    subject: "Offline subject".into(),
+                    body: "Private offline body.".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            accepted_offline.output.as_deref(),
+            Some("Mail accepted.\r\n")
+        );
+        assert!(accepted_offline.events.is_empty());
+        assert_eq!(
+            store.state.lock().unwrap().domain_events.len(),
+            events_before
+        );
+
+        let recipient = world
+            .enter_character(recipient_account, recipient_id)
+            .await
+            .unwrap();
+        let listed = world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Mail(tiamud_core::MailAction::List { page: 1 }),
+            )
+            .await
+            .unwrap();
+        let page = listed.mail_page.expect("private mailbox page");
+        assert_eq!(page.total_messages, 2);
+        assert_eq!(page.unread_count, 2);
+        assert_eq!(page.messages.len(), 2);
+        assert!(page.messages.iter().all(|message| {
+            message.public_id.len() == tiamud_core::MAIL_PUBLIC_ID_BYTES
+                && tiamud_core::valid_mail_public_id(&message.public_id)
+        }));
+        let offline_id = page
+            .messages
+            .iter()
+            .find(|message| message.subject == "Offline subject")
+            .unwrap()
+            .public_id
+            .clone();
+
+        let read = world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Mail(tiamud_core::MailAction::Read {
+                    mail_id: offline_id.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            read.mail_message
+                .as_ref()
+                .map(|message| message.body.as_str()),
+            Some("Private offline body.")
+        );
+        assert!(matches!(
+            world
+                .apply(
+                    recipient.session_id,
+                    PlayerAction::Social(SocialAction::Reply("Mail is not reply state".into())),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::SocialTargetNotFound))
+        ));
+
+        let reported = world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Mail(tiamud_core::MailAction::Report {
+                    mail_id: offline_id.clone(),
+                    reason: "Unwanted contact".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(reported.output.unwrap().contains("report 1"));
+        {
+            let state = store.state.lock().unwrap();
+            let evidence = state.staff_reports[0].mail_evidence.as_ref().unwrap();
+            assert_eq!(evidence.sender_name, "Mail Sender");
+            assert_eq!(evidence.subject, "Offline subject");
+            assert_eq!(evidence.body, "Private offline body.");
+        }
+
+        world
+            .apply(
+                recipient.session_id,
+                PlayerAction::Mail(tiamud_core::MailAction::Delete {
+                    mail_id: offline_id,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .mail
+                .iter()
+                .filter(|mail| mail.sender == sender_id && mail.recipient == recipient_id)
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

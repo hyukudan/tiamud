@@ -4,7 +4,7 @@ use crate::{
         ActiveSessionLimit, ActiveSessionLimiter, AuthRateLimiter, CommandRateLimiter,
         OutputTransport, RuntimeMetrics,
     },
-    persistence::StoreError,
+    persistence::{MailMessage, MailPage, StoreError},
     social::{SocialChannel, SocialMessage},
     telnet_transport::{TelnetStream, TelnetTransport},
     world_actor::{CharacterBackgroundSelection, GameError, WorldHandle},
@@ -985,6 +985,7 @@ async fn write_auth_error(connection: &mut TelnetConnection, error: &GameError) 
 
 fn public_error(error: &GameError) -> String {
     match error {
+        GameError::MailRecipientUnavailable => "That mail recipient is not available.".to_owned(),
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
         GameError::World(tiamud_core::WorldError::LootUnavailable) => {
             "That loot is not available.".to_owned()
@@ -1040,13 +1041,28 @@ fn public_error(error: &GameError) -> String {
             "That report is not available for resolution.".to_owned()
         }
         GameError::Persistence(StoreError::ChatMuted) => {
-            "You cannot send chat while your account is muted.".to_owned()
+            "You cannot send messages while your account is muted.".to_owned()
         }
         GameError::Persistence(StoreError::ChatRateLimited) => {
             "Chat rate limit exceeded; wait before sending another message.".to_owned()
         }
         GameError::Persistence(StoreError::InvalidSocialInput) => {
             "The social action is invalid or rate limited.".to_owned()
+        }
+        GameError::Persistence(StoreError::InvalidMailInput) => {
+            "The mail action is invalid or exceeds its limits.".to_owned()
+        }
+        GameError::Persistence(StoreError::MailRateLimited) => {
+            "Mail send quota exceeded; wait before sending more mail.".to_owned()
+        }
+        GameError::Persistence(StoreError::MailNotFound) => {
+            "That mail is not available.".to_owned()
+        }
+        GameError::Persistence(StoreError::MailAlreadyReported) => {
+            "That mail has already been reported.".to_owned()
+        }
+        GameError::Persistence(StoreError::MailReportLimit | StoreError::MailEvidenceLimit) => {
+            "Mail reporting is temporarily unavailable.".to_owned()
         }
         GameError::Persistence(StoreError::InvalidStaffInput) => {
             "The staff action is invalid or exceeds its limits.".to_owned()
@@ -1266,6 +1282,18 @@ async fn serve_entered(
                                             odds,
                                             outcome.player.revision,
                                         );
+                                        if !gmcp.is_empty() {
+                                            output_queue_bytes(output, gmcp)?;
+                                        }
+                                    }
+                                    if let Some(page) = &outcome.mail_page {
+                                        let gmcp = input.negotiation.mail_page_gmcp(page);
+                                        if !gmcp.is_empty() {
+                                            output_queue_bytes(output, gmcp)?;
+                                        }
+                                    }
+                                    if let Some(message) = &outcome.mail_message {
+                                        let gmcp = input.negotiation.mail_message_gmcp(message);
                                         if !gmcp.is_empty() {
                                             output_queue_bytes(output, gmcp)?;
                                         }
@@ -2639,6 +2667,66 @@ impl TelnetSession {
         output
     }
 
+    fn mail_page_gmcp(&self, page: &MailPage) -> Vec<u8> {
+        if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("tiamud.mail") {
+            return Vec::new();
+        }
+        let messages = page
+            .messages
+            .iter()
+            .map(|message| {
+                json!({
+                    "id": message.public_id,
+                    "sender": message.sender_name,
+                    "subject": message.subject,
+                    "createdAt": message.created_at,
+                    "expiresAt": message.expires_at,
+                    "read": message.read,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut output = Vec::new();
+        if !append_gmcp(
+            &mut output,
+            "Tiamud.Mail.List",
+            &json!({
+                "page": page.page,
+                "totalPages": page.total_pages,
+                "totalMessages": page.total_messages,
+                "unreadCount": page.unread_count,
+                "capacity": page.capacity,
+                "messages": messages,
+            }),
+        ) {
+            warn!("failed to encode bounded Tiamud.Mail.List page");
+        }
+        output
+    }
+
+    fn mail_message_gmcp(&self, message: &MailMessage) -> Vec<u8> {
+        if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("tiamud.mail") {
+            return Vec::new();
+        }
+        let summary = &message.summary;
+        let mut output = Vec::new();
+        if !append_gmcp(
+            &mut output,
+            "Tiamud.Mail.Message",
+            &json!({
+                "id": summary.public_id,
+                "sender": summary.sender_name,
+                "subject": summary.subject,
+                "body": message.body,
+                "createdAt": summary.created_at,
+                "expiresAt": summary.expires_at,
+                "read": summary.read,
+            }),
+        ) {
+            warn!("failed to encode bounded Tiamud.Mail.Message");
+        }
+        output
+    }
+
     fn social_gmcp(&self, message: &SocialMessage) -> Vec<u8> {
         if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("comm") {
             return Vec::new();
@@ -2779,6 +2867,7 @@ const GMCP_PACKAGES: &[&str] = &[
     "Char.Items 1",
     "Char.Trade 1",
     "Char.Reward 1",
+    "Tiamud.Mail 1",
     "Tiamud.Scene 1",
     "Tiamud.Character 1",
     "Tiamud.Assets 1",
@@ -3525,7 +3614,7 @@ mod tests {
         );
         assert_eq!(
             public_error(&GameError::Persistence(StoreError::ChatMuted)),
-            "You cannot send chat while your account is muted."
+            "You cannot send messages while your account is muted."
         );
         assert_eq!(
             public_error(&GameError::World(
@@ -4656,6 +4745,75 @@ mod tests {
             payload["affixes"][0]["affixLabel"].as_str().unwrap().len()
                 <= MAX_GMCP_CONTAINER_FALLBACK_LABEL_BYTES
         );
+    }
+
+    #[test]
+    fn mail_gmcp_is_opt_in_exact_and_bounded() {
+        let summary = crate::persistence::MailMessageSummary {
+            public_id: "m0123456789abcdef0123456789abcdef".into(),
+            sender_name: "A&B <sender>".into(),
+            subject: "é".repeat(64),
+            created_at: 10,
+            expires_at: 20,
+            read: false,
+        };
+        let page = MailPage {
+            page: 1,
+            total_pages: 1,
+            total_messages: 1,
+            unread_count: 1,
+            capacity: 64,
+            messages: vec![summary.clone()],
+        };
+        let message = MailMessage {
+            summary: summary.clone(),
+            body: format!("{} | <&>", "é".repeat(1_000)),
+        };
+
+        let unnegotiated = TelnetSession::default();
+        assert!(unnegotiated.mail_page_gmcp(&page).is_empty());
+        assert!(unnegotiated.mail_message_gmcp(&message).is_empty());
+
+        let mut session = TelnetSession::default();
+        session.begin_initial_negotiation();
+        session.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        session.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Tiamud.Mail 1"]"#.to_vec(),
+        }]);
+
+        let list_payloads = gmcp_payloads(&session.mail_page_gmcp(&page));
+        assert_eq!(list_payloads.len(), 1);
+        assert!(list_payloads[0].len() <= MAX_GMCP_BYTES);
+        let list: Value = serde_json::from_slice(
+            list_payloads[0]
+                .strip_prefix(b"Tiamud.Mail.List ")
+                .expect("mail list package"),
+        )
+        .unwrap();
+        assert_eq!(list["messages"][0]["id"], summary.public_id);
+        assert_eq!(list["messages"][0]["sender"], "A&B <sender>");
+        assert_eq!(list["messages"][0]["subject"], summary.subject);
+        assert!(list["messages"][0].get("body").is_none());
+
+        let message_payloads = gmcp_payloads(&session.mail_message_gmcp(&message));
+        assert_eq!(message_payloads.len(), 1);
+        assert!(message_payloads[0].len() <= MAX_GMCP_BYTES);
+        let detail: Value = serde_json::from_slice(
+            message_payloads[0]
+                .strip_prefix(b"Tiamud.Mail.Message ")
+                .expect("mail message package"),
+        )
+        .unwrap();
+        assert_eq!(detail["id"], summary.public_id);
+        assert_eq!(detail["body"], message.body);
+        let encoded = detail.to_string();
+        assert!(!encoded.contains("recipientCharacterId"));
+        assert!(!encoded.contains("senderCharacterId"));
+        assert!(!encoded.contains("accountId"));
     }
 
     #[test]

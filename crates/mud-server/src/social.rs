@@ -1,18 +1,22 @@
 use crate::{
     persistence::{
-        CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, ModerationAction,
-        SocialRelationKind, StaffAccess, StoreError,
+        CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, MailMessage, MailPage,
+        MailSendResult, ModerationAction, SocialRelationKind, StaffAccess, StoreError,
     },
     world_actor::GameError,
 };
+use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write as _,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tiamud_core::{
-    AccountId, CharacterId, ConnectedCharacter, SessionId, SocialAction, SocialChannelName,
-    StaffCapability, StaffProfileKey, World,
+    AccountId, CharacterId, ConnectedCharacter, MAIL_PUBLIC_ID_BYTES, MAX_MAIL_BODY_BYTES,
+    MAX_MAIL_PAGE, MAX_MAIL_REPORT_REASON_BYTES, MAX_MAIL_SUBJECT_BYTES, MAX_MAIL_TARGET_BYTES,
+    MailAction, SessionId, SocialAction, SocialChannelName, StaffCapability, StaffProfileKey,
+    World, valid_mail_public_id, valid_mail_subject, valid_mail_target, valid_mail_visible_text,
 };
 
 pub const MAX_CHAT_MESSAGE_BYTES: usize = 512;
@@ -90,6 +94,13 @@ pub struct AppliedSocial {
     pub disconnects: Vec<(SessionId, CharacterId)>,
 }
 
+#[derive(Debug)]
+pub struct AppliedMail {
+    pub output: String,
+    pub page: Option<MailPage>,
+    pub message: Option<MailMessage>,
+}
+
 impl SocialRuntime {
     pub fn new() -> Self {
         Self {
@@ -126,6 +137,142 @@ impl SocialRuntime {
         bucket.tokens -= 1.0;
         true
     }
+}
+
+pub async fn apply_mail(
+    runtime: &mut SocialRuntime,
+    world: &World,
+    store: &dyn CharacterStore,
+    session: SessionId,
+    action: MailAction,
+) -> Result<AppliedMail, GameError> {
+    let actor = world.character_snapshot(session)?;
+    match action {
+        MailAction::List { page } => {
+            if !(1..=MAX_MAIL_PAGE).contains(&page) {
+                return Err(StoreError::InvalidMailInput.into());
+            }
+            let page = store.mailbox_page(actor.id, u32::from(page)).await?;
+            let output = render_mail_page(&page);
+            Ok(AppliedMail {
+                output,
+                page: Some(page),
+                message: None,
+            })
+        }
+        MailAction::Read { mail_id } => {
+            ensure_mail_id(&mail_id)?;
+            let message = store.read_mail(actor.id, &mail_id).await?;
+            let output = format!(
+                "Mail {} from {}\r\nSubject: {}\r\nSent: {} · Expires: {}\r\n\r\n{}\r\n",
+                message.summary.public_id,
+                message.summary.sender_name,
+                message.summary.subject,
+                message.summary.created_at,
+                message.summary.expires_at,
+                message.body,
+            );
+            Ok(AppliedMail {
+                output,
+                page: None,
+                message: Some(message),
+            })
+        }
+        MailAction::Delete { mail_id } => {
+            ensure_mail_id(&mail_id)?;
+            store.delete_mail(actor.id, &mail_id).await?;
+            Ok(AppliedMail {
+                output: "Mail deleted.\r\n".to_owned(),
+                page: None,
+                message: None,
+            })
+        }
+        MailAction::Send {
+            target,
+            subject,
+            body,
+        } => {
+            let target = normalise_mail_text(&target, MAX_MAIL_TARGET_BYTES)?;
+            let subject = normalise_mail_text(&subject, MAX_MAIL_SUBJECT_BYTES)?;
+            let body = normalise_mail_text(&body, MAX_MAIL_BODY_BYTES)?;
+            if !valid_mail_target(&target) || !valid_mail_subject(&subject) {
+                return Err(StoreError::InvalidMailInput.into());
+            }
+            ensure_chat_allowed(runtime, store, actor.id).await?;
+            let public_id = random_mail_public_id();
+            match store
+                .send_mail(actor.id, &target, &public_id, &subject, &body)
+                .await?
+            {
+                MailSendResult::Stored | MailSendResult::Suppressed => Ok(AppliedMail {
+                    output: "Mail accepted.\r\n".to_owned(),
+                    page: None,
+                    message: None,
+                }),
+                MailSendResult::Unavailable => Err(GameError::MailRecipientUnavailable),
+            }
+        }
+        MailAction::Report { mail_id, reason } => {
+            ensure_mail_id(&mail_id)?;
+            let reason = normalise_mail_text(&reason, MAX_MAIL_REPORT_REASON_BYTES)?;
+            let report_id = store.report_mail(actor.id, &mail_id, &reason).await?;
+            Ok(AppliedMail {
+                output: format!("Mail reported for moderator review as report {report_id}.\r\n"),
+                page: None,
+                message: None,
+            })
+        }
+    }
+}
+
+fn ensure_mail_id(value: &str) -> Result<(), StoreError> {
+    valid_mail_public_id(value)
+        .then_some(())
+        .ok_or(StoreError::InvalidMailInput)
+}
+
+fn normalise_mail_text(value: &str, maximum: usize) -> Result<String, StoreError> {
+    let value = value.trim();
+    valid_mail_visible_text(value, maximum)
+        .then(|| value.to_owned())
+        .ok_or(StoreError::InvalidMailInput)
+}
+
+fn random_mail_public_id() -> String {
+    let mut random = [0_u8; 16];
+    OsRng.fill_bytes(&mut random);
+    let mut id = String::with_capacity(MAIL_PUBLIC_ID_BYTES);
+    id.push('m');
+    for byte in random {
+        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    debug_assert!(valid_mail_public_id(&id));
+    id
+}
+
+fn render_mail_page(page: &MailPage) -> String {
+    let mut output = format!(
+        "Mail page {}/{} ({} message(s), {} unread; capacity {}).\r\n",
+        page.page, page.total_pages, page.total_messages, page.unread_count, page.capacity,
+    );
+    if page.messages.is_empty() {
+        output.push_str("- No mail on this page.\r\n");
+        return output;
+    }
+    for message in &page.messages {
+        let state = if message.read { "read" } else { "unread" };
+        writeln!(
+            &mut output,
+            "- {} [{state}] from {}: {} (sent {}, expires {})\r",
+            message.public_id,
+            message.sender_name,
+            message.subject,
+            message.created_at,
+            message.expires_at,
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
 }
 
 pub async fn apply_social(
@@ -809,6 +956,7 @@ fn help_text(topic: Option<&str>) -> String {
             "Social: say <message>, tell <name> <message>, reply <message>, who.\r\n",
             "Telepathy: telepathy <ability-id> <name> <message> when the world grants it.\r\n",
             "Emotes: emotes lists authored gestures; emote <command> [character] performs one.\r\n",
+            "Mail: mail list [page], mail read/delete <id>, mail send <name> | <subject> | <body>, mail report <id> | <reason>.\r\n",
             "Party: party say/invite/accept/revoke/kick/transfer/disband/leave/status.\r\n",
             "Channels: channel list, channel join/leave <general|newbie|staff>, ",
             "channel say <channel> <message>. Staff requires a moderator, administrator or implementor profile.\r\n",
@@ -828,7 +976,7 @@ fn help_text(topic: Option<&str>) -> String {
             "Movement: north/east/south/west/up/down, look.\r\n",
             "Items: inventory, take/drop/give [quantity], contents, put/get [quantity], examine, use, equip, unequip.\r\n",
             "Trade: request, offer, review and double-confirm a same-room exchange; help trade.\r\n",
-            "Social: say, tell, reply, telepathy, emotes, party say, channels, who, ignore, block, report.\r\n",
+            "Social: say, tell, reply, telepathy, emotes, mail, party say, channels, who, ignore, block, report.\r\n",
             "More: help social, help trade.\r\n"
         )
         .to_owned(),

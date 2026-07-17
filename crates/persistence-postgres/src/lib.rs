@@ -47,10 +47,10 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 12;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
-pub(crate) const APPLICATION_TABLES: [&str; 17] = [
+pub(crate) const APPLICATION_TABLES: [&str; 20] = [
     "accounts",
     "characters",
     "auth_sessions",
@@ -59,9 +59,12 @@ pub(crate) const APPLICATION_TABLES: [&str; 17] = [
     "social_ignores",
     "social_blocks",
     "social_channel_subscriptions",
+    "social_mail_usage",
     "moderation_mutes",
     "account_bans",
     "social_reports",
+    "social_mail_messages",
+    "social_mail_report_evidence",
     "moderation_audit",
     "staff_profiles",
     "staff_capability_assignments",
@@ -162,6 +165,16 @@ CREATE TABLE social_channel_subscriptions (
 CREATE INDEX social_channel_subscriptions_channel_idx
     ON social_channel_subscriptions (channel, character_id);
 
+CREATE TABLE social_mail_usage (
+    account_id BIGINT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    hour_started_at BIGINT NOT NULL,
+    hour_count INTEGER NOT NULL CHECK (hour_count BETWEEN 0 AND 20),
+    day_started_at BIGINT NOT NULL,
+    day_count INTEGER NOT NULL CHECK (day_count BETWEEN 0 AND 50),
+    updated_at BIGINT NOT NULL,
+    CHECK (updated_at >= hour_started_at AND updated_at >= day_started_at)
+);
+
 CREATE TABLE moderation_mutes (
     id BIGSERIAL PRIMARY KEY,
     account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -194,6 +207,8 @@ CREATE TABLE social_reports (
     id BIGSERIAL PRIMARY KEY,
     reporter_character_id BIGINT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
     target_character_id BIGINT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    report_kind TEXT NOT NULL DEFAULT 'character'
+        CHECK (report_kind IN ('character', 'mail')),
     reason TEXT NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 2048),
     created_at BIGINT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open'
@@ -222,6 +237,47 @@ CREATE TABLE social_reports (
 );
 CREATE INDEX social_reports_status_idx
     ON social_reports (status, created_at);
+CREATE INDEX social_reports_mail_open_idx
+    ON social_reports (report_kind, status, reporter_character_id);
+
+CREATE TABLE social_mail_messages (
+    id BIGSERIAL PRIMARY KEY,
+    public_id TEXT NOT NULL UNIQUE
+        CHECK (public_id ~ '^m[0-9a-f]{32}$'),
+    sender_character_id BIGINT REFERENCES characters(id) ON DELETE SET NULL,
+    sender_name TEXT NOT NULL
+        CHECK (octet_length(sender_name) BETWEEN 1 AND 64),
+    recipient_character_id BIGINT NOT NULL
+        REFERENCES characters(id) ON DELETE CASCADE,
+    subject TEXT NOT NULL CHECK (octet_length(subject) BETWEEN 1 AND 128),
+    body TEXT NOT NULL CHECK (octet_length(body) BETWEEN 1 AND 2048),
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    read_at BIGINT,
+    report_id BIGINT UNIQUE REFERENCES social_reports(id) ON DELETE SET NULL,
+    CHECK (expires_at = created_at + 2592000),
+    CHECK (read_at IS NULL OR read_at BETWEEN created_at AND expires_at),
+    CHECK (sender_character_id IS NULL OR sender_character_id <> recipient_character_id)
+);
+CREATE INDEX social_mail_messages_recipient_idx
+    ON social_mail_messages (recipient_character_id, created_at DESC, id DESC);
+CREATE INDEX social_mail_messages_expires_idx
+    ON social_mail_messages (expires_at, id);
+
+CREATE TABLE social_mail_report_evidence (
+    report_id BIGINT PRIMARY KEY REFERENCES social_reports(id) ON DELETE CASCADE,
+    sender_name TEXT NOT NULL
+        CHECK (octet_length(sender_name) BETWEEN 1 AND 64),
+    subject TEXT NOT NULL CHECK (octet_length(subject) BETWEEN 1 AND 128),
+    body TEXT NOT NULL CHECK (octet_length(body) BETWEEN 1 AND 2048),
+    sent_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    CHECK (created_at >= sent_at),
+    CHECK (expires_at = created_at + 7776000)
+);
+CREATE INDEX social_mail_report_evidence_expires_idx
+    ON social_mail_report_evidence (expires_at, report_id);
 
 CREATE TABLE moderation_audit (
     sequence BIGSERIAL PRIMARY KEY,
@@ -321,7 +377,7 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 11);
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 12);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -498,6 +554,67 @@ SET version = 11, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 10;
 "#;
 
+const UPGRADE_V11_TO_V12_SQL: &str = r#"
+ALTER TABLE social_reports
+    ADD COLUMN report_kind TEXT NOT NULL DEFAULT 'character'
+        CHECK (report_kind IN ('character', 'mail'));
+CREATE INDEX social_reports_mail_open_idx
+    ON social_reports (report_kind, status, reporter_character_id);
+
+CREATE TABLE social_mail_usage (
+    account_id BIGINT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    hour_started_at BIGINT NOT NULL,
+    hour_count INTEGER NOT NULL CHECK (hour_count BETWEEN 0 AND 20),
+    day_started_at BIGINT NOT NULL,
+    day_count INTEGER NOT NULL CHECK (day_count BETWEEN 0 AND 50),
+    updated_at BIGINT NOT NULL,
+    CHECK (updated_at >= hour_started_at AND updated_at >= day_started_at)
+);
+
+CREATE TABLE social_mail_messages (
+    id BIGSERIAL PRIMARY KEY,
+    public_id TEXT NOT NULL UNIQUE
+        CHECK (public_id ~ '^m[0-9a-f]{32}$'),
+    sender_character_id BIGINT REFERENCES characters(id) ON DELETE SET NULL,
+    sender_name TEXT NOT NULL
+        CHECK (octet_length(sender_name) BETWEEN 1 AND 64),
+    recipient_character_id BIGINT NOT NULL
+        REFERENCES characters(id) ON DELETE CASCADE,
+    subject TEXT NOT NULL CHECK (octet_length(subject) BETWEEN 1 AND 128),
+    body TEXT NOT NULL CHECK (octet_length(body) BETWEEN 1 AND 2048),
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    read_at BIGINT,
+    report_id BIGINT UNIQUE REFERENCES social_reports(id) ON DELETE SET NULL,
+    CHECK (expires_at = created_at + 2592000),
+    CHECK (read_at IS NULL OR read_at BETWEEN created_at AND expires_at),
+    CHECK (sender_character_id IS NULL OR sender_character_id <> recipient_character_id)
+);
+CREATE INDEX social_mail_messages_recipient_idx
+    ON social_mail_messages (recipient_character_id, created_at DESC, id DESC);
+CREATE INDEX social_mail_messages_expires_idx
+    ON social_mail_messages (expires_at, id);
+
+CREATE TABLE social_mail_report_evidence (
+    report_id BIGINT PRIMARY KEY REFERENCES social_reports(id) ON DELETE CASCADE,
+    sender_name TEXT NOT NULL
+        CHECK (octet_length(sender_name) BETWEEN 1 AND 64),
+    subject TEXT NOT NULL CHECK (octet_length(subject) BETWEEN 1 AND 128),
+    body TEXT NOT NULL CHECK (octet_length(body) BETWEEN 1 AND 2048),
+    sent_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    CHECK (created_at >= sent_at),
+    CHECK (expires_at = created_at + 7776000)
+);
+CREATE INDEX social_mail_report_evidence_expires_idx
+    ON social_mail_report_evidence (expires_at, report_id);
+
+UPDATE tiamud_schema
+SET version = 12, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 11;
+"#;
+
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
 WITH candidate AS (
     SELECT id FROM accounts
@@ -536,17 +653,17 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v11 schema or migration from v6/v7/v8/v9/v10"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v12 schema or migration from v6/v7/v8/v9/v10/v11"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v11 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v12 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6/v7/v8/v9/v10 are upgraded to v11, and v11 is
+/// at the current version, v6/v7/v8/v9/v10/v11 are upgraded to v12, and v12 is
 /// verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
@@ -593,23 +710,31 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
             client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
             client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
             client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
+            client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
         }
         7 => {
             client.batch_execute(UPGRADE_V7_TO_V8_SQL)?;
             client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
             client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
             client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
+            client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
         }
         8 => {
             client.batch_execute(UPGRADE_V8_TO_V9_SQL)?;
             client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
             client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
+            client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
         }
         9 => {
             client.batch_execute(UPGRADE_V9_TO_V10_SQL)?;
             client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
+            client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
         }
-        10 => client.batch_execute(UPGRADE_V10_TO_V11_SQL)?,
+        10 => {
+            client.batch_execute(UPGRADE_V10_TO_V11_SQL)?;
+            client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
+        }
+        11 => client.batch_execute(UPGRADE_V11_TO_V12_SQL)?,
         SCHEMA_VERSION => {}
         _ => return Err(SchemaError::UnsupportedVersion { found }),
     }
@@ -655,6 +780,9 @@ mod tests {
             "social_ignores",
             "social_blocks",
             "social_channel_subscriptions",
+            "social_mail_messages",
+            "social_mail_usage",
+            "social_mail_report_evidence",
             "moderation_mutes",
             "account_bans",
             "social_reports",
@@ -670,7 +798,7 @@ mod tests {
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 11)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 12)"));
         assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
@@ -749,6 +877,27 @@ mod tests {
         assert!(UPGRADE_V10_TO_V11_SQL.contains("SET version = 11"));
         assert!(!UPGRADE_V10_TO_V11_SQL.contains("DROP TABLE"));
         assert!(!UPGRADE_V10_TO_V11_SQL.contains("DELETE FROM"));
+    }
+
+    #[test]
+    fn v12_upgrade_adds_bounded_offline_mail_without_snapshot_changes() {
+        for table in [
+            "social_mail_messages",
+            "social_mail_usage",
+            "social_mail_report_evidence",
+        ] {
+            assert!(UPGRADE_V11_TO_V12_SQL.contains(&format!("CREATE TABLE {table}")));
+            assert!(SCHEMA_SQL.contains(&format!("CREATE TABLE {table}")));
+        }
+        for limit in ["20", "50", "128", "2048", "2592000", "7776000"] {
+            assert!(UPGRADE_V11_TO_V12_SQL.contains(limit));
+            assert!(SCHEMA_SQL.contains(limit));
+        }
+        assert!(UPGRADE_V11_TO_V12_SQL.contains("SET version = 12"));
+        assert!(UPGRADE_V11_TO_V12_SQL.contains("ADD COLUMN report_kind"));
+        assert!(UPGRADE_V11_TO_V12_SQL.contains("'character', 'mail'"));
+        assert!(!UPGRADE_V11_TO_V12_SQL.contains("world_runtime"));
+        assert!(!UPGRADE_V11_TO_V12_SQL.contains("DELETE FROM"));
     }
 
     #[test]

@@ -172,12 +172,21 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v11, both SQLite and PostgreSQL retain the v8
+In current schema v12, both SQLite and PostgreSQL retain the v8
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
 snapshot is never compacted. This keeps normal runtime storage bounded without
 weakening snapshot/event atomicity.
+
+Offline mail uses a separate physical-retention loop. Startup must complete one
+purge batch before readiness; failure blocks startup. A live actor then retries
+once per hour, deleting at most 256 expired messages/evidence rows per run. A
+periodic failure is warned without stopping play because every list/read,
+capacity and evidence query filters expiry independently; delayed maintenance
+never makes expired content visible or count against a live limit. Repeated
+errors or a growing expired-row backlog are operational alerts, not a reason to
+raise the batch without measurement.
 
 SQLite normally places deleted rows on its internal free-page list and reuses
 those pages for later writes. The database file therefore may not become
@@ -209,6 +218,15 @@ constraint and advances `tiamud_schema` in the same migration chain. Neither
 backend creates a mirror loot table, converts the snapshot to `jsonb` or writes
 to both stores.
 
+Schema v12 adds bounded offline mail without changing the runtime snapshot:
+the closed `social_reports.report_kind` marker, `social_mail_messages`,
+per-account `social_mail_usage` and the independently retained
+`social_mail_report_evidence`. The marker keeps an open mail report in the
+per-account cap after its 90-day evidence body is purged; it does not extend
+body retention. The v11→v12 step is additive in both backends. Keep the
+pre-migration backup until inbox, quota, report resolution, restart and the
+selected backend's integrity checks pass.
+
 The decoder applies a dual admission rule: raw legacy snapshots v1-v5 remain
 limited to 1 MiB, while v6 and current v7 snapshots and new commits may use up
 to 2 MiB. This prevents an oversized old document from using migration as a
@@ -239,7 +257,7 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires schema v11 and refuses to run while any operational
+The command requires schema v12 and refuses to run while any operational
 `administrator` or `implementor` profile exists. A legacy `admin` role alone
 does not count as executable authority. Recovery replaces the target's profile
 with `implementor`, clears its lore title and previous direct assignments,
@@ -251,7 +269,7 @@ commit in one transaction; any failure rolls all of them back.
 `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
 verify the installation's normal `pg_dump` or physical backup, then run
 `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
-equivalent schema-v11 transaction:
+equivalent schema-v12 transaction:
 
 ```sql
 BEGIN;
@@ -263,8 +281,8 @@ DECLARE
     target_id BIGINT;
     recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 11 THEN
-        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 11';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 12 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 12';
     END IF;
     IF EXISTS (
         SELECT 1 FROM staff_profiles
@@ -377,9 +395,10 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v11, including durable social
+The mover requires the current SQLite schema v12, including durable social
 channel subscriptions, staff profiles, capability assignments, report
-resolutions and staff audit. It refuses a non-empty target and commits schema
+resolutions, staff audit, offline mail usage/messages and retained mail-report
+evidence. It refuses a non-empty target and commits schema
 plus rows in one PostgreSQL transaction. Configure exactly one line in the
 service environment and remove/comment the other:
 
@@ -388,15 +407,19 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 # TIAMUD_DB_PATH is absent
 ```
 
-Exercise registration, login, movement, combat, social state, restart and
-readiness before deleting or archiving the SQLite rollback copy.
+Exercise registration, login, movement, combat and social state before deleting
+or archiving the SQLite rollback copy. For schema v12 explicitly send, list,
+read, delete and report mail, restart, and confirm that the moved PostgreSQL
+state retains the inbox, usage quota and report evidence. Then resolve a test
+report and verify readiness again.
 The repository's retained [PostgreSQL 18 schema-v8 acceptance
 run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the earlier v8 adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
 authenticated restart against a separate disposable server process. It does
-not prove or claim a schema-v11 acceptance run. Focused v11 migration, store
-and transfer tests cover the runtime-snapshot cap, subscriptions and additive
-staff tables, but they do not replace this exercise or establish monitoring,
+not prove or claim a schema-v12 acceptance run. Focused v11/v12 migration,
+store and transfer tests cover the runtime-snapshot cap, subscriptions,
+additive staff tables and bounded mail tables, but they do not replace this
+exercise or establish monitoring,
 TLS, PostgreSQL backup/restore or point-in-time recovery for a production
 installation.
 

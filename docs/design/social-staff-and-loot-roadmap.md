@@ -20,8 +20,8 @@ sobre la aceptación de la especificación histórica.
   authored con recurso, cooldown, interferencia por sala y supresión privada.
   También existen emotes de sala authored, con plantillas cerradas por
   perspectiva y targeting local cerrado: sin objetivo, opcional u obligatorio.
-  No existen correo sin conexión ni
-  historial durable de conversación.
+  También existe correo offline explícito con buzón, cuotas, caducidad y
+  denuncia acotados. No existe historial general durable de conversación.
 - Sí existen los perfiles `helper`, `builder`, `moderator`, `administrator` e
   `implementor`, doce capacidades cerradas y un título narrativo opcional. La
   XP, la ficha, WorldPack, el perfil visible y el rol legado nunca sustituyen
@@ -48,8 +48,8 @@ Las fases 1, comunicación/grupo, 2, staff por capacidades, 3A, fundamento de
 objetos, 3B, pilas/contenedores, 3C, entrega/políticas, y 3D, trade confirmado,
 están implementadas. También están implementadas 4A, botín repetible con
 derechos y procedencia, y 4B, sellos ganados y afijos deterministas.
-Las fases 5A, telepatía directa authored, y 5B, emotes de sala authored,
-también están implementadas.
+Las fases 5A, telepatía directa authored, 5B, emotes de sala authored, y 5C,
+correo offline acotado, también están implementadas.
 
 ## Estado verificado en el código
 
@@ -75,12 +75,13 @@ habilidad del chat ordinario. `SocialChannel` contiene `Announcement`, `Say`,
 - la entrega usa el router directo y los buzones acotados por sesión;
 - reportes, relaciones, sanciones y suscripciones sobreviven a un reinicio.
 
-SQLite y PostgreSQL implementan actualmente el esquema v11. Conserva
+SQLite y PostgreSQL implementan actualmente el esquema v12. Conserva
 `social_channel_subscriptions` de v9 y añade perfiles, capacidades, resolución
 cerrada de reportes y auditoría append-only de v10; v11 admite snapshots v6 y
-v7 de hasta 2 MiB sin relajar el límite legacy v1–v5 de 1 MiB. El traslado sin
-conexión también los copia. La evidencia histórica PostgreSQL real sigue
-acreditando v8 y no se presenta como aceptación v11.
+v7 de hasta 2 MiB sin relajar el límite legacy v1–v5 de 1 MiB; v12 añade las
+tres tablas acotadas del correo offline. El traslado sin conexión también los
+copia. La evidencia histórica PostgreSQL real sigue acreditando v8 y no se
+presenta como aceptación v12.
 
 Por tanto, `tell` sigue siendo el mensaje privado online clásico y no se
 presenta como telepatía. La telepatía de 5A entra por una habilidad distinta:
@@ -282,7 +283,7 @@ o sellada, encuentros, derechos y cursores. Las lecturas v1–v5 usan DTO exacto
 bajo 1 MiB, migran con procedencia legacy y rechazan campos nuevos; v6 y v7
 admiten hasta 2 MiB. Un v6 estricto sube a v7 con `itemAffixes: []` en cada
 instancia y contador de apertura uno. SQLite y PostgreSQL confirman esa única
-autoridad en la transacción de esquema v11, sin tabla espejo de loot/escrow.
+autoridad en la transacción de esquema v12, sin tabla espejo de loot/escrow.
 Al restaurar se conservan nuevas instancias authored sin resucitar runtime
 ausente. La barrera valida por lotes propietarios, vínculos, cohortes y
 beneficiarios; cancela encuentros abiertos antes de readiness, pero conserva
@@ -313,14 +314,16 @@ persistencia y single writer.
 
 ## Comunicación implementada y ampliaciones futuras
 
-Las fases 1 y 5A conservan una sola política social; ningún canal está
+Las fases 1, 5A y 5B conservan una sola política social efímera; ningún canal está
 implementado de forma independiente en WebSocket, Telnet o la interfaz. La
 telepatía ya entra por esa política después de mutar gameplay de forma durable.
+El correo 5C comparte mute/bucket, pero después sigue una transacción y una
+proyección privada distintas: no entra en el router de chat.
 
 ```mermaid
 flowchart LR
     accTitle: Enrutamiento actual de las comunicaciones de Tiamud
-    accDescr: Las acciones de texto entran en una política social común que calcula destinatarios, aplica bloqueos y límites y entrega solo a buzones autorizados. La telepatía confirma primero su coste de gameplay y solo después usa esa entrega común.
+    accDescr: Chat, emotes y telepatía entregan copias efímeras mediante una política común. El correo supera las guardas comunes y pasa a cuota, almacenamiento temporal y consulta privada separada.
 
     Text[PlayerAction social] --> Policy[Política social común]
     Ability[Habilidad authored de telepatía] --> Effect[Recurso + cooldown<br/>commit durable]
@@ -336,6 +339,10 @@ flowchart LR
     Direct --> Delivery
     Channel --> Delivery
     Safety --> Delivery
+    Mail[PlayerAction Mail] --> Guard[Mute · bucket]
+    Guard --> Quota[Cuota por cuenta]
+    Quota --> Store[(SQLite o PostgreSQL v12)]
+    Store --> Private[mail.list · mail.message<br/>sesión solicitante]
 ```
 
 ### Fase 1 entregada
@@ -359,9 +366,8 @@ Web usa acciones estructuradas y representa los nueve valores de
 como texto y como `Comm.Channel.Text` cuando GMCP `Comm` está negociado. Esta
 paridad no convierte GMCP en una segunda autoridad.
 
-El correo offline, tablones y guild/clan chat pueden seguir después. Requieren
-retención, límites, búsqueda/moderación, eliminación y reglas de privacidad
-propias.
+Los tablones y guild/clan chat pueden seguir después. Requieren retención,
+límites, búsqueda/moderación, eliminación y reglas de privacidad propias.
 
 ### Fase 5A — telepatía directa authored — implementada
 
@@ -401,6 +407,25 @@ un rollback publica cero copias.
 No hay texto libre, IDs authored en transporte, `DomainEvent`, `reply`,
 historial, snapshot o SQL. El contrato está en
 [ADR 0016](../decisions/0016-authored-room-emotes.md).
+
+### Fase 5C — correo offline acotado — implementada
+
+`mail list/read/delete/send/report` separa la correspondencia durable de
+`tell`, `reply`, telepatía y chat. El buzón admite 64 mensajes, 128 KiB y siete
+páginas de diez; cada carta vive 30 días. Tras mute y el bucket común, los
+intentos con campos válidos consumen por cuenta una cuota de 20 por hora y 50
+por día antes de resolver el nombre.
+Ignore/block, ban y capacidad suprimen la entrega con la misma aceptación que
+un guardado, de modo que el emisor no sondea estado privado.
+
+SQLite/PostgreSQL v12 persisten mensaje, cuota y evidencia denunciada. Solo el
+destinatario puede leer, borrar o denunciar una vez; hasta ocho denuncias de
+correo abiertas por cuenta capturan evidencia durante 90 días. Staff ve el
+asunto y un extracto acotado en la cola, no explora buzones ni registra cuerpos
+en auditoría. Web `mail.list`/`mail.message`, texto Telnet y `Tiamud.Mail 1`
+comparten dominio. No hay outbox, búsqueda, adjuntos, correo grupal ni
+notificación online. El contrato está en
+[ADR 0017](../decisions/0017-bounded-offline-mail.md).
 
 ## Staff: rango visible, capacidad real
 
@@ -534,8 +559,8 @@ master-loot y reparto por contribución requieren otro diseño.
 
 | Sistema | Estado actual | Cuándo considerarlo |
 | --- | --- | --- |
-| Emotes/sociales | Ausente. | Con el router social ampliado y plantillas seguras. |
-| Mail y tablones | Ausente. | Después de definir retención, cuotas, moderación y privacidad. |
+| Emotes/sociales | Emotes de sala authored implementados con plantillas cerradas, targeting local y paridad Web/Telnet/GMCP. | Emotes globales/de grupo solo con audiencia, percepción, cuotas y privacidad explícitas. |
+| Mail y tablones | Correo offline 5C implementado con retención, cuotas, privacidad y evidencia moderable; tablones ausentes. | Tablones 5D con capacidad, caducidad, permisos y moderación propios, sin reutilizar el buzón privado como historial público. |
 | Guilds/clanes | Ausente. | Tras estabilizar parties, canales y autoridad comunitaria. |
 | Puertas y llaves | Ausentes como sistema general; los contenedores de inventario sí existen. | Cuando el estado abierto/cerrado, acceso y llaves tenga autoría/persistencia explícita. |
 | Give | Implementado para raíces portadas, misma sala, capacidad bilateral y subárbol enteramente transferible. | Ampliarlo solo si se diseña entrega remota/offline con política explícita. |
@@ -649,7 +674,7 @@ diseño adicional. Cajas, llaves y tiradas pagadas permanecen fuera.
 
 - 5A telepatía directa authored: implementada;
 - 5B emotes authored con plantillas y audiencias seguras: implementada;
-- 5C correo offline con cuotas/retención/moderación: pendiente;
+- 5C correo offline con cuotas/retención/moderación: implementada;
 - 5D tablones moderables: pendiente;
 - guilds según necesidades observadas;
 - crafting/auction/housing solo con sinks, cuotas y moderación;

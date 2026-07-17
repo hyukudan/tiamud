@@ -52,7 +52,8 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
 - **Grupos y conversación:** `say` local, `tell` y `reply` en línea, telepatía
   directa como habilidad authored con recurso/cooldowns, emotes de sala
   definidos por el mundo con plantillas seguras, chat de grupo,
-  liderazgo completo y canales suscritos `general`, `newbie` y `staff`.
+  liderazgo completo, canales suscritos `general`, `newbie` y `staff`, y correo
+  offline privado con cuotas, buzón/caducidad acotados y denuncia moderable.
   `staff` exige perfil `moderator`, `administrator` o `implementor`. Navegador,
   Telnet y GMCP comparten la misma política social.
 - **Staff por capacidades:** cinco perfiles operativos, doce capacidades
@@ -203,13 +204,14 @@ SQLite a PostgreSQL es una operación sin conexión, no replicación. Los datos
 consultables siguen siendo relacionales; las instantáneas JSON acotadas se
 guardan como texto opaco porque el servidor no consulta su interior.
 
-Ambos adaptadores implementan actualmente el **esquema v11**. La migración
-v10→v11 reconstruye de forma transaccional la custodia opaca del runtime. El
+Ambos adaptadores implementan actualmente el **esquema v12**. La migración
+v10→v11 reconstruye de forma transaccional la custodia opaca del runtime y
+v11→v12 añade correo offline, cuotas y evidencia de denuncia. El
 snapshot vigente es v7: los DTO v1–v5 siguen limitados a 1 MiB y v6–v7 admiten
 hasta 2 MiB al decodificarse. Se conservan las relaciones sociales y de
 staff de v9/v10, y el traslado SQLite→PostgreSQL las copia junto con el estado
 actual. La evidencia real PostgreSQL retenida acredita v8: todavía no existe
-una aceptación PostgreSQL v11 contra un servidor real.
+una aceptación PostgreSQL v12 contra un servidor real.
 
 Si una instalación pierde toda autoridad administrativa, la recuperación
 offline documentada no se limita al rol legado: `tiamud-admin recover-admin`
@@ -289,9 +291,9 @@ implementado de la hoja de ruta.
 
 | Sistema | Implementado | Pendiente |
 | --- | --- | --- |
-| Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; telepatía directa online como habilidad authored con recurso/cooldowns y bloqueo por sala; emotes de sala authored mediante plantillas cerradas y sin texto libre; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`. | Correo e historial durable, shout/yell espacial, emotes globales/de grupo, tablones y telepatía de grupo/offline. `tell` no es telepatía. |
+| Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; telepatía directa online como habilidad authored con recurso/cooldowns y bloqueo por sala; emotes de sala authored mediante plantillas cerradas y sin texto libre; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`; correo offline separado, privado y paginado, con 64 mensajes/128 KiB/30 días, cuotas por cuenta y evidencia de denuncia durante 90 días. | Historial general durable, shout/yell espacial, emotes globales/de grupo, tablones y telepatía de grupo/offline. `tell` no es telepatía ni correo. |
 | Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. Una cohorte congelada de miembros próximos y vivos participa en el reparto round-robin del botín. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos y reparto need/greed, master-loot o por contribución. |
-| Canales | Suscripción persistente en SQLite/PostgreSQL v11; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
+| Canales | Suscripción persistente en SQLite/PostgreSQL v12; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
 | Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
 | Inventario | WorldPack v9 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo, vínculo, afijo y acceso al botín; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` es unilateral; `trade` negocia hasta 128 raíces transferibles y moneda mediante reservas durables, revisión exacta y dos confirmaciones, y liquida ambos lados en un solo commit. Un afijo durable por instancia puede aportar prefijo/sufijo y deltas acotados de ataque/curación. Web, Telnet y GMCP proyectan política, cantidades, afijo e IDs opacos, nunca dueños, cohortes ni identidades durables. | Desgaste/durabilidad de objetos; trade remoto/offline, subastas y mercado offline. |
 | Botín | WorldPack v9/AreaPack v8 conservan las fuentes `npc_spawn`, tablas enteras repetibles, recompensas selladas ganadas y pools de afijos deterministas de 4B. La derrota confirma procedencia y derechos para un máximo de 64 raíces; `party_round_robin`, `loot pass` y los plazos 20/120 siguen siendo autoritativos. Un sello ligado y portado se consulta con `reward odds` y se abre con `open`: Tiamud simula RNG, IDs, afijo, vínculo, capacidad y el límite de 16 recompensas antes de consumirlo y confirmar todo en un único commit. Web, Telnet y `Char.Reward 1` GMCP comparten fracciones exactas paginadas y referencias opacas. | Need/greed, master-loot y reparto por contribución. Cajas, llaves, moneda premium, pity y tiradas pagadas quedan fuera del baseline. |
@@ -333,7 +335,15 @@ stateDiagram-v2
 
 `reply` no persiste el destinatario: conserva en memoria el ID interno del
 último remitente cuyo `tell` se entregó. Al desconectar o reiniciar no se
-convierte en correo implícito. Las suscripciones de canal sí son durables.
+convierte en correo implícito. `mail` es una superficie distinta y explícita;
+las suscripciones de canal también son durables.
+
+El correo offline se consulta bajo demanda y no notifica presencia. Tras
+superar mute y el bucket común, cada intento con campos válidos consume cuota
+antes de resolver el destinatario; ignore/block, ban o capacidad suprimen la
+entrega con la misma aceptación que un guardado.
+No hay outbox, adjuntos, búsqueda, correo de grupo ni acceso general de staff a
+buzones. Véase la [decisión de correo offline](docs/decisions/0017-bounded-offline-mail.md).
 
 La telepatía directa online es una habilidad de autoría: exige conocimiento,
 recurso y cooldown, puede bloquear salas, comparte mute/rate/ignore/block y
@@ -680,6 +690,24 @@ No se ejecutaron PostgreSQL real v11, WebKit, lector manual, carga/soak ni soak
 de 24 h. Consulta el
 [registro de fase 5B](docs/project/log/2026-07-17-authored-room-emotes-phase-5b.md).
 
+La fase 5C añade correo offline como una superficie durable separada: buzones
+de 64 mensajes/128 KiB, páginas de diez, caducidad de 30 días, cuotas por
+cuenta, referencias opacas y aceptación que no revela ignore, bloqueos,
+sanciones o capacidad. Solo el destinatario puede leer, borrar o denunciar;
+staff recibe evidencia acotada, no acceso al buzón. SQLite/PostgreSQL avanzan a
+v12 y Web, Telnet, `Tiamud.Mail 1` y el bot estricto comparten el contrato del
+[ADR 0017](docs/decisions/0017-bounded-offline-mail.md).
+
+Sobre el árbol integrado 5C pasan formato/diff/clippy y 669/669 pruebas Rust:
+142 core, 268 servidor, 132 WorldPack y 127 restantes. La web pasa check 0/0,
+117/117 Vitest, build y 44/44 Playwright soportado (22 Chromium y 22 Firefox);
+la suite Node pasa 87/87 y el humo integrado también. Pasan además
+`cargo deny check advisories sources`, licencias y avisos para 307 dependencias
+Rust y 76 web. La auditoría adversarial deja 0 P1/P2/P3 abiertos. No se
+ejecutaron PostgreSQL real v12/mover, WebKit, lector manual, carga/soak ni soak
+de 24 h. Consulta el
+[registro de fase 5C](docs/project/log/2026-07-17-bounded-offline-mail-phase-5c.md).
+
 Una prueba corta de carga no sustituye al soak de 24 horas. WebKit no arranca
 en el host local actual por bibliotecas GTK/GStreamer/medios ausentes; eso no
 es un pase ni un fallo de aplicación.
@@ -692,6 +720,7 @@ sobre aceptación.
 
 Puertas externas pendientes:
 
+- aceptación de PostgreSQL real contra el esquema v12 y el mover actual;
 - soak retenido y verificado de 24 horas para el candidato exacto;
 - WebKit actual en un host compatible y prueba manual con lector de pantalla;
 - release etiquetada con procedencia OIDC verificada independientemente;
@@ -699,7 +728,7 @@ Puertas externas pendientes:
 
 Siguientes líneas técnicas y de producto:
 
-- añadir correo offline y tablones solo con cuotas, retención y moderación explícitas;
+- añadir tablones compartidos con cuotas, retención y moderación explícitas;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
 - considerar need/greed, master-loot o contribución solo tras modelar sus
@@ -765,7 +794,8 @@ deploy/                      ejemplos Caddy, systemd y entorno
   [botín repetible y derechos](docs/decisions/0013-repeatable-loot-rights-and-provenance.md) ·
   [recompensas selladas y afijos](docs/decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md) ·
   [telepatía directa authored](docs/decisions/0015-authored-online-telepathy.md) ·
-  [emotes de sala authored](docs/decisions/0016-authored-room-emotes.md).
+  [emotes de sala authored](docs/decisions/0016-authored-room-emotes.md) ·
+  [correo offline acotado](docs/decisions/0017-bounded-offline-mail.md).
 - **Estado:** [matriz](docs/project/COMPLETION_MATRIX.md) ·
   [especificación v0.3](docs/spec-v0.3.md) ·
   [memoria](docs/project/PROJECT_MEMORY.md) ·

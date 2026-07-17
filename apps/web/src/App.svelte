@@ -6,6 +6,8 @@
     ConnectionState,
     ContainerContentsData,
     LiveServerMessage,
+    MailListData,
+    MailMessageData,
     MessageAppendData,
     MessagePresentationCue,
     PlayerStateSnapshot,
@@ -92,6 +94,8 @@
   let containerContents = $state<ContainerContentsData>();
   let tradeContents = $state<TradeContentsData>();
   let rewardOdds = $state<RewardOddsData>();
+  let mailList = $state<MailListData>();
+  let mailMessage = $state<MailMessageData>();
   let manifestImage = $state<SceneSnapshot['image']>();
   let activeAssetKey: string | undefined;
   let failedImageUrls = $state<string[]>([]);
@@ -519,6 +523,29 @@
       case 'reward.odds':
         rewardOdds = message.data;
         break;
+      case 'mail.list':
+        mailList = message.data;
+        if (mailMessage && !message.data.messages.some((entry) => entry.id === mailMessage?.id)) {
+          mailMessage = undefined;
+        }
+        break;
+      case 'mail.message':
+        mailMessage = message.data;
+        if (mailList) {
+          mailList = {
+            ...mailList,
+            unreadCount: Math.max(
+              0,
+              mailList.unreadCount - (mailList.messages.some(
+                (entry) => entry.id === message.data.id && !entry.read,
+              ) ? 1 : 0),
+            ),
+            messages: mailList.messages.map((entry) => entry.id === message.data.id
+              ? { ...entry, read: true }
+              : entry),
+          };
+        }
+        break;
       case 'map.snapshot':
         if (player && player.revision <= message.data.revision) {
           player = { ...player, revision: message.data.revision, map: message.data.map };
@@ -577,6 +604,8 @@
     containerContents = undefined;
     tradeContents = undefined;
     rewardOdds = undefined;
+    mailList = undefined;
+    mailMessage = undefined;
   }
 
   function submitCommand(value = command): void {
@@ -603,6 +632,7 @@
       tradeContents = undefined;
     }
     if (sent && action === 'reward.open') rewardOdds = undefined;
+    if (sent && action === 'mail.delete') mailMessage = undefined;
     recordSubmission(label, id, sent);
   }
 
@@ -677,6 +707,8 @@
     containerContents = undefined;
     tradeContents = undefined;
     rewardOdds = undefined;
+    mailList = undefined;
+    mailMessage = undefined;
     accessError = undefined;
     selectedAccess = selection;
     if (!connection) {
@@ -698,6 +730,8 @@
               containerContents = undefined;
               tradeContents = undefined;
               rewardOdds = undefined;
+              mailList = undefined;
+              mailMessage = undefined;
             }
           },
           onProtocolError: () => {
@@ -729,6 +763,8 @@
     containerContents = undefined;
     tradeContents = undefined;
     rewardOdds = undefined;
+    mailList = undefined;
+    mailMessage = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -751,6 +787,8 @@
     containerContents = undefined;
     tradeContents = undefined;
     rewardOdds = undefined;
+    mailList = undefined;
+    mailMessage = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -1037,6 +1075,8 @@
         {containerContents}
         {tradeContents}
         {rewardOdds}
+        {mailList}
+        {mailMessage}
         abilityTargets={scene?.npcs ?? []}
         oncommand={submitCommand}
         onaction={submitAction}

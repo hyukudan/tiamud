@@ -531,6 +531,12 @@ export function parseServerMessage(raw) {
     case 'reward.odds':
       validateRewardOdds(message.data);
       break;
+    case 'mail.list':
+      validateMailList(message.data);
+      break;
+    case 'mail.message':
+      validateMailMessage(message.data);
+      break;
     case 'map.snapshot':
       validateMapSnapshot(message.data);
       break;
@@ -597,6 +603,81 @@ export function parseServerMessage(raw) {
       throw new Error(`Server sent unknown tiamud.v1 type ${message.type}.`);
   }
   return message;
+}
+
+function validateMailId(value, label) {
+  if (typeof value !== 'string' || !/^m[0-9a-f]{32}$/.test(value)) {
+    throw new Error(`${label} is not a valid mail id.`);
+  }
+}
+
+function assertMailText(value, maximumBytes, label) {
+  requiredString(value, label);
+  if (value.trim() !== value || Buffer.byteLength(value, 'utf8') > maximumBytes ||
+      /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value)) {
+    throw new Error(`${label} is invalid or exceeds ${maximumBytes} UTF-8 bytes.`);
+  }
+}
+
+function validateMailSummary(summary, label = 'mail summary') {
+  assertRecord(summary, label);
+  assertOnlyKeys(
+    summary,
+    ['id', 'sender', 'subject', 'createdAt', 'expiresAt', 'read'],
+    label,
+  );
+  validateMailId(summary.id, `${label} id`);
+  assertMailText(summary.sender, 64, `${label} sender`);
+  assertMailText(summary.subject, 128, `${label} subject`);
+  assertPositiveInteger(summary.createdAt, `${label} createdAt`);
+  assertPositiveInteger(summary.expiresAt, `${label} expiresAt`);
+  if (summary.expiresAt !== summary.createdAt + 2_592_000) {
+    throw new Error(`${label} expiry is invalid.`);
+  }
+  assertBoolean(summary.read, `${label} read`);
+}
+
+function validateMailList(data) {
+  assertOnlyKeys(
+    data,
+    ['page', 'totalPages', 'totalMessages', 'unreadCount', 'capacity', 'messages'],
+    'mail.list.data',
+  );
+  assertPositiveInteger(data.page, 'mail list page');
+  assertPositiveInteger(data.totalPages, 'mail list total pages');
+  assertNonNegativeInteger(data.totalMessages, 'mail list total messages');
+  assertNonNegativeInteger(data.unreadCount, 'mail list unread count');
+  assertPositiveInteger(data.capacity, 'mail list capacity');
+  if (data.page > 7 || data.totalPages > 7 || data.capacity !== 64 ||
+      data.totalMessages > data.capacity || data.unreadCount > data.totalMessages) {
+    throw new Error('mail.list counts are inconsistent.');
+  }
+  const expectedTotalPages = Math.max(1, Math.ceil(data.totalMessages / 10));
+  if (data.totalPages !== expectedTotalPages) {
+    throw new Error('mail.list total pages are inconsistent.');
+  }
+  assertArrayMax(data.messages, 10, 'mail list messages');
+  if (data.page > data.totalPages && data.messages.length !== 0) {
+    throw new Error('mail.list beyond the last page must be empty.');
+  }
+  const ids = new Set();
+  for (const summary of data.messages) {
+    validateMailSummary(summary);
+    if (ids.has(summary.id)) throw new Error('mail.list contains a duplicate id.');
+    ids.add(summary.id);
+  }
+}
+
+function validateMailMessage(data) {
+  assertOnlyKeys(
+    data,
+    ['id', 'sender', 'subject', 'body', 'createdAt', 'expiresAt', 'read'],
+    'mail.message.data',
+  );
+  const { body, ...summary } = data;
+  validateMailSummary(summary, 'mail message');
+  if (summary.read !== true) throw new Error('mail.message must already be marked read.');
+  assertMailText(body, 2048, 'mail message body');
 }
 
 function validateScenePatch(patch) {

@@ -28,7 +28,7 @@ describe el baseline vigente de personajes, inventario y medios.
   el paquete web admite pnpm 10+.
 - Un servidor Rust posee un actor de mundo con escritor único. Navegador y
   Telnet comparten dominio, persistencia y proyección.
-- PostgreSQL esquema v11 es el perfil público recomendado; SQLite esquema v11 es
+- PostgreSQL esquema v12 es el perfil público recomendado; SQLite esquema v12 es
   la ruta local sin servicios. Cada proceso abre uno y nunca doble-escribe.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
@@ -42,7 +42,7 @@ describe el baseline vigente de personajes, inventario y medios.
   persiste `WorldRuntimeSnapshot` v7 con DTO exactos v1-v7. v1-v3 se
   convierten a vínculo `unbound`; schema-smuggling, vínculos y políticas
   incoherentes fallan cerrados; v4 normaliza a contador inicial y trades vacíos.
-  SQLite/PostgreSQL conservan el snapshot único en esquema v11, sin tabla
+  SQLite/PostgreSQL conservan el snapshot único en esquema v12, sin tabla
   espejo ni custodia SQL. Los snapshots v1-v5 conservan el límite de 1 MiB y
   v6-v7 admiten 2 MiB; v6 rechaza campos v7 y normaliza a afijos vacíos y
   contador de aperturas inicial. Restore conserva nuevas
@@ -92,8 +92,12 @@ describe el baseline vigente de personajes, inventario y medios.
   plantillas cerradas por perspectiva y targeting local cerrado —sin objetivo,
   opcional u obligatorio— mediante
   `emotes`/`emote`, sin texto libre, historial o SQL. Ignore/block se aplica por
-  receptor y la entrega espera al commit de `OnTalk`. No hay correo/historial,
-  tablones, shout/yell, emotes globales/de grupo ni telepatía de grupo/offline.
+  receptor y la entrega espera al commit de `OnTalk`. La fase 5C añade correo
+  offline explícito con 64 mensajes/128 KiB/30 días por buzón, páginas de 10,
+  cuotas por cuenta 20/h y 50/día, aceptación opaca ante política/capacidad y
+  denuncia con evidencia de 90 días. Web, Telnet y `Tiamud.Mail 1` comparten
+  dominio. No hay historial general, tablones, shout/yell, emotes globales/de
+  grupo ni telepatía de grupo/offline.
 - Accept, revoke, kick y transfer resuelven el nombre de un personaje conectado.
   La membresía de grupo sí persiste cuando alguien se desconecta, pero esas
   operaciones dirigidas no administran un objetivo offline.
@@ -206,6 +210,17 @@ restantes), formato/diff/clippy, check web 0/0, 114 Vitest, build, 86 Node/bot,
 licencias/avisos 307 Rust/76 web. Dos auditorías dejan 0 P1/P2/P3 abiertos.
 No se ejecutaron PostgreSQL real v11, WebKit, lector manual, carga/soak ni soak
 de 24 h.
+
+La integración actual 5C mantiene WorldPack v9/AreaPack v8 y snapshot v7, y
+avanza SQLite/PostgreSQL al esquema v12. Añade correo offline separado con
+buzón 64/128 KiB/30 días, cuotas 20/h y 50/día, referencias opacas, supresión
+no reveladora y denuncia con evidencia de 90 días; Web, Telnet y
+`Tiamud.Mail 1` tienen paridad. Pasan 669/669 pruebas Rust (142 core, 268
+servidor, 132 WorldPack y 127 restantes), formato/diff/clippy, check web 0/0,
+117 Vitest, build, 87 Node/bot, 44/44 Playwright soportado (22 Chromium y 22
+Firefox), humo, `cargo deny check advisories sources` y licencias/avisos 307
+Rust/76 web. La auditoría deja 0 P1/P2/P3 abiertos. No se ejecutaron
+PostgreSQL real v12/mover, WebKit, lector manual, carga/soak ni soak de 24 h.
 
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil

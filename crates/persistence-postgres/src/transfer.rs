@@ -8,7 +8,7 @@ use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transact
 
 const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 
-const TABLES: [&str; 17] = APPLICATION_TABLES;
+const TABLES: [&str; 20] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -117,6 +117,10 @@ pub fn copy_sqlite_to_postgres(
         rows: copy_social_channel_subscriptions(&source, &mut target)?,
     });
     tables.push(TableCount {
+        table: "social_mail_usage",
+        rows: copy_social_mail_usage(&source, &mut target)?,
+    });
+    tables.push(TableCount {
         table: "moderation_mutes",
         rows: copy_moderation_decisions(&source, &mut target, "moderation_mutes")?,
     });
@@ -127,6 +131,14 @@ pub fn copy_sqlite_to_postgres(
     tables.push(TableCount {
         table: "social_reports",
         rows: copy_social_reports(&source, &mut target)?,
+    });
+    tables.push(TableCount {
+        table: "social_mail_messages",
+        rows: copy_social_mail_messages(&source, &mut target)?,
+    });
+    tables.push(TableCount {
+        table: "social_mail_report_evidence",
+        rows: copy_social_mail_report_evidence(&source, &mut target)?,
     });
     tables.push(TableCount {
         table: "moderation_audit",
@@ -173,6 +185,8 @@ fn lock_target_tables<C: GenericClient>(target: &mut C) -> Result<(), postgres::
         "LOCK TABLE accounts, characters, auth_sessions, domain_events,
                     world_runtime, social_ignores, social_blocks,
                     social_channel_subscriptions,
+                    social_mail_usage, social_mail_messages,
+                    social_mail_report_evidence,
                     moderation_mutes, account_bans, social_reports,
                     moderation_audit, staff_profiles,
                     staff_capability_assignments, staff_audit,
@@ -465,6 +479,43 @@ fn copy_social_channel_subscriptions<C: GenericClient>(
     Ok(count)
 }
 
+fn copy_social_mail_usage<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT account_id, hour_started_at, hour_count,
+                day_started_at, day_count, updated_at
+         FROM social_mail_usage ORDER BY account_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let account_id: i64 = row.get(0)?;
+        let hour_started_at: i64 = row.get(1)?;
+        let hour_count: i32 = row.get(2)?;
+        let day_started_at: i64 = row.get(3)?;
+        let day_count: i32 = row.get(4)?;
+        let updated_at: i64 = row.get(5)?;
+        target.execute(
+            "INSERT INTO social_mail_usage
+                 (account_id, hour_started_at, hour_count,
+                  day_started_at, day_count, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &account_id,
+                &hour_started_at,
+                &hour_count,
+                &day_started_at,
+                &day_count,
+                &updated_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn copy_moderation_decisions<C: GenericClient>(
     source: &Connection,
     target: &mut C,
@@ -517,7 +568,7 @@ fn copy_social_reports<C: GenericClient>(
     target: &mut C,
 ) -> Result<u64, TransferError> {
     let mut statement = source.prepare(
-        "SELECT id, reporter_character_id, target_character_id, reason,
+        "SELECT id, reporter_character_id, target_character_id, report_kind, reason,
                 created_at, status, resolution, resolution_reason,
                 resolved_by_account_id, resolved_at
          FROM social_reports ORDER BY id",
@@ -528,23 +579,25 @@ fn copy_social_reports<C: GenericClient>(
         let id: i64 = row.get(0)?;
         let reporter: i64 = row.get(1)?;
         let target_character: i64 = row.get(2)?;
-        let reason: String = row.get(3)?;
-        let created_at: i64 = row.get(4)?;
-        let status: String = row.get(5)?;
-        let resolution: Option<String> = row.get(6)?;
-        let resolution_reason: Option<String> = row.get(7)?;
-        let resolved_by: Option<i64> = row.get(8)?;
-        let resolved_at: Option<i64> = row.get(9)?;
+        let report_kind: String = row.get(3)?;
+        let reason: String = row.get(4)?;
+        let created_at: i64 = row.get(5)?;
+        let status: String = row.get(6)?;
+        let resolution: Option<String> = row.get(7)?;
+        let resolution_reason: Option<String> = row.get(8)?;
+        let resolved_by: Option<i64> = row.get(9)?;
+        let resolved_at: Option<i64> = row.get(10)?;
         target.execute(
             "INSERT INTO social_reports
-                 (id, reporter_character_id, target_character_id, reason,
+                 (id, reporter_character_id, target_character_id, report_kind, reason,
                   created_at, status, resolution, resolution_reason,
                   resolved_by_account_id, resolved_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             &[
                 &id,
                 &reporter,
                 &target_character,
+                &report_kind,
                 &reason,
                 &created_at,
                 &status,
@@ -552,6 +605,94 @@ fn copy_social_reports<C: GenericClient>(
                 &resolution_reason,
                 &resolved_by,
                 &resolved_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn copy_social_mail_messages<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT id, public_id, sender_character_id, sender_name,
+                recipient_character_id, subject, body, created_at,
+                expires_at, read_at, report_id
+         FROM social_mail_messages ORDER BY id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let public_id: String = row.get(1)?;
+        let sender_character_id: Option<i64> = row.get(2)?;
+        let sender_name: String = row.get(3)?;
+        let recipient_character_id: i64 = row.get(4)?;
+        let subject: String = row.get(5)?;
+        let body: String = row.get(6)?;
+        let created_at: i64 = row.get(7)?;
+        let expires_at: i64 = row.get(8)?;
+        let read_at: Option<i64> = row.get(9)?;
+        let report_id: Option<i64> = row.get(10)?;
+        target.execute(
+            "INSERT INTO social_mail_messages
+                 (id, public_id, sender_character_id, sender_name,
+                  recipient_character_id, subject, body, created_at,
+                  expires_at, read_at, report_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[
+                &id,
+                &public_id,
+                &sender_character_id,
+                &sender_name,
+                &recipient_character_id,
+                &subject,
+                &body,
+                &created_at,
+                &expires_at,
+                &read_at,
+                &report_id,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn copy_social_mail_report_evidence<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT report_id, sender_name, subject, body, sent_at,
+                created_at, expires_at
+         FROM social_mail_report_evidence ORDER BY report_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let report_id: i64 = row.get(0)?;
+        let sender_name: String = row.get(1)?;
+        let subject: String = row.get(2)?;
+        let body: String = row.get(3)?;
+        let sent_at: i64 = row.get(4)?;
+        let created_at: i64 = row.get(5)?;
+        let expires_at: i64 = row.get(6)?;
+        target.execute(
+            "INSERT INTO social_mail_report_evidence
+                 (report_id, sender_name, subject, body, sent_at,
+                  created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            &[
+                &report_id,
+                &sender_name,
+                &subject,
+                &body,
+                &sent_at,
+                &created_at,
+                &expires_at,
             ],
         )?;
         count += 1;
@@ -769,6 +910,8 @@ fn reset_sequences<C: GenericClient>(target: &mut C) -> Result<(), postgres::Err
                        COALESCE(MAX(id), 1), COUNT(*) > 0) FROM account_bans;
          SELECT setval(pg_get_serial_sequence('social_reports', 'id')::regclass,
                        COALESCE(MAX(id), 1), COUNT(*) > 0) FROM social_reports;
+         SELECT setval(pg_get_serial_sequence('social_mail_messages', 'id')::regclass,
+                       COALESCE(MAX(id), 1), COUNT(*) > 0) FROM social_mail_messages;
          SELECT setval(pg_get_serial_sequence('moderation_audit', 'sequence')::regclass,
                        COALESCE(MAX(sequence), 1), COUNT(*) > 0) FROM moderation_audit;
          SELECT setval(pg_get_serial_sequence('staff_audit', 'sequence')::regclass,
@@ -971,7 +1114,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 11
+                required: 12
             }
         ));
         assert_eq!(
@@ -1010,7 +1153,7 @@ mod tests {
     fn transfer_manifest_is_parent_before_child_and_complete() {
         assert_eq!(TABLES[0], "accounts");
         assert_eq!(TABLES[1], "characters");
-        assert_eq!(TABLES.len(), 17);
+        assert_eq!(TABLES.len(), 20);
         assert_eq!(TABLES.last(), Some(&"world_adventure"));
     }
 }

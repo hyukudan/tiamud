@@ -62,12 +62,13 @@ matriz, memoria y documentación pública a la vez.
 - Mundo y conversación usan buzones acotados de 256 entradas por sesión,
   encaminados por `SessionId`. Conserva el fan-out O(S), recuperación por lag y
   limpieza segura ante cancelación.
-- PostgreSQL esquema v11 es el perfil recomendado para un host público nuevo.
-  SQLite esquema v11 es la ruta local/predeterminada sin servicios. Se abre un
+- PostgreSQL esquema v12 es el perfil recomendado para un host público nuevo.
+  SQLite esquema v12 es la ruta local/predeterminada sin servicios. Se abre un
   único sistema autoritativo; no hay doble escritura.
 - `tiamud-migrate-postgres` traslada sin conexión una instantánea SQLite actual
   a PostgreSQL vacío en una transacción, incluidas suscripciones, perfiles,
-  capacidades, reportes resueltos y auditoría de staff.
+  capacidades, reportes resueltos, auditoría de staff, mensajes/cuotas de
+  correo y evidencia denunciada.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
@@ -75,7 +76,7 @@ matriz, memoria y documentación pública a la vez.
   instancias, reservas de trade, procedencia y derechos de botín, afijos por
   instancia y contador de aperturas. SQLite y
   PostgreSQL la confirman con personajes/eventos en su transacción existente;
-  ambos adaptadores usan esquema v11 y no hay tabla espejo ni custodia SQL de
+  ambos adaptadores usan esquema v12 y no hay tabla espejo ni custodia SQL de
   trade o botín. DTO exactos v1-v7 se seleccionan por `snapshotVersion`;
   snapshots v1-v5 conservan su límite legado de 1 MiB y v6-v7 admiten hasta
   2 MiB. El DTO v6 estricto rechaza campos v7 y normaliza a afijos vacíos y
@@ -197,7 +198,7 @@ matriz, memoria y documentación pública a la vez.
   administración dirigida de un líder/invitado/miembro desconectado.
 - La conversación incluye `say` local, `tell`, `reply` en memoria mientras el
   destinatario siga conectado, chat de grupo y canales `general`, `newbie` y
-  `staff`. Suscripciones son durables en v11; `staff` requiere perfil
+  `staff`. Suscripciones son durables en v12; `staff` requiere perfil
   `moderator`, `administrator` o `implementor` al unirse, enviar y recibir;
   `helper` y `builder` no acceden. WorldPack v9/AreaPack v8 conservan una
   comunicación `telepathy/direct_online` en habilidades `spell|utility`
@@ -207,8 +208,13 @@ matriz, memoria y documentación pública a la vez.
   cooldowns en un commit antes de entregar; ignore/block, estado o sala del
   receptor suprimen la entrega sin revelarlo. No actualiza `reply`, no guarda
   cuerpo/destino y comparte mute/bucket. Web, Telnet y `Comm.Channel.Text`
-  GMCP comparten política. No hay correo/historial durable, shout/yell,
-  telepatía de grupo/offline o tablones. WorldPack v9/AreaPack v8 añaden hasta
+  GMCP comparten política. El correo offline es una superficie separada:
+  `mail list/read/delete/send/report`, 64 mensajes y 128 KiB por buzón,
+  caducidad de 30 días, cuotas por cuenta 20/h y 50/día, aceptación opaca ante
+  ignore/block/capacidad y evidencia denunciada durante 90 días. Web publica
+  `mail.list`/`mail.message`; Telnet y `Tiamud.Mail 1` son equivalentes. No hay
+  historial general durable, shout/yell, telepatía de grupo/offline o tablones.
+  WorldPack v9/AreaPack v8 añaden hasta
   32 emotes locales authored: `emotes` lista y `emote <comando> [personaje]`
   renderiza plantillas cerradas por perspectiva, sin texto libre, persistencia
   ni reevaluación de placeholders insertados. El objetivo es otro personaje
@@ -402,6 +408,24 @@ auditoría adversarial cerró render recursivo, divergencia validador/runtime y
 escape MXP incompleto; quedan 0 P1/P2/P3 abiertos. No se ejecutaron PostgreSQL
 real v11, WebKit, lector manual, carga/soak ni soak de 24 h.
 
+### Evidencia integrada de correo offline 5C
+
+La fase 5C mantiene WorldPack v9, AreaPack v8, WorldProject v2 y snapshot v7,
+pero avanza SQLite/PostgreSQL al esquema v12. El correo es una superficie
+durable separada con buzón, bytes, páginas, caducidad y cuotas por cuenta
+acotados; referencias públicas aleatorias; entrega suprimida no reveladora; y
+evidencia denunciada de 90 días sin navegación staff de buzones. Web, texto
+Telnet, `Tiamud.Mail 1` y el bot estricto comparten el contrato.
+
+El árbol integrado pasa 669/669 pruebas Rust (142 core, 268 servidor, 132
+WorldPack y 127 restantes), formato/diff/clippy; check web 0/0, 117/117 Vitest,
+build, 87/87 Node y 44/44 Playwright soportado (22 Chromium y 22 Firefox).
+También pasan humo, `cargo deny check advisories sources` y licencias/avisos
+307 Rust/76 web. La auditoría adversarial deja 0 P1/P2/P3 abiertos. No se
+ejecutaron PostgreSQL real v12/mover, WebKit, lector manual, carga/soak ni soak
+de 24 h. Véase el
+[registro 5C](docs/project/log/2026-07-17-bounded-offline-mail-phase-5c.md).
+
 ### Evidencia histórica retenida
 
 La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
@@ -461,8 +485,8 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 | --- | --- |
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
-| `crates/persistence-sqlite/` | SQLite esquema v11 y almacenamiento local |
-| `crates/persistence-postgres/` | PostgreSQL esquema v11, adaptador y mover |
+| `crates/persistence-sqlite/` | SQLite esquema v12 y almacenamiento local |
+| `crates/persistence-postgres/` | PostgreSQL esquema v12, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
@@ -591,9 +615,9 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
   verificada;
 - sin entrenamiento general, migración general de IDs, multiclase, sprite de
   jugador, heal cue del servidor ni lápida de derrota;
-- fases social 1, telepatía 5A y emotes authored 5B implementadas; sin
-  correo/historial, shout/yell, telepatía de grupo/offline, emotes globales/de
-  grupo o tablones;
+- fases social 1, telepatía 5A, emotes authored 5B y correo offline 5C
+  implementadas; sin historial general, shout/yell, telepatía de grupo/offline,
+  emotes globales/de grupo o tablones;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
 - fase 4B de inventario/botín implementada: prototipos/instancias, creación durable,

@@ -206,6 +206,30 @@ describe('PlayerDashboard', () => {
             conditionalProbabilityNumerator: 1, conditionalProbabilityDenominator: 5,
           }],
         },
+        mailList: {
+          page: 1,
+          totalPages: 1,
+          totalMessages: 1,
+          unreadCount: 1,
+          capacity: 64,
+          messages: [{
+            id: 'm0123456789abcdef0123456789abcdef',
+            sender: 'Bram <&>',
+            subject: 'The northern gate',
+            createdAt: 1_700_000_000,
+            expiresAt: 1_702_592_000,
+            read: false,
+          }],
+        },
+        mailMessage: {
+          id: 'm0123456789abcdef0123456789abcdef',
+          sender: 'Bram <&>',
+          subject: 'The northern gate',
+          body: 'Meet me by the lighthouse.',
+          createdAt: 1_700_000_000,
+          expiresAt: 1_702_592_000,
+          read: true,
+        },
         abilityTargets: [{ id: 'owolf000000000001', label: 'rain wolf' }],
         oncommand: () => undefined,
         onaction: () => undefined,
@@ -227,6 +251,8 @@ describe('PlayerDashboard', () => {
       'General', 'Newbie', 'Staff', 'Nearby recipient', 'Transferable',
       'Bound to this character', 'Non-transferable',
       'Mind to reach with Mind Thread', 'Private thought', 'Direct online message',
+      'Offline mail', 'Inbox', 'The northern gate', 'Meet me by the lighthouse.',
+      'Send offline mail', 'Report this message',
     ]) {
       expect(body).toContain(label);
     }
@@ -274,6 +300,7 @@ describe('PlayerDashboard', () => {
       'social.reply', 'social.channel.list', 'social.channel.join',
       'social.channel.leave', 'social.channel.say',
       'social.telepathy', 'social.emote.list', 'social.emote',
+      'mail.list', 'mail.read', 'mail.delete', 'mail.send', 'mail.report',
     ]) {
       expect(dashboardSource).toContain(action);
     }
@@ -287,6 +314,7 @@ describe('PlayerDashboard', () => {
     expect(dashboardSource).toContain("'item.give'");
     expect(dashboardSource).toContain("'reward.open'");
     expect(dashboardSource).toContain("'reward.odds'");
+    expect(dashboardSource).toContain('\\u007f-\\u009f');
     expect(dashboardSource).toContain('recipient: recipient.id');
     expect(dashboardSource).toContain('<option value="staff">');
     expect(dashboardSource).not.toContain('<option value="announcement">');

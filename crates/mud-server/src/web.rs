@@ -4,7 +4,10 @@ use crate::{
         ActiveSessionLimit, ActiveSessionLimiter, AuthRateLimiter, CommandRateLimiter,
         OutputTransport, RuntimeMetrics,
     },
-    persistence::{CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, StoreError},
+    persistence::{
+        CharacterStore, MAX_REPORT_REASON_BYTES, MAX_SOCIAL_REASON_BYTES, MailMessage, MailPage,
+        StoreError,
+    },
     social::{MAX_CHAT_MESSAGE_BYTES, MAX_SOCIAL_TARGET_BYTES},
     world_actor::{
         CharacterBackgroundSelection, CombatCueKind, GameError, ProjectedViewEvent, WorldHandle,
@@ -31,10 +34,11 @@ use std::{
 };
 use tiamud_core::{
     AccountRole, CharacterId, CharacterSnapshot, ContainerContentsView, EconomyAction,
-    ItemSelection, LootAction, PartyAction, PlayerAction, PlayerStateView, QuestAction,
-    RewardOddsView, SceneView, SessionId, SocialAction, SocialChannelName, StaffAction,
-    StaffCapability, StaffProfileKey, StaffReportResolution, TradeAction, TradeContentsView,
-    WorldError, parse_action,
+    ItemSelection, LootAction, MAX_MAIL_BODY_BYTES, MAX_MAIL_PAGE, MAX_MAIL_REPORT_REASON_BYTES,
+    MailAction, PartyAction, PlayerAction, PlayerStateView, QuestAction, RewardOddsView, SceneView,
+    SessionId, SocialAction, SocialChannelName, StaffAction, StaffCapability, StaffProfileKey,
+    StaffReportResolution, TradeAction, TradeContentsView, WorldError, parse_action,
+    valid_mail_public_id, valid_mail_subject, valid_mail_target, valid_mail_visible_text,
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
@@ -199,6 +203,12 @@ struct ActionPerformData {
     action: String,
     #[serde(default)]
     emote: Option<String>,
+    #[serde(default)]
+    mail_id: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     ability_id: Option<String>,
     #[serde(default)]
@@ -525,6 +535,8 @@ struct CachedActionResult {
     container_contents: Option<ContainerContentsView>,
     trade_contents: Option<TradeContentsView>,
     reward_odds: Option<RewardOddsView>,
+    mail_page: Option<MailPage>,
+    mail_message: Option<MailMessage>,
     projection_session: SessionId,
 }
 
@@ -555,6 +567,18 @@ impl CachedActionResult {
     fn reward_odds_for(&self, session: SessionId) -> Option<&RewardOddsView> {
         (self.projection_session == session)
             .then_some(self.reward_odds.as_ref())
+            .flatten()
+    }
+
+    fn mail_page_for(&self, session: SessionId) -> Option<&MailPage> {
+        (self.projection_session == session)
+            .then_some(self.mail_page.as_ref())
+            .flatten()
+    }
+
+    fn mail_message_for(&self, session: SessionId) -> Option<&MailMessage> {
+        (self.projection_session == session)
+            .then_some(self.mail_message.as_ref())
             .flatten()
     }
 }
@@ -1212,6 +1236,10 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 !queue_trade_contents(&outbound, &mut sequence, contents)
                             }) || cached.reward_odds_for(entered.session_id).is_some_and(|odds| {
                                 !queue_reward_odds(&outbound, &mut sequence, odds)
+                            }) || cached.mail_page_for(entered.session_id).is_some_and(|page| {
+                                !queue_mail_page(&outbound, &mut sequence, page)
+                            }) || cached.mail_message_for(entered.session_id).is_some_and(|message| {
+                                !queue_mail_message(&outbound, &mut sequence, message)
                             }) || !queue_scene(
                                 &outbound,
                                 &mut sequence,
@@ -1247,13 +1275,24 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         let trade_selector_matches = requested.trade_selector.as_ref().is_none_or(
                             |selector| last_player.trade.as_ref().is_some_and(|trade| &trade.id == selector),
                         );
-                        let (ok, message, events, container_contents, trade_contents, reward_odds) = match requested.action {
+                        let (
+                            ok,
+                            message,
+                            events,
+                            container_contents,
+                            trade_contents,
+                            reward_odds,
+                            mail_page,
+                            mail_message,
+                        ) = match requested.action {
                             Ok(_) if !trade_selector_matches => {
                                 state.metrics.action_finished(action_started.elapsed(), false);
                                 (
                                     false,
                                     Some("That trade is not available.".to_owned()),
                                     Vec::new(),
+                                    None,
+                                    None,
                                     None,
                                     None,
                                     None,
@@ -1275,6 +1314,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                         outcome.container_contents,
                                         outcome.trade_contents,
                                         outcome.reward_odds,
+                                        outcome.mail_page,
+                                        outcome.mail_message,
                                     )
                                 }
                                 Err(error) => {
@@ -1287,12 +1328,14 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                         None,
                                         None,
                                         None,
+                                        None,
+                                        None,
                                     )
                                 }
                             },
                             Err(error) => {
                                 state.metrics.action_finished(action_started.elapsed(), false);
-                                (false, Some(error), Vec::new(), None, None, None)
+                                (false, Some(error), Vec::new(), None, None, None, None, None)
                             }
                         };
                         state
@@ -1308,6 +1351,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                     container_contents: container_contents.clone(),
                                     trade_contents: trade_contents.clone(),
                                     reward_odds: reward_odds.clone(),
+                                    mail_page: mail_page.clone(),
+                                    mail_message: mail_message.clone(),
                                     projection_session: entered.session_id,
                                 },
                             );
@@ -1332,6 +1377,16 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         }
                         if let Some(odds) = &reward_odds
                             && !queue_reward_odds(&outbound, &mut sequence, odds)
+                        {
+                            break;
+                        }
+                        if let Some(page) = &mail_page
+                            && !queue_mail_page(&outbound, &mut sequence, page)
+                        {
+                            break;
+                        }
+                        if let Some(message) = &mail_message
+                            && !queue_mail_message(&outbound, &mut sequence, message)
                         {
                             break;
                         }
@@ -2144,6 +2199,64 @@ fn queue_reward_odds(outbound: &OutboundHandle, sequence: &mut u64, odds: &Rewar
     )
 }
 
+fn mail_summary_json(summary: &crate::persistence::MailMessageSummary) -> Value {
+    json!({
+        "id": summary.public_id,
+        "sender": summary.sender_name,
+        "subject": summary.subject,
+        "createdAt": summary.created_at,
+        "expiresAt": summary.expires_at,
+        "read": summary.read,
+    })
+}
+
+fn queue_mail_page(outbound: &OutboundHandle, sequence: &mut u64, page: &MailPage) -> bool {
+    let messages = page
+        .messages
+        .iter()
+        .map(mail_summary_json)
+        .collect::<Vec<_>>();
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        "mail.list",
+        json!({
+            "page": page.page,
+            "totalPages": page.total_pages,
+            "totalMessages": page.total_messages,
+            "unreadCount": page.unread_count,
+            "capacity": page.capacity,
+            "messages": messages,
+        }),
+    )
+}
+
+fn queue_mail_message(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    message: &MailMessage,
+) -> bool {
+    let summary = &message.summary;
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        "mail.message",
+        json!({
+            "id": summary.public_id,
+            "sender": summary.sender_name,
+            "subject": summary.subject,
+            "body": message.body,
+            "createdAt": summary.created_at,
+            "expiresAt": summary.expires_at,
+            "read": summary.read,
+        }),
+    )
+}
+
 fn queue_notice(outbound: &OutboundHandle, sequence: &mut u64, message: &str) -> bool {
     queue_sequenced(
         outbound,
@@ -2380,6 +2493,18 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                     .emote
                     .as_deref()
                     .is_some_and(|emote| !valid_social_emote_command(emote))
+                || data
+                    .mail_id
+                    .as_deref()
+                    .is_some_and(|mail_id| !valid_mail_public_id(mail_id))
+                || data
+                    .subject
+                    .as_deref()
+                    .is_some_and(|subject| !valid_mail_subject(subject))
+                || data
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| !valid_mail_visible_text(body, MAX_MAIL_BODY_BYTES))
                 || data.ability_id.as_deref().is_some_and(|ability_id| {
                     !valid_definition_id(ability_id, MAX_ABILITY_ID_BYTES)
                 })
@@ -2417,6 +2542,8 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                     .quantity
                     .is_some_and(|quantity| quantity == 0 || quantity > 256)
                 || data.page == Some(0)
+                || (data.action == "mail.list"
+                    && data.page.is_some_and(|page| page > MAX_MAIL_PAGE))
                 || data
                     .trade_id
                     .as_deref()
@@ -2445,6 +2572,15 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         || reason.len() > MAX_REPORT_REASON_BYTES
                         || reason.chars().any(char::is_control)
                 })
+                || (data.action == "mail.report"
+                    && data.reason.as_deref().is_some_and(|reason| {
+                        !valid_mail_visible_text(reason, MAX_MAIL_REPORT_REASON_BYTES)
+                    }))
+                || (data.action == "mail.send"
+                    && data
+                        .target
+                        .as_deref()
+                        .is_some_and(|target| !valid_mail_target(target)))
                 || matches!(
                     &data.lore_title,
                     NullableField::Value(title)
@@ -2488,6 +2624,9 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                         &data.lore_title,
                         data.capability,
                         data.enabled,
+                        &data.mail_id,
+                        &data.subject,
+                        &data.body,
                     ),
                 )
             );
@@ -2606,7 +2745,47 @@ fn special_social_action_has_exact_fields(data: &Value) -> bool {
                 && fields.get("emote").is_some_and(Value::is_string)
                 && fields.get("target").is_none_or(Value::is_string)
         }
-        _ => !fields.contains_key("emote"),
+        Some("mail.list") => {
+            const EXACT_FIELDS: [&str; 3] = ["requestId", "action", "page"];
+            (fields.len() == 2 || fields.len() == 3)
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && fields.get("page").is_none_or(Value::is_number)
+        }
+        Some("mail.read" | "mail.delete") => {
+            const EXACT_FIELDS: [&str; 3] = ["requestId", "action", "mailId"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && fields.get("mailId").is_some_and(Value::is_string)
+        }
+        Some("mail.send") => {
+            const EXACT_FIELDS: [&str; 5] = ["requestId", "action", "target", "subject", "body"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && ["target", "subject", "body"]
+                    .into_iter()
+                    .all(|field| fields.get(field).is_some_and(Value::is_string))
+        }
+        Some("mail.report") => {
+            const EXACT_FIELDS: [&str; 4] = ["requestId", "action", "mailId", "reason"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && fields.get("mailId").is_some_and(Value::is_string)
+                && fields.get("reason").is_some_and(Value::is_string)
+        }
+        _ => {
+            !fields.contains_key("emote")
+                && !fields.contains_key("mailId")
+                && !fields.contains_key("subject")
+                && !fields.contains_key("body")
+        }
     }
 }
 
@@ -2635,6 +2814,12 @@ fn valid_social_emote_command(value: &str) -> bool {
 
 fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     let action = data.action.as_str();
+    if action.starts_with("mail.") {
+        return structured_mail_action(data);
+    }
+    if data.mail_id.is_some() || data.subject.is_some() || data.body.is_some() {
+        return Err(format!("Action {action:?} has unexpected fields."));
+    }
     if !matches!(action, "social.emote" | "social.emote.list") && data.emote.is_some() {
         return Err(format!("Action {action:?} has unexpected fields."));
     }
@@ -3526,8 +3711,124 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
     }
 }
 
+fn structured_mail_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
+    let action = data.action.as_str();
+    let common_extras = data.emote.is_some()
+        || data.ability_id.is_some()
+        || data.class_id.is_some()
+        || data.graph_id.is_some()
+        || data.node_id.is_some()
+        || data.recipient.is_some()
+        || data.container.is_some()
+        || data.quantity.is_some()
+        || data.trade_id.is_some()
+        || data.coins.is_some()
+        || data.state_revision.is_some()
+        || data.message.is_some()
+        || data.channel.is_some()
+        || data.duration_seconds.is_some()
+        || data.role.is_some()
+        || data.report_id.is_some()
+        || data.resolution.is_some()
+        || !matches!(data.profile, NullableField::Missing)
+        || !matches!(data.lore_title, NullableField::Missing)
+        || data.capability.is_some()
+        || data.enabled.is_some();
+    if common_extras {
+        return Err(format!("Action {action:?} has unexpected fields."));
+    }
+    match action {
+        "mail.list" => {
+            if data.target.is_some()
+                || data.mail_id.is_some()
+                || data.subject.is_some()
+                || data.body.is_some()
+                || data.reason.is_some()
+            {
+                return Err("Mail list has unexpected fields.".to_owned());
+            }
+            let page = data.page.unwrap_or(1);
+            if !(1..=MAX_MAIL_PAGE).contains(&page) {
+                return Err("Mail page is not available.".to_owned());
+            }
+            Ok(PlayerAction::Mail(MailAction::List { page }))
+        }
+        "mail.read" | "mail.delete" => {
+            if data.target.is_some()
+                || data.subject.is_some()
+                || data.body.is_some()
+                || data.page.is_some()
+                || data.reason.is_some()
+            {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            let mail_id = data
+                .mail_id
+                .as_deref()
+                .filter(|mail_id| valid_mail_public_id(mail_id))
+                .ok_or_else(|| "Mail action requires a valid mailId.".to_owned())?
+                .to_owned();
+            Ok(PlayerAction::Mail(if action == "mail.read" {
+                MailAction::Read { mail_id }
+            } else {
+                MailAction::Delete { mail_id }
+            }))
+        }
+        "mail.send" => {
+            if data.mail_id.is_some() || data.page.is_some() || data.reason.is_some() {
+                return Err("Mail send has unexpected fields.".to_owned());
+            }
+            let target = data
+                .target
+                .as_deref()
+                .filter(|value| valid_mail_target(value))
+                .ok_or_else(|| "Mail send requires target.".to_owned())?;
+            let subject = data
+                .subject
+                .as_deref()
+                .filter(|value| valid_mail_subject(value))
+                .ok_or_else(|| "Mail send requires subject.".to_owned())?;
+            let body = data
+                .body
+                .as_deref()
+                .filter(|value| valid_mail_visible_text(value, MAX_MAIL_BODY_BYTES))
+                .ok_or_else(|| "Mail send requires body.".to_owned())?;
+            Ok(PlayerAction::Mail(MailAction::Send {
+                target: target.to_owned(),
+                subject: subject.to_owned(),
+                body: body.to_owned(),
+            }))
+        }
+        "mail.report" => {
+            if data.target.is_some()
+                || data.subject.is_some()
+                || data.body.is_some()
+                || data.page.is_some()
+            {
+                return Err("Mail report has unexpected fields.".to_owned());
+            }
+            let mail_id = data
+                .mail_id
+                .as_deref()
+                .filter(|mail_id| valid_mail_public_id(mail_id))
+                .ok_or_else(|| "Mail report requires a valid mailId.".to_owned())?;
+            let reason = data
+                .reason
+                .as_deref()
+                .filter(|reason| valid_mail_visible_text(reason, MAX_MAIL_REPORT_REASON_BYTES))
+                .ok_or_else(|| "Mail report requires reason.".to_owned())?;
+            Ok(PlayerAction::Mail(MailAction::Report {
+                mail_id: mail_id.to_owned(),
+                reason: reason.to_owned(),
+            }))
+        }
+        _ => Err(format!("Unknown structured action: {action}")),
+    }
+}
+
 fn public_game_error(error: &GameError) -> String {
     match error {
+        GameError::MailRecipientUnavailable => "That mail recipient is not available.".to_owned(),
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
         GameError::World(WorldError::LootUnavailable) => "That loot is not available.".to_owned(),
         GameError::TradeUnavailable
@@ -3587,13 +3888,28 @@ fn public_game_error(error: &GameError) -> String {
             "That report is not available for resolution.".to_owned()
         }
         GameError::Persistence(StoreError::ChatMuted) => {
-            "You cannot send chat while your account is muted.".to_owned()
+            "You cannot send messages while your account is muted.".to_owned()
         }
         GameError::Persistence(StoreError::ChatRateLimited) => {
             "Chat rate limit exceeded; wait before sending another message.".to_owned()
         }
         GameError::Persistence(StoreError::InvalidSocialInput) => {
             "The social action is invalid or rate limited.".to_owned()
+        }
+        GameError::Persistence(StoreError::InvalidMailInput) => {
+            "The mail action is invalid or exceeds its limits.".to_owned()
+        }
+        GameError::Persistence(StoreError::MailRateLimited) => {
+            "Mail send quota exceeded; wait before sending more mail.".to_owned()
+        }
+        GameError::Persistence(StoreError::MailNotFound) => {
+            "That mail is not available.".to_owned()
+        }
+        GameError::Persistence(StoreError::MailAlreadyReported) => {
+            "That mail has already been reported.".to_owned()
+        }
+        GameError::Persistence(StoreError::MailReportLimit | StoreError::MailEvidenceLimit) => {
+            "Mail reporting is temporarily unavailable.".to_owned()
         }
         GameError::Persistence(StoreError::InvalidStaffInput) => {
             "The staff action is invalid or exceeds its limits.".to_owned()
@@ -4721,6 +5037,88 @@ mod tests {
     }
 
     #[test]
+    fn structured_mail_actions_accept_only_the_exact_private_wire_shapes() {
+        let mail_id = "m0123456789abcdef0123456789abcdef";
+        let cases = [
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-list","action":"mail.list"}}"#,
+                PlayerAction::Mail(MailAction::List { page: 1 }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-list-7","action":"mail.list","page":7}}"#,
+                PlayerAction::Mail(MailAction::List { page: 7 }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-read","action":"mail.read","mailId":"m0123456789abcdef0123456789abcdef"}}"#,
+                PlayerAction::Mail(MailAction::Read {
+                    mail_id: mail_id.into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-delete","action":"mail.delete","mailId":"m0123456789abcdef0123456789abcdef"}}"#,
+                PlayerAction::Mail(MailAction::Delete {
+                    mail_id: mail_id.into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-send","action":"mail.send","target":"Aria","subject":"Plan <&>","body":"Meet | beyond the gate."}}"#,
+                PlayerAction::Mail(MailAction::Send {
+                    target: "Aria".into(),
+                    subject: "Plan <&>".into(),
+                    body: "Meet | beyond the gate.".into(),
+                }),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-report","action":"mail.report","mailId":"m0123456789abcdef0123456789abcdef","reason":"Unwanted contact"}}"#,
+                PlayerAction::Mail(MailAction::Report {
+                    mail_id: mail_id.into(),
+                    reason: "Unwanted contact".into(),
+                }),
+            ),
+        ];
+
+        for (message, expected) in cases {
+            assert_eq!(requested_action(message).action, Ok(expected), "{message}");
+        }
+
+        for message in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-null-page","action":"mail.list","page":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-page-zero","action":"mail.list","page":0}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-page-eight","action":"mail.list","page":8}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-read-null","action":"mail.read","mailId":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-read-extra","action":"mail.read","mailId":"m0123456789abcdef0123456789abcdef","body":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-send-missing","action":"mail.send","target":"Aria","subject":"Plan"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-send-extra","action":"mail.send","target":"Aria","subject":"Plan","body":"Meet","message":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-report-extra","action":"mail.report","mailId":"m0123456789abcdef0123456789abcdef","reason":"Abuse","target":null}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-bad-id","action":"mail.read","mailId":"m0123456789ABCDEF0123456789abcdef"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-bidi","action":"mail.send","target":"Aria","subject":"safe\u202etxt","body":"Meet"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"mail-smuggle","action":"look","mailId":null}}"#,
+        ] {
+            assert_eq!(
+                parse_client_message(message).unwrap_err(),
+                ClientMessageError::InvalidEnvelope,
+                "{message}"
+            );
+        }
+
+        let oversized_body = serde_json::json!({
+            "v": 1,
+            "type": "action.perform",
+            "data": {
+                "requestId": "mail-oversized-utf8",
+                "action": "mail.send",
+                "target": "Aria",
+                "subject": "Plan",
+                "body": "é".repeat(MAX_MAIL_BODY_BYTES / 2 + 1),
+            }
+        });
+        assert_eq!(
+            parse_client_message(&oversized_body.to_string()).unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
+    }
+
+    #[test]
     fn structured_telepathy_accepts_only_the_exact_wire_fields() {
         let exact = r#"{"v":1,"type":"action.perform","data":{"requestId":"telepathy-1","action":"social.telepathy","abilityId":"tiamud:mind-whisper","target":"Aria","message":"Meet beyond the gate."}}"#;
         assert_eq!(
@@ -5035,6 +5433,8 @@ mod tests {
             container_contents: None,
             trade_contents: None,
             reward_odds: None,
+            mail_page: None,
+            mail_message: None,
             projection_session: SessionId(1),
         };
         cache.insert("request-1".to_owned(), result("look"));
@@ -5058,6 +5458,8 @@ mod tests {
             container_contents: None,
             trade_contents: None,
             reward_odds: None,
+            mail_page: None,
+            mail_message: None,
             projection_session: SessionId(11),
         };
         shared.lock().unwrap().insert(first.clone(), cached.clone());
@@ -5088,6 +5490,8 @@ mod tests {
             container_contents: Some(contents.clone()),
             trade_contents: None,
             reward_odds: None,
+            mail_page: None,
+            mail_message: None,
             projection_session: SessionId(11),
         };
 
@@ -5127,6 +5531,8 @@ mod tests {
             container_contents: None,
             trade_contents: Some(contents.clone()),
             reward_odds: None,
+            mail_page: None,
+            mail_message: None,
             projection_session: SessionId(11),
         };
 
@@ -5176,6 +5582,8 @@ mod tests {
             container_contents: None,
             trade_contents: None,
             reward_odds: Some(odds.clone()),
+            mail_page: None,
+            mail_message: None,
             projection_session: SessionId(31),
         };
 
@@ -5209,6 +5617,65 @@ mod tests {
     }
 
     #[test]
+    fn mail_frames_are_exact_bounded_and_never_cross_sessions() {
+        let summary = crate::persistence::MailMessageSummary {
+            public_id: "m0123456789abcdef0123456789abcdef".into(),
+            sender_name: "A&B <sender>".into(),
+            subject: "Plan <&>".into(),
+            created_at: 10,
+            expires_at: 20,
+            read: false,
+        };
+        let page = MailPage {
+            page: 1,
+            total_pages: 1,
+            total_messages: 1,
+            unread_count: 1,
+            capacity: 64,
+            messages: vec![summary.clone()],
+        };
+        let message = MailMessage {
+            summary: summary.clone(),
+            body: "Meet | beyond the gate. <&>".into(),
+        };
+        let cached = CachedActionResult {
+            signature: "mail.read".into(),
+            ok: true,
+            message: Some("Mail follows.".into()),
+            container_contents: None,
+            trade_contents: None,
+            reward_odds: None,
+            mail_page: Some(page.clone()),
+            mail_message: Some(message.clone()),
+            projection_session: SessionId(41),
+        };
+        assert_eq!(cached.mail_page_for(SessionId(41)), Some(&page));
+        assert_eq!(cached.mail_message_for(SessionId(41)), Some(&message));
+        assert!(cached.mail_page_for(SessionId(42)).is_none());
+        assert!(cached.mail_message_for(SessionId(42)).is_none());
+
+        let outbound = OutboundHandle::new(3, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_mail_page(&outbound, &mut sequence, &page));
+        assert!(queue_mail_message(&outbound, &mut sequence, &message));
+        let list = outbound.pop().unwrap();
+        let detail = outbound.pop().unwrap();
+        assert_eq!(list.value["type"], "mail.list");
+        assert_eq!(list.value["data"]["messages"][0]["id"], summary.public_id);
+        assert_eq!(list.value["data"]["messages"][0]["subject"], "Plan <&>");
+        assert!(list.value["data"]["messages"][0].get("body").is_none());
+        assert_eq!(detail.value["type"], "mail.message");
+        assert_eq!(detail.value["data"]["body"], message.body);
+        for frame in [list, detail] {
+            assert!(serde_json::to_vec(&frame.value).unwrap().len() <= MAX_WS_MESSAGE_BYTES);
+            let encoded = frame.value.to_string();
+            assert!(!encoded.contains("recipientCharacterId"));
+            assert!(!encoded.contains("senderCharacterId"));
+            assert!(!encoded.contains("accountId"));
+        }
+    }
+
+    #[test]
     fn cached_inventory_text_never_crosses_session_salts() {
         let cached = CachedActionResult {
             signature: "inventory".into(),
@@ -5217,6 +5684,8 @@ mod tests {
             container_contents: None,
             trade_contents: None,
             reward_odds: None,
+            mail_page: None,
+            mail_message: None,
             projection_session: SessionId(21),
         };
 

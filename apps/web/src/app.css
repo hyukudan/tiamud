@@ -1078,13 +1078,23 @@ main {
 }
 
 .inline-form input,
-.inline-form select {
+.inline-form select,
+.inline-form textarea {
   width: 100%;
   min-width: 0;
   padding: 0.42rem 0.55rem;
   border: 1px solid #4c503f;
   border-radius: 0.25rem;
   background: #11140f;
+}
+
+.inline-form textarea {
+  resize: vertical;
+}
+
+.mail-body {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .inline-form small {

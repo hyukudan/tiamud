@@ -513,8 +513,34 @@ fn reports_output(reports: &[StaffReport]) -> String {
                 single_line(&report.reason),
             ),
         );
+        if let Some(evidence) = &report.mail_evidence {
+            push_bounded_line(
+                &mut output,
+                &format!(
+                    "  mail from {} · subject: {} · excerpt: {}",
+                    single_line(&evidence.sender_name),
+                    single_line(&evidence.subject),
+                    mail_excerpt(&evidence.body),
+                ),
+            );
+        }
     }
     bounded_output(output)
+}
+
+fn mail_excerpt(value: &str) -> String {
+    const MAX_BYTES: usize = 256;
+    let mut value = single_line(value);
+    if value.len() <= MAX_BYTES {
+        return value;
+    }
+    let mut boundary = MAX_BYTES.saturating_sub(3);
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    value.truncate(boundary);
+    value.push_str("...");
+    value
 }
 
 fn audit_output(entries: &[StaffAuditEntry]) -> String {
