@@ -47,7 +47,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Compose strict AreaPack v6 modules offline into one canonical runtime WorldPack v7.
+    /// Compose strict AreaPack v7 modules offline into one canonical runtime WorldPack v8.
     Compose {
         project: PathBuf,
         #[arg(short, long)]

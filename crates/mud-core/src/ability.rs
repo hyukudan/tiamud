@@ -4,7 +4,7 @@
 //! reviewed authoring document into these bounded runtime definitions.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::CharacterId;
 
@@ -12,6 +12,11 @@ pub const MAX_ABILITIES: usize = 512;
 pub const MAX_KNOWN_ABILITIES: usize = 64;
 pub const MAX_ABILITY_EFFECTS: usize = 8;
 pub const MAX_ABILITY_RESOURCE_COSTS: usize = 4;
+pub const MAX_COMMUNICATION_BLOCKED_ROOMS: usize = 64;
+pub const MAX_COMMUNICATION_ABILITIES: usize = 32;
+pub const MAX_TELEPATHY_ABILITY_ID_BYTES: usize = 64;
+pub const MAX_TELEPATHY_TARGET_BYTES: usize = 64;
+pub const MAX_TELEPATHY_MESSAGE_BYTES: usize = 512;
 pub const MAX_RESOURCE_POOLS: usize = 16;
 pub const MAX_RESISTANCES: usize = 16;
 pub const MAX_ACTIVE_STATUSES: usize = 32;
@@ -71,6 +76,32 @@ pub enum AbilityTargeting {
     SelfOnly,
     SingleEnemy,
     SingleAlly,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbilityCommunicationKind {
+    Telepathy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbilityCommunicationScope {
+    DirectOnline,
+}
+
+/// Optional communication behavior attached to one authored ability.
+///
+/// This is intentionally a closed vocabulary: communication routing and
+/// social policy remain server-owned, while core owns the ability rules and
+/// the rooms where the effect cannot be emitted or received.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbilityCommunicationDefinition {
+    pub kind: AbilityCommunicationKind,
+    pub scope: AbilityCommunicationScope,
+    #[serde(default)]
+    pub blocked_room_ids: BTreeSet<String>,
 }
 
 impl AbilityTargeting {
@@ -157,6 +188,8 @@ pub struct AbilityDefinition {
     pub heal: Option<AbilityHealDefinition>,
     #[serde(default)]
     pub status_effects: Vec<AbilityStatusEffectDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub communication: Option<AbilityCommunicationDefinition>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -236,10 +269,18 @@ pub struct AbilityView {
     pub name: String,
     pub description: String,
     pub kind: String,
+    pub purpose: AbilityPurpose,
     pub resource_costs: Vec<AbilityResourceCostView>,
     pub cooldown_remaining: u64,
     pub usable: bool,
     pub targeting: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbilityPurpose {
+    Gameplay,
+    Telepathy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

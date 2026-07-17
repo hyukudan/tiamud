@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use world_pack::{
-    AbilityEffectTarget, AbilityStatusEffect, ArchetypeDefinition, AreaPack, DamageType,
-    GrantDefinition, LevelProgressionDefinition, MAX_ABILITY_COOLDOWN_TICKS,
-    MAX_ABILITY_EFFECT_DURATION_TICKS, MAX_GAMEPLAY_VALUE, MAX_RESISTANCE_PERCENT,
+    AbilityCategory, AbilityCommunicationDefinition, AbilityCommunicationKind,
+    AbilityCommunicationScope, AbilityEffectTarget, AbilityStatusEffect, AbilityTargeting,
+    ArchetypeDefinition, AreaPack, DamageType, GrantDefinition, LevelProgressionDefinition,
+    MAX_ABILITY_COOLDOWN_TICKS, MAX_ABILITY_EFFECT_DURATION_TICKS, MAX_COMMUNICATION_ABILITIES,
+    MAX_COMMUNICATION_BLOCKED_ROOMS, MAX_GAMEPLAY_VALUE, MAX_RESISTANCE_PERCENT,
     MAX_RESOURCES_PER_ARCHETYPE, MAX_SKILL_VALUE, MAX_STATS_PER_ARCHETYPE, ValidationError,
     WorldPack, WorldPackDocument,
 };
@@ -149,6 +151,172 @@ fn old_world_pack_v2_is_normalized_without_inventing_a_character_catalog() {
 }
 
 #[test]
+fn world_pack_v2_through_v7_normalize_without_inventing_communication_and_reject_smuggling() {
+    for schema_version in 2..=7 {
+        let legacy = json!({
+            "schemaVersion": schema_version,
+            "id": "legacy",
+            "name": "Legacy",
+            "startRoomId": "legacy:start",
+            "rooms": [{
+                "id": "legacy:start",
+                "title": "Start",
+                "description": "A legacy room."
+            }],
+            "gameplay": {
+                "abilities": [{
+                    "id": "legacy:strike",
+                    "name": "Strike",
+                    "description": "An ordinary legacy ability.",
+                    "category": "martial",
+                    "targeting": "single_enemy",
+                    "damage": {
+                        "target": "target",
+                        "damageType": "physical",
+                        "baseAmount": 1
+                    }
+                }]
+            }
+        });
+        let normalized =
+            WorldPackDocument::from_json(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(
+            normalized.world.schema_version,
+            world_pack::CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(normalized.world.gameplay.abilities.len(), 1);
+        assert!(
+            normalized.world.gameplay.abilities[0]
+                .communication
+                .is_none()
+        );
+
+        let mut smuggled = legacy;
+        smuggled["gameplay"] = json!({
+            "abilities": [{
+                "id": "legacy:whisper",
+                "name": "Whisper",
+                "description": "A field from a later schema.",
+                "category": "utility",
+                "resourceCosts": {"stamina": 1},
+                "cooldownTicks": 1,
+                "targeting": "single_ally",
+                "communication": {
+                    "kind": "telepathy",
+                    "scope": "direct_online",
+                    "blockedRoomIds": []
+                }
+            }]
+        });
+        let error =
+            WorldPackDocument::from_json(&serde_json::to_vec(&smuggled).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("cannot declare v8"), "{error}");
+    }
+}
+
+fn communication_ability(pack: &WorldPack) -> world_pack::AbilityDefinition {
+    let mut ability = pack.gameplay.abilities[0].clone();
+    ability.id = "demo:whisper".to_owned();
+    ability.name = "Whisper".to_owned();
+    ability.category = AbilityCategory::Utility;
+    ability.resource_costs = BTreeMap::from([("stamina".to_owned(), 1)]);
+    ability.cooldown_ticks = 1;
+    ability.targeting = AbilityTargeting::SingleAlly;
+    ability.damage = None;
+    ability.heal = None;
+    ability.status_effects.clear();
+    ability.communication = Some(AbilityCommunicationDefinition {
+        kind: AbilityCommunicationKind::Telepathy,
+        scope: AbilityCommunicationScope::DirectOnline,
+        blocked_room_ids: vec![pack.rooms[0].id.clone()],
+    });
+    ability
+}
+
+#[test]
+fn communication_abilities_enforce_closed_shape_bounds_rooms_and_npc_exclusion() {
+    let mut valid = reviewed_world();
+    let communication = communication_ability(&valid);
+    valid.gameplay.abilities.push(communication.clone());
+    valid.validate().unwrap();
+
+    let mut invalid = valid.clone();
+    let damage = invalid.gameplay.abilities[0].damage.clone();
+    let communication = invalid.gameplay.abilities.last_mut().unwrap();
+    communication.category = AbilityCategory::Martial;
+    communication.targeting = AbilityTargeting::SelfOnly;
+    communication.resource_costs.clear();
+    communication.cooldown_ticks = 0;
+    communication.damage = damage;
+    communication
+        .communication
+        .as_mut()
+        .unwrap()
+        .blocked_room_ids = vec!["missing:room".to_owned(), "missing:room".to_owned()];
+    invalid.gameplay.npc_ability_sets[0]
+        .ability_ids
+        .push("demo:whisper".to_owned());
+    let messages = invalid
+        .validate()
+        .unwrap_err()
+        .0
+        .into_iter()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("spend a resource"), "{messages}");
+    assert!(messages.contains("repeats blocked room"), "{messages}");
+    assert!(messages.contains("missing blocked room"), "{messages}");
+    assert!(
+        messages.contains("cannot use communication ability"),
+        "{messages}"
+    );
+
+    let mut too_many_rooms = valid.clone();
+    too_many_rooms
+        .gameplay
+        .abilities
+        .last_mut()
+        .unwrap()
+        .communication
+        .as_mut()
+        .unwrap()
+        .blocked_room_ids = (0..=MAX_COMMUNICATION_BLOCKED_ROOMS)
+        .map(|index| format!("missing:{index}"))
+        .collect();
+    let messages = too_many_rooms
+        .validate()
+        .unwrap_err()
+        .0
+        .into_iter()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("blocks 65 rooms"), "{messages}");
+
+    let mut too_many_abilities = reviewed_world();
+    let prototype = communication_ability(&too_many_abilities);
+    for index in 0..=MAX_COMMUNICATION_ABILITIES {
+        let mut ability = prototype.clone();
+        ability.id = format!("demo:whisper-{index}");
+        ability.name = format!("Whisper {index}");
+        too_many_abilities.gameplay.abilities.push(ability);
+    }
+    let messages = too_many_abilities
+        .validate()
+        .unwrap_err()
+        .0
+        .into_iter()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("communication abilities; the maximum is 32"),
+        "{messages}"
+    );
+}
+
+#[test]
 fn modular_authoring_rejects_nested_ability_typos() {
     let error = serde_json::from_value::<AreaPack>(json!({
         "schemaVersion": 1,
@@ -225,7 +393,17 @@ fn reviewed_catalog_rejects_broken_references_and_hard_bounds() {
 
 #[test]
 fn character_catalog_serialization_is_order_independent() {
-    let left = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap();
+    let mut left = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap();
+    left.world
+        .gameplay
+        .abilities
+        .iter_mut()
+        .find(|ability| ability.id == "tiamud:mind-whisper")
+        .unwrap()
+        .communication
+        .as_mut()
+        .unwrap()
+        .blocked_room_ids = vec!["demo:north-gate".to_owned(), "demo:archive".to_owned()];
     let mut right = left.clone();
     right.world.gameplay.archetypes.reverse();
     right.world.gameplay.abilities.reverse();
@@ -239,6 +417,9 @@ fn character_catalog_serialization_is_order_independent() {
     }
     for ability in &mut right.world.gameplay.abilities {
         ability.status_effects.reverse();
+        if let Some(communication) = &mut ability.communication {
+            communication.blocked_room_ids.reverse();
+        }
     }
     for set in &mut right.world.gameplay.npc_ability_sets {
         set.ability_ids.reverse();

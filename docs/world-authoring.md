@@ -1,7 +1,7 @@
 # Autoría, validación y publicación de mundos
 
-Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v7**
-como artefacto canónico de ejecución, **AreaPack v6** como módulo de autoría y
+Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v8**
+como artefacto canónico de ejecución, **AreaPack v7** como módulo de autoría y
 `WorldProjectManifest` v2 como composición fuera de línea. La autoridad exacta
 son los tipos y validadores de `crates/world-pack`; el ejemplo revisado es
 [`worlds/lantern-square.world.json`](../worlds/lantern-square.world.json).
@@ -12,7 +12,7 @@ variantes, scripts y pruebas de contenido.
 
 ## Frontera de ejecución
 
-El servidor valida y carga un único `WorldPackDocument` v7 completo antes de
+El servidor valida y carga un único `WorldPackDocument` v8 completo antes de
 abrir sus listeners. `TIAMUD_WORLD_PACK` permite seleccionar un artefacto
 externo revisado; si no se define, se usa Lantern Square embebido.
 
@@ -34,9 +34,9 @@ flowchart LR
     accDescr: Las áreas se componen y validan fuera de línea para producir un solo WorldPack canónico que el servidor carga al arrancar. No existe carga caliente.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
-    Areas[AreaPack v6<br/>1..=256 módulos] --> Compose
+    Areas[AreaPack v7<br/>1..=256 módulos] --> Compose
     Compose --> Validate[Validación global<br/>referencias · límites · Lua]
-    Validate --> Artifact[WorldPack v7 canónico]
+    Validate --> Artifact[WorldPack v8 canónico]
     Artifact --> Server[Servidor único<br/>carga al arrancar]
     Hot[Catálogo caliente/LRU] -. futuro .-> Server
 ```
@@ -45,14 +45,14 @@ flowchart LR
 
 | Entrada | Tratamiento |
 | --- | --- |
-| WorldPack v7 | Formato canónico nativo. |
-| WorldPack v6/v5/v4/v3/v2 | Se normaliza de forma determinista a v7 antes de validar, sin inventar sellos ni afijos; v2-v5 tampoco inventan tablas ni fuentes de botín. |
-| AreaPack v6 | Formato modular nativo. |
-| AreaPack v5/v4/v3/v2/v1 | Se normaliza a v6 antes de componer, sin inventar sellos ni afijos; v1-v4 tampoco inventan tablas ni fuentes de botín. |
+| WorldPack v8 | Formato canónico nativo. |
+| WorldPack v7/v6/v5/v4/v3/v2 | Se normaliza de forma determinista a v8 antes de validar, sin inventar comunicación; v2-v6 tampoco inventan sellos ni afijos y v2-v5 tampoco inventan tablas ni fuentes de botín. |
+| AreaPack v7 | Formato modular nativo. |
+| AreaPack v6/v5/v4/v3/v2/v1 | Se normaliza a v7 antes de componer, sin inventar comunicación; v1-v5 tampoco inventan sellos ni afijos y v1-v4 tampoco inventan tablas ni fuentes de botín. |
 | Envy/Merc | Solo pasa por `envy-import`; los programas históricos nunca se ejecutan. |
 
 La compatibilidad antigua no permite escribir vocabulario legado en un
-documento nativo. WorldPack v7 y AreaPack v6 rechazan `items`, `room.items`,
+documento nativo. WorldPack v8 y AreaPack v7 rechazan `items`, `room.items`,
 `itemRules` y `lootItemIds`: usan `itemPrototypes` e
 `initialItemInstances`.
 
@@ -67,6 +67,12 @@ WorldPack v7 y AreaPack v6. Declararlos, aunque estén vacíos, en formatos
 anteriores se rechaza como mezcla de esquemas. La normalización conserva el
 botín normal de v6/v5, pero no inventa sellos, probabilidades secundarias ni
 afijos.
+
+La comunicación authored nace en WorldPack v8 y AreaPack v7. Un campo
+`ability.communication`, aunque sea una forma vacía o parcial, se rechaza en
+WorldPack v2-v7 y AreaPack v1-v6 en vez de interpretarse como una habilidad
+ordinaria. La normalización deja `communication` ausente y `envy-import` no lo
+deduce de prosa, programas o flags históricos.
 
 WorldPack v4 y AreaPack v3 reciben por normalización `maxStackUnits: 1`, sin
 contenedor y con `transferPolicy: transferable`. En esas versiones la política
@@ -121,15 +127,15 @@ Ejemplo:
 }
 ```
 
-## AreaPack v6
+## AreaPack v7
 
 Cada área reutiliza los mismos registros del WorldPack; no crea una segunda
 representación de salas, objetos o NPC. Solo añade `id` y `dependsOn` como
 frontera de propiedad.
 
 ```text
-AreaPack v6
-├── schemaVersion! = 6
+AreaPack v7
+├── schemaVersion! = 7
 ├── id!
 ├── dependsOn[]?
 ├── itemPrototypes[]?
@@ -177,7 +183,7 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 
 ```json
 {
-  "schemaVersion": 5,
+  "schemaVersion": 7,
   "id": "plaza",
   "dependsOn": ["puerta"],
   "itemPrototypes": [
@@ -292,15 +298,15 @@ es botín fijo authored, asignado una sola vez y validado. El botín repetible s
 declara por separado mediante `lootTables` y `lootSources`, como se detalla más
 abajo.
 
-## WorldPack v7
+## WorldPack v8
 
 El artefacto plano conserva identidad, catálogos de objeto, salas y gameplay.
 Las extensiones de multimedia/percepción/scripts se aplanan en el documento
 por `WorldPackDocument` aunque la estructura Rust separa el núcleo del mundo.
 
 ```text
-WorldPack v7
-├── schemaVersion! = 7
+WorldPack v8
+├── schemaVersion! = 8
 ├── id!
 ├── name!
 ├── startRoomId!
@@ -331,7 +337,7 @@ Un mundo mínimo sin objetos:
 
 ```json
 {
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "id": "ejemplo",
   "name": "Mundo de ejemplo",
   "startRoomId": "ejemplo:entrada",
@@ -350,6 +356,43 @@ caracteres de control, y una `description` de 1..=8.192 bytes UTF-8 seguros. Los
 línea y tabulaciones revisados son válidos en la descripción; una cadena vacía,
 solo whitespace, una secuencia de control insegura o un exceso de bytes se
 rechazan. Los límites cuentan bytes, no caracteres Unicode.
+
+## Habilidades de comunicación y telepatía
+
+WorldPack v8/AreaPack v7 reutiliza `AbilityDefinition`: la telepatía no es un
+canal global ni un `tell` renombrado. El personaje debe conocer la habilidad,
+tener su recurso disponible y pagar un coste positivo; la habilidad tiene un
+cooldown authored positivo y conserva el cooldown global de habilidades.
+
+```json
+{
+  "id": "tiamud:mind-whisper",
+  "name": "Mind Whisper",
+  "description": "Envía un pensamiento privado a un aliado conectado.",
+  "category": "utility",
+  "resourceCosts": { "stamina": 2 },
+  "cooldownTicks": 2,
+  "targeting": "single_ally",
+  "communication": {
+    "kind": "telepathy",
+    "scope": "direct_online",
+    "blockedRoomIds": ["demo:archive"]
+  }
+}
+```
+
+El vocabulario es cerrado: solo `kind: telepathy` y
+`scope: direct_online`. La habilidad debe ser `spell` o `utility`, usar
+`single_ally` y no puede combinar comunicación con daño, curación ni estados.
+Un mundo admite como máximo 32 habilidades de comunicación; cada una enumera
+hasta 64 salas bloqueadas, únicas y existentes. Una referencia a una sala de
+otra AreaPack exige la correspondiente dependencia `dependsOn`. Ningún
+`npcAbilitySet` puede incluirla.
+
+Lantern Square concede `tiamud:mind-whisper` a `tiamud:wanderer`, la clase
+predeterminada, cuyo pool de stamina permite pagarla desde nivel 1. El Archivo
+demuestra un bloqueo authored. El mensaje y el destinatario son input runtime:
+no se escriben en el WorldPack.
 
 ## Prototipos e instancias de objeto
 
@@ -451,7 +494,7 @@ ubicaciones relativas de todo su subárbol.
 
 ### Propiedad efectiva y transferencia
 
-WorldPack v7 y AreaPack v6 aceptan las tres políticas. WorldPack v5 y AreaPack
+WorldPack v8 y AreaPack v7 aceptan las tres políticas. WorldPack v5 y AreaPack
 v4 también las aceptaban en su frontera histórica. La vinculación no se escribe
 en autoría: pertenece a cada instancia runtime y se crea, valida y persiste
 cuando el personaje adquiere el objeto.
@@ -508,7 +551,7 @@ canónico. Cada pool realiza `rolls` selecciones con reemplazo. Una entrada
 una instancia y no admite prototipo ni cantidades. El runtime usa rejection
 sampling, no porcentajes flotantes ni módulo sesgado.
 
-AreaPack v6 declara ambas colecciones en su nivel superior; WorldPack v7 las
+AreaPack v7 declara ambas colecciones en su nivel superior; WorldPack v8 las
 sitúa dentro de `gameplay`. El botín normal se introdujo en AreaPack v5 y
 WorldPack v6. El fragmento siguiente muestra su forma común actual:
 
@@ -588,8 +631,9 @@ Reglas de referencias y capacidad:
 
 ## Sellos ganados y afijos (fase 4B)
 
-WorldPack v7 y AreaPack v6 añaden recompensas selladas obtenidas jugando y un
-único afijo opcional por unidad de botín `unique`. La decisión autoritativa es
+WorldPack v8 y AreaPack v7 conservan las recompensas selladas obtenidas jugando
+y un único afijo opcional por unidad de botín `unique`, introducidos en v7/v6.
+La decisión autoritativa es
 el [ADR 0014](decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
 No son cajas pagadas: no existen compra de tiradas, llaves, pity ni una moneda
 premium implícita.
@@ -720,11 +764,11 @@ La composición:
 
 Lantern Square se compone desde tres áreas y produce tres salas, diez
 prototipos, nueve instancias iniciales, dos tablas de botín y una fuente. El
-artefacto de 52.349 bytes es byte a byte idéntico al WorldPack canónico y su
+artefacto de 53.040 bytes es byte a byte idéntico al WorldPack canónico y su
 SHA-256 es:
 
 ```text
-183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef
+109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6
 ```
 
 La demostración conserva `tiamud:road-token` y `tiamud:wolf-clasp` como
@@ -737,6 +781,8 @@ para el `tiamud:road-token` y el `tiamud:storm-seal` garantizados, además de la
 tirada 60 % `tiamud:wolf-clasp`/40 % `nothing` de su tabla repetible. El clasp
 normal y el talón obtenido al abrir el sello comparten una tirada de afijo:
 60 % `storm-bitten` y 40 % sin afijo.
+La clase inicial predeterminada concede además `tiamud:mind-whisper`, con coste
+de stamina y cooldown positivos; `demo:archive` demuestra su bloqueo authored.
 
 Límites principales:
 

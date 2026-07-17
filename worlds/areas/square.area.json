@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 6,
+  "schemaVersion": 7,
   "id": "square",
   "dependsOn": [
     "archive",
@@ -193,7 +193,8 @@
         { "kind": "skill", "skillId": "survival", "amount": 8 },
         { "kind": "resource_max", "resourceId": "stamina", "amount": 8 },
         { "kind": "resource_regeneration", "resourceId": "stamina", "amount": 1 },
-        { "kind": "ability", "abilityId": "tiamud:basic-strike" }
+        { "kind": "ability", "abilityId": "tiamud:basic-strike" },
+        { "kind": "ability", "abilityId": "tiamud:mind-whisper" }
       ],
       "levelGrants": [
         { "level": 2, "grants": [ { "kind": "attribute", "attributeId": "max_health", "amount": 4 }, { "kind": "skill", "skillId": "survival", "amount": 1 } ] },
@@ -561,6 +562,24 @@
         "baseAmount": 6,
         "scalingAttribute": "intellect",
         "scalingPercent": 125
+      }
+    },
+    {
+      "id": "tiamud:mind-whisper",
+      "name": "Mind Whisper",
+      "description": "Spend a measured breath of stamina to send one private thought to a named online ally, except where the Archive's wards suppress the link.",
+      "category": "utility",
+      "resourceCosts": {
+        "stamina": 2
+      },
+      "cooldownTicks": 2,
+      "targeting": "single_ally",
+      "communication": {
+        "kind": "telepathy",
+        "scope": "direct_online",
+        "blockedRoomIds": [
+          "demo:archive"
+        ]
       }
     }
   ],

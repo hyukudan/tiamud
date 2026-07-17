@@ -18,7 +18,7 @@ use super::{
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 1_024;
 
-/// A WorldPack v7 plus optional authoring data ignored by older runtime readers.
+/// A WorldPack v8 plus optional authoring data ignored by older runtime readers.
 ///
 /// Keeping the additions at the top level preserves Rust source compatibility for
 /// existing `WorldPack` and `Room` struct literals. Serde's default unknown-field
@@ -1385,14 +1385,14 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
             .get("gameplay")
             .is_some_and(|gameplay| gameplay.get("itemRules").is_some())
     {
-        return Err("WorldPack v7 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("WorldPack v8 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("WorldPack v7 rooms cannot declare legacy items".to_owned());
+        return Err("WorldPack v8 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("gameplay")
@@ -1404,7 +1404,7 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("WorldPack v7 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("WorldPack v8 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
     Ok(())
 }
@@ -1470,6 +1470,27 @@ fn reject_legacy_reward_fields(
     if prototypes_have_sealed || gameplay_has_affixes || loot_has_affix_pool {
         return Err(format!(
             "WorldPack v{schema_version} cannot declare v7 sealed rewards or affixes"
+        ));
+    }
+    Ok(())
+}
+
+fn reject_legacy_communication_fields(
+    value: &serde_json::Value,
+    schema_version: u64,
+) -> Result<(), String> {
+    let has_communication = value
+        .get("gameplay")
+        .and_then(|gameplay| gameplay.get("abilities"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|abilities| {
+            abilities
+                .iter()
+                .any(|ability| ability.get("communication").is_some())
+        });
+    if has_communication {
+        return Err(format!(
+            "WorldPack v{schema_version} cannot declare v8 communication abilities"
         ));
     }
     Ok(())
@@ -1552,6 +1573,10 @@ impl WorldPackDocument {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or_default();
         let legacy_schema = schema_version == 2 || schema_version == 3;
+        if (2..u64::from(crate::CURRENT_SCHEMA_VERSION)).contains(&schema_version) {
+            reject_legacy_communication_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
+        }
         if legacy_schema {
             reject_legacy_loot_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
@@ -1573,6 +1598,8 @@ impl WorldPackDocument {
         } else if schema_version == 6 {
             reject_legacy_reward_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
+            normalize_v6_rewards(&mut value).map_err(DocumentToolError::LegacyItems)?;
+        } else if schema_version == 7 {
             normalize_v6_rewards(&mut value).map_err(DocumentToolError::LegacyItems)?;
         } else if schema_version == u64::from(crate::CURRENT_SCHEMA_VERSION) {
             reject_native_legacy_item_fields(&value).map_err(DocumentToolError::LegacyItems)?;
@@ -2328,6 +2355,9 @@ impl WorldPackDocument {
             .sort_by(|left, right| left.id.cmp(&right.id));
         for ability in &mut document.world.gameplay.abilities {
             ability.status_effects.sort();
+            if let Some(communication) = &mut ability.communication {
+                communication.blocked_room_ids.sort();
+            }
         }
         document
             .world
@@ -3728,7 +3758,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_normalizes_to_v6_but_rejects_schema_smuggling() {
+    fn v4_normalizes_to_v8_but_rejects_schema_smuggling() {
         let mut legacy = serde_json::to_value(document()).unwrap();
         legacy["schemaVersion"] = serde_json::json!(4);
         legacy["itemPrototypes"][0]

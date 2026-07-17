@@ -174,6 +174,17 @@ describe('TiamudConnection', () => {
         channel: 'general', message: 'Lanterns are lit.',
       },
     });
+    expect(connection.perform(
+      'social.telepathy',
+      { abilityId: 'mind-thread', target: 'Bram', message: 'Meet at the gate.' },
+      'telepathy-1',
+    )).toBe(true);
+    expect(lastSent(socket)).toMatchObject({
+      data: {
+        requestId: 'telepathy-1', action: 'social.telepathy', abilityId: 'mind-thread',
+        target: 'Bram', message: 'Meet at the gate.',
+      },
+    });
     expect(connection.promote('stormcaller', 'promote-1')).toBe(true);
     expect(lastSent(socket)).toMatchObject({
       data: { requestId: 'promote-1', action: 'progression.promote', classId: 'stormcaller' },

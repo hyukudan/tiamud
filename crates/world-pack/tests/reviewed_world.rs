@@ -1,13 +1,13 @@
 use world_pack::{
-    AbilityCategory, AbilityStatusEffect, AffixPosition, CURRENT_SCHEMA_VERSION, EquipmentSlot,
-    ExitTarget, GrantDefinition, InitialItemLocation, ItemStackPolicy, ItemTransferPolicy,
-    WorldPackDocument,
+    AbilityCategory, AbilityCommunicationKind, AbilityCommunicationScope, AbilityStatusEffect,
+    AbilityTargeting, AffixPosition, CURRENT_SCHEMA_VERSION, EquipmentSlot, ExitTarget,
+    GrantDefinition, InitialItemLocation, ItemStackPolicy, ItemTransferPolicy, WorldPackDocument,
 };
 
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 #[test]
-fn reviewed_runtime_fixture_matches_world_pack_v7() {
+fn reviewed_runtime_fixture_matches_world_pack_v8() {
     let document = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap();
     let pack = document.world;
 
@@ -152,7 +152,7 @@ fn reviewed_runtime_fixture_matches_world_pack_v7() {
     assert_eq!(pack.gameplay.npc_spawns.len(), 1);
     assert!(pack.gameplay.default_archetype_id.is_none());
     assert!(pack.gameplay.archetypes.is_empty());
-    assert_eq!(pack.gameplay.abilities.len(), 3);
+    assert_eq!(pack.gameplay.abilities.len(), 4);
     assert_eq!(pack.gameplay.npc_ability_sets.len(), 1);
     assert_eq!(pack.gameplay.loot_tables.len(), 2);
     assert_eq!(pack.gameplay.loot_sources.len(), 1);
@@ -248,6 +248,35 @@ fn reviewed_runtime_fixture_matches_world_pack_v7() {
         .find(|ability| ability.id == "tiamud:arcane-bolt")
         .unwrap();
     assert_eq!(spell.category, AbilityCategory::Spell);
+    let whisper = pack
+        .gameplay
+        .abilities
+        .iter()
+        .find(|ability| ability.id == "tiamud:mind-whisper")
+        .unwrap();
+    assert_eq!(whisper.category, AbilityCategory::Utility);
+    assert_eq!(whisper.targeting, AbilityTargeting::SingleAlly);
+    assert_eq!(whisper.resource_costs.get("stamina"), Some(&2));
+    assert_eq!(whisper.cooldown_ticks, 2);
+    assert!(whisper.damage.is_none());
+    assert!(whisper.heal.is_none());
+    assert!(whisper.status_effects.is_empty());
+    let communication = whisper.communication.as_ref().unwrap();
+    assert_eq!(communication.kind, AbilityCommunicationKind::Telepathy);
+    assert_eq!(communication.scope, AbilityCommunicationScope::DirectOnline);
+    assert_eq!(communication.blocked_room_ids, ["demo:archive"]);
+    let wanderer = progression
+        .base_classes
+        .iter()
+        .find(|class| class.id == "tiamud:wanderer")
+        .unwrap();
+    assert!(
+        wanderer
+            .creation_grants
+            .contains(&GrantDefinition::Ability {
+                ability_id: "tiamud:mind-whisper".to_owned(),
+            })
+    );
     assert_eq!(
         pack.gameplay.npc_spawns[0].prototype_id,
         "tiamud:gate-stalker"

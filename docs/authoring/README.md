@@ -1,8 +1,8 @@
 # World authoring
 
 This is the current English entry point for creating Tiamud content. The
-runtime consumes one canonical **WorldPack v7**. Authors can maintain that
-world as strict **AreaPack v6** modules under a **WorldProjectManifest v2** and
+runtime consumes one canonical **WorldPack v8**. Authors can maintain that
+world as strict **AreaPack v7** modules under a **WorldProjectManifest v2** and
 compose them offline; areas are not services and are not loaded independently
 at runtime.
 
@@ -67,7 +67,7 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   `staged` location. Fungible stacks remain derived from individual instances;
   do not author or persist stack IDs/quantities. Do not restore v3 `items`,
   `itemRules` or `lootItemIds` fields.
-- Native WorldPack v7 and AreaPack v6 accept `transferable`,
+- Native WorldPack v8 and AreaPack v7 accept `transferable`,
   `character_bound` and `non_transferable`. Character binding is runtime state,
   not an authoring field: it is created on first acquisition and persisted in
   WorldRuntimeSnapshot v7. Legacy WorldPack v4/AreaPack v3 inputs must remain
@@ -87,8 +87,8 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   packs normalize to empty collections and reject injected fields instead of
   inferring probabilities. The canonical table digest becomes durable drop
   provenance; IDs, weights, quantities and references are validated strictly.
-- Sealed earned rewards and affixes are native only to WorldPack v7/AreaPack
-  v6. A sealed prototype is unique, consumable, `character_bound`, has no
+- Sealed earned rewards and affixes were introduced by WorldPack v7/AreaPack
+  v6 and remain valid in v8/v7. A sealed prototype is unique, consumable, `character_bound`, has no
   equipment/container/effect payload and names one table whose minimum and
   maximum guarantee 1..=16 units and expands to at most 1,024 visible odds
   rows. It cannot be an initial instance or a direct NPC `lootSource`, must
@@ -104,6 +104,12 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   These are encounter rewards, not paid boxes, keys or purchasable random
   rolls. Pity, need/greed, master-loot and contribution sharing are not part of
   this contract.
+- WorldPack v8/AreaPack v7 add closed communication abilities. Telepathy is an
+  ordinary known ability with a positive resource cost and cooldown, a single
+  online ally target and up to 64 unique existing blocked rooms. It cannot
+  damage, heal, apply statuses or belong to an NPC ability set. A world may
+  define at most 32 such abilities; v7/v6 and older inputs reject rather than
+  ignore this later field.
 - WorldRuntimeSnapshot v7 is the single durable authority for item location,
   binding, trade reservations, loot provenance, ground rights, applied affixes
   and sealed-open counters. SQLite and PostgreSQL schema v11 store it as opaque
@@ -144,12 +150,12 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
 - [Optional editorial AI](../../crates/editorial-ai/README.md)
 - [Historical Envy/Merc importer](../../tools/envy-import/README.md)
 
-The [Spanish WorldPack v7/AreaPack v6 guide](../world-authoring.md) is the
+The [Spanish WorldPack v8/AreaPack v7 guide](../world-authoring.md) is the
 current compact schema and workflow reference. Its reviewed Lantern Square
 example has three rooms, ten item prototypes, nine initial instances, two
-loot tables and one loot source. The 52,349-byte
+loot tables and one loot source. The 53,040-byte
 canonical artifact has SHA-256
-`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
+`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
 It keeps the published `tiamud:road-token` and `tiamud:wolf-clasp` semantics
 transferable, and demonstrates phase 3C with the non-transferable consumable
 `tiamud:rain-writ` in `demo:north-gate` and the character-bound fixed loot
@@ -158,4 +164,5 @@ party round-robin for one guaranteed road token, one earned sealed oath and
 one weighted roll: 60% wolf clasp, 40% nothing. Both the normal clasp drop and
 the talon yielded by breaking the bound oath make one 60% `storm-bitten`
 prefix roll (40% unchanged), demonstrating that affixes are not limited to
-sealed rewards.
+sealed rewards. The default Wanderer also receives the resource-costed
+`tiamud:mind-whisper`; `demo:archive` demonstrates an authored telepathy block.

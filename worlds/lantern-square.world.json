@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "id": "lantern-square",
   "name": "Tiamud: Lantern Square",
   "startRoomId": "demo:lantern-square",
@@ -618,6 +618,10 @@
             {
               "kind": "ability",
               "abilityId": "tiamud:basic-strike"
+            },
+            {
+              "kind": "ability",
+              "abilityId": "tiamud:mind-whisper"
             }
           ],
           "levelGrants": [
@@ -1591,6 +1595,24 @@
             "durationTicks": 2
           }
         ]
+      },
+      {
+        "id": "tiamud:mind-whisper",
+        "name": "Mind Whisper",
+        "description": "Spend a measured breath of stamina to send one private thought to a named online ally, except where the Archive's wards suppress the link.",
+        "category": "utility",
+        "resourceCosts": {
+          "stamina": 2
+        },
+        "cooldownTicks": 2,
+        "targeting": "single_ally",
+        "communication": {
+          "kind": "telepathy",
+          "scope": "direct_online",
+          "blockedRoomIds": [
+            "demo:archive"
+          ]
+        }
       }
     ],
     "npcAbilitySets": [

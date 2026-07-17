@@ -28,6 +28,7 @@ pub enum SocialChannel {
     Announcement,
     Say,
     Tell,
+    Telepathy,
     Party,
     General,
     Newbie,
@@ -579,7 +580,7 @@ async fn remove_moderation(
     })
 }
 
-async fn ensure_chat_allowed(
+pub(crate) async fn ensure_chat_allowed(
     runtime: &mut SocialRuntime,
     store: &dyn CharacterStore,
     actor: CharacterId,
@@ -617,7 +618,7 @@ async fn plan_allowed<'a>(
     Ok(())
 }
 
-fn resolve_connected<'a>(
+pub(crate) fn resolve_connected<'a>(
     connected: &'a [ConnectedCharacter],
     target: &str,
 ) -> Result<&'a ConnectedCharacter, StoreError> {
@@ -690,7 +691,7 @@ async fn authorize_staff_target(
     }
 }
 
-fn normalise_text(value: &str, maximum: usize) -> Result<String, StoreError> {
+pub(crate) fn normalise_text(value: &str, maximum: usize) -> Result<String, StoreError> {
     let value = value.trim();
     if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
         Err(StoreError::InvalidSocialInput)
@@ -728,6 +729,7 @@ fn help_text(topic: Option<&str>) -> String {
         .to_owned(),
         Some(topic) if topic.eq_ignore_ascii_case("social") => concat!(
             "Social: say <message>, tell <name> <message>, reply <message>, who.\r\n",
+            "Telepathy: telepathy <ability-id> <name> <message> when the world grants it.\r\n",
             "Party: party say/invite/accept/revoke/kick/transfer/disband/leave/status.\r\n",
             "Channels: channel list, channel join/leave <general|newbie|staff>, ",
             "channel say <channel> <message>. Staff requires a moderator, administrator or implementor profile.\r\n",
@@ -747,7 +749,7 @@ fn help_text(topic: Option<&str>) -> String {
             "Movement: north/east/south/west/up/down, look.\r\n",
             "Items: inventory, take/drop/give [quantity], contents, put/get [quantity], examine, use, equip, unequip.\r\n",
             "Trade: request, offer, review and double-confirm a same-room exchange; help trade.\r\n",
-            "Social: say, tell, reply, party say, channels, who, ignore, block, report.\r\n",
+            "Social: say, tell, reply, telepathy, party say, channels, who, ignore, block, report.\r\n",
             "More: help social, help trade.\r\n"
         )
         .to_owned(),
@@ -782,6 +784,16 @@ mod tests {
         ] {
             assert!(!encoded.contains(&secret));
         }
+
+        assert_eq!(
+            serde_json::to_value(SocialMessage {
+                channel: SocialChannel::Telepathy,
+                sender: "Aria".into(),
+                text: "A private thought.".into(),
+            })
+            .unwrap(),
+            json!({"channel": "telepathy", "sender": "Aria", "text": "A private thought."})
+        );
     }
 
     #[test]

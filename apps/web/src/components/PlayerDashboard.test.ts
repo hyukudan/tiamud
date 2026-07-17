@@ -35,10 +35,15 @@ const player: PlayerStateSnapshot = {
     abilities: [{
       id: 'ember-bolt', name: 'Ember Bolt', description: 'Hurls a compact flame.', kind: 'spell',
       resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 4 }], cooldownRemaining: 0, usable: true,
-      targeting: 'explicitTarget',
+      purpose: 'gameplay', targeting: 'explicitTarget',
     }, {
       id: 'mending-light', name: 'Mending Light', description: 'Restores the caster.', kind: 'spell',
-      resourceCosts: [], cooldownRemaining: 0, usable: true, targeting: 'optionalTarget',
+      resourceCosts: [], cooldownRemaining: 0, usable: true,
+      purpose: 'gameplay', targeting: 'optionalTarget',
+    }, {
+      id: 'mind-thread', name: 'Mind Thread', description: 'Carries a private thought.', kind: 'utility',
+      resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 2 }], cooldownRemaining: 0,
+      usable: true, purpose: 'telepathy', targeting: 'optionalTarget',
     }],
     progressionPoints: { talent: 2 },
     talents: [{
@@ -220,6 +225,7 @@ describe('PlayerDashboard', () => {
       'Reply to your latest direct message', 'World channels', 'Channel',
       'General', 'Newbie', 'Staff', 'Nearby recipient', 'Transferable',
       'Bound to this character', 'Non-transferable',
+      'Mind to reach with Mind Thread', 'Private thought', 'Direct online message',
     ]) {
       expect(body).toContain(label);
     }
@@ -253,6 +259,7 @@ describe('PlayerDashboard', () => {
     expect(body).toContain('Rank 1 / 3');
     expect(body).toContain('Ember Bolt');
     expect(body).toContain('Target for Ember Bolt');
+    expect(body).toContain('Reach with Mind Thread');
     expect(body).toContain('rain wolf');
     expect(body).not.toContain('optional ally');
     expect(body).toContain('<button');
@@ -265,6 +272,7 @@ describe('PlayerDashboard', () => {
       'party.say', 'party.revoke', 'party.kick', 'party.transfer', 'party.disband',
       'social.reply', 'social.channel.list', 'social.channel.join',
       'social.channel.leave', 'social.channel.say',
+      'social.telepathy',
     ]) {
       expect(dashboardSource).toContain(action);
     }

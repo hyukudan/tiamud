@@ -6,7 +6,10 @@ use crate::{
         StoreError,
     },
     runtime_content::{RuntimeContent, ScenePresentation},
-    social::{SocialChannel, SocialMessage, SocialRuntime, apply_social},
+    social::{
+        MAX_CHAT_MESSAGE_BYTES, MAX_SOCIAL_TARGET_BYTES, SocialChannel, SocialMessage,
+        SocialRuntime, apply_social, ensure_chat_allowed, normalise_text, resolve_connected,
+    },
     staff::{apply_staff, derived_role},
 };
 use std::{
@@ -44,6 +47,8 @@ pub enum GameError {
     GiveUnavailable,
     #[error("that trade is not available")]
     TradeUnavailable,
+    #[error("the action's script hook was rejected")]
+    ScriptHookRejected,
     #[error("world actor startup failed during {stage}: {reason}")]
     Startup { stage: &'static str, reason: String },
 }
@@ -1219,6 +1224,135 @@ async fn apply(
     }
     if let PlayerAction::Trade(trade_action) = &action {
         ensure_trade_social_preflight(world, store, session, trade_action).await?;
+    }
+    if let PlayerAction::Telepathy {
+        ability_id,
+        target,
+        message,
+    } = &action
+    {
+        let ability_id = normalise_text(ability_id, 64)?;
+        let target = normalise_text(target, MAX_SOCIAL_TARGET_BYTES)?;
+        let message = normalise_text(message, MAX_CHAT_MESSAGE_BYTES)?;
+        let actor = world.character_snapshot(session)?;
+        let connected = world.connected_characters()?;
+        let recipient = resolve_connected(&connected, &target)?.clone();
+        if recipient.character_id == actor.id {
+            return Err(StoreError::SocialSelfTarget.into());
+        }
+        world.telepathy_preflight(session, &ability_id, &target, &message)?;
+        ensure_chat_allowed(social, store, actor.id).await?;
+
+        // Receiver-side policy and gameplay receptivity are deliberately
+        // collapsed into the same accepted sender result. Their values are
+        // used only to decide post-commit delivery, never to decide whether
+        // the earned resource and cooldown cost is consumed.
+        let socially_allowed = store
+            .social_delivery_allowed(actor.id, recipient.character_id)
+            .await?;
+        let receptive = world.telepathy_receptive(recipient.session_id, &ability_id)?;
+
+        let checkpoint = world.checkpoint();
+        let plan = match world.apply_telepathy(session, &ability_id, &target, &message) {
+            Ok(plan) => plan,
+            Err(error) => {
+                world.restore_checkpoint(checkpoint);
+                return Err(error.into());
+            }
+        };
+        let hook = runtime_content.run_hook(world, session, role, ScriptHook::OnTalk);
+        if hook.rejected {
+            world.restore_checkpoint(checkpoint);
+            return Err(GameError::ScriptHookRejected);
+        }
+        let mut committed_events = hook.domain_events.clone();
+        match reconcile_world_trades(world, store, &checkpoint).await {
+            Ok(events) => committed_events.extend(events),
+            Err(error) => {
+                world.restore_checkpoint(checkpoint);
+                return Err(error);
+            }
+        }
+        let characters = match durable_connected_characters(world) {
+            Ok(characters) => characters,
+            Err(error) => {
+                world.restore_checkpoint(checkpoint);
+                return Err(error.into());
+            }
+        };
+        let events = match project_view_events(world, session, &committed_events) {
+            Ok(events) => events,
+            Err(error) => {
+                world.restore_checkpoint(checkpoint);
+                return Err(error.into());
+            }
+        };
+        let mut scene = match world.current_scene(session) {
+            Ok(scene) => scene,
+            Err(error) => {
+                world.restore_checkpoint(checkpoint);
+                return Err(error.into());
+            }
+        };
+        runtime_content.resolve_scene(world, session, role, &mut scene);
+        let presentation = runtime_content.resolve_entity_presentation(world, session);
+        let player = match world.player_state_view(session) {
+            Ok(player) => player,
+            Err(error) => {
+                world.restore_checkpoint(checkpoint);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = store
+            .commit_action(
+                characters,
+                world.runtime_snapshot(),
+                committed_events.clone(),
+            )
+            .await
+        {
+            world.restore_checkpoint(checkpoint);
+            return Err(error.into());
+        }
+
+        if socially_allowed && receptive {
+            // This path intentionally does not update last_tell_senders: a
+            // telepathic delivery can never become a plain `reply` target.
+            delivery.send_social(
+                recipient.session_id,
+                SocialMessage {
+                    channel: SocialChannel::Telepathy,
+                    sender: actor.name,
+                    text: message.clone(),
+                },
+            );
+        }
+        if hook.changed || !committed_events.is_empty() {
+            broadcast_world_deliveries(
+                world,
+                runtime_content,
+                session_roles,
+                Some(session),
+                &committed_events,
+                delivery,
+            );
+        }
+        return Ok(AppliedAction {
+            scene,
+            presentation,
+            player,
+            output: combine_output(
+                Some(format!(
+                    "You reach for {} with {}, \"{message}\".\r\n",
+                    recipient.name, plan.ability_name
+                )),
+                hook.narration,
+            ),
+            container_contents: None,
+            trade_contents: None,
+            reward_odds: None,
+            events,
+        });
     }
     let checkpoint = world.checkpoint();
     let action = match action {
@@ -5804,6 +5938,62 @@ mod tests {
         .expect("social delivery timed out")
     }
 
+    fn telepathy_test_world() -> World {
+        let loaded = crate::world_loader::default_loaded_world().unwrap();
+        crate::world_loader::build_loaded_world(&loaded).unwrap()
+    }
+
+    async fn create_telepathy_character(
+        world: &WorldHandle,
+        name: &str,
+    ) -> (String, CharacterSnapshot) {
+        let authenticated = world
+            .register_account(
+                format!("{name} account"),
+                "correct horse battery staple".into(),
+            )
+            .await
+            .unwrap();
+        let character = world
+            .create_authenticated_character(authenticated.token.as_str().into(), name.into())
+            .await
+            .unwrap();
+        (authenticated.token.as_str().to_owned(), character)
+    }
+
+    async fn enter_telepathy_character(
+        world: &WorldHandle,
+        token: &str,
+        character: CharacterId,
+    ) -> EnteredWorld {
+        world
+            .enter_authenticated_character(token.to_owned(), character)
+            .await
+            .unwrap()
+    }
+
+    fn projected_resource(player: &PlayerStateView, id: &str) -> u32 {
+        player
+            .character
+            .resources
+            .iter()
+            .find(|resource| resource.id == id)
+            .unwrap()
+            .current
+    }
+
+    fn projected_ability<'a>(
+        player: &'a PlayerStateView,
+        id: &str,
+    ) -> &'a tiamud_core::AbilityView {
+        player
+            .character
+            .abilities
+            .iter()
+            .find(|ability| ability.id == id)
+            .unwrap()
+    }
+
     fn drain_deliveries(inbox: &mut DeliveryInbox) {
         while inbox.try_recv().is_ok() {}
     }
@@ -6267,6 +6457,375 @@ mod tests {
         assert_eq!(
             next_social(&mut recipient.deliveries).await.text,
             "committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn telepathy_consumes_authored_costs_commits_then_delivers_without_reply_or_event() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(telepathy_test_world(), store.clone())
+            .await
+            .unwrap();
+        let (sender_token, sender_character) = create_telepathy_character(&world, "Sender").await;
+        let (recipient_token, recipient_character) =
+            create_telepathy_character(&world, "Recipient").await;
+        let sender = enter_telepathy_character(&world, &sender_token, sender_character.id).await;
+        let mut recipient =
+            enter_telepathy_character(&world, &recipient_token, recipient_character.id).await;
+        let before = world.current_state(sender.session_id).await.unwrap().2;
+
+        let applied = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Telepathy {
+                    ability_id: "tiamud:mind-whisper".into(),
+                    target: "Recipient".into(),
+                    message: "Meet beyond the gate".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            applied.output.as_deref(),
+            Some("You reach for Recipient with Mind Whisper, \"Meet beyond the gate\".\r\n")
+        );
+        assert_eq!(
+            projected_resource(&applied.player, "stamina"),
+            projected_resource(&before, "stamina") - 2
+        );
+        let ability = projected_ability(&applied.player, "tiamud:mind-whisper");
+        assert_eq!(ability.cooldown_remaining, 2);
+        assert!(!ability.usable);
+
+        let delivered = next_social(&mut recipient.deliveries).await;
+        assert_eq!(delivered.channel, SocialChannel::Telepathy);
+        assert_eq!(delivered.sender, "Sender");
+        assert_eq!(delivered.text, "Meet beyond the gate");
+        assert!(matches!(
+            world
+                .apply(
+                    recipient.session_id,
+                    PlayerAction::Social(SocialAction::Reply("I hear you".into())),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::SocialTargetNotFound))
+        ));
+
+        let state = store.state.lock().unwrap();
+        assert!(state.domain_events.is_empty());
+        let persisted = state.gameplay.get(&sender_character.id).unwrap();
+        assert_eq!(
+            persisted.resources["stamina"].current,
+            projected_resource(&before, "stamina") - 2
+        );
+        assert_eq!(persisted.ability_cooldowns["tiamud:mind-whisper"], 2);
+        assert_eq!(persisted.ability_global_ready_tick, 1);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PrivateTelepathyBarrier {
+        Ignore,
+        Block,
+        Defeated,
+        BlockedRoom,
+    }
+
+    #[tokio::test]
+    async fn private_receiver_barriers_are_indistinguishable_and_still_consume() {
+        for barrier in [
+            PrivateTelepathyBarrier::Ignore,
+            PrivateTelepathyBarrier::Block,
+            PrivateTelepathyBarrier::Defeated,
+            PrivateTelepathyBarrier::BlockedRoom,
+        ] {
+            let store = Arc::new(MemoryStore::default());
+            let world = WorldHandle::spawn(telepathy_test_world(), store.clone())
+                .await
+                .unwrap();
+            let (sender_token, sender_character) =
+                create_telepathy_character(&world, "Sender").await;
+            let (recipient_token, recipient_character) =
+                create_telepathy_character(&world, "Recipient").await;
+            {
+                let mut state = store.state.lock().unwrap();
+                match barrier {
+                    PrivateTelepathyBarrier::Ignore => {
+                        state
+                            .ignores
+                            .insert((recipient_character.id, sender_character.id));
+                    }
+                    PrivateTelepathyBarrier::Block => {
+                        state
+                            .blocks
+                            .insert((recipient_character.id, sender_character.id));
+                    }
+                    PrivateTelepathyBarrier::Defeated => {
+                        let target = state.gameplay.get_mut(&recipient_character.id).unwrap();
+                        target.vitals.health = 0;
+                        target.recovery_at_tick = Some(3);
+                    }
+                    PrivateTelepathyBarrier::BlockedRoom => {
+                        state
+                            .characters
+                            .get_mut(&recipient_character.id)
+                            .unwrap()
+                            .room_id = "demo:archive".into();
+                    }
+                }
+            }
+            let sender =
+                enter_telepathy_character(&world, &sender_token, sender_character.id).await;
+            let mut recipient =
+                enter_telepathy_character(&world, &recipient_token, recipient_character.id).await;
+            let before = world.current_state(sender.session_id).await.unwrap().2;
+
+            let applied = world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Telepathy {
+                        ability_id: "tiamud:mind-whisper".into(),
+                        target: "Recipient".into(),
+                        message: "Still there?".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                applied.output.as_deref(),
+                Some("You reach for Recipient with Mind Whisper, \"Still there?\".\r\n"),
+                "{barrier:?}"
+            );
+            assert_eq!(
+                projected_resource(&applied.player, "stamina"),
+                projected_resource(&before, "stamina") - 2,
+                "{barrier:?}"
+            );
+            assert_eq!(
+                projected_ability(&applied.player, "tiamud:mind-whisper").cooldown_remaining,
+                2,
+                "{barrier:?}"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                    .await
+                    .is_err(),
+                "{barrier:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_or_muted_telepathy_fails_before_consuming_resources() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(telepathy_test_world(), store.clone())
+            .await
+            .unwrap();
+        let (sender_token, sender_character) = create_telepathy_character(&world, "Sender").await;
+        let (recipient_token, recipient_character) =
+            create_telepathy_character(&world, "Recipient").await;
+        let sender = enter_telepathy_character(&world, &sender_token, sender_character.id).await;
+        let mut recipient =
+            enter_telepathy_character(&world, &recipient_token, recipient_character.id).await;
+        let before = world.current_state(sender.session_id).await.unwrap().2;
+
+        for target in ["Sender", "Nobody"] {
+            assert!(
+                world
+                    .apply(
+                        sender.session_id,
+                        PlayerAction::Telepathy {
+                            ability_id: "tiamud:mind-whisper".into(),
+                            target: target.into(),
+                            message: "No cost".into(),
+                        },
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                world.current_state(sender.session_id).await.unwrap().2,
+                before
+            );
+        }
+
+        store.state.lock().unwrap().muted.insert(sender.account_id);
+        assert!(matches!(
+            world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Telepathy {
+                        ability_id: "tiamud:mind-whisper".into(),
+                        target: "Recipient".into(),
+                        message: "Muted".into(),
+                    },
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::ChatMuted))
+        ));
+        assert_eq!(
+            world.current_state(sender.session_id).await.unwrap().2,
+            before
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn telepathy_store_failure_rolls_back_and_never_delivers() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(telepathy_test_world(), store.clone())
+            .await
+            .unwrap();
+        let (sender_token, sender_character) = create_telepathy_character(&world, "Sender").await;
+        let (recipient_token, recipient_character) =
+            create_telepathy_character(&world, "Recipient").await;
+        let sender = enter_telepathy_character(&world, &sender_token, sender_character.id).await;
+        let mut recipient =
+            enter_telepathy_character(&world, &recipient_token, recipient_character.id).await;
+        let before = world.current_state(sender.session_id).await.unwrap().2;
+        store.fail_saves.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Telepathy {
+                        ability_id: "tiamud:mind-whisper".into(),
+                        target: "Recipient".into(),
+                        message: "Do not deliver".into(),
+                    },
+                )
+                .await,
+            Err(GameError::Persistence(_))
+        ));
+        assert_eq!(
+            world.current_state(sender.session_id).await.unwrap().2,
+            before
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                .await
+                .is_err()
+        );
+
+        store.fail_saves.store(false, Ordering::SeqCst);
+        world
+            .apply(
+                sender.session_id,
+                PlayerAction::Telepathy {
+                    ability_id: "tiamud:mind-whisper".into(),
+                    target: "Recipient".into(),
+                    message: "Now deliver".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            next_social(&mut recipient.deliveries).await.text,
+            "Now deliver"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_receiver_mailbox_does_not_reveal_itself_or_refund_telepathy() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(telepathy_test_world(), store)
+            .await
+            .unwrap();
+        let (sender_token, sender_character) = create_telepathy_character(&world, "Sender").await;
+        let (recipient_token, recipient_character) =
+            create_telepathy_character(&world, "Recipient").await;
+        let sender = enter_telepathy_character(&world, &sender_token, sender_character.id).await;
+        let recipient =
+            enter_telepathy_character(&world, &recipient_token, recipient_character.id).await;
+        drop(recipient.deliveries);
+        let before = world.current_state(sender.session_id).await.unwrap().2;
+
+        let applied = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Telepathy {
+                    ability_id: "tiamud:mind-whisper".into(),
+                    target: "Recipient".into(),
+                    message: "Are you there?".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            applied.output.as_deref(),
+            Some("You reach for Recipient with Mind Whisper, \"Are you there?\".\r\n")
+        );
+        assert_eq!(
+            projected_resource(&applied.player, "stamina"),
+            projected_resource(&before, "stamina") - 2
+        );
+        assert_eq!(
+            projected_ability(&applied.player, "tiamud:mind-whisper").cooldown_remaining,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_on_talk_rolls_back_telepathy_and_never_delivers() {
+        let store = Arc::new(MemoryStore::default());
+        let content = RuntimeContent::new(
+            Vec::new(),
+            vec![RuntimeScript {
+                id: "script:reject-telepathy".into(),
+                room_id: "demo:lantern-square".into(),
+                hooks: BTreeSet::from([ScriptHook::OnTalk]),
+                capabilities: BTreeSet::from([ScriptCapability::SetFlag]),
+                limits: ScriptLimits::default(),
+                source: r#"
+                    function on_talk(ctx)
+                        tiamud.emit('set_flag', 'another', 'must-fail-closed')
+                    end
+                "#
+                .into(),
+            }],
+            19,
+        );
+        let world = WorldHandle::spawn_with_scheduler_and_content(
+            telepathy_test_world(),
+            store,
+            WorldSchedulerConfig::default(),
+            content,
+        )
+        .await
+        .unwrap();
+        let (sender_token, sender_character) = create_telepathy_character(&world, "Sender").await;
+        let (recipient_token, recipient_character) =
+            create_telepathy_character(&world, "Recipient").await;
+        let sender = enter_telepathy_character(&world, &sender_token, sender_character.id).await;
+        let mut recipient =
+            enter_telepathy_character(&world, &recipient_token, recipient_character.id).await;
+        let before = world.current_state(sender.session_id).await.unwrap().2;
+
+        assert!(matches!(
+            world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Telepathy {
+                        ability_id: "tiamud:mind-whisper".into(),
+                        target: "Recipient".into(),
+                        message: "Rejected".into(),
+                    },
+                )
+                .await,
+            Err(GameError::ScriptHookRejected)
+        ));
+        assert_eq!(
+            world.current_state(sender.session_id).await.unwrap().2,
+            before
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
+                .await
+                .is_err()
         );
     }
 

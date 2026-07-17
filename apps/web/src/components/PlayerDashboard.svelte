@@ -36,6 +36,8 @@
   let communityChannel = $state<CommunityChannel>('general');
   let communityMessage = $state('');
   let abilityTargetById = $state<Record<string, string>>({});
+  let telepathyTargetById = $state<Record<string, string>>({});
+  let telepathyMessageById = $state<Record<string, string>>({});
   let itemQuantity = $state(1);
   let destinationContainer = $state('');
   let giveRecipient = $state('');
@@ -46,6 +48,9 @@
   const carriedContainers = $derived(value?.inventory.filter((item) => item.containerCapacity) ?? []);
   const nearbyRecipients = $derived(
     value?.social.online.filter((character) => character.nearby && !character.selfCharacter) ?? [],
+  );
+  const telepathyRecipients = $derived(
+    value?.social.online.filter((character) => !character.selfCharacter) ?? [],
   );
   const giveRecipientIsNearby = $derived(
     nearbyRecipients.some((character) => character.id === giveRecipient),
@@ -320,13 +325,15 @@
     communityMessage = '';
   }
 
-  const targetingLabel = (targeting: PlayerStateSnapshot['character']['abilities'][number]['targeting']): string => ({
-    self: 'Self',
-    // The current scene contract has no authorized ally target IDs. The wire
-    // value stays additive for a future client, but v1 executes it as self.
-    optionalTarget: 'Self',
-    explicitTarget: 'Choose a target',
-  })[targeting];
+  const targetingLabel = (
+    ability: PlayerStateSnapshot['character']['abilities'][number],
+  ): string => ability.purpose === 'telepathy' ? 'Direct online message' : ({
+      self: 'Self',
+      // The current scene contract has no authorized ally target IDs. The wire
+      // value stays additive for a future client, but v1 executes it as self.
+      optionalTarget: 'Self',
+      explicitTarget: 'Choose a target',
+    })[ability.targeting];
 
   function resourceCostLabel(
     cost: PlayerStateSnapshot['character']['abilities'][number]['resourceCosts'][number],
@@ -344,6 +351,18 @@
       ? abilityTarget(ability.id)
       : undefined;
     onability(ability.id, target, `${ability.kind === 'spell' ? 'cast' : 'use'} ${ability.name}`);
+  }
+
+  function sendTelepathy(ability: PlayerStateSnapshot['character']['abilities'][number]): void {
+    const target = (telepathyTargetById[ability.id] ?? '').trim();
+    const message = (telepathyMessageById[ability.id] ?? '').trim();
+    if (!target || !message) return;
+    onaction(
+      'social.telepathy',
+      { abilityId: ability.id, target, message },
+      `telepathy with ${ability.name} to ${target}`,
+    );
+    telepathyMessageById = { ...telepathyMessageById, [ability.id]: '' };
   }
 </script>
 
@@ -557,7 +576,7 @@
                     <span class={`ability-kind ${ability.kind}`}>{ability.kind}</span>
                     <h3 id={`ability-${ability.id}`}>{ability.name}</h3>
                   </div>
-                  <span>{targetingLabel(ability.targeting)}</span>
+                  <span>{targetingLabel(ability)}</span>
                 </div>
                 <p id={`ability-description-${ability.id}`}>{ability.description}</p>
                 <ul class="ability-meta" aria-label={`${ability.name} requirements`}>
@@ -566,7 +585,50 @@
                   {/each}
                   {#if ability.cooldownRemaining > 0}<li>{ability.cooldownRemaining} ticks cooldown</li>{/if}
                 </ul>
-                {#if ability.targeting === 'explicitTarget'}
+                {#if ability.purpose === 'telepathy'}
+                  <form
+                    class="inline-form telepathy-form"
+                    onsubmit={(event) => { event.preventDefault(); sendTelepathy(ability); }}
+                  >
+                    <label for={`telepathy-target-${ability.id}`}>Mind to reach with {ability.name}</label>
+                    <input
+                      id={`telepathy-target-${ability.id}`}
+                      list={`telepathy-recipients-${ability.id}`}
+                      maxlength="64"
+                      value={telepathyTargetById[ability.id] ?? ''}
+                      oninput={(event) => {
+                        telepathyTargetById = {
+                          ...telepathyTargetById,
+                          [ability.id]: event.currentTarget.value,
+                        };
+                      }}
+                    />
+                    <datalist id={`telepathy-recipients-${ability.id}`}>
+                      {#each telepathyRecipients as recipient (recipient.id)}
+                        <option value={recipient.name}></option>
+                      {/each}
+                    </datalist>
+                    <label for={`telepathy-message-${ability.id}`}>Private thought</label>
+                    <input
+                      id={`telepathy-message-${ability.id}`}
+                      maxlength="512"
+                      value={telepathyMessageById[ability.id] ?? ''}
+                      oninput={(event) => {
+                        telepathyMessageById = {
+                          ...telepathyMessageById,
+                          [ability.id]: event.currentTarget.value,
+                        };
+                      }}
+                    />
+                    <button
+                      type="submit"
+                      aria-describedby={`ability-description-${ability.id}`}
+                      disabled={!ability.usable || ability.cooldownRemaining > 0 ||
+                        !(telepathyTargetById[ability.id] ?? '').trim() ||
+                        !(telepathyMessageById[ability.id] ?? '').trim()}
+                    >Reach with {ability.name}</button>
+                  </form>
+                {:else if ability.targeting === 'explicitTarget'}
                   <label for={`ability-target-${ability.id}`}>Target for {ability.name}</label>
                   <select
                     id={`ability-target-${ability.id}`}
@@ -584,17 +646,21 @@
                     {/each}
                   </select>
                 {/if}
-                <button
-                  type="button"
-                  aria-describedby={`ability-description-${ability.id}`}
-                  disabled={!ability.usable || ability.cooldownRemaining > 0 ||
-                    (ability.targeting === 'explicitTarget' && !abilityTarget(ability.id))}
-                  onclick={() => useAbility(ability)}
-                >{ability.kind === 'spell' ? 'Cast' : 'Use'} {ability.name}</button>
-                {#if !ability.usable}
-                  <p class="ability-unavailable" role="status">Unavailable right now.</p>
-                {:else if ability.targeting === 'explicitTarget' && !abilityTarget(ability.id)}
-                  <p class="ability-unavailable">Choose a visible target to use this ability.</p>
+                {#if ability.purpose === 'gameplay'}
+                  <button
+                    type="button"
+                    aria-describedby={`ability-description-${ability.id}`}
+                    disabled={!ability.usable || ability.cooldownRemaining > 0 ||
+                      (ability.targeting === 'explicitTarget' && !abilityTarget(ability.id))}
+                    onclick={() => useAbility(ability)}
+                  >{ability.kind === 'spell' ? 'Cast' : 'Use'} {ability.name}</button>
+                  {#if !ability.usable}
+                    <p class="ability-unavailable" role="status">Unavailable right now.</p>
+                  {:else if ability.targeting === 'explicitTarget' && !abilityTarget(ability.id)}
+                    <p class="ability-unavailable">Choose a visible target to use this ability.</p>
+                  {/if}
+                {:else if !ability.usable}
+                  <p class="ability-unavailable" role="status">Telepathy is unavailable right now.</p>
                 {/if}
               </li>
             {/each}

@@ -24,6 +24,7 @@ describe('Tiamud entry flow', () => {
     expect(appSource).toContain('`${message.sender} announces`');
     expect(appSource).toContain("case 'say'");
     expect(appSource).toContain("case 'tell'");
+    expect(appSource).toContain("case 'telepathy'");
     expect(appSource).toContain("case 'party'");
     expect(appSource).toContain('in #${message.channel}');
     expect(appSource).toContain('socialHistoryLabel(message.data)');

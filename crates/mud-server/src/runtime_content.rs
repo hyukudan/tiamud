@@ -215,7 +215,7 @@ impl RuntimeContent {
         maximum_wall_time: Duration,
     ) -> ScriptBatchOutcome {
         let Ok(runtime) = world.authorized_runtime_context(session) else {
-            return ScriptBatchOutcome::default();
+            return ScriptBatchOutcome::rejected();
         };
         let scripts = self
             .scripts
@@ -236,7 +236,7 @@ impl RuntimeContent {
                 maximum = MAX_MODULES_PER_ROOM_HOOK_BATCH,
                 "WorldPack script batch rejected before execution"
             );
-            return ScriptBatchOutcome::default();
+            return ScriptBatchOutcome::rejected();
         }
 
         let batch_budget = maximum_wall_time.min(SCRIPT_BATCH_WALL_BUDGET);
@@ -301,7 +301,7 @@ impl RuntimeContent {
                         category = script_error_category(&error),
                         "isolated WorldPack script failure"
                     );
-                    return ScriptBatchOutcome::default();
+                    return ScriptBatchOutcome::rejected();
                 }
             }
         }
@@ -319,7 +319,7 @@ impl RuntimeContent {
                 category = "invalid_event",
                 "isolated WorldPack script failure"
             );
-            return ScriptBatchOutcome::default();
+            return ScriptBatchOutcome::rejected();
         };
         let checkpoint = world.checkpoint();
         let mut result = ScriptBatchOutcome::default();
@@ -342,7 +342,7 @@ impl RuntimeContent {
                                 category = "invalid_effect",
                                 "isolated WorldPack script failure"
                             );
-                            return ScriptBatchOutcome::default();
+                            return ScriptBatchOutcome::rejected();
                         }
                     }
                 }
@@ -565,6 +565,19 @@ pub(crate) struct ScriptBatchOutcome {
     pub(crate) changed: bool,
     pub(crate) domain_events: Vec<DomainEvent>,
     pub(crate) budget_exhausted: bool,
+    /// Distinguishes an inert hook with no matching module from a rejected
+    /// batch. Actions that make the hook part of their transaction can then
+    /// fail closed without inferring rejection from an empty outcome.
+    pub(crate) rejected: bool,
+}
+
+impl ScriptBatchOutcome {
+    fn rejected() -> Self {
+        Self {
+            rejected: true,
+            ..Self::default()
+        }
+    }
 }
 
 enum ValidatedEvent {
@@ -686,7 +699,7 @@ fn rollback_script_batch(
         category = "invalid_effect",
         "isolated WorldPack script failure"
     );
-    ScriptBatchOutcome::default()
+    ScriptBatchOutcome::rejected()
 }
 
 fn reject_script_budget(
@@ -705,6 +718,7 @@ fn reject_script_budget(
     );
     ScriptBatchOutcome {
         budget_exhausted: true,
+        rejected: true,
         ..ScriptBatchOutcome::default()
     }
 }

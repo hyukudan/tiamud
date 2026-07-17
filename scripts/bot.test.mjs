@@ -357,7 +357,7 @@ test('strict bot accepts bounded combat cues and rejects unrelated or extended c
 
 test('strict bot accepts every social scope and bounded access notice codes', () => {
   for (const channel of [
-    'announcement', 'say', 'tell', 'party', 'general', 'newbie', 'staff',
+    'announcement', 'say', 'tell', 'telepathy', 'party', 'general', 'newbie', 'staff',
   ]) {
     assert.equal(
       parseEnvelope('chat.message', { channel, sender: 'Tiamud', text: 'Ready.' }).data.channel,
@@ -643,8 +643,31 @@ test('strict bot validates private confirmed-trade state and paginated offered c
 });
 
 test('strict bot accepts the current v3 character projection and fails closed', () => {
-  const parsed = parseServerMessage(JSON.stringify(playerSnapshot()));
+  const telepathy = {
+    id: 'tiamud:mind-thread',
+    name: 'Mind Thread',
+    description: 'Carries a private thought.',
+    kind: 'utility',
+    resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 2 }],
+    cooldownRemaining: 0,
+    usable: true,
+    purpose: 'telepathy',
+    targeting: 'optionalTarget',
+  };
+  const parsed = parseServerMessage(JSON.stringify(playerSnapshot({
+    resources: [{ id: 'mana', label: 'Mana', current: 4, max: 8 }],
+    abilities: [telepathy],
+  })));
   assert.equal(parsed.data.character.lineage.id, 'tiamud:human');
+  assert.equal(parsed.data.character.abilities[0].purpose, 'telepathy');
+
+  assert.throws(
+    () => parseServerMessage(JSON.stringify(playerSnapshot({
+      resources: [{ id: 'mana', label: 'Mana', current: 4, max: 8 }],
+      abilities: [{ ...telepathy, purpose: 'mail' }],
+    }))),
+    /purpose is invalid/,
+  );
 
   assert.throws(
     () => parseServerMessage(JSON.stringify(playerSnapshot({ durableCharacterId: 42 }))),

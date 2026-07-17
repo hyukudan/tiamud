@@ -340,6 +340,8 @@
         return `${message.sender} says`;
       case 'tell':
         return `${message.sender} tells you`;
+      case 'telepathy':
+        return `${message.sender} reaches your mind`;
       case 'party':
         return `${message.sender} to the party`;
       default:

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::File,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -8,7 +8,11 @@ use std::{
 use crate::runtime_content::{RuntimeContent, RuntimeScript};
 use thiserror::Error;
 use tiamud_core::{
-    AbilityCategory as CoreAbilityCategory, AbilityDamageDefinition as CoreAbilityDamageDefinition,
+    AbilityCategory as CoreAbilityCategory,
+    AbilityCommunicationDefinition as CoreAbilityCommunicationDefinition,
+    AbilityCommunicationKind as CoreAbilityCommunicationKind,
+    AbilityCommunicationScope as CoreAbilityCommunicationScope,
+    AbilityDamageDefinition as CoreAbilityDamageDefinition,
     AbilityDefinition as CoreAbilityDefinition, AbilityEffectTarget as CoreAbilityEffectTarget,
     AbilityHealDefinition as CoreAbilityHealDefinition,
     AbilityStatusEffectDefinition as CoreAbilityStatusEffectDefinition,
@@ -817,6 +821,24 @@ fn map_ability(definition: world_pack::AbilityDefinition) -> CoreAbilityDefiniti
             .into_iter()
             .map(map_ability_status_effect)
             .collect(),
+        communication: definition.communication.map(|communication| {
+            CoreAbilityCommunicationDefinition {
+                kind: match communication.kind {
+                    world_pack::AbilityCommunicationKind::Telepathy => {
+                        CoreAbilityCommunicationKind::Telepathy
+                    }
+                },
+                scope: match communication.scope {
+                    world_pack::AbilityCommunicationScope::DirectOnline => {
+                        CoreAbilityCommunicationScope::DirectOnline
+                    }
+                },
+                blocked_room_ids: communication
+                    .blocked_room_ids
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+            }
+        }),
     }
 }
 
@@ -1137,6 +1159,14 @@ mod tests {
             world_pack::MAX_REWARD_ODDS_ROWS,
             tiamud_core::MAX_REWARD_ODDS_ROWS
         );
+        assert_eq!(
+            world_pack::MAX_COMMUNICATION_ABILITIES,
+            tiamud_core::MAX_COMMUNICATION_ABILITIES
+        );
+        assert_eq!(
+            world_pack::MAX_COMMUNICATION_BLOCKED_ROOMS,
+            tiamud_core::MAX_COMMUNICATION_BLOCKED_ROOMS
+        );
     }
 
     #[test]
@@ -1282,7 +1312,24 @@ mod tests {
         assert_eq!(loaded.character_progression.lineages.len(), 3);
         assert_eq!(loaded.character_progression.base_classes.len(), 3);
         assert_eq!(loaded.character_progression.advanced_classes.len(), 4);
-        assert_eq!(loaded.abilities.len(), 3);
+        assert_eq!(loaded.abilities.len(), 4);
+        let whisper = loaded
+            .abilities
+            .iter()
+            .find(|ability| ability.id == "tiamud:mind-whisper")
+            .unwrap();
+        assert_eq!(whisper.resource_costs.get("stamina"), Some(&2));
+        assert_eq!(whisper.cooldown_ticks, 2);
+        let communication = whisper.communication.as_ref().unwrap();
+        assert_eq!(communication.kind, CoreAbilityCommunicationKind::Telepathy);
+        assert_eq!(
+            communication.scope,
+            CoreAbilityCommunicationScope::DirectOnline
+        );
+        assert_eq!(
+            communication.blocked_room_ids,
+            BTreeSet::from(["demo:archive".to_owned()])
+        );
         assert_eq!(loaded.npcs.len(), 1);
         assert_eq!(loaded.npc_ability_sets.len(), 1);
         assert_eq!(loaded.loot_tables.len(), 2);
@@ -1397,6 +1444,22 @@ mod tests {
         );
         assert_eq!(initial.ability_ids, ["tiamud:basic-strike"]);
         assert_eq!(initial.resistances.get(&CoreDamageType::Arcane), Some(&5));
+
+        let wanderer = world
+            .initial_gameplay(
+                Some("tiamud:mortal"),
+                tiamud_core::BackgroundSelection::Id("tiamud:caravan-scout"),
+                Some("tiamud:wanderer"),
+            )
+            .unwrap();
+        assert_eq!(
+            wanderer.ability_ids,
+            ["tiamud:basic-strike", "tiamud:mind-whisper"]
+        );
+        assert_eq!(
+            wanderer.resources.get("stamina"),
+            Some(&tiamud_core::ResourcePool { current: 8, max: 8 })
+        );
     }
 
     #[test]

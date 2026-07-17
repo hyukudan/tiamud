@@ -76,6 +76,15 @@ fn only_unconditional_room_object_resets_become_world_pack_items() {
     );
     assert!(result.world_pack.gameplay.loot_tables.is_empty());
     assert!(result.world_pack.gameplay.loot_sources.is_empty());
+    assert!(result.world_pack.gameplay.abilities.is_empty());
+    assert!(
+        result
+            .world_pack
+            .gameplay
+            .abilities
+            .iter()
+            .all(|ability| ability.communication.is_none())
+    );
     assert_eq!(result.world_pack.item_prototypes.len(), 1);
     assert_eq!(result.world_pack.initial_item_instances.len(), 1);
     let prototype = &result.world_pack.item_prototypes[0];

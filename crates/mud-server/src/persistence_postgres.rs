@@ -2892,6 +2892,14 @@ mod tests {
                 defence: 9,
                 ..defaults.attributes
             },
+            resources: BTreeMap::from([(
+                "tiamud:focus".into(),
+                tiamud_core::ResourcePool {
+                    current: 7,
+                    max: 12,
+                },
+            )]),
+            ability_cooldowns: BTreeMap::from([("tiamud:mind-whisper".into(), 23)]),
             ..defaults
         };
         selected_gameplay

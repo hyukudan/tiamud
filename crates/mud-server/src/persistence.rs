@@ -5192,6 +5192,17 @@ mod tests {
         let gameplay = CharacterGameplaySnapshot {
             level: 4,
             experience: 375,
+            resources: std::collections::BTreeMap::from([(
+                "tiamud:focus".into(),
+                tiamud_core::ResourcePool {
+                    current: 7,
+                    max: 12,
+                },
+            )]),
+            ability_cooldowns: std::collections::BTreeMap::from([(
+                "tiamud:mind-whisper".into(),
+                23,
+            )]),
             vitals: tiamud_core::Vitals {
                 health: 0,
                 max_health: defaults.vitals.max_health,

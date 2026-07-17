@@ -1,8 +1,8 @@
 //! Strict, bounded, offline composition of modular authoring areas.
 //!
-//! AreaPack v6 is deliberately an authoring format, not a runtime hot-load
+//! AreaPack v7 is deliberately an authoring format, not a runtime hot-load
 //! protocol. Composition resolves and validates the complete graph, then emits
-//! one validated [`WorldPackDocument`] v7 consumed by the runtime.
+//! one validated [`WorldPackDocument`] v8 consumed by the runtime.
 //! Area identities, source digests, ownership and cross-area edges are exposed
 //! in [`CompositionReport`] so a later catalog/activation design can build on
 //! stable facts without weakening today's all-or-nothing runtime validation.
@@ -30,7 +30,7 @@ use crate::{
 };
 
 pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 2;
-pub const AREA_PACK_SCHEMA_VERSION: u32 = 6;
+pub const AREA_PACK_SCHEMA_VERSION: u32 = 7;
 pub const MAX_PROJECT_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_AREA_COUNT: usize = 256;
 pub const MAX_AREA_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -272,6 +272,10 @@ impl<'de> Deserialize<'de> for AreaPack {
             .get("schemaVersion")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| D::Error::custom("AreaPack schemaVersion is required"))?;
+        if (1..u64::from(AREA_PACK_SCHEMA_VERSION)).contains(&schema_version) {
+            reject_legacy_area_communication_fields(&value, schema_version)
+                .map_err(D::Error::custom)?;
+        }
         if schema_version == 1 || schema_version == 2 {
             reject_legacy_area_loot_fields(&value, schema_version).map_err(D::Error::custom)?;
             reject_legacy_area_reward_fields(&value, schema_version).map_err(D::Error::custom)?;
@@ -287,6 +291,8 @@ impl<'de> Deserialize<'de> for AreaPack {
         } else if schema_version == 5 {
             reject_legacy_area_reward_fields(&value, schema_version).map_err(D::Error::custom)?;
             normalize_v5_area_rewards(&mut value).map_err(D::Error::custom)?;
+        } else if schema_version == 6 {
+            normalize_v5_area_rewards(&mut value).map_err(D::Error::custom)?;
         } else if schema_version == u64::from(AREA_PACK_SCHEMA_VERSION) {
             reject_native_area_legacy_item_fields(&value).map_err(D::Error::custom)?;
         }
@@ -296,6 +302,7 @@ impl<'de> Deserialize<'de> for AreaPack {
             && raw.schema_version != 3
             && raw.schema_version != 4
             && raw.schema_version != 5
+            && raw.schema_version != 6
             && raw.schema_version != AREA_PACK_SCHEMA_VERSION
         {
             return Err(D::Error::custom(format!(
@@ -359,14 +366,14 @@ fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<()
         return Ok(());
     };
     if root.contains_key("items") || root.contains_key("itemRules") {
-        return Err("AreaPack v6 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("AreaPack v7 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("AreaPack v6 rooms cannot declare legacy items".to_owned());
+        return Err("AreaPack v7 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("npcPrototypes")
@@ -377,7 +384,7 @@ fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<()
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("AreaPack v6 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("AreaPack v7 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
     Ok(())
 }
@@ -444,6 +451,26 @@ fn reject_legacy_area_reward_fields(
     {
         return Err(format!(
             "AreaPack v{schema_version} cannot declare v6 sealed rewards or affixes"
+        ));
+    }
+    Ok(())
+}
+
+fn reject_legacy_area_communication_fields(
+    value: &serde_json::Value,
+    schema_version: u64,
+) -> Result<(), String> {
+    let has_communication = value
+        .get("abilities")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|abilities| {
+            abilities
+                .iter()
+                .any(|ability| ability.get("communication").is_some())
+        });
+    if has_communication {
+        return Err(format!(
+            "AreaPack v{schema_version} cannot declare v7 communication abilities"
         ));
     }
     Ok(())
@@ -589,6 +616,7 @@ pub enum AreaCrossReferenceKind {
     ItemSealedLootTable,
     AffixPoolAffix,
     ArchetypeAbility,
+    AbilityBlockedRoom,
     ProgressionReference,
     NpcAbilitySetPrototype,
     NpcAbility,
@@ -1371,7 +1399,7 @@ fn compose_loaded(
                 unreachable!("artifact generation does not resolve scenes: {error}")
             }
             crate::DocumentToolError::LegacyProgression(error) => {
-                unreachable!("composed artifacts are already WorldPack v7: {error}")
+                unreachable!("composed artifacts are already WorldPack v8: {error}")
             }
             crate::DocumentToolError::LegacyItems(error) => {
                 unreachable!("composed artifacts already use native v5 items: {error}")
@@ -1739,6 +1767,22 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                         &archetype.id,
                         ability_id,
                     );
+                }
+            }
+        }
+        for ability in &area.pack.abilities {
+            if let Some(communication) = &ability.communication {
+                for room_id in &communication.blocked_room_ids {
+                    if let Some(owner) = room_owner.get(room_id.as_str()) {
+                        add_edge(
+                            &mut edges,
+                            from,
+                            owner,
+                            AreaCrossReferenceKind::AbilityBlockedRoom,
+                            &ability.id,
+                            room_id,
+                        );
+                    }
                 }
             }
         }
@@ -2328,7 +2372,7 @@ fn safe_identifier(value: &str) -> bool {
 }
 
 /// Existing runtime WorldPack readers intentionally tolerate future fields.
-/// AreaPack v6 does not: this format-specific key audit makes every structured
+/// AreaPack v7 does not: this format-specific key audit makes every structured
 /// authoring record fail closed without changing runtime deserialization.
 fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionError> {
     let Some(area) = audit_object(
@@ -2646,6 +2690,7 @@ fn audit_ability(value: &serde_json::Value, path: &str) -> Result<(), Compositio
             "damage",
             "heal",
             "statusEffects",
+            "communication",
         ],
         path,
     )?
@@ -2670,6 +2715,13 @@ fn audit_ability(value: &serde_json::Value, path: &str) -> Result<(), Compositio
             heal,
             &["target", "baseAmount", "scalingAttribute", "scalingPercent"],
             &format!("{path}.heal"),
+        )?;
+    }
+    if let Some(communication) = ability.get("communication") {
+        audit_object(
+            communication,
+            &["kind", "scope", "blockedRoomIds"],
+            &format!("{path}.communication"),
         )?;
     }
     audit_array(

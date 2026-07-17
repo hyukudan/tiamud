@@ -898,6 +898,7 @@ fn authored_ability_grants_remain_usable() {
         }),
         heal: None,
         status_effects: Vec::new(),
+        communication: None,
     };
     let mut definition = basic_definition();
     definition.base_classes[0].creation_grants = vec![

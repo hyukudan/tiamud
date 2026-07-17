@@ -38,7 +38,7 @@ pub use progression::{
     RequirementPredicate, TalentGraphDefinition, TalentNodeDefinition, TalentRankDefinition,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 pub const MAX_ROOM_TITLE_BYTES: usize = 128;
 pub const MAX_ROOM_DESCRIPTION_BYTES: usize = 8_192;
 pub const MAX_ITEM_PROTOTYPES: usize = 1_024;
@@ -85,6 +85,8 @@ pub const MAX_RESOURCES_PER_ARCHETYPE: usize = 16;
 pub const MAX_ABILITIES_PER_ACTOR: usize = 64;
 pub const MAX_ABILITY_RESOURCE_COSTS: usize = 4;
 pub const MAX_ABILITY_STATUS_EFFECTS: usize = 8;
+pub const MAX_COMMUNICATION_ABILITIES: usize = 32;
+pub const MAX_COMMUNICATION_BLOCKED_ROOMS: usize = 64;
 pub const MAX_ABILITY_COOLDOWN_TICKS: u32 = 10_000;
 pub const MAX_ABILITY_EFFECT_DURATION_TICKS: u32 = 10_000;
 pub const MAX_ABILITY_EFFECT_MAGNITUDE: i32 = 100_000;
@@ -499,6 +501,31 @@ pub struct AbilityDefinition {
     pub heal: Option<AbilityHeal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub status_effects: Vec<AbilityStatusEffect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub communication: Option<AbilityCommunicationDefinition>,
+}
+
+/// A closed, author-controlled communication effect. Communication abilities
+/// still use the ordinary ability ownership, resource and cooldown rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AbilityCommunicationDefinition {
+    pub kind: AbilityCommunicationKind,
+    pub scope: AbilityCommunicationScope,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_room_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbilityCommunicationKind {
+    Telepathy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbilityCommunicationScope {
+    DirectOnline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1036,7 +1063,7 @@ impl WorldPack {
             }
         }
 
-        validate_character_and_abilities(&self.gameplay, &prototypes, &mut errors);
+        validate_character_and_abilities(&self.gameplay, &prototypes, &room_ids, &mut errors);
         if let Some(progression) = &self.gameplay.character_progression {
             progression::validate_character_progression(
                 progression,
@@ -2083,6 +2110,7 @@ fn authored_item_total_weight<'a>(
 fn validate_character_and_abilities(
     gameplay: &GameplayDefinition,
     prototypes: &HashMap<&str, &NpcPrototype>,
+    room_ids: &HashSet<&str>,
     errors: &mut Vec<ValidationError>,
 ) {
     if gameplay.abilities.len() > MAX_ABILITIES {
@@ -2091,6 +2119,19 @@ fn validate_character_and_abilities(
             format!(
                 "world declares {} abilities; the maximum is {MAX_ABILITIES}",
                 gameplay.abilities.len()
+            ),
+        );
+    }
+    let communication_ability_count = gameplay
+        .abilities
+        .iter()
+        .filter(|ability| ability.communication.is_some())
+        .count();
+    if communication_ability_count > MAX_COMMUNICATION_ABILITIES {
+        invalid_gameplay(
+            errors,
+            format!(
+                "world declares {communication_ability_count} communication abilities; the maximum is {MAX_COMMUNICATION_ABILITIES}"
             ),
         );
     }
@@ -2132,7 +2173,7 @@ fn validate_character_and_abilities(
                 ),
             );
         }
-        validate_ability(ability, errors);
+        validate_ability(ability, room_ids, errors);
     }
 
     if gameplay.archetypes.len() > MAX_ARCHETYPES {
@@ -2263,6 +2304,20 @@ fn validate_character_and_abilities(
             &format!("NPC {:?}", set.npc_prototype_id),
             errors,
         );
+        for ability_id in &set.ability_ids {
+            if ability_by_id
+                .get(ability_id.as_str())
+                .is_some_and(|ability| ability.communication.is_some())
+            {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "NPC {:?} cannot use communication ability {ability_id:?}",
+                        set.npc_prototype_id
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -2576,7 +2631,11 @@ fn validate_archetype(
     }
 }
 
-fn validate_ability(ability: &AbilityDefinition, errors: &mut Vec<ValidationError>) {
+fn validate_ability(
+    ability: &AbilityDefinition,
+    room_ids: &HashSet<&str>,
+    errors: &mut Vec<ValidationError>,
+) {
     validate_u32_map(
         &ability.resource_costs,
         MAX_ABILITY_RESOURCE_COSTS,
@@ -2593,8 +2652,62 @@ fn validate_ability(ability: &AbilityDefinition, errors: &mut Vec<ValidationErro
             ),
         );
     }
-    if ability.damage.is_none() && ability.heal.is_none() && ability.status_effects.is_empty() {
+    if ability.damage.is_none()
+        && ability.heal.is_none()
+        && ability.status_effects.is_empty()
+        && ability.communication.is_none()
+    {
         invalid_gameplay(errors, format!("ability {:?} has no effect", ability.id));
+    }
+    if let Some(communication) = &ability.communication {
+        if !matches!(
+            ability.category,
+            AbilityCategory::Spell | AbilityCategory::Utility
+        ) || ability.targeting != AbilityTargeting::SingleAlly
+            || ability.resource_costs.is_empty()
+            || ability.cooldown_ticks == 0
+            || ability.damage.is_some()
+            || ability.heal.is_some()
+            || !ability.status_effects.is_empty()
+        {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "communication ability {:?} must be spell or utility, target one ally, spend a resource, have a positive cooldown, and have no damage, heal, or status effects",
+                    ability.id
+                ),
+            );
+        }
+        if communication.blocked_room_ids.len() > MAX_COMMUNICATION_BLOCKED_ROOMS {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "communication ability {:?} blocks {} rooms; the maximum is {MAX_COMMUNICATION_BLOCKED_ROOMS}",
+                    ability.id,
+                    communication.blocked_room_ids.len()
+                ),
+            );
+        }
+        let mut blocked_room_ids = HashSet::new();
+        for room_id in &communication.blocked_room_ids {
+            if !blocked_room_ids.insert(room_id.as_str()) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "communication ability {:?} repeats blocked room {room_id:?}",
+                        ability.id
+                    ),
+                );
+            } else if !room_ids.contains(room_id.as_str()) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "communication ability {:?} references missing blocked room {room_id:?}",
+                        ability.id
+                    ),
+                );
+            }
+        }
     }
     if ability.status_effects.len() > MAX_ABILITY_STATUS_EFFECTS {
         invalid_gameplay(

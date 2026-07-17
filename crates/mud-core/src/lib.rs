@@ -115,6 +115,11 @@ pub enum PlayerAction {
         ability_id: String,
         target: Option<String>,
     },
+    Telepathy {
+        ability_id: String,
+        target: String,
+        message: String,
+    },
     Promote {
         class_id: String,
     },
@@ -966,6 +971,34 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     if normalised == "role" {
         return Err(ParseActionError::MissingTarget { command: "role" });
     }
+    if normalised == "telepathy" {
+        return Err(ParseActionError::MissingTarget {
+            command: "telepathy",
+        });
+    }
+    if let Some(rest) = command_tail(input, "telepathy") {
+        let (ability_id, rest) = rest
+            .split_once(char::is_whitespace)
+            .map(|(head, tail)| (head.trim(), tail.trim_start()))
+            .unwrap_or_default();
+        let (target, message) = rest
+            .split_once(char::is_whitespace)
+            .map(|(head, tail)| (head.trim(), tail.trim()))
+            .unwrap_or_default();
+        if ability_id.is_empty() || target.is_empty() || message.is_empty() {
+            return Err(ParseActionError::MissingTarget {
+                command: "telepathy",
+            });
+        }
+        if !valid_telepathy_fields(ability_id, target, message) {
+            return Err(ParseActionError::Unknown(input.to_owned()));
+        }
+        return Ok(PlayerAction::Telepathy {
+            ability_id: ability_id.to_owned(),
+            target: target.to_owned(),
+            message: message.to_owned(),
+        });
+    }
     if matches!(normalised.as_str(), "staff" | "staff status") {
         return Ok(PlayerAction::Staff(StaffAction::Status));
     }
@@ -1390,6 +1423,19 @@ pub struct ConnectedCharacter {
     pub account_id: AccountId,
     pub name: String,
     pub room_id: String,
+}
+
+/// Server-internal result of an authoritative telepathy ability preflight.
+///
+/// The destination and message are deliberately absent: they are transient
+/// social-routing inputs and must never become a durable domain event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TelepathyPlan {
+    pub sender_character_id: CharacterId,
+    pub sender_name: String,
+    pub sender_room_id: String,
+    pub ability_id: String,
+    pub ability_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -4272,6 +4318,8 @@ pub enum WorldError {
     InsufficientResource,
     #[error("That ability target is not valid.")]
     InvalidAbilityTarget,
+    #[error("That telepathic message is not valid.")]
+    InvalidTelepathyRequest,
     #[error("The persisted world runtime snapshot is invalid or incompatible.")]
     InvalidRuntimeSnapshot,
     #[error("That party action is not available.")]
@@ -5128,6 +5176,14 @@ impl World {
         if abilities.len() > MAX_ABILITIES {
             return Err(WorldError::InvalidAbilityDefinition);
         }
+        if abilities
+            .iter()
+            .filter(|ability| ability.communication.is_some())
+            .count()
+            > MAX_COMMUNICATION_ABILITIES
+        {
+            return Err(WorldError::InvalidAbilityDefinition);
+        }
         let ability_count = abilities.len();
         let unique_ability_names = abilities
             .iter()
@@ -5140,6 +5196,14 @@ impl World {
             .into_iter()
             .map(|ability| {
                 validate_ability_definition(&ability)?;
+                if ability.communication.as_ref().is_some_and(|communication| {
+                    communication
+                        .blocked_room_ids
+                        .iter()
+                        .any(|room_id| !self.stable_rooms.contains_key(room_id))
+                }) {
+                    return Err(WorldError::InvalidAbilityDefinition);
+                }
                 Ok((ability.id.clone(), ability))
             })
             .collect::<Result<BTreeMap<_, _>, WorldError>>()?;
@@ -5180,10 +5244,11 @@ impl World {
             == definition.ability_ids.len();
         let abilities_usable = definition.ability_ids.iter().all(|id| {
             self.abilities.get(id).is_some_and(|ability| {
-                ability
-                    .resource_costs
-                    .keys()
-                    .all(|resource| definition.resource_pools.contains_key(resource))
+                ability.communication.is_none()
+                    && ability
+                        .resource_costs
+                        .keys()
+                        .all(|resource| definition.resource_pools.contains_key(resource))
             })
         });
         let npc = self
@@ -10672,7 +10737,7 @@ impl World {
                 changed_character: None,
                 domain_events: Vec::new(),
             }),
-            PlayerAction::Social(_) | PlayerAction::Staff(_) => {
+            PlayerAction::Telepathy { .. } | PlayerAction::Social(_) | PlayerAction::Staff(_) => {
                 Err(WorldError::GameplayUnavailable)
             }
             PlayerAction::Move(direction) => {
@@ -12222,6 +12287,14 @@ impl World {
             return Err(WorldError::AbilityNotKnown);
         };
         let ability = ability.clone();
+        // Communication abilities have their own server-coordinated action
+        // path because social policy, private receiver receptivity and
+        // post-commit delivery are not ordinary gameplay effects. Accepting
+        // one here would spend its resources and emit AbilityUsed without
+        // applying those boundaries.
+        if ability.communication.is_some() {
+            return Err(WorldError::AbilityUnavailable);
+        }
         if state
             .ability_cooldowns
             .get(&ability.id)
@@ -13855,6 +13928,161 @@ impl World {
             .collect()
     }
 
+    /// Validates one telepathy attempt without mutating resources or timers.
+    ///
+    /// The server still resolves the online destination and applies social
+    /// policy. Core owns the authored ability, sender state, room interference
+    /// and bounded input contract.
+    pub fn telepathy_preflight(
+        &self,
+        session: SessionId,
+        ability_id: &str,
+        target: &str,
+        message: &str,
+    ) -> Result<TelepathyPlan, WorldError> {
+        if !valid_telepathy_fields(ability_id, target, message) {
+            return Err(WorldError::InvalidTelepathyRequest);
+        }
+        let sender = self.character(session)?;
+        let room_id = room_checked(&self.entities, sender.location)?
+            .stable_id
+            .clone();
+        let state = self
+            .character_gameplay
+            .get(&sender.id)
+            .ok_or(WorldError::InvalidEntity)?;
+        let ability = self
+            .abilities
+            .get(ability_id)
+            .filter(|_| state.ability_ids.iter().any(|known| known == ability_id))
+            .ok_or(WorldError::AbilityNotKnown)?;
+        let communication = ability
+            .communication
+            .as_ref()
+            .ok_or(WorldError::AbilityUnavailable)?;
+        if state.vitals.health == 0
+            || state.recovery_at_tick.is_some()
+            || state.ability_global_ready_tick > self.logical_tick
+            || state
+                .statuses
+                .iter()
+                .any(|status| status.kind == ActiveStatusKind::Stun)
+            || communication.blocked_room_ids.contains(&room_id)
+            || state
+                .ability_cooldowns
+                .get(ability_id)
+                .is_some_and(|ready| *ready > self.logical_tick)
+        {
+            return Err(WorldError::AbilityUnavailable);
+        }
+        if ability.resource_costs.iter().any(|(resource_id, cost)| {
+            state
+                .resources
+                .get(resource_id)
+                .is_none_or(|pool| pool.current < *cost)
+        }) {
+            return Err(WorldError::InsufficientResource);
+        }
+        Ok(TelepathyPlan {
+            sender_character_id: sender.id,
+            sender_name: sender.name.clone(),
+            sender_room_id: room_id,
+            ability_id: ability.id.clone(),
+            ability_name: ability.name.clone(),
+        })
+    }
+
+    /// Returns private routing eligibility for one already-resolved online
+    /// destination. A single false value intentionally hides whether room
+    /// interference, defeat/recovery or stun caused the rejection.
+    pub fn telepathy_receptive(
+        &self,
+        target_session: SessionId,
+        ability_id: &str,
+    ) -> Result<bool, WorldError> {
+        if ability_id.len() > MAX_TELEPATHY_ABILITY_ID_BYTES || !valid_definition_id(ability_id) {
+            return Err(WorldError::AbilityNotKnown);
+        }
+        let communication = self
+            .abilities
+            .get(ability_id)
+            .and_then(|ability| ability.communication.as_ref())
+            .ok_or(WorldError::AbilityNotKnown)?;
+        let target = self.character(target_session)?;
+        let target_room_id = room_checked(&self.entities, target.location)?
+            .stable_id
+            .as_str();
+        let state = self
+            .character_gameplay
+            .get(&target.id)
+            .ok_or(WorldError::InvalidEntity)?;
+        Ok(state.vitals.health > 0
+            && state.recovery_at_tick.is_none()
+            && !state
+                .statuses
+                .iter()
+                .any(|status| status.kind == ActiveStatusKind::Stun)
+            && !communication.blocked_room_ids.contains(target_room_id))
+    }
+
+    /// Atomically consumes one validated telepathy ability use.
+    ///
+    /// No destination, message body or `DomainEvent` is retained. The world
+    /// actor persists the changed character/runtime before social delivery.
+    pub fn apply_telepathy(
+        &mut self,
+        session: SessionId,
+        ability_id: &str,
+        target: &str,
+        message: &str,
+    ) -> Result<TelepathyPlan, WorldError> {
+        let checkpoint = self.checkpoint();
+        match self.apply_telepathy_inner(session, ability_id, target, message) {
+            Ok(plan) => Ok(plan),
+            Err(error) => {
+                self.restore_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_telepathy_inner(
+        &mut self,
+        session: SessionId,
+        ability_id: &str,
+        target: &str,
+        message: &str,
+    ) -> Result<TelepathyPlan, WorldError> {
+        let plan = self.telepathy_preflight(session, ability_id, target, message)?;
+        let ability = self
+            .abilities
+            .get(&plan.ability_id)
+            .cloned()
+            .ok_or(WorldError::AbilityNotKnown)?;
+        let state = self
+            .character_gameplay
+            .get_mut(&plan.sender_character_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        for (resource_id, cost) in &ability.resource_costs {
+            let pool = state
+                .resources
+                .get_mut(resource_id)
+                .ok_or(WorldError::InsufficientResource)?;
+            pool.current = pool
+                .current
+                .checked_sub(*cost)
+                .ok_or(WorldError::InsufficientResource)?;
+        }
+        state.ability_cooldowns.insert(
+            ability.id,
+            self.logical_tick
+                .saturating_add(u64::from(ability.cooldown_ticks)),
+        );
+        state.ability_global_ready_tick = self.logical_tick.saturating_add(1);
+        self.mark_authorized_script_change(session)?;
+        Ok(plan)
+    }
+
     /// Resolve a connected, co-located give recipient using only the acting
     /// session's opaque character selectors or one exact, unambiguous name.
     /// The returned durable IDs are server-internal and must not be serialized.
@@ -14829,11 +15057,23 @@ impl World {
                                 .get(id)
                                 .is_some_and(|pool| pool.current >= *cost)
                         });
+                        let purpose = if ability.communication.is_some() {
+                            AbilityPurpose::Telepathy
+                        } else {
+                            AbilityPurpose::Gameplay
+                        };
+                        let communication_ready =
+                            ability.communication.as_ref().is_none_or(|communication| {
+                                !communication
+                                    .blocked_room_ids
+                                    .contains(&current_room.stable_id)
+                            });
                         AbilityView {
                             id: ability.id.clone(),
                             name: ability.name.clone(),
                             description: ability.description.clone(),
                             kind: ability.category.as_str().into(),
+                            purpose,
                             resource_costs: ability
                                 .resource_costs
                                 .iter()
@@ -14846,6 +15086,8 @@ impl World {
                             cooldown_remaining,
                             usable: cooldown_remaining == 0
                                 && has_resources
+                                && communication_ready
+                                && gameplay.vitals.health > 0
                                 && gameplay.recovery_at_tick.is_none()
                                 && !gameplay
                                     .statuses
@@ -16951,6 +17193,29 @@ fn validate_ability_definition(ability: &AbilityDefinition) -> Result<(), WorldE
         .status_effects
         .iter()
         .all(|status| effect_target_valid(status_target(status)));
+    let has_gameplay_effect =
+        ability.damage.is_some() || ability.heal.is_some() || !ability.status_effects.is_empty();
+    let communication_valid = match &ability.communication {
+        None => has_gameplay_effect,
+        Some(communication) => {
+            ability.id.len() <= MAX_TELEPATHY_ABILITY_ID_BYTES
+                && matches!(
+                    ability.category,
+                    AbilityCategory::Spell | AbilityCategory::Utility
+                )
+                && ability.targeting == AbilityTargeting::SingleAlly
+                && !ability.resource_costs.is_empty()
+                && ability.cooldown_ticks > 0
+                && !has_gameplay_effect
+                && communication.blocked_room_ids.len() <= MAX_COMMUNICATION_BLOCKED_ROOMS
+                && communication
+                    .blocked_room_ids
+                    .iter()
+                    .all(|room_id| valid_definition_id(room_id))
+                && matches!(communication.kind, AbilityCommunicationKind::Telepathy)
+                && matches!(communication.scope, AbilityCommunicationScope::DirectOnline)
+        }
+    };
     let valid = valid_definition_id(&ability.id)
         && safe_definition_text(&ability.name, 128)
         && safe_definition_text(&ability.description, 2_048)
@@ -16962,9 +17227,7 @@ fn validate_ability_definition(ability: &AbilityDefinition) -> Result<(), WorldE
         && ability.cooldown_ticks <= MAX_COOLDOWN_TICKS
         && ability.status_effects.len() <= MAX_ABILITY_EFFECTS
         && target_semantics_valid
-        && (ability.damage.is_some()
-            || ability.heal.is_some()
-            || !ability.status_effects.is_empty())
+        && communication_valid
         && ability.damage.as_ref().is_none_or(|damage| {
             (1..=1_000_000).contains(&damage.base_amount)
                 && scaling_valid(&damage.scaling_attribute, damage.scaling_percent)
@@ -16986,6 +17249,15 @@ fn safe_definition_text(value: &str, maximum_bytes: usize) -> bool {
         && !trimmed
             .chars()
             .any(|character| character.is_control() || character == '\u{7f}')
+}
+
+fn valid_telepathy_fields(ability_id: &str, target: &str, message: &str) -> bool {
+    ability_id.len() <= MAX_TELEPATHY_ABILITY_ID_BYTES
+        && valid_definition_id(ability_id)
+        && target == target.trim()
+        && message == message.trim()
+        && safe_definition_text(target, MAX_TELEPATHY_TARGET_BYTES)
+        && safe_definition_text(message, MAX_TELEPATHY_MESSAGE_BYTES)
 }
 
 fn valid_digest_sha256(value: &str) -> bool {
@@ -24447,6 +24719,7 @@ mod tests {
                 }),
                 heal: None,
                 status_effects: Vec::new(),
+                communication: None,
             },
         );
         world

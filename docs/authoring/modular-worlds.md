@@ -1,8 +1,8 @@
 # Projects, areas and composition
 
 The current modular source format is a **WorldProject manifest v2** containing
-strict **AreaPack v6** files. `tiamud-world compose` validates the complete
-graph and produces one canonical **WorldPack v7** document.
+strict **AreaPack v7** files. `tiamud-world compose` validates the complete
+graph and produces one canonical **WorldPack v8** document.
 
 Use [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json)
 and [`worlds/areas/square.area.json`](../../worlds/areas/square.area.json) as
@@ -37,10 +37,13 @@ Sealed prototypes add an edge to their reward table. Loot entries with an
 affix definition. A sealed reward table cannot be attached directly to an NPC
 loot source: the NPC-sourced normal table must award the sealed prototype.
 Every cross-area edge still requires `dependsOn`.
+An ability's `communication.blockedRoomIds` creates the same audited edge to
+each owning area; a blocked-room reference cannot bypass modular dependency
+review.
 
 ```json
 {
-  "schemaVersion": 6,
+  "schemaVersion": 7,
   "id": "north-gate",
   "dependsOn": ["square"],
   "itemPrototypes": [],
@@ -60,7 +63,8 @@ Every cross-area edge still requires `dependsOn`.
 Unknown fields fail closed in modular authoring. Keep an AreaPack focused on a
 coherent ownership boundary, not on a deployment boundary.
 
-AreaPack v1-v5 normalize to v6 without inventing sealed rewards or affixes.
+AreaPack v1-v6 normalize to v7 without inventing communication abilities.
+AreaPack v1-v5 also normalize without inventing sealed rewards or affixes.
 AreaPack v1-v4 also normalize without inventing loot. Declaring
 `lootTables` or `lootSources`, even empty ones, in an older schema is rejected
 rather than silently reinterpreted. Native base/variant room titles are limited
@@ -92,12 +96,12 @@ LRU. Runtime hot-loading remains future architecture.
 
 Lantern Square currently composes three areas into three rooms, ten item
 prototypes, nine initial instances, two loot tables and one loot source. The
-canonical 52,349-byte artifact has SHA-256
-`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
+canonical 53,040-byte artifact has SHA-256
+`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
 
 ## Direct WorldPack authoring
 
-A monolithic WorldPack v7 remains valid, but AreaPacks are preferable once
+A monolithic WorldPack v8 remains valid, but AreaPacks are preferable once
 multiple builders or regions are involved. Use `tiamud-world build` to validate
 and canonicalize a direct document:
 

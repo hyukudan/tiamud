@@ -271,7 +271,7 @@ quest.list, quest.accept, quest.status, quest.complete
 economy.balance, economy.shop, economy.buy, economy.sell
 weather, time
 social.say, social.tell, social.reply, social.channel.list,
-social.channel.join, social.channel.leave, social.channel.say,
+social.channel.join, social.channel.leave, social.channel.say, social.telepathy,
 social.who, social.help
 social.ignore, social.unignore, social.block, social.unblock, social.report
 moderation.mute, moderation.unmute, moderation.ban, moderation.unban,
@@ -288,6 +288,11 @@ Según la acción, el payload estricto también puede contener `message`,
 `role` (`player`, `moderator`, `admin`). `party.revoke`, `party.kick` y
 `party.transfer` usan `target`; `party.say` y `social.reply` usan `message`;
 alta/baja de canal usa `channel`, y el envío requiere `channel` y `message`.
+`social.telepathy` exige exactamente `abilityId`, `target` y `message`: el ID
+authored ocupa como máximo 64 bytes, el personaje 64 y el pensamiento UTF-8
+visible 512. No acepta campos de combate, canal ni persistencia, aunque un
+campo adicional conocido llegue como `null`. Una habilidad cuyo propósito es
+`telepathy` se rechaza en `combat.ability`; no existe una segunda ruta genérica.
 Los campos inesperados y objetivos ausentes/prohibidos se rechazan. Se aplican
 las mismas reglas de autorización y percepción; una acción estructurada no es
 un atajo confiable. Accept/revoke/kick/transfer resuelven `target` como nombre
@@ -401,7 +406,7 @@ Los comandos equivalentes son `trade request`, `trade accept|decline|status|canc
 depender de Web ni GMCP.
 
 Los equivalentes de texto usan `party say` (`gsay`/`gtell`), `party revoke`,
-`party kick`, `party transfer`, `party disband`, `reply`, `channel(s)`,
+`party kick`, `party transfer`, `party disband`, `reply`, `telepathy`, `channel(s)`,
 `channel join`, `channel leave` y `channel say`. Los alias `gossip`, `newbie` y
 `wiznet` envían a `general`, `newbie`, `staff`. Unirse, enviar o recibir
 `staff` exige perfil `moderator`, `administrator` o `implementor`.
@@ -515,7 +520,7 @@ traffic.
 | `reward.odds` | Página privada de probabilidades exactas de una recompensa sellada portada. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
-| `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `party`, `general`, `newbie` o `staff`. |
+| `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `telepathy`, `party`, `general`, `newbie` o `staff`. |
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
@@ -762,6 +767,7 @@ is:
       "resourceCosts": [{"resourceId":"mana","label":"Mana","amount":4}],
       "cooldownRemaining": 0,
       "usable": true,
+      "purpose": "gameplay",
       "targeting": "explicitTarget"
     }
   ],
@@ -829,7 +835,8 @@ availability, safe requirement statuses and executable text command.
 `promotions` contains only transitions reachable from the current active class
 and likewise reports safe requirements and its text command.
 
-Ability `kind` is `martial`, `spell` or `utility`; `targeting` is `self`,
+Ability `kind` is `martial`, `spell` or `utility`; `purpose` is the closed
+`gameplay|telepathy` presentation contract; `targeting` is `self`,
 `explicitTarget` or `optionalTarget`. Status kinds are `attribute_modifier`,
 `regeneration`, `damage_over_time` and `stun`. Damage types are `physical`,
 `arcane`, `fire`, `frost` and `lightning`. Resistances and active statuses are
@@ -987,8 +994,9 @@ Telnet conserva la narración textual completa. Si negoció `Char.Items`, emisor
 y receptor reciben listas de inventario regeneradas independientemente con su
 propia sal; el observador de sala no recibe una lista ajena.
 
-`chat.message.data` contiene `channel` (`announcement`, `say`, `tell`, `party`,
-`general`, `newbie` o `staff`), `sender` y texto plano acotado. Ignore y block
+`chat.message.data` contiene `channel` (`announcement`, `say`, `tell`,
+`telepathy`, `party`, `general`, `newbie` o `staff`), `sender` y texto plano
+acotado. Ignore y block
 por cualquiera de las partes se aplican antes de entregar. Mute/ban y rate
 limit se aplican en servidor. `general`, `newbie` y `staff` requieren
 suscripción durable en esquema v11; `staff` exige además perfil `moderator`,
@@ -997,6 +1005,13 @@ suscripción durable en esquema v11; `staff` exige además perfil `moderator`,
 acceso. `announcement` es entrega del servidor, no un canal suscribible. La
 suscripción es durable, pero el estado de `reply` y el historial son solo
 memoria.
+
+`telepathy` procede de `social.telepathy`, no de `tell`: el actor debe conocer
+la habilidad, pagar recurso y cooldowns, y estar en una sala permitida. El
+servidor confirma esa mutación antes de entregar. Ignore/block y la sala o el
+estado privado del receptor pueden suprimir la entrega sin cambiar la
+confirmación del emisor. El cuerpo, destino y `abilityId` no se incluyen en
+eventos durables; la recepción no modifica el destinatario de `reply`.
 
 Telnet representa el mismo `SocialMessage` autorizado como texto acotado. Si
 negoció GMCP `Comm`, recibe también `Comm.Channel.Text` con el mismo alcance,

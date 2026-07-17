@@ -32,8 +32,8 @@ describe el baseline vigente de personajes, inventario y medios.
   la ruta local sin servicios. Cada proceso abre uno y nunca doble-escribe.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
-- WorldPack v7 y AreaPack v6 son actuales; WorldProject permanece en v2.
-  WorldPack v6/v5/v4/v3/v2, AreaPack v5/v4/v3/v2/v1 y Envy se normalizan en fronteras explícitas. El servidor carga un paquete
+- WorldPack v8 y AreaPack v7 son actuales; WorldProject permanece en v2.
+  WorldPack v7/v6/v5/v4/v3/v2, AreaPack v6/v5/v4/v3/v2/v1 y Envy se normalizan en fronteras explícitas. El servidor carga un paquete
   completo; ADR 0005 para carga caliente/LRU es futuro.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
@@ -57,7 +57,7 @@ describe el baseline vigente de personajes, inventario y medios.
   referencias. Los medios de objeto referencian el prototipo y `hiddenItems` la
   instancia. Un afijo durable por instancia añade un prefijo/sufijo y deltas
   acotados de ataque/curación sin exponer IDs ni digests internos.
-- WorldPack v7/AreaPack v6 aceptan `transferable`, `character_bound` y
+- WorldPack v8/AreaPack v7 aceptan `transferable`, `character_bound` y
   `non_transferable`, igual que WorldPack v6/v5 y AreaPack v5/v4; WorldPack
   v4/AreaPack v3 y anteriores solo `transferable`. La adquisición
   liga recursivamente, y ninguna raíz puede soltar o cambiar de dueño un
@@ -83,8 +83,13 @@ describe el baseline vigente de personajes, inventario y medios.
 - La fase social 1 está implementada: `say`, `tell`, `reply` online, grupos de
   seis miembros con chat y liderazgo, y suscripciones durables a `general`,
   `newbie`, `staff`. `staff` exige perfil `moderator`, `administrator` o
-  `implementor`; `helper` y `builder` no acceden. Web, texto Telnet y GMCP
-  comparten política. No hay correo/historial ni telepatía.
+  `implementor`; `helper` y `builder` no acceden. La fase 5A añade telepatía
+  directa online como habilidad WorldPack v8: exige conocimiento, recurso,
+  cooldown y sala emisora permitida; ignore/block o la receptividad privada del
+  receptor suprimen sin filtrar y el commit precede a la entrega. No enlaza
+  `reply`, no persiste texto/destino y comparte mute/bucket. Web, texto Telnet
+  y GMCP comparten política. No hay correo/historial, emotes, tablones,
+  shout/yell ni telepatía de grupo/offline.
 - Accept, revoke, kick y transfer resuelven el nombre de un personaje conectado.
   La membresía de grupo sí persiste cuando alguien se desconecta, pero esas
   operaciones dirigidas no administran un objetivo offline.
@@ -157,7 +162,7 @@ y el soak corto de 58 rondas/127 acciones/readiness 8/8. Lantern Square ocupa
 No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector manual ni soak de
 24 horas.
 
-La integración actual 4B añade WorldPack v7/AreaPack v6 y snapshot v7 sobre el
+La integración histórica 4B añade WorldPack v7/AreaPack v6 y snapshot v7 sobre el
 mismo esquema SQL v11. Lantern Square contiene 10 prototipos, 9 instancias
 iniciales, 2 tablas, 1 fuente, 1 afijo y 1 pool; ocupa 52.349 bytes y tiene
 SHA-256
@@ -172,6 +177,18 @@ errores. La carga crece 55.365.632 bytes RSS, bajo 96 MiB; el soak informa
 un árbol precommit dirty: el verificador rechaza correctamente el reporte corto
 por duración/perfil/warmup/árbol no limpio. No acreditan PostgreSQL real v11,
 WebKit, lector manual, candidato limpio ni soak de 24 h.
+
+La integración actual 5A añade WorldPack v8/AreaPack v7 sin cambiar snapshot
+v7 ni esquema SQL v11. La telepatía directa exige habilidad, recurso,
+cooldowns y sala emisora permitida; confirma antes de entregar y no filtra la
+receptividad privada del receptor. Lantern Square mide 53.040 bytes y tiene
+SHA-256
+`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
+Pasan 630/630 pruebas Rust (131 core, 252 servidor, 123 WorldPack y 124
+restantes), formato/diff/clippy, check web 0/0, 113 Vitest, build, 86 Node/bot,
+42/42 Playwright soportado (21 Chromium y 21 Firefox), `cargo-deny` y
+licencias/avisos 307 Rust/76 web. No se ejecutaron PostgreSQL real v11,
+WebKit, lector manual ni soak de 24 h.
 
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil

@@ -40,6 +40,15 @@ heal delta is at most 1,000. A loot entry may choose at most one compatible
 affix for exactly one unique, non-sealed item, and its effective statistics
 must remain within runtime caps. Injecting any of these fields into v6/v5 or
 older input also fails closed.
+
+WorldPack v8/AreaPack v7 additionally accept the closed telepathy definition.
+Validation requires category `spell|utility`, `single_ally`, a non-empty
+positive resource cost, positive cooldown, no damage/heal/status payload and
+exclusion from every NPC ability set. The world admits at most 32 communication
+abilities, each with at most 64 unique existing blocked rooms. WorldPack v2-v7
+and AreaPack v1-v6 reject a smuggled `communication` field instead of silently
+normalizing it.
+
 `test` runs the document's embedded content expectations. Run both explicitly;
 publishing does not replace content tests or human play review.
 
@@ -67,8 +76,8 @@ IDs, secret predicates, hidden entities or undiscovered asset paths.
 
 For the reviewed Lantern Square sources, composition must reproduce three
 rooms, ten item prototypes, nine initial instances, two loot tables and one
-loot source. The canonical file is 52,349 bytes with SHA-256
-`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
+loot source. The canonical file is 53,040 bytes with SHA-256
+`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
 Its gate-stalker combines a fixed stormglass talon, a guaranteed road token,
 an earned sealed oath and one 60% wolf-clasp/40% nothing roll under party
 round-robin rights. The ordinary clasp drop and the oath's one talon each use

@@ -157,6 +157,16 @@ describe('protocol messages', () => {
         channel: 'newbie', message: 'Where is the market?',
       },
     });
+    expect(createActionPerform(
+      'social.telepathy',
+      { abilityId: 'mind-thread', target: 'Bram', message: 'Meet beyond the archive.' },
+      'request-telepathy',
+    )).toMatchObject({
+      data: {
+        requestId: 'request-telepathy', action: 'social.telepathy',
+        abilityId: 'mind-thread', target: 'Bram', message: 'Meet beyond the archive.',
+      },
+    });
     expect(createSyncRequest(12)).toEqual({
       v: 1,
       type: 'sync.request',
@@ -196,6 +206,21 @@ describe('protocol messages', () => {
     expect(() => createActionPerform(
       'item.give', { target: 'tonic', recipient: 'x'.repeat(65) }, 'bad',
     )).toThrow(RangeError);
+  });
+
+  it('creates only the exact bounded telepathy action form', () => {
+    const fields = { abilityId: 'mind-thread', target: 'Bram', message: 'Can you hear me?' };
+    expect(createActionPerform('social.telepathy', fields, 'telepathy')).toMatchObject({
+      data: { action: 'social.telepathy', ...fields },
+    });
+    expect(() => createActionPerform('social.telepathy', { ...fields, page: 1 }, 'extra'))
+      .toThrow('exact closed field set');
+    expect(() => createActionPerform('social.telepathy', { ...fields, abilityId: 'Bad Id' }, 'id'))
+      .toThrow('bounded definition id');
+    expect(() => createActionPerform('social.telepathy', { ...fields, target: `Bram\n` }, 'target'))
+      .toThrow('bounded visible UTF-8 text');
+    expect(() => createActionPerform('social.telepathy', { ...fields, message: 'é'.repeat(257) }, 'bytes'))
+      .toThrow('bounded visible UTF-8 text');
   });
 
   it('creates only the exact closed loot action forms', () => {
@@ -1460,6 +1485,7 @@ describe('protocol messages', () => {
           resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 4 }],
           cooldownRemaining: 0,
           usable: true,
+          purpose: 'gameplay',
           targeting: 'explicitTarget',
         }],
       },
@@ -1483,7 +1509,7 @@ describe('protocol messages', () => {
         resources: [{ id: 'mana', current: 12, max: 20 }],
         abilities: [{
           id: 'ember-bolt', kind: 'spell', resourceCosts: [{ resourceId: 'mana', amount: 4 }],
-          targeting: 'explicitTarget', usable: true,
+          purpose: 'gameplay', targeting: 'explicitTarget', usable: true,
         }],
       } },
     });
@@ -1521,6 +1547,7 @@ describe('protocol messages', () => {
           resourceCosts: [],
           cooldownRemaining: 10_000,
           usable: false,
+          purpose: 'gameplay',
           targeting: 'self',
         }],
         resistances: [{ damageType: 'lightning', percent: 90 }],
@@ -1598,7 +1625,7 @@ describe('protocol messages', () => {
     if (additive?.type !== 'chat.message') throw new Error('expected chat message');
     expect('blocked' in additive.data).toBe(false);
 
-    for (const channel of ['announcement', 'party', 'general', 'newbie', 'staff'] as const) {
+    for (const channel of ['announcement', 'telepathy', 'party', 'general', 'newbie', 'staff'] as const) {
       expect(parseServerMessage(JSON.stringify({
         v: 1,
         type: 'chat.message',

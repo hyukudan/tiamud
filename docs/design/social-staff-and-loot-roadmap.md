@@ -16,8 +16,9 @@ sobre la aceptación de la especificación histórica.
   estado, además de `party say` con alias `gsay`/`gtell`.
 - Sí existen `reply` en línea y los canales suscritos `general`, `newbie` y
   `staff`; este último exige perfil `moderator`, `administrator` o
-  `implementor`. No existen correo sin conexión, historial durable de
-  conversación ni una habilidad de telepatía.
+  `implementor`. También existe telepatía directa online como habilidad
+  authored con recurso, cooldown, interferencia por sala y supresión privada.
+  No existen correo sin conexión ni historial durable de conversación.
 - Sí existen los perfiles `helper`, `builder`, `moderator`, `administrator` e
   `implementor`, doce capacidades cerradas y un título narrativo opcional. La
   XP, la ficha, WorldPack, el perfil visible y el rol legado nunca sustituyen
@@ -44,6 +45,7 @@ Las fases 1, comunicación/grupo, 2, staff por capacidades, 3A, fundamento de
 objetos, 3B, pilas/contenedores, 3C, entrega/políticas, y 3D, trade confirmado,
 están implementadas. También están implementadas 4A, botín repetible con
 derechos y procedencia, y 4B, sellos ganados y afijos deterministas.
+La fase 5A, telepatía directa authored, también está implementada.
 
 ## Estado verificado en el código
 
@@ -51,8 +53,9 @@ derechos y procedencia, y 4B, sellos ganados y afijos deterministas.
 
 `SocialAction` ofrece `Say`, `PartySay`, `Tell`, `Reply`, listado/alta/baja/envío
 de canal, `Who`, `Help`, ignore/block, reportes, mute/ban, reversión de
-sanciones y cambio de rol. `SocialChannel` contiene `Announcement`, `Say`,
-`Tell`, `Party`, `General`, `Newbie` y `Staff`.
+sanciones y cambio de rol. `PlayerAction::Telepathy` separa la mutación de
+habilidad del chat ordinario. `SocialChannel` contiene `Announcement`, `Say`,
+`Tell`, `Telepathy`, `Party`, `General`, `Newbie` y `Staff`.
 
 - `say` se entrega a otros personajes conectados en la misma sala;
 - `tell` se entrega a un personaje conectado, aunque esté en otra sala;
@@ -75,9 +78,9 @@ v7 de hasta 2 MiB sin relajar el límite legacy v1–v5 de 1 MiB. El traslado si
 conexión también los copia. La evidencia histórica PostgreSQL real sigue
 acreditando v8 y no se presenta como aceptación v11.
 
-Por tanto, `tell` sirve como mensaje privado online clásico, pero no debe
-presentarse como telepatía: no consume una habilidad o recurso, no aplica
-alcance, sentidos, interferencias ni condiciones de mundo, y no llega a un
+Por tanto, `tell` sigue siendo el mensaje privado online clásico y no se
+presenta como telepatía. La telepatía de 5A entra por una habilidad distinta:
+consume recurso/cooldowns, admite interferencia authored y tampoco llega a un
 personaje desconectado.
 
 ### Parties
@@ -174,7 +177,7 @@ capa de operador.
 
 ### Inventario y botín
 
-WorldPack v7/AreaPack v6 separan `itemPrototypes` de
+WorldPack v8/AreaPack v7 separan `itemPrototypes` de
 `initialItemInstances`. El prototipo contiene nombre, descripción, aliases,
 equipo/ataque/curación/efecto, peso, coste de slot, rareza, nivel y políticas
 cerradas. Cada instancia durable referencia un prototipo y comienza en una
@@ -306,17 +309,17 @@ persistencia y single writer.
 
 ## Comunicación implementada y ampliaciones futuras
 
-La fase 1 conserva una sola política social; ningún canal está implementado de
-forma independiente en WebSocket, Telnet o la interfaz. La futura telepatía
-deberá entrar por esa misma política.
+Las fases 1 y 5A conservan una sola política social; ningún canal está
+implementado de forma independiente en WebSocket, Telnet o la interfaz. La
+telepatía ya entra por esa política después de mutar gameplay de forma durable.
 
 ```mermaid
 flowchart LR
-    accTitle: Enrutamiento actual y futuro de las comunicaciones de Tiamud
-    accDescr: Las acciones de texto implementadas entran en una política social común que calcula destinatarios, aplica bloqueos y límites y entrega solo a buzones autorizados. La telepatía sigue siendo una ampliación futura que deberá reutilizar la misma política.
+    accTitle: Enrutamiento actual de las comunicaciones de Tiamud
+    accDescr: Las acciones de texto entran en una política social común que calcula destinatarios, aplica bloqueos y límites y entrega solo a buzones autorizados. La telepatía confirma primero su coste de gameplay y solo después usa esa entrega común.
 
     Text[PlayerAction social] --> Policy[Política social común]
-    Ability[Habilidad futura de telepatía] -.-> Effect[Efecto autorizado]
+    Ability[Habilidad authored de telepatía] --> Effect[Recurso + cooldown<br/>commit durable]
     Effect --> Policy
     Policy --> Audience{Ámbito}
     Audience --> Room[Sala]
@@ -347,7 +350,7 @@ flowchart LR
 6. Pendientes emotes/sociales con plantillas estrictas que nunca conviertan
    texto del jugador en ANSI, HTML, MXP o instrucciones evaluables.
 
-Web usa acciones estructuradas y representa los siete valores de
+Web usa acciones estructuradas y representa los ocho valores de
 `SocialMessage`; Telnet comparte los comandos de texto y proyecta cada entrega
 como texto y como `Comm.Channel.Text` cuando GMCP `Comm` está negociado. Esta
 paridad no convierte GMCP en una segunda autoridad.
@@ -356,23 +359,24 @@ El correo offline, tablones y guild/clan chat pueden seguir después. Requieren
 retención, límites, búsqueda/moderación, eliminación y reglas de privacidad
 propias.
 
-### Telepatía
+### Fase 5A — telepatía directa authored — implementada
 
-La telepatía debe ser data-driven y opcional por mundo. Una definición mínima
-necesita:
+WorldPack v8/AreaPack v7 implementan una comunicación cerrada
+`telepathy/direct_online`. Una habilidad válida:
 
-- habilidad o efecto que la habilita;
-- destinatario directo o party;
-- coste y cooldown;
-- alcance o ausencia explícita de alcance;
-- sentidos/estados que permiten emitir y recibir;
-- interferencias y zonas que la bloquean;
-- una proyección textual completa para ambos transportes;
-- los mismos límites sociales, ignore, block, mute y auditoría aplicables al
-  resto de comunicaciones.
+- es `spell|utility`, `single_ally` y no pertenece a un NPC;
+- tiene al menos un coste de recurso y cooldown positivo;
+- no combina daño, curación ni estados;
+- dirige un pensamiento de hasta 512 bytes a otro personaje conectado;
+- puede bloquear hasta 64 salas existentes;
+- rechaza al emisor derrotado, recuperándose, aturdido o sin recursos; y
+- confirma recurso/cooldowns antes de la entrega Web/Telnet/GMCP.
 
-No se debe disfrazar `tell` como telepatía porque eso impediría a cada
-WorldPack decidir su ficción y sus reglas.
+Ignore/block y la receptividad del receptor se usan solo para decidir entrega:
+su resultado nunca cambia la confirmación del emisor. No hay `DomainEvent` con
+texto/destino, no se enlaza `reply` y no existe entrega offline o grupal. El
+contrato aceptado está en
+[ADR 0015](../decisions/0015-authored-online-telepathy.md).
 
 ## Staff: rango visible, capacidad real
 
@@ -617,9 +621,13 @@ El contrato aceptado e implementado está en
 Need/greed, master-loot y reparto por contribución no forman parte de 4B sin
 diseño adicional. Cajas, llaves y tiradas pagadas permanecen fuera.
 
-### Fase 5 — comunidad y contenido — pendiente
+### Fase 5 — comunidad y contenido — en curso
 
-- emotes, mail/boards y guilds según necesidades observadas;
+- 5A telepatía directa authored: implementada;
+- 5B emotes authored con plantillas y audiencias seguras: pendiente;
+- 5C correo offline con cuotas/retención/moderación: pendiente;
+- 5D tablones moderables: pendiente;
+- guilds según necesidades observadas;
 - crafting/auction/housing solo con sinks, cuotas y moderación;
 - OLC únicamente sobre el pipeline de artefactos revisados.
 

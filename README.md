@@ -49,8 +49,9 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   opcional, clases base y avanzadas, una curva global de XP, talentos con rango
   y promociones atómicas. Atributos, habilidades, recursos, resistencias,
   tiempos de reutilización y estados están acotados.
-- **Grupos y conversación:** `say` local, `tell` y `reply` en línea, chat de
-  grupo, liderazgo completo y canales suscritos `general`, `newbie` y `staff`.
+- **Grupos y conversación:** `say` local, `tell` y `reply` en línea, telepatía
+  directa como habilidad authored con recurso/cooldowns, chat de grupo,
+  liderazgo completo y canales suscritos `general`, `newbie` y `staff`.
   `staff` exige perfil `moderator`, `administrator` o `implementor`. Navegador,
   Telnet y GMCP comparten la misma política social.
 - **Staff por capacidades:** cinco perfiles operativos, doce capacidades
@@ -64,8 +65,8 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
 - **Multimedia segura:** imagen de escena y audio opcionales, recursos
   inmutables direccionados por contenido, texto alternativo y preferencias de
   medios, movimiento, contraste y lector de pantalla.
-- **Autoría modular:** AreaPack v6 permite dividir un mundo en áreas; la
-  composición sin conexión de WorldProject v2 produce un WorldPack v7
+- **Autoría modular:** AreaPack v7 permite dividir un mundo en áreas; la
+  composición sin conexión de WorldProject v2 produce un WorldPack v8
   canónico, determinista y revisable. El servidor aún carga un único paquete
   completo al arrancar.
 - **Operación en un host:** adaptadores PostgreSQL/SQLite, credenciales
@@ -155,6 +156,7 @@ quest ...                  party create / invite / accept / status
 party revoke / kick / transfer / disband / leave
 party say <texto>          gsay / gtell <texto>
 say / tell / reply         who / help / ignore / block
+telepathy <ability-id> <personaje> <mensaje>
 channels                   channel join / leave <canal>
 channel say <canal> <texto>  gossip / newbie / wiznet <texto>
 balance / shop / buy ...
@@ -220,7 +222,7 @@ de referencia de Caddy no publica métricas.
 
 ## Personajes, clases y progresión
 
-WorldPack v7 conserva el modelo de personaje v3: compone un personaje con
+WorldPack v8 conserva el modelo de personaje v3: compone un personaje con
 linaje, trasfondo opcional y clase base.
 Una XP acumulada gobierna el nivel global, las concesiones de clase y reservas
 de puntos separadas. Hay una clase activa y un historial ordenado, no
@@ -228,7 +230,7 @@ multiclase libre.
 
 ```mermaid
 flowchart LR
-    accTitle: Composición y avance de un personaje v3 en WorldPack v7
+    accTitle: Composición y avance de un personaje v3 en WorldPack v8
     accDescr: Linaje, trasfondo opcional y clase base forman la ficha permanente. El nivel concede mejoras y puntos; los talentos modifican la ficha y una promoción atómica activa una clase avanzada cuando se cumplen sus requisitos.
 
     Lineage[Linaje] --> Sheet[Ficha permanente]
@@ -265,7 +267,7 @@ del trasfondo predeterminado. Telnet recibe además la ficha mediante
 | Clases base | Wanderer, Vanguard, Arcanist |
 | Clases avanzadas | Pathfinder, Bastion, Stormcaller, Spellblade |
 
-WorldPack v6/v5/v4/v3/v2, AreaPack v5/v4/v3/v2/v1 y Envy/Merc solo entran por límites
+WorldPack v7/v6/v5/v4/v3/v2, AreaPack v6/v5/v4/v3/v2/v1 y Envy/Merc solo entran por límites
 explícitos de normalización/importación; `archetype` no es una segunda
 identidad del personaje. Los IDs publicados son la frontera de migración de
 contenido.
@@ -285,12 +287,12 @@ implementado de la hoja de ruta.
 
 | Sistema | Implementado | Pendiente |
 | --- | --- | --- |
-| Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`. | Correo e historial durable, shout/yell espacial, emotes, tablones y telepatía definida por el mundo. `tell` no es telepatía. |
+| Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; telepatía directa online como habilidad authored con recurso/cooldowns y bloqueo por sala; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`. | Correo e historial durable, shout/yell espacial, emotes, tablones y telepatía de grupo/offline. `tell` no es telepatía. |
 | Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. Una cohorte congelada de miembros próximos y vivos participa en el reparto round-robin del botín. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos y reparto need/greed, master-loot o por contribución. |
 | Canales | Suscripción persistente en SQLite/PostgreSQL v11; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
 | Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
-| Inventario | WorldPack v7 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo, vínculo, afijo y acceso al botín; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` es unilateral; `trade` negocia hasta 128 raíces transferibles y moneda mediante reservas durables, revisión exacta y dos confirmaciones, y liquida ambos lados en un solo commit. Un afijo durable por instancia puede aportar prefijo/sufijo y deltas acotados de ataque/curación. Web, Telnet y GMCP proyectan política, cantidades, afijo e IDs opacos, nunca dueños, cohortes ni identidades durables. | Desgaste/durabilidad de objetos; trade remoto/offline, subastas y mercado offline. |
-| Botín | WorldPack v7/AreaPack v6 definen fuentes `npc_spawn`, tablas enteras repetibles, recompensas selladas ganadas y pools de afijos deterministas. La derrota confirma procedencia y derechos para un máximo de 64 raíces; `party_round_robin`, `loot pass` y los plazos 20/120 siguen siendo autoritativos. Un sello ligado y portado se consulta con `reward odds` y se abre con `open`: Tiamud simula RNG, IDs, afijo, vínculo, capacidad y el límite de 16 recompensas antes de consumirlo y confirmar todo en un único commit. Web, Telnet y `Char.Reward 1` GMCP comparten fracciones exactas paginadas y referencias opacas. | Need/greed, master-loot y reparto por contribución. Cajas, llaves, moneda premium, pity y tiradas pagadas quedan fuera del baseline. |
+| Inventario | WorldPack v8 separa prototipos e instancias durables. Las pilas se derivan por ubicación, prototipo, vínculo, afijo y acceso al botín; los contenedores aplican slots, peso recursivo, profundidad cuatro y validación atómica. `take`/`drop`/`put`/`get`/`give` aceptan 1..=256 unidades. `transferable` puede cambiar de dueño; `character_bound` se liga al primer adquirente; `non_transferable` puede adquirirse pero no abandonar al dueño actual. `give` es unilateral; `trade` negocia hasta 128 raíces transferibles y moneda mediante reservas durables, revisión exacta y dos confirmaciones, y liquida ambos lados en un solo commit. Un afijo durable por instancia puede aportar prefijo/sufijo y deltas acotados de ataque/curación. Web, Telnet y GMCP proyectan política, cantidades, afijo e IDs opacos, nunca dueños, cohortes ni identidades durables. | Desgaste/durabilidad de objetos; trade remoto/offline, subastas y mercado offline. |
+| Botín | WorldPack v8/AreaPack v7 conservan las fuentes `npc_spawn`, tablas enteras repetibles, recompensas selladas ganadas y pools de afijos deterministas de 4B. La derrota confirma procedencia y derechos para un máximo de 64 raíces; `party_round_robin`, `loot pass` y los plazos 20/120 siguen siendo autoritativos. Un sello ligado y portado se consulta con `reward odds` y se abre con `open`: Tiamud simula RNG, IDs, afijo, vínculo, capacidad y el límite de 16 recompensas antes de consumirlo y confirmar todo en un único commit. Web, Telnet y `Char.Reward 1` GMCP comparten fracciones exactas paginadas y referencias opacas. | Need/greed, master-loot y reparto por contribución. Cajas, llaves, moneda premium, pity y tiradas pagadas quedan fuera del baseline. |
 
 ```mermaid
 flowchart LR
@@ -331,9 +333,11 @@ stateDiagram-v2
 último remitente cuyo `tell` se entregó. Al desconectar o reiniciar no se
 convierte en correo implícito. Las suscripciones de canal sí son durables.
 
-La telepatía futura deberá ser una habilidad o efecto de autoría con coste,
-alcance, percepción y estados; seguirá respetando ignore, block, mute y
-límites. Las cajas de botín de pago, llaves pagadas o tiradas con moneda prémium
+La telepatía directa online es una habilidad de autoría: exige conocimiento,
+recurso y cooldown, puede bloquear salas, comparte mute/rate/ignore/block y
+confirma el estado del personaje antes de entregar. `reply` sigue perteneciendo
+solo a `tell`, y no hay retención del pensamiento ni entrega offline. Las cajas
+de botín de pago, llaves pagadas o tiradas con moneda prémium
 quedan fuera del baseline. Véase la
 [hoja de ruta social, staff y botín](docs/design/social-staff-and-loot-roadmap.md).
 
@@ -386,9 +390,9 @@ mantiene estos límites explícitos.
 
 ![Ilustración técnica de las tres salas de Lantern Square y sus módulos de medios, percepción, variantes, guiones y pruebas.](docs/images/tiamud-worldpack.webp)
 
-El entorno de ejecución consume **un WorldPack v7 canónico**. Para trabajar con
+El entorno de ejecución consume **un WorldPack v8 canónico**. Para trabajar con
 menos acoplamiento, los autores dividen un **WorldProject v2** en **AreaPack
-v6** con dependencias y propiedad declaradas, y los componen sin conexión:
+v7** con dependencias y propiedad declaradas, y los componen sin conexión:
 
 ```sh
 mkdir -p build/worlds
@@ -405,7 +409,7 @@ jugadores son arquitectura futura de
 [ADR 0005](docs/decisions/0005-hot-area-lifecycle.md), no funcionalidad
 publicada.
 
-El vocabulario v7 separa la definición reusable en `itemPrototypes` de cada
+El vocabulario v8 separa la definición reusable en `itemPrototypes` de cada
 unidad inicial en `initialItemInstances`. Una instancia empieza en una sala,
 un `npc_spawn`, `staged` o dentro de otra instancia contenedor; los IDs durables
 y de prototipo permanecen en el servidor y cada sesión recibe solo IDs opacos.
@@ -414,11 +418,11 @@ raíces fijas y generables por derrota, y añade sellos, `affixes` y
 `affixPools` estrictos. Los títulos de sala —incluidas sus
 variantes— ocupan como máximo 128 bytes y las descripciones 8.192 bytes; ambos
 se validan como texto seguro.
-WorldPack v6/v5/v4/v3/v2 y AreaPack v5/v4/v3/v2/v1 se aceptan únicamente para
+WorldPack v7/v6/v5/v4/v3/v2 y AreaPack v6/v5/v4/v3/v2/v1 se aceptan únicamente para
 normalización determinista. Las entradas antiguas no pueden introducir campos
 de fases posteriores: los formatos previos a v6/v5 rechazan `lootTables` o
 `lootSources` aunque estén vacíos, y los previos a v7/v6 rechazan sellos y
-afijos. WorldPack v4 y AreaPack v3 exigen
+afijos; todos los previos a v8/v7 rechazan `communication`. WorldPack v4 y AreaPack v3 exigen
 `transferable`; para publicar `character_bound` o `non_transferable` se
 requiere al menos WorldPack v5/AreaPack v4.
 
@@ -454,9 +458,10 @@ conservan intactos los derechos ya creados. SQLite y PostgreSQL usan esquema
 v11, sin tabla de loot/escrow espejo ni doble escritura.
 
 El mundo revisado compone tres áreas en 10 prototipos, 9 instancias iniciales,
-2 tablas, 1 fuente de botín, 1 afijo y 1 pool de afijos: 52.349 bytes con
-SHA-256
-`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
+2 tablas, 1 fuente de botín, 1 afijo y 1 pool de afijos. Añade la habilidad
+telepática `tiamud:mind-whisper` y bloquea su uso desde `demo:archive`. El
+artefacto ocupa 53.040 bytes y tiene SHA-256
+`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
 El gate-stalker conserva su `stormglass-talon` fijo, garantiza un `road-token`
 y un `storm-seal`, y resuelve una tirada ponderada repetible de `wolf-clasp` o
 `nothing` con derechos round-robin. El sello abre la tabla
@@ -641,6 +646,18 @@ reporte corto como aceptación de 24 horas. No se ejecutaron PostgreSQL real
 v11, WebKit ni lector de pantalla manual. Consulta el
 [registro de fase 4B](docs/project/log/2026-07-17-earned-sealed-rewards-and-affixes-phase-4b.md).
 
+La fase 5A añade telepatía directa online como una habilidad authored, no como
+alias de `tell`. La acción comprueba conocimiento, recurso, cooldowns e
+interferencia de sala; confirma gameplay antes de entregar y suprime estados
+privados del receptor sin filtrarlos. El árbol integrado pasa 630 pruebas Rust
+(131 core, 252 servidor, 123 WorldPack y 124 restantes), check web 0/0, 113
+Vitest, build, 86 Node/bot y 42/42 escenarios Playwright soportados (21
+Chromium y 21 Firefox). El WorldPack v8 canónico mide 53.040 bytes y tiene
+SHA-256
+`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
+No se ejecutaron PostgreSQL real v11, WebKit, lector manual ni soak de 24 h.
+Consulta el [registro de fase 5A](docs/project/log/2026-07-17-authored-online-telepathy-phase-5a.md).
+
 Una prueba corta de carga no sustituye al soak de 24 horas. WebKit no arranca
 en el host local actual por bibliotecas GTK/GStreamer/medios ausentes; eso no
 es un pase ni un fallo de aplicación.
@@ -660,8 +677,8 @@ Puertas externas pendientes:
 
 Siguientes líneas técnicas y de producto:
 
-- diseñar telepatía como habilidad de autoría, no renombrar `tell`;
-- añadir correo/historial/emotes solo con retención y moderación explícitas;
+- añadir emotes authored con plantillas seguras y percepción por audiencia;
+- añadir correo offline y tablones solo con cuotas, retención y moderación explícitas;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
 - considerar need/greed, master-loot o contribución solo tras modelar sus
@@ -703,7 +720,7 @@ deploy/                      ejemplos Caddy, systemd y entorno
 - **Operación:** [host único](docs/operations/single-host.md) ·
   [releases](docs/operations/releases.md) ·
   [carga y soak](docs/operations/soak-testing.md).
-- **Autoría:** [WorldPack v7](docs/authoring/README.md) ·
+- **Autoría:** [WorldPack v8](docs/authoring/README.md) ·
   [progresión v3](docs/design/character-progression-v3.md) ·
   [compositor de escena](docs/design/scene-compositor-v1.md) ·
   [hoja social/staff/botín](docs/design/social-staff-and-loot-roadmap.md) ·
@@ -725,7 +742,8 @@ deploy/                      ejemplos Caddy, systemd y entorno
   [entrega atómica y políticas](docs/decisions/0011-atomic-give-and-item-transfer-policies.md) ·
   [trade confirmado](docs/decisions/0012-confirmed-trade-reservations.md) ·
   [botín repetible y derechos](docs/decisions/0013-repeatable-loot-rights-and-provenance.md) ·
-  [recompensas selladas y afijos](docs/decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
+  [recompensas selladas y afijos](docs/decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md) ·
+  [telepatía directa authored](docs/decisions/0015-authored-online-telepathy.md).
 - **Estado:** [matriz](docs/project/COMPLETION_MATRIX.md) ·
   [especificación v0.3](docs/spec-v0.3.md) ·
   [memoria](docs/project/PROJECT_MEMORY.md) ·

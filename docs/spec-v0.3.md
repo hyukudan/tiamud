@@ -50,10 +50,10 @@ y orquestación no son objetivo sin carga medida que lo justifique.
 
 ## Datos de mundo y autoría
 
-WorldPack v7 es el objetivo canónico. AreaPack v6 permite composición modular
-estricta bajo WorldProject v2. WorldPack v6/v5/v4/v3/v2, AreaPack
-v5/v4/v3/v2/v1 y Envy/Merc se normalizan al importar o componer; el dominio no
-conserva vocabulario heredado ni inventa sellos o afijos.
+WorldPack v8 es el objetivo canónico. AreaPack v7 permite composición modular
+estricta bajo WorldProject v2. WorldPack v7/v6/v5/v4/v3/v2, AreaPack
+v6/v5/v4/v3/v2/v1 y Envy/Merc se normalizan al importar o componer; el dominio
+no conserva vocabulario heredado ni inventa sellos, afijos o telepatía.
 
 Propiedades obligatorias:
 
@@ -75,7 +75,7 @@ Consulta [world-authoring.md](world-authoring.md) y
 
 ### Objetos, inventario y botín 3A–4B
 
-WorldPack v7 separa `itemPrototypes`, que contienen contenido y reglas
+WorldPack v8 separa `itemPrototypes`, que contienen contenido y reglas
 reutilizables, de `initialItemInstances`, que asignan cada unidad durable a una
 sala, un `npc_spawn`, `staged` o a otra instancia contenedor. En runtime
 `ItemInstanceId` es una cadena tipada interna; las instancias nuevas usan una
@@ -127,8 +127,8 @@ cantidad opcional, `put <objeto> in <contenedor>` mueve raíces portadas y
 1..=256 unidades. `contents` pagina veinte grupos y evita incrustar árboles
 recursivos en las fichas o escenas.
 
-WorldPack v7 y AreaPack v6 actuales, igual que WorldPack v6/v5 y AreaPack
-v5/v4, aceptan el vocabulario cerrado `transferable`, `character_bound` y
+WorldPack v8 y AreaPack v7 actuales, igual que WorldPack v7/v6/v5 y AreaPack
+v6/v5/v4, aceptan el vocabulario cerrado `transferable`, `character_bound` y
 `non_transferable`; WorldPack v4, AreaPack v3 y formatos anteriores solo
 normalizan `transferable`. El propietario efectivo de una
 instancia se obtiene siguiendo como máximo cuatro aristas de contención hasta
@@ -217,9 +217,10 @@ MiB para el snapshot v6 compatible y el v7 actual. El presupuesto agregado de
 fichas de
 propietarios inspeccionadas al arrancar sigue siendo 1 MiB y cada ficha tiene
 un máximo de 64 KiB. Lantern Square contiene 3 salas, 10 prototipos, 9
-instancias iniciales, 2 tablas y 1 fuente; el WorldPack canónico ocupa 52.349
+instancias iniciales, 2 tablas, 1 fuente, 1 afijo, 1 pool y 1 habilidad
+telepática; el WorldPack canónico ocupa 53.040
 bytes y tiene SHA-256
-`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
+`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
 
 WorldPack v7/AreaPack v6 admiten drops garantizados y pools ponderados con
 pesos enteros. Las entradas se ordenan canónicamente y cada selección usa
@@ -355,11 +356,21 @@ recibir `staff` requiere perfil `moderator`, `administrator` o `implementor`;
 desconexión, pero accept/revoke/kick/transfer resuelven un nombre conectado y no
 administran un objetivo offline.
 
+La fase 5A añade telepatía directa online sin convertir `tell` en otra cosa.
+WorldPack v8/AreaPack v7 pueden marcar una habilidad `spell|utility`,
+`single_ally`, sin daño/curación/estado, con al menos un coste positivo,
+cooldown positivo y hasta 64 salas bloqueadas. El actor debe conocerla y estar
+vivo, libre de stun/recuperación y en una sala permitida. Recurso, cooldown de
+habilidad y cooldown global se confirman antes de entregar. Ignore/block,
+estado o sala del receptor suprimen la entrega sin revelarlo; el pensamiento y
+destino no persisten y no actualizan `reply`.
+
 La misma política, rate limit, mute, ignore/block y buzones por sesión sirve a
 acciones web, comandos Telnet y `Comm.Channel.Text` GMCP. No existen correo o
-historial durable, shout/yell espacial, telepatía authored, follow/assist/
-rescue, selección general de aliados ni XP/misión compartida. El reparto de
-botín implementado se limita a la cohorte próxima y round-robin de 4A.
+historial durable, shout/yell espacial, telepatía de grupo/offline,
+follow/assist/rescue, selección general de aliados ni XP/misión compartida. El
+reparto de botín implementado se limita a la cohorte próxima y round-robin de
+4A.
 
 La autoridad ejecutable de staff es independiente de la ficha y usa una de
 doce capacidades cerradas: `reports.view`, `reports.resolve`,
@@ -504,7 +515,7 @@ secuencia ni se infieren de prosa. Referencia:
 | --- | --- |
 | Combate y habilidades acotadas | Baseline implementado y probado |
 | Límites acumulados y nivel sin relleno | Implementado y probado |
-| WorldPack v7/AreaPack v6/WorldProject v2, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v6/v5/v4/v3/v2 y AreaPack v5/v4/v3/v2/v1 se normalizan sin inventar sellos, afijos ni loot ausente |
+| WorldPack v8/AreaPack v7/WorldProject v2, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v7/v6/v5/v4/v3/v2 y AreaPack v6/v5/v4/v3/v2/v1 se normalizan sin inventar sellos, afijos, telepatía ni loot ausente |
 | Linaje/clase/talento/promoción y persistencia | Implementado y probado |
 | Creación v3 navegador/Telnet | Default/none/explícito implementado |
 | Ficha, talentos y promociones web | Implementado y probado |
@@ -514,6 +525,7 @@ secuencia ni se infieren de prosa. Referencia:
 | Sidecar de entidades seguro | Implementado; sin sprites de muestra |
 | Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
 | Social fase 1 y esquema v11 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; aceptación PostgreSQL real v11 aún no retenida |
+| Comunicación fase 5A | Telepatía directa online authored con coste/cooldowns, bloqueo por sala, supresión privada, commit antes de entrega y paridad Web/Telnet/GMCP; sin mail/historial ni telepatía offline/grupal |
 | Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; aceptación PostgreSQL real v11 aún no retenida |
 | Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
@@ -563,6 +575,14 @@ bytes de crecimiento RSS bajo el límite de 96 MiB; el soak corto de 30 s
 completa 58 rondas, 127 acciones, readiness 8/8 y cero errores sin crecimiento
 continuo. No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector real ni
 soak de 24 horas; esta evidencia local no demuestra release o producción.
+
+En el árbol integrado de fase 5A pasan formato/diff/clippy y 630 pruebas Rust:
+131 core, 252 servidor, 123 WorldPack y 124 restantes. La web pasa check 0/0,
+113 Vitest, build y 42/42 Playwright soportado (21 Chromium y 21 Firefox); la
+suite Node/bot pasa 86/86. También pasan `cargo-deny`, licencias y avisos 307
+Rust/76 web. El WorldPack v8 canónico mide 53.040 bytes y tiene SHA-256
+`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
+No se ejecutaron PostgreSQL real v11, WebKit, lector manual ni soak de 24 h.
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
 cuando las puertas de integración cambien.

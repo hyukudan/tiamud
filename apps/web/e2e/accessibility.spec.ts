@@ -133,7 +133,14 @@ async function installMockWorld(
                 abilities: [{
                   id: 'ember-bolt', name: 'Ember Bolt', description: 'Hurl a compact flame.', kind: 'spell',
                   resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 4 }],
-                  cooldownRemaining: 0, usable: true, targeting: 'explicitTarget',
+                  cooldownRemaining: 0, usable: true,
+                  purpose: 'gameplay', targeting: 'explicitTarget',
+                }, {
+                  id: 'mind-thread', name: 'Mind Thread',
+                  description: 'Carry a private thought to an online mind.', kind: 'utility',
+                  resourceCosts: [{ resourceId: 'mana', label: 'Mana', amount: 2 }],
+                  cooldownRemaining: 0, usable: true,
+                  purpose: 'telepathy', targeting: 'optionalTarget',
                 }],
                 resistances: [{ damageType: 'fire', percent: 10 }],
                 statuses: [],
@@ -884,6 +891,27 @@ test('ability panel chooses a visible target and sends a structured ability acti
     action: 'combat.ability',
     abilityId: 'ember-bolt',
     target: 'opaque-wolf',
+  });
+});
+
+test('telepathy ability reaches an online mind through an exact structured action', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+
+  await page.getByLabel('Mind to reach with Mind Thread').fill('Cato');
+  await page.getByLabel('Private thought').fill('Meet beyond the archive.');
+  await page.getByRole('button', { name: 'Reach with Mind Thread' }).click();
+
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toEqual({
+    requestId: expect.any(String),
+    action: 'social.telepathy',
+    abilityId: 'mind-thread',
+    target: 'Cato',
+    message: 'Meet beyond the archive.',
   });
 });
 

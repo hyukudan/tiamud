@@ -271,7 +271,13 @@ export interface MediaStopData {
 
 export type CommunityChannel = 'general' | 'newbie' | 'staff';
 
-export type SocialMessageChannel = 'announcement' | 'say' | 'tell' | 'party' | CommunityChannel;
+export type SocialMessageChannel =
+  | 'announcement'
+  | 'say'
+  | 'tell'
+  | 'telepathy'
+  | 'party'
+  | CommunityChannel;
 
 export type StaffReportResolution = 'dismissed' | 'action_taken' | 'no_action';
 
@@ -380,6 +386,7 @@ export interface PlayerCharacterSnapshot {
     }>;
     cooldownRemaining: number;
     usable: boolean;
+    purpose: 'gameplay' | 'telepathy';
     targeting: 'self' | 'optionalTarget' | 'explicitTarget';
   }>;
   progressionPoints: Record<string, number>;
@@ -647,6 +654,7 @@ export type CommandSubmit = Envelope<
 >;
 
 export interface ActionPerformFields {
+  abilityId?: string;
   target?: string;
   recipient?: string;
   container?: string;
@@ -671,7 +679,6 @@ export type ActionPerform = Envelope<
   ActionPerformFields & {
     requestId: string;
     action: string;
-    abilityId?: string;
     classId?: string;
     graphId?: string;
     nodeId?: string;
@@ -1232,6 +1239,7 @@ const parseCharacterProgression = (
         : undefined;
       const kind = entry.kind;
       const cooldownRemaining = nonNegativeIntegerOrUndefined(entry.cooldownRemaining);
+      const purpose = entry.purpose;
       const targeting = entry.targeting;
       const rawCosts = entry.resourceCosts;
       if (!Array.isArray(rawCosts) || rawCosts.length > 4) return undefined;
@@ -1251,11 +1259,13 @@ const parseCharacterProgression = (
         !id || abilityIds.has(id) || !name || description === undefined ||
         (kind !== 'martial' && kind !== 'spell' && kind !== 'utility') ||
         cooldownRemaining === undefined || cooldownRemaining > 10_000 || typeof entry.usable !== 'boolean' ||
+        (purpose !== 'gameplay' && purpose !== 'telepathy') ||
         (targeting !== 'self' && targeting !== 'optionalTarget' && targeting !== 'explicitTarget')
       ) return undefined;
       abilityIds.add(id);
       abilities.push({
-        id, name, description, kind, resourceCosts, cooldownRemaining, usable: entry.usable, targeting,
+        id, name, description, kind, resourceCosts, cooldownRemaining,
+        usable: entry.usable, purpose, targeting,
       });
     }
   }
@@ -2382,6 +2392,7 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
           channel !== 'announcement' &&
           channel !== 'say' &&
           channel !== 'tell' &&
+          channel !== 'telepathy' &&
           channel !== 'party' &&
           channel !== 'general' &&
           channel !== 'newbie' &&
@@ -2451,6 +2462,7 @@ export function createActionPerform(
   fields: ActionPerformFields | undefined,
   requestId: string,
 ): ActionPerform {
+  if (action === 'social.telepathy') validateTelepathyActionFields(fields);
   if (action.startsWith('trade.')) validateTradeActionFields(action, fields);
   if (action.startsWith('loot.')) validateLootActionFields(action, fields);
   if (action.startsWith('reward.')) validateRewardActionFields(action, fields);
@@ -2494,6 +2506,27 @@ export function createActionPerform(
     type: 'action.perform',
     data: { requestId, action, ...fields },
   };
+}
+
+function validateTelepathyActionFields(fields: ActionPerformFields | undefined): void {
+  const expected = ['abilityId', 'message', 'target'];
+  const actual = Object.keys(fields ?? {}).toSorted();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new RangeError('social.telepathy requires its exact closed field set');
+  }
+  if (typeof fields?.abilityId !== 'string' ||
+    !/^[a-z0-9](?:[a-z0-9_.:-]{0,62}[a-z0-9])?$/.test(fields.abilityId)) {
+    throw new RangeError('telepathy abilityId must be a bounded definition id');
+  }
+  for (const [label, value, maximum] of [
+    ['target', fields?.target, 64],
+    ['message', fields?.message, 512],
+  ] as const) {
+    if (typeof value !== 'string' || value.trim() !== value || value.length === 0 ||
+      new TextEncoder().encode(value).length > maximum || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new RangeError(`telepathy ${label} must be bounded visible UTF-8 text`);
+    }
+  }
 }
 
 function validateLootActionFields(

@@ -2363,7 +2363,9 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
             }))
         }
         "action.perform" => {
-            if trade_action_contains_null(&envelope.data) {
+            if trade_action_contains_null(&envelope.data)
+                || !telepathy_action_has_exact_fields(&envelope.data)
+            {
                 return Err(ClientMessageError::InvalidEnvelope);
             }
             let data = serde_json::from_value::<ActionPerformData>(envelope.data)
@@ -2561,6 +2563,20 @@ fn trade_action_contains_null(data: &Value) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|action| action.starts_with("trade."))
         && fields.values().any(Value::is_null)
+}
+
+fn telepathy_action_has_exact_fields(data: &Value) -> bool {
+    let Some(fields) = data.as_object() else {
+        return true;
+    };
+    if fields.get("action").and_then(Value::as_str) != Some("social.telepathy") {
+        return true;
+    }
+    const EXACT_FIELDS: [&str; 5] = ["requestId", "action", "abilityId", "target", "message"];
+    fields.len() == EXACT_FIELDS.len()
+        && fields
+            .keys()
+            .all(|field| EXACT_FIELDS.contains(&field.as_str()))
 }
 
 fn valid_definition_id(value: &str, maximum: usize) -> bool {
@@ -3088,6 +3104,45 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 .map(|message| SocialAction::Tell { target, message })
                 .map(PlayerAction::Social)
                 .ok_or_else(|| "Social tell requires message.".to_owned())
+        }
+        "social.telepathy" => {
+            let target = social_target()?;
+            if data.class_id.is_some()
+                || data.graph_id.is_some()
+                || data.node_id.is_some()
+                || data.container.is_some()
+                || data.recipient.is_some()
+                || data.quantity.is_some()
+                || data.page.is_some()
+                || data.trade_id.is_some()
+                || data.coins.is_some()
+                || data.state_revision.is_some()
+                || data.channel.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+                || data.report_id.is_some()
+                || data.resolution.is_some()
+                || !matches!(data.profile, NullableField::Missing)
+                || !matches!(data.lore_title, NullableField::Missing)
+                || data.capability.is_some()
+                || data.enabled.is_some()
+            {
+                return Err("Social telepathy has unexpected fields.".to_owned());
+            }
+            let ability_id = data
+                .ability_id
+                .clone()
+                .ok_or_else(|| "Social telepathy requires abilityId.".to_owned())?;
+            let message = data
+                .message
+                .clone()
+                .ok_or_else(|| "Social telepathy requires message.".to_owned())?;
+            Ok(PlayerAction::Telepathy {
+                ability_id,
+                target,
+                message,
+            })
         }
         "social.reply" => {
             no_target()?;
@@ -4605,6 +4660,84 @@ mod tests {
         );
         assert_eq!(general.request_id, newbie.request_id);
         assert_ne!(general.signature, newbie.signature);
+    }
+
+    #[test]
+    fn structured_telepathy_accepts_only_the_exact_wire_fields() {
+        let exact = r#"{"v":1,"type":"action.perform","data":{"requestId":"telepathy-1","action":"social.telepathy","abilityId":"tiamud:mind-whisper","target":"Aria","message":"Meet beyond the gate."}}"#;
+        assert_eq!(
+            requested_action(exact).action,
+            Ok(PlayerAction::Telepathy {
+                ability_id: "tiamud:mind-whisper".into(),
+                target: "Aria".into(),
+                message: "Meet beyond the gate.".into(),
+            })
+        );
+
+        for message in [
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"telepathy-no-ability","action":"social.telepathy","target":"Aria","message":"Hello"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"telepathy-no-target","action":"social.telepathy","abilityId":"tiamud:mind-whisper","message":"Hello"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"telepathy-no-message","action":"social.telepathy","abilityId":"tiamud:mind-whisper","target":"Aria"}}"#,
+        ] {
+            assert_eq!(
+                parse_client_message(message).unwrap_err(),
+                ClientMessageError::InvalidEnvelope,
+                "{message}"
+            );
+        }
+
+        for extra in [
+            "classId",
+            "graphId",
+            "nodeId",
+            "recipient",
+            "container",
+            "quantity",
+            "page",
+            "tradeId",
+            "coins",
+            "stateRevision",
+            "channel",
+            "durationSeconds",
+            "reason",
+            "role",
+            "reportId",
+            "resolution",
+            "profile",
+            "loreTitle",
+            "capability",
+            "enabled",
+            "unknownFutureField",
+        ] {
+            let mut message = serde_json::json!({
+                "v": 1,
+                "type": "action.perform",
+                "data": {
+                    "requestId": "telepathy-extra-null",
+                    "action": "social.telepathy",
+                    "abilityId": "tiamud:mind-whisper",
+                    "target": "Aria",
+                    "message": "Hello"
+                }
+            });
+            message["data"]
+                .as_object_mut()
+                .expect("test action data is an object")
+                .insert(extra.to_owned(), Value::Null);
+            assert_eq!(
+                parse_client_message(&message.to_string()).unwrap_err(),
+                ClientMessageError::InvalidEnvelope,
+                "extra field {extra} must fail even when null"
+            );
+        }
+
+        assert_eq!(
+            parse_client_message(
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"telepathy-extra","action":"social.telepathy","abilityId":"tiamud:mind-whisper","target":"Aria","message":"Hello","quantity":1}}"#,
+            )
+            .unwrap_err(),
+            ClientMessageError::InvalidEnvelope
+        );
     }
 
     #[test]

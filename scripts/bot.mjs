@@ -17,7 +17,7 @@ const MAX_SCENE_PRESENTATION_ENTITIES = 12;
 const MAX_SCENE_PRESENTATION_POSES = 32;
 const MAX_ENTITY_SOURCE_REFERENCES = 2;
 const SOCIAL_CHANNELS = new Set([
-  'announcement', 'say', 'tell', 'party', 'general', 'newbie', 'staff',
+  'announcement', 'say', 'tell', 'telepathy', 'party', 'general', 'newbie', 'staff',
 ]);
 const MEDIA_CHANNELS = new Set(['music', 'ambience', 'effects']);
 
@@ -1472,7 +1472,7 @@ function validatePlayerCharacter(character) {
       ability,
       [
         'id', 'name', 'description', 'kind', 'resourceCosts', 'cooldownRemaining',
-        'usable', 'targeting',
+        'usable', 'purpose', 'targeting',
       ],
       'player ability',
     );
@@ -1485,6 +1485,9 @@ function validatePlayerCharacter(character) {
     assertNonNegativeInteger(ability.cooldownRemaining, 'player ability cooldown');
     if (ability.cooldownRemaining > 10_000) throw new Error('Player ability cooldown exceeds 10000.');
     assertBoolean(ability.usable, 'player ability usable state');
+    if (!['gameplay', 'telepathy'].includes(ability.purpose)) {
+      throw new Error('Player ability purpose is invalid.');
+    }
     if (!['self', 'optionalTarget', 'explicitTarget'].includes(ability.targeting)) {
       throw new Error('Player ability targeting is invalid.');
     }
