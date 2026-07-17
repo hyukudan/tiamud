@@ -515,6 +515,76 @@ test('strict bot validates paginated container summaries without durable ids or 
   }), /unknown keys: prototypeId/);
 });
 
+test('strict bot validates exact sealed-reward odds without authoring ids', () => {
+  const data = {
+    selector: OPAQUE_ITEM,
+    page: 1,
+    totalPages: 2,
+    guaranteed: [{ label: 'three sparks', quantity: 3 }],
+    weighted: [{
+      poolLabel: 'storm draw',
+      rolls: 1,
+      outcomeLabel: 'nothing',
+      minQuantity: 0,
+      maxQuantity: 0,
+      probabilityNumerator: 1,
+      probabilityDenominator: 4,
+    }],
+    affixes: [{
+      parentOutcomeLabel: 'iron blade',
+      affixLabel: 'charged',
+      position: 'prefix',
+      attackBonusDelta: 2,
+      healAmountDelta: 0,
+      conditionalProbabilityNumerator: 1,
+      conditionalProbabilityDenominator: 5,
+    }],
+  };
+  const parsed = parseEnvelope('reward.odds', data);
+  assert.equal(parsed.data.weighted[0].probabilityDenominator, 4);
+  assert.equal(parsed.data.affixes[0].conditionalProbabilityDenominator, 5);
+  assert.throws(() => parseEnvelope('reward.odds', { ...data, page: 3 }));
+  assert.throws(() => parseEnvelope('reward.odds', {
+    ...data,
+    weighted: [{ ...data.weighted[0], lootTableId: 'secret' }],
+  }), /unknown keys: lootTableId/);
+  assert.throws(() => parseEnvelope('reward.odds', {
+    ...data,
+    affixes: Array.from({ length: 20 }, () => data.affixes[0]),
+  }));
+  assert.throws(() => parseEnvelope('reward.odds', {
+    ...data,
+    affixes: [{
+      ...data.affixes[0],
+      conditionalProbabilityNumerator: 6,
+      conditionalProbabilityDenominator: 5,
+    }],
+  }));
+});
+
+test('strict bot accepts only the public item-affix projection', () => {
+  const affix = {
+    label: 'charged',
+    position: 'prefix',
+    attackBonusDelta: 2,
+    healAmountDelta: 0,
+  };
+  const parsed = parseServerMessage(JSON.stringify(sceneEnvelope(sceneItem({
+    label: 'charged blue lantern',
+    affix,
+  }))));
+  assert.deepEqual(parsed.data.items[0].affix, affix);
+  for (const invalid of [
+    { ...affix, position: 'middle' },
+    { ...affix, attackBonusDelta: 0 },
+    { ...affix, affixId: 'secret:charged' },
+  ]) {
+    assert.throws(() => parseServerMessage(
+      JSON.stringify(sceneEnvelope(sceneItem({ affix: invalid }))),
+    ));
+  }
+});
+
 test('strict bot validates private confirmed-trade state and paginated offered contents', () => {
   const player = playerSnapshot();
   player.data.economy = {

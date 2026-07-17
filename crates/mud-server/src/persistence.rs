@@ -37,6 +37,10 @@ const MAX_ACTIVE_SESSIONS: i64 = 16;
 const MAX_CHARACTER_JSON_BYTES: usize = 65_536;
 const MAX_EVENT_JSON_BYTES: usize = 65_536;
 const MAX_RUNTIME_JSON_BYTES: usize = tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES;
+/// Snapshot v6 introduced the 2 MiB physical budget. Keep that admission
+/// boundary stable when the current runtime format advances to v7 and beyond;
+/// only the exact v1-v5 DTOs remain on the historical 1 MiB budget.
+const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 /// Number of snapshot-covered domain events retained for diagnostics and
 /// compatibility. Older covered events are compacted transactionally.
 pub(super) const DOMAIN_EVENT_RETENTION: i64 = 10_000;
@@ -3665,7 +3669,7 @@ pub(super) fn decode_runtime_snapshot(
 ) -> Result<WorldRuntimeSnapshot, StoreError> {
     let durable_version =
         u32::try_from(durable_version).map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
-    let maximum = if durable_version < tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
+    let maximum = if durable_version <= LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION {
         tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
     } else {
         MAX_RUNTIME_JSON_BYTES
@@ -3683,9 +3687,9 @@ pub(super) fn decode_runtime_snapshot(
         return Err(StoreError::InvalidRuntimeSnapshot);
     }
     // Admission must cover the normalized current representation too. A valid
-    // near-limit legacy payload can expand substantially when v6 adds explicit
-    // binding and provenance per instance. Reject it here, before the decoder
-    // hands persistence an inadmissible v6 representation for restoration.
+    // near-limit legacy payload can expand substantially when later versions
+    // add explicit per-instance state. Reject it here, before the decoder hands
+    // persistence an inadmissible current representation for restoration.
     bounded_json(&snapshot, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
     Ok(snapshot)
 }
@@ -4684,7 +4688,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_runtime_upgrade_rejects_a_current_snapshot_above_the_v6_budget() {
+    fn legacy_runtime_upgrade_rejects_a_current_snapshot_above_the_current_budget() {
         let build = |count: usize| WorldRuntimeSnapshotV2 {
             snapshot_version: 2,
             revision: 1,
@@ -4808,8 +4812,16 @@ mod tests {
             "lootEncounters",
             "groundLoot",
             "partyLootCursors",
+            "nextRewardOpenId",
         ] {
             legacy.as_object_mut().unwrap().remove(field);
+        }
+        for item in legacy["itemInstances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            item.as_object_mut().unwrap().remove("itemAffixes");
         }
         connection
             .execute(
@@ -4837,6 +4849,46 @@ mod tests {
             .unwrap();
         assert!(matches!(
             load_runtime_snapshot(&connection),
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
+    fn sqlite_runtime_loader_upgrades_strict_v6_and_rejects_v7_smuggling() {
+        let mut legacy = serde_json::to_value(World::demo().runtime_snapshot()).unwrap();
+        legacy["snapshotVersion"] = serde_json::json!(6);
+        legacy.as_object_mut().unwrap().remove("nextRewardOpenId");
+        for item in legacy["itemInstances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            item.as_object_mut().unwrap().remove("itemAffixes");
+        }
+        let json = legacy.to_string();
+        let upgraded = decode_runtime_snapshot(6, &json).unwrap();
+        assert_eq!(
+            upgraded.snapshot_version,
+            tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION
+        );
+        assert_eq!(upgraded.next_reward_open_id, tiamud_core::RewardOpenId(1));
+        assert!(
+            upgraded
+                .item_instances
+                .values()
+                .all(|item| item.item_affixes.is_empty())
+        );
+
+        let item_id = legacy["itemInstances"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        legacy["itemInstances"][item_id]["itemAffixes"] = serde_json::json!([]);
+        assert!(matches!(
+            decode_runtime_snapshot(6, &legacy.to_string()),
             Err(StoreError::InvalidRuntimeSnapshot)
         ));
     }
@@ -4914,6 +4966,42 @@ mod tests {
             Err(StoreError::SnapshotTooLarge {
                 kind: "world runtime",
                 maximum: tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
+            })
+        ));
+    }
+
+    #[test]
+    fn snapshot_v6_and_v7_use_the_two_mib_admission_budget() {
+        let between_budgets = format!(
+            "\"{}\"",
+            "é".repeat(tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES / 2)
+        );
+        assert!(between_budgets.len() > tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES);
+        assert!(between_budgets.len() <= MAX_RUNTIME_JSON_BYTES);
+
+        assert!(matches!(
+            decode_runtime_snapshot(5, &between_budgets),
+            Err(StoreError::SnapshotTooLarge {
+                kind: "world runtime",
+                maximum: tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES,
+            })
+        ));
+        assert!(matches!(
+            decode_runtime_snapshot(6, &between_budgets),
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+        assert!(matches!(
+            decode_runtime_snapshot(7, &between_budgets),
+            Err(StoreError::InvalidRuntimeSnapshot)
+        ));
+
+        let above_current = format!("\"{}\"", "é".repeat(MAX_RUNTIME_JSON_BYTES / 2));
+        assert!(above_current.len() > MAX_RUNTIME_JSON_BYTES);
+        assert!(matches!(
+            decode_runtime_snapshot(7, &above_current),
+            Err(StoreError::SnapshotTooLarge {
+                kind: "world runtime",
+                maximum: MAX_RUNTIME_JSON_BYTES,
             })
         ));
     }

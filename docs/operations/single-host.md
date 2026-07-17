@@ -210,11 +210,16 @@ backend creates a mirror loot table, converts the snapshot to `jsonb` or writes
 to both stores.
 
 The decoder applies a dual admission rule: raw legacy snapshots v1-v5 remain
-limited to 1 MiB, while current v6 snapshots and new commits may use up to
-2 MiB. This prevents an oversized old document from using migration as a way
-around its original bound, while allowing a valid legacy document to expand
-into the exact v6 provenance and rights form. Always keep the pre-migration
-backup until integrity, readiness, restart and gameplay checks pass.
+limited to 1 MiB, while v6 and current v7 snapshots and new commits may use up
+to 2 MiB. This prevents an oversized old document from using migration as a
+way around its original bound. A strict v6 document expands to the exact v7
+form with empty applied-affix state and sealed-open counter one; v7 additionally
+retains applied affixes plus sealed reward provenance and open counters. The
+whole snapshot remains one authority: a successful `open` commits seal
+consumption, RNG advancement, counters, created items, bindings and capacity
+together, while any failure restores the checkpoint exactly. Always keep the
+pre-migration backup until integrity, readiness, restart and gameplay checks
+pass.
 
 ## Emergency Implementor recovery
 

@@ -528,6 +528,9 @@ export function parseServerMessage(raw) {
     case 'trade.contents':
       validateTradeContents(message.data);
       break;
+    case 'reward.odds':
+      validateRewardOdds(message.data);
+      break;
     case 'map.snapshot':
       validateMapSnapshot(message.data);
       break;
@@ -704,7 +707,7 @@ function validateContainerContents(data) {
       [
         'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
         'availableQuantity', 'reservedForTrade', 'totalWeightGrams', 'containerCapacity',
-        'transferPolicy', 'boundToYou', 'canGive', 'canTrade', 'actions',
+        'transferPolicy', 'boundToYou', 'affix', 'canGive', 'canTrade', 'actions',
       ],
       'container contents item',
     );
@@ -736,6 +739,100 @@ function validateTradeContents(data) {
     totalPages: data.totalPages,
     capacity: data.capacity,
   });
+}
+
+function validateRewardOdds(data) {
+  assertRecord(data, 'reward.odds.data');
+  assertOnlyKeys(
+    data,
+    ['selector', 'page', 'totalPages', 'guaranteed', 'weighted', 'affixes'],
+    'reward.odds.data',
+  );
+  assertOpaqueId(data.selector, 'reward odds selector');
+  assertPositiveInteger(data.page, 'reward odds page');
+  assertPositiveInteger(data.totalPages, 'reward odds total pages');
+  if (data.page > data.totalPages || data.totalPages > 0xffff) {
+    throw new Error('Reward odds page is invalid.');
+  }
+  assertArrayMax(data.guaranteed, 20, 'reward odds guaranteed rows');
+  assertArrayMax(data.weighted, 20, 'reward odds weighted rows');
+  assertArrayMax(data.affixes, 20, 'reward odds affix rows');
+  if (data.guaranteed.length + data.weighted.length + data.affixes.length > 20) {
+    throw new Error('Reward odds page exceeds twenty combined rows.');
+  }
+  for (const row of data.guaranteed) {
+    assertRecord(row, 'reward odds guaranteed row');
+    assertOnlyKeys(row, ['label', 'quantity', 'affixPoolLabel'], 'reward odds guaranteed row');
+    assertBoundedString(row.label, 256, 'reward odds guaranteed label');
+    assertPositiveInteger(row.quantity, 'reward odds guaranteed quantity');
+    if (row.quantity > MAX_ITEM_STACK_UNITS) {
+      throw new Error('Reward odds guaranteed quantity is too large.');
+    }
+    if (row.affixPoolLabel !== undefined) {
+      assertBoundedString(row.affixPoolLabel, 256, 'reward odds affix pool label');
+    }
+  }
+  for (const row of data.weighted) {
+    assertRecord(row, 'reward odds weighted row');
+    assertOnlyKeys(
+      row,
+      [
+        'poolLabel', 'rolls', 'outcomeLabel', 'minQuantity', 'maxQuantity',
+        'probabilityNumerator', 'probabilityDenominator', 'affixPoolLabel',
+      ],
+      'reward odds weighted row',
+    );
+    assertBoundedString(row.poolLabel, 256, 'reward odds pool label');
+    assertPositiveInteger(row.rolls, 'reward odds rolls');
+    if (row.rolls > 8) throw new Error('Reward odds rolls are too large.');
+    assertBoundedString(row.outcomeLabel, 256, 'reward odds outcome label');
+    assertNonNegativeInteger(row.minQuantity, 'reward odds minimum quantity');
+    assertNonNegativeInteger(row.maxQuantity, 'reward odds maximum quantity');
+    if (row.minQuantity > row.maxQuantity || row.maxQuantity > MAX_ITEM_STACK_UNITS) {
+      throw new Error('Reward odds quantity interval is invalid.');
+    }
+    validateExactProbability(
+      row.probabilityNumerator,
+      row.probabilityDenominator,
+      'reward odds probability',
+    );
+    if (row.affixPoolLabel !== undefined) {
+      assertBoundedString(row.affixPoolLabel, 256, 'reward odds affix pool label');
+    }
+  }
+  for (const row of data.affixes) {
+    assertRecord(row, 'reward odds affix row');
+    assertOnlyKeys(
+      row,
+      [
+        'parentOutcomeLabel', 'affixLabel', 'position', 'attackBonusDelta',
+        'healAmountDelta', 'conditionalProbabilityNumerator',
+        'conditionalProbabilityDenominator',
+      ],
+      'reward odds affix row',
+    );
+    assertBoundedString(row.parentOutcomeLabel, 256, 'reward odds parent outcome label');
+    assertBoundedString(row.affixLabel, 256, 'reward odds affix label');
+    if (row.position !== undefined && !['prefix', 'suffix'].includes(row.position)) {
+      throw new Error('Reward odds affix position is invalid.');
+    }
+    assertSignedInteger(row.attackBonusDelta, -0x80000000, 0x7fffffff, 'reward odds attack delta');
+    assertSignedInteger(row.healAmountDelta, -0x80000000, 0x7fffffff, 'reward odds heal delta');
+    if (row.position === undefined && (row.attackBonusDelta !== 0 || row.healAmountDelta !== 0)) {
+      throw new Error('Reward odds no-affix row has stat deltas.');
+    }
+    validateExactProbability(
+      row.conditionalProbabilityNumerator,
+      row.conditionalProbabilityDenominator,
+      'reward odds conditional probability',
+    );
+  }
+}
+
+function validateExactProbability(numerator, denominator, label) {
+  assertNonNegativeInteger(numerator, `${label} numerator`);
+  assertPositiveInteger(denominator, `${label} denominator`);
+  if (numerator > denominator) throw new Error(`${label} exceeds one.`);
 }
 
 function validateMapSnapshot(data) {
@@ -1013,7 +1110,7 @@ function validateSceneEntity(entity, kind, extraKeys = []) {
   const itemKeys = kind === 'item'
     ? [
         'rarity', 'itemLevel', 'weightGrams', 'quantity', 'stackSlots',
-        'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou', 'loot',
+        'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou', 'affix', 'loot',
       ]
     : [];
   assertOnlyKeys(
@@ -1576,7 +1673,8 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
       [
         'id', 'label', 'description', 'rarity', 'itemLevel', 'weightGrams', 'quantity',
         'availableQuantity', 'reservedForTrade', 'stackSlots', 'totalWeightGrams',
-        'containerCapacity', 'transferPolicy', 'boundToYou', 'canGive', 'canTrade', 'actions',
+        'containerCapacity', 'transferPolicy', 'boundToYou', 'affix', 'canGive', 'canTrade',
+        'actions',
       ],
       itemLabel,
     );
@@ -1606,7 +1704,7 @@ function validatePlayerInventory(inventory, equipment, capacity, label) {
       [
         'id', 'slot', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity',
         'stackSlots', 'totalWeightGrams', 'containerCapacity', 'transferPolicy', 'boundToYou',
-        'actions',
+        'affix', 'actions',
       ],
       itemLabel,
     );
@@ -1647,6 +1745,7 @@ function validateItemMetadata(item, label) {
   if (item.transferPolicy !== 'character_bound' && item.boundToYou) {
     throw new Error(`${label} has an invalid binding marker.`);
   }
+  if (item.affix !== undefined) validateItemAffix(item.affix, `${label} affix`);
   assertPositiveInteger(item.itemLevel, `${label} itemLevel`);
   if (item.itemLevel > MAX_ITEM_LEVEL) {
     throw new Error(`${label} itemLevel exceeds ${MAX_ITEM_LEVEL}.`);
@@ -1674,6 +1773,24 @@ function validateItemMetadata(item, label) {
       throw new Error(`${label} container total weight is inconsistent.`);
     }
     validateCapacityShape(item.containerCapacity, `${label} container capacity`);
+  }
+}
+
+function validateItemAffix(affix, label) {
+  assertRecord(affix, label);
+  assertOnlyKeys(
+    affix,
+    ['label', 'position', 'attackBonusDelta', 'healAmountDelta'],
+    label,
+  );
+  assertBoundedString(affix.label, 256, `${label} label`);
+  if (!['prefix', 'suffix'].includes(affix.position)) {
+    throw new Error(`${label} position is invalid.`);
+  }
+  assertSignedInteger(affix.attackBonusDelta, -0x80000000, 0x7fffffff, `${label} attack delta`);
+  assertSignedInteger(affix.healAmountDelta, -0x80000000, 0x7fffffff, `${label} heal delta`);
+  if (affix.attackBonusDelta === 0 && affix.healAmountDelta === 0) {
+    throw new Error(`${label} has no modifier.`);
   }
 }
 

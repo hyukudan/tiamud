@@ -926,6 +926,7 @@ mod tests {
                 max_stack_units: 1,
                 container: None,
                 transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
+                sealed_loot_table_id: None,
             }],
             initial_item_instances: vec![first_instance, second_instance]
                 .into_iter()

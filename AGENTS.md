@@ -71,12 +71,15 @@ matriz, memoria y documentación pública a la vez.
 - Los datos consultables son relacionales. Las instantáneas JSON acotadas se
   guardan como `TEXT` opaco en ambos adaptadores; no uses `jsonb` sin necesidad
   medida y ADR.
-- `WorldRuntimeSnapshot` v6 es la única autoridad durable del grafo de
-  instancias, reservas de trade, procedencia y derechos de botín. SQLite y
+- `WorldRuntimeSnapshot` v7 es la única autoridad durable del grafo de
+  instancias, reservas de trade, procedencia y derechos de botín, afijos por
+  instancia y contador de aperturas. SQLite y
   PostgreSQL la confirman con personajes/eventos en su transacción existente;
   ambos adaptadores usan esquema v11 y no hay tabla espejo ni custodia SQL de
-  trade o botín. DTO exactos v1-v6 se seleccionan por `snapshotVersion`;
-  snapshots v1-v5 conservan su límite legado de 1 MiB y v6 admite hasta 2 MiB.
+  trade o botín. DTO exactos v1-v7 se seleccionan por `snapshotVersion`;
+  snapshots v1-v5 conservan su límite legado de 1 MiB y v6-v7 admiten hasta
+  2 MiB. El DTO v6 estricto rechaza campos v7 y normaliza a afijos vacíos y
+  `nextRewardOpenId: 1` sin inventar procedencia.
   v1-v3 se convierten a vínculo `unbound` y un campo
   `binding` inyectado en v3 se rechaza; v4 crea `nextTradeId: 1` y `trades`
   vacío. La lectura falla cerrada ante campos de otra versión, referencias,
@@ -92,9 +95,9 @@ matriz, memoria y documentación pública a la vez.
 
 ### Mundo, personajes y juego
 
-- WorldPack v6 es canónico; AreaPack v5 es la autoría modular nativa y
-  WorldProject permanece en v2. WorldPack v5/v4/v3/v2,
-  AreaPack v4/v3/v2/v1 y Envy/Merc solo entran por
+- WorldPack v7 es canónico; AreaPack v6 es la autoría modular nativa y
+  WorldProject permanece en v2. WorldPack v6/v5/v4/v3/v2,
+  AreaPack v5/v4/v3/v2/v1 y Envy/Merc solo entran por
   normalización/importación.
 - Se valida y carga un WorldPack completo antes de abrir listeners.
   `TIAMUD_WORLD_PACK` selecciona uno externo revisado; si no, se usa el
@@ -106,7 +109,7 @@ matriz, memoria y documentación pública a la vez.
   1..=8.192; rechaza controles inseguros y normaliza entradas legacy antes de
   validar. No subas estos topes para hacer caber prosa generada.
 - El modelo de personaje v3 funciona de extremo a extremo dentro de WorldPack
-  v6: linaje, trasfondo opcional, clase
+  v7: linaje, trasfondo opcional, clase
   base/avanzada, XP global, clase activa, historial, reservas, talentos con
   rango y promoción atómica.
 - `archetype` no es identidad canónica. Normalízalo en la frontera; no crees un
@@ -129,15 +132,19 @@ matriz, memoria y documentación pública a la vez.
   referencia opaca y permite usarla en comandos. En autoría,
   `entityMedia(kind=item)` referencia el prototipo reusable, mientras
   `roomPerception.hiddenItems` referencia la instancia concreta. Las pilas
-  fungibles son vistas derivadas por ubicación/prototipo/vínculo: no persisten
-  cantidad ni identidad de pila. Los contenedores son instancias únicas con
+  fungibles son vistas derivadas por ubicación/prototipo/vínculo/afijo: no
+  persisten cantidad ni identidad de pila. Un afijo durable por instancia
+  añade un prefijo o sufijo y deltas acotados de ataque/curación; su copia y
+  digests se validan al restaurar, pero los IDs/digests no se proyectan. Los
+  contenedores son instancias únicas con
   slots/peso propios, peso recursivo, profundidad máxima cuatro y grafo
   validado. `take`/`drop`/`put`/`get` y `give` aceptan 1..=256 unidades y
   `contents` pagina 20 grupos; Web, Telnet y GMCP reciben cantidad, slots, peso
   total, capacidad, política de transferencia y estado de vínculo mediante
   referencias opacas.
-- WorldPack v6 y AreaPack v5 aceptan el vocabulario cerrado `transferable`,
-  `character_bound` y `non_transferable`, igual que WorldPack v5/AreaPack v4;
+- WorldPack v7 y AreaPack v6 aceptan el vocabulario cerrado `transferable`,
+  `character_bound` y `non_transferable`, igual que WorldPack v6/v5 y AreaPack
+  v5/v4;
   WorldPack v4/AreaPack v3 y anteriores solo normalizan `transferable`. La primera adquisición liga
   recursivamente un `character_bound`. Mover dentro del grafo del mismo dueño
   está permitido, pero `drop` o un cambio de dueño exige que toda la raíz y sus
@@ -163,7 +170,8 @@ matriz, memoria y documentación pública a la vez.
   temporalmente sus agregados y valida existencia, vínculo, equipo, grafo y
   capacidad, incluidos los desconectados. Esos agregados no quedan retenidos
   como personajes conectados. Una incoherencia bloquea listeners.
-- WorldPack v6 añade tablas enteras de botín y fuentes por aparición de NPC.
+- WorldPack v6 añadió tablas enteras de botín y fuentes por aparición de NPC;
+  WorldPack v7/AreaPack v6 añaden recompensas selladas y afijos.
   Cada derrota resuelve una vez el botín fijo y repetible, con rejection
   sampling sin sesgo, procedencia durable y máximo combinado de 64 raíces. La
   capacidad puede suprimir un drop sin bloquear la derrota ni permitir reroll.
@@ -171,8 +179,15 @@ matriz, memoria y documentación pública a la vez.
   cede el derecho sin renovar el plazo; la reserva es exclusiva 20 ticks,
   pública después y desaparece al tick 120. Reiniciar cancela encuentros
   abiertos antes de readiness, pero conserva intactos los derechos ya creados.
-  Need/greed, master-loot, contribución, afijos y recompensas selladas son fases
-  posteriores; cajas, llaves o tiradas pagadas no pertenecen al baseline.
+  Un sello solo se obtiene como botín NPC, es raíz portada, única, consumible y
+  `character_bound`, y no puede equipar, contener, atacar, curar ni aplicar
+  efectos. `open <sello>` simula RNG, IDs, afijo, vínculo, capacidad y hasta 16
+  recompensas antes de consumir y confirmar todo en un commit; cualquier fallo
+  restaura el checkpoint exacto. `reward odds <sello> [página]` expone
+  fracciones exactas en páginas de 20 sin IDs/digests internos. Web, Telnet y
+  `Char.Reward 1` GMCP comparten acciones y proyección. Need/greed,
+  master-loot y contribución son fases posteriores; cajas, llaves, moneda
+  premium, pity o tiradas pagadas no pertenecen al baseline.
 - Los grupos admiten hasta seis miembros y soportan
   create/invite/accept/revoke/kick/transfer/disband/leave/status y `party say`
   (`gsay`/`gtell`). No hay follow/assist/rescue, selección general de aliados,
@@ -329,6 +344,24 @@ y readiness 8/8. No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector
 de pantalla ni soak de 24 horas; la evidencia local precommit no es una
 aceptación de release.
 
+### Evidencia integrada de recompensas y afijos 4B
+
+La fase 4B usa WorldPack v7, AreaPack v6, WorldProject v2, snapshot v7 y
+esquema SQL v11. El artefacto canónico de Lantern Square contiene tres salas,
+diez prototipos, nueve instancias iniciales, dos tablas, una fuente, un afijo y
+un pool; ocupa 52.349 bytes y su SHA-256 es
+`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
+El árbol integrado pasa 608/608 pruebas Rust (122 core, 245 servidor, 117
+WorldPack y 124 restantes), formato, check, build y clippy estricto; 112/112
+Vitest, 86/86 Node/bot y 40/40 escenarios Playwright, 20 Chromium y 20 Firefox.
+También pasan `cargo-deny`, licencias/avisos 307 Rust/76 web, humo, carga 16/32
+con 15 WebSocket+1 Telnet, cero errores y 55.365.632 bytes de crecimiento RSS
+bajo 96 MiB, y soak corto de 30 s con 58 rondas, 127 acciones, readiness 8/8,
+cero errores, 45.211.648 bytes totales y 1.536.000 sostenidos. Es evidencia
+local precommit dirty: el verificador de aceptación rechaza correctamente el
+reporte corto por duración/perfil/warmup/árbol no limpio, no por fallo
+funcional. No acredita PostgreSQL real v11, WebKit, lector manual ni soak 24 h.
+
 ### Evidencia histórica retenida
 
 La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
@@ -371,10 +404,10 @@ Inspecciona el job real; no conviertas una insignia en evidencia.
 9. Autoridad de staff separada de XP, nivel, clase y talentos. Usa la capacidad
    concreta y auditoría append-only; perfiles y títulos son asignación/presentación,
    no autorización implícita.
-10. Las fases 3A–4A ya separan prototipo/instancia, derivan pilas, aplican
+10. Las fases 3A–4B ya separan prototipo/instancia, derivan pilas, aplican
     capacidad recursiva, ejecutan `give` y trade, y resuelven botín repetible
-    con procedencia, derechos round-robin y pass atómicos. Conserva esos
-    invariantes antes de añadir afijos, recompensas selladas u otro reparto.
+    con procedencia, derechos round-robin, pass, recompensas selladas y afijos
+    en commits atómicos. Conserva esos invariantes antes de añadir otro reparto.
     Cajas, llaves y tiradas pagadas quedan fuera.
 11. Optimiza con evidencia. Siguiente ruta: dirty tracking y deltas/coalescing,
     conservando snapshot atómico.
@@ -521,11 +554,11 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
 - fase social 1 implementada, pero sin correo/historial, shout/yell o telepatía;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
-- fase 4A de inventario/botín implementada: prototipos/instancias, creación durable,
+- fase 4B de inventario/botín implementada: prototipos/instancias, creación durable,
   pilas derivadas, contenedores con capacidad/profundidad acotadas, cantidades,
   paginación, rareza, `itemLevel`, vínculo, políticas, `give`, trade confirmado,
-  botín repetible, procedencia, round-robin y pass; sin recompensas selladas,
-  afijos, need/greed, contribución ni master-loot;
+  botín repetible, procedencia, round-robin, pass, recompensas selladas ganadas
+  y afijos deterministas; sin need/greed, contribución ni master-loot;
 - backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;
 - marca/dominios y derechos de terceros siguen siendo trabajo legal externo.
 

@@ -13,7 +13,9 @@ use tiamud_core::{
     AbilityHealDefinition as CoreAbilityHealDefinition,
     AbilityStatusEffectDefinition as CoreAbilityStatusEffectDefinition,
     AbilityTargeting as CoreAbilityTargeting, ActiveEffect,
-    AdvancedClassDefinition as CoreAdvancedClassDefinition,
+    AdvancedClassDefinition as CoreAdvancedClassDefinition, AffixDefinition as CoreAffixDefinition,
+    AffixPoolDefinition as CoreAffixPoolDefinition, AffixPoolEntry as CoreAffixPoolEntry,
+    AffixPoolEntryKind as CoreAffixPoolEntryKind, AffixPosition as CoreAffixPosition,
     BackgroundDefinition as CoreBackgroundDefinition,
     BaseClassDefinition as CoreBaseClassDefinition,
     CharacterDefaultsDefinition as CoreCharacterDefaultsDefinition,
@@ -68,6 +70,8 @@ pub struct LoadedWorldDefinition {
     pub npc_ability_sets: Vec<CoreNpcAbilitySetDefinition>,
     pub loot_tables: Vec<CoreLootTableDefinition>,
     pub loot_sources: Vec<CoreLootSourceDefinition>,
+    pub affixes: Vec<CoreAffixDefinition>,
+    pub affix_pools: Vec<CoreAffixPoolDefinition>,
     pub room_light: Vec<(String, CoreLightLevel)>,
     pub hidden_items: Vec<(String, u16)>,
     pub hidden_npcs: Vec<(String, u16)>,
@@ -109,6 +113,7 @@ pub fn build_loaded_world(
     for npc in &loaded.npcs {
         world.spawn_npc(npc.clone())?;
     }
+    world.configure_affixes(loaded.affixes.clone(), loaded.affix_pools.clone())?;
     world.configure_loot(loaded.loot_tables.clone(), loaded.loot_sources.clone())?;
     for npc_ability_set in &loaded.npc_ability_sets {
         world.configure_npc_abilities(npc_ability_set.clone())?;
@@ -221,6 +226,8 @@ fn convert_pack(
         npc_ability_sets: pack_npc_ability_sets,
         loot_tables: pack_loot_tables,
         loot_sources: pack_loot_sources,
+        affixes: pack_affixes,
+        affix_pools: pack_affix_pools,
         ..
     } = std::mem::take(&mut pack.gameplay);
     let start_room_id = pack.start_room_id.clone();
@@ -248,6 +255,7 @@ fn convert_pack(
             max_stack_units: item.max_stack_units,
             container: item.container.map(map_item_container),
             transfer_policy: map_item_transfer_policy(item.transfer_policy),
+            sealed_loot_table_id: item.sealed_loot_table_id,
         })
         .collect::<Vec<_>>();
     let initial_item_instances = std::mem::take(&mut pack.initial_item_instances)
@@ -362,6 +370,8 @@ fn convert_pack(
     let abilities = pack_abilities.into_iter().map(map_ability).collect();
     let loot_tables = pack_loot_tables.into_iter().map(map_loot_table).collect();
     let loot_sources = pack_loot_sources.into_iter().map(map_loot_source).collect();
+    let affixes = pack_affixes.into_iter().map(map_affix).collect();
+    let affix_pools = pack_affix_pools.into_iter().map(map_affix_pool).collect();
     let prototypes = npc_prototypes
         .into_iter()
         .map(|prototype| (prototype.id.clone(), prototype))
@@ -430,6 +440,8 @@ fn convert_pack(
         npc_ability_sets,
         loot_tables,
         loot_sources,
+        affixes,
+        affix_pools,
         room_light,
         hidden_items,
         hidden_npcs,
@@ -450,6 +462,7 @@ fn map_loot_table(table: world_pack::LootTableDefinition) -> CoreLootTableDefini
                 id: entry.id,
                 item_prototype_id: entry.item_prototype_id,
                 quantity: entry.quantity,
+                affix_pool_id: entry.affix_pool_id,
             })
             .collect(),
         pools: table
@@ -471,8 +484,41 @@ fn map_loot_table(table: world_pack::LootTableDefinition) -> CoreLootTableDefini
                         item_prototype_id: entry.item_prototype_id,
                         min_quantity: entry.min_quantity,
                         max_quantity: entry.max_quantity,
+                        affix_pool_id: entry.affix_pool_id,
                     })
                     .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn map_affix(affix: world_pack::AffixDefinition) -> CoreAffixDefinition {
+    CoreAffixDefinition {
+        id: affix.id,
+        label: affix.label,
+        position: match affix.position {
+            world_pack::AffixPosition::Prefix => CoreAffixPosition::Prefix,
+            world_pack::AffixPosition::Suffix => CoreAffixPosition::Suffix,
+        },
+        attack_bonus_delta: affix.attack_bonus_delta,
+        heal_amount_delta: affix.heal_amount_delta,
+    }
+}
+
+fn map_affix_pool(pool: world_pack::AffixPoolDefinition) -> CoreAffixPoolDefinition {
+    CoreAffixPoolDefinition {
+        id: pool.id,
+        entries: pool
+            .entries
+            .into_iter()
+            .map(|entry| CoreAffixPoolEntry {
+                kind: match entry.kind {
+                    world_pack::AffixPoolEntryKind::Affix => CoreAffixPoolEntryKind::Affix,
+                    world_pack::AffixPoolEntryKind::Nothing => CoreAffixPoolEntryKind::Nothing,
+                },
+                id: entry.id,
+                weight: entry.weight,
+                affix_id: entry.affix_id,
             })
             .collect(),
     }
@@ -1065,6 +1111,35 @@ mod tests {
     }
 
     #[test]
+    fn sealed_reward_authoring_and_runtime_caps_match() {
+        assert_eq!(
+            usize::try_from(world_pack::MAX_SEALED_REWARD_UNITS).unwrap(),
+            tiamud_core::MAX_SEALED_REWARD_UNITS
+        );
+        assert_eq!(
+            world_pack::MAX_AFFIX_DEFINITIONS,
+            tiamud_core::MAX_AFFIX_DEFINITIONS
+        );
+        assert_eq!(world_pack::MAX_AFFIX_POOLS, tiamud_core::MAX_AFFIX_POOLS);
+        assert_eq!(
+            world_pack::MAX_AFFIX_ENTRIES_PER_POOL,
+            tiamud_core::MAX_AFFIX_POOL_ENTRIES
+        );
+        assert_eq!(
+            world_pack::MAX_AFFIX_ENTRIES,
+            tiamud_core::MAX_TOTAL_AFFIX_POOL_ENTRIES
+        );
+        assert_eq!(
+            world_pack::MAX_AFFIX_MODIFIER,
+            tiamud_core::MAX_AFFIX_MODIFIER
+        );
+        assert_eq!(
+            world_pack::MAX_REWARD_ODDS_ROWS,
+            tiamud_core::MAX_REWARD_ODDS_ROWS
+        );
+    }
+
+    #[test]
     fn reviewed_pack_loads_as_a_runtime_definition() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worlds/lantern-square.world.json");
@@ -1117,7 +1192,7 @@ mod tests {
     #[test]
     fn reviewed_pack_loads_item_prototypes_instances_and_an_npc_spawn() {
         let loaded = default_loaded_world().unwrap();
-        assert_eq!(loaded.definition.item_prototypes.len(), 9);
+        assert_eq!(loaded.definition.item_prototypes.len(), 10);
         assert_eq!(loaded.definition.initial_item_instances.len(), 9);
         let tonic = loaded
             .definition
@@ -1164,6 +1239,17 @@ mod tests {
             stormglass_talon.transfer_policy,
             CoreItemTransferPolicy::CharacterBound
         );
+        let storm_seal = loaded
+            .definition
+            .item_prototypes
+            .iter()
+            .find(|prototype| prototype.prototype_id == "tiamud:storm-seal")
+            .unwrap();
+        assert_eq!(
+            storm_seal.sealed_loot_table_id.as_deref(),
+            Some("tiamud:storm-oath-rewards")
+        );
+        assert!(storm_seal.consumable);
         assert!(
             loaded
                 .definition
@@ -1199,8 +1285,10 @@ mod tests {
         assert_eq!(loaded.abilities.len(), 3);
         assert_eq!(loaded.npcs.len(), 1);
         assert_eq!(loaded.npc_ability_sets.len(), 1);
-        assert_eq!(loaded.loot_tables.len(), 1);
+        assert_eq!(loaded.loot_tables.len(), 2);
         assert_eq!(loaded.loot_sources.len(), 1);
+        assert_eq!(loaded.affixes.len(), 1);
+        assert_eq!(loaded.affix_pools.len(), 1);
         assert_eq!(loaded.loot_tables[0].id, "tiamud:gate-stalker-drops");
         assert_eq!(loaded.loot_tables[0].digest_sha256.len(), 64);
         assert!(
@@ -1209,6 +1297,30 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+        assert_eq!(
+            loaded.loot_tables[0].pools[0]
+                .entries
+                .iter()
+                .find(|entry| { entry.item_prototype_id.as_deref() == Some("tiamud:wolf-clasp") })
+                .unwrap()
+                .affix_pool_id
+                .as_deref(),
+            Some("tiamud:storm-talon-affixes")
+        );
+        let reward_table = loaded
+            .loot_tables
+            .iter()
+            .find(|table| table.id == "tiamud:storm-oath-rewards")
+            .unwrap();
+        assert_eq!(
+            reward_table.guaranteed[0].affix_pool_id.as_deref(),
+            Some("tiamud:storm-talon-affixes")
+        );
+        assert_eq!(loaded.affixes[0].id, "tiamud:affix:storm-bitten");
+        assert_eq!(loaded.affixes[0].position, CoreAffixPosition::Prefix);
+        assert_eq!(loaded.affixes[0].attack_bonus_delta, 1);
+        assert_eq!(loaded.affix_pools[0].id, "tiamud:storm-talon-affixes");
+        assert_eq!(loaded.affix_pools[0].entries.len(), 2);
         assert_eq!(loaded.loot_sources[0].npc_spawn_id, "tiamud:gate-stalker-1");
         assert_eq!(
             loaded.loot_sources[0].loot_table_id,

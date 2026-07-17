@@ -20,8 +20,8 @@ use std::{
 };
 use tiamud_cell_frame::{AnsiProfile, Cell, CellAttributes, CellFrame, NativeProtocol, RgbColor};
 use tiamud_core::{
-    CharacterSnapshot, ContainerContentsView, PlayerStateView, SceneAudio, SceneView,
-    TradeContentsView, parse_action,
+    CharacterSnapshot, ContainerContentsView, PlayerStateView, RewardOddsView, SceneAudio,
+    SceneView, TradeContentsView, parse_action,
 };
 use tiamud_telnet_codec::{DO, DONT, IAC, SB, SE, TelnetEvent, TelnetParser, WILL, WONT};
 use tokio::{
@@ -1256,6 +1256,15 @@ async fn serve_entered(
                                             output_queue_bytes(output, gmcp)?;
                                         }
                                     }
+                                    if let Some(odds) = &outcome.reward_odds {
+                                        let gmcp = input.negotiation.reward_odds_gmcp(
+                                            odds,
+                                            outcome.player.revision,
+                                        );
+                                        if !gmcp.is_empty() {
+                                            output_queue_bytes(output, gmcp)?;
+                                        }
+                                    }
                                     write_scene(output, input, &outcome.scene, &outcome.player)?;
                                 }
                                 Err(error) => {
@@ -2261,6 +2270,9 @@ impl TelnetSession {
                     if let Some(capacity) = &item.container_capacity {
                         value["containerCapacity"] = json!(capacity);
                     }
+                    if let Some(affix) = &item.affix {
+                        value["affix"] = json!(affix);
+                    }
                     value
                 })
                 .collect::<Vec<_>>();
@@ -2293,6 +2305,9 @@ impl TelnetSession {
                     });
                     if let Some(capacity) = &item.container_capacity {
                         value["containerCapacity"] = json!(capacity);
+                    }
+                    if let Some(affix) = &item.affix {
+                        value["affix"] = json!(affix);
                     }
                     value
                 })
@@ -2414,6 +2429,9 @@ impl TelnetSession {
                 if let Some(capacity) = &item.container_capacity {
                     value["containerCapacity"] = json!(capacity);
                 }
+                if let Some(affix) = &item.affix {
+                    value["affix"] = json!(affix);
+                }
                 value
             })
             .collect::<Vec<_>>();
@@ -2456,6 +2474,9 @@ impl TelnetSession {
                 });
                 if let Some(capacity) = &item.container_capacity {
                     value["containerCapacity"] = json!(capacity);
+                }
+                if let Some(affix) = &item.affix {
+                    value["affix"] = json!(affix);
                 }
                 value
             })
@@ -2515,6 +2536,9 @@ impl TelnetSession {
                     if let Some(capacity) = &item.container_capacity {
                         value["containerCapacity"] = json!(capacity);
                     }
+                    if let Some(affix) = &item.affix {
+                        value["affix"] = json!(affix);
+                    }
                     value
                 })
                 .collect::<Vec<_>>()
@@ -2548,6 +2572,41 @@ impl TelnetSession {
         });
         if !append_gmcp(&mut output, "Char.Trade.Contents", &fallback) {
             warn!("failed to encode bounded Char.Trade.Contents overflow fallback");
+        }
+        output
+    }
+
+    fn reward_odds_gmcp(&self, odds: &RewardOddsView, revision: u64) -> Vec<u8> {
+        if !self.q.local_enabled(OPT_GMCP) || !self.gmcp.supports("char.reward") {
+            return Vec::new();
+        }
+        let mut output = Vec::new();
+        let mut full =
+            serde_json::to_value(odds).expect("reward odds views contain only serializable values");
+        full.as_object_mut()
+            .expect("reward odds views serialize as objects")
+            .insert("revision".into(), json!(revision));
+        if append_gmcp(&mut output, "Char.Reward.Odds", &full) {
+            return output;
+        }
+
+        // The complete human-readable page was already emitted as Telnet
+        // text. Keep exact fractions and deltas in GMCP while bounding only
+        // presentation labels if a reviewed pack reaches the 8 KiB package
+        // budget.
+        bound_reward_odds_labels(&mut full, MAX_GMCP_CONTAINER_FALLBACK_LABEL_BYTES);
+        if let Some(object) = full.as_object_mut() {
+            object.insert("truncated".into(), json!(true));
+            object.insert(
+                "overflow".into(),
+                json!({
+                    "reason": "messageTooLarge",
+                    "maximumBytes": MAX_GMCP_BYTES,
+                }),
+            );
+        }
+        if !append_gmcp(&mut output, "Char.Reward.Odds", &full) {
+            warn!("failed to encode bounded Char.Reward.Odds overflow fallback");
         }
         output
     }
@@ -2691,6 +2750,7 @@ const GMCP_PACKAGES: &[&str] = &[
     "Char.Vitals 1",
     "Char.Items 1",
     "Char.Trade 1",
+    "Char.Reward 1",
     "Tiamud.Scene 1",
     "Tiamud.Character 1",
     "Tiamud.Assets 1",
@@ -2746,6 +2806,27 @@ fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> (String, bool) {
         .last()
         .unwrap_or(0);
     (value[..end].to_owned(), true)
+}
+
+fn bound_reward_odds_labels(value: &mut Value, maximum_bytes: usize) {
+    match value {
+        Value::String(text) => {
+            if text.len() > maximum_bytes {
+                *text = bounded_utf8_prefix(text, maximum_bytes).0;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                bound_reward_odds_labels(value, maximum_bytes);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                bound_reward_odds_labels(value, maximum_bytes);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn append_telnet_escaped(output: &mut Vec<u8>, bytes: &[u8]) {
@@ -4332,6 +4413,7 @@ mod tests {
                     total_weight_grams: 1_000_000,
                     transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                     bound_to_you: false,
+                    affix: None,
                     can_give: false,
                     can_trade: false,
                     container_capacity: None,
@@ -4396,6 +4478,7 @@ mod tests {
                     total_weight_grams: 1_000_000,
                     transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                     bound_to_you: false,
+                    affix: None,
                     can_give: false,
                     can_trade: true,
                     container_capacity: Some(tiamud_core::InventoryCapacityView {
@@ -4443,6 +4526,102 @@ mod tests {
             assert_eq!(item["canGive"], false);
             assert_eq!(item["containerCapacity"]["maxSlots"], 1_000);
         }
+    }
+
+    #[test]
+    fn reward_odds_gmcp_keeps_exact_fractions_and_bounds_only_labels() {
+        let mut session = TelnetSession::default();
+        session.begin_initial_negotiation();
+        session.handle(vec![TelnetEvent::Negotiation {
+            command: DO,
+            option: OPT_GMCP,
+        }]);
+        session.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: br#"Core.Supports.Set ["Char.Reward 1"]"#.to_vec(),
+        }]);
+        let odds = RewardOddsView {
+            selector: "o6666666666666666".into(),
+            page: 2,
+            total_pages: 3,
+            guaranteed: Vec::new(),
+            weighted: vec![tiamud_core::RewardOddsWeightedRow {
+                pool_label: "storm draw".into(),
+                rolls: 2,
+                outcome_label: "nothing".into(),
+                min_quantity: 0,
+                max_quantity: 0,
+                probability_numerator: 3,
+                probability_denominator: 7,
+                affix_pool_label: None,
+            }],
+            affixes: vec![tiamud_core::RewardOddsAffixRow {
+                parent_outcome_label: "iron blade".into(),
+                affix_label: "charged".into(),
+                position: Some(tiamud_core::AffixPosition::Prefix),
+                attack_bonus_delta: 2,
+                heal_amount_delta: 0,
+                conditional_probability_numerator: 1,
+                conditional_probability_denominator: 5,
+            }],
+        };
+
+        let payloads = gmcp_payloads(&session.reward_odds_gmcp(&odds, 12));
+        assert_eq!(payloads.len(), 1);
+        let payload: Value = serde_json::from_slice(
+            payloads[0]
+                .strip_prefix(b"Char.Reward.Odds ")
+                .expect("reward package"),
+        )
+        .unwrap();
+        assert_eq!(payload["selector"], "o6666666666666666");
+        assert_eq!(payload["revision"], 12);
+        assert_eq!(payload["weighted"][0]["probabilityNumerator"], 3);
+        assert_eq!(payload["weighted"][0]["probabilityDenominator"], 7);
+        assert_eq!(
+            payload["affixes"][0]["conditionalProbabilityDenominator"],
+            5
+        );
+        let serialized = serde_json::to_string(&payload).unwrap();
+        assert!(!serialized.contains("lootTableId"));
+        assert!(!serialized.contains("affixPoolId"));
+        assert!(!serialized.contains("digest"));
+
+        let oversized = RewardOddsView {
+            selector: odds.selector.clone(),
+            page: 1,
+            total_pages: 1,
+            guaranteed: Vec::new(),
+            weighted: Vec::new(),
+            affixes: (0..20)
+                .map(|_| tiamud_core::RewardOddsAffixRow {
+                    parent_outcome_label: "é".repeat(256),
+                    affix_label: "ø".repeat(256),
+                    position: Some(tiamud_core::AffixPosition::Suffix),
+                    attack_bonus_delta: 0,
+                    heal_amount_delta: 3,
+                    conditional_probability_numerator: 2,
+                    conditional_probability_denominator: 9,
+                })
+                .collect(),
+        };
+        let payloads = gmcp_payloads(&session.reward_odds_gmcp(&oversized, 13));
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].len() <= MAX_GMCP_BYTES);
+        let payload: Value = serde_json::from_slice(
+            payloads[0]
+                .strip_prefix(b"Char.Reward.Odds ")
+                .expect("reward package"),
+        )
+        .unwrap();
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(payload["overflow"]["maximumBytes"], MAX_GMCP_BYTES);
+        assert_eq!(payload["affixes"].as_array().unwrap().len(), 20);
+        assert_eq!(payload["affixes"][0]["conditionalProbabilityNumerator"], 2);
+        assert!(
+            payload["affixes"][0]["affixLabel"].as_str().unwrap().len()
+                <= MAX_GMCP_CONTAINER_FALLBACK_LABEL_BYTES
+        );
     }
 
     #[test]
@@ -5096,6 +5275,7 @@ mod tests {
                     room_id: "demo:lantern-square".into(),
                 },
                 binding: tiamud_core::ItemBinding::Unbound,
+                item_affixes: Vec::new(),
             },
         );
         runtime.item_provenance.insert(
@@ -5183,6 +5363,7 @@ mod tests {
                 total_weight_grams: 1,
                 transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                 bound_to_you: false,
+                affix: None,
                 container_capacity: None,
                 loot: Some(tiamud_core::SceneLootAccessView {
                     access: tiamud_core::LootAccessView::Yours,
@@ -5258,6 +5439,7 @@ mod tests {
             total_weight_grams: 700,
             transfer_policy: tiamud_core::ItemTransferPolicy::CharacterBound,
             bound_to_you: false,
+            affix: None,
             container_capacity: Some(tiamud_core::InventoryCapacityView {
                 used_slots: 1,
                 max_slots: 8,

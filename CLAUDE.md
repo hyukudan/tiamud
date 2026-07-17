@@ -32,32 +32,34 @@ describe el baseline vigente de personajes, inventario y medios.
   la ruta local sin servicios. Cada proceso abre uno y nunca doble-escribe.
 - Buzones acotados por sesión encaminan proyecciones sin amplificación de
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
-- WorldPack v6 y AreaPack v5 son actuales; WorldProject permanece en v2.
-  WorldPack v5/v4/v3/v2, AreaPack v4/v3/v2/v1 y Envy se normalizan en fronteras explícitas. El servidor carga un paquete
+- WorldPack v7 y AreaPack v6 son actuales; WorldProject permanece en v2.
+  WorldPack v6/v5/v4/v3/v2, AreaPack v5/v4/v3/v2/v1 y Envy se normalizan en fronteras explícitas. El servidor carga un paquete
   completo; ADR 0005 para carga caliente/LRU es futuro.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
-- La fase de inventario 4A separa `itemPrototypes` de instancias durables y
-  persiste `WorldRuntimeSnapshot` v6 con DTO exactos v1-v6. v1-v3 se
+- La fase de inventario 4B separa `itemPrototypes` de instancias durables y
+  persiste `WorldRuntimeSnapshot` v7 con DTO exactos v1-v7. v1-v3 se
   convierten a vínculo `unbound`; schema-smuggling, vínculos y políticas
   incoherentes fallan cerrados; v4 normaliza a contador inicial y trades vacíos.
   SQLite/PostgreSQL conservan el snapshot único en esquema v11, sin tabla
   espejo ni custodia SQL. Los snapshots v1-v5 conservan el límite de 1 MiB y
-  v6 admite 2 MiB. Restore conserva nuevas
+  v6-v7 admiten 2 MiB; v6 rechaza campos v7 y normaliza a afijos vacíos y
+  contador de aperturas inicial. Restore conserva nuevas
   instancias iniciales del WorldPack y superpone el snapshot sin resucitar
   instancias runtime ausentes.
-- Las pilas fungibles se derivan por ubicación/prototipo/vínculo y no persisten
+- Las pilas fungibles se derivan por ubicación/prototipo/vínculo/afijo y no persisten
   cantidad ni ID de pila. Los contenedores únicos tienen capacidad propia, peso
   recursivo, profundidad máxima cuatro y rechazo atómico de
   ciclos/sobrecapacidad. Rareza cerrada, `itemLevel`, peso unitario/total,
   cantidad, slots, capacidad, política y vínculo se proyectan como texto con IDs
   opacos derivados de una sal aleatoria por sesión; Telnet muestra y acepta esas
   referencias. Los medios de objeto referencian el prototipo y `hiddenItems` la
-  instancia.
-- WorldPack v6/AreaPack v5 aceptan `transferable`, `character_bound` y
-  `non_transferable`, igual que WorldPack v5/AreaPack v4; WorldPack v4/AreaPack
-  v3 y anteriores solo `transferable`. La adquisición
+  instancia. Un afijo durable por instancia añade un prefijo/sufijo y deltas
+  acotados de ataque/curación sin exponer IDs ni digests internos.
+- WorldPack v7/AreaPack v6 aceptan `transferable`, `character_bound` y
+  `non_transferable`, igual que WorldPack v6/v5 y AreaPack v5/v4; WorldPack
+  v4/AreaPack v3 y anteriores solo `transferable`. La adquisición
   liga recursivamente, y ninguna raíz puede soltar o cambiar de dueño un
   descendiente restringido. `give [cantidad] <objeto> to <personaje>` mueve
   1..=256 raíces portadas a un receptor distinto, conectado y en la misma sala,
@@ -72,8 +74,12 @@ describe el baseline vigente de personajes, inventario y medios.
   Congela la cohorte de grupo, asigna round-robin, admite `loot pass`, reserva
   20 ticks, publica después y desaparece al 120. La capacidad suprime sin
   bloquear derrota ni reroll; reiniciar cancela encuentros abiertos pero no
-  derechos resueltos. Need/greed, contribución, master-loot, afijos y
-  recompensas selladas siguen pendientes; no hay cajas ni tiradas pagadas.
+  derechos resueltos. La fase 4B añade sellos obtenidos solo como botín NPC:
+  `open` simula y confirma atómicamente hasta 16 resultados, vínculo, capacidad
+  y afijo, mientras `reward odds` publica fracciones exactas paginadas. Web,
+  Telnet y `Char.Reward 1` GMCP comparten la misma autoridad. Need/greed,
+  contribución y master-loot siguen pendientes; no hay cajas, llaves, moneda
+  premium, pity ni tiradas pagadas.
 - La fase social 1 está implementada: `say`, `tell`, `reply` online, grupos de
   seis miembros con chat y liderazgo, y suscripciones durables a `general`,
   `newbie`, `staff`. `staff` exige perfil `moderator`, `administrator` o
@@ -141,7 +147,7 @@ El pase Playwright final completa 36/36 escenarios, 18 Chromium y 18 Firefox.
 No se ejecutaron
 PostgreSQL real v10, WebKit local ni soak de 24 horas.
 
-La integración actual 4A añade WorldPack v6/AreaPack v5, snapshot v6 y esquema
+La integración histórica 4A añadió WorldPack v6/AreaPack v5, snapshot v6 y esquema
 SQL v11. Pasa 587/587 pruebas Rust (113 core, 240 servidor, 112 WorldPack y 122
 restantes), clippy/formato, 109 Vitest, 84 Node/bot y 19/19 Chromium. También
 pasan licencias/avisos 307 Rust/76 web, humo, 16 bootstraps/32 rondas de carga
@@ -150,6 +156,22 @@ y el soak corto de 58 rondas/127 acciones/readiness 8/8. Lantern Square ocupa
 `3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
 No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector manual ni soak de
 24 horas.
+
+La integración actual 4B añade WorldPack v7/AreaPack v6 y snapshot v7 sobre el
+mismo esquema SQL v11. Lantern Square contiene 10 prototipos, 9 instancias
+iniciales, 2 tablas, 1 fuente, 1 afijo y 1 pool; ocupa 52.349 bytes y tiene
+SHA-256
+`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
+Pasan formato, check, build, clippy estricto, 608/608 pruebas Rust (122 core,
+245 servidor, 117 WorldPack y 124 restantes), 112 Vitest, 86 Node/bot y 40/40
+Playwright (20 Chromium y 20 Firefox). También pasan cargo-deny,
+licencias/avisos 307 Rust/76 web, humo, carga 16/32 con 15 WebSocket+1 Telnet y
+soak corto de 30 s con 58 rondas, 127 acciones y readiness 8/8, todos sin
+errores. La carga crece 55.365.632 bytes RSS, bajo 96 MiB; el soak informa
+45.211.648 bytes totales y 1.536.000 sostenidos. Son diagnósticos locales sobre
+un árbol precommit dirty: el verificador rechaza correctamente el reporte corto
+por duración/perfil/warmup/árbol no limpio. No acreditan PostgreSQL real v11,
+WebKit, lector manual, candidato limpio ni soak de 24 h.
 
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil
@@ -179,8 +201,8 @@ por facturación antes de ejecutar.
 - Medios pasan por pipeline y manifiesto revisado; perderlos no cambia juego.
 - La identidad durable prototype/instance, las pilas derivadas y los
   contenedores acotados, `give`, trade confirmado y botín repetible con
-  procedencia/derechos ya existen. Conserva su atomicidad antes de afijos,
-  recompensas selladas o reparto avanzado. No añadas cajas de botín pagadas al
+  procedencia/derechos, recompensas selladas y afijos ya existen. Conserva su
+  atomicidad antes de reparto avanzado. No añadas cajas de botín pagadas al
   baseline.
 - Las acciones staff que tocan el mundo resuelven un personaje conectado y
   comprueban una capacidad concreta. Conserva la sintaxis textual con `|` para

@@ -1,8 +1,8 @@
 # Projects, areas and composition
 
 The current modular source format is a **WorldProject manifest v2** containing
-strict **AreaPack v5** files. `tiamud-world compose` validates the complete
-graph and produces one canonical **WorldPack v6** document.
+strict **AreaPack v6** files. `tiamud-world compose` validates the complete
+graph and produces one canonical **WorldPack v7** document.
 
 Use [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json)
 and [`worlds/areas/square.area.json`](../../worlds/areas/square.area.json) as
@@ -11,7 +11,7 @@ reviewed examples.
 ## Ownership and dependencies
 
 An area owns every room, item prototype, initial item instance, NPC, loot table,
-loot source, ability, progression entry, media record, script and content test
+loot source, affix, affix pool, ability, progression entry, media record, script and content test
 it declares. Stable IDs are globally unique across the composed project. A legacy-normalized
 prototype/instance pair may preserve the same historical string because the
 two IDs occupy distinct typed namespaces.
@@ -32,10 +32,15 @@ source's NPC spawn and table. A table and source have separate ownership even
 when they are declared in the same area. Each spawn may have at most one
 source, every table must be used, and fixed `npc_spawn` instances plus that
 table's repeatable worst case may not exceed 64 roots per defeat.
+Sealed prototypes add an edge to their reward table. Loot entries with an
+`affixPoolId` add an edge to that pool, and each pool entry adds an edge to its
+affix definition. A sealed reward table cannot be attached directly to an NPC
+loot source: the NPC-sourced normal table must award the sealed prototype.
+Every cross-area edge still requires `dependsOn`.
 
 ```json
 {
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "id": "north-gate",
   "dependsOn": ["square"],
   "itemPrototypes": [],
@@ -45,6 +50,8 @@ table's repeatable worst case may not exceed 64 roots per defeat.
   "npcSpawns": [],
   "lootTables": [],
   "lootSources": [],
+  "affixes": [],
+  "affixPools": [],
   "abilities": [],
   "entityMedia": []
 }
@@ -53,7 +60,8 @@ table's repeatable worst case may not exceed 64 roots per defeat.
 Unknown fields fail closed in modular authoring. Keep an AreaPack focused on a
 coherent ownership boundary, not on a deployment boundary.
 
-AreaPack v1-v4 normalize to v5 without inventing loot. Declaring
+AreaPack v1-v5 normalize to v6 without inventing sealed rewards or affixes.
+AreaPack v1-v4 also normalize without inventing loot. Declaring
 `lootTables` or `lootSources`, even empty ones, in an older schema is rejected
 rather than silently reinterpreted. Native base/variant room titles are limited
 to 128 safe UTF-8 bytes and base/variant descriptions to 8,192 safe UTF-8 bytes.
@@ -82,14 +90,14 @@ the server loads one flat WorldPack at startup. It does not download missing
 areas, resolve dependencies during play, hot-add modules or evict them through
 LRU. Runtime hot-loading remains future architecture.
 
-Lantern Square currently composes three areas into three rooms, nine item
-prototypes, nine initial instances, one loot table and one loot source. The
-canonical 50,498-byte artifact has SHA-256
-`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
+Lantern Square currently composes three areas into three rooms, ten item
+prototypes, nine initial instances, two loot tables and one loot source. The
+canonical 52,349-byte artifact has SHA-256
+`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
 
 ## Direct WorldPack authoring
 
-A monolithic WorldPack v6 remains valid, but AreaPacks are preferable once
+A monolithic WorldPack v7 remains valid, but AreaPacks are preferable once
 multiple builders or regions are involved. Use `tiamud-world build` to validate
 and canonicalize a direct document:
 

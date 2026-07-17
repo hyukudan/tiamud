@@ -6,6 +6,8 @@ use thiserror::Error;
 
 use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transaction};
 
+const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
+
 const TABLES: [&str; 17] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -394,7 +396,7 @@ fn validate_runtime_snapshot(
 ) -> Result<(), TransferError> {
     let runtime_version =
         u32::try_from(snapshot_version).map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
-    let maximum = if runtime_version < tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
+    let maximum = if runtime_version <= LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION {
         tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
     } else {
         tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
@@ -786,7 +788,20 @@ mod tests {
         connection
     }
 
-    fn remove_v6_loot_fields(snapshot: &mut serde_json::Value) {
+    fn remove_v7_fields(snapshot: &mut serde_json::Value) {
+        let snapshot = snapshot.as_object_mut().unwrap();
+        snapshot.remove("nextRewardOpenId");
+        for item in snapshot["itemInstances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            item.as_object_mut().unwrap().remove("itemAffixes");
+        }
+    }
+
+    fn remove_v6_and_v7_fields(snapshot: &mut serde_json::Value) {
+        remove_v7_fields(snapshot);
         let snapshot = snapshot.as_object_mut().unwrap();
         for field in [
             "nextLootDropId",
@@ -867,7 +882,7 @@ mod tests {
 
         let mut v3 = serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
         v3["snapshotVersion"] = serde_json::json!(3);
-        remove_v6_loot_fields(&mut v3);
+        remove_v6_and_v7_fields(&mut v3);
         v3.as_object_mut().unwrap().remove("nextTradeId");
         v3.as_object_mut().unwrap().remove("trades");
         for item in v3["itemInstances"].as_object_mut().unwrap().values_mut() {
@@ -882,7 +897,7 @@ mod tests {
 
         let mut v4 = serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
         v4["snapshotVersion"] = serde_json::json!(4);
-        remove_v6_loot_fields(&mut v4);
+        remove_v6_and_v7_fields(&mut v4);
         v4.as_object_mut().unwrap().remove("nextTradeId");
         v4.as_object_mut().unwrap().remove("trades");
         validate_runtime_snapshot(4, &v4.to_string()).unwrap();
@@ -897,6 +912,52 @@ mod tests {
         assert!(matches!(
             validate_runtime_snapshot(3, &v3.to_string()),
             Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+
+        let mut v6 = serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
+        v6["snapshotVersion"] = serde_json::json!(6);
+        remove_v7_fields(&mut v6);
+        validate_runtime_snapshot(6, &v6.to_string()).unwrap();
+        v6["itemInstances"][first_item.0.as_str()]["itemAffixes"] = serde_json::json!([]);
+        assert!(matches!(
+            validate_runtime_snapshot(6, &v6.to_string()),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
+    fn v6_and_v7_transfer_validation_use_the_two_mib_budget() {
+        let between_budgets = format!(
+            "\"{}\"",
+            "é".repeat(tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES / 2)
+        );
+        assert!(between_budgets.len() > tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES);
+        assert!(between_budgets.len() <= tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES);
+
+        assert!(matches!(
+            validate_runtime_snapshot(5, &between_budgets),
+            Err(TransferError::RuntimeSnapshotTooLarge {
+                maximum: tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES,
+            })
+        ));
+        assert!(matches!(
+            validate_runtime_snapshot(6, &between_budgets),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+        assert!(matches!(
+            validate_runtime_snapshot(7, &between_budgets),
+            Err(TransferError::InvalidRuntimeSnapshot)
+        ));
+
+        let above_current = format!(
+            "\"{}\"",
+            "é".repeat(tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES / 2)
+        );
+        assert!(matches!(
+            validate_runtime_snapshot(7, &above_current),
+            Err(TransferError::RuntimeSnapshotTooLarge {
+                maximum: tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES,
+            })
         ));
     }
 

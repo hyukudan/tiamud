@@ -1,7 +1,7 @@
 # Autoría, validación y publicación de mundos
 
-Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v6**
-como artefacto canónico de ejecución, **AreaPack v5** como módulo de autoría y
+Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v7**
+como artefacto canónico de ejecución, **AreaPack v6** como módulo de autoría y
 `WorldProjectManifest` v2 como composición fuera de línea. La autoridad exacta
 son los tipos y validadores de `crates/world-pack`; el ejemplo revisado es
 [`worlds/lantern-square.world.json`](../worlds/lantern-square.world.json).
@@ -12,7 +12,7 @@ variantes, scripts y pruebas de contenido.
 
 ## Frontera de ejecución
 
-El servidor valida y carga un único `WorldPackDocument` v6 completo antes de
+El servidor valida y carga un único `WorldPackDocument` v7 completo antes de
 abrir sus listeners. `TIAMUD_WORLD_PACK` permite seleccionar un artefacto
 externo revisado; si no se define, se usa Lantern Square embebido.
 
@@ -34,9 +34,9 @@ flowchart LR
     accDescr: Las áreas se componen y validan fuera de línea para producir un solo WorldPack canónico que el servidor carga al arrancar. No existe carga caliente.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
-    Areas[AreaPack v5<br/>1..=256 módulos] --> Compose
+    Areas[AreaPack v6<br/>1..=256 módulos] --> Compose
     Compose --> Validate[Validación global<br/>referencias · límites · Lua]
-    Validate --> Artifact[WorldPack v6 canónico]
+    Validate --> Artifact[WorldPack v7 canónico]
     Artifact --> Server[Servidor único<br/>carga al arrancar]
     Hot[Catálogo caliente/LRU] -. futuro .-> Server
 ```
@@ -45,14 +45,14 @@ flowchart LR
 
 | Entrada | Tratamiento |
 | --- | --- |
-| WorldPack v6 | Formato canónico nativo. |
-| WorldPack v5/v4/v3/v2 | Se normaliza de forma determinista a v6 antes de validar, sin inventar tablas ni fuentes de botín. |
-| AreaPack v5 | Formato modular nativo. |
-| AreaPack v4/v3/v2/v1 | Se normaliza a v5 antes de componer, sin inventar tablas ni fuentes de botín. |
+| WorldPack v7 | Formato canónico nativo. |
+| WorldPack v6/v5/v4/v3/v2 | Se normaliza de forma determinista a v7 antes de validar, sin inventar sellos ni afijos; v2-v5 tampoco inventan tablas ni fuentes de botín. |
+| AreaPack v6 | Formato modular nativo. |
+| AreaPack v5/v4/v3/v2/v1 | Se normaliza a v6 antes de componer, sin inventar sellos ni afijos; v1-v4 tampoco inventan tablas ni fuentes de botín. |
 | Envy/Merc | Solo pasa por `envy-import`; los programas históricos nunca se ejecutan. |
 
 La compatibilidad antigua no permite escribir vocabulario legado en un
-documento nativo. WorldPack v6 y AreaPack v5 rechazan `items`, `room.items`,
+documento nativo. WorldPack v7 y AreaPack v6 rechazan `items`, `room.items`,
 `itemRules` y `lootItemIds`: usan `itemPrototypes` e
 `initialItemInstances`.
 
@@ -61,6 +61,12 @@ aunque estén vacíos, en WorldPack v2-v5 o AreaPack v1-v4 se rechaza como mezcl
 de esquemas. La conversión de esos formatos crea colecciones vacías: ni el
 normalizador ni `envy-import` deducen probabilidades a partir de resets o listas
 históricas ambiguas.
+
+Las recompensas selladas, `affixes`, `affixPools` y `affixPoolId` nacen en
+WorldPack v7 y AreaPack v6. Declararlos, aunque estén vacíos, en formatos
+anteriores se rechaza como mezcla de esquemas. La normalización conserva el
+botín normal de v6/v5, pero no inventa sellos, probabilidades secundarias ni
+afijos.
 
 WorldPack v4 y AreaPack v3 reciben por normalización `maxStackUnits: 1`, sin
 contenedor y con `transferPolicy: transferable`. En esas versiones la política
@@ -115,15 +121,15 @@ Ejemplo:
 }
 ```
 
-## AreaPack v5
+## AreaPack v6
 
 Cada área reutiliza los mismos registros del WorldPack; no crea una segunda
 representación de salas, objetos o NPC. Solo añade `id` y `dependsOn` como
 frontera de propiedad.
 
 ```text
-AreaPack v5
-├── schemaVersion! = 5
+AreaPack v6
+├── schemaVersion! = 6
 ├── id!
 ├── dependsOn[]?
 ├── itemPrototypes[]?
@@ -133,6 +139,8 @@ AreaPack v5
 ├── npcSpawns[]?
 ├── lootTables[]?
 ├── lootSources[]?
+├── affixes[]?
+├── affixPools[]?
 ├── levelThresholds[]?
 ├── lineages[]?
 ├── backgrounds[]?
@@ -284,15 +292,15 @@ es botín fijo authored, asignado una sola vez y validado. El botín repetible s
 declara por separado mediante `lootTables` y `lootSources`, como se detalla más
 abajo.
 
-## WorldPack v6
+## WorldPack v7
 
 El artefacto plano conserva identidad, catálogos de objeto, salas y gameplay.
 Las extensiones de multimedia/percepción/scripts se aplanan en el documento
 por `WorldPackDocument` aunque la estructura Rust separa el núcleo del mundo.
 
 ```text
-WorldPack v6
-├── schemaVersion! = 6
+WorldPack v7
+├── schemaVersion! = 7
 ├── id!
 ├── name!
 ├── startRoomId!
@@ -308,7 +316,9 @@ WorldPack v6
 │   ├── abilities[]?
 │   ├── npcAbilitySets[]?
 │   ├── lootTables[]?
-│   └── lootSources[]?
+│   ├── lootSources[]?
+│   ├── affixes[]?
+│   └── affixPools[]?
 ├── roomMedia[]?
 ├── entityMedia[]?
 ├── roomPerception[]?
@@ -321,7 +331,7 @@ Un mundo mínimo sin objetos:
 
 ```json
 {
-  "schemaVersion": 6,
+  "schemaVersion": 7,
   "id": "ejemplo",
   "name": "Mundo de ejemplo",
   "startRoomId": "ejemplo:entrada",
@@ -441,9 +451,10 @@ ubicaciones relativas de todo su subárbol.
 
 ### Propiedad efectiva y transferencia
 
-WorldPack v6 y AreaPack v5 aceptan las tres políticas. La vinculación no se
-escribe en autoría: pertenece a cada instancia runtime y se crea, valida y
-persiste cuando el personaje adquiere el objeto.
+WorldPack v7 y AreaPack v6 aceptan las tres políticas. WorldPack v5 y AreaPack
+v4 también las aceptaban en su frontera histórica. La vinculación no se escribe
+en autoría: pertenece a cada instancia runtime y se crea, valida y persiste
+cuando el personaje adquiere el objeto.
 
 - `transferable` puede cambiar de propietario o volver al mundo si todas las
   instancias de su subárbol también son transferibles;
@@ -477,8 +488,8 @@ interfaz, nunca sustituyen esta autorización del servidor.
 La fase 3D implementa intercambio confirmado como estado runtime, no como
 autoría del WorldPack. Solo reserva raíces `Carried` cuyo subárbol completo es
 `transferable`; no añade campos de trade, escrow ni propietario a
-`ItemPrototype` o `InitialItemInstance`. Siguen ausentes entrega offline/remota,
-afijos y los repartos need/greed, master-loot o por contribución.
+`ItemPrototype` o `InitialItemInstance`. Siguen ausentes entrega offline/remota
+y los repartos need/greed, master-loot o por contribución.
 
 ## Botín fijo y repetible
 
@@ -497,8 +508,9 @@ canónico. Cada pool realiza `rolls` selecciones con reemplazo. Una entrada
 una instancia y no admite prototipo ni cantidades. El runtime usa rejection
 sampling, no porcentajes flotantes ni módulo sesgado.
 
-AreaPack v5 declara ambas colecciones en su nivel superior; WorldPack v6 las
-sitúa dentro de `gameplay`. El fragmento siguiente muestra su forma común:
+AreaPack v6 declara ambas colecciones en su nivel superior; WorldPack v7 las
+sitúa dentro de `gameplay`. El botín normal se introdujo en AreaPack v5 y
+WorldPack v6. El fragmento siguiente muestra su forma común actual:
 
 ```json
 {
@@ -509,6 +521,11 @@ sitúa dentro de `gameplay`. El fragmento siguiente muestra su forma común:
         {
           "id": "tiamud:drop:road-token",
           "itemPrototypeId": "tiamud:road-token",
+          "quantity": 1
+        },
+        {
+          "id": "tiamud:drop:storm-seal",
+          "itemPrototypeId": "tiamud:storm-seal",
           "quantity": 1
         }
       ],
@@ -523,7 +540,8 @@ sitúa dentro de `gameplay`. El fragmento siguiente muestra su forma común:
               "weight": 6000,
               "itemPrototypeId": "tiamud:wolf-clasp",
               "minQuantity": 1,
-              "maxQuantity": 1
+              "maxQuantity": 1,
+              "affixPoolId": "tiamud:storm-talon-affixes"
             },
             {
               "kind": "nothing",
@@ -547,9 +565,9 @@ sitúa dentro de `gameplay`. El fragmento siguiente muestra su forma común:
 }
 ```
 
-En la demostración, cada derrota produce un `tiamud:road-token` garantizado y
-realiza una tirada: `tiamud:wolf-clasp` tiene peso 6000 y `nothing` 4000, es
-decir, 60 % frente a 40 %. Además, la instancia inicial
+En la demostración, cada derrota produce un `tiamud:road-token` y un
+`tiamud:storm-seal` garantizados y realiza una tirada: `tiamud:wolf-clasp`
+tiene peso 6000 y `nothing` 4000, es decir, 60 % frente a 40 %. Además, la instancia inicial
 `tiamud:stormglass-talon` permanece como botín fijo de la primera derrota. La
 política `party_round_robin` reparte cada raíz sucesiva por una cohorte de hasta
 seis personajes; `credited_character` reservaría todas al iniciador. La
@@ -568,11 +586,111 @@ Reglas de referencias y capacidad:
 - el peor caso de raíces fijas más unidades repetibles para una aparición no
   puede superar 64 por derrota.
 
+## Sellos ganados y afijos (fase 4B)
+
+WorldPack v7 y AreaPack v6 añaden recompensas selladas obtenidas jugando y un
+único afijo opcional por unidad de botín `unique`. La decisión autoritativa es
+el [ADR 0014](decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
+No son cajas pagadas: no existen compra de tiradas, llaves, pity ni una moneda
+premium implícita.
+
+Un prototipo sellado declara `sealedLootTableId` y debe ser `unique`,
+`maxStackUnits: 1`, consumible, `character_bound`, sin contenedor, equipo,
+ataque, curación ni efecto. No admite instancia inicial. Una tabla normal
+asociada a un NPC debe generarlo como recompensa; su tabla de apertura no puede
+ser una `lootSource` directa ni producir otro sello. La apertura siempre genera
+entre 1 y 16 unidades y su expansión de resultados base más afijos
+condicionales admite como máximo 1.024 filas visibles en `reward odds`.
+
+```json
+{
+  "itemPrototypes": [
+    {
+      "id": "tiamud:storm-seal",
+      "name": "juramento sellado del acechante",
+      "description": "Un cordón ennegrecido por la lluvia rodea una esquirla marcada.",
+      "consumable": true,
+      "weightGrams": 40,
+      "slotCost": 1,
+      "rarity": "rare",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "maxStackUnits": 1,
+      "transferPolicy": "character_bound",
+      "sealedLootTableId": "tiamud:storm-oath-rewards"
+    }
+  ],
+  "lootTables": [
+    {
+      "id": "tiamud:storm-oath-rewards",
+      "guaranteed": [
+        {
+          "id": "tiamud:reward:stormglass-talon",
+          "itemPrototypeId": "tiamud:stormglass-talon",
+          "quantity": 1,
+          "affixPoolId": "tiamud:storm-talon-affixes"
+        }
+      ]
+    }
+  ],
+  "affixes": [
+    {
+      "id": "tiamud:affix:storm-bitten",
+      "label": "mordido por la tormenta",
+      "position": "prefix",
+      "attackBonusDelta": 1
+    }
+  ],
+  "affixPools": [
+    {
+      "id": "tiamud:storm-talon-affixes",
+      "entries": [
+        {
+          "kind": "affix",
+          "id": "tiamud:affix-roll:storm-bitten",
+          "weight": 6000,
+          "affixId": "tiamud:affix:storm-bitten"
+        },
+        {
+          "kind": "nothing",
+          "id": "tiamud:affix-roll:plain",
+          "weight": 4000
+        }
+      ]
+    }
+  ]
+}
+```
+
+Hay como máximo 512 definiciones de afijo, 256 pools, 64 entradas por pool y
+4.096 entradas ponderadas en total. La etiqueta ocupa hasta 64 bytes; cada
+delta positivo de ataque o curación llega como máximo a 1.000. Un pool se
+referencia solo con cantidad exactamente uno desde un prototipo no sellado,
+`unique` y `maxStackUnits: 1`. Un delta de ataque requiere objeto equipable y
+uno de curación, consumible; el valor efectivo no puede superar los límites
+del runtime. Un objeto recibe como máximo un afijo.
+
+Los pools normales y sellados usan selección ponderada entera, determinista y
+sin sesgo. La tirada de afijo normal se consume aunque después no quepa o se
+suprima el drop, para que el resultado no dependa de la capacidad observable.
+`open <sello>` consume una unidad y `reward odds <sello>` muestra las
+probabilidades exactas authored. Consumo, RNG, contador de apertura, creación,
+vínculo, capacidad y grupos de resultado —hasta 16 y coherentes con las
+instancias creadas— forman un solo commit; cualquier fallo restaura exactamente
+el sello, los contadores y el RNG.
+
+`WorldRuntimeSnapshot` v7 conserva por instancia el afijo aplicado y la
+procedencia `SealedReward`. Las copias durables incluyen los digests canónicos
+de definición, pool y registro, pero clientes Web, Telnet y GMCP solo reciben
+la presentación y estadísticas autorizadas: IDs estables, estado RNG,
+contadores internos y digests permanecen opacos. Los mismos afijos funcionan
+en botín normal y sellado.
+
 El SHA-256 de la forma canónica exacta de cada tabla viaja al dominio. Cada
 instancia generada conserva procedencia durable con drop, aparición, tabla,
 digest, entrada, pool opcional, índices y tick. Las instancias iniciales se
 marcan como authored; las creadas por la API general conservan procedencia
-runtime propia. Esta metadata vive en `WorldRuntimeSnapshot` v6 y nunca se
+runtime propia. Esta metadata vive en `WorldRuntimeSnapshot` v7 y nunca se
 expone a clientes. Cambiar una tabla después no reescribe la procedencia de los
 objetos ya generados.
 
@@ -600,13 +718,13 @@ La composición:
 - produce bytes y reportes deterministas; y
 - escribe el destino completo de forma atómica sin sobreescribirlo.
 
-Lantern Square se compone desde tres áreas y produce tres salas, nueve
-prototipos, nueve instancias iniciales, una tabla de botín y una fuente. El
-artefacto de 50.498 bytes es byte a byte idéntico al WorldPack canónico y su
+Lantern Square se compone desde tres áreas y produce tres salas, diez
+prototipos, nueve instancias iniciales, dos tablas de botín y una fuente. El
+artefacto de 52.349 bytes es byte a byte idéntico al WorldPack canónico y su
 SHA-256 es:
 
 ```text
-3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816
+183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef
 ```
 
 La demostración conserva `tiamud:road-token` y `tiamud:wolf-clasp` como
@@ -615,8 +733,10 @@ casos 3C son nuevas identidades: `tiamud:rain-writ`, consumible con
 `healAmount: 1` y `non_transferable`, comienza en `demo:north-gate`; y
 `tiamud:stormglass-talon`, `character_bound`, es botín fijo de
 `tiamud:gate-stalker-1`. Esa misma aparición usa reparto round-robin de party
-para el `tiamud:road-token` garantizado y la tirada 60 %
-`tiamud:wolf-clasp`/40 % `nothing` de su tabla repetible.
+para el `tiamud:road-token` y el `tiamud:storm-seal` garantizados, además de la
+tirada 60 % `tiamud:wolf-clasp`/40 % `nothing` de su tabla repetible. El clasp
+normal y el talón obtenido al abrir el sello comparten una tirada de afijo:
+60 % `storm-bitten` y 40 % sin afijo.
 
 Límites principales:
 
@@ -684,17 +804,21 @@ validación y revisión humana.
 
 ## Persistencia y evolución del formato
 
-WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v6 define dónde están
+WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v7 define dónde están
 las instancias después de jugar, su `binding` obligatorio, los contadores de
-identidad, las reservas de trade, la procedencia, los encuentros de botín, los
-derechos sobre suelo y los cursores round-robin. El decoder elige primero por
+identidad y apertura, los afijos aplicados, las reservas de trade, la
+procedencia normal o sellada, los encuentros de botín, los derechos sobre suelo
+y los cursores round-robin. El decoder elige primero por
 `snapshotVersion` y compara esa versión original con la columna SQL. DTO
 explícitos v1-v5 convierten de forma estricta: v1-v3 producen
 `binding: { kind: "unbound" }` y v4 añade trade vacío. Al llegar a v6, cada
 origen v1-v5 añade botín vacío y procedencia
-`legacy_snapshot { sourceVersion }` para todas sus instancias.
+`legacy_snapshot { sourceVersion }` para todas sus instancias. Un v6 exacto
+convierte a v7 con `itemAffixes: []` en cada instancia y
+`nextRewardOpenId: 1`.
 Todas fallan cerradas ante campos cruzados. En particular, inyectar `binding`
-en v3, trade en v4 o procedencia/derechos v6 en v5 no adelanta su versión.
+en v3, trade en v4, procedencia/derechos v6 en v5 o afijos/contador de apertura
+v7 en v6 no adelanta su versión.
 También se rechazan referencias, ciclos, profundidad, capacidad, contador,
 propietario, vínculo, participante, reserva, cohorte o procedencia inválidos.
 
@@ -712,8 +836,10 @@ botín abiertos antes de readiness, pero los derechos ya generados sobreviven al
 reinicio. Esos agregados temporales no quedan en el mundo activo.
 
 El runtime admite hasta 65.536 instancias. Los snapshots raw heredados v1-v5
-conservan el límite físico de 1 MiB; el snapshot v6 actual y cada nueva
-admisión/confirmación admiten hasta 2 MiB. La suma de fichas de propietarios
+conservan el límite físico de 1 MiB; el snapshot v6 compatible y el v7 actual,
+así como
+cada nueva admisión/confirmación, admiten hasta 2 MiB. La suma de fichas de
+propietarios
 inspeccionadas sigue limitada a 1 MiB y cada ficha a 64 KiB. SQLite y
 PostgreSQL esquema v11 guardan el snapshot como `TEXT` opaco dentro de la
 transacción existente. La migración v10→v11 aumenta de forma transaccional la

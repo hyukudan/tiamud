@@ -18,7 +18,7 @@ use super::{
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_CONDITION_NODES: usize = 1_024;
 
-/// A WorldPack v6 plus optional authoring data ignored by older runtime readers.
+/// A WorldPack v7 plus optional authoring data ignored by older runtime readers.
 ///
 /// Keeping the additions at the top level preserves Rust source compatibility for
 /// existing `WorldPack` and `Room` struct literals. Serde's default unknown-field
@@ -1385,14 +1385,14 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
             .get("gameplay")
             .is_some_and(|gameplay| gameplay.get("itemRules").is_some())
     {
-        return Err("WorldPack v6 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("WorldPack v7 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("WorldPack v6 rooms cannot declare legacy items".to_owned());
+        return Err("WorldPack v7 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("gameplay")
@@ -1404,7 +1404,7 @@ fn reject_native_legacy_item_fields(value: &serde_json::Value) -> Result<(), Str
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("WorldPack v6 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("WorldPack v7 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
     Ok(())
 }
@@ -1420,7 +1420,62 @@ fn reject_legacy_loot_fields(value: &serde_json::Value, schema_version: u64) -> 
     Ok(())
 }
 
-fn normalize_v5_loot(value: &mut serde_json::Value) -> Result<(), String> {
+fn reject_legacy_reward_fields(
+    value: &serde_json::Value,
+    schema_version: u64,
+) -> Result<(), String> {
+    let prototypes_have_sealed = ["itemPrototypes", "items"].into_iter().any(|field| {
+        value
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|prototypes| {
+                prototypes
+                    .iter()
+                    .any(|prototype| prototype.get("sealedLootTableId").is_some())
+            })
+    });
+    let gameplay = value.get("gameplay");
+    let gameplay_has_affixes = gameplay.is_some_and(|gameplay| {
+        gameplay.get("affixes").is_some() || gameplay.get("affixPools").is_some()
+    });
+    let loot_has_affix_pool = gameplay
+        .and_then(|gameplay| gameplay.get("lootTables"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tables| {
+            tables.iter().any(|table| {
+                table
+                    .get("guaranteed")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|entries| {
+                        entries
+                            .iter()
+                            .any(|entry| entry.get("affixPoolId").is_some())
+                    })
+                    || table
+                        .get("pools")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|pools| {
+                            pools.iter().any(|pool| {
+                                pool.get("entries")
+                                    .and_then(serde_json::Value::as_array)
+                                    .is_some_and(|entries| {
+                                        entries
+                                            .iter()
+                                            .any(|entry| entry.get("affixPoolId").is_some())
+                                    })
+                            })
+                        })
+            })
+        });
+    if prototypes_have_sealed || gameplay_has_affixes || loot_has_affix_pool {
+        return Err(format!(
+            "WorldPack v{schema_version} cannot declare v7 sealed rewards or affixes"
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_v6_rewards(value: &mut serde_json::Value) -> Result<(), String> {
     reject_native_legacy_item_fields(value)?;
     let root = value
         .as_object_mut()
@@ -1500,15 +1555,25 @@ impl WorldPackDocument {
         if legacy_schema {
             reject_legacy_loot_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
+            reject_legacy_reward_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
             normalize_legacy_items(&mut value).map_err(DocumentToolError::LegacyItems)?;
         } else if schema_version == 4 {
             reject_legacy_loot_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
+            reject_legacy_reward_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
             normalize_v4_items(&mut value).map_err(DocumentToolError::LegacyItems)?;
         } else if schema_version == 5 {
             reject_legacy_loot_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
-            normalize_v5_loot(&mut value).map_err(DocumentToolError::LegacyItems)?;
+            reject_legacy_reward_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
+            normalize_v6_rewards(&mut value).map_err(DocumentToolError::LegacyItems)?;
+        } else if schema_version == 6 {
+            reject_legacy_reward_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
+            normalize_v6_rewards(&mut value).map_err(DocumentToolError::LegacyItems)?;
         } else if schema_version == u64::from(crate::CURRENT_SCHEMA_VERSION) {
             reject_native_legacy_item_fields(&value).map_err(DocumentToolError::LegacyItems)?;
         }
@@ -2170,6 +2235,32 @@ impl WorldPackDocument {
                     .iter()
                     .map(|source| (&source.id, source)),
             ),
+            affixes: diff_entities(
+                self.world
+                    .gameplay
+                    .affixes
+                    .iter()
+                    .map(|affix| (&affix.id, affix)),
+                other
+                    .world
+                    .gameplay
+                    .affixes
+                    .iter()
+                    .map(|affix| (&affix.id, affix)),
+            ),
+            affix_pools: diff_entities(
+                self.world
+                    .gameplay
+                    .affix_pools
+                    .iter()
+                    .map(|pool| (&pool.id, pool)),
+                other
+                    .world
+                    .gameplay
+                    .affix_pools
+                    .iter()
+                    .map(|pool| (&pool.id, pool)),
+            ),
             scene_variants: diff_entities(
                 self.scene_variants
                     .iter()
@@ -2265,6 +2356,19 @@ impl WorldPackDocument {
             .gameplay
             .loot_sources
             .sort_by(|left, right| left.id.cmp(&right.id));
+        document
+            .world
+            .gameplay
+            .affixes
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        document
+            .world
+            .gameplay
+            .affix_pools
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        for pool in &mut document.world.gameplay.affix_pools {
+            pool.entries.sort_by(|left, right| left.id.cmp(&right.id));
+        }
         document
             .world
             .rooms
@@ -2705,6 +2809,8 @@ pub struct WorldPackDiff {
     pub npc_ability_sets: EntityDiff,
     pub loot_tables: EntityDiff,
     pub loot_sources: EntityDiff,
+    pub affixes: EntityDiff,
+    pub affix_pools: EntityDiff,
     pub scene_variants: EntityDiff,
     pub scripts: EntityDiff,
     pub content_tests: EntityDiff,
@@ -2726,6 +2832,8 @@ impl WorldPackDiff {
             && self.npc_ability_sets.is_empty()
             && self.loot_tables.is_empty()
             && self.loot_sources.is_empty()
+            && self.affixes.is_empty()
+            && self.affix_pools.is_empty()
             && self.scene_variants.is_empty()
             && self.scripts.is_empty()
             && self.content_tests.is_empty()
@@ -2757,6 +2865,8 @@ impl fmt::Display for WorldPackDiff {
         write_entity_diff(formatter, "NPC ability sets", &self.npc_ability_sets)?;
         write_entity_diff(formatter, "loot tables", &self.loot_tables)?;
         write_entity_diff(formatter, "loot sources", &self.loot_sources)?;
+        write_entity_diff(formatter, "affixes", &self.affixes)?;
+        write_entity_diff(formatter, "affix pools", &self.affix_pools)?;
         write_entity_diff(formatter, "scene variants", &self.scene_variants)?;
         write_entity_diff(formatter, "scripts", &self.scripts)?;
         write_entity_diff(formatter, "content tests", &self.content_tests)
@@ -2909,6 +3019,7 @@ mod tests {
                     max_stack_units: 1,
                     container: None,
                     transfer_policy: ItemTransferPolicy::Transferable,
+                    sealed_loot_table_id: None,
                 }],
                 initial_item_instances: vec![InitialItemInstance {
                     id: "demo:lantern".into(),
@@ -2984,6 +3095,7 @@ mod tests {
                             item_prototype_id: None,
                             min_quantity: None,
                             max_quantity: None,
+                            affix_pool_id: None,
                         },
                         crate::LootEntryDefinition {
                             kind: crate::LootEntryKind::Item,
@@ -2992,6 +3104,7 @@ mod tests {
                             item_prototype_id: Some("demo:lantern".into()),
                             min_quantity: Some(1),
                             max_quantity: Some(1),
+                            affix_pool_id: None,
                         },
                     ],
                 }],
@@ -3323,7 +3436,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_items_normalize_to_typed_v6_identity_without_duplicate_authorities() {
+    fn v3_items_normalize_to_typed_v7_identity_without_duplicate_authorities() {
         let legacy = serde_json::json!({
             "schemaVersion": 3,
             "id": "legacy",
@@ -3397,9 +3510,9 @@ mod tests {
     }
 
     #[test]
-    fn world_pack_v2_through_v5_normalize_without_inventing_loot() {
+    fn world_pack_v2_through_v6_normalize_without_inventing_rewards() {
         let current = serde_json::to_value(document()).unwrap();
-        for schema_version in [2, 3, 4, 5] {
+        for schema_version in [2, 3, 4, 5, 6] {
             let mut legacy = current.clone();
             legacy["schemaVersion"] = serde_json::json!(schema_version);
             if schema_version <= 3 {
@@ -3427,20 +3540,56 @@ mod tests {
             );
             assert!(normalized.world.gameplay.loot_tables.is_empty());
             assert!(normalized.world.gameplay.loot_sources.is_empty());
+            assert!(normalized.world.gameplay.affixes.is_empty());
+            assert!(normalized.world.gameplay.affix_pools.is_empty());
 
-            for field in ["lootTables", "lootSources"] {
-                let mut smuggled = legacy.clone();
-                smuggled["gameplay"][field] = serde_json::json!([]);
-                assert!(matches!(
-                    WorldPackDocument::from_json(&serde_json::to_vec(&smuggled).unwrap()),
-                    Err(DocumentToolError::LegacyItems(_))
-                ));
+            if schema_version <= 5 {
+                for field in ["lootTables", "lootSources"] {
+                    let mut smuggled = legacy.clone();
+                    smuggled["gameplay"][field] = serde_json::json!([]);
+                    assert!(matches!(
+                        WorldPackDocument::from_json(&serde_json::to_vec(&smuggled).unwrap()),
+                        Err(DocumentToolError::LegacyItems(_))
+                    ));
+                }
             }
+
+            let mut smuggled_affixes = legacy.clone();
+            smuggled_affixes["gameplay"]["affixes"] = serde_json::json!([]);
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&smuggled_affixes).unwrap()),
+                Err(DocumentToolError::LegacyItems(_))
+            ));
+
+            let mut smuggled_seal = legacy.clone();
+            if schema_version <= 3 {
+                smuggled_seal["items"] = serde_json::json!([{
+                    "sealedLootTableId": "demo:rewards"
+                }]);
+            } else {
+                smuggled_seal["itemPrototypes"][0]["sealedLootTableId"] =
+                    serde_json::json!("demo:rewards");
+            }
+            assert!(matches!(
+                WorldPackDocument::from_json(&serde_json::to_vec(&smuggled_seal).unwrap()),
+                Err(DocumentToolError::LegacyItems(_))
+            ));
         }
+
+        let mut v6 = document();
+        add_repeatable_loot(&mut v6);
+        let mut v6 = serde_json::to_value(v6).unwrap();
+        v6["schemaVersion"] = serde_json::json!(6);
+        v6["gameplay"]["lootTables"][0]["pools"][0]["entries"][1]["affixPoolId"] =
+            serde_json::json!("demo:affixes");
+        assert!(matches!(
+            WorldPackDocument::from_json(&serde_json::to_vec(&v6).unwrap()),
+            Err(DocumentToolError::LegacyItems(_))
+        ));
     }
 
     #[test]
-    fn native_loot_dtos_reject_unknown_nested_fields() {
+    fn native_reward_dtos_reject_unknown_nested_fields() {
         let mut value = document();
         add_repeatable_loot(&mut value);
         let mut json = serde_json::to_value(value).unwrap();
@@ -3448,6 +3597,27 @@ mod tests {
             serde_json::json!(true);
         assert!(matches!(
             WorldPackDocument::from_json(&serde_json::to_vec(&json).unwrap()),
+            Err(DocumentToolError::Json(_))
+        ));
+
+        let mut affix = serde_json::to_value(document()).unwrap();
+        affix["gameplay"]["affixes"] = serde_json::json!([{
+            "id":"demo:charged","label":"charged","position":"prefix",
+            "attackBonusDelta":1,"future":true
+        }]);
+        assert!(matches!(
+            WorldPackDocument::from_json(&serde_json::to_vec(&affix).unwrap()),
+            Err(DocumentToolError::Json(_))
+        ));
+
+        let mut pool = serde_json::to_value(document()).unwrap();
+        pool["gameplay"]["affixPools"] = serde_json::json!([{
+            "id":"demo:affixes","entries":[{
+                "kind":"nothing","id":"demo:plain","weight":1,"future":true
+            }]
+        }]);
+        assert!(matches!(
+            WorldPackDocument::from_json(&serde_json::to_vec(&pool).unwrap()),
             Err(DocumentToolError::Json(_))
         ));
     }
@@ -3909,6 +4079,58 @@ mod tests {
         add_variants(&mut after);
         add_repeatable_loot(&mut after);
         after.world.item_prototypes[0].equipment_slot = Some(crate::EquipmentSlot::Trinket);
+        after.world.gameplay.affixes.push(crate::AffixDefinition {
+            id: "demo:charged".into(),
+            label: "charged".into(),
+            position: crate::AffixPosition::Prefix,
+            attack_bonus_delta: 1,
+            heal_amount_delta: 0,
+        });
+        after
+            .world
+            .gameplay
+            .affix_pools
+            .push(crate::AffixPoolDefinition {
+                id: "demo:lantern-affixes".into(),
+                entries: vec![crate::AffixPoolEntry {
+                    kind: crate::AffixPoolEntryKind::Affix,
+                    id: "demo:charged-roll".into(),
+                    weight: 1,
+                    affix_id: Some("demo:charged".into()),
+                }],
+            });
+        let mut seal = after.world.item_prototypes[0].clone();
+        seal.id = "demo:sealed-lantern-reward".into();
+        seal.name = "sealed lantern reward".into();
+        seal.aliases.clear();
+        seal.equipment_slot = None;
+        seal.attack_bonus = 0;
+        seal.consumable = true;
+        seal.transfer_policy = crate::ItemTransferPolicy::CharacterBound;
+        seal.sealed_loot_table_id = Some("demo:lantern-rewards".into());
+        after.world.item_prototypes.push(seal);
+        after.world.gameplay.loot_tables[0]
+            .guaranteed
+            .push(crate::LootGuaranteedDefinition {
+                id: "demo:earned-seal".into(),
+                item_prototype_id: "demo:sealed-lantern-reward".into(),
+                quantity: 1,
+                affix_pool_id: None,
+            });
+        after
+            .world
+            .gameplay
+            .loot_tables
+            .push(crate::LootTableDefinition {
+                id: "demo:lantern-rewards".into(),
+                guaranteed: vec![crate::LootGuaranteedDefinition {
+                    id: "demo:lantern-reward".into(),
+                    item_prototype_id: "demo:lantern".into(),
+                    quantity: 1,
+                    affix_pool_id: Some("demo:lantern-affixes".into()),
+                }],
+                pools: Vec::new(),
+            });
         after.world.rooms[0].description.push_str(" Changed.");
         after.content_tests.push(ContentTest {
             name: "smoke".into(),
@@ -3923,9 +4145,15 @@ mod tests {
         assert_eq!(diff.rooms.changed, ["demo:square"]);
         assert_eq!(diff.scene_variants.added, ["demo:square"]);
         assert_eq!(diff.item_prototypes.changed, ["demo:lantern"]);
+        assert_eq!(diff.item_prototypes.added, ["demo:sealed-lantern-reward"]);
         assert_eq!(diff.content_tests.added, ["smoke"]);
-        assert_eq!(diff.loot_tables.added, ["demo:wolf-drops"]);
+        assert_eq!(
+            diff.loot_tables.added,
+            ["demo:lantern-rewards", "demo:wolf-drops"]
+        );
         assert_eq!(diff.loot_sources.added, ["demo:wolf-source"]);
+        assert_eq!(diff.affixes.added, ["demo:charged"]);
+        assert_eq!(diff.affix_pools.added, ["demo:lantern-affixes"]);
         assert!(diff.to_string().contains("scene variants: + demo:square"));
     }
 

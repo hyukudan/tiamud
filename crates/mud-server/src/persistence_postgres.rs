@@ -2714,7 +2714,7 @@ mod tests {
     };
 
     #[test]
-    fn postgres_runtime_decoder_accepts_v5_and_upgrades_strict_v3_v4() {
+    fn postgres_runtime_decoder_accepts_current_and_upgrades_strict_v3_v4_v6() {
         let mut current = World::demo().runtime_snapshot();
         let item_id = current.item_instances.keys().next().unwrap().clone();
         let item = current.item_instances.get_mut(&item_id).unwrap();
@@ -2783,12 +2783,27 @@ mod tests {
             "lootEncounters",
             "groundLoot",
             "partyLootCursors",
+            "nextRewardOpenId",
         ] {
             v4.as_object_mut().unwrap().remove(field);
+        }
+        for item in v4["itemInstances"].as_object_mut().unwrap().values_mut() {
+            item.as_object_mut().unwrap().remove("itemAffixes");
         }
         decode_runtime_snapshot(4, &v4.to_string()).unwrap();
         v4["trades"] = serde_json::json!({});
         assert!(decode_runtime_snapshot(4, &v4.to_string()).is_err());
+
+        let mut v6 = serde_json::to_value(&current).unwrap();
+        v6["snapshotVersion"] = serde_json::json!(6);
+        v6.as_object_mut().unwrap().remove("nextRewardOpenId");
+        for item in v6["itemInstances"].as_object_mut().unwrap().values_mut() {
+            item.as_object_mut().unwrap().remove("itemAffixes");
+        }
+        let upgraded = decode_runtime_snapshot(6, &v6.to_string()).unwrap();
+        assert_eq!(upgraded.next_reward_open_id, tiamud_core::RewardOpenId(1));
+        v6["itemInstances"][item_id.0.as_str()]["itemAffixes"] = serde_json::json!([]);
+        assert!(decode_runtime_snapshot(6, &v6.to_string()).is_err());
     }
 
     fn scoped_url(base: &str, schema: &str) -> String {
@@ -2951,6 +2966,7 @@ mod tests {
                     binding: ItemBinding::Character {
                         character_id: keeper_character.id,
                     },
+                    item_affixes: Vec::new(),
                 },
             )]),
             next_loot_drop_id: LootDropId(1),
@@ -2966,6 +2982,7 @@ mod tests {
             progression_flags: Default::default(),
             next_trade_id: tiamud_core::TradeId(1),
             trades: BTreeMap::new(),
+            next_reward_open_id: tiamud_core::RewardOpenId(1),
         };
         let event = DomainEvent::CharacterMoved {
             actor_id: keeper_character.id,

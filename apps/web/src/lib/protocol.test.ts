@@ -214,6 +214,24 @@ describe('protocol messages', () => {
     )).toThrow('exact closed field set');
   });
 
+  it('creates only the exact closed sealed-reward action forms', () => {
+    const target = 'o1111111111111111';
+    expect(createActionPerform('reward.open', { target }, 'reward-open')).toMatchObject({
+      data: { action: 'reward.open', target },
+    });
+    expect(createActionPerform('reward.odds', { target, page: 2 }, 'reward-odds')).toMatchObject({
+      data: { action: 'reward.odds', target, page: 2 },
+    });
+    expect(() => createActionPerform('reward.open', { target, page: 1 }, 'extra'))
+      .toThrow('exact closed field set');
+    expect(() => createActionPerform('reward.open', { target: 'internal:id' }, 'internal'))
+      .toThrow('opaque selector');
+    expect(() => createActionPerform('reward.odds', { target }, 'missing'))
+      .toThrow('exact closed field set');
+    expect(() => createActionPerform('reward.odds', { target, page: 0 }, 'bad-page'))
+      .toThrow(RangeError);
+  });
+
   it('creates only the exact closed trade action forms', () => {
     const tradeId = 'oaaaaaaaaaaaaaaaa';
     const itemId = 'obbbbbbbbbbbbbbbb';
@@ -916,6 +934,102 @@ describe('protocol messages', () => {
         durableContainerId: 'tiamud:satchel',
       },
     })))).toBeUndefined();
+  });
+
+  it('parses exact paginated sealed-reward odds without internal authoring ids', () => {
+    const data = {
+      selector: 'o6666666666666666',
+      page: 1,
+      totalPages: 2,
+      guaranteed: [{ label: 'three sparks', quantity: 3 }],
+      weighted: [{
+        poolLabel: 'storm draw',
+        rolls: 1,
+        outcomeLabel: 'nothing',
+        minQuantity: 0,
+        maxQuantity: 0,
+        probabilityNumerator: 1,
+        probabilityDenominator: 4,
+      }],
+      affixes: [{
+        parentOutcomeLabel: 'iron blade',
+        affixLabel: 'charged',
+        position: 'prefix',
+        attackBonusDelta: 2,
+        healAmountDelta: 0,
+        conditionalProbabilityNumerator: 1,
+        conditionalProbabilityDenominator: 5,
+      }],
+    };
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'reward.odds', seq: 30, data,
+    }))).toMatchObject({
+      type: 'reward.odds',
+      data: {
+        selector: data.selector,
+        weighted: [{ probabilityNumerator: 1, probabilityDenominator: 4 }],
+        affixes: [{ conditionalProbabilityNumerator: 1, conditionalProbabilityDenominator: 5 }],
+      },
+    });
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'reward.odds', seq: 31,
+      data: { ...data, page: 3 },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'reward.odds', seq: 32,
+      data: { ...data, weighted: [{ ...data.weighted[0], lootTableId: 'secret' }] },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'reward.odds', seq: 33,
+      data: { ...data, affixes: Array.from({ length: 20 }, () => data.affixes[0]) },
+    }))).toBeUndefined();
+    expect(parseServerMessage(JSON.stringify({
+      v: 1, type: 'reward.odds', seq: 34,
+      data: {
+        ...data,
+        affixes: [{
+          ...data.affixes[0],
+          conditionalProbabilityNumerator: 6,
+          conditionalProbabilityDenominator: 5,
+        }],
+      },
+    }))).toBeUndefined();
+  });
+
+  it('projects only the public effective item affix shape', () => {
+    const affix = {
+      label: 'charged',
+      position: 'prefix',
+      attackBonusDelta: 2,
+      healAmountDelta: 0,
+    };
+    const state = validPlayerState();
+    const stateWithAffix = {
+      ...state,
+      inventory: [{ ...state.inventory[0], label: 'charged blue lantern', affix }],
+    };
+    const parsed = parseServerMessage(JSON.stringify({
+      v: 1, type: 'player.snapshot', seq: 35, data: stateWithAffix,
+    }));
+    expect(parsed).toMatchObject({
+      type: 'player.snapshot',
+      data: { inventory: [{ label: 'charged blue lantern', affix }] },
+    });
+    for (const invalidAffix of [
+      { ...affix, position: 'middle' },
+      { ...affix, attackBonusDelta: 0 },
+      { ...affix, affixId: 'secret:charged' },
+    ]) {
+      expect(parseServerMessage(JSON.stringify({
+        v: 1,
+        type: 'player.snapshot',
+        seq: 36,
+        data: {
+          ...validPlayerState(),
+          inventory: [{ ...validPlayerState().inventory[0], affix: invalidAffix }],
+        },
+      }))).toBeUndefined();
+    }
   });
 
   it('parses private trade state, reservations, and offered container pages', () => {

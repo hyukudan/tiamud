@@ -6,7 +6,7 @@ repository, the Rust CLI and a reviewable asset directory on a developer or
 builder machine, then deploys one validated artifact to the server.
 
 ```text
-AreaPack v5 sources + reviewed assets
+AreaPack v6 sources + reviewed assets
                 |
                 v
         compose and validate
@@ -18,7 +18,7 @@ AreaPack v5 sources + reviewed assets
        immutable publication
                 |
                 v
-    one WorldPack v6 loaded at startup
+    one WorldPack v7 loaded at startup
 ```
 
 ## Recommended loop
@@ -66,8 +66,10 @@ by `TIAMUD_WORLD_PACK`. It loads one complete artifact before opening game
 ports. Area hot-loading remains future architecture, not part of the current
 authoring or deployment path.
 
-The current artifact contract is WorldPack v6/AreaPack v5/Project v2. The
+The current artifact contract is WorldPack v7/AreaPack v6/Project v2. The
 selected persistence backend is prepared as schema v11 before readiness;
 legacy raw runtime snapshots v1-v5 keep their 1 MiB physical limit, while
-current v6 admission and commits allow 2 MiB. This storage migration does not
-compose content, create a second loot table authority or enable dual writes.
+v6 and current v7 admission and commits allow 2 MiB. Strict v6 upgrade adds
+empty applied-affix state and initializes the sealed-open counter at one. This
+storage migration does not compose content, create a second loot table
+authority or enable dual writes.

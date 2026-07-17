@@ -62,7 +62,7 @@ const player: PlayerStateSnapshot = {
   },
   inventory: [{
     id: 'o1111111111111111',
-    label: 'blue lantern',
+    label: 'charged blue lantern',
     description: 'Cold light rests behind rain-speckled glass.',
     rarity: 'uncommon',
     itemLevel: 3,
@@ -74,9 +74,16 @@ const player: PlayerStateSnapshot = {
     totalWeightGrams: 1600,
     transferPolicy: 'transferable',
     boundToYou: false,
+    affix: {
+      label: 'charged', position: 'prefix', attackBonusDelta: 2, healAmountDelta: 0,
+    },
     canGive: true,
     canTrade: true,
-    actions: [{ label: 'Drop', command: 'drop o1111111111111111' }],
+    actions: [
+      { label: 'Drop', command: 'drop o1111111111111111' },
+      { label: 'Abrir', command: 'open o1111111111111111' },
+      { label: 'Probabilidades', command: 'reward odds o1111111111111111 1' },
+    ],
   }, {
     id: 'o6666666666666666',
     label: 'archive satchel',
@@ -178,6 +185,22 @@ describe('PlayerDashboard', () => {
           totalPages: 2,
           capacity: { usedSlots: 1, maxSlots: 8, usedWeightGrams: 750, maxWeightGrams: 5000 },
         },
+        rewardOdds: {
+          selector: 'o1111111111111111',
+          page: 1,
+          totalPages: 2,
+          guaranteed: [{ label: 'three sparks', quantity: 3 }],
+          weighted: [{
+            poolLabel: 'storm draw', rolls: 1, outcomeLabel: 'nothing',
+            minQuantity: 0, maxQuantity: 0,
+            probabilityNumerator: 1, probabilityDenominator: 4,
+          }],
+          affixes: [{
+            parentOutcomeLabel: 'iron blade', affixLabel: 'charged', position: 'prefix',
+            attackBonusDelta: 2, healAmountDelta: 0,
+            conditionalProbabilityNumerator: 1, conditionalProbabilityDenominator: 5,
+          }],
+        },
         abilityTargets: [{ id: 'owolf000000000001', label: 'rain wolf' }],
         oncommand: () => undefined,
         onaction: () => undefined,
@@ -213,6 +236,12 @@ describe('PlayerDashboard', () => {
     expect(body).toContain('Container contents');
     expect(body).toContain('Page 1 of 2');
     expect(body).toContain('healing tonic');
+    expect(body).toContain('Modifier: charged (prefix)');
+    expect(body).toContain('Sealed reward odds');
+    expect(body).toContain('Fractions below are exact');
+    expect(body).toContain('1/4 (25.00%)');
+    expect(body).toContain('1/5 (20.00%)');
+    expect(body).toContain('nothing');
     expect(body).toContain('First Hunt');
     expect(body).toContain('Lantern Market');
     expect(body).toContain('Spellblade');
@@ -245,6 +274,8 @@ describe('PlayerDashboard', () => {
     expect(dashboardSource).toContain("'item.put'");
     expect(dashboardSource).toContain("'item.get'");
     expect(dashboardSource).toContain("'item.give'");
+    expect(dashboardSource).toContain("'reward.open'");
+    expect(dashboardSource).toContain("'reward.odds'");
     expect(dashboardSource).toContain('recipient: recipient.id');
     expect(dashboardSource).toContain('<option value="staff">');
     expect(dashboardSource).not.toContain('<option value="announcement">');

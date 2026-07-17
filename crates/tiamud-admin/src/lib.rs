@@ -20,6 +20,7 @@ use world_pack::{DocumentToolError, ValidationErrors, WorldPack, WorldPackDocume
 /// Keep this in sync with `tiamud-server`'s persistence schema. Versions below
 /// this value remain supported because the server can migrate them on startup.
 pub const SUPPORTED_DATABASE_SCHEMA_VERSION: i64 = SCHEMA_VERSION;
+const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 const MAX_WORLD_PACK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -649,7 +650,7 @@ fn validate_runtime_snapshot(connection: &Connection, path: &Path) -> Result<(),
     };
     let version =
         u32::try_from(version).map_err(|_| AdminError::InvalidRuntimeSnapshot(path.to_owned()))?;
-    let maximum = if version < tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION {
+    let maximum = if version <= LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION {
         tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
     } else {
         tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
@@ -767,7 +768,20 @@ mod tests {
         .unwrap();
     }
 
-    fn remove_v6_loot_fields(snapshot: &mut serde_json::Value) {
+    fn remove_v7_fields(snapshot: &mut serde_json::Value) {
+        let snapshot = snapshot.as_object_mut().unwrap();
+        snapshot.remove("nextRewardOpenId");
+        for item in snapshot["itemInstances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            item.as_object_mut().unwrap().remove("itemAffixes");
+        }
+    }
+
+    fn remove_v6_and_v7_fields(snapshot: &mut serde_json::Value) {
+        remove_v7_fields(snapshot);
         let snapshot = snapshot.as_object_mut().unwrap();
         for field in [
             "nextLootDropId",
@@ -822,8 +836,9 @@ mod tests {
     }
 
     #[test]
-    fn check_accepts_strict_v3_v4_and_v5_runtime_snapshots() {
-        for (case, snapshot_version) in [("v3", 3_i64), ("v4", 4_i64), ("v5", 5_i64)] {
+    fn check_accepts_strict_v3_through_v6_runtime_snapshots() {
+        for (case, snapshot_version) in [("v3", 3_i64), ("v4", 4_i64), ("v5", 5_i64), ("v6", 6_i64)]
+        {
             let temporary = TempDir::new().unwrap();
             let database = temporary.path().join(format!("tiamud-{case}.sqlite3"));
             let world = temporary.path().join("world.json");
@@ -834,7 +849,7 @@ mod tests {
                 let mut runtime =
                     serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
                 runtime["snapshotVersion"] = serde_json::json!(3);
-                remove_v6_loot_fields(&mut runtime);
+                remove_v6_and_v7_fields(&mut runtime);
                 runtime.as_object_mut().unwrap().remove("nextTradeId");
                 runtime.as_object_mut().unwrap().remove("trades");
                 for item in runtime["itemInstances"]
@@ -849,11 +864,11 @@ mod tests {
                 let mut runtime =
                     serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
                 runtime["snapshotVersion"] = serde_json::json!(4);
-                remove_v6_loot_fields(&mut runtime);
+                remove_v6_and_v7_fields(&mut runtime);
                 runtime.as_object_mut().unwrap().remove("nextTradeId");
                 runtime.as_object_mut().unwrap().remove("trades");
                 runtime.to_string()
-            } else {
+            } else if snapshot_version == 5 {
                 let mut runtime = tiamud_core::World::demo().runtime_snapshot();
                 let item = runtime.item_instances.values_mut().next().unwrap();
                 item.location = tiamud_core::RuntimeItemLocation::Carried {
@@ -861,7 +876,13 @@ mod tests {
                 };
                 let mut runtime = serde_json::to_value(runtime).unwrap();
                 runtime["snapshotVersion"] = serde_json::json!(5);
-                remove_v6_loot_fields(&mut runtime);
+                remove_v6_and_v7_fields(&mut runtime);
+                runtime.to_string()
+            } else {
+                let mut runtime =
+                    serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
+                runtime["snapshotVersion"] = serde_json::json!(6);
+                remove_v7_fields(&mut runtime);
                 runtime.to_string()
             };
             let decoded = tiamud_core::decode_world_runtime_snapshot(
@@ -884,6 +905,66 @@ mod tests {
 
             check(&database, &world).unwrap();
         }
+    }
+
+    #[test]
+    fn admin_validation_uses_one_mib_through_v5_and_two_mib_from_v6() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE world_runtime (
+                     singleton INTEGER PRIMARY KEY,
+                     snapshot_version INTEGER NOT NULL,
+                     snapshot_json TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        let path = Path::new("memory.sqlite3");
+        let between_budgets = format!(
+            "\"{}\"",
+            "é".repeat(tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES / 2)
+        );
+        connection
+            .execute(
+                "INSERT INTO world_runtime (singleton, snapshot_version, snapshot_json)
+                 VALUES (1, 5, ?1)",
+                [&between_budgets],
+            )
+            .unwrap();
+        assert!(matches!(
+            validate_runtime_snapshot(&connection, path),
+            Err(AdminError::RuntimeSnapshotTooLarge {
+                maximum: tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES,
+                ..
+            })
+        ));
+        for version in [6_i64, 7_i64] {
+            connection
+                .execute("UPDATE world_runtime SET snapshot_version = ?1", [version])
+                .unwrap();
+            assert!(matches!(
+                validate_runtime_snapshot(&connection, path),
+                Err(AdminError::InvalidRuntimeSnapshot(_))
+            ));
+        }
+
+        let above_current = format!(
+            "\"{}\"",
+            "é".repeat(tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES / 2)
+        );
+        connection
+            .execute(
+                "UPDATE world_runtime SET snapshot_version = 7, snapshot_json = ?1",
+                [&above_current],
+            )
+            .unwrap();
+        assert!(matches!(
+            validate_runtime_snapshot(&connection, path),
+            Err(AdminError::RuntimeSnapshotTooLarge {
+                maximum: tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -6,6 +6,7 @@
     ContainerItemSnapshot,
     PlayerItemSnapshot,
     PlayerStateSnapshot,
+    RewardOddsData,
     SceneAction,
     TradeContentsData,
   } from '../lib/protocol';
@@ -14,6 +15,7 @@
     value?: PlayerStateSnapshot;
     containerContents?: ContainerContentsData;
     tradeContents?: TradeContentsData;
+    rewardOdds?: RewardOddsData;
     abilityTargets?: Array<{ id: string; label: string }>;
     oncommand: (command: string) => void;
     onaction: (action: string, fields: ActionPerformFields | undefined, label: string) => void;
@@ -23,7 +25,7 @@
   }
 
   let {
-    value, containerContents, tradeContents, abilityTargets = [],
+    value, containerContents, tradeContents, rewardOdds, abilityTargets = [],
     oncommand, onaction, onability, onpromote, ontalent,
   }: Props = $props();
   let socialTarget = $state('');
@@ -75,6 +77,19 @@
   function perform(action: SceneAction): void {
     const [verb = '', ...tail] = action.command.trim().split(/\s+/);
     const target = tail.join(' ') || undefined;
+    if (verb.toLowerCase() === 'open' && tail.length === 1) {
+      onaction('reward.open', { target: tail[0] }, action.command);
+      return;
+    }
+    if (verb.toLowerCase() === 'reward' && tail[0]?.toLowerCase() === 'odds' && tail[1]) {
+      const page = Number.parseInt(tail[2] ?? '1', 10);
+      onaction(
+        'reward.odds',
+        { target: tail[1], page: Number.isSafeInteger(page) && page > 0 ? page : 1 },
+        action.command,
+      );
+      return;
+    }
     const structured = ({
       examine: 'item.examine',
       drop: 'item.drop',
@@ -235,6 +250,18 @@
 
   function openContainer(container: string, page = 1): void {
     onaction('item.contents', { container, page }, `contents page ${page}`);
+  }
+
+  function requestRewardOdds(selector: string, page: number): void {
+    onaction('reward.odds', { target: selector, page }, `reward odds ${selector} ${page}`);
+  }
+
+  function exactProbability(numerator: number, denominator: number): string {
+    return `${numerator}/${denominator} (${((numerator * 100) / denominator).toFixed(2)}%)`;
+  }
+
+  function signedDelta(value: number): string {
+    return `${value >= 0 ? '+' : ''}${value}`;
   }
 
   function sendChat(): void {
@@ -648,6 +675,13 @@
                     </p>
                   {/if}
                   <p>{item.description}</p>
+                  {#if item.affix}
+                    <p>
+                      Modifier: {item.affix.label} ({item.affix.position}) ·
+                      attack {signedDelta(item.affix.attackBonusDelta)} ·
+                      healing {signedDelta(item.affix.healAmountDelta)}
+                    </p>
+                  {/if}
                 </div>
                 <div class="dashboard-actions">
                   {#each item.actions as action (action.command)}
@@ -698,6 +732,13 @@
                     {(item.containerCapacity.maxWeightGrams / 1000).toFixed(1)} kg
                   </p>
                 {/if}
+                {#if item.affix}
+                  <p>
+                    Modifier: {item.affix.label} ({item.affix.position}) ·
+                    attack {signedDelta(item.affix.attackBonusDelta)} ·
+                    healing {signedDelta(item.affix.healAmountDelta)}
+                  </p>
+                {/if}
                 <div class="dashboard-actions">
                   {#each item.actions as action (action.command)}
                     <button type="button" onclick={() => perform(action)}>{action.label}</button>
@@ -732,6 +773,13 @@
                       {(item.totalWeightGrams / 1000).toFixed(1)} kg total ·
                       {item.stackSlots} {item.stackSlots === 1 ? 'stack slot' : 'stack slots'}
                     </span>
+                    {#if item.affix}
+                      <p>
+                        Modifier: {item.affix.label} ({item.affix.position}) ·
+                        attack {signedDelta(item.affix.attackBonusDelta)} ·
+                        healing {signedDelta(item.affix.healAmountDelta)}
+                      </p>
+                    {/if}
                     <div class="dashboard-actions">
                       <button type="button" onclick={() => getItem(item)}>Get</button>
                       {#if item.containerCapacity}
@@ -752,6 +800,69 @@
                 type="button"
                 disabled={containerContents.page >= containerContents.totalPages}
                 onclick={() => openContainer(containerContents.container, containerContents.page + 1)}
+              >Next</button>
+            </div>
+          </section>
+        {/if}
+        {#if rewardOdds}
+          <section aria-labelledby="reward-odds-title">
+            <h3 id="reward-odds-title">Sealed reward odds</h3>
+            <p>
+              Page {rewardOdds.page} of {rewardOdds.totalPages}. Fractions below are exact;
+              percentages are display-only.
+            </p>
+            {#if rewardOdds.guaranteed.length > 0}
+              <h4>Guaranteed</h4>
+              <ul class="compact-list">
+                {#each rewardOdds.guaranteed as row, index (`${row.label}-${index}`)}
+                  <li>
+                    <strong>{row.label}</strong> ×{row.quantity}
+                    {#if row.affixPoolLabel} · modifier draw: {row.affixPoolLabel}{/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if rewardOdds.weighted.length > 0}
+              <h4>Weighted outcomes</h4>
+              <ul class="compact-list">
+                {#each rewardOdds.weighted as row, index (`${row.poolLabel}-${row.outcomeLabel}-${index}`)}
+                  <li>
+                    <strong>{row.outcomeLabel}</strong> · {row.poolLabel} · {row.rolls}
+                    {row.rolls === 1 ? 'draw' : 'draws'} · quantity {row.minQuantity}–{row.maxQuantity} ·
+                    exact chance {exactProbability(row.probabilityNumerator, row.probabilityDenominator)}
+                    {#if row.affixPoolLabel} · modifier draw: {row.affixPoolLabel}{/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if rewardOdds.affixes.length > 0}
+              <h4>Conditional modifiers</h4>
+              <ul class="compact-list">
+                {#each rewardOdds.affixes as row, index (`${row.parentOutcomeLabel}-${row.affixLabel}-${index}`)}
+                  <li>
+                    <strong>{row.parentOutcomeLabel}</strong> → {row.affixLabel}
+                    {#if row.position} ({row.position}){/if} ·
+                    attack {signedDelta(row.attackBonusDelta)} ·
+                    healing {signedDelta(row.healAmountDelta)} ·
+                    exact conditional chance
+                    {exactProbability(
+                      row.conditionalProbabilityNumerator,
+                      row.conditionalProbabilityDenominator,
+                    )}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <div class="dashboard-actions" aria-label="Sealed reward odds pages">
+              <button
+                type="button"
+                disabled={rewardOdds.page <= 1}
+                onclick={() => requestRewardOdds(rewardOdds.selector, rewardOdds.page - 1)}
+              >Previous</button>
+              <button
+                type="button"
+                disabled={rewardOdds.page >= rewardOdds.totalPages}
+                onclick={() => requestRewardOdds(rewardOdds.selector, rewardOdds.page + 1)}
               >Next</button>
             </div>
           </section>

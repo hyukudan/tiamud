@@ -588,7 +588,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
     }
 
     for bad_area in [
-        json!({"schemaVersion":6,"id":"a","rooms":[room("a:start", None)]}),
+        json!({"schemaVersion":7,"id":"a","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","rooms":[room("a:start", None)],"unknown":true}),
         json!({"schemaVersion":1,"id":"wrong","rooms":[room("a:start", None)]}),
         json!({"schemaVersion":1,"id":"a","dependsOn":["missing"],"rooms":[room("a:start", None)]}),
@@ -603,7 +603,7 @@ fn schema_identity_dependencies_and_unknown_fields_are_strict() {
 }
 
 #[test]
-fn area_v3_normalizes_to_v5_but_rejects_v4_schema_smuggling() {
+fn area_v3_normalizes_to_v6_but_rejects_v4_schema_smuggling() {
     let legacy = json!({
         "schemaVersion": 3,
         "id": "a",
@@ -681,7 +681,7 @@ fn area_v1_and_v2_only_normalize_transferable_items() {
 }
 
 #[test]
-fn area_v4_normalizes_to_v5_and_accepts_all_transfer_policies() {
+fn area_v4_normalizes_to_v6_and_accepts_all_transfer_policies() {
     for transfer_policy in ["transferable", "character_bound", "non_transferable"] {
         let area: AreaPack = serde_json::from_value(json!({
             "schemaVersion": 4,
@@ -722,7 +722,7 @@ fn area_v1_through_v4_reject_repeatable_loot_schema_smuggling() {
             });
             value[field] = json!([]);
             let error = serde_json::from_value::<AreaPack>(value).unwrap_err();
-            assert!(error.to_string().contains("cannot declare v5"), "{error}");
+            assert!(error.to_string().contains("cannot declare"), "{error}");
         }
     }
 
@@ -738,6 +738,62 @@ fn area_v1_through_v4_reject_repeatable_loot_schema_smuggling() {
     );
     assert!(normalized.loot_tables.is_empty());
     assert!(normalized.loot_sources.is_empty());
+}
+
+#[test]
+fn area_v1_through_v5_normalize_without_inventing_rewards_and_reject_smuggling() {
+    for schema_version in [1, 2, 3, 4, 5] {
+        let legacy = json!({
+            "schemaVersion": schema_version,
+            "id": "a",
+            "rooms": [room("a:start", None)]
+        });
+        let normalized: AreaPack = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            normalized.schema_version,
+            world_pack::AREA_PACK_SCHEMA_VERSION
+        );
+        assert!(normalized.affixes.is_empty());
+        assert!(normalized.affix_pools.is_empty());
+
+        for field in ["affixes", "affixPools"] {
+            let mut smuggled = legacy.clone();
+            smuggled[field] = json!([]);
+            let error = serde_json::from_value::<AreaPack>(smuggled).unwrap_err();
+            assert!(error.to_string().contains("cannot declare v6"), "{error}");
+        }
+
+        let mut sealed = legacy.clone();
+        let field = if schema_version <= 2 {
+            "items"
+        } else {
+            "itemPrototypes"
+        };
+        sealed[field] = json!([{"sealedLootTableId":"a:rewards"}]);
+        let error = serde_json::from_value::<AreaPack>(sealed).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot declare v6")
+                || error
+                    .to_string()
+                    .contains("unknown field \"sealedLootTableId\""),
+            "{error}"
+        );
+    }
+
+    let affix_reference = json!({
+        "schemaVersion": 5,
+        "id": "a",
+        "rooms": [room("a:start", None)],
+        "lootTables": [{
+            "id":"a:rewards",
+            "guaranteed":[{
+                "id":"a:reward","itemPrototypeId":"a:item","quantity":1,
+                "affixPoolId":"a:affixes"
+            }]
+        }]
+    });
+    let error = serde_json::from_value::<AreaPack>(affix_reference).unwrap_err();
+    assert!(error.to_string().contains("cannot declare v6"), "{error}");
 }
 
 #[test]
@@ -832,6 +888,96 @@ fn loot_ownership_and_cross_area_dependencies_are_complete_and_deterministic() {
         reparsed.deterministic_artifact().unwrap(),
         composed.artifact
     );
+}
+
+#[test]
+fn sealed_reward_and_affix_edges_are_owned_and_audited_across_areas() {
+    let temp = tempfile::tempdir().unwrap();
+    let encounter = json!({
+        "schemaVersion": 6,
+        "id": "a",
+        "dependsOn": ["b"],
+        "rooms": [room("a:start", None)],
+        "itemPrototypes": [{
+            "id":"a:seal","name":"Sealed oath","description":"An earned sealed oath.",
+            "consumable":true,"weightGrams":1,"slotCost":1,"rarity":"rare","itemLevel":1,
+            "stackPolicy":"unique","maxStackUnits":1,"transferPolicy":"character_bound",
+            "sealedLootTableId":"b:rewards"
+        }],
+        "npcPrototypes": [{
+            "id":"a:wolf","name":"Wolf","description":"A wolf.","level":1,
+            "maxHealth":10,"strength":2,"defence":0,"experienceReward":10,"respawnTicks":2
+        }],
+        "npcSpawns": [{"id":"a:wolf-1","prototypeId":"a:wolf","roomId":"a:start"}],
+        "lootTables": [{
+            "id":"a:drops",
+            "guaranteed":[{"id":"a:seal-drop","itemPrototypeId":"a:seal","quantity":1}]
+        }],
+        "lootSources": [{
+            "kind":"npc_spawn","id":"a:source","npcSpawnId":"a:wolf-1",
+            "lootTableId":"a:drops","rights":"credited_character"
+        }],
+        "affixPools": [{
+            "id":"a:weapon-affixes","entries":[{
+                "kind":"affix","id":"a:charged-roll","weight":1,"affixId":"b:charged"
+            }]
+        }]
+    });
+    let rewards = json!({
+        "schemaVersion": 6,
+        "id": "b",
+        "dependsOn": ["a"],
+        "affixes": [{
+            "id":"b:charged","label":"charged","position":"prefix","attackBonusDelta":1
+        }],
+        "itemPrototypes": [{
+            "id":"b:blade","name":"Storm blade","description":"A storm-marked blade.",
+            "equipmentSlot":"weapon","weightGrams":100,"slotCost":1,"rarity":"rare","itemLevel":1,
+            "stackPolicy":"unique","maxStackUnits":1,"transferPolicy":"transferable"
+        }],
+        "lootTables": [{
+            "id":"b:rewards",
+            "guaranteed":[{
+                "id":"b:blade-reward","itemPrototypeId":"b:blade","quantity":1,
+                "affixPoolId":"a:weapon-affixes"
+            }]
+        }]
+    });
+    write_json(&temp.path().join("a.json"), &encounter);
+    write_json(&temp.path().join("b.json"), &rewards);
+    let manifest = temp.path().join("world.project.json");
+    write_json(&manifest, &project(vec![("a", "a.json"), ("b", "b.json")]));
+
+    let composed = compose_world_project(manifest).unwrap();
+    let owner = composed
+        .report
+        .areas
+        .iter()
+        .find(|area| area.id == "a")
+        .unwrap();
+    assert!(owner.ownership.affixes.is_empty());
+    assert_eq!(owner.ownership.affix_pools, ["a:weapon-affixes"]);
+    let reward_owner = composed
+        .report
+        .areas
+        .iter()
+        .find(|area| area.id == "b")
+        .unwrap();
+    assert_eq!(reward_owner.ownership.affixes, ["b:charged"]);
+    for kind in [
+        world_pack::AreaCrossReferenceKind::ItemSealedLootTable,
+        world_pack::AreaCrossReferenceKind::LootGuaranteedAffixPool,
+        world_pack::AreaCrossReferenceKind::AffixPoolAffix,
+    ] {
+        assert!(
+            composed
+                .report
+                .cross_area_references
+                .iter()
+                .any(|reference| reference.kind == kind),
+            "missing {kind:?}"
+        );
+    }
 }
 
 #[test]
@@ -1131,7 +1277,7 @@ fn compose_is_present_in_top_level_and_subcommand_help() {
     let help = String::from_utf8_lossy(&compose.stdout);
     assert!(help.contains("world.project.json") || help.contains("<PROJECT>"));
     assert!(help.contains("--output"));
-    assert!(help.contains("AreaPack v5"));
+    assert!(help.contains("AreaPack v6"));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "id": "north-gate",
   "dependsOn": [
     "square"
@@ -67,6 +67,7 @@
         "wolf clasp",
         "silver clasp"
       ],
+      "equipmentSlot": "trinket",
       "weightGrams": 100,
       "slotCost": 1,
       "rarity": "uncommon",
@@ -74,6 +75,25 @@
       "stackPolicy": "unique",
       "maxStackUnits": 1,
       "transferPolicy": "transferable"
+    },
+    {
+      "id": "tiamud:storm-seal",
+      "name": "gate-stalker's sealed oath",
+      "description": "A knot of rain-black cord encloses a shard of marked slate. The oath yields its earned reward only when its binding is deliberately broken.",
+      "aliases": [
+        "oath",
+        "sealed oath",
+        "storm seal"
+      ],
+      "consumable": true,
+      "weightGrams": 40,
+      "slotCost": 1,
+      "rarity": "rare",
+      "itemLevel": 1,
+      "stackPolicy": "unique",
+      "maxStackUnits": 1,
+      "transferPolicy": "character_bound",
+      "sealedLootTableId": "tiamud:storm-oath-rewards"
     }
   ],
   "initialItemInstances": [
@@ -146,6 +166,11 @@
           "id": "tiamud:drop:road-token",
           "itemPrototypeId": "tiamud:road-token",
           "quantity": 1
+        },
+        {
+          "id": "tiamud:drop:storm-seal",
+          "itemPrototypeId": "tiamud:storm-seal",
+          "quantity": 1
         }
       ],
       "pools": [
@@ -159,7 +184,8 @@
               "weight": 6000,
               "itemPrototypeId": "tiamud:wolf-clasp",
               "minQuantity": 1,
-              "maxQuantity": 1
+              "maxQuantity": 1,
+              "affixPoolId": "tiamud:storm-talon-affixes"
             },
             {
               "kind": "nothing",
@@ -167,6 +193,17 @@
               "weight": 4000
             }
           ]
+        }
+      ]
+    },
+    {
+      "id": "tiamud:storm-oath-rewards",
+      "guaranteed": [
+        {
+          "id": "tiamud:reward:stormglass-talon",
+          "itemPrototypeId": "tiamud:stormglass-talon",
+          "quantity": 1,
+          "affixPoolId": "tiamud:storm-talon-affixes"
         }
       ]
     }
@@ -178,6 +215,32 @@
       "npcSpawnId": "tiamud:gate-stalker-1",
       "lootTableId": "tiamud:gate-stalker-drops",
       "rights": "party_round_robin"
+    }
+  ],
+  "affixes": [
+    {
+      "id": "tiamud:affix:storm-bitten",
+      "label": "storm-bitten",
+      "position": "prefix",
+      "attackBonusDelta": 1
+    }
+  ],
+  "affixPools": [
+    {
+      "id": "tiamud:storm-talon-affixes",
+      "entries": [
+        {
+          "kind": "affix",
+          "id": "tiamud:affix-roll:storm-bitten",
+          "weight": 6000,
+          "affixId": "tiamud:affix:storm-bitten"
+        },
+        {
+          "kind": "nothing",
+          "id": "tiamud:affix-roll:plain",
+          "weight": 4000
+        }
+      ]
     }
   ],
   "npcAbilitySets": [

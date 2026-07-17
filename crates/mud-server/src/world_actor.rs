@@ -18,9 +18,9 @@ use thiserror::Error;
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, AdventureEvent, BackgroundSelection,
     CharacterCreationCatalogView, CharacterGameplaySnapshot, CharacterId, CharacterSnapshot,
-    ContainerContentsView, DomainEvent, GameplayEvent, PlayerAction, PlayerStateView, SceneView,
-    SessionId, TradeAction, TradeCancellationReason, TradeContentsView, ViewEvent, World,
-    WorldCheckpoint, WorldError as CoreWorldError,
+    ContainerContentsView, DomainEvent, GameplayEvent, PlayerAction, PlayerStateView,
+    RewardOddsView, SceneView, SessionId, TradeAction, TradeCancellationReason, TradeContentsView,
+    ViewEvent, World, WorldCheckpoint, WorldError as CoreWorldError,
 };
 use tiamud_scripting::ScriptHook;
 use tokio::sync::{mpsc, oneshot};
@@ -74,6 +74,7 @@ pub struct AppliedAction {
     pub output: Option<String>,
     pub container_contents: Option<ContainerContentsView>,
     pub trade_contents: Option<TradeContentsView>,
+    pub reward_odds: Option<RewardOddsView>,
     pub events: Vec<ProjectedViewEvent>,
 }
 
@@ -1269,6 +1270,7 @@ async fn apply(
                 output: Some(applied.output),
                 container_contents: None,
                 trade_contents: None,
+                reward_odds: None,
                 events,
             });
         }
@@ -1411,6 +1413,7 @@ async fn apply(
             output: combine_output(Some(applied.outcome.output), hook.narration),
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             events,
         });
     }
@@ -1524,6 +1527,7 @@ async fn apply(
         output: combine_output(outcome.output, narration),
         container_contents: outcome.container_contents,
         trade_contents: outcome.trade_contents,
+        reward_odds: outcome.reward_odds,
         events,
     })
 }
@@ -2161,6 +2165,7 @@ mod tests {
                     max_stack_units: 1,
                     container: None,
                     transfer_policy: ItemTransferPolicy::Transferable,
+                    sealed_loot_table_id: None,
                 },
                 ItemPrototypeDefinition {
                     prototype_id: "test:potion".into(),
@@ -2184,6 +2189,7 @@ mod tests {
                     max_stack_units: 1,
                     container: None,
                     transfer_policy: ItemTransferPolicy::Transferable,
+                    sealed_loot_table_id: None,
                 },
                 ItemPrototypeDefinition {
                     prototype_id: "test:loot".into(),
@@ -2203,6 +2209,7 @@ mod tests {
                     max_stack_units: 1,
                     container: None,
                     transfer_policy: ItemTransferPolicy::Transferable,
+                    sealed_loot_table_id: None,
                 },
             ],
             initial_item_instances: vec![

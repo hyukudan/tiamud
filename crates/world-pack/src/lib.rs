@@ -38,7 +38,7 @@ pub use progression::{
     RequirementPredicate, TalentGraphDefinition, TalentNodeDefinition, TalentRankDefinition,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 pub const MAX_ROOM_TITLE_BYTES: usize = 128;
 pub const MAX_ROOM_DESCRIPTION_BYTES: usize = 8_192;
 pub const MAX_ITEM_PROTOTYPES: usize = 1_024;
@@ -65,6 +65,17 @@ pub const MAX_LOOT_WEIGHT: u32 = 1_000_000;
 pub const MAX_LOOT_QUANTITY: u16 = 32;
 pub const MAX_LOOT_UNITS_PER_RESOLUTION: u64 = 64;
 pub const MAX_LOOT_ROOTS_PER_DEFEAT: u64 = 64;
+pub const MAX_SEALED_REWARD_UNITS: u64 = 16;
+pub const MAX_AFFIX_DEFINITIONS: usize = 512;
+pub const MAX_AFFIX_POOLS: usize = 256;
+pub const MAX_AFFIX_ENTRIES_PER_POOL: usize = 64;
+pub const MAX_AFFIX_ENTRIES: usize = 4_096;
+pub const MAX_AFFIX_LABEL_BYTES: usize = 64;
+pub const MAX_AFFIX_MODIFIER: i32 = 1_000;
+/// Maximum number of base outcomes plus conditional affix outcomes that the
+/// runtime can expose through the paginated `reward odds` view for one sealed
+/// reward table.
+pub const MAX_REWARD_ODDS_ROWS: usize = 1_024;
 pub const MAX_ARCHETYPES: usize = 32;
 pub const MAX_ABILITIES: usize = 512;
 pub const MAX_NPC_ABILITY_SETS: usize = 512;
@@ -156,6 +167,8 @@ pub struct ItemPrototype {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<ItemContainerDefinition>,
     pub transfer_policy: ItemTransferPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_loot_table_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +250,10 @@ pub struct GameplayDefinition {
     pub loot_tables: Vec<LootTableDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loot_sources: Vec<LootSourceDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affixes: Vec<AffixDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affix_pools: Vec<AffixPoolDefinition>,
 }
 
 impl GameplayDefinition {
@@ -251,6 +268,8 @@ impl GameplayDefinition {
             && self.npc_ability_sets.is_empty()
             && self.loot_tables.is_empty()
             && self.loot_sources.is_empty()
+            && self.affixes.is_empty()
+            && self.affix_pools.is_empty()
     }
 }
 
@@ -289,6 +308,8 @@ pub struct LootGuaranteedDefinition {
     pub id: String,
     pub item_prototype_id: String,
     pub quantity: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affix_pool_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,6 +332,71 @@ pub struct LootEntryDefinition {
     pub min_quantity: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_quantity: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affix_pool_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AffixDefinition {
+    pub id: String,
+    pub label: String,
+    pub position: AffixPosition,
+    #[serde(default)]
+    pub attack_bonus_delta: i32,
+    #[serde(default)]
+    pub heal_amount_delta: i32,
+}
+
+impl AffixDefinition {
+    pub fn canonical_sha256(&self) -> String {
+        let bytes =
+            serde_json::to_vec(self).expect("affix definitions contain only serializable values");
+        hex::encode(Sha256::digest(bytes))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AffixPosition {
+    Prefix,
+    Suffix,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AffixPoolDefinition {
+    pub id: String,
+    pub entries: Vec<AffixPoolEntry>,
+}
+
+impl AffixPoolDefinition {
+    pub fn canonical_sha256(&self) -> String {
+        let mut canonical = self.clone();
+        canonical
+            .entries
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        let bytes = serde_json::to_vec(&canonical)
+            .expect("affix pool definitions contain only serializable values");
+        hex::encode(Sha256::digest(bytes))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AffixPoolEntry {
+    pub kind: AffixPoolEntryKind,
+    pub id: String,
+    pub weight: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affix_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AffixPoolEntryKind {
+    Affix,
+    Nothing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -853,6 +939,23 @@ impl WorldPack {
                     )));
                 }
             }
+            if let Some(table_id) = &prototype.sealed_loot_table_id
+                && (!valid_gameplay_identifier(table_id)
+                    || prototype.stack_policy != ItemStackPolicy::Unique
+                    || prototype.max_stack_units != 1
+                    || !prototype.consumable
+                    || prototype.transfer_policy != ItemTransferPolicy::CharacterBound
+                    || prototype.container.is_some()
+                    || prototype.equipment_slot.is_some()
+                    || prototype.attack_bonus != 0
+                    || prototype.heal_amount != 0
+                    || prototype.effect.is_some())
+            {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "sealed reward prototype {:?} must reference a canonical table and be unique, consumable, character_bound, non-structural, and effect-free",
+                    prototype.id
+                )));
+            }
         }
 
         if self.initial_item_instances.len() > MAX_INITIAL_ITEM_INSTANCES {
@@ -878,6 +981,17 @@ impl WorldPack {
                 errors.push(ValidationError::InvalidGameplay(format!(
                     "initial item instance {:?} references missing prototype {:?}",
                     instance.id, instance.prototype_id
+                )));
+            }
+            if self
+                .item_prototypes
+                .iter()
+                .find(|prototype| prototype.id == instance.prototype_id)
+                .is_some_and(|prototype| prototype.sealed_loot_table_id.is_some())
+            {
+                errors.push(ValidationError::InvalidGameplay(format!(
+                    "sealed reward prototype {:?} cannot have an initial instance",
+                    instance.prototype_id
                 )));
             }
             if let InitialItemLocation::Room { room_id } = &instance.location
@@ -968,11 +1082,18 @@ impl WorldPack {
             )));
         }
 
+        validate_affix_authoring(
+            &self.gameplay.affixes,
+            &self.gameplay.affix_pools,
+            &mut errors,
+        );
         validate_loot_authoring(
             &self.gameplay.loot_tables,
             &self.gameplay.loot_sources,
             &self.initial_item_instances,
-            &item_prototype_ids,
+            &self.item_prototypes,
+            &self.gameplay.affixes,
+            &self.gameplay.affix_pools,
             &spawn_ids,
             &mut errors,
         );
@@ -1050,14 +1171,191 @@ impl WorldPack {
     }
 }
 
+fn validate_affix_authoring(
+    affixes: &[AffixDefinition],
+    pools: &[AffixPoolDefinition],
+    errors: &mut Vec<ValidationError>,
+) {
+    if affixes.len() > MAX_AFFIX_DEFINITIONS {
+        invalid_gameplay(
+            errors,
+            format!(
+                "WorldPack declares {} affixes; the maximum is {MAX_AFFIX_DEFINITIONS}",
+                affixes.len()
+            ),
+        );
+    }
+    if pools.len() > MAX_AFFIX_POOLS {
+        invalid_gameplay(
+            errors,
+            format!(
+                "WorldPack declares {} affix pools; the maximum is {MAX_AFFIX_POOLS}",
+                pools.len()
+            ),
+        );
+    }
+
+    let mut affix_ids = HashSet::new();
+    for affix in affixes {
+        if !valid_gameplay_identifier(&affix.id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "affix id {:?} must contain 1..=128 canonical identifier bytes",
+                    affix.id
+                ),
+            );
+        } else if !affix_ids.insert(affix.id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!("affix id {:?} appears more than once", affix.id),
+            );
+        }
+        if !safe_gameplay_label(&affix.label, MAX_AFFIX_LABEL_BYTES)
+            || !(0..=MAX_AFFIX_MODIFIER).contains(&affix.attack_bonus_delta)
+            || !(0..=MAX_AFFIX_MODIFIER).contains(&affix.heal_amount_delta)
+            || (affix.attack_bonus_delta == 0 && affix.heal_amount_delta == 0)
+        {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "affix {:?} must have a safe label and at least one bounded positive modifier",
+                    affix.id
+                ),
+            );
+        }
+    }
+
+    let mut pool_ids = HashSet::new();
+    let mut used_affixes = HashSet::new();
+    let mut total_entries = 0usize;
+    for pool in pools {
+        if !valid_gameplay_identifier(&pool.id) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "affix pool id {:?} must contain 1..=128 canonical identifier bytes",
+                    pool.id
+                ),
+            );
+        } else if !pool_ids.insert(pool.id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!("affix pool id {:?} appears more than once", pool.id),
+            );
+        }
+        if pool.entries.is_empty() || pool.entries.len() > MAX_AFFIX_ENTRIES_PER_POOL {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "affix pool {:?} must contain 1..={MAX_AFFIX_ENTRIES_PER_POOL} entries",
+                    pool.id
+                ),
+            );
+        }
+        total_entries = total_entries.saturating_add(pool.entries.len());
+        let mut entry_ids = HashSet::new();
+        let mut pool_affixes = HashSet::new();
+        let mut total_weight = 0u64;
+        for entry in &pool.entries {
+            if !valid_gameplay_identifier(&entry.id) || !entry_ids.insert(entry.id.as_str()) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "affix pool {:?} entry id {:?} is invalid or duplicated",
+                        pool.id, entry.id
+                    ),
+                );
+            }
+            if !(1..=MAX_LOOT_WEIGHT).contains(&entry.weight) {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "affix pool {:?} entry {:?} weight must be 1..={MAX_LOOT_WEIGHT}",
+                        pool.id, entry.id
+                    ),
+                );
+            }
+            total_weight = total_weight.saturating_add(u64::from(entry.weight));
+            match entry.kind {
+                AffixPoolEntryKind::Affix => match entry.affix_id.as_deref() {
+                    Some(affix_id)
+                        if affix_ids.contains(affix_id) && pool_affixes.insert(affix_id) =>
+                    {
+                        used_affixes.insert(affix_id);
+                    }
+                    _ => invalid_gameplay(
+                        errors,
+                        format!(
+                            "affix pool {:?} entry {:?} must reference one unique existing affix",
+                            pool.id, entry.id
+                        ),
+                    ),
+                },
+                AffixPoolEntryKind::Nothing if entry.affix_id.is_some() => invalid_gameplay(
+                    errors,
+                    format!(
+                        "affix pool {:?} nothing entry {:?} cannot reference an affix",
+                        pool.id, entry.id
+                    ),
+                ),
+                AffixPoolEntryKind::Nothing => {}
+            }
+        }
+        if total_weight == u64::MAX {
+            invalid_gameplay(
+                errors,
+                format!("affix pool {:?} weight sum overflows", pool.id),
+            );
+        }
+    }
+    if total_entries > MAX_AFFIX_ENTRIES {
+        invalid_gameplay(
+            errors,
+            format!(
+                "WorldPack declares {total_entries} weighted affix entries; the maximum is {MAX_AFFIX_ENTRIES}"
+            ),
+        );
+    }
+    for affix_id in affix_ids {
+        if !used_affixes.contains(affix_id) {
+            invalid_gameplay(errors, format!("affix {affix_id:?} has no pool entry"));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_loot_authoring(
     tables: &[LootTableDefinition],
     sources: &[LootSourceDefinition],
     initial_item_instances: &[InitialItemInstance],
-    item_prototype_ids: &HashSet<&str>,
+    item_prototypes: &[ItemPrototype],
+    affixes: &[AffixDefinition],
+    affix_pools: &[AffixPoolDefinition],
     npc_spawn_ids: &HashSet<&str>,
     errors: &mut Vec<ValidationError>,
 ) {
+    let item_prototypes = item_prototypes
+        .iter()
+        .map(|prototype| (prototype.id.as_str(), prototype))
+        .collect::<HashMap<_, _>>();
+    let item_prototype_ids = item_prototypes.keys().copied().collect::<HashSet<_>>();
+    let affixes = affixes
+        .iter()
+        .map(|affix| (affix.id.as_str(), affix))
+        .collect::<HashMap<_, _>>();
+    let affix_pools = affix_pools
+        .iter()
+        .map(|pool| (pool.id.as_str(), pool))
+        .collect::<HashMap<_, _>>();
+    let sealed_prototype_ids = item_prototypes
+        .iter()
+        .filter_map(|(id, prototype)| prototype.sealed_loot_table_id.as_ref().map(|_| *id))
+        .collect::<HashSet<_>>();
+    let sealed_table_ids = item_prototypes
+        .values()
+        .filter_map(|prototype| prototype.sealed_loot_table_id.as_deref())
+        .collect::<HashSet<_>>();
     if tables.len() > MAX_LOOT_TABLES {
         invalid_gameplay(
             errors,
@@ -1078,7 +1376,11 @@ fn validate_loot_authoring(
     }
 
     let mut table_ids = HashSet::new();
+    let mut table_minimum_units = HashMap::new();
     let mut table_worst_case_units = HashMap::new();
+    let mut table_reward_odds_rows = HashMap::new();
+    let mut table_output_prototypes = HashMap::<&str, HashSet<&str>>::new();
+    let mut used_affix_pools = HashSet::<String>::new();
     let mut total_pool_entries = 0usize;
     for table in tables {
         if !valid_gameplay_identifier(&table.id) {
@@ -1122,9 +1424,20 @@ fn validate_loot_authoring(
             );
         }
 
+        let mut minimum_units = 0u64;
         let mut worst_case_units = 0u64;
+        let mut reward_odds_rows = 0usize;
         let mut component_ids = HashSet::new();
+        let mut output_prototypes = HashSet::new();
         for guaranteed in &table.guaranteed {
+            reward_odds_rows = reward_odds_rows.saturating_add(1);
+            if let Some(pool) = guaranteed
+                .affix_pool_id
+                .as_deref()
+                .and_then(|pool_id| affix_pools.get(pool_id))
+            {
+                reward_odds_rows = reward_odds_rows.saturating_add(pool.entries.len());
+            }
             validate_loot_local_id(
                 &guaranteed.id,
                 &mut component_ids,
@@ -1140,6 +1453,8 @@ fn validate_loot_authoring(
                         table.id, guaranteed.id, guaranteed.item_prototype_id
                     ),
                 );
+            } else {
+                output_prototypes.insert(guaranteed.item_prototype_id.as_str());
             }
             if !(1..=MAX_LOOT_QUANTITY).contains(&guaranteed.quantity) {
                 invalid_gameplay(
@@ -1150,7 +1465,28 @@ fn validate_loot_authoring(
                     ),
                 );
             }
+            if guaranteed.affix_pool_id.is_some() && guaranteed.quantity != 1 {
+                invalid_gameplay(
+                    errors,
+                    format!(
+                        "loot table {:?} guaranteed entry {:?} may apply one affix only with quantity 1",
+                        table.id, guaranteed.id
+                    ),
+                );
+            }
             worst_case_units = worst_case_units.saturating_add(u64::from(guaranteed.quantity));
+            minimum_units = minimum_units.saturating_add(u64::from(guaranteed.quantity));
+            validate_loot_affix_reference(
+                guaranteed.affix_pool_id.as_deref(),
+                &guaranteed.item_prototype_id,
+                &item_prototypes,
+                &affixes,
+                &affix_pools,
+                &mut used_affix_pools,
+                &table.id,
+                &guaranteed.id,
+                errors,
+            );
         }
 
         for pool in &table.pools {
@@ -1176,8 +1512,17 @@ fn validate_loot_authoring(
             total_pool_entries = total_pool_entries.saturating_add(pool.entries.len());
 
             let mut total_weight = 0u64;
+            let mut minimum_quantity = u16::MAX;
             let mut maximum_quantity = 0u16;
             for entry in &pool.entries {
+                reward_odds_rows = reward_odds_rows.saturating_add(1);
+                if let Some(affix_pool) = entry
+                    .affix_pool_id
+                    .as_deref()
+                    .and_then(|pool_id| affix_pools.get(pool_id))
+                {
+                    reward_odds_rows = reward_odds_rows.saturating_add(affix_pool.entries.len());
+                }
                 validate_loot_local_id(
                     &entry.id,
                     &mut component_ids,
@@ -1219,6 +1564,8 @@ fn validate_loot_authoring(
                                     table.id, pool.id, entry.id, prototype_id
                                 ),
                             );
+                        } else {
+                            output_prototypes.insert(prototype_id);
                         }
                         if minimum == 0 || minimum > maximum || maximum > MAX_LOOT_QUANTITY {
                             invalid_gameplay(
@@ -1230,11 +1577,34 @@ fn validate_loot_authoring(
                             );
                         }
                         maximum_quantity = maximum_quantity.max(maximum);
+                        minimum_quantity = minimum_quantity.min(minimum);
+                        if entry.affix_pool_id.is_some() && (minimum != 1 || maximum != 1) {
+                            invalid_gameplay(
+                                errors,
+                                format!(
+                                    "loot table {:?} pool entry {:?} may apply one affix only with quantity exactly 1",
+                                    table.id, entry.id
+                                ),
+                            );
+                        }
+                        validate_loot_affix_reference(
+                            entry.affix_pool_id.as_deref(),
+                            prototype_id,
+                            &item_prototypes,
+                            &affixes,
+                            &affix_pools,
+                            &mut used_affix_pools,
+                            &table.id,
+                            &entry.id,
+                            errors,
+                        );
                     }
                     LootEntryKind::Nothing => {
+                        minimum_quantity = 0;
                         if entry.item_prototype_id.is_some()
                             || entry.min_quantity.is_some()
                             || entry.max_quantity.is_some()
+                            || entry.affix_pool_id.is_some()
                         {
                             invalid_gameplay(
                                 errors,
@@ -1258,6 +1628,13 @@ fn validate_loot_authoring(
             }
             worst_case_units = worst_case_units
                 .saturating_add(u64::from(pool.rolls).saturating_mul(u64::from(maximum_quantity)));
+            let pool_minimum = if minimum_quantity != u16::MAX {
+                minimum_quantity
+            } else {
+                0
+            };
+            minimum_units = minimum_units
+                .saturating_add(u64::from(pool.rolls).saturating_mul(u64::from(pool_minimum)));
         }
         if worst_case_units > MAX_LOOT_UNITS_PER_RESOLUTION {
             invalid_gameplay(
@@ -1268,7 +1645,10 @@ fn validate_loot_authoring(
                 ),
             );
         }
+        table_minimum_units.insert(table.id.as_str(), minimum_units);
         table_worst_case_units.insert(table.id.as_str(), worst_case_units);
+        table_reward_odds_rows.insert(table.id.as_str(), reward_odds_rows);
+        table_output_prototypes.insert(table.id.as_str(), output_prototypes);
     }
     if total_pool_entries > MAX_LOOT_ENTRIES {
         invalid_gameplay(
@@ -1278,10 +1658,16 @@ fn validate_loot_authoring(
             ),
         );
     }
+    for pool_id in affix_pools.keys() {
+        if !used_affix_pools.contains(*pool_id) {
+            invalid_gameplay(errors, format!("affix pool {pool_id:?} has no loot entry"));
+        }
+    }
 
     let mut source_ids = HashSet::new();
     let mut source_spawns = HashSet::new();
     let mut used_tables = HashSet::new();
+    let mut npc_sourced_tables = HashSet::new();
     let mut fixed_roots_by_spawn = HashMap::<&str, u64>::new();
     for instance in initial_item_instances {
         if let InitialItemLocation::NpcSpawn { npc_spawn_id } = &instance.location {
@@ -1332,8 +1718,17 @@ fn validate_loot_authoring(
                     source.id, source.loot_table_id
                 ),
             );
+        } else if sealed_table_ids.contains(source.loot_table_id.as_str()) {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "loot source {:?} cannot directly use sealed reward table {:?}",
+                    source.id, source.loot_table_id
+                ),
+            );
         } else {
             used_tables.insert(source.loot_table_id.as_str());
+            npc_sourced_tables.insert(source.loot_table_id.as_str());
         }
         let fixed_roots = fixed_roots_by_spawn
             .get(source.npc_spawn_id.as_str())
@@ -1364,9 +1759,140 @@ fn validate_loot_authoring(
             );
         }
     }
+    for prototype in item_prototypes.values() {
+        let Some(table_id) = prototype.sealed_loot_table_id.as_deref() else {
+            continue;
+        };
+        if !table_ids.contains(table_id) {
+            invalid_gameplay(
+                errors,
+                format!("sealed reward prototype references missing loot table {table_id:?}"),
+            );
+            continue;
+        }
+        used_tables.insert(table_id);
+        let worst_case = table_worst_case_units
+            .get(table_id)
+            .copied()
+            .unwrap_or_default();
+        let minimum = table_minimum_units
+            .get(table_id)
+            .copied()
+            .unwrap_or_default();
+        if minimum == 0 || worst_case > MAX_SEALED_REWARD_UNITS {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "sealed reward table {table_id:?} must always generate 1..={MAX_SEALED_REWARD_UNITS} units"
+                ),
+            );
+        }
+        let reward_odds_rows = table_reward_odds_rows
+            .get(table_id)
+            .copied()
+            .unwrap_or_default();
+        if reward_odds_rows > MAX_REWARD_ODDS_ROWS {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "sealed reward table {table_id:?} exposes {reward_odds_rows} probability rows; the maximum is {MAX_REWARD_ODDS_ROWS}"
+                ),
+            );
+        }
+        if table_output_prototypes
+            .get(table_id)
+            .is_some_and(|outputs| outputs.iter().any(|id| sealed_prototype_ids.contains(id)))
+        {
+            invalid_gameplay(
+                errors,
+                format!("sealed reward table {table_id:?} cannot generate another sealed reward"),
+            );
+        }
+    }
+    for sealed_id in &sealed_prototype_ids {
+        let earned = npc_sourced_tables.iter().any(|table_id| {
+            table_output_prototypes
+                .get(table_id)
+                .is_some_and(|outputs| outputs.contains(sealed_id))
+        });
+        if !earned {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "sealed reward prototype {sealed_id:?} must be generated by an NPC loot source"
+                ),
+            );
+        }
+    }
     for table_id in table_ids {
         if !used_tables.contains(table_id) {
             invalid_gameplay(errors, format!("loot table {table_id:?} has no source"));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_loot_affix_reference(
+    pool_id: Option<&str>,
+    prototype_id: &str,
+    item_prototypes: &HashMap<&str, &ItemPrototype>,
+    affixes: &HashMap<&str, &AffixDefinition>,
+    affix_pools: &HashMap<&str, &AffixPoolDefinition>,
+    used_affix_pools: &mut HashSet<String>,
+    table_id: &str,
+    entry_id: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    let Some(pool_id) = pool_id else {
+        return;
+    };
+    let Some(pool) = affix_pools.get(pool_id) else {
+        invalid_gameplay(
+            errors,
+            format!(
+                "loot table {table_id:?} entry {entry_id:?} references missing affix pool {pool_id:?}"
+            ),
+        );
+        return;
+    };
+    used_affix_pools.insert(pool_id.to_owned());
+    let Some(prototype) = item_prototypes.get(prototype_id) else {
+        return;
+    };
+    if prototype.stack_policy != ItemStackPolicy::Unique
+        || prototype.max_stack_units != 1
+        || prototype.sealed_loot_table_id.is_some()
+    {
+        invalid_gameplay(
+            errors,
+            format!(
+                "loot table {table_id:?} entry {entry_id:?} can apply an affix only to a non-sealed unique prototype"
+            ),
+        );
+        return;
+    }
+    let max_gameplay_value =
+        i32::try_from(MAX_GAMEPLAY_VALUE).expect("MAX_GAMEPLAY_VALUE fits in i32");
+    for entry in &pool.entries {
+        let Some(affix_id) = entry.affix_id.as_deref() else {
+            continue;
+        };
+        let Some(affix) = affixes.get(affix_id) else {
+            continue;
+        };
+        let effective_attack = prototype.attack_bonus.checked_add(affix.attack_bonus_delta);
+        let effective_heal = prototype.heal_amount.checked_add(affix.heal_amount_delta);
+        if (affix.attack_bonus_delta > 0 && prototype.equipment_slot.is_none())
+            || (affix.heal_amount_delta > 0 && !prototype.consumable)
+            || effective_attack.is_none_or(|value| !(0..=max_gameplay_value).contains(&value))
+            || effective_heal.is_none_or(|value| !(0..=max_gameplay_value).contains(&value))
+        {
+            invalid_gameplay(
+                errors,
+                format!(
+                    "affix {affix_id:?} is incompatible with loot prototype {prototype_id:?} in table {table_id:?}"
+                ),
+            );
         }
     }
 }
@@ -2669,6 +3195,7 @@ mod tests {
             max_stack_units: 1,
             container: None,
             transfer_policy: ItemTransferPolicy::Transferable,
+            sealed_loot_table_id: None,
         }
     }
 
@@ -2711,6 +3238,7 @@ mod tests {
                 id: "test:guaranteed".into(),
                 item_prototype_id: "test:token".into(),
                 quantity: 1,
+                affix_pool_id: None,
             }],
             pools: vec![LootPoolDefinition {
                 id: "test:pool".into(),
@@ -2723,6 +3251,7 @@ mod tests {
                         item_prototype_id: Some("test:token".into()),
                         min_quantity: Some(1),
                         max_quantity: Some(2),
+                        affix_pool_id: None,
                     },
                     LootEntryDefinition {
                         kind: LootEntryKind::Nothing,
@@ -2731,6 +3260,7 @@ mod tests {
                         item_prototype_id: None,
                         min_quantity: None,
                         max_quantity: None,
+                        affix_pool_id: None,
                     },
                 ],
             }],
@@ -2745,6 +3275,65 @@ mod tests {
         value
     }
 
+    fn pack_with_sealed_affix_rewards() -> WorldPack {
+        let mut value = pack_with_loot();
+        let mut blade = item_prototype("test:storm-blade");
+        blade.name = "storm blade".into();
+        blade.equipment_slot = Some(EquipmentSlot::Weapon);
+        blade.attack_bonus = 2;
+        blade.rarity = ItemRarity::Rare;
+        let mut seal = item_prototype("test:storm-seal");
+        seal.name = "sealed storm writ".into();
+        seal.consumable = true;
+        seal.transfer_policy = ItemTransferPolicy::CharacterBound;
+        seal.sealed_loot_table_id = Some("test:storm-rewards".into());
+        value.item_prototypes.extend([blade, seal]);
+
+        value.gameplay.affixes.push(AffixDefinition {
+            id: "test:charged".into(),
+            label: "charged".into(),
+            position: AffixPosition::Prefix,
+            attack_bonus_delta: 1,
+            heal_amount_delta: 0,
+        });
+        value.gameplay.affix_pools.push(AffixPoolDefinition {
+            id: "test:storm-affixes".into(),
+            entries: vec![
+                AffixPoolEntry {
+                    kind: AffixPoolEntryKind::Affix,
+                    id: "test:charged-roll".into(),
+                    weight: 3,
+                    affix_id: Some("test:charged".into()),
+                },
+                AffixPoolEntry {
+                    kind: AffixPoolEntryKind::Nothing,
+                    id: "test:plain-roll".into(),
+                    weight: 1,
+                    affix_id: None,
+                },
+            ],
+        });
+        value.gameplay.loot_tables[0]
+            .guaranteed
+            .push(LootGuaranteedDefinition {
+                id: "test:earned-seal".into(),
+                item_prototype_id: "test:storm-seal".into(),
+                quantity: 1,
+                affix_pool_id: None,
+            });
+        value.gameplay.loot_tables.push(LootTableDefinition {
+            id: "test:storm-rewards".into(),
+            guaranteed: vec![LootGuaranteedDefinition {
+                id: "test:storm-blade-reward".into(),
+                item_prototype_id: "test:storm-blade".into(),
+                quantity: 1,
+                affix_pool_id: Some("test:storm-affixes".into()),
+            }],
+            pools: Vec::new(),
+        });
+        value
+    }
+
     fn add_fixed_loot_roots(pack: &mut WorldPack, count: usize) {
         pack.initial_item_instances
             .extend((0..count).map(|index| InitialItemInstance {
@@ -2754,6 +3343,39 @@ mod tests {
                     npc_spawn_id: "test:wolf-1".into(),
                 },
             }));
+    }
+
+    fn sealed_reward_odds_boundary_pack(extra_guaranteed: bool) -> WorldPack {
+        let mut value = pack_with_sealed_affix_rewards();
+        value.gameplay.affix_pools[0].entries.truncate(1);
+        let reward_table = &mut value.gameplay.loot_tables[1];
+        reward_table.guaranteed.clear();
+        reward_table.pools = (0..MAX_LOOT_POOLS_PER_TABLE)
+            .map(|pool_index| LootPoolDefinition {
+                id: format!("test:odds-pool-{pool_index}"),
+                rolls: 1,
+                entries: (0..MAX_LOOT_ENTRIES_PER_POOL)
+                    .map(|entry_index| LootEntryDefinition {
+                        kind: LootEntryKind::Item,
+                        id: format!("test:odds-entry-{pool_index}-{entry_index}"),
+                        weight: 1,
+                        item_prototype_id: Some("test:storm-blade".into()),
+                        min_quantity: Some(1),
+                        max_quantity: Some(1),
+                        affix_pool_id: Some("test:storm-affixes".into()),
+                    })
+                    .collect(),
+            })
+            .collect();
+        if extra_guaranteed {
+            reward_table.guaranteed.push(LootGuaranteedDefinition {
+                id: "test:odds-extra".into(),
+                item_prototype_id: "test:storm-blade".into(),
+                quantity: 1,
+                affix_pool_id: None,
+            });
+        }
+        value
     }
 
     #[test]
@@ -2778,6 +3400,236 @@ mod tests {
         let mut reordered = table.clone();
         reordered.pools[0].entries.reverse();
         assert_eq!(reordered.canonical_sha256(), digest);
+    }
+
+    #[test]
+    fn sealed_rewards_and_single_affix_rolls_are_bounded_and_canonical() {
+        let pack = pack_with_sealed_affix_rewards();
+        pack.validate().unwrap();
+        let seal = pack
+            .item_prototypes
+            .iter()
+            .find(|prototype| prototype.id == "test:storm-seal")
+            .unwrap();
+        assert_eq!(
+            seal.sealed_loot_table_id.as_deref(),
+            Some("test:storm-rewards")
+        );
+        assert_eq!(pack.gameplay.affixes[0].canonical_sha256().len(), 64);
+        let digest = pack.gameplay.affix_pools[0].canonical_sha256();
+        let mut reordered = pack.gameplay.affix_pools[0].clone();
+        reordered.entries.reverse();
+        assert_eq!(reordered.canonical_sha256(), digest);
+
+        let encoded = serde_json::to_vec(&pack).unwrap();
+        assert_eq!(serde_json::from_slice::<WorldPack>(&encoded).unwrap(), pack);
+    }
+
+    #[test]
+    fn sealed_reward_probability_rows_match_the_runtime_boundary() {
+        let exact = sealed_reward_odds_boundary_pack(false);
+        exact.validate().unwrap();
+
+        let oversized = sealed_reward_odds_boundary_pack(true);
+        let message = validation_message(&oversized);
+        assert!(
+            message.contains(
+                "sealed reward table \"test:storm-rewards\" exposes 1025 probability rows; the maximum is 1024"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn sealed_rewards_must_be_earned_non_structural_non_nested_and_at_most_sixteen_units() {
+        let base = pack_with_sealed_affix_rewards();
+
+        let mut initial = base.clone();
+        initial.initial_item_instances.push(InitialItemInstance {
+            id: "test:initial-seal".into(),
+            prototype_id: "test:storm-seal".into(),
+            location: InitialItemLocation::Staged,
+        });
+        let message = validation_message(&initial);
+        assert!(
+            message.contains("cannot have an initial instance"),
+            "{message}"
+        );
+
+        let mut unearned = base.clone();
+        unearned.gameplay.loot_tables[0]
+            .guaranteed
+            .retain(|entry| entry.item_prototype_id != "test:storm-seal");
+        let message = validation_message(&unearned);
+        assert!(
+            message.contains("must be generated by an NPC loot source"),
+            "{message}"
+        );
+
+        let mut nested = base.clone();
+        nested.gameplay.loot_tables[1].guaranteed[0].item_prototype_id = "test:storm-seal".into();
+        nested.gameplay.loot_tables[1].guaranteed[0].affix_pool_id = None;
+        let message = validation_message(&nested);
+        assert!(
+            message.contains("cannot generate another sealed reward"),
+            "{message}"
+        );
+
+        let mut oversized = base.clone();
+        oversized.gameplay.loot_tables[1].guaranteed[0].quantity = 17;
+        let message = validation_message(&oversized);
+        assert!(
+            message.contains("must always generate 1..=16 units"),
+            "{message}"
+        );
+
+        let mut possible_nothing = base.clone();
+        possible_nothing.gameplay.loot_tables[1].guaranteed.clear();
+        possible_nothing.gameplay.loot_tables[1]
+            .pools
+            .push(LootPoolDefinition {
+                id: "test:uncertain-reward".into(),
+                rolls: 1,
+                entries: vec![
+                    LootEntryDefinition {
+                        kind: LootEntryKind::Item,
+                        id: "test:possible-blade".into(),
+                        weight: 1,
+                        item_prototype_id: Some("test:storm-blade".into()),
+                        min_quantity: Some(1),
+                        max_quantity: Some(1),
+                        affix_pool_id: Some("test:storm-affixes".into()),
+                    },
+                    LootEntryDefinition {
+                        kind: LootEntryKind::Nothing,
+                        id: "test:possible-nothing".into(),
+                        weight: 1,
+                        item_prototype_id: None,
+                        min_quantity: None,
+                        max_quantity: None,
+                        affix_pool_id: None,
+                    },
+                ],
+            });
+        let message = validation_message(&possible_nothing);
+        assert!(
+            message.contains("must always generate 1..=16 units"),
+            "{message}"
+        );
+
+        let mut guaranteed_with_nothing = base.clone();
+        guaranteed_with_nothing.gameplay.loot_tables[1]
+            .pools
+            .push(possible_nothing.gameplay.loot_tables[1].pools[0].clone());
+        guaranteed_with_nothing.validate().unwrap();
+
+        let mut directly_sourced = base.clone();
+        directly_sourced.gameplay.npc_spawns.push(NpcSpawn {
+            id: "test:wolf-2".into(),
+            prototype_id: "test:wolf".into(),
+            room_id: "test:1".into(),
+        });
+        directly_sourced
+            .gameplay
+            .loot_sources
+            .push(LootSourceDefinition {
+                kind: LootSourceKind::NpcSpawn,
+                id: "test:sealed-direct-source".into(),
+                npc_spawn_id: "test:wolf-2".into(),
+                loot_table_id: "test:storm-rewards".into(),
+                rights: LootRightsPolicy::CreditedCharacter,
+            });
+        let message = validation_message(&directly_sourced);
+        assert!(
+            message.contains(
+                "loot source \"test:sealed-direct-source\" cannot directly use sealed reward table \"test:storm-rewards\""
+            ),
+            "{message}"
+        );
+
+        let mut structural = base;
+        let seal = structural
+            .item_prototypes
+            .iter_mut()
+            .find(|prototype| prototype.id == "test:storm-seal")
+            .unwrap();
+        seal.container = Some(ItemContainerDefinition {
+            max_slots: 1,
+            max_weight_grams: 1,
+        });
+        let message = validation_message(&structural);
+        assert!(
+            message.contains("non-structural, and effect-free"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn affixes_apply_to_exactly_one_compatible_unique_loot_unit() {
+        let base = pack_with_sealed_affix_rewards();
+
+        let mut stack = base.clone();
+        let target = stack
+            .item_prototypes
+            .iter_mut()
+            .find(|prototype| prototype.id == "test:storm-blade")
+            .unwrap();
+        target.stack_policy = ItemStackPolicy::Fungible;
+        target.max_stack_units = 2;
+        let message = validation_message(&stack);
+        assert!(
+            message.contains("only to a non-sealed unique prototype"),
+            "{message}"
+        );
+
+        let mut incompatible = base.clone();
+        incompatible
+            .item_prototypes
+            .iter_mut()
+            .find(|prototype| prototype.id == "test:storm-blade")
+            .unwrap()
+            .equipment_slot = None;
+        let message = validation_message(&incompatible);
+        assert!(
+            message.contains("is incompatible with loot prototype"),
+            "{message}"
+        );
+
+        let mut nothing = base;
+        let entry = &mut nothing.gameplay.affix_pools[0].entries[1];
+        entry.affix_id = Some("test:charged".into());
+        let message = validation_message(&nothing);
+        assert!(
+            message.contains("nothing entry") && message.contains("cannot reference"),
+            "{message}"
+        );
+
+        let mut direct = pack_with_sealed_affix_rewards();
+        direct
+            .item_prototypes
+            .iter_mut()
+            .find(|prototype| prototype.id == "test:token")
+            .unwrap()
+            .equipment_slot = Some(EquipmentSlot::Trinket);
+        direct.gameplay.loot_tables[0].pools[0].entries[0].affix_pool_id =
+            Some("test:storm-affixes".into());
+        direct.gameplay.loot_tables[0].pools[0].entries[0].max_quantity = Some(1);
+        direct.validate().unwrap();
+
+        let mut quantity = pack_with_sealed_affix_rewards();
+        quantity.gameplay.loot_tables[1].guaranteed[0].quantity = 2;
+        let message = validation_message(&quantity);
+        assert!(message.contains("with quantity 1"), "{message}");
+    }
+
+    fn validation_message(pack: &WorldPack) -> String {
+        pack.validate()
+            .unwrap_err()
+            .0
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -2972,6 +3824,7 @@ mod tests {
                                 item_prototype_id: None,
                                 min_quantity: None,
                                 max_quantity: None,
+                                affix_pool_id: None,
                             })
                             .collect(),
                     })

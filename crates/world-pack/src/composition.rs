@@ -1,8 +1,8 @@
 //! Strict, bounded, offline composition of modular authoring areas.
 //!
-//! AreaPack v5 is deliberately an authoring format, not a runtime hot-load
+//! AreaPack v6 is deliberately an authoring format, not a runtime hot-load
 //! protocol. Composition resolves and validates the complete graph, then emits
-//! one validated [`WorldPackDocument`] v6 consumed by the runtime.
+//! one validated [`WorldPackDocument`] v7 consumed by the runtime.
 //! Area identities, source digests, ownership and cross-area edges are exposed
 //! in [`CompositionReport`] so a later catalog/activation design can build on
 //! stable facts without weakening today's all-or-nothing runtime validation.
@@ -19,18 +19,18 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    AbilityDefinition, AdvancedClassDefinition, ArchetypeDefinition, BackgroundDefinition,
-    BaseClassDefinition, CharacterDefaultsDefinition, CharacterProgressionDefinition, ContentTest,
-    EntityMediaDefinition, EntityMediaKind, ExitTarget, GameplayDefinition, GrantDefinition,
-    InitialItemInstance, ItemPrototype, LevelThresholdDefinition, LineageDefinition,
-    LootSourceDefinition, LootTableDefinition, NpcAbilitySet, NpcPrototype, NpcSpawn,
-    RequirementDefinition, RequirementPredicate, Room, RoomMediaDefinition,
-    RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition, SourceMetadata,
-    TalentGraphDefinition, ValidationErrors, WorldPack, WorldPackDocument,
+    AbilityDefinition, AdvancedClassDefinition, AffixDefinition, AffixPoolDefinition,
+    ArchetypeDefinition, BackgroundDefinition, BaseClassDefinition, CharacterDefaultsDefinition,
+    CharacterProgressionDefinition, ContentTest, EntityMediaDefinition, EntityMediaKind,
+    ExitTarget, GameplayDefinition, GrantDefinition, InitialItemInstance, ItemPrototype,
+    LevelThresholdDefinition, LineageDefinition, LootSourceDefinition, LootTableDefinition,
+    NpcAbilitySet, NpcPrototype, NpcSpawn, RequirementDefinition, RequirementPredicate, Room,
+    RoomMediaDefinition, RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition,
+    SourceMetadata, TalentGraphDefinition, ValidationErrors, WorldPack, WorldPackDocument,
 };
 
 pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 2;
-pub const AREA_PACK_SCHEMA_VERSION: u32 = 5;
+pub const AREA_PACK_SCHEMA_VERSION: u32 = 6;
 pub const MAX_PROJECT_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_AREA_COUNT: usize = 256;
 pub const MAX_AREA_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -138,6 +138,10 @@ pub struct AreaPack {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loot_sources: Vec<LootSourceDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affixes: Vec<AffixDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affix_pools: Vec<AffixPoolDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archetypes: Vec<ArchetypeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub level_thresholds: Vec<LevelThresholdDefinition>,
@@ -227,6 +231,10 @@ impl<'de> Deserialize<'de> for AreaPack {
             #[serde(default)]
             loot_sources: Vec<LootSourceDefinition>,
             #[serde(default)]
+            affixes: Vec<AffixDefinition>,
+            #[serde(default)]
+            affix_pools: Vec<AffixPoolDefinition>,
+            #[serde(default)]
             archetypes: Vec<ArchetypeDefinition>,
             #[serde(default)]
             level_thresholds: Vec<LevelThresholdDefinition>,
@@ -266,13 +274,19 @@ impl<'de> Deserialize<'de> for AreaPack {
             .ok_or_else(|| D::Error::custom("AreaPack schemaVersion is required"))?;
         if schema_version == 1 || schema_version == 2 {
             reject_legacy_area_loot_fields(&value, schema_version).map_err(D::Error::custom)?;
+            reject_legacy_area_reward_fields(&value, schema_version).map_err(D::Error::custom)?;
             normalize_legacy_area_items(&mut value).map_err(D::Error::custom)?;
         } else if schema_version == 3 {
             reject_legacy_area_loot_fields(&value, schema_version).map_err(D::Error::custom)?;
+            reject_legacy_area_reward_fields(&value, schema_version).map_err(D::Error::custom)?;
             normalize_v3_area_items(&mut value).map_err(D::Error::custom)?;
         } else if schema_version == 4 {
             reject_legacy_area_loot_fields(&value, schema_version).map_err(D::Error::custom)?;
+            reject_legacy_area_reward_fields(&value, schema_version).map_err(D::Error::custom)?;
             normalize_v4_area_loot(&mut value).map_err(D::Error::custom)?;
+        } else if schema_version == 5 {
+            reject_legacy_area_reward_fields(&value, schema_version).map_err(D::Error::custom)?;
+            normalize_v5_area_rewards(&mut value).map_err(D::Error::custom)?;
         } else if schema_version == u64::from(AREA_PACK_SCHEMA_VERSION) {
             reject_native_area_legacy_item_fields(&value).map_err(D::Error::custom)?;
         }
@@ -281,6 +295,7 @@ impl<'de> Deserialize<'de> for AreaPack {
             && raw.schema_version != 2
             && raw.schema_version != 3
             && raw.schema_version != 4
+            && raw.schema_version != 5
             && raw.schema_version != AREA_PACK_SCHEMA_VERSION
         {
             return Err(D::Error::custom(format!(
@@ -318,6 +333,8 @@ impl<'de> Deserialize<'de> for AreaPack {
             npc_spawns: raw.npc_spawns,
             loot_tables: raw.loot_tables,
             loot_sources: raw.loot_sources,
+            affixes: raw.affixes,
+            affix_pools: raw.affix_pools,
             archetypes,
             level_thresholds,
             lineages,
@@ -342,14 +359,14 @@ fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<()
         return Ok(());
     };
     if root.contains_key("items") || root.contains_key("itemRules") {
-        return Err("AreaPack v5 must use itemPrototypes and initialItemInstances".to_owned());
+        return Err("AreaPack v6 must use itemPrototypes and initialItemInstances".to_owned());
     }
     if root
         .get("rooms")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|rooms| rooms.iter().any(|room| room.get("items").is_some()))
     {
-        return Err("AreaPack v5 rooms cannot declare legacy items".to_owned());
+        return Err("AreaPack v6 rooms cannot declare legacy items".to_owned());
     }
     if root
         .get("npcPrototypes")
@@ -360,7 +377,7 @@ fn reject_native_area_legacy_item_fields(value: &serde_json::Value) -> Result<()
                 .any(|prototype| prototype.get("lootItemIds").is_some())
         })
     {
-        return Err("AreaPack v5 NPC prototypes cannot declare legacy lootItemIds".to_owned());
+        return Err("AreaPack v6 NPC prototypes cannot declare legacy lootItemIds".to_owned());
     }
     Ok(())
 }
@@ -371,13 +388,80 @@ fn reject_legacy_area_loot_fields(
 ) -> Result<(), String> {
     if value.get("lootTables").is_some() || value.get("lootSources").is_some() {
         return Err(format!(
-            "AreaPack v{schema_version} cannot declare v5 lootTables or lootSources"
+            "AreaPack v{schema_version} cannot declare lootTables or lootSources"
+        ));
+    }
+    Ok(())
+}
+
+fn reject_legacy_area_reward_fields(
+    value: &serde_json::Value,
+    schema_version: u64,
+) -> Result<(), String> {
+    let has_sealed = ["itemPrototypes", "items"].into_iter().any(|field| {
+        value
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|prototypes| {
+                prototypes
+                    .iter()
+                    .any(|prototype| prototype.get("sealedLootTableId").is_some())
+            })
+    });
+    let has_affix_pool_reference = value
+        .get("lootTables")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tables| {
+            tables.iter().any(|table| {
+                table
+                    .get("guaranteed")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|entries| {
+                        entries
+                            .iter()
+                            .any(|entry| entry.get("affixPoolId").is_some())
+                    })
+                    || table
+                        .get("pools")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|pools| {
+                            pools.iter().any(|pool| {
+                                pool.get("entries")
+                                    .and_then(serde_json::Value::as_array)
+                                    .is_some_and(|entries| {
+                                        entries
+                                            .iter()
+                                            .any(|entry| entry.get("affixPoolId").is_some())
+                                    })
+                            })
+                        })
+            })
+        });
+    if value.get("affixes").is_some()
+        || value.get("affixPools").is_some()
+        || has_sealed
+        || has_affix_pool_reference
+    {
+        return Err(format!(
+            "AreaPack v{schema_version} cannot declare v6 sealed rewards or affixes"
         ));
     }
     Ok(())
 }
 
 fn normalize_v4_area_loot(value: &mut serde_json::Value) -> Result<(), String> {
+    reject_native_area_legacy_item_fields(value)?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "AreaPack root must be an object".to_owned())?;
+    root.insert(
+        "schemaVersion".to_owned(),
+        serde_json::json!(AREA_PACK_SCHEMA_VERSION),
+    );
+    Ok(())
+}
+
+fn normalize_v5_area_rewards(value: &mut serde_json::Value) -> Result<(), String> {
     reject_native_area_legacy_item_fields(value)?;
     let root = value
         .as_object_mut()
@@ -456,6 +540,8 @@ pub struct AreaOwnership {
     pub npc_spawns: Vec<String>,
     pub loot_tables: Vec<String>,
     pub loot_sources: Vec<String>,
+    pub affixes: Vec<String>,
+    pub affix_pools: Vec<String>,
     pub archetypes: Vec<String>,
     pub lineages: Vec<String>,
     pub backgrounds: Vec<String>,
@@ -495,9 +581,13 @@ pub enum AreaCrossReferenceKind {
     NpcSpawnPrototype,
     NpcSpawnRoom,
     LootGuaranteedPrototype,
+    LootGuaranteedAffixPool,
     LootEntryPrototype,
+    LootEntryAffixPool,
     LootSourceNpcSpawn,
     LootSourceTable,
+    ItemSealedLootTable,
+    AffixPoolAffix,
     ArchetypeAbility,
     ProgressionReference,
     NpcAbilitySetPrototype,
@@ -914,6 +1004,18 @@ fn compose_loaded(
         )?;
         register_entities(
             &mut global_ids,
+            "affix",
+            &pack.id,
+            pack.affixes.iter().map(|value| &value.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "affix pool",
+            &pack.id,
+            pack.affix_pools.iter().map(|value| &value.id),
+        )?;
+        register_entities(
+            &mut global_ids,
             "archetype",
             &pack.id,
             pack.archetypes.iter().map(|v| &v.id),
@@ -1015,6 +1117,13 @@ fn compose_loaded(
                 ),
                 loot_sources: sorted(
                     pack.loot_sources
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                affixes: sorted(pack.affixes.iter().map(|value| value.id.clone()).collect()),
+                affix_pools: sorted(
+                    pack.affix_pools
                         .iter()
                         .map(|value| value.id.clone())
                         .collect(),
@@ -1137,6 +1246,12 @@ fn compose_loaded(
             .gameplay
             .loot_sources
             .extend(pack.loot_sources.clone());
+        document.world.gameplay.affixes.extend(pack.affixes.clone());
+        document
+            .world
+            .gameplay
+            .affix_pools
+            .extend(pack.affix_pools.clone());
         document
             .world
             .gameplay
@@ -1256,7 +1371,7 @@ fn compose_loaded(
                 unreachable!("artifact generation does not resolve scenes: {error}")
             }
             crate::DocumentToolError::LegacyProgression(error) => {
-                unreachable!("composed artifacts are already WorldPack v6: {error}")
+                unreachable!("composed artifacts are already WorldPack v7: {error}")
             }
             crate::DocumentToolError::LegacyItems(error) => {
                 unreachable!("composed artifacts already use native v5 items: {error}")
@@ -1384,6 +1499,12 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
     let loot_table_owner = owner_map(areas, |area| {
         area.loot_tables.iter().map(|value| value.id.as_str())
     });
+    let affix_owner = owner_map(areas, |area| {
+        area.affixes.iter().map(|value| value.id.as_str())
+    });
+    let affix_pool_owner = owner_map(areas, |area| {
+        area.affix_pools.iter().map(|value| value.id.as_str())
+    });
     let legacy_owner = areas
         .iter()
         .flat_map(|area| {
@@ -1396,6 +1517,20 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
     let mut edges = Vec::new();
     for area in areas {
         let from = area.pack.id.as_str();
+        for prototype in &area.pack.item_prototypes {
+            if let Some(table_id) = prototype.sealed_loot_table_id.as_deref()
+                && let Some(owner) = loot_table_owner.get(table_id)
+            {
+                add_edge(
+                    &mut edges,
+                    from,
+                    owner,
+                    AreaCrossReferenceKind::ItemSealedLootTable,
+                    &prototype.id,
+                    table_id,
+                );
+            }
+        }
         for room in &area.pack.rooms {
             for exit in &room.exits {
                 let target = match &exit.target {
@@ -1510,6 +1645,18 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                         &guaranteed.item_prototype_id,
                     );
                 }
+                if let Some(pool_id) = guaranteed.affix_pool_id.as_deref()
+                    && let Some(owner) = affix_pool_owner.get(pool_id)
+                {
+                    add_edge(
+                        &mut edges,
+                        from,
+                        owner,
+                        AreaCrossReferenceKind::LootGuaranteedAffixPool,
+                        &guaranteed.id,
+                        pool_id,
+                    );
+                }
             }
             for entry in table.pools.iter().flat_map(|pool| &pool.entries) {
                 if let Some(prototype_id) = entry.item_prototype_id.as_deref()
@@ -1522,6 +1669,34 @@ fn derive_cross_area_references(areas: &[LoadedArea]) -> Vec<AreaCrossReference>
                         AreaCrossReferenceKind::LootEntryPrototype,
                         &entry.id,
                         prototype_id,
+                    );
+                }
+                if let Some(pool_id) = entry.affix_pool_id.as_deref()
+                    && let Some(owner) = affix_pool_owner.get(pool_id)
+                {
+                    add_edge(
+                        &mut edges,
+                        from,
+                        owner,
+                        AreaCrossReferenceKind::LootEntryAffixPool,
+                        &entry.id,
+                        pool_id,
+                    );
+                }
+            }
+        }
+        for pool in &area.pack.affix_pools {
+            for entry in &pool.entries {
+                if let Some(affix_id) = entry.affix_id.as_deref()
+                    && let Some(owner) = affix_owner.get(affix_id)
+                {
+                    add_edge(
+                        &mut edges,
+                        from,
+                        owner,
+                        AreaCrossReferenceKind::AffixPoolAffix,
+                        &pool.id,
+                        affix_id,
                     );
                 }
             }
@@ -2153,7 +2328,7 @@ fn safe_identifier(value: &str) -> bool {
 }
 
 /// Existing runtime WorldPack readers intentionally tolerate future fields.
-/// AreaPack v5 does not: this format-specific key audit makes every structured
+/// AreaPack v6 does not: this format-specific key audit makes every structured
 /// authoring record fail closed without changing runtime deserialization.
 fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionError> {
     let Some(area) = audit_object(
@@ -2171,6 +2346,8 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
             "npcSpawns",
             "lootTables",
             "lootSources",
+            "affixes",
+            "affixPools",
             "archetypes",
             "levelThresholds",
             "lineages",
@@ -2213,6 +2390,8 @@ fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionErro
     audit_array(area.get("npcSpawns"), "$.npcSpawns", audit_npc_spawn)?;
     audit_array(area.get("lootTables"), "$.lootTables", audit_loot_table)?;
     audit_array(area.get("lootSources"), "$.lootSources", audit_loot_source)?;
+    audit_array(area.get("affixes"), "$.affixes", audit_affix)?;
+    audit_array(area.get("affixPools"), "$.affixPools", audit_affix_pool)?;
     audit_array(area.get("archetypes"), "$.archetypes", audit_archetype)?;
     audit_array(area.get("abilities"), "$.abilities", audit_ability)?;
     audit_array(
@@ -2266,6 +2445,7 @@ fn audit_item_prototype(value: &serde_json::Value, path: &str) -> Result<(), Com
             "maxStackUnits",
             "container",
             "transferPolicy",
+            "sealedLootTableId",
         ],
         path,
     )?
@@ -2541,7 +2721,14 @@ fn audit_loot_table(value: &serde_json::Value, path: &str) -> Result<(), Composi
     audit_array(
         table.get("guaranteed"),
         &format!("{path}.guaranteed"),
-        |value, path| audit_object(value, &["id", "itemPrototypeId", "quantity"], path).map(|_| ()),
+        |value, path| {
+            audit_object(
+                value,
+                &["id", "itemPrototypeId", "quantity", "affixPoolId"],
+                path,
+            )
+            .map(|_| ())
+        },
     )?;
     audit_array(
         table.get("pools"),
@@ -2563,6 +2750,7 @@ fn audit_loot_table(value: &serde_json::Value, path: &str) -> Result<(), Composi
                             "itemPrototypeId",
                             "minQuantity",
                             "maxQuantity",
+                            "affixPoolId",
                         ],
                         path,
                     )
@@ -2572,6 +2760,32 @@ fn audit_loot_table(value: &serde_json::Value, path: &str) -> Result<(), Composi
         },
     )?;
     Ok(())
+}
+
+fn audit_affix(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    audit_object(
+        value,
+        &[
+            "id",
+            "label",
+            "position",
+            "attackBonusDelta",
+            "healAmountDelta",
+        ],
+        path,
+    )
+    .map(|_| ())
+}
+
+fn audit_affix_pool(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {
+    let Some(pool) = audit_object(value, &["id", "entries"], path)? else {
+        return Ok(());
+    };
+    audit_array(
+        pool.get("entries"),
+        &format!("{path}.entries"),
+        |value, path| audit_object(value, &["kind", "id", "weight", "affixId"], path).map(|_| ()),
+    )
 }
 
 fn audit_loot_source(value: &serde_json::Value, path: &str) -> Result<(), CompositionError> {

@@ -139,11 +139,11 @@ cannot displace an accepted command result.
 ### Additive v1 rollout policy
 
 `tiamud.v1` aún no ha alcanzado su primer hito de compatibilidad ni se ha usado
-en producción pública. Durante este intervalo de prelanzamiento, la fase 4A
-sustituye deliberadamente el contrato fuente de forma incompatible: el servidor
-y el cliente oficial deben proceder del mismo checkout. No existe una capacidad
-negociada que haga compatible un cliente anterior con los campos o enums de 4A,
-y no debe afirmarse esa compatibilidad.
+en producción pública. Durante este intervalo de prelanzamiento, las fases 4A y
+4B sustituyen deliberadamente el contrato fuente de forma incompatible: el
+servidor y el cliente oficial deben proceder del mismo checkout. No existe una
+capacidad negociada que haga compatible un cliente anterior con los campos o
+enums de 4A y 4B, y no debe afirmarse esa compatibilidad.
 
 La política aditiva siguiente será vinculante a partir del primer hito explícito
 de compatibilidad. Desde ese hito, los esquemas cliente-servidor permanecerán
@@ -262,6 +262,7 @@ look, inventory, move
 item.take, item.drop, item.contents, item.put, item.get, item.give,
 item.examine, item.use, item.equip, item.unequip
 loot.status, loot.pass
+reward.open, reward.odds
 combat.attack, combat.ability
 progression.promote, progression.talent
 party.create, party.invite, party.accept, party.revoke, party.kick,
@@ -355,6 +356,21 @@ ocupa como máximo 256 bytes sin controles. Forma parte de la firma de
 deduplicación; cambiarlo bajo el mismo `requestId` se rechaza. `loot.pass` solo
 puede ceder un derecho propio a la siguiente identidad de la cohorte congelada,
 no renueva el plazo y no revela esa identidad al cliente.
+
+Las recompensas selladas usan formas separadas y cerradas:
+
+| Acción | Campos exactos adicionales |
+| --- | --- |
+| `reward.open` | `target` |
+| `reward.odds` | `target`, `page` |
+
+`target` identifica una recompensa sellada que el personaje lleva y `page` es
+positivo. Ambos forman parte de la firma de deduplicación. Los comandos de
+texto equivalentes, compartidos por Web y Telnet, son `open <selector>` y
+`reward odds <selector> [página]`; al omitir la página textual se usa la
+primera. Abrir vuelve a comprobar autoridad, espacio y peso y confirma en una
+sola mutación durable el consumo del sello y la creación de todo el resultado.
+Consultar probabilidades no muta el mundo.
 
 El intercambio confirmado usa estas formas cerradas; todo selector es opaco y
 pertenece a la sesión que lo proyectó:
@@ -496,6 +512,7 @@ traffic.
 | `inventory.patch` | Complete current inventory/equipment fragment. |
 | `container.contents` | Página autorizada de hasta 20 grupos hijos directos, con capacidad del contenedor. |
 | `trade.contents` | Página privada autorizada de hasta 20 grupos hijos directos de un contenedor ofrecido. |
+| `reward.odds` | Página privada de probabilidades exactas de una recompensa sellada portada. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
 | `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `party`, `general`, `newbie` o `staff`. |
@@ -875,6 +892,13 @@ ubicación o miembros. `container.contents` contiene `container`, `page`,
 `totalPages`, `capacity` e `items`; cada página incluye como máximo veinte
 grupos y debe caber en el límite normal de 16 KiB.
 
+Una unidad única modificada añade `affix` con `label`, `position`
+(`prefix` o `suffix`), `attackBonusDelta` y `healAmountDelta`. El nombre
+proyectado de ese objeto ya incorpora el prefijo o sufijo. La vista nunca
+publica el ID de definición, el pool, hashes ni procedencia durable del afijo;
+el modificador es presentación y estadística autorizadas, no autoridad de
+autoría. Los objetos sin modificador omiten `affix`.
+
 En inventario, `availableQuantity` y `reservedForTrade` separan unidades
 mutables de las reservadas y `canTrade` solo propone raíces completamente
 transferibles no bloqueadas. La oferta proyecta líneas agrupadas con selector,
@@ -900,6 +924,25 @@ contenedor entrega/trade siempre son falsos. `Char.Trade 1` y
 `Char.Trade.Contents` proyectan el mismo estado privado y los mismos fallbacks
 acotados que el texto. Cada regeneración usa la sal de la sesión Telnet y no
 transporta vínculo, propietario, trade ni instancia durables.
+
+Una respuesta Web `reward.odds` contiene `selector`, `page`, `totalPages` y
+tres listas cuya suma no supera veinte filas por página: `guaranteed`,
+`weighted` y `affixes`. Las filas garantizadas exponen etiqueta y cantidad;
+las ponderadas exponen etiqueta de pool, tiradas, etiqueta del resultado,
+cantidad mínima/máxima y `probabilityNumerator`/`probabilityDenominator`; las
+de afijo exponen resultado padre, etiqueta, posición y deltas, junto con
+`conditionalProbabilityNumerator`/`conditionalProbabilityDenominator`.
+`nothing` es una fila explícita cuando corresponde. Las fracciones enteras son
+el contrato exacto: el cliente puede mostrar además un porcentaje calculado,
+pero no sustituirlas por redondeos. `affixPoolLabel` es solo una etiqueta
+revisada opcional; no es un identificador y no debe usarse para acciones.
+
+Telnet siempre recibe la misma información jugable en texto. Si negocia
+`Char.Reward 1`, recibe además `Char.Reward.Odds` con la misma página, las
+fracciones exactas y la revisión privada. Cada paquete conserva el límite GMCP
+de 8 KiB; ante un exceso se acotan solo etiquetas y se añaden
+`truncated: true` y `overflow.reason: "messageTooLarge"`, sin eliminar
+selectores, filas, deltas ni numeradores/denominadores.
 
 `vitals.update`, `inventory.patch` and `map.snapshot` replace their complete
 corresponding fragment at the stated revision. Other player changes use a new

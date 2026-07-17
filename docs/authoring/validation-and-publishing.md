@@ -30,6 +30,16 @@ per table, 8 rolls and 64 entries per pool, 4,096 weighted entries globally,
 and no more than 64 fixed plus repeatable roots for one defeat. Native loot
 fields require WorldPack v6/AreaPack v5; injecting them into an older schema,
 even as empty arrays, fails closed instead of upgrading it implicitly.
+WorldPack v7/AreaPack v6 additionally validate sealed reward shape, earned-only
+provenance, absence from initial instances, no sealed-to-sealed output and a
+16-unit reward-table ceiling. A sealed table cannot be an NPC source directly,
+and its base plus conditional-affix expansion may expose at most 1,024 odds
+rows. At most 512 affixes, 256 pools, 64 entries per pool and 4,096 total pool
+entries are accepted; labels are at most 64 bytes and each positive attack or
+heal delta is at most 1,000. A loot entry may choose at most one compatible
+affix for exactly one unique, non-sealed item, and its effective statistics
+must remain within runtime caps. Injecting any of these fields into v6/v5 or
+older input also fails closed.
 `test` runs the document's embedded content expectations. Run both explicitly;
 publishing does not replace content tests or human play review.
 
@@ -56,11 +66,13 @@ Review hidden-state cases separately. Preview and tests must not expose variant
 IDs, secret predicates, hidden entities or undiscovered asset paths.
 
 For the reviewed Lantern Square sources, composition must reproduce three
-rooms, nine item prototypes, nine initial instances, one loot table and one
-loot source. The canonical file is 50,498 bytes with SHA-256
-`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
-Its gate-stalker combines a fixed stormglass talon, a guaranteed road token and
-one 60% wolf-clasp/40% nothing roll under party round-robin rights.
+rooms, ten item prototypes, nine initial instances, two loot tables and one
+loot source. The canonical file is 52,349 bytes with SHA-256
+`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
+Its gate-stalker combines a fixed stormglass talon, a guaranteed road token,
+an earned sealed oath and one 60% wolf-clasp/40% nothing roll under party
+round-robin rights. The ordinary clasp drop and the oath's one talon each use
+a single bounded affix roll.
 
 ## Repository gates
 

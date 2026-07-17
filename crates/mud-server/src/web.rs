@@ -31,9 +31,10 @@ use std::{
 };
 use tiamud_core::{
     AccountRole, CharacterId, CharacterSnapshot, ContainerContentsView, EconomyAction,
-    ItemSelection, LootAction, PartyAction, PlayerAction, PlayerStateView, QuestAction, SceneView,
-    SessionId, SocialAction, SocialChannelName, StaffAction, StaffCapability, StaffProfileKey,
-    StaffReportResolution, TradeAction, TradeContentsView, WorldError, parse_action,
+    ItemSelection, LootAction, PartyAction, PlayerAction, PlayerStateView, QuestAction,
+    RewardOddsView, SceneView, SessionId, SocialAction, SocialChannelName, StaffAction,
+    StaffCapability, StaffProfileKey, StaffReportResolution, TradeAction, TradeContentsView,
+    WorldError, parse_action,
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
@@ -521,6 +522,7 @@ struct CachedActionResult {
     message: Option<String>,
     container_contents: Option<ContainerContentsView>,
     trade_contents: Option<TradeContentsView>,
+    reward_odds: Option<RewardOddsView>,
     projection_session: SessionId,
 }
 
@@ -545,6 +547,12 @@ impl CachedActionResult {
     fn trade_contents_for(&self, session: SessionId) -> Option<&TradeContentsView> {
         (self.projection_session == session)
             .then_some(self.trade_contents.as_ref())
+            .flatten()
+    }
+
+    fn reward_odds_for(&self, session: SessionId) -> Option<&RewardOddsView> {
+        (self.projection_session == session)
+            .then_some(self.reward_odds.as_ref())
             .flatten()
     }
 }
@@ -1200,6 +1208,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 !queue_container_contents(&outbound, &mut sequence, contents)
                             }) || cached.trade_contents_for(entered.session_id).is_some_and(|contents| {
                                 !queue_trade_contents(&outbound, &mut sequence, contents)
+                            }) || cached.reward_odds_for(entered.session_id).is_some_and(|odds| {
+                                !queue_reward_odds(&outbound, &mut sequence, odds)
                             }) || !queue_scene(
                                 &outbound,
                                 &mut sequence,
@@ -1235,13 +1245,14 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         let trade_selector_matches = requested.trade_selector.as_ref().is_none_or(
                             |selector| last_player.trade.as_ref().is_some_and(|trade| &trade.id == selector),
                         );
-                        let (ok, message, events, container_contents, trade_contents) = match requested.action {
+                        let (ok, message, events, container_contents, trade_contents, reward_odds) = match requested.action {
                             Ok(_) if !trade_selector_matches => {
                                 state.metrics.action_finished(action_started.elapsed(), false);
                                 (
                                     false,
                                     Some("That trade is not available.".to_owned()),
                                     Vec::new(),
+                                    None,
                                     None,
                                     None,
                                 )
@@ -1261,17 +1272,25 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                         outcome.events,
                                         outcome.container_contents,
                                         outcome.trade_contents,
+                                        outcome.reward_odds,
                                     )
                                 }
                                 Err(error) => {
                                     state.metrics.action_finished(action_started.elapsed(), false);
                                     warn!(%error, "game action failed");
-                                    (false, Some(public_game_error(&error)), Vec::new(), None, None)
+                                    (
+                                        false,
+                                        Some(public_game_error(&error)),
+                                        Vec::new(),
+                                        None,
+                                        None,
+                                        None,
+                                    )
                                 }
                             },
                             Err(error) => {
                                 state.metrics.action_finished(action_started.elapsed(), false);
-                                (false, Some(error), Vec::new(), None, None)
+                                (false, Some(error), Vec::new(), None, None, None)
                             }
                         };
                         state
@@ -1286,6 +1305,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                     message: message.clone(),
                                     container_contents: container_contents.clone(),
                                     trade_contents: trade_contents.clone(),
+                                    reward_odds: reward_odds.clone(),
                                     projection_session: entered.session_id,
                                 },
                             );
@@ -1305,6 +1325,11 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         }
                         if let Some(contents) = &trade_contents
                             && !queue_trade_contents(&outbound, &mut sequence, contents)
+                        {
+                            break;
+                        }
+                        if let Some(odds) = &reward_odds
+                            && !queue_reward_odds(&outbound, &mut sequence, odds)
                         {
                             break;
                         }
@@ -2103,6 +2128,20 @@ fn queue_trade_contents(
     )
 }
 
+fn queue_reward_odds(outbound: &OutboundHandle, sequence: &mut u64, odds: &RewardOddsView) -> bool {
+    // Core pages this private projection before it reaches the transport. Keep
+    // exact integer probability fractions and every actionable selector in a
+    // dedicated critical frame; the ordinary 16 KiB gate remains authoritative.
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        "reward.odds",
+        json!(odds),
+    )
+}
+
 fn queue_notice(outbound: &OutboundHandle, sequence: &mut u64, message: &str) -> bool {
     queue_sequenced(
         outbound,
@@ -2558,6 +2597,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             | "item.get"
             | "item.contents"
             | "item.give"
+            | "reward.odds"
             | "trade.item.set"
             | "trade.contents"
     ) && has_item_fields
@@ -2755,6 +2795,17 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "loot.pass" => gameplay_target()
             .map(LootAction::Pass)
             .map(PlayerAction::Loot),
+        "reward.open" => gameplay_target().map(PlayerAction::OpenReward),
+        "reward.odds" => {
+            no_item_extras()?;
+            if data.container.is_some() || data.quantity.is_some() {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            Ok(PlayerAction::RewardOdds {
+                target: required_target()?,
+                page: data.page.unwrap_or(1),
+            })
+        }
         "move" => {
             let target = gameplay_target()?;
             match parse_action(&target) {
@@ -3985,6 +4036,24 @@ mod tests {
             )))
         );
         assert_ne!(loot_status.signature, loot_pass.signature);
+        let reward_open = requested_action(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"reward-open","action":"reward.open","target":"o6666666666666666"}}"#,
+        );
+        assert_eq!(
+            reward_open.action,
+            Ok(PlayerAction::OpenReward("o6666666666666666".into()))
+        );
+        let reward_odds = requested_action(
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"reward-odds","action":"reward.odds","target":"o6666666666666666","page":2}}"#,
+        );
+        assert_eq!(
+            reward_odds.action,
+            Ok(PlayerAction::RewardOdds {
+                target: "o6666666666666666".into(),
+                page: 2,
+            })
+        );
+        assert_ne!(reward_open.signature, reward_odds.signature);
         assert_ne!(action.signature, put.signature);
         let signatures = [
             r#"{"v":1,"type":"action.perform","data":{"requestId":"same","action":"item.put","target":"o1111111111111111","container":"o2222222222222222","quantity":12}}"#,
@@ -4014,6 +4083,7 @@ mod tests {
             r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-item-3","action":"item.contents","container":"bag","page":0}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-give-1","action":"item.give","target":"tonic","recipient":"Bram","quantity":0}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-give-2","action":"item.give","target":"tonic","recipient":"Bram","quantity":257}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"bad-reward-page","action":"reward.odds","target":"reward","page":0}}"#,
         ] {
             assert_eq!(
                 parse_client_message(invalid).unwrap_err(),
@@ -4044,6 +4114,9 @@ mod tests {
             r#"{"v":1,"type":"action.perform","data":{"requestId":"loot-status-target","action":"loot.status","target":"tonic"}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"loot-pass-missing","action":"loot.pass"}}"#,
             r#"{"v":1,"type":"action.perform","data":{"requestId":"loot-pass-extra","action":"loot.pass","target":"tonic","message":"smuggled"}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"reward-open-page","action":"reward.open","target":"parcel","page":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"reward-odds-missing","action":"reward.odds","page":1}}"#,
+            r#"{"v":1,"type":"action.perform","data":{"requestId":"reward-odds-extra","action":"reward.odds","target":"parcel","quantity":1}}"#,
         ] {
             let ClientMessage::Action(action) = parse_client_message(invalid_fields).unwrap()
             else {
@@ -4713,6 +4786,7 @@ mod tests {
             message: Some("Done.".to_owned()),
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             projection_session: SessionId(1),
         };
         cache.insert("request-1".to_owned(), result("look"));
@@ -4735,6 +4809,7 @@ mod tests {
             message: None,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             projection_session: SessionId(11),
         };
         shared.lock().unwrap().insert(first.clone(), cached.clone());
@@ -4764,6 +4839,7 @@ mod tests {
             message: Some("It is empty.".into()),
             container_contents: Some(contents.clone()),
             trade_contents: None,
+            reward_odds: None,
             projection_session: SessionId(11),
         };
 
@@ -4802,6 +4878,7 @@ mod tests {
             message: Some("That offered container is empty.".into()),
             container_contents: None,
             trade_contents: Some(contents.clone()),
+            reward_odds: None,
             projection_session: SessionId(11),
         };
 
@@ -4814,6 +4891,76 @@ mod tests {
     }
 
     #[test]
+    fn reward_odds_are_exact_bounded_and_never_cross_session_salts() {
+        let odds = RewardOddsView {
+            selector: "o6666666666666666".into(),
+            page: 1,
+            total_pages: 1,
+            guaranteed: vec![tiamud_core::RewardOddsGuaranteedRow {
+                label: "three sparks".into(),
+                quantity: 3,
+                affix_pool_label: None,
+            }],
+            weighted: vec![tiamud_core::RewardOddsWeightedRow {
+                pool_label: "storm draw".into(),
+                rolls: 1,
+                outcome_label: "nothing".into(),
+                min_quantity: 0,
+                max_quantity: 0,
+                probability_numerator: 1,
+                probability_denominator: 4,
+                affix_pool_label: None,
+            }],
+            affixes: vec![tiamud_core::RewardOddsAffixRow {
+                parent_outcome_label: "iron blade".into(),
+                affix_label: "charged".into(),
+                position: Some(tiamud_core::AffixPosition::Prefix),
+                attack_bonus_delta: 2,
+                heal_amount_delta: 0,
+                conditional_probability_numerator: 1,
+                conditional_probability_denominator: 5,
+            }],
+        };
+        let cached = CachedActionResult {
+            signature: "reward.odds".into(),
+            ok: true,
+            message: Some("Exact odds follow.".into()),
+            container_contents: None,
+            trade_contents: None,
+            reward_odds: Some(odds.clone()),
+            projection_session: SessionId(31),
+        };
+
+        assert_eq!(cached.reward_odds_for(SessionId(31)), Some(&odds));
+        assert!(cached.reward_odds_for(SessionId(32)).is_none());
+
+        let outbound = OutboundHandle::new(2, Arc::new(RuntimeMetrics::default()));
+        let mut sequence = 1;
+        assert!(queue_reward_odds(&outbound, &mut sequence, &odds));
+        let frame = outbound.pop().unwrap();
+        assert_eq!(frame.value["type"], "reward.odds");
+        assert_eq!(frame.value["data"]["selector"], "o6666666666666666");
+        assert_eq!(
+            frame.value["data"]["weighted"][0]["probabilityNumerator"],
+            1
+        );
+        assert_eq!(
+            frame.value["data"]["weighted"][0]["probabilityDenominator"],
+            4
+        );
+        assert_eq!(
+            frame.value["data"]["affixes"][0]["conditionalProbabilityDenominator"],
+            5
+        );
+        let encoded = serde_json::to_vec(&frame.value).unwrap();
+        assert!(encoded.len() <= MAX_WS_MESSAGE_BYTES);
+        let encoded = String::from_utf8(encoded).unwrap();
+        assert!(!encoded.contains("lootTableId"));
+        assert!(!encoded.contains("affixPoolId"));
+        assert!(!encoded.contains("digest"));
+    }
+
+    #[test]
     fn cached_inventory_text_never_crosses_session_salts() {
         let cached = CachedActionResult {
             signature: "inventory".into(),
@@ -4821,6 +4968,7 @@ mod tests {
             message: Some("You are carrying a lantern [ref o1111111111111111].\r\n".into()),
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             projection_session: SessionId(21),
         };
 
@@ -5272,6 +5420,7 @@ mod tests {
                 total_weight_grams: 1,
                 transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                 bound_to_you: false,
+                affix: None,
                 can_give: true,
                 can_trade: true,
                 container_capacity: None,
@@ -5450,6 +5599,7 @@ mod tests {
                 total_weight_grams: 1,
                 transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                 bound_to_you: false,
+                affix: None,
                 can_give: true,
                 can_trade: true,
                 container_capacity: None,
@@ -5501,6 +5651,7 @@ mod tests {
                 total_weight_grams: 1,
                 transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                 bound_to_you: false,
+                affix: None,
                 container_capacity: None,
                 loot: Some(tiamud_core::SceneLootAccessView {
                     access: tiamud_core::LootAccessView::Yours,
@@ -5670,6 +5821,7 @@ mod tests {
             total_weight_grams: 0,
             transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
             bound_to_you: false,
+            affix: None,
             can_give: true,
             can_trade: true,
             container_capacity: None,
@@ -5768,6 +5920,7 @@ mod tests {
                     total_weight_grams: 1,
                     transfer_policy: tiamud_core::ItemTransferPolicy::Transferable,
                     bound_to_you: false,
+                    affix: None,
                     can_give: false,
                     can_trade: true,
                     container_capacity: None,

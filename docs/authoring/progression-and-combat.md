@@ -1,6 +1,6 @@
 # Progression, abilities and combat
 
-The v3 character model in WorldPack v6 separates character identity from role:
+The v3 character model in WorldPack v7 separates character identity from role:
 
 - a lineage is an inherited or supernatural origin;
 - an optional background is learned personal history;
@@ -58,7 +58,7 @@ NPC ability sets attach resources, regeneration, resistances and known
 abilities. Reusable item prototypes attach equipment slots, attack bonuses,
 healing, consumption, weight, slot cost, rarity, item level, transfer/stack
 policy, optional bounded-container capacity and short regeneration or strength
-effects. Native WorldPack v6/AreaPack v5 accept `transferable`,
+effects. Native WorldPack v7/AreaPack v6 accept `transferable`,
 `character_bound` and `non_transferable`. Fungible stacks are derived from
 durable units and never author a quantity or stack ID. A container must be
 unique and non-consumable.
@@ -75,8 +75,15 @@ Loot rights are authored on the source as `credited_character` or
 durable cursor; it is not a discretionary leader choice. The runtime records
 the table's canonical SHA-256 with per-instance provenance and resolves RNG,
 creation, rights, NPC defeat and XP in one checkpointed commit. Need/greed,
-master-loot, contribution-based sharing, affixes and paid boxes are not
-authoring features.
+master-loot and contribution-based sharing are not authoring features. Native
+v7/v6 supports earned sealed rewards with exact visible odds and a single
+bounded, unbiased affix roll for a unique non-sealed loot unit, whether it
+comes from normal or sealed loot. A sealed table yields 1..=16 units and at
+most 1,024 visible odds rows; `open` commits consumption, RNG, counters,
+creation, binding and capacity checks atomically or rolls all of them back.
+Instance IDs, RNG state and provenance/affix digests remain opaque. Paid boxes,
+keys, purchasable random rolls, pity, need/greed, master-loot and contribution
+sharing remain outside the contract.
 
 All actions still pass through the same authoritative world actor. Browser and
 Telnet commands do not implement separate combat rules. Definitions are
@@ -85,8 +92,10 @@ instead of wrapping.
 
 The reviewed gate-stalker demonstrates both paths: its authored
 `tiamud:stormglass-talon` is fixed loot, while its repeatable table guarantees
-one road token and rolls once between a wolf clasp with weight 6000 and
-`nothing` with weight 4000. The source uses party round-robin.
+one road token plus an earned sealed oath and rolls once between a wolf clasp
+with weight 6000 and `nothing` with weight 4000. The oath resolves a separate
+one-unit table whose stormglass talon receives one 6000-weight `storm-bitten`
+prefix or the 4000-weight `nothing` outcome. The source uses party round-robin.
 
 ## Author checklist
 

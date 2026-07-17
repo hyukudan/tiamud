@@ -27,6 +27,7 @@ async function installMockWorld(
       emitMockEvents?: (count: number) => void;
       emitMockTrade?: () => void;
       emitMockTradeStep?: (step: 'initial' | 'changed' | 'settled') => void;
+      emitMockRewardOdds?: (page: 1 | 2) => void;
     };
     mockState.mockHellos = [];
     mockState.mockActions = [];
@@ -144,8 +145,15 @@ async function installMockWorld(
                 quantity: 1, availableQuantity: 1, reservedForTrade: 0,
                 stackSlots: 1, totalWeightGrams: 800,
                 transferPolicy: 'transferable', boundToYou: false,
+                affix: {
+                  label: 'charged', position: 'prefix', attackBonusDelta: 2, healAmountDelta: 0,
+                },
                 canGive: true, canTrade: true,
-                actions: [{ label: 'Drop', command: 'drop o2222222222222222' }],
+                actions: [
+                  { label: 'Drop', command: 'drop o2222222222222222' },
+                  { label: 'Abrir', command: 'open o2222222222222222' },
+                  { label: 'Probabilidades', command: 'reward odds o2222222222222222 1' },
+                ],
               }],
               equipment: [],
               inventoryCapacity: {
@@ -299,6 +307,46 @@ async function installMockWorld(
           },
         }) }));
       }
+    };
+    mockState.emitMockRewardOdds = (page) => {
+      serverSequence += 1;
+      const firstPage = page === 1;
+      activeSocket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+        v: 1,
+        type: 'reward.odds',
+        seq: serverSequence,
+        data: {
+          selector: 'o2222222222222222',
+          page,
+          totalPages: 2,
+          guaranteed: firstPage ? [{
+            label: 'three sparks', quantity: 3, affixPoolLabel: 'storm modifiers',
+          }] : [{ label: 'healing tonic', quantity: 1 }],
+          weighted: firstPage ? [{
+            poolLabel: 'storm draw', rolls: 1, outcomeLabel: 'iron blade',
+            minQuantity: 1, maxQuantity: 1,
+            probabilityNumerator: 1, probabilityDenominator: 4,
+            affixPoolLabel: 'storm modifiers',
+          }, {
+            poolLabel: 'storm draw', rolls: 1, outcomeLabel: 'nothing',
+            minQuantity: 0, maxQuantity: 0,
+            probabilityNumerator: 3, probabilityDenominator: 4,
+          }] : [],
+          affixes: firstPage ? [{
+            parentOutcomeLabel: 'iron blade', affixLabel: 'charged', position: 'prefix',
+            attackBonusDelta: 2, healAmountDelta: 0,
+            conditionalProbabilityNumerator: 1, conditionalProbabilityDenominator: 5,
+          }, {
+            parentOutcomeLabel: 'iron blade', affixLabel: 'restoring', position: 'suffix',
+            attackBonusDelta: 0, healAmountDelta: 3,
+            conditionalProbabilityNumerator: 1, conditionalProbabilityDenominator: 10,
+          }, {
+            parentOutcomeLabel: 'iron blade', affixLabel: 'nothing',
+            attackBonusDelta: 0, healAmountDelta: 0,
+            conditionalProbabilityNumerator: 7, conditionalProbabilityDenominator: 10,
+          }] : [],
+        },
+      }) }));
     };
   }, sceneImage ?? null);
 }
@@ -632,6 +680,81 @@ test('authenticated mobile play exposes complete accessible panels and a fixed c
     clientWidth: document.documentElement.clientWidth,
   }));
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+  const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+    .analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test('sealed-reward odds render every public row and paginate with structured actions', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+
+  await expect(page.getByText(
+    'Modifier: charged (prefix) · attack +2 · healing +0',
+    { exact: true },
+  )).toBeVisible();
+  await page.getByRole('button', { name: 'Probabilidades' }).click();
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toMatchObject({
+    action: 'reward.odds', target: 'o2222222222222222', page: 1,
+  });
+
+  await page.evaluate(() => {
+    (window as Window & { emitMockRewardOdds?: (page: 1 | 2) => void })
+      .emitMockRewardOdds?.(1);
+  });
+  const panel = page.locator('section[aria-labelledby="reward-odds-title"]');
+  await expect(panel).toContainText('Page 1 of 2');
+  await expect(panel).toContainText('three sparks ×3 · modifier draw: storm modifiers');
+  await expect(panel).toContainText('iron blade · storm draw · 1 draw · quantity 1–1');
+  await expect(panel).toContainText('exact chance 1/4 (25.00%)');
+  await expect(panel).toContainText('nothing · storm draw · 1 draw · quantity 0–0');
+  await expect(panel).toContainText('exact chance 3/4 (75.00%)');
+  await expect(panel).toContainText('iron blade → charged (prefix)');
+  await expect(panel).toContainText('attack +2 · healing +0');
+  await expect(panel).toContainText('exact conditional chance 1/5 (20.00%)');
+  await expect(panel).toContainText('iron blade → restoring (suffix)');
+  await expect(panel).toContainText('attack +0 · healing +3');
+  await expect(panel).toContainText('exact conditional chance 1/10 (10.00%)');
+  await expect(panel).toContainText('iron blade → nothing');
+  await expect(panel).toContainText('exact conditional chance 7/10 (70.00%)');
+  await expect(panel).not.toContainText('prototypeId');
+  await expect(panel).not.toContainText('affixPoolId');
+  await expect(panel).not.toContainText('digest');
+
+  await panel.getByRole('button', { name: 'Next' }).click();
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toMatchObject({
+    action: 'reward.odds', target: 'o2222222222222222', page: 2,
+  });
+  await page.evaluate(() => {
+    (window as Window & { emitMockRewardOdds?: (page: 1 | 2) => void })
+      .emitMockRewardOdds?.(2);
+  });
+  await expect(panel).toContainText('Page 2 of 2');
+  await expect(panel).toContainText('healing tonic ×1');
+  await expect(panel.getByRole('button', { name: 'Next' })).toBeDisabled();
+  await expect(panel.getByRole('button', { name: 'Previous' })).toBeEnabled();
+  await panel.getByRole('button', { name: 'Previous' }).click();
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toMatchObject({
+    action: 'reward.odds', target: 'o2222222222222222', page: 1,
+  });
+
+  await page.getByRole('button', { name: 'Abrir' }).click();
+  await expect.poll(async () => page.evaluate(() => {
+    const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
+    return state.mockActions?.at(-1)?.data;
+  })).toMatchObject({ action: 'reward.open', target: 'o2222222222222222' });
+
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
     .analyze();

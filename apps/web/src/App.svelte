@@ -9,6 +9,7 @@
     MessageAppendData,
     MessagePresentationCue,
     PlayerStateSnapshot,
+    RewardOddsData,
     SceneEntityVisualSource,
     SceneSnapshot,
     ServerNoticeData,
@@ -90,6 +91,7 @@
   let player = $state<PlayerStateSnapshot>();
   let containerContents = $state<ContainerContentsData>();
   let tradeContents = $state<TradeContentsData>();
+  let rewardOdds = $state<RewardOddsData>();
   let manifestImage = $state<SceneSnapshot['image']>();
   let activeAssetKey: string | undefined;
   let failedImageUrls = $state<string[]>([]);
@@ -478,6 +480,9 @@
         ) {
           tradeContents = undefined;
         }
+        if (rewardOdds && !message.data.inventory.some((item) => item.id === rewardOdds?.selector)) {
+          rewardOdds = undefined;
+        }
         player = message.data;
         break;
       case 'vitals.update':
@@ -496,6 +501,9 @@
           };
           containerContents = undefined;
           tradeContents = undefined;
+          if (rewardOdds && !message.data.inventory.some((item) => item.id === rewardOdds?.selector)) {
+            rewardOdds = undefined;
+          }
         }
         break;
       case 'container.contents':
@@ -503,6 +511,9 @@
         break;
       case 'trade.contents':
         tradeContents = message.data;
+        break;
+      case 'reward.odds':
+        rewardOdds = message.data;
         break;
       case 'map.snapshot':
         if (player && player.revision <= message.data.revision) {
@@ -561,6 +572,7 @@
     player = recovery.player;
     containerContents = undefined;
     tradeContents = undefined;
+    rewardOdds = undefined;
   }
 
   function submitCommand(value = command): void {
@@ -586,6 +598,7 @@
     if (sent && action.startsWith('trade.') && action !== 'trade.contents') {
       tradeContents = undefined;
     }
+    if (sent && action === 'reward.open') rewardOdds = undefined;
     recordSubmission(label, id, sent);
   }
 
@@ -628,7 +641,10 @@
   }
 
   function itemActionName(commandValue: string): string | undefined {
-    const verb = commandValue.trim().split(/\s+/, 1)[0]?.toLowerCase();
+    const normalized = commandValue.trim().toLowerCase();
+    if (normalized.startsWith('reward odds ')) return 'reward.odds';
+    const verb = normalized.split(/\s+/, 1)[0];
+    if (verb === 'open') return 'reward.open';
     return verb && ['take', 'drop', 'examine', 'use', 'equip', 'unequip', 'contents'].includes(verb)
       ? `item.${verb}`
       : undefined;
@@ -656,6 +672,7 @@
     }
     containerContents = undefined;
     tradeContents = undefined;
+    rewardOdds = undefined;
     accessError = undefined;
     selectedAccess = selection;
     if (!connection) {
@@ -676,6 +693,7 @@
               cancelVisualCues();
               containerContents = undefined;
               tradeContents = undefined;
+              rewardOdds = undefined;
             }
           },
           onProtocolError: () => {
@@ -706,6 +724,7 @@
     player = undefined;
     containerContents = undefined;
     tradeContents = undefined;
+    rewardOdds = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -726,6 +745,8 @@
     resetVisualPresentation();
     player = undefined;
     containerContents = undefined;
+    tradeContents = undefined;
+    rewardOdds = undefined;
     notice = undefined;
     history = [];
     historyAnchored = true;
@@ -921,6 +942,13 @@
                         </p>
                       {/if}
                       {#if item.description}<p>{item.description}</p>{/if}
+                      {#if item.affix}
+                        <p>
+                          Modifier: {item.affix.label} ({item.affix.position}) ·
+                          attack {item.affix.attackBonusDelta >= 0 ? '+' : ''}{item.affix.attackBonusDelta} ·
+                          healing {item.affix.healAmountDelta >= 0 ? '+' : ''}{item.affix.healAmountDelta}
+                        </p>
+                      {/if}
                       {#if item.loot?.access === 'yours'}
                         <p class="loot-access">
                           Reserved for you · {item.loot.expiresInTicks}
@@ -940,7 +968,9 @@
                             } else {
                               const actionName = itemActionName(action.command);
                               if (actionName === 'item.contents') {
-                              submitAction(actionName, { container: item.id, page: 1 }, action.command);
+                                submitAction(actionName, { container: item.id, page: 1 }, action.command);
+                              } else if (actionName === 'reward.odds') {
+                                submitAction(actionName, { target: item.id, page: 1 }, action.command);
                               } else if (actionName) {
                                 submitAction(actionName, { target: item.id }, action.command);
                               }
@@ -1002,6 +1032,7 @@
         value={player}
         {containerContents}
         {tradeContents}
+        {rewardOdds}
         abilityTargets={scene?.npcs ?? []}
         oncommand={submitCommand}
         onaction={submitAction}

@@ -39,7 +39,8 @@ escritura.
 Ambos adaptadores implementan el esquema v11. Conserva las relaciones sociales
 y de staff de v9/v10 y amplía de forma transaccional el límite físico del
 snapshot opaco actual a 2 MiB. Los snapshots legacy v1–v5 continúan limitados a
-1 MiB al decodificarse. El traslado SQLite→PostgreSQL copia estas relaciones y
+1 MiB al decodificarse; v6 y v7 admiten 2 MiB. El traslado
+SQLite→PostgreSQL copia estas relaciones y
 el runtime en una transacción. La aceptación PostgreSQL real retenida es v8;
 no se relabela como aceptación v11 y aún falta ejecutar v11 contra un servidor
 PostgreSQL real.
@@ -49,10 +50,10 @@ y orquestación no son objetivo sin carga medida que lo justifique.
 
 ## Datos de mundo y autoría
 
-WorldPack v6 es el objetivo canónico. AreaPack v5 permite composición modular
-estricta bajo WorldProject v2. WorldPack v5/v4/v3/v2, AreaPack v4/v3/v2/v1 y
-Envy/Merc se normalizan al importar o componer; el dominio no conserva
-vocabulario heredado.
+WorldPack v7 es el objetivo canónico. AreaPack v6 permite composición modular
+estricta bajo WorldProject v2. WorldPack v6/v5/v4/v3/v2, AreaPack
+v5/v4/v3/v2/v1 y Envy/Merc se normalizan al importar o componer; el dominio no
+conserva vocabulario heredado ni inventa sellos o afijos.
 
 Propiedades obligatorias:
 
@@ -72,9 +73,9 @@ bytes, no de puntos de código.
 Consulta [world-authoring.md](world-authoring.md) y
 [character-progression-v3.md](design/character-progression-v3.md).
 
-### Objetos, inventario y botín 3A–4A
+### Objetos, inventario y botín 3A–4B
 
-WorldPack v6 separa `itemPrototypes`, que contienen contenido y reglas
+WorldPack v7 separa `itemPrototypes`, que contienen contenido y reglas
 reutilizables, de `initialItemInstances`, que asignan cada unidad durable a una
 sala, un `npc_spawn`, `staged` o a otra instancia contenedor. En runtime
 `ItemInstanceId` es una cadena tipada interna; las instancias nuevas usan una
@@ -126,8 +127,8 @@ cantidad opcional, `put <objeto> in <contenedor>` mueve raíces portadas y
 1..=256 unidades. `contents` pagina veinte grupos y evita incrustar árboles
 recursivos en las fichas o escenas.
 
-WorldPack v6 y AreaPack v5 actuales, igual que WorldPack v5 y AreaPack v4,
-aceptan el vocabulario cerrado `transferable`, `character_bound` y
+WorldPack v7 y AreaPack v6 actuales, igual que WorldPack v6/v5 y AreaPack
+v5/v4, aceptan el vocabulario cerrado `transferable`, `character_bound` y
 `non_transferable`; WorldPack v4, AreaPack v3 y formatos anteriores solo
 normalizan `transferable`. El propietario efectivo de una
 instancia se obtiene siguiendo como máximo cuatro aristas de contención hasta
@@ -176,11 +177,12 @@ texto en escena, inventario, equipo y contenidos. El color nunca es la única
 señal. Web usa `container.contents`; Telnet ofrece texto equivalente y GMCP
 proyecta `Char.Items.List` con ubicación `container`.
 
-`WorldRuntimeSnapshot` v6 conserva `itemInstances`, su grafo de ubicaciones,
+`WorldRuntimeSnapshot` v7 conserva `itemInstances`, su grafo de ubicaciones,
 el vínculo obligatorio por instancia, el siguiente contador de instancia,
-`nextTradeId`, las reservas de trade, RNG y cinco campos de botín:
-`nextLootDropId`, `itemProvenance`, `lootEncounters`, `groundLoot` y
-`partyLootCursors`. El vínculo tiene
+`nextTradeId`, las reservas de trade, RNG, `itemAffixes`,
+`nextRewardOpenId` y cinco campos de botín: `nextLootDropId`,
+`itemProvenance`, `lootEncounters`, `groundLoot` y `partyLootCursors`. La
+procedencia distingue además las recompensas `SealedReward`. El vínculo tiene
 exactamente una de estas formas:
 
 ```json
@@ -188,10 +190,12 @@ exactamente una de estas formas:
 {"kind":"character","characterId":42}
 ```
 
-El decoder lee primero `snapshotVersion` y usa DTO explícitos v1–v6; v1–v3 se
+El decoder lee primero `snapshotVersion` y usa DTO explícitos v1–v7; v1–v3 se
 convierten a `unbound`, v4 produce un estado de trade vacío y v1–v5 reciben
 procedencia `legacy_snapshot { sourceVersion }` sin inventar derechos. Campos
-posteriores inyectados en una versión antigua, referencias huérfanas, ciclos,
+de v6 se convierten estrictamente a v7 con `itemAffixes: []` en cada instancia y
+`nextRewardOpenId: 1`. Campos posteriores inyectados en una versión antigua,
+referencias huérfanas, ciclos,
 profundidad, política/vínculo, trades, procedencia, derechos, reservas o
 contadores inválidos bloquean el arranque. La restauración conserva instancias
 iniciales nuevas del WorldPack y superpone el estado durable, sin resucitar
@@ -209,14 +213,15 @@ esquema v11; no hay tabla espejo de loot o escrow ni doble escritura.
 
 Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
 WorldPack, 65.536 instancias runtime, 1 MiB para un snapshot legacy v1–v5 y 2
-MiB para el snapshot v6 actual. El presupuesto agregado de fichas de
+MiB para el snapshot v6 compatible y el v7 actual. El presupuesto agregado de
+fichas de
 propietarios inspeccionadas al arrancar sigue siendo 1 MiB y cada ficha tiene
-un máximo de 64 KiB. Lantern Square contiene 3 salas, 9 prototipos, 9
-instancias iniciales, 1 tabla y 1 fuente; el WorldPack canónico ocupa 50.498
+un máximo de 64 KiB. Lantern Square contiene 3 salas, 10 prototipos, 9
+instancias iniciales, 2 tablas y 1 fuente; el WorldPack canónico ocupa 52.349
 bytes y tiene SHA-256
-`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
+`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
 
-WorldPack v6/AreaPack v5 admiten drops garantizados y pools ponderados con
+WorldPack v7/AreaPack v6 admiten drops garantizados y pools ponderados con
 pesos enteros. Las entradas se ordenan canónicamente y cada selección usa
 rejection sampling, evitando sesgo de módulo. Una fuente `npc_spawn` se
 resuelve una sola vez por derrota; botín fijo y generable suman como máximo 64
@@ -237,8 +242,35 @@ Cada raíz conserva procedencia cerrada `authored_initial`, `legacy_snapshot`,
 cabe el peor caso bajo los presupuestos de instancias/derechos, las raíces
 fijas tienen prioridad y la generación restante se suprime de forma durable:
 la derrota y XP se confirman, RNG y `dropId` avanzan y un reinicio no permite
-reroll. Los afijos y recompensas selladas ganadas jugando se aplazan a 4B; las
-cajas, llaves o tiradas pagadas quedan fuera del baseline.
+reroll. En la frontera histórica 4A todavía no existían afijos ni recompensas
+selladas; las cajas, llaves o tiradas pagadas ya quedaban fuera del baseline.
+
+La fase 4B está implementada en WorldPack v7/AreaPack v6. Un sello es un
+prototipo `unique`, consumible, `character_bound`, no estructural y sin efectos,
+que no admite instancia inicial. Debe ser generado por una tabla normal
+asociada a un NPC; su tabla sellada no puede ser `lootSource` directa ni
+producir otro sello. Cada apertura genera 1..=16 unidades y admite hasta 1.024
+filas de probabilidad base y condicional visibles mediante `reward odds`.
+
+Una entrada normal o sellada de cantidad exactamente uno puede referenciar un
+pool que elija, con pesos enteros y sin sesgo, un único afijo o `nothing` para
+un prototipo `unique`, `maxStackUnits: 1` y no sellado. El WorldPack admite 512
+afijos, 256 pools, 64 entradas por pool y 4.096 entradas ponderadas totales;
+cada etiqueta ocupa hasta 64 bytes y cada delta positivo de ataque o curación
+es como máximo 1.000. La compatibilidad del tipo y los caps efectivos se
+validan antes de publicar y al cargar.
+
+`open` confirma juntos consumo del sello, RNG, contador, creación, afijo,
+vínculo, capacidad, procedencia y evento; un fallo restaura el checkpoint
+exacto. En botín normal, la tirada de afijo se consume aunque la generación
+termine suprimida para impedir reroll por capacidad. Las copias durables del
+afijo conservan digests de definición, pool y registro, mientras IDs internos,
+RNG, contadores y digests no se proyectan. Web, Telnet y GMCP comparten esta
+autoridad y muestran estadísticas autorizadas mediante referencias opacas. El
+contrato está en el
+[ADR 0014](decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
+Pity, need/greed, master-loot, reparto por contribución, cajas, llaves y tiradas
+pagadas permanecen fuera.
 
 ## Modelo de personaje
 
@@ -386,9 +418,10 @@ tres políticas de transferencia y `give` atómico están implementados. Tambié
 lo está el trade confirmado mediante reservas durables, revisión/digest y
 liquidación simultánea. 4A añade tablas enteras fixed+repeatable, procedencia,
 derechos de 20 ticks, reparto de grupo round-robin, `loot pass`, publicidad y
-despawn al tick 120. Faltan afijos y recompensas selladas de 4B; need/greed,
-master-loot y contribución no están implementados. Cajas de botín pagadas o
-tiradas con moneda prémium quedan fuera del baseline.
+despawn al tick 120. 4B añade sellos ganados con `open`/`reward odds` y un
+afijo acotado para botín único normal o sellado. Need/greed, master-loot,
+contribución y pity no están implementados. Cajas de botín pagadas o tiradas
+con moneda prémium quedan fuera del baseline.
 
 Consulta la [hoja de ruta social/staff/botín](design/social-staff-and-loot-roadmap.md).
 
@@ -471,7 +504,7 @@ secuencia ni se infieren de prosa. Referencia:
 | --- | --- |
 | Combate y habilidades acotadas | Baseline implementado y probado |
 | Límites acumulados y nivel sin relleno | Implementado y probado |
-| WorldPack v6/AreaPack v5/WorldProject v2, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v5/v4/v3/v2 y AreaPack v4/v3/v2/v1 se normalizan sin inventar loot |
+| WorldPack v7/AreaPack v6/WorldProject v2, validador, normalizador y catálogo | Integrado en servidor; entradas WorldPack v6/v5/v4/v3/v2 y AreaPack v5/v4/v3/v2/v1 se normalizan sin inventar sellos, afijos ni loot ausente |
 | Linaje/clase/talento/promoción y persistencia | Implementado y probado |
 | Creación v3 navegador/Telnet | Default/none/explícito implementado |
 | Ficha, talentos y promociones web | Implementado y probado |
@@ -487,6 +520,7 @@ secuencia ni se infieren de prosa. Referencia:
 | Inventario fase 3C | Snapshot v4 con vínculo durable y migración v1-v3, tres políticas, `give` atómico, opacidad y paridad Web/Telnet/GMCP implementados; puertas locales soportadas superadas |
 | Inventario fase 3D | Snapshot v5 migrado desde v4, reservas durables, doble confirmación y liquidación simultánea de objetos/moneda en Web/Telnet/GMCP; puertas integradas y Playwright final 36/36 superados |
 | Botín fase 4A | Snapshot v6 migrado estrictamente desde v1–v5, tablas enteras fixed+repeatable, rejection sampling, procedencia, round-robin/pass, 20/120 ticks, privacidad y paridad Web/Telnet/GMCP implementados |
+| Botín fase 4B | WorldPack v7/AreaPack v6 y snapshot v7; sellos ganados, `open`, odds exactas, afijo único normal/sellado, rollback, caps y opacidad implementados |
 | Proyección densa acotada | Ventanas semánticas Web/Telnet, batches de 16 y coalescing con snapshot autoritativo implementados; no es un journal/replay general de eventos |
 
 En la evidencia histórica integrada de fase 3A pasan formato, pruebas bloqueadas del workspace
@@ -618,14 +652,32 @@ Botín 4A:
 7. Escenas densas respetan ventanas semánticas Web 14 KiB/Telnet 48 KiB,
    batches de 16, aviso/coalescing y recuperación mediante snapshot autoritativo.
 
+Botín 4B:
+
+1. WorldPack v7/AreaPack v6 validan sellos earned-only, pools de afijos,
+   referencias, compatibilidad, máximos de 16 unidades y 1.024 filas de odds;
+   formatos anteriores rechazan campos 4B.
+2. Snapshot v7 conserva `itemAffixes`, procedencia sellada y contador de
+   apertura; v6 migra exactamente con afijos vacíos/contador uno, v1–v5 quedan
+   bajo 1 MiB y v6–v7 bajo 2 MiB.
+3. `reward odds` publica probabilidades authored exactas y paginadas; no revela
+   RNG, identidades internas, contadores ni digests de procedencia/afijo.
+4. `open` confirma o revierte juntos sello, RNG, contador, objetos, afijos,
+   vínculos, capacidad, procedencia y evento; un fallo no deja consumo parcial.
+5. Botín normal y sellado comparten selección ponderada entera sin sesgo y un
+   afijo máximo por unidad única; una tirada normal se consume aunque el drop
+   termine suprimido.
+6. Web, Telnet y GMCP comparten acciones, límites, páginas y referencias opacas.
+7. Pity, need/greed, master-loot, reparto por contribución y recompensas pagadas
+   no forman parte de esta fase.
+
 ## Trabajo aplazado o rechazado
 
 Aplazado hasta necesidad demostrada: transformaciones, culturas, respec,
 rangos de clase, editor de grafos, simulación de balance, medios animados,
 gráficos raster terminales y carga caliente. El compositor necesita sprites
-revisados; avatar, heal cue y lápida son mejoras opcionales. La fase 4B conserva
-afijos y recompensas selladas obtenidas jugando; need/greed, master-loot y
-contribución requieren diseño adicional.
+revisados; avatar, heal cue y lápida son mejoras opcionales. Need/greed,
+master-loot, reparto por contribución y pity requieren diseño adicional.
 
 Rechazado como baseline: Kubernetes, microservicios, Redis, object storage
 obligatorio, generación de imagen runtime, decisiones LLM runtime, layout de

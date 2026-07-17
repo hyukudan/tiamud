@@ -30,6 +30,7 @@ fn property_world() -> (World, SessionId) {
             max_stack_units: 1,
             container: None,
             transfer_policy: ItemTransferPolicy::Transferable,
+            sealed_loot_table_id: None,
         };
     let mut world = World::from_definition(WorldDefinition {
         start_room_id: "property:market".into(),

@@ -895,6 +895,7 @@ fn translate_object_resets(
                 max_stack_units: 1,
                 container: None,
                 transfer_policy: ItemTransferPolicy::Transferable,
+                sealed_loot_table_id: None,
             });
         }
         pack.initial_item_instances.push(InitialItemInstance {
@@ -1091,7 +1092,7 @@ fn append_reference_diagnostics(
                     Some(reset.line),
                     reset.arguments.first().copied(),
                     "P reset container placement is preserved inert and was not converted",
-                    "author an explicit WorldPack v6 container instance after reviewing reset limits and ordering",
+                    "author an explicit WorldPack v7 container instance after reviewing reset limits and ordering",
                 ));
             }
             "G" | "E" => {

@@ -100,6 +100,7 @@ export interface SceneItem {
   totalWeightGrams: number;
   transferPolicy: ItemTransferPolicy;
   boundToYou: boolean;
+  affix?: ItemAffixSnapshot;
   containerCapacity?: InventoryCapacitySnapshot;
   loot?: SceneLootAccess;
   actions: SceneAction[];
@@ -426,6 +427,7 @@ export interface PlayerItemSnapshot {
   totalWeightGrams: number;
   transferPolicy: ItemTransferPolicy;
   boundToYou: boolean;
+  affix?: ItemAffixSnapshot;
   canGive: boolean;
   canTrade: boolean;
   containerCapacity?: InventoryCapacitySnapshot;
@@ -444,12 +446,20 @@ export interface EquippedItemSnapshot {
   totalWeightGrams: number;
   transferPolicy: ItemTransferPolicy;
   boundToYou: boolean;
+  affix?: ItemAffixSnapshot;
   containerCapacity?: InventoryCapacitySnapshot;
   actions: SceneAction[];
 }
 
 export type ItemRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
 export type ItemTransferPolicy = 'transferable' | 'character_bound' | 'non_transferable';
+
+export interface ItemAffixSnapshot {
+  label: string;
+  position: 'prefix' | 'suffix';
+  attackBonusDelta: number;
+  healAmountDelta: number;
+}
 
 export interface InventoryCapacitySnapshot {
   usedSlots: number;
@@ -466,6 +476,42 @@ export interface ContainerContentsData {
   page: number;
   totalPages: number;
   capacity: InventoryCapacitySnapshot;
+}
+
+export interface RewardOddsGuaranteedRow {
+  label: string;
+  quantity: number;
+  affixPoolLabel?: string;
+}
+
+export interface RewardOddsWeightedRow {
+  poolLabel: string;
+  rolls: number;
+  outcomeLabel: string;
+  minQuantity: number;
+  maxQuantity: number;
+  probabilityNumerator: number;
+  probabilityDenominator: number;
+  affixPoolLabel?: string;
+}
+
+export interface RewardOddsAffixRow {
+  parentOutcomeLabel: string;
+  affixLabel: string;
+  position?: 'prefix' | 'suffix';
+  attackBonusDelta: number;
+  healAmountDelta: number;
+  conditionalProbabilityNumerator: number;
+  conditionalProbabilityDenominator: number;
+}
+
+export interface RewardOddsData {
+  selector: string;
+  page: number;
+  totalPages: number;
+  guaranteed: RewardOddsGuaranteedRow[];
+  weighted: RewardOddsWeightedRow[];
+  affixes: RewardOddsAffixRow[];
 }
 
 export interface PlayerStateSnapshot {
@@ -559,6 +605,7 @@ export type ServerMessage =
   | Envelope<'inventory.patch', InventoryPatchData>
   | Envelope<'container.contents', ContainerContentsData>
   | Envelope<'trade.contents', TradeContentsData>
+  | Envelope<'reward.odds', RewardOddsData>
   | Envelope<'map.snapshot', MapSnapshotData>
   | Envelope<'action.result', ActionResultData>
   | Envelope<'server.notice', ServerNoticeData>
@@ -650,6 +697,12 @@ const positiveIntegerOrUndefined = (value: unknown): number | undefined =>
 const nonNegativeIntegerOrUndefined = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 
+const signedI32OrUndefined = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isSafeInteger(value) &&
+    value >= -0x8000_0000 && value <= 0x7fff_ffff
+    ? value
+    : undefined;
+
 const itemRarityOrUndefined = (value: unknown): ItemRarity | undefined =>
   value === 'common' || value === 'uncommon' || value === 'rare' || value === 'epic' ||
     value === 'legendary'
@@ -668,6 +721,20 @@ const parseItemTransfer = (
   if (!transferPolicy || typeof value.boundToYou !== 'boolean' ||
     (transferPolicy !== 'character_bound' && value.boundToYou)) return undefined;
   return { transferPolicy, boundToYou: value.boundToYou };
+};
+
+const parseItemAffix = (value: unknown): ItemAffixSnapshot | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'label', 'position', 'attackBonusDelta', 'healAmountDelta',
+  ])) return undefined;
+  const label = boundedString(value.label, 256);
+  const position = value.position;
+  const attackBonusDelta = signedI32OrUndefined(value.attackBonusDelta);
+  const healAmountDelta = signedI32OrUndefined(value.healAmountDelta);
+  if (!label || (position !== 'prefix' && position !== 'suffix') ||
+    attackBonusDelta === undefined || healAmountDelta === undefined ||
+    (attackBonusDelta === 0 && healAmountDelta === 0)) return undefined;
+  return { label, position, attackBonusDelta, healAmountDelta };
 };
 
 const parseInventoryCapacity = (value: unknown): InventoryCapacitySnapshot | undefined => {
@@ -809,7 +876,7 @@ const parseContainerContents = (value: unknown): ContainerContentsData | undefin
     if (!isRecord(entry) || !hasOnlyKeys(entry, [
       'id', 'label', 'rarity', 'itemLevel', 'weightGrams', 'quantity', 'availableQuantity',
       'reservedForTrade', 'stackSlots', 'totalWeightGrams', 'containerCapacity', 'transferPolicy',
-      'boundToYou', 'canGive', 'canTrade', 'actions',
+      'boundToYou', 'affix', 'canGive', 'canTrade', 'actions',
     ]) || (entry.containerCapacity !== undefined &&
       (!isRecord(entry.containerCapacity) || !hasOnlyKeys(entry.containerCapacity, [
         'usedSlots', 'maxSlots', 'usedWeightGrams', 'maxWeightGrams',
@@ -822,11 +889,13 @@ const parseContainerContents = (value: unknown): ContainerContentsData | undefin
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
     const transfer = parseItemTransfer(entry);
+    const affix = entry.affix === undefined ? undefined : parseItemAffix(entry.affix);
     const canGive = typeof entry.canGive === 'boolean' ? entry.canGive : undefined;
     const canTrade = typeof entry.canTrade === 'boolean' ? entry.canTrade : undefined;
     const actions = parseActions(entry.actions);
     if (!id || ids.has(id) || !label || !rarity || itemLevel === undefined || itemLevel > 1_000 ||
       weightGrams === undefined || weightGrams > 1_000_000 || !stack || !transfer ||
+      (entry.affix !== undefined && !affix) ||
       canGive !== false ||
       (stack.containerCapacity
         ? stack.quantity !== 1 || stack.totalWeightGrams !==
@@ -836,7 +905,8 @@ const parseContainerContents = (value: unknown): ContainerContentsData | undefin
     if (!trade) return undefined;
     ids.add(id);
     items.push({
-      id, label, rarity, itemLevel, weightGrams, ...stack, ...trade, ...transfer, canGive, actions,
+      id, label, rarity, itemLevel, weightGrams, ...stack, ...trade, ...transfer,
+      ...(affix ? { affix } : {}), canGive, actions,
     });
   }
   return { container, items, page, totalPages, capacity };
@@ -855,6 +925,105 @@ const parseTradeContents = (value: unknown): TradeContentsData | undefined => {
     capacity: value.capacity,
   });
   return tradeId && contents ? { tradeId, ...contents } : undefined;
+};
+
+const parseRewardOdds = (value: unknown): RewardOddsData | undefined => {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'selector', 'page', 'totalPages', 'guaranteed', 'weighted', 'affixes',
+  ]) || !Array.isArray(value.guaranteed) || !Array.isArray(value.weighted) ||
+    !Array.isArray(value.affixes) ||
+    value.guaranteed.length + value.weighted.length + value.affixes.length > 20) {
+    return undefined;
+  }
+  const selector = opaqueId(value.selector);
+  const page = positiveIntegerOrUndefined(value.page);
+  const totalPages = positiveIntegerOrUndefined(value.totalPages);
+  if (!selector || page === undefined || totalPages === undefined || page > totalPages ||
+    totalPages > 0xffff) return undefined;
+
+  const guaranteed: RewardOddsGuaranteedRow[] = [];
+  for (const entry of value.guaranteed) {
+    if (!isRecord(entry) || !hasOnlyKeys(entry, ['label', 'quantity', 'affixPoolLabel'])) {
+      return undefined;
+    }
+    const label = boundedString(entry.label, 256);
+    const quantity = positiveIntegerOrUndefined(entry.quantity);
+    const affixPoolLabel = entry.affixPoolLabel === undefined
+      ? undefined
+      : boundedString(entry.affixPoolLabel, 256);
+    if (!label || quantity === undefined || quantity > 1_000 ||
+      (entry.affixPoolLabel !== undefined && !affixPoolLabel)) return undefined;
+    guaranteed.push({ label, quantity, ...(affixPoolLabel ? { affixPoolLabel } : {}) });
+  }
+
+  const weighted: RewardOddsWeightedRow[] = [];
+  for (const entry of value.weighted) {
+    if (!isRecord(entry) || !hasOnlyKeys(entry, [
+      'poolLabel', 'rolls', 'outcomeLabel', 'minQuantity', 'maxQuantity',
+      'probabilityNumerator', 'probabilityDenominator', 'affixPoolLabel',
+    ])) return undefined;
+    const poolLabel = boundedString(entry.poolLabel, 256);
+    const rolls = positiveIntegerOrUndefined(entry.rolls);
+    const outcomeLabel = boundedString(entry.outcomeLabel, 256);
+    const minQuantity = nonNegativeIntegerOrUndefined(entry.minQuantity);
+    const maxQuantity = nonNegativeIntegerOrUndefined(entry.maxQuantity);
+    const probabilityNumerator = nonNegativeIntegerOrUndefined(entry.probabilityNumerator);
+    const probabilityDenominator = positiveIntegerOrUndefined(entry.probabilityDenominator);
+    const affixPoolLabel = entry.affixPoolLabel === undefined
+      ? undefined
+      : boundedString(entry.affixPoolLabel, 256);
+    if (!poolLabel || rolls === undefined || rolls > 8 || !outcomeLabel ||
+      minQuantity === undefined || maxQuantity === undefined || minQuantity > maxQuantity ||
+      maxQuantity > 1_000 || probabilityNumerator === undefined ||
+      probabilityDenominator === undefined || probabilityNumerator > probabilityDenominator ||
+      (entry.affixPoolLabel !== undefined && !affixPoolLabel)) return undefined;
+    weighted.push({
+      poolLabel,
+      rolls,
+      outcomeLabel,
+      minQuantity,
+      maxQuantity,
+      probabilityNumerator,
+      probabilityDenominator,
+      ...(affixPoolLabel ? { affixPoolLabel } : {}),
+    });
+  }
+
+  const affixes: RewardOddsAffixRow[] = [];
+  for (const entry of value.affixes) {
+    if (!isRecord(entry) || !hasOnlyKeys(entry, [
+      'parentOutcomeLabel', 'affixLabel', 'position', 'attackBonusDelta', 'healAmountDelta',
+      'conditionalProbabilityNumerator', 'conditionalProbabilityDenominator',
+    ])) return undefined;
+    const parentOutcomeLabel = boundedString(entry.parentOutcomeLabel, 256);
+    const affixLabel = boundedString(entry.affixLabel, 256);
+    const position = entry.position;
+    const attackBonusDelta = signedI32OrUndefined(entry.attackBonusDelta);
+    const healAmountDelta = signedI32OrUndefined(entry.healAmountDelta);
+    const conditionalProbabilityNumerator = nonNegativeIntegerOrUndefined(
+      entry.conditionalProbabilityNumerator,
+    );
+    const conditionalProbabilityDenominator = positiveIntegerOrUndefined(
+      entry.conditionalProbabilityDenominator,
+    );
+    if (!parentOutcomeLabel || !affixLabel ||
+      (position !== undefined && position !== 'prefix' && position !== 'suffix') ||
+      attackBonusDelta === undefined || healAmountDelta === undefined ||
+      (position === undefined && (attackBonusDelta !== 0 || healAmountDelta !== 0)) ||
+      conditionalProbabilityNumerator === undefined ||
+      conditionalProbabilityDenominator === undefined ||
+      conditionalProbabilityNumerator > conditionalProbabilityDenominator) return undefined;
+    affixes.push({
+      parentOutcomeLabel,
+      affixLabel,
+      ...(position ? { position } : {}),
+      attackBonusDelta,
+      healAmountDelta,
+      conditionalProbabilityNumerator,
+      conditionalProbabilityDenominator,
+    });
+  }
+  return { selector, page, totalPages, guaranteed, weighted, affixes };
 };
 
 const parseTradeOffer = (value: unknown): TradeOfferSnapshot | undefined => {
@@ -1252,12 +1421,14 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
     const transfer = parseItemTransfer(entry);
+    const affix = entry.affix === undefined ? undefined : parseItemAffix(entry.affix);
     const canGive = typeof entry.canGive === 'boolean' ? entry.canGive : undefined;
     const canTrade = typeof entry.canTrade === 'boolean' ? entry.canTrade : undefined;
     const actions = parseActions(entry.actions);
     if (!id || !label || description === undefined || !rarity || itemLevel === undefined ||
       itemLevel > 1_000 || weightGrams === undefined || weightGrams > 1_000_000 || !stack ||
       (!transfer || (transfer.transferPolicy === 'character_bound' && !transfer.boundToYou)) ||
+      (entry.affix !== undefined && !affix) ||
       canGive === undefined || canTrade === undefined ||
       (canGive && transfer.transferPolicy !== 'transferable') ||
       (stack.containerCapacity
@@ -1270,7 +1441,7 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     if (!trade || trade.canTrade !== canTrade) return undefined;
     inventory.push({
       id, label, description, rarity, itemLevel, weightGrams, ...stack, ...trade, ...transfer,
-      canGive, actions,
+      ...(affix ? { affix } : {}), canGive, actions,
     });
   }
 
@@ -1286,17 +1457,22 @@ export function parsePlayerState(value: unknown): PlayerStateSnapshot | undefine
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
     const transfer = parseItemTransfer(entry);
+    const affix = entry.affix === undefined ? undefined : parseItemAffix(entry.affix);
     const actions = parseActions(entry.actions);
     if (!id || (slot !== 'weapon' && slot !== 'body' && slot !== 'trinket') || !label ||
       !rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
       weightGrams > 1_000_000 || !stack || !transfer ||
       (transfer.transferPolicy === 'character_bound' && !transfer.boundToYou) || stack.quantity !== 1 ||
+      (entry.affix !== undefined && !affix) ||
       (stack.containerCapacity
         ? stack.totalWeightGrams !== weightGrams + stack.containerCapacity.usedWeightGrams
         : stack.totalWeightGrams !== weightGrams) || !actions) {
       return undefined;
     }
-    equipment.push({ id, slot, label, rarity, itemLevel, weightGrams, ...stack, ...transfer, actions });
+    equipment.push({
+      id, slot, label, rarity, itemLevel, weightGrams, ...stack, ...transfer,
+      ...(affix ? { affix } : {}), actions,
+    });
   }
 
   const inventoryCapacity = parseInventoryCapacity(value.inventoryCapacity);
@@ -1792,9 +1968,11 @@ const toItems = (value: unknown): SceneItem[] => {
     const weightGrams = nonNegativeIntegerOrUndefined(entry.weightGrams);
     const stack = parseItemStackProjection(entry);
     const transfer = parseItemTransfer(entry);
+    const affix = entry.affix === undefined ? undefined : parseItemAffix(entry.affix);
     const loot = entry.loot === undefined ? undefined : parseSceneLootAccess(entry.loot);
     if (!rarity || itemLevel === undefined || itemLevel > 1_000 || weightGrams === undefined ||
       weightGrams > 1_000_000 || !stack || !transfer ||
+      (entry.affix !== undefined && !affix) ||
       (entry.loot !== undefined && !loot) || (stack.containerCapacity
         ? stack.quantity !== 1 || stack.totalWeightGrams !==
           weightGrams + stack.containerCapacity.usedWeightGrams
@@ -1813,6 +1991,7 @@ const toItems = (value: unknown): SceneItem[] => {
       weightGrams,
       ...stack,
       ...transfer,
+      ...(affix ? { affix } : {}),
       ...(loot ? { loot } : {}),
       actions: suppliedActions.length > 0 || loot
         ? suppliedActions
@@ -2042,6 +2221,10 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const contents = parseTradeContents(candidate.data);
       return contents ? { ...base, type: candidate.type, data: contents } : undefined;
     }
+    case 'reward.odds': {
+      const odds = parseRewardOdds(candidate.data);
+      return odds ? { ...base, type: candidate.type, data: odds } : undefined;
+    }
     case 'map.snapshot': {
       const revision = positiveIntegerOrUndefined(candidate.data.revision);
       if (revision === undefined) return undefined;
@@ -2270,6 +2453,7 @@ export function createActionPerform(
 ): ActionPerform {
   if (action.startsWith('trade.')) validateTradeActionFields(action, fields);
   if (action.startsWith('loot.')) validateLootActionFields(action, fields);
+  if (action.startsWith('reward.')) validateRewardActionFields(action, fields);
   if (fields?.reportId !== undefined &&
     (!Number.isSafeInteger(fields.reportId) || fields.reportId <= 0)) {
     throw new RangeError('reportId must be a positive safe integer');
@@ -2331,6 +2515,31 @@ function validateLootActionFields(
     /[\u0000-\u001f\u007f]/.test(fields.target)
   )) {
     throw new RangeError('loot target must be a bounded visible selector');
+  }
+}
+
+function validateRewardActionFields(
+  action: string,
+  fields: ActionPerformFields | undefined,
+): void {
+  const expectedByAction: Record<string, readonly (keyof ActionPerformFields)[]> = {
+    'reward.open': ['target'],
+    'reward.odds': ['page', 'target'],
+  };
+  const expected = expectedByAction[action];
+  if (!expected) throw new RangeError('unknown reward action');
+  const actual = Object.keys(fields ?? {}).toSorted();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new RangeError(`${action} requires its exact closed field set`);
+  }
+  if (typeof fields?.target !== 'string' || !/^o[0-9a-f]{16}$/.test(fields.target)) {
+    throw new RangeError('reward target must be an opaque selector');
+  }
+  if (action === 'reward.odds') {
+    const page = fields?.page;
+    if (typeof page !== 'number' || !Number.isSafeInteger(page) || page < 1 || page > 0xffff) {
+      throw new RangeError('reward odds page must be a positive 16-bit integer');
+    }
   }
 }
 

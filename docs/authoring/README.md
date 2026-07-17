@@ -1,8 +1,8 @@
 # World authoring
 
 This is the current English entry point for creating Tiamud content. The
-runtime consumes one canonical **WorldPack v6**. Authors can maintain that
-world as strict **AreaPack v5** modules under a **WorldProjectManifest v2** and
+runtime consumes one canonical **WorldPack v7**. Authors can maintain that
+world as strict **AreaPack v6** modules under a **WorldProjectManifest v2** and
 compose them offline; areas are not services and are not loaded independently
 at runtime.
 
@@ -67,10 +67,10 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   `staged` location. Fungible stacks remain derived from individual instances;
   do not author or persist stack IDs/quantities. Do not restore v3 `items`,
   `itemRules` or `lootItemIds` fields.
-- Native WorldPack v6 and AreaPack v5 accept `transferable`,
+- Native WorldPack v7 and AreaPack v6 accept `transferable`,
   `character_bound` and `non_transferable`. Character binding is runtime state,
   not an authoring field: it is created on first acquisition and persisted in
-  WorldRuntimeSnapshot v6. Legacy WorldPack v4/AreaPack v3 inputs must remain
+  WorldRuntimeSnapshot v7. Legacy WorldPack v4/AreaPack v3 inputs must remain
   exactly `transferable`; older packs and Envy/Merc imports also normalize only
   to transferable objects instead of inferring ownership from historical flags.
 - Transfer policy applies to the entire contained subtree. A transferable bag
@@ -83,15 +83,34 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
   first, weighted integer pools may explicitly select `nothing`, and each NPC
   spawn has at most one source. Fixed and repeatable roots share a hard
   worst-case limit of 64 per defeat.
-- Loot tables and sources are native only to WorldPack v6/AreaPack v5. Older
+- Loot tables and sources are native from WorldPack v6/AreaPack v5. Older
   packs normalize to empty collections and reject injected fields instead of
   inferring probabilities. The canonical table digest becomes durable drop
   provenance; IDs, weights, quantities and references are validated strictly.
-- WorldRuntimeSnapshot v6 is the single durable authority for item location,
-  binding, trade reservations, loot provenance and ground rights. SQLite and
-  PostgreSQL schema v11 store it as opaque `TEXT`; legacy raw v1-v5 snapshots
-  retain a 1 MiB physical cap while v6 admission and commits use 2 MiB. There
-  is no mirror loot/escrow table or dual write.
+- Sealed earned rewards and affixes are native only to WorldPack v7/AreaPack
+  v6. A sealed prototype is unique, consumable, `character_bound`, has no
+  equipment/container/effect payload and names one table whose minimum and
+  maximum guarantee 1..=16 units and expands to at most 1,024 visible odds
+  rows. It cannot be an initial instance or a direct NPC `lootSource`, must
+  itself be produced by an NPC-sourced normal table and its table cannot output
+  another sealed prototype. `open` consumes one earned seal and `reward odds`
+  reports exact authored outcomes without exposing RNG state, hidden instance
+  identity or provenance digests.
+  Affix pools make one unbiased weighted choice per referenced unique,
+  non-sealed item; each affix is a reviewed prefix or suffix with bounded
+  attack/heal deltas, and an item receives at most one affix. Normal and sealed
+  loot use the same rules. Opening, RNG advancement, counters, creation,
+  binding and capacity validation commit atomically; failure restores them all.
+  These are encounter rewards, not paid boxes, keys or purchasable random
+  rolls. Pity, need/greed, master-loot and contribution sharing are not part of
+  this contract.
+- WorldRuntimeSnapshot v7 is the single durable authority for item location,
+  binding, trade reservations, loot provenance, ground rights, applied affixes
+  and sealed-open counters. SQLite and PostgreSQL schema v11 store it as opaque
+  `TEXT`; legacy raw v1-v5 snapshots retain a 1 MiB physical cap while v6 and
+  v7 admission and commits use 2 MiB. Strict v6 upgrade adds empty affix state
+  and starts the sealed-open counter at one. There is no mirror loot/escrow
+  table or dual write.
 - Base and variant room titles contain 1..=128 safe UTF-8 bytes and base or
   variant descriptions 1..=8,192; limits count bytes rather than Unicode
   characters.
@@ -118,21 +137,25 @@ alternative text, hidden-state behavior, balance and the semantic diff first.
 - [Atomic give and executable transfer policies](../decisions/0011-atomic-give-and-item-transfer-policies.md)
 - [Confirmed trade reservations](../decisions/0012-confirmed-trade-reservations.md)
 - [Repeatable loot, rights and provenance](../decisions/0013-repeatable-loot-rights-and-provenance.md)
+- [Earned sealed rewards and deterministic affixes](../decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md)
 - [Scene compositor decision](../decisions/0008-optional-scene-compositor.md)
 - [Asset compiler](../../crates/asset-pipeline/README.md)
 - [Lua runtime](../../crates/scripting/README.md)
 - [Optional editorial AI](../../crates/editorial-ai/README.md)
 - [Historical Envy/Merc importer](../../tools/envy-import/README.md)
 
-The [Spanish WorldPack v6/AreaPack v5 guide](../world-authoring.md) is the
+The [Spanish WorldPack v7/AreaPack v6 guide](../world-authoring.md) is the
 current compact schema and workflow reference. Its reviewed Lantern Square
-example has three rooms, nine item prototypes, nine initial instances, one
-loot table and one loot source. The 50,498-byte
+example has three rooms, ten item prototypes, nine initial instances, two
+loot tables and one loot source. The 52,349-byte
 canonical artifact has SHA-256
-`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
+`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
 It keeps the published `tiamud:road-token` and `tiamud:wolf-clasp` semantics
 transferable, and demonstrates phase 3C with the non-transferable consumable
 `tiamud:rain-writ` in `demo:north-gate` and the character-bound fixed loot
 `tiamud:stormglass-talon` on `tiamud:gate-stalker-1`. That spawn also uses
-party round-robin for one guaranteed road token and one weighted roll: 60%
-wolf clasp, 40% nothing.
+party round-robin for one guaranteed road token, one earned sealed oath and
+one weighted roll: 60% wolf clasp, 40% nothing. Both the normal clasp drop and
+the talon yielded by breaking the bound oath make one 60% `storm-bitten`
+prefix roll (40% unchanged), demonstrating that affixes are not limited to
+sealed rewards.

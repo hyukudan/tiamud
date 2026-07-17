@@ -1,12 +1,13 @@
 use world_pack::{
-    AbilityCategory, AbilityStatusEffect, CURRENT_SCHEMA_VERSION, EquipmentSlot, ExitTarget,
-    GrantDefinition, InitialItemLocation, ItemStackPolicy, ItemTransferPolicy, WorldPackDocument,
+    AbilityCategory, AbilityStatusEffect, AffixPosition, CURRENT_SCHEMA_VERSION, EquipmentSlot,
+    ExitTarget, GrantDefinition, InitialItemLocation, ItemStackPolicy, ItemTransferPolicy,
+    WorldPackDocument,
 };
 
 const REVIEWED_WORLD: &[u8] = include_bytes!("../../../worlds/lantern-square.world.json");
 
 #[test]
-fn reviewed_runtime_fixture_matches_world_pack_v6() {
+fn reviewed_runtime_fixture_matches_world_pack_v7() {
     let document = WorldPackDocument::from_json(REVIEWED_WORLD).unwrap();
     let pack = document.world;
 
@@ -14,7 +15,7 @@ fn reviewed_runtime_fixture_matches_world_pack_v6() {
     assert_eq!(pack.schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(pack.start_room_id, "demo:lantern-square");
     assert!(pack.rooms.iter().any(|room| room.id == pack.start_room_id));
-    assert_eq!(pack.item_prototypes.len(), 9);
+    assert_eq!(pack.item_prototypes.len(), 10);
     assert_eq!(pack.initial_item_instances.len(), 9);
     assert!(
         pack.item_prototypes
@@ -44,7 +45,7 @@ fn reviewed_runtime_fixture_matches_world_pack_v6() {
             .iter()
             .filter(|item| item.equipment_slot.is_some() || item.consumable)
             .count(),
-        5
+        7
     );
     for stable_id in ["tiamud:road-token", "tiamud:wolf-clasp"] {
         assert_eq!(
@@ -56,6 +57,12 @@ fn reviewed_runtime_fixture_matches_world_pack_v6() {
             ItemTransferPolicy::Transferable
         );
     }
+    let wolf_clasp = pack
+        .item_prototypes
+        .iter()
+        .find(|prototype| prototype.id == "tiamud:wolf-clasp")
+        .unwrap();
+    assert_eq!(wolf_clasp.equipment_slot, Some(EquipmentSlot::Trinket));
     let rain_writ = pack
         .item_prototypes
         .iter()
@@ -74,6 +81,26 @@ fn reviewed_runtime_fixture_matches_world_pack_v6() {
                 InitialItemLocation::Room { room_id } if room_id == "demo:north-gate"
             )
     }));
+    let storm_seal = pack
+        .item_prototypes
+        .iter()
+        .find(|prototype| prototype.id == "tiamud:storm-seal")
+        .unwrap();
+    assert!(storm_seal.consumable);
+    assert_eq!(storm_seal.stack_policy, ItemStackPolicy::Unique);
+    assert_eq!(
+        storm_seal.transfer_policy,
+        ItemTransferPolicy::CharacterBound
+    );
+    assert_eq!(
+        storm_seal.sealed_loot_table_id.as_deref(),
+        Some("tiamud:storm-oath-rewards")
+    );
+    assert!(
+        pack.initial_item_instances
+            .iter()
+            .all(|instance| instance.prototype_id != storm_seal.id)
+    );
     let stormglass = pack
         .item_prototypes
         .iter()
@@ -127,7 +154,7 @@ fn reviewed_runtime_fixture_matches_world_pack_v6() {
     assert!(pack.gameplay.archetypes.is_empty());
     assert_eq!(pack.gameplay.abilities.len(), 3);
     assert_eq!(pack.gameplay.npc_ability_sets.len(), 1);
-    assert_eq!(pack.gameplay.loot_tables.len(), 1);
+    assert_eq!(pack.gameplay.loot_tables.len(), 2);
     assert_eq!(pack.gameplay.loot_sources.len(), 1);
     let loot_table = &pack.gameplay.loot_tables[0];
     assert_eq!(loot_table.id, "tiamud:gate-stalker-drops");
@@ -136,7 +163,36 @@ fn reviewed_runtime_fixture_matches_world_pack_v6() {
         "tiamud:road-token"
     );
     assert_eq!(loot_table.pools[0].entries.len(), 2);
+    assert_eq!(
+        loot_table.pools[0]
+            .entries
+            .iter()
+            .find(|entry| entry.item_prototype_id.as_deref() == Some("tiamud:wolf-clasp"))
+            .unwrap()
+            .affix_pool_id
+            .as_deref(),
+        Some("tiamud:storm-talon-affixes")
+    );
     assert_eq!(loot_table.canonical_sha256().len(), 64);
+    assert!(loot_table.guaranteed.iter().any(|entry| {
+        entry.item_prototype_id == storm_seal.id && entry.affix_pool_id.is_none()
+    }));
+    let reward_table = pack
+        .gameplay
+        .loot_tables
+        .iter()
+        .find(|table| table.id == "tiamud:storm-oath-rewards")
+        .unwrap();
+    assert_eq!(reward_table.guaranteed.len(), 1);
+    assert_eq!(
+        reward_table.guaranteed[0].affix_pool_id.as_deref(),
+        Some("tiamud:storm-talon-affixes")
+    );
+    assert_eq!(pack.gameplay.affixes.len(), 1);
+    assert_eq!(pack.gameplay.affix_pools.len(), 1);
+    assert_eq!(pack.gameplay.affixes[0].position, AffixPosition::Prefix);
+    assert_eq!(pack.gameplay.affixes[0].attack_bonus_delta, 1);
+    assert_eq!(pack.gameplay.affix_pools[0].entries.len(), 2);
     let loot_source = &pack.gameplay.loot_sources[0];
     assert_eq!(loot_source.npc_spawn_id, "tiamud:gate-stalker-1");
     assert_eq!(

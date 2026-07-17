@@ -35,14 +35,15 @@ sobre la aceptación de la especificación histórica.
   doble confirmación de objetos y moneda.
 - Sí existen tablas enteras fixed+repeatable, procedencia durable, derechos de
   20 ticks, reparto de cohorte round-robin, `loot pass` y despawn al tick 120.
-- No existen afijos, recompensas selladas, need/greed, master-loot o reparto por
-  contribución. Las cajas y llaves pagadas quedan fuera.
+- Sí existen recompensas selladas ganadas jugando, `open`, consulta exacta y
+  paginada con `reward odds` y un afijo acotado para botín único normal o
+  sellado. No existen need/greed, master-loot, reparto por contribución, pity,
+  cajas, llaves o tiradas pagadas.
 
 Las fases 1, comunicación/grupo, 2, staff por capacidades, 3A, fundamento de
 objetos, 3B, pilas/contenedores, 3C, entrega/políticas, y 3D, trade confirmado,
-están implementadas. También está implementada 4A, botín repetible con derechos
-y procedencia. La continuación 4B reserva afijos y recompensas selladas ganadas
-jugando.
+están implementadas. También están implementadas 4A, botín repetible con
+derechos y procedencia, y 4B, sellos ganados y afijos deterministas.
 
 ## Estado verificado en el código
 
@@ -69,8 +70,8 @@ sanciones y cambio de rol. `SocialChannel` contiene `Announcement`, `Say`,
 
 SQLite y PostgreSQL implementan actualmente el esquema v11. Conserva
 `social_channel_subscriptions` de v9 y añade perfiles, capacidades, resolución
-cerrada de reportes y auditoría append-only de v10; v11 amplía a 2 MiB el
-snapshot actual sin relajar el límite legacy v1–v5 de 1 MiB. El traslado sin
+cerrada de reportes y auditoría append-only de v10; v11 admite snapshots v6 y
+v7 de hasta 2 MiB sin relajar el límite legacy v1–v5 de 1 MiB. El traslado sin
 conexión también los copia. La evidencia histórica PostgreSQL real sigue
 acreditando v8 y no se presenta como aceptación v11.
 
@@ -173,7 +174,7 @@ capa de operador.
 
 ### Inventario y botín
 
-WorldPack v6/AreaPack v5 separan `itemPrototypes` de
+WorldPack v7/AreaPack v6 separan `itemPrototypes` de
 `initialItemInstances`. El prototipo contiene nombre, descripción, aliases,
 equipo/ataque/curación/efecto, peso, coste de slot, rareza, nivel y políticas
 cerradas. Cada instancia durable referencia un prototipo y comienza en una
@@ -187,7 +188,8 @@ servidor; Web, Telnet y GMCP reciben un ID opaco distinto por unidad, derivado
 de una sal criptográficamente aleatoria nueva por sesión. Telnet lo muestra
 como referencia y permite usarlo como selector exacto. Una pila visible usa la
 referencia opaca de su primer miembro visible ordenado; las consultas textuales
-ambiguas fallan en vez de escoger una unidad arbitraria. 4A añade procedencia
+ambiguas fallan en vez de escoger una unidad arbitraria. La fase histórica 4A
+añadió procedencia
 durable exacta: `authored_initial`, `legacy_snapshot`, `runtime_created` o
 `npc_loot` con tabla/digest/entrada/tirada; esa procedencia nunca sale del
 servidor.
@@ -250,10 +252,29 @@ pública después y se retira al tick 120. Web, Telnet y GMCP solo muestran
 `yours` con ticks restantes, `reserved` sin identidad, o público; las pilas se
 parten por ese acceso.
 
-`WorldRuntimeSnapshot` v6 persiste instancias, contención, contadores, vínculo,
-trade, RNG, procedencia, encuentros, derechos y cursores. Las lecturas v1–v5
-usan DTO exactos bajo 1 MiB, migran con procedencia legacy y rechazan campos v6;
-el snapshot actual admite hasta 2 MiB. SQLite y PostgreSQL confirman esa única
+4B añade sellos `unique`, consumibles y `character_bound` que solo pueden
+obtenerse desde una tabla normal asociada a un NPC. No son instancias iniciales,
+su tabla de apertura no puede ser fuente directa ni generar otro sello, produce
+1..=16 unidades y expone como máximo 1.024 filas de probabilidad. `open` y
+`reward odds` comparten el mismo dominio en Web, Telnet y GMCP; odds informa
+las probabilidades authored exactas sin revelar RNG, IDs estables ni digests.
+
+Las entradas normales o selladas de cantidad uno pueden referenciar un pool de
+afijos para un prototipo `unique`, no sellado. Hay como máximo un afijo por
+instancia, con 512 definiciones, 256 pools, 64 entradas por pool, 4.096 entradas
+totales, etiquetas de 64 bytes y deltas positivos de ataque/curación de hasta
+1.000. La selección ponderada es entera y sin sesgo; las copias durables
+conservan digests de definición, pool y registro sin proyectarlos. Una apertura
+confirma o revierte junta consumo, RNG, contador, creación, vínculo y capacidad.
+El fallo restaura exactamente el checkpoint. En botín normal la tirada de afijo
+se consume aunque después se suprima el drop, evitando rerolls por capacidad.
+
+`WorldRuntimeSnapshot` v7 persiste instancias, contención, contadores de
+identidad y apertura, afijos aplicados, vínculo, trade, RNG, procedencia normal
+o sellada, encuentros, derechos y cursores. Las lecturas v1–v5 usan DTO exactos
+bajo 1 MiB, migran con procedencia legacy y rechazan campos nuevos; v6 y v7
+admiten hasta 2 MiB. Un v6 estricto sube a v7 con `itemAffixes: []` en cada
+instancia y contador de apertura uno. SQLite y PostgreSQL confirman esa única
 autoridad en la transacción de esquema v11, sin tabla espejo de loot/escrow.
 Al restaurar se conservan nuevas instancias authored sin resucitar runtime
 ausente. La barrera valida por lotes propietarios, vínculos, cohortes y
@@ -405,7 +426,7 @@ Son sistemas distintos y deben modelarse por separado.
 ```mermaid
 flowchart LR
     accTitle: Inventario implementado y ampliaciones de transferencia y botín
-    accDescr: Cada unidad conserva identidad durable; pilas, contenedores, políticas, trade, tablas repetibles, procedencia y derechos ya son autoritativos. Los afijos y recompensas selladas quedan para 4B.
+    accDescr: Cada unidad conserva identidad durable; pilas, contenedores, políticas, trade, tablas repetibles, sellos, afijos, procedencia y derechos son autoritativos.
 
     Prototype[ItemPrototype implementado<br/>nombre · reglas · rareza · peso] --> Instance[ItemInstance implementada<br/>ID durable · prototypeId · ubicación]
     Sequence[(Secuencia persistida)] --> Instance
@@ -425,7 +446,13 @@ flowchart LR
     RR --> Rights
     Rights --> Public[Público]
     Public --> Despawn[Despawn tick 120]
-    Table -. fase 4B .-> Sealed[Selladas + afijos]
+    Table --> NormalAffix[Afijo normal opcional<br/>máximo uno]
+    Table --> Seal[Sello ganado<br/>no fuente directa]
+    Seal --> Open[open atómico]
+    Open --> Reward[1..=16 unidades]
+    Reward --> SealedAffix[Afijo sellado opcional<br/>máximo uno]
+    AffixPool[Pool entero sin sesgo] --> NormalAffix
+    AffixPool --> SealedAffix
 ```
 
 ### Fundamento y secuencia
@@ -445,7 +472,8 @@ flowchart LR
 6. Implementado: tablas enteras fixed+repeatable, procedencia, ventana
    exclusiva de 20 ticks, round-robin de cohorte y `loot pass`; publicación y
    despawn ocurren a 20/120 ticks.
-7. Pendiente 4B: afijos y recompensas selladas obtenidas jugando.
+7. Implementado: sellos obtenidos jugando, probabilidades exactas, apertura
+   atómica y un afijo acotado para botín único normal o sellado.
 
 ### Rareza y nivel de objeto
 
@@ -453,25 +481,26 @@ La rareza cerrada `common|uncommon|rare|epic|legendary` ya forma parte del
 prototipo y se muestra como texto en navegador y Telnet/GMCP; nunca depende solo
 del color.
 
-`itemLevel`, calidad y afijos son ejes diferentes. Deben tener límites authored
-por slot/tier/nivel y aritmética saturada. Una rareza alta no puede saltarse
-requisitos, capacidades o validación económica.
+`itemLevel`, calidad y afijos son ejes diferentes. El contrato actual no deriva
+la potencia del afijo de la rareza: valida deltas positivos acotados, tipo de
+objeto compatible y estadísticas efectivas dentro de los caps runtime. Una
+rareza alta no puede saltarse requisitos, capacidad o validación económica.
 
 ### Tablas y recompensas selladas
 
-4A implementa tablas con pesos enteros acotados y suma comprobada, cantidades y
-tiradas limitadas, `nothing`, RNG persistido con rejection sampling,
+La fase histórica 4A implementó tablas con pesos enteros acotados, suma
+comprobada, cantidades y tiradas limitadas, `nothing`, RNG persistido con rejection sampling,
 procedencia durable y commit atómico. No incluye tablas anidadas, condiciones,
 afijos, reglas de únicos, pity ni scripts de recompensa. El peor caso fijo más
 generado se valida a 64 raíces por derrota.
 
-4B podrá añadir recompensas selladas conseguidas jugando y afijos. Abrir una
-deberá prevalidar tirada, vínculo y capacidad antes de consumir contenedor, RNG
-o contador, confirmar recompensa y consumo juntos y mostrar probabilidades
-exactas. Las loot boxes, llaves y tiradas pagadas quedan fuera del baseline:
-añaden incentivos y riesgos legales/éticos innecesarios para el motor. Si algún
-día se plantea monetización, es preferible vender cosméticos conocidos o apoyo
-de precio fijo.
+4B está implementada con WorldPack v7/AreaPack v6 y snapshot v7. Un sello debe
+ganarse en una tabla normal de NPC; `reward odds` muestra las probabilidades
+exactas y `open` confirma o revierte atómicamente sello, RNG, contador,
+instancias, vínculos y capacidad. El afijo opcional funciona tanto en botín
+normal como sellado y queda copiado con procedencia/digests opacos. Las loot
+boxes, llaves, tiradas pagadas y pity quedan fuera del baseline; need/greed,
+master-loot y reparto por contribución requieren otro diseño.
 
 ## Otros sistemas MUD candidatos
 
@@ -565,12 +594,25 @@ El contrato aceptado e implementado está en
 El contrato aceptado e implementado está en
 [ADR 0013](../decisions/0013-repeatable-loot-rights-and-provenance.md).
 
-### Fase 4B — selladas y afijos — pendiente
+### Fase 4B — selladas y afijos — implementada
 
-- recompensas selladas obtenidas jugando, con probabilidades exactas;
-- simulación de tirada, vínculo y capacidad antes del consumo atómico;
-- afijos acotados por rareza/`itemLevel` y economía;
-- pruebas deterministas de probabilidades y límites.
+- WorldPack v7/AreaPack v6/WorldProject v2, con normalización estricta de
+  formatos anteriores sin inventar sellos ni afijos;
+- sellos ganados únicamente desde botín normal de NPC, sin instancias iniciales,
+  fuente sellada directa ni cadenas sello→sello;
+- `open` y `reward odds` con probabilidades exactas, máximo 16 unidades y 1.024
+  filas visibles por tabla sellada;
+- un afijo máximo en unidades `unique` no selladas, tanto en botín normal como
+  sellado, con vocabulario, pesos, cantidades, deltas y caps cerrados;
+- RNG determinista sin sesgo, rollback exacto ante fallo de capacidad y
+  consumo de la tirada normal aunque el drop termine suprimido;
+- snapshot v7 con afijos, procedencia sellada y contador de apertura; upgrade
+  exacto desde v6, límites de 1 MiB para v1–v5 y 2 MiB para v6–v7; y
+- paridad de dominio Web/Telnet/GMCP con referencias, RNG, contadores y digests
+  internos opacos.
+
+El contrato aceptado e implementado está en
+[ADR 0014](../decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
 
 Need/greed, master-loot y reparto por contribución no forman parte de 4B sin
 diseño adicional. Cajas, llaves y tiradas pagadas permanecen fuera.

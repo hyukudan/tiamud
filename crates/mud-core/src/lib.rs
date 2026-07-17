@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use slotmap::{SlotMap, new_key_type};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write as _;
 use thiserror::Error;
 
 new_key_type! {
@@ -103,6 +104,11 @@ pub enum PlayerAction {
     },
     Loot(LootAction),
     Trade(TradeAction),
+    OpenReward(String),
+    RewardOdds {
+        target: String,
+        page: u16,
+    },
     Examine(String),
     Attack(String),
     Ability {
@@ -131,6 +137,15 @@ pub enum PlayerAction {
 pub const MAX_ITEM_SELECTION_QUANTITY: u16 = 256;
 
 pub const MAX_LOOT_UNITS_PER_RESOLUTION: usize = 64;
+pub const MAX_SEALED_REWARD_UNITS: usize = 16;
+pub const MAX_AFFIXES_PER_ITEM: usize = 1;
+pub const MAX_AFFIX_DEFINITIONS: usize = 512;
+pub const MAX_AFFIX_MODIFIER: i32 = 1_000;
+pub const MAX_AFFIX_POOLS: usize = 256;
+pub const MAX_AFFIX_POOL_ENTRIES: usize = 64;
+pub const MAX_TOTAL_AFFIX_POOL_ENTRIES: usize = 4_096;
+pub const MAX_REWARD_ODDS_ROWS: usize = 1_024;
+pub const REWARD_ODDS_PAGE_SIZE: usize = 20;
 pub const MAX_GROUND_LOOT_RESERVATIONS: usize = 2_048;
 pub const MAX_LOOT_ENCOUNTERS: usize = 2_048;
 pub const LOOT_EXCLUSIVE_TICKS: u64 = 20;
@@ -1227,6 +1242,32 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
             }
         }
     }
+    if normalised == "reward odds" {
+        return Err(ParseActionError::MissingTarget {
+            command: "reward odds",
+        });
+    }
+    if let Some(rest) = normalised.strip_prefix("reward odds ") {
+        let (target, page) = if let Some((target, page)) = rest.rsplit_once(char::is_whitespace)
+            && let Ok(page) = page.parse::<u16>()
+        {
+            if page == 0 {
+                return Err(ParseActionError::Unknown(input.to_owned()));
+            }
+            (target.trim(), page)
+        } else {
+            (rest.trim(), 1)
+        };
+        if target.is_empty() {
+            return Err(ParseActionError::MissingTarget {
+                command: "reward odds",
+            });
+        }
+        return Ok(PlayerAction::RewardOdds {
+            target: target.to_owned(),
+            page,
+        });
+    }
     for (command, aliases, action) in [
         (
             "examine",
@@ -1235,6 +1276,7 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
         ),
         ("attack", &["attack", "kill"][..], PlayerAction::Attack),
         ("use", &["use"][..], PlayerAction::Use),
+        ("open", &["open"][..], PlayerAction::OpenReward),
         ("equip", &["equip", "wear"][..], PlayerAction::Equip),
         ("unequip", &["unequip", "remove"][..], PlayerAction::Unequip),
     ] {
@@ -1427,6 +1469,8 @@ pub struct SceneItem {
     pub transfer_policy: ItemTransferPolicy,
     pub bound_to_you: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub affix: Option<ItemAffixView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub container_capacity: Option<InventoryCapacityView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loot: Option<SceneLootAccessView>,
@@ -1551,6 +1595,8 @@ pub struct PlayerItemView {
     pub can_give: bool,
     pub can_trade: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub affix: Option<ItemAffixView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub container_capacity: Option<InventoryCapacityView>,
     pub actions: Vec<SceneAction>,
 }
@@ -1570,6 +1616,8 @@ pub struct EquippedItemView {
     pub transfer_policy: ItemTransferPolicy,
     pub bound_to_you: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub affix: Option<ItemAffixView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub container_capacity: Option<InventoryCapacityView>,
     pub actions: Vec<SceneAction>,
 }
@@ -1581,6 +1629,62 @@ pub struct InventoryCapacityView {
     pub max_slots: u16,
     pub used_weight_grams: u32,
     pub max_weight_grams: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemAffixView {
+    pub label: String,
+    pub position: AffixPosition,
+    pub attack_bonus_delta: i32,
+    pub heal_amount_delta: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewardOddsView {
+    pub selector: String,
+    pub page: u16,
+    pub total_pages: u16,
+    pub guaranteed: Vec<RewardOddsGuaranteedRow>,
+    pub weighted: Vec<RewardOddsWeightedRow>,
+    pub affixes: Vec<RewardOddsAffixRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewardOddsGuaranteedRow {
+    pub label: String,
+    pub quantity: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affix_pool_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewardOddsWeightedRow {
+    pub pool_label: String,
+    pub rolls: u8,
+    pub outcome_label: String,
+    pub min_quantity: u16,
+    pub max_quantity: u16,
+    pub probability_numerator: u64,
+    pub probability_denominator: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affix_pool_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewardOddsAffixRow {
+    pub parent_outcome_label: String,
+    pub affix_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<AffixPosition>,
+    pub attack_bonus_delta: i32,
+    pub heal_amount_delta: i32,
+    pub conditional_probability_numerator: u64,
+    pub conditional_probability_denominator: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1977,6 +2081,63 @@ pub struct ItemPrototypeDefinition {
     pub max_stack_units: u16,
     pub container: Option<ItemContainerDefinition>,
     pub transfer_policy: ItemTransferPolicy,
+    pub sealed_loot_table_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AffixPosition {
+    Prefix,
+    Suffix,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AffixDefinition {
+    pub id: String,
+    pub label: String,
+    pub position: AffixPosition,
+    pub attack_bonus_delta: i32,
+    pub heal_amount_delta: i32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AffixPoolEntryKind {
+    Affix,
+    Nothing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AffixPoolEntry {
+    pub kind: AffixPoolEntryKind,
+    pub id: String,
+    pub weight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affix_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AffixPoolDefinition {
+    pub id: String,
+    pub entries: Vec<AffixPoolEntry>,
+}
+
+/// Immutable, self-contained result of one reviewed affix roll.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppliedItemAffix {
+    pub affix_id: String,
+    pub definition_digest_sha256: String,
+    pub pool_id: String,
+    pub pool_digest_sha256: String,
+    pub record_digest_sha256: String,
+    pub label: String,
+    pub position: AffixPosition,
+    pub attack_bonus_delta: i32,
+    pub heal_amount_delta: i32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2274,6 +2435,7 @@ pub struct LootGuaranteedDefinition {
     pub id: String,
     pub item_prototype_id: String,
     pub quantity: u16,
+    pub affix_pool_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2284,6 +2446,7 @@ pub struct LootEntryDefinition {
     pub item_prototype_id: Option<String>,
     pub min_quantity: Option<u16>,
     pub max_quantity: Option<u16>,
+    pub affix_pool_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2314,6 +2477,10 @@ pub struct LootSourceDefinition {
 #[serde(transparent)]
 pub struct LootDropId(pub u64);
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct RewardOpenId(pub u64);
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
@@ -2337,10 +2504,92 @@ pub enum ItemProvenance {
         entry_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pool_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_loot_table_id: Option<String>,
         roll_index: u8,
         quantity_index: u16,
         generated_tick: u64,
     },
+    SealedReward {
+        open_id: RewardOpenId,
+        source_item_id: ItemInstanceId,
+        source_npc_loot_digest_sha256: String,
+        sealed_prototype_id: String,
+        loot_table_id: String,
+        table_digest_sha256: String,
+        entry_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pool_id: Option<String>,
+        roll_index: u8,
+        quantity_index: u16,
+        generated_tick: u64,
+    },
+}
+
+/// Exact provenance vocabulary accepted from snapshot v6.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ItemProvenanceV6 {
+    AuthoredInitial,
+    LegacySnapshot {
+        source_version: u32,
+    },
+    RuntimeCreated {
+        created_tick: u64,
+    },
+    NpcLoot {
+        drop_id: LootDropId,
+        npc_spawn_id: String,
+        loot_table_id: String,
+        table_digest_sha256: String,
+        entry_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pool_id: Option<String>,
+        roll_index: u8,
+        quantity_index: u16,
+        generated_tick: u64,
+    },
+}
+
+impl From<ItemProvenanceV6> for ItemProvenance {
+    fn from(value: ItemProvenanceV6) -> Self {
+        match value {
+            ItemProvenanceV6::AuthoredInitial => Self::AuthoredInitial,
+            ItemProvenanceV6::LegacySnapshot { source_version } => {
+                Self::LegacySnapshot { source_version }
+            }
+            ItemProvenanceV6::RuntimeCreated { created_tick } => {
+                Self::RuntimeCreated { created_tick }
+            }
+            ItemProvenanceV6::NpcLoot {
+                drop_id,
+                npc_spawn_id,
+                loot_table_id,
+                table_digest_sha256,
+                entry_id,
+                pool_id,
+                roll_index,
+                quantity_index,
+                generated_tick,
+            } => Self::NpcLoot {
+                drop_id,
+                npc_spawn_id,
+                loot_table_id,
+                table_digest_sha256,
+                entry_id,
+                pool_id,
+                sealed_loot_table_id: None,
+                roll_index,
+                quantity_index,
+                generated_tick,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2402,7 +2651,7 @@ pub struct DurableCharacterSnapshot {
     pub gameplay: CharacterGameplaySnapshot,
 }
 
-pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 6;
+pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 7;
 pub const MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES: usize = 1_048_576;
 pub const MAX_WORLD_RUNTIME_SNAPSHOT_BYTES: usize = 2_097_152;
 const MAX_ACTIVE_EFFECTS: usize = 32;
@@ -2569,6 +2818,17 @@ pub struct RuntimeItemInstanceSnapshot {
     pub prototype_id: String,
     pub location: RuntimeItemLocation,
     pub binding: ItemBinding,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_affixes: Vec<AppliedItemAffix>,
+}
+
+/// Exact item shape written by snapshot v6. It cannot opt into v7 affixes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeItemInstanceSnapshotV6 {
+    pub prototype_id: String,
+    pub location: RuntimeItemLocation,
+    pub binding: ItemBinding,
 }
 
 /// Exact item shape written by inventory phase 3B. It intentionally lacks
@@ -2711,6 +2971,33 @@ pub struct WorldRuntimeSnapshot {
     pub loot_encounters: BTreeMap<String, LootEncounter>,
     pub ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
     pub party_loot_cursors: BTreeMap<u64, u64>,
+    pub next_reward_open_id: RewardOpenId,
+}
+
+/// Exact snapshot shape produced by repeatable-loot phase 4A. It cannot opt
+/// into affixes, sealed provenance or the reward-open counter introduced by
+/// v7.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldRuntimeSnapshotV6 {
+    pub snapshot_version: u32,
+    pub revision: u64,
+    pub logical_tick: u64,
+    pub rng_state: u64,
+    pub next_item_instance_sequence: u64,
+    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshotV6>,
+    pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
+    #[serde(default)]
+    pub adventure: AdventureRuntimeSnapshot,
+    #[serde(default)]
+    pub progression_flags: BTreeSet<String>,
+    pub next_trade_id: TradeId,
+    pub trades: BTreeMap<TradeId, TradeSnapshot>,
+    pub next_loot_drop_id: LootDropId,
+    pub item_provenance: BTreeMap<ItemInstanceId, ItemProvenanceV6>,
+    pub loot_encounters: BTreeMap<String, LootEncounter>,
+    pub ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
+    pub party_loot_cursors: BTreeMap<u64, u64>,
 }
 
 /// Exact snapshot shape produced by inventory phase 3D. It intentionally has
@@ -2723,7 +3010,7 @@ pub struct WorldRuntimeSnapshotV5 {
     pub logical_tick: u64,
     pub rng_state: u64,
     pub next_item_instance_sequence: u64,
-    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshot>,
+    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshotV6>,
     pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
     #[serde(default)]
     pub adventure: AdventureRuntimeSnapshot,
@@ -2744,7 +3031,7 @@ pub struct WorldRuntimeSnapshotV4 {
     pub logical_tick: u64,
     pub rng_state: u64,
     pub next_item_instance_sequence: u64,
-    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshot>,
+    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshotV6>,
     pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
     #[serde(default)]
     pub adventure: AdventureRuntimeSnapshot,
@@ -2834,6 +3121,7 @@ impl WorldRuntimeSnapshot {
                         prototype_id: instance.prototype_id,
                         location: instance.location.into(),
                         binding: ItemBinding::Unbound,
+                        item_affixes: Vec::new(),
                     },
                 )
             })
@@ -2856,6 +3144,7 @@ impl WorldRuntimeSnapshot {
             loot_encounters: BTreeMap::new(),
             ground_loot: BTreeMap::new(),
             party_loot_cursors: BTreeMap::new(),
+            next_reward_open_id: RewardOpenId(1),
         })
     }
 
@@ -2873,6 +3162,7 @@ impl WorldRuntimeSnapshot {
                         prototype_id: instance.prototype_id,
                         location: instance.location,
                         binding: ItemBinding::Unbound,
+                        item_affixes: Vec::new(),
                     },
                 )
             })
@@ -2895,6 +3185,7 @@ impl WorldRuntimeSnapshot {
             loot_encounters: BTreeMap::new(),
             ground_loot: BTreeMap::new(),
             party_loot_cursors: BTreeMap::new(),
+            next_reward_open_id: RewardOpenId(1),
         })
     }
 
@@ -2903,13 +3194,14 @@ impl WorldRuntimeSnapshot {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
         let item_provenance = legacy_item_provenance(&snapshot.item_instances, 4);
+        let item_instances = upgrade_v6_item_instances(snapshot.item_instances);
         Ok(Self {
             snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
             revision: snapshot.revision,
             logical_tick: snapshot.logical_tick,
             rng_state: snapshot.rng_state,
             next_item_instance_sequence: snapshot.next_item_instance_sequence,
-            item_instances: snapshot.item_instances,
+            item_instances,
             npcs: snapshot.npcs,
             adventure: snapshot.adventure,
             progression_flags: snapshot.progression_flags,
@@ -2920,6 +3212,7 @@ impl WorldRuntimeSnapshot {
             loot_encounters: BTreeMap::new(),
             ground_loot: BTreeMap::new(),
             party_loot_cursors: BTreeMap::new(),
+            next_reward_open_id: RewardOpenId(1),
         })
     }
 
@@ -2928,13 +3221,14 @@ impl WorldRuntimeSnapshot {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
         let item_provenance = legacy_item_provenance(&snapshot.item_instances, 5);
+        let item_instances = upgrade_v6_item_instances(snapshot.item_instances);
         Ok(Self {
             snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
             revision: snapshot.revision,
             logical_tick: snapshot.logical_tick,
             rng_state: snapshot.rng_state,
             next_item_instance_sequence: snapshot.next_item_instance_sequence,
-            item_instances: snapshot.item_instances,
+            item_instances,
             npcs: snapshot.npcs,
             adventure: snapshot.adventure,
             progression_flags: snapshot.progression_flags,
@@ -2945,8 +3239,57 @@ impl WorldRuntimeSnapshot {
             loot_encounters: BTreeMap::new(),
             ground_loot: BTreeMap::new(),
             party_loot_cursors: BTreeMap::new(),
+            next_reward_open_id: RewardOpenId(1),
         })
     }
+
+    pub fn upgrade_v6(snapshot: WorldRuntimeSnapshotV6) -> Result<Self, WorldError> {
+        if snapshot.snapshot_version != 6 {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        Ok(Self {
+            snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
+            revision: snapshot.revision,
+            logical_tick: snapshot.logical_tick,
+            rng_state: snapshot.rng_state,
+            next_item_instance_sequence: snapshot.next_item_instance_sequence,
+            item_instances: upgrade_v6_item_instances(snapshot.item_instances),
+            npcs: snapshot.npcs,
+            adventure: snapshot.adventure,
+            progression_flags: snapshot.progression_flags,
+            next_trade_id: snapshot.next_trade_id,
+            trades: snapshot.trades,
+            next_loot_drop_id: snapshot.next_loot_drop_id,
+            item_provenance: snapshot
+                .item_provenance
+                .into_iter()
+                .map(|(id, provenance)| (id, provenance.into()))
+                .collect(),
+            loot_encounters: snapshot.loot_encounters,
+            ground_loot: snapshot.ground_loot,
+            party_loot_cursors: snapshot.party_loot_cursors,
+            next_reward_open_id: RewardOpenId(1),
+        })
+    }
+}
+
+fn upgrade_v6_item_instances(
+    instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshotV6>,
+) -> BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshot> {
+    instances
+        .into_iter()
+        .map(|(id, instance)| {
+            (
+                id,
+                RuntimeItemInstanceSnapshot {
+                    prototype_id: instance.prototype_id,
+                    location: instance.location,
+                    binding: instance.binding,
+                    item_affixes: Vec::new(),
+                },
+            )
+        })
+        .collect()
 }
 
 fn legacy_item_provenance<T>(
@@ -2994,7 +3337,8 @@ impl WorldRuntimeSnapshotV2 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompatibleWorldRuntimeSnapshot {
-    V6(WorldRuntimeSnapshot),
+    V7(WorldRuntimeSnapshot),
+    V6(WorldRuntimeSnapshotV6),
     V5(WorldRuntimeSnapshotV5),
     V4(WorldRuntimeSnapshotV4),
     V3(WorldRuntimeSnapshotV3),
@@ -3031,6 +3375,9 @@ impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
             6 => serde_json::from_value(value)
                 .map(Self::V6)
                 .map_err(serde::de::Error::custom),
+            7 => serde_json::from_value(value)
+                .map(Self::V7)
+                .map_err(serde::de::Error::custom),
             _ => Err(serde::de::Error::custom("unsupported snapshotVersion")),
         }
     }
@@ -3039,7 +3386,8 @@ impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
 impl CompatibleWorldRuntimeSnapshot {
     pub fn into_current(self) -> Result<WorldRuntimeSnapshot, WorldError> {
         match self {
-            Self::V6(snapshot) => Ok(snapshot),
+            Self::V7(snapshot) => Ok(snapshot),
+            Self::V6(snapshot) => WorldRuntimeSnapshot::upgrade_v6(snapshot),
             Self::V5(snapshot) => WorldRuntimeSnapshot::upgrade_v5(snapshot),
             Self::V4(snapshot) => WorldRuntimeSnapshot::upgrade_v4(snapshot),
             Self::V3(snapshot) => WorldRuntimeSnapshot::upgrade_v3(snapshot),
@@ -3067,6 +3415,7 @@ pub fn decode_world_runtime_snapshot(
     let compatible: CompatibleWorldRuntimeSnapshot =
         serde_json::from_str(json).map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
     let payload_version = match &compatible {
+        CompatibleWorldRuntimeSnapshot::V7(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V6(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V5(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V4(snapshot) => snapshot.snapshot_version,
@@ -3117,6 +3466,7 @@ pub fn validate_world_runtime_snapshot_semantics(
         return Err(WorldError::InvalidRuntimeSnapshot);
     }
     if snapshot.next_loot_drop_id.0 == 0
+        || snapshot.next_reward_open_id.0 == 0
         || snapshot.item_provenance.len() != snapshot.item_instances.len()
         || snapshot
             .item_provenance
@@ -3155,8 +3505,41 @@ pub fn validate_world_runtime_snapshot_semantics(
             || !valid_definition_id(&instance.prototype_id)
             || !location_valid
             || matches!(instance.binding, ItemBinding::Character { character_id } if character_id.0 <= 0)
+            || instance.item_affixes.len() > MAX_AFFIXES_PER_ITEM
+            || instance.item_affixes.iter().any(|affix| {
+                !valid_definition_id(&affix.affix_id)
+                    || !valid_digest_sha256(&affix.definition_digest_sha256)
+                    || !valid_definition_id(&affix.pool_id)
+                    || !valid_digest_sha256(&affix.pool_digest_sha256)
+                    || !valid_digest_sha256(&affix.record_digest_sha256)
+                    || !safe_definition_text(&affix.label, 64)
+                    || !(0..=MAX_AFFIX_MODIFIER).contains(&affix.attack_bonus_delta)
+                    || !(0..=MAX_AFFIX_MODIFIER).contains(&affix.heal_amount_delta)
+                    || (affix.attack_bonus_delta == 0 && affix.heal_amount_delta == 0)
+            })
+            || !instance.item_affixes.windows(2).all(|pair| {
+                (pair[0].position, pair[0].affix_id.as_str())
+                    < (pair[1].position, pair[1].affix_id.as_str())
+            })
         {
             return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        for affix in &instance.item_affixes {
+            let definition = AffixDefinition {
+                id: affix.affix_id.clone(),
+                label: affix.label.clone(),
+                position: affix.position,
+                attack_bonus_delta: affix.attack_bonus_delta,
+                heal_amount_delta: affix.heal_amount_delta,
+            };
+            if canonical_sha256(&definition).map_err(|_| WorldError::InvalidRuntimeSnapshot)?
+                != affix.definition_digest_sha256
+                || applied_affix_record_sha256(affix)
+                    .map_err(|_| WorldError::InvalidRuntimeSnapshot)?
+                    != affix.record_digest_sha256
+            {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
         }
     }
     for item_id in snapshot.item_instances.keys() {
@@ -3181,14 +3564,16 @@ pub fn validate_world_runtime_snapshot_semantics(
         }
     }
 
-    let valid_digest = |digest: &str| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
     let mut greatest_drop_id = 0_u64;
-    for provenance in snapshot.item_provenance.values() {
+    let mut greatest_open_id = 0_u64;
+    let mut open_sources =
+        BTreeMap::<RewardOpenId, (ItemInstanceId, String, String, String, String, u64)>::new();
+    let mut source_opens = BTreeMap::<ItemInstanceId, RewardOpenId>::new();
+    let mut reward_units = BTreeSet::new();
+    let mut open_unit_counts = BTreeMap::<RewardOpenId, usize>::new();
+    let mut quantity_indexes =
+        BTreeMap::<(RewardOpenId, String, Option<String>, u8), BTreeSet<u16>>::new();
+    for (item_id, provenance) in &snapshot.item_provenance {
         match provenance {
             ItemProvenance::AuthoredInitial => {}
             ItemProvenance::LegacySnapshot { source_version } => {
@@ -3208,6 +3593,7 @@ pub fn validate_world_runtime_snapshot_semantics(
                 table_digest_sha256,
                 entry_id,
                 pool_id,
+                sealed_loot_table_id,
                 roll_index,
                 quantity_index,
                 generated_tick,
@@ -3218,7 +3604,10 @@ pub fn validate_world_runtime_snapshot_semantics(
                     || !valid_definition_id(loot_table_id)
                     || !valid_definition_id(entry_id)
                     || pool_id.as_ref().is_some_and(|id| !valid_definition_id(id))
-                    || !valid_digest(table_digest_sha256)
+                    || sealed_loot_table_id
+                        .as_ref()
+                        .is_some_and(|id| !valid_definition_id(id))
+                    || !valid_digest_sha256(table_digest_sha256)
                     || *roll_index >= 8
                     || *quantity_index >= 32
                     || *generated_tick > snapshot.logical_tick
@@ -3226,6 +3615,92 @@ pub fn validate_world_runtime_snapshot_semantics(
                     return Err(WorldError::InvalidRuntimeSnapshot);
                 }
             }
+            ItemProvenance::SealedReward {
+                open_id,
+                source_item_id,
+                source_npc_loot_digest_sha256,
+                sealed_prototype_id,
+                loot_table_id,
+                table_digest_sha256,
+                entry_id,
+                pool_id,
+                roll_index,
+                quantity_index,
+                generated_tick,
+            } => {
+                greatest_open_id = greatest_open_id.max(open_id.0);
+                if open_id.0 == 0
+                    || source_item_id == item_id
+                    || !valid_item_instance_id(source_item_id.as_str())
+                    || !valid_digest_sha256(source_npc_loot_digest_sha256)
+                    || !valid_definition_id(sealed_prototype_id)
+                    || !valid_definition_id(loot_table_id)
+                    || !valid_digest_sha256(table_digest_sha256)
+                    || !valid_definition_id(entry_id)
+                    || pool_id.as_ref().is_some_and(|id| !valid_definition_id(id))
+                    || *roll_index >= 8
+                    || usize::from(*quantity_index) >= MAX_SEALED_REWARD_UNITS
+                    || *generated_tick > snapshot.logical_tick
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+                let source_key = (
+                    source_item_id.clone(),
+                    source_npc_loot_digest_sha256.clone(),
+                    sealed_prototype_id.clone(),
+                    loot_table_id.clone(),
+                    table_digest_sha256.clone(),
+                    *generated_tick,
+                );
+                if open_sources
+                    .insert(*open_id, source_key.clone())
+                    .is_some_and(|previous| previous != source_key)
+                    || source_opens
+                        .insert(source_item_id.clone(), *open_id)
+                        .is_some_and(|previous| previous != *open_id)
+                    || !reward_units.insert((
+                        *open_id,
+                        entry_id.clone(),
+                        pool_id.clone(),
+                        *roll_index,
+                        *quantity_index,
+                    ))
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+                *open_unit_counts.entry(*open_id).or_default() += 1;
+                quantity_indexes
+                    .entry((*open_id, entry_id.clone(), pool_id.clone(), *roll_index))
+                    .or_default()
+                    .insert(*quantity_index);
+            }
+        }
+    }
+    if open_unit_counts
+        .values()
+        .any(|count| !(1..=MAX_SEALED_REWARD_UNITS).contains(count))
+        || quantity_indexes
+            .values()
+            .any(|indexes| indexes.iter().copied().ne((0_u16..).take(indexes.len())))
+    {
+        return Err(WorldError::InvalidRuntimeSnapshot);
+    }
+    for (_, (source_item_id, expected_digest, sealed_prototype_id, _, _, _)) in open_sources {
+        let Some(source_instance) = snapshot.item_instances.get(&source_item_id) else {
+            continue;
+        };
+        let source_provenance = snapshot
+            .item_provenance
+            .get(&source_item_id)
+            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+        if !matches!(source_instance.location, RuntimeItemLocation::Consumed)
+            || source_instance.prototype_id != sealed_prototype_id
+            || !matches!(source_provenance, ItemProvenance::NpcLoot { .. })
+            || canonical_sha256(source_provenance)
+                .map_err(|_| WorldError::InvalidRuntimeSnapshot)?
+                != expected_digest
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
         }
     }
     for (npc_id, encounter) in &snapshot.loot_encounters {
@@ -3291,6 +3766,7 @@ pub fn validate_world_runtime_snapshot_semantics(
         }
     }
     if greatest_drop_id >= snapshot.next_loot_drop_id.0
+        || greatest_open_id >= snapshot.next_reward_open_id.0
         || snapshot
             .party_loot_cursors
             .iter()
@@ -3561,6 +4037,7 @@ struct ItemPrototype {
     max_stack_units: u16,
     container: Option<ItemContainerDefinition>,
     transfer_policy: ItemTransferPolicy,
+    sealed_loot_table_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3568,6 +4045,15 @@ struct ItemInstance {
     prototype_id: String,
     location: SharedItemLocation,
     binding: ItemBinding,
+    item_affixes: Vec<AppliedItemAffix>,
+}
+
+#[derive(Clone, Debug)]
+struct AffixPool {
+    id: String,
+    digest_sha256: String,
+    entries: Vec<AffixPoolEntry>,
+    total_weight: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -3592,6 +4078,7 @@ struct RolledLootUnit {
     pool_id: Option<String>,
     roll_index: u8,
     quantity_index: u16,
+    affix_pool_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -3749,6 +4236,8 @@ pub enum WorldError {
     ItemReservedForTrade,
     #[error("That loot action is not available.")]
     LootUnavailable,
+    #[error("That sealed reward is not available.")]
+    RewardUnavailable,
     #[error("That trade confirmation refers to an obsolete revision.")]
     StaleTradeRevision,
     #[error("Nothing is equipped in that slot.")]
@@ -4099,6 +4588,16 @@ pub enum GameplayEvent {
         item_name: String,
         room_id: String,
     },
+    RewardOpened {
+        open_id: RewardOpenId,
+        character_id: CharacterId,
+        character_name: String,
+        source_item_id: ItemInstanceId,
+        source_item_name: String,
+        item_ids: Vec<ItemInstanceId>,
+        item_names: Vec<String>,
+        room_id: String,
+    },
     CharacterHealed {
         character_id: CharacterId,
         character_name: String,
@@ -4162,6 +4661,8 @@ pub struct ActionOutcome {
     pub container_contents: Option<ContainerContentsView>,
     /// Present only for an explicit inspection of an offered container.
     pub trade_contents: Option<TradeContentsView>,
+    /// Present only for an explicit, bounded sealed-reward odds request.
+    pub reward_odds: Option<RewardOddsView>,
     /// Optional transport-independent, plain-text response to the command.
     pub output: Option<String>,
     /// Present when the action changed persistent character state.
@@ -4182,9 +4683,12 @@ pub struct World {
     item_instances: BTreeMap<ItemInstanceId, ItemInstance>,
     next_item_instance_sequence: u64,
     item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
+    affixes: BTreeMap<String, AffixDefinition>,
+    affix_pools: BTreeMap<String, AffixPool>,
     loot_tables: BTreeMap<String, LootTable>,
     loot_sources: BTreeMap<String, LootSource>,
     next_loot_drop_id: LootDropId,
+    next_reward_open_id: RewardOpenId,
     loot_encounters: BTreeMap<String, LootEncounter>,
     ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
     party_loot_cursors: BTreeMap<u64, u64>,
@@ -4224,6 +4728,7 @@ pub struct WorldCheckpoint {
     item_instances: BTreeMap<ItemInstanceId, ItemInstance>,
     next_item_instance_sequence: u64,
     item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
+    next_reward_open_id: RewardOpenId,
     next_loot_drop_id: LootDropId,
     loot_encounters: BTreeMap<String, LootEncounter>,
     ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
@@ -4288,6 +4793,18 @@ impl World {
                     .aliases
                     .iter()
                     .all(|alias| safe_definition_text(alias, 64));
+            let sealed_valid = item.sealed_loot_table_id.as_ref().is_none_or(|table_id| {
+                valid_definition_id(table_id)
+                    && item.stack_policy == ItemStackPolicy::Unique
+                    && item.max_stack_units == 1
+                    && item.consumable
+                    && item.container.is_none()
+                    && item.equipment_slot.is_none()
+                    && item.attack_bonus == 0
+                    && item.heal_amount == 0
+                    && item.effect.is_none()
+                    && item.transfer_policy == ItemTransferPolicy::CharacterBound
+            });
             if !presentation_valid
                 || item.weight_grams > 1_000_000
                 || item.slot_cost == 0
@@ -4296,6 +4813,7 @@ impl World {
                 || item.item_level > 1_000
                 || !stack_valid
                 || !container_valid
+                || !sealed_valid
             {
                 return Err(WorldBuildError::InvalidItemPrototype(item.prototype_id));
             }
@@ -4322,6 +4840,7 @@ impl World {
                     max_stack_units: item.max_stack_units,
                     container: item.container,
                     transfer_policy: item.transfer_policy,
+                    sealed_loot_table_id: item.sealed_loot_table_id,
                 },
             );
         }
@@ -4385,6 +4904,12 @@ impl World {
             if !item_prototypes.contains_key(&instance.prototype_id) {
                 return Err(WorldBuildError::UnknownItemPrototype(instance.prototype_id));
             }
+            if item_prototypes
+                .get(&instance.prototype_id)
+                .is_some_and(|prototype| prototype.sealed_loot_table_id.is_some())
+            {
+                return Err(WorldBuildError::InvalidItemPrototype(instance.prototype_id));
+            }
             if item_instances.contains_key(&instance_id) {
                 return Err(WorldBuildError::DuplicateItemId(instance_id.0));
             }
@@ -4410,6 +4935,7 @@ impl World {
                     prototype_id: instance.prototype_id,
                     location,
                     binding: ItemBinding::Unbound,
+                    item_affixes: Vec::new(),
                 },
             );
         }
@@ -4475,9 +5001,12 @@ impl World {
             item_instances,
             next_item_instance_sequence,
             item_provenance,
+            affixes: BTreeMap::new(),
+            affix_pools: BTreeMap::new(),
             loot_tables: BTreeMap::new(),
             loot_sources: BTreeMap::new(),
             next_loot_drop_id: LootDropId(1),
+            next_reward_open_id: RewardOpenId(1),
             loot_encounters: BTreeMap::new(),
             ground_loot: BTreeMap::new(),
             party_loot_cursors: BTreeMap::new(),
@@ -4528,6 +5057,7 @@ impl World {
                 max_stack_units: 1,
                 container: None,
                 transfer_policy: ItemTransferPolicy::Transferable,
+                sealed_loot_table_id: None,
             }],
             initial_item_instances: vec![InitialItemInstanceDefinition {
                 instance_id: ItemInstanceId("demo:blue-lantern".into()),
@@ -4718,6 +5248,94 @@ impl World {
         self.rng = DeterministicRng::new(seed);
     }
 
+    pub fn configure_affixes(
+        &mut self,
+        mut definitions: Vec<AffixDefinition>,
+        mut pools: Vec<AffixPoolDefinition>,
+    ) -> Result<(), WorldError> {
+        if definitions.len() > MAX_AFFIX_DEFINITIONS || pools.len() > MAX_AFFIX_POOLS {
+            return Err(WorldError::InvalidGameplayDefinition);
+        }
+        definitions.sort_by(|left, right| left.id.cmp(&right.id));
+        pools.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut compiled_definitions = BTreeMap::new();
+        for definition in definitions {
+            let valid_delta = (0..=MAX_AFFIX_MODIFIER).contains(&definition.attack_bonus_delta)
+                && (0..=MAX_AFFIX_MODIFIER).contains(&definition.heal_amount_delta)
+                && (definition.attack_bonus_delta > 0 || definition.heal_amount_delta > 0);
+            if !valid_definition_id(&definition.id)
+                || !safe_definition_text(&definition.label, 64)
+                || !valid_delta
+                || compiled_definitions
+                    .insert(definition.id.clone(), definition)
+                    .is_some()
+            {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+        }
+        let mut compiled_pools = BTreeMap::new();
+        let mut total_entries = 0_usize;
+        for mut pool in pools {
+            pool.entries.sort_by(|left, right| left.id.cmp(&right.id));
+            total_entries = total_entries
+                .checked_add(pool.entries.len())
+                .ok_or(WorldError::InvalidGameplayDefinition)?;
+            if !valid_definition_id(&pool.id)
+                || pool.entries.is_empty()
+                || pool.entries.len() > MAX_AFFIX_POOL_ENTRIES
+                || total_entries > MAX_TOTAL_AFFIX_POOL_ENTRIES
+            {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+            let digest_sha256 = canonical_sha256(&pool)?;
+            let mut ids = BTreeSet::new();
+            let mut total_weight = 0_u64;
+            for entry in &pool.entries {
+                if !ids.insert(entry.id.clone())
+                    || !valid_definition_id(&entry.id)
+                    || !(1..=1_000_000).contains(&entry.weight)
+                {
+                    return Err(WorldError::InvalidGameplayDefinition);
+                }
+                total_weight = total_weight
+                    .checked_add(u64::from(entry.weight))
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+                match entry.kind {
+                    AffixPoolEntryKind::Affix => {
+                        if entry
+                            .affix_id
+                            .as_ref()
+                            .is_none_or(|id| !compiled_definitions.contains_key(id))
+                        {
+                            return Err(WorldError::InvalidGameplayDefinition);
+                        }
+                    }
+                    AffixPoolEntryKind::Nothing if entry.affix_id.is_none() => {}
+                    AffixPoolEntryKind::Nothing => {
+                        return Err(WorldError::InvalidGameplayDefinition);
+                    }
+                }
+            }
+            if compiled_pools
+                .insert(
+                    pool.id.clone(),
+                    AffixPool {
+                        id: pool.id,
+                        digest_sha256,
+                        entries: pool.entries,
+                        total_weight,
+                    },
+                )
+                .is_some()
+            {
+                return Err(WorldError::InvalidGameplayDefinition);
+            }
+        }
+        self.affixes = compiled_definitions;
+        self.affix_pools = compiled_pools;
+        Ok(())
+    }
+
     pub fn configure_loot(
         &mut self,
         mut tables: Vec<LootTableDefinition>,
@@ -4728,6 +5346,11 @@ impl World {
         }
         tables.sort_by(|left, right| left.id.cmp(&right.id));
         sources.sort_by(|left, right| left.id.cmp(&right.id));
+        let sealed_table_ids = self
+            .item_prototypes
+            .values()
+            .filter_map(|prototype| prototype.sealed_loot_table_id.clone())
+            .collect::<BTreeSet<_>>();
         let mut compiled = BTreeMap::new();
         let mut total_entries = 0_usize;
         for mut table in tables {
@@ -4748,19 +5371,49 @@ impl World {
             table.pools.sort_by(|left, right| left.id.cmp(&right.id));
             let mut ids = BTreeSet::new();
             let mut worst_case_units = 0_usize;
+            let mut minimum_units = 0_usize;
+            let mut odds_rows = 0_usize;
+            let sealed_table = sealed_table_ids.contains(&table.id);
             for guaranteed in &table.guaranteed {
+                let prototype = self
+                    .item_prototypes
+                    .get(&guaranteed.item_prototype_id)
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
                 if !ids.insert(guaranteed.id.clone())
                     || !valid_definition_id(&guaranteed.id)
-                    || !self
-                        .item_prototypes
-                        .contains_key(&guaranteed.item_prototype_id)
                     || !(1..=32).contains(&guaranteed.quantity)
+                    || guaranteed.affix_pool_id.as_ref().is_some_and(|pool_id| {
+                        guaranteed.quantity != 1
+                            || !affix_pool_applies(
+                                pool_id,
+                                prototype,
+                                &self.affix_pools,
+                                &self.affixes,
+                            )
+                    })
+                    || (sealed_table && prototype.sealed_loot_table_id.is_some())
                 {
                     return Err(WorldError::InvalidGameplayDefinition);
                 }
                 worst_case_units = worst_case_units
                     .checked_add(usize::from(guaranteed.quantity))
                     .ok_or(WorldError::InvalidGameplayDefinition)?;
+                minimum_units = minimum_units
+                    .checked_add(usize::from(guaranteed.quantity))
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+                if sealed_table {
+                    odds_rows = odds_rows
+                        .checked_add(1)
+                        .and_then(|rows| {
+                            guaranteed
+                                .affix_pool_id
+                                .as_ref()
+                                .map_or(Some(rows), |pool_id| {
+                                    rows.checked_add(self.affix_pools.get(pool_id)?.entries.len())
+                                })
+                        })
+                        .ok_or(WorldError::InvalidGameplayDefinition)?;
+                }
             }
             for pool in &mut table.pools {
                 if !ids.insert(pool.id.clone())
@@ -4777,6 +5430,8 @@ impl World {
                     .ok_or(WorldError::InvalidGameplayDefinition)?;
                 let mut total_weight = 0_u64;
                 let mut maximum_quantity = 0_u16;
+                let mut minimum_quantity = u16::MAX;
+                let mut can_roll_nothing = false;
                 for entry in &pool.entries {
                     if !ids.insert(entry.id.clone())
                         || !valid_definition_id(&entry.id)
@@ -4787,6 +5442,16 @@ impl World {
                     total_weight = total_weight
                         .checked_add(u64::from(entry.weight))
                         .ok_or(WorldError::InvalidGameplayDefinition)?;
+                    if sealed_table {
+                        odds_rows = odds_rows
+                            .checked_add(1)
+                            .and_then(|rows| {
+                                entry.affix_pool_id.as_ref().map_or(Some(rows), |pool_id| {
+                                    rows.checked_add(self.affix_pools.get(pool_id)?.entries.len())
+                                })
+                            })
+                            .ok_or(WorldError::InvalidGameplayDefinition)?;
+                    }
                     match entry.kind {
                         LootEntryKind::Item => {
                             let prototype_id = entry
@@ -4799,22 +5464,39 @@ impl World {
                             let maximum = entry
                                 .max_quantity
                                 .ok_or(WorldError::InvalidGameplayDefinition)?;
-                            if !self.item_prototypes.contains_key(prototype_id)
-                                || minimum == 0
+                            let prototype = self
+                                .item_prototypes
+                                .get(prototype_id)
+                                .ok_or(WorldError::InvalidGameplayDefinition)?;
+                            if minimum == 0
                                 || minimum > maximum
                                 || maximum > 32
+                                || entry.affix_pool_id.as_ref().is_some_and(|pool_id| {
+                                    minimum != 1
+                                        || maximum != 1
+                                        || !affix_pool_applies(
+                                            pool_id,
+                                            prototype,
+                                            &self.affix_pools,
+                                            &self.affixes,
+                                        )
+                                })
+                                || (sealed_table && prototype.sealed_loot_table_id.is_some())
                             {
                                 return Err(WorldError::InvalidGameplayDefinition);
                             }
                             maximum_quantity = maximum_quantity.max(maximum);
+                            minimum_quantity = minimum_quantity.min(minimum);
                         }
                         LootEntryKind::Nothing => {
                             if entry.item_prototype_id.is_some()
                                 || entry.min_quantity.is_some()
                                 || entry.max_quantity.is_some()
+                                || entry.affix_pool_id.is_some()
                             {
                                 return Err(WorldError::InvalidGameplayDefinition);
                             }
+                            can_roll_nothing = true;
                         }
                     }
                 }
@@ -4824,8 +5506,19 @@ impl World {
                 worst_case_units = worst_case_units
                     .checked_add(usize::from(pool.rolls) * usize::from(maximum_quantity))
                     .ok_or(WorldError::InvalidGameplayDefinition)?;
+                if !can_roll_nothing {
+                    minimum_units = minimum_units
+                        .checked_add(usize::from(pool.rolls) * usize::from(minimum_quantity))
+                        .ok_or(WorldError::InvalidGameplayDefinition)?;
+                }
             }
-            if total_entries > 4_096 || worst_case_units > MAX_LOOT_UNITS_PER_RESOLUTION {
+            if total_entries > 4_096
+                || worst_case_units > MAX_LOOT_UNITS_PER_RESOLUTION
+                || (sealed_table
+                    && (minimum_units == 0
+                        || worst_case_units > MAX_SEALED_REWARD_UNITS
+                        || odds_rows > MAX_REWARD_ODDS_ROWS))
+            {
                 return Err(WorldError::InvalidGameplayDefinition);
             }
             let id = table.id.clone();
@@ -4854,6 +5547,7 @@ impl World {
                 || !source_ids.insert(source.id.clone())
                 || !valid_definition_id(&source.npc_spawn_id)
                 || !compiled.contains_key(&source.loot_table_id)
+                || sealed_table_ids.contains(&source.loot_table_id)
                 || !self.npcs.contains_key(&source.npc_spawn_id)
             {
                 return Err(WorldError::InvalidGameplayDefinition);
@@ -4889,7 +5583,10 @@ impl World {
                 return Err(WorldError::InvalidGameplayDefinition);
             }
         }
-        if compiled.keys().any(|id| !used_tables.contains(id)) {
+        used_tables.extend(sealed_table_ids.iter().cloned());
+        if sealed_table_ids.iter().any(|id| !compiled.contains_key(id))
+            || compiled.keys().any(|id| !used_tables.contains(id))
+        {
             return Err(WorldError::InvalidGameplayDefinition);
         }
         self.loot_tables = compiled;
@@ -4924,6 +5621,7 @@ impl World {
                     prototype_id: prototype_id.to_owned(),
                     location: SharedItemLocation::Staged,
                     binding: ItemBinding::Unbound,
+                    item_affixes: Vec::new(),
                 },
             );
             self.item_provenance.insert(
@@ -4964,6 +5662,92 @@ impl World {
         self.item_prototype_for(instance_id)
     }
 
+    fn item_affix(&self, instance_id: &ItemInstanceId) -> Option<&AppliedItemAffix> {
+        self.item_instances
+            .get(instance_id)
+            .and_then(|instance| instance.item_affixes.first())
+    }
+
+    fn item_affix_view(&self, instance_id: &ItemInstanceId) -> Option<ItemAffixView> {
+        self.item_affix(instance_id).map(|affix| ItemAffixView {
+            label: affix.label.clone(),
+            position: affix.position,
+            attack_bonus_delta: affix.attack_bonus_delta,
+            heal_amount_delta: affix.heal_amount_delta,
+        })
+    }
+
+    fn item_effective_name(&self, instance_id: &ItemInstanceId) -> Result<String, WorldError> {
+        let prototype = self.item_prototype_for(instance_id)?;
+        Ok(match self.item_affix(instance_id) {
+            Some(affix) if affix.position == AffixPosition::Prefix => {
+                format!("{} {}", affix.label, prototype.name)
+            }
+            Some(affix) => format!("{} {}", prototype.name, affix.label),
+            None => prototype.name.clone(),
+        })
+    }
+
+    fn item_effective_attack_bonus(&self, instance_id: &ItemInstanceId) -> Result<i32, WorldError> {
+        let prototype = self.item_prototype_for(instance_id)?;
+        prototype
+            .attack_bonus
+            .checked_add(
+                self.item_affix(instance_id)
+                    .map_or(0, |affix| affix.attack_bonus_delta),
+            )
+            .ok_or(WorldError::InvalidEntity)
+    }
+
+    fn item_effective_heal_amount(&self, instance_id: &ItemInstanceId) -> Result<i32, WorldError> {
+        let prototype = self.item_prototype_for(instance_id)?;
+        prototype
+            .heal_amount
+            .checked_add(
+                self.item_affix(instance_id)
+                    .map_or(0, |affix| affix.heal_amount_delta),
+            )
+            .ok_or(WorldError::InvalidEntity)
+    }
+
+    fn item_is_openable_reward(
+        &self,
+        instance_id: &ItemInstanceId,
+        character_id: CharacterId,
+    ) -> bool {
+        let Some(instance) = self.item_instances.get(instance_id) else {
+            return false;
+        };
+        let Some(prototype) = self.item_prototypes.get(&instance.prototype_id) else {
+            return false;
+        };
+        matches!(instance.location, SharedItemLocation::Carried(owner) if owner == character_id)
+            && instance.binding == (ItemBinding::Character { character_id })
+            && instance.item_affixes.is_empty()
+            && prototype.transfer_policy == ItemTransferPolicy::CharacterBound
+            && prototype.stack_policy == ItemStackPolicy::Unique
+            && prototype.max_stack_units == 1
+            && prototype.consumable
+            && prototype.container.is_none()
+            && prototype.equipment_slot.is_none()
+            && prototype.attack_bonus == 0
+            && prototype.heal_amount == 0
+            && prototype.effect.is_none()
+            && prototype
+                .sealed_loot_table_id
+                .as_ref()
+                .is_some_and(|table_id| {
+                    self.loot_tables.contains_key(table_id)
+                        && matches!(
+                            self.item_provenance.get(instance_id),
+                            Some(ItemProvenance::NpcLoot {
+                                sealed_loot_table_id: Some(authored_table_id),
+                                ..
+                            }) if authored_table_id == table_id
+                        )
+                })
+    }
+
     fn item_location(&self, instance_id: &ItemInstanceId) -> Option<&SharedItemLocation> {
         self.item_instances
             .get(instance_id)
@@ -4988,6 +5772,7 @@ impl World {
             item_instances: self.item_instances.clone(),
             next_item_instance_sequence: self.next_item_instance_sequence,
             item_provenance: self.item_provenance.clone(),
+            next_reward_open_id: self.next_reward_open_id,
             next_loot_drop_id: self.next_loot_drop_id,
             loot_encounters: self.loot_encounters.clone(),
             ground_loot: self.ground_loot.clone(),
@@ -5013,6 +5798,7 @@ impl World {
         self.item_instances = checkpoint.item_instances;
         self.next_item_instance_sequence = checkpoint.next_item_instance_sequence;
         self.item_provenance = checkpoint.item_provenance;
+        self.next_reward_open_id = checkpoint.next_reward_open_id;
         self.next_loot_drop_id = checkpoint.next_loot_drop_id;
         self.loot_encounters = checkpoint.loot_encounters;
         self.ground_loot = checkpoint.ground_loot;
@@ -5073,6 +5859,7 @@ impl World {
                             prototype_id: instance.prototype_id.clone(),
                             location,
                             binding: instance.binding,
+                            item_affixes: instance.item_affixes.clone(),
                         },
                     )
                 })
@@ -5117,6 +5904,7 @@ impl World {
             loot_encounters: self.loot_encounters.clone(),
             ground_loot: self.ground_loot.clone(),
             party_loot_cursors: self.party_loot_cursors.clone(),
+            next_reward_open_id: self.next_reward_open_id,
         }
     }
 
@@ -5301,6 +6089,7 @@ impl World {
                     prototype_id: saved_instance.prototype_id.clone(),
                     location,
                     binding: saved_instance.binding,
+                    item_affixes: saved_instance.item_affixes.clone(),
                 },
             );
         }
@@ -5318,6 +6107,14 @@ impl World {
         }
 
         if validate_item_graph(&item_instances, &self.item_prototypes).is_err()
+            || validate_restored_item_affixes(&item_instances, &self.item_prototypes).is_err()
+            || validate_restored_sealed_items(
+                &item_instances,
+                &item_provenance,
+                &snapshot.ground_loot,
+                &self.item_prototypes,
+            )
+            .is_err()
             || npcs.values().any(|npc| {
                 npc.loot_item_ids
                     .iter()
@@ -5366,6 +6163,7 @@ impl World {
         self.loot_encounters = snapshot.loot_encounters;
         self.ground_loot = snapshot.ground_loot;
         self.party_loot_cursors = snapshot.party_loot_cursors;
+        self.next_reward_open_id = snapshot.next_reward_open_id;
         self.tick_resolution_pending = false;
         self.last_view_bump = None;
         Ok(())
@@ -6492,7 +7290,7 @@ impl World {
                             &item_id,
                             SharedItemLocation::Room(room_id.clone()),
                         )?;
-                        let item_name = self.item_prototype_for(&item_id)?.name.clone();
+                        let item_name = self.item_effective_name(&item_id)?;
                         events.push(DomainEvent::Gameplay {
                             event: GameplayEvent::LootDropped {
                                 npc_id: npc_id.clone(),
@@ -6569,8 +7367,7 @@ impl World {
             let equipment_bonus = state
                 .equipment
                 .values()
-                .filter_map(|item_id| self.item_gameplay_for(item_id).ok())
-                .map(|item| item.attack_bonus)
+                .filter_map(|item_id| self.item_effective_attack_bonus(item_id).ok())
                 .fold(0_i32, i32::saturating_add);
             let effect_bonus = state
                 .effects
@@ -6863,6 +7660,7 @@ impl World {
                     pool_id: None,
                     roll_index: 0,
                     quantity_index,
+                    affix_pool_id: guaranteed.affix_pool_id.clone(),
                 });
             }
         }
@@ -6906,6 +7704,7 @@ impl World {
                         pool_id: Some(pool.id.clone()),
                         roll_index,
                         quantity_index,
+                        affix_pool_id: entry.affix_pool_id.clone(),
                     });
                 }
             }
@@ -7080,6 +7879,23 @@ impl World {
                 .as_ref()
                 .map(|source| self.roll_loot_table(&source.loot_table_id))
                 .transpose()?;
+            let rolled = rolled
+                .map(|(table, units)| {
+                    let mut prepared = Vec::with_capacity(units.len());
+                    for unit in units {
+                        let item_affixes = unit
+                            .affix_pool_id
+                            .as_deref()
+                            .map(|pool_id| self.roll_item_affix(pool_id))
+                            .transpose()?
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>();
+                        prepared.push((unit, item_affixes));
+                    }
+                    Ok::<_, WorldError>((table, prepared))
+                })
+                .transpose()?;
             let rights = source
                 .as_ref()
                 .map_or(LootRightsPolicy::CreditedCharacter, |source| source.rights);
@@ -7108,7 +7924,7 @@ impl World {
                     false
                 };
                 if admitted {
-                    let item_name = self.item_prototype_for(&item_id)?.name.clone();
+                    let item_name = self.item_effective_name(&item_id)?;
                     events.push(DomainEvent::Gameplay {
                         event: GameplayEvent::LootDropped {
                             npc_id: npc_id.to_owned(),
@@ -7165,8 +7981,16 @@ impl World {
                     let checkpoint = self.checkpoint();
                     let mut generated_events = Vec::new();
                     let mut generated_roots = Vec::with_capacity(units.len());
-                    for unit in units {
+                    for (unit, item_affixes) in units {
+                        let sealed_loot_table_id = self
+                            .item_prototypes
+                            .get(&unit.prototype_id)
+                            .and_then(|prototype| prototype.sealed_loot_table_id.clone());
                         let item_id = self.create_staged_item_instance(&unit.prototype_id)?;
+                        self.item_instances
+                            .get_mut(&item_id)
+                            .ok_or(WorldError::InvalidDomainTransition)?
+                            .item_affixes = item_affixes;
                         self.set_item_location(
                             &item_id,
                             SharedItemLocation::Room(room_id.to_owned()),
@@ -7180,12 +8004,13 @@ impl World {
                                 table_digest_sha256: table.digest_sha256.clone(),
                                 entry_id: unit.entry_id,
                                 pool_id: unit.pool_id,
+                                sealed_loot_table_id,
                                 roll_index: unit.roll_index,
                                 quantity_index: unit.quantity_index,
                                 generated_tick: tick,
                             },
                         );
-                        let item_name = self.item_prototype_for(&item_id)?.name.clone();
+                        let item_name = self.item_effective_name(&item_id)?;
                         generated_roots.push(item_id.clone());
                         generated_events.push(DomainEvent::Gameplay {
                             event: GameplayEvent::LootDropped {
@@ -7303,7 +8128,8 @@ impl World {
                     | GameplayEvent::LootRightsChanged { .. }
                     | GameplayEvent::LootGenerationSuppressed { .. }
                     | GameplayEvent::LootDespawned { .. }
-                    | GameplayEvent::LootEncounterCancelled { .. },
+                    | GameplayEvent::LootEncounterCancelled { .. }
+                    | GameplayEvent::RewardOpened { .. },
             } => Err(WorldError::InvalidDomainTransition),
             DomainEvent::CharacterMoved { .. }
             | DomainEvent::CharacterRelocated { .. }
@@ -8124,6 +8950,7 @@ impl World {
             scene: self.scene_for(response_session)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some(output.to_owned()),
             changed_character: Some(self.character_snapshot(moving)?),
             domain_events: events,
@@ -8181,6 +9008,7 @@ impl World {
             scene: self.scene_for(actor)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some("The target has been fully restored.\r\n".to_owned()),
             changed_character: Some(self.character_snapshot(target)?),
             domain_events: vec![event],
@@ -8265,6 +9093,7 @@ impl World {
                     scene: self.scene_for(session)?,
                     container_contents: None,
                     trade_contents: None,
+                    reward_odds: None,
                     output: Some(output),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -8294,12 +9123,13 @@ impl World {
                     .get(&item_id)
                     .cloned()
                     .ok_or(WorldError::LootUnavailable)?;
-                let item_name = self.item_prototype_for(&item_id)?.name.clone();
+                let item_name = self.item_effective_name(&item_id)?;
                 if reservation.passed.contains(&actor_id) {
                     return Ok(ActionOutcome {
                         scene: self.scene_for(session)?,
                         container_contents: None,
                         trade_contents: None,
+                        reward_odds: None,
                         output: Some(format!("You have already passed on {item_name}.\r\n")),
                         changed_character: None,
                         domain_events: Vec::new(),
@@ -8343,12 +9173,462 @@ impl World {
                     scene: self.scene_for(session)?,
                     container_contents: None,
                     trade_contents: None,
+                    reward_odds: None,
                     output: Some(format!("{summary}\r\n")),
                     changed_character: None,
                     domain_events: vec![event],
                 })
             }
         }
+    }
+
+    fn open_reward(
+        &mut self,
+        session: SessionId,
+        query: &str,
+    ) -> Result<ActionOutcome, WorldError> {
+        let checkpoint = self.checkpoint();
+        match self.open_reward_inner(session, query) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.restore_checkpoint(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn open_reward_inner(
+        &mut self,
+        session: SessionId,
+        query: &str,
+    ) -> Result<ActionOutcome, WorldError> {
+        let source_item_id = self.resolve_accessible_item(session, query, ItemScope::Carried)?;
+        self.ensure_items_unreserved(std::iter::once(&source_item_id))?;
+        let character = self.character(session)?;
+        let character_id = character.id;
+        let character_name = character.name.clone();
+        let room_id = room_checked(&self.entities, character.location)?
+            .stable_id
+            .clone();
+        let source_instance = self
+            .item_instances
+            .get(&source_item_id)
+            .cloned()
+            .ok_or(WorldError::RewardUnavailable)?;
+        if source_instance.binding != (ItemBinding::Character { character_id })
+            || !source_instance.item_affixes.is_empty()
+        {
+            return Err(WorldError::RewardUnavailable);
+        }
+        let source_prototype = self
+            .item_prototypes
+            .get(&source_instance.prototype_id)
+            .cloned()
+            .ok_or(WorldError::RewardUnavailable)?;
+        let table_id = source_prototype
+            .sealed_loot_table_id
+            .clone()
+            .ok_or(WorldError::RewardUnavailable)?;
+        if source_prototype.transfer_policy != ItemTransferPolicy::CharacterBound
+            || source_prototype.stack_policy != ItemStackPolicy::Unique
+            || source_prototype.max_stack_units != 1
+            || !source_prototype.consumable
+            || source_prototype.container.is_some()
+            || source_prototype.equipment_slot.is_some()
+            || source_prototype.attack_bonus != 0
+            || source_prototype.heal_amount != 0
+            || source_prototype.effect.is_some()
+        {
+            return Err(WorldError::RewardUnavailable);
+        }
+        let source_provenance = self
+            .item_provenance
+            .get(&source_item_id)
+            .cloned()
+            .ok_or(WorldError::RewardUnavailable)?;
+        if !matches!(
+            &source_provenance,
+            ItemProvenance::NpcLoot {
+                sealed_loot_table_id: Some(authored_table_id),
+                ..
+            } if authored_table_id == &table_id
+        ) {
+            return Err(WorldError::RewardUnavailable);
+        }
+        let source_npc_loot_digest_sha256 = canonical_sha256(&source_provenance)?;
+        let source_item_name = self.item_effective_name(&source_item_id)?;
+        let open_id = self.next_reward_open_id;
+        self.next_reward_open_id = RewardOpenId(
+            open_id
+                .0
+                .checked_add(1)
+                .ok_or(WorldError::RewardUnavailable)?,
+        );
+        let (table, units) = self.roll_loot_table(&table_id)?;
+        if units.is_empty() || units.len() > MAX_SEALED_REWARD_UNITS {
+            return Err(WorldError::RewardUnavailable);
+        }
+
+        let mut generated = Vec::with_capacity(units.len());
+        for unit in units {
+            let item_id = self.create_staged_item_instance(&unit.prototype_id)?;
+            let item_affixes = unit
+                .affix_pool_id
+                .as_deref()
+                .map(|pool_id| self.roll_item_affix(pool_id))
+                .transpose()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            self.item_instances
+                .get_mut(&item_id)
+                .ok_or(WorldError::RewardUnavailable)?
+                .item_affixes = item_affixes;
+            generated.push((item_id, unit));
+        }
+
+        let mut prospective = self.item_instances.clone();
+        prospective
+            .get_mut(&source_item_id)
+            .ok_or(WorldError::RewardUnavailable)?
+            .location = SharedItemLocation::Consumed;
+        for (item_id, _) in &generated {
+            prospective
+                .get_mut(item_id)
+                .ok_or(WorldError::RewardUnavailable)?
+                .location = SharedItemLocation::Carried(character_id);
+        }
+        let mut roots = Vec::with_capacity(generated.len() + 1);
+        roots.push(source_item_id.clone());
+        roots.extend(generated.iter().map(|(item_id, _)| item_id.clone()));
+        self.apply_item_ownership_transitions(&mut prospective, &roots)?;
+        self.validate_prospective_item_locations(&prospective, [character_id])?;
+        self.item_instances = prospective;
+
+        let mut item_ids = Vec::with_capacity(generated.len());
+        let mut item_names = Vec::with_capacity(generated.len());
+        for (item_id, unit) in generated {
+            self.item_provenance.insert(
+                item_id.clone(),
+                ItemProvenance::SealedReward {
+                    open_id,
+                    source_item_id: source_item_id.clone(),
+                    source_npc_loot_digest_sha256: source_npc_loot_digest_sha256.clone(),
+                    sealed_prototype_id: source_instance.prototype_id.clone(),
+                    loot_table_id: table.id.clone(),
+                    table_digest_sha256: table.digest_sha256.clone(),
+                    entry_id: unit.entry_id,
+                    pool_id: unit.pool_id,
+                    roll_index: unit.roll_index,
+                    quantity_index: unit.quantity_index,
+                    generated_tick: self.logical_tick,
+                },
+            );
+            item_names.push(self.item_effective_name(&item_id)?);
+            item_ids.push(item_id);
+        }
+        let event = DomainEvent::Gameplay {
+            event: GameplayEvent::RewardOpened {
+                open_id,
+                character_id,
+                character_name,
+                source_item_id,
+                source_item_name,
+                item_ids,
+                item_names: item_names.clone(),
+                room_id,
+            },
+        };
+        let outcome = self.finish_gameplay_action(
+            session,
+            format!(
+                "Abres la recompensa sellada y obtienes: {}.\r\n",
+                item_names.join(", ")
+            ),
+            vec![event],
+        )?;
+        if serde_json::to_vec(&self.runtime_snapshot())
+            .map_err(|_| WorldError::RewardUnavailable)?
+            .len()
+            > MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+        {
+            return Err(WorldError::InventoryCapacityExceeded);
+        }
+        Ok(outcome)
+    }
+
+    fn roll_item_affix(&mut self, pool_id: &str) -> Result<Option<AppliedItemAffix>, WorldError> {
+        let pool = self
+            .affix_pools
+            .get(pool_id)
+            .cloned()
+            .ok_or(WorldError::InvalidGameplayDefinition)?;
+        let selected = self.rng.uniform_below(pool.total_weight)?;
+        let mut cumulative = 0_u64;
+        let entry = pool
+            .entries
+            .iter()
+            .find(|entry| {
+                cumulative = cumulative.saturating_add(u64::from(entry.weight));
+                selected < cumulative
+            })
+            .ok_or(WorldError::InvalidGameplayDefinition)?;
+        if entry.kind == AffixPoolEntryKind::Nothing {
+            return Ok(None);
+        }
+        let definition = self
+            .affixes
+            .get(
+                entry
+                    .affix_id
+                    .as_deref()
+                    .ok_or(WorldError::InvalidGameplayDefinition)?,
+            )
+            .cloned()
+            .ok_or(WorldError::InvalidGameplayDefinition)?;
+        let mut applied = AppliedItemAffix {
+            affix_id: definition.id.clone(),
+            definition_digest_sha256: canonical_sha256(&definition)?,
+            pool_id: pool.id,
+            pool_digest_sha256: pool.digest_sha256,
+            record_digest_sha256: String::new(),
+            label: definition.label,
+            position: definition.position,
+            attack_bonus_delta: definition.attack_bonus_delta,
+            heal_amount_delta: definition.heal_amount_delta,
+        };
+        applied.record_digest_sha256 = applied_affix_record_sha256(&applied)?;
+        Ok(Some(applied))
+    }
+
+    fn reward_odds(
+        &self,
+        session: SessionId,
+        target: &str,
+        page: u16,
+    ) -> Result<ActionOutcome, WorldError> {
+        if page == 0 {
+            return Err(WorldError::RewardUnavailable);
+        }
+        let source_item_id = self.resolve_accessible_item(session, target, ItemScope::Carried)?;
+        let character_id = self.character(session)?.id;
+        if !self.item_is_openable_reward(&source_item_id, character_id) {
+            return Err(WorldError::RewardUnavailable);
+        }
+        let source = self
+            .item_instances
+            .get(&source_item_id)
+            .ok_or(WorldError::RewardUnavailable)?;
+        let table_id = self
+            .item_prototypes
+            .get(&source.prototype_id)
+            .and_then(|prototype| prototype.sealed_loot_table_id.as_deref())
+            .ok_or(WorldError::RewardUnavailable)?;
+        let table = self
+            .loot_tables
+            .get(table_id)
+            .ok_or(WorldError::RewardUnavailable)?;
+
+        enum OddsRow {
+            Guaranteed(RewardOddsGuaranteedRow),
+            Weighted(RewardOddsWeightedRow),
+            Affix(RewardOddsAffixRow),
+        }
+        let mut rows = Vec::new();
+        let append_affixes =
+            |outcome_label: &str, pool_id: Option<&str>| -> Result<Vec<OddsRow>, WorldError> {
+                let Some(pool_id) = pool_id else {
+                    return Ok(Vec::new());
+                };
+                let pool = self
+                    .affix_pools
+                    .get(pool_id)
+                    .ok_or(WorldError::InvalidGameplayDefinition)?;
+                let mut affix_rows = Vec::with_capacity(pool.entries.len());
+                for entry in &pool.entries {
+                    let (affix_label, position, attack_bonus_delta, heal_amount_delta) =
+                        if entry.kind == AffixPoolEntryKind::Nothing {
+                            ("sin afijo".to_owned(), None, 0, 0)
+                        } else {
+                            let definition = self
+                                .affixes
+                                .get(
+                                    entry
+                                        .affix_id
+                                        .as_deref()
+                                        .ok_or(WorldError::InvalidGameplayDefinition)?,
+                                )
+                                .ok_or(WorldError::InvalidGameplayDefinition)?;
+                            (
+                                definition.label.clone(),
+                                Some(definition.position),
+                                definition.attack_bonus_delta,
+                                definition.heal_amount_delta,
+                            )
+                        };
+                    affix_rows.push(OddsRow::Affix(RewardOddsAffixRow {
+                        parent_outcome_label: outcome_label.to_owned(),
+                        affix_label,
+                        position,
+                        attack_bonus_delta,
+                        heal_amount_delta,
+                        conditional_probability_numerator: u64::from(entry.weight),
+                        conditional_probability_denominator: pool.total_weight,
+                    }));
+                }
+                Ok(affix_rows)
+            };
+        for guaranteed in &table.guaranteed {
+            let label = self
+                .item_prototypes
+                .get(&guaranteed.item_prototype_id)
+                .ok_or(WorldError::InvalidGameplayDefinition)?
+                .name
+                .clone();
+            rows.push(OddsRow::Guaranteed(RewardOddsGuaranteedRow {
+                label: label.clone(),
+                quantity: guaranteed.quantity,
+                affix_pool_label: guaranteed
+                    .affix_pool_id
+                    .as_ref()
+                    .map(|_| "afijo aleatorio".to_owned()),
+            }));
+            rows.extend(append_affixes(&label, guaranteed.affix_pool_id.as_deref())?);
+        }
+        for (pool_index, pool) in table.pools.iter().enumerate() {
+            let denominator = pool.entries.iter().try_fold(0_u64, |total, entry| {
+                total
+                    .checked_add(u64::from(entry.weight))
+                    .ok_or(WorldError::InvalidGameplayDefinition)
+            })?;
+            for entry in &pool.entries {
+                let (label, minimum, maximum) = if entry.kind == LootEntryKind::Nothing {
+                    ("sin recompensa".to_owned(), 0, 0)
+                } else {
+                    (
+                        self.item_prototypes
+                            .get(
+                                entry
+                                    .item_prototype_id
+                                    .as_deref()
+                                    .ok_or(WorldError::InvalidGameplayDefinition)?,
+                            )
+                            .ok_or(WorldError::InvalidGameplayDefinition)?
+                            .name
+                            .clone(),
+                        entry
+                            .min_quantity
+                            .ok_or(WorldError::InvalidGameplayDefinition)?,
+                        entry
+                            .max_quantity
+                            .ok_or(WorldError::InvalidGameplayDefinition)?,
+                    )
+                };
+                rows.push(OddsRow::Weighted(RewardOddsWeightedRow {
+                    pool_label: format!("Tirada {}", pool_index + 1),
+                    rolls: pool.rolls,
+                    outcome_label: label.clone(),
+                    min_quantity: minimum,
+                    max_quantity: maximum,
+                    probability_numerator: u64::from(entry.weight),
+                    probability_denominator: denominator,
+                    affix_pool_label: entry
+                        .affix_pool_id
+                        .as_ref()
+                        .map(|_| "afijo aleatorio".to_owned()),
+                }));
+                rows.extend(append_affixes(&label, entry.affix_pool_id.as_deref())?);
+            }
+        }
+        if rows.len() > MAX_REWARD_ODDS_ROWS {
+            return Err(WorldError::InvalidGameplayDefinition);
+        }
+        let total_pages = rows.len().max(1).div_ceil(REWARD_ODDS_PAGE_SIZE);
+        let page_index = usize::from(page - 1);
+        if page_index >= total_pages {
+            return Err(WorldError::RewardUnavailable);
+        }
+        let mut guaranteed = Vec::new();
+        let mut weighted = Vec::new();
+        let mut affixes = Vec::new();
+        for row in rows
+            .into_iter()
+            .skip(page_index * REWARD_ODDS_PAGE_SIZE)
+            .take(REWARD_ODDS_PAGE_SIZE)
+        {
+            match row {
+                OddsRow::Guaranteed(row) => guaranteed.push(row),
+                OddsRow::Weighted(row) => weighted.push(row),
+                OddsRow::Affix(row) => affixes.push(row),
+            }
+        }
+        let total_pages = u16::try_from(total_pages).map_err(|_| WorldError::RewardUnavailable)?;
+        let selector = opaque_id(
+            self.observer(session)?.salt,
+            "item",
+            source_item_id.as_str(),
+        );
+        let mut output = format!("Probabilidades de recompensa, página {page}/{total_pages}:\r\n");
+        for row in &guaranteed {
+            let affix = if row.affix_pool_label.is_some() {
+                "; afijo aleatorio"
+            } else {
+                ""
+            };
+            output.push_str(&format!(
+                "- {} × {}: garantizado{affix}.\r\n",
+                row.quantity, row.label,
+            ));
+        }
+        for row in &weighted {
+            let affix = if row.affix_pool_label.is_some() {
+                "; afijo aleatorio"
+            } else {
+                ""
+            };
+            output.push_str(&format!(
+                "- {}: {} tirada(s); {}; cantidad {}..={}; probabilidad {}/{} por tirada{affix}.\r\n",
+                row.pool_label,
+                row.rolls,
+                row.outcome_label,
+                row.min_quantity,
+                row.max_quantity,
+                row.probability_numerator,
+                row.probability_denominator,
+            ));
+        }
+        for row in &affixes {
+            let position = match row.position {
+                Some(AffixPosition::Prefix) => "prefix",
+                Some(AffixPosition::Suffix) => "suffix",
+                None => "none",
+            };
+            output.push_str(&format!(
+                "- {} → {}: posición {position}; ataque {:+}; curación {:+}; probabilidad {}/{} condicional.\r\n",
+                row.parent_outcome_label,
+                row.affix_label,
+                row.attack_bonus_delta,
+                row.heal_amount_delta,
+                row.conditional_probability_numerator,
+                row.conditional_probability_denominator
+            ));
+        }
+        Ok(ActionOutcome {
+            scene: self.scene_for(session)?,
+            container_contents: None,
+            trade_contents: None,
+            reward_odds: Some(RewardOddsView {
+                selector,
+                page,
+                total_pages,
+                guaranteed,
+                weighted,
+                affixes,
+            }),
+            output: Some(output),
+            changed_character: None,
+            domain_events: Vec::new(),
+        })
     }
 
     fn apply_trade(
@@ -8879,6 +10159,7 @@ impl World {
             scene: self.scene_for(session)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some(output),
             changed_character: None,
             domain_events: events,
@@ -8971,6 +10252,7 @@ impl World {
             scene: self.scene_for(session)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some(output),
             changed_character: None,
             domain_events: Vec::new(),
@@ -9040,7 +10322,7 @@ impl World {
                     .map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
                 Ok(PlayerItemView {
                     id: opaque_id(observer.salt, "item", first.as_str()),
-                    label: prototype.name.clone(),
+                    label: self.item_effective_name(first)?,
                     description: prototype.description.clone(),
                     rarity: prototype.rarity.as_str().into(),
                     item_level: prototype.item_level,
@@ -9061,6 +10343,7 @@ impl World {
                     bound_to_you: false,
                     can_give: false,
                     can_trade: false,
+                    affix: self.item_affix_view(first),
                     container_capacity: prototype
                         .container
                         .as_ref()
@@ -9118,6 +10401,7 @@ impl World {
                 total_pages,
                 capacity: capacity.clone(),
             }),
+            reward_odds: None,
             output: Some(output),
             changed_character: None,
             domain_events: Vec::new(),
@@ -9126,7 +10410,7 @@ impl World {
 
     fn trade_basis_sha256(&self, trade: &TradeSnapshot) -> Result<[u8; 32], WorldError> {
         let mut digest = Sha256::new();
-        digest.update(b"tiamud.trade.basis.v1\0");
+        digest.update(b"tiamud.trade.basis.v2\0");
         canonical_u64(&mut digest, trade.id.0);
         canonical_i64(&mut digest, trade.requester.0);
         canonical_i64(&mut digest, trade.recipient.0);
@@ -9157,6 +10441,7 @@ impl World {
                 canonical_str(&mut digest, &instance.prototype_id)?;
                 canonical_item_location(&mut digest, &instance.location)?;
                 canonical_item_binding(&mut digest, instance.binding);
+                canonical_item_affixes(&mut digest, &instance.item_affixes)?;
                 digest.update([match prototype.transfer_policy {
                     ItemTransferPolicy::Transferable => 0,
                     ItemTransferPolicy::CharacterBound => 1,
@@ -9207,6 +10492,7 @@ impl World {
                         canonical_str(&mut digest, &instance.prototype_id)?;
                         digest.update([prototype.transfer_policy as u8]);
                         canonical_item_binding(&mut digest, instance.binding);
+                        canonical_item_affixes(&mut digest, &instance.item_affixes)?;
                         canonical_item_location(&mut digest, &instance.location)?;
                     }
                 }
@@ -9259,6 +10545,7 @@ impl World {
                     | PlayerAction::Examine(_)
                     | PlayerAction::Contents { .. }
                     | PlayerAction::Loot(_)
+                    | PlayerAction::RewardOdds { .. }
                     | PlayerAction::Party(_)
                     | PlayerAction::Quest(_)
                     | PlayerAction::Economy(EconomyAction::Balance)
@@ -9276,6 +10563,7 @@ impl World {
                     | PlayerAction::Examine(_)
                     | PlayerAction::Contents { .. }
                     | PlayerAction::Loot(_)
+                    | PlayerAction::RewardOdds { .. }
                     | PlayerAction::Weather
                     | PlayerAction::Time
             )
@@ -9287,6 +10575,7 @@ impl World {
                 scene: self.scene_for(session)?,
                 container_contents: None,
                 trade_contents: None,
+                reward_odds: None,
                 output: None,
                 changed_character: None,
                 domain_events: Vec::new(),
@@ -9295,6 +10584,7 @@ impl World {
                 scene: self.scene_for(session)?,
                 container_contents: None,
                 trade_contents: None,
+                reward_odds: None,
                 output: Some(self.inventory_as_plain_text(session)?),
                 changed_character: None,
                 domain_events: Vec::new(),
@@ -9303,11 +10593,20 @@ impl World {
                 let item_id =
                     self.resolve_accessible_item(session, &query, ItemScope::Accessible)?;
                 let item = self.item_prototype_for(&item_id)?;
+                let name = self.item_effective_name(&item_id)?;
+                let affix = self.item_affix(&item_id);
+                let affix_text = affix.map_or_else(String::new, |affix| {
+                    format!(
+                        "\r\nAfijo: {} (ataque {:+}, curación {:+}).",
+                        affix.label, affix.attack_bonus_delta, affix.heal_amount_delta
+                    )
+                });
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
                     container_contents: None,
                     trade_contents: None,
-                    output: Some(format!("{}\r\n", item.description)),
+                    reward_odds: None,
+                    output: Some(format!("{name}: {}{affix_text}\r\n", item.description)),
                     changed_character: None,
                     domain_events: Vec::new(),
                 })
@@ -9331,6 +10630,8 @@ impl World {
             } => self.give_item(session, &selection, &recipient),
             PlayerAction::Loot(action) => self.apply_loot(session, action),
             PlayerAction::Trade(action) => self.apply_trade(session, action),
+            PlayerAction::OpenReward(query) => self.open_reward(session, &query),
+            PlayerAction::RewardOdds { target, page } => self.reward_odds(session, &target, page),
             PlayerAction::Attack(query) => self.start_combat(session, &query),
             PlayerAction::Ability { ability_id, target } => {
                 self.use_ability(session, &ability_id, target.as_deref())
@@ -9349,6 +10650,7 @@ impl World {
                 scene: self.scene_for(session)?,
                 container_contents: None,
                 trade_contents: None,
+                reward_odds: None,
                 output: Some(format!(
                     "The weather is {}.\r\n",
                     weather_label(self.adventure.weather)
@@ -9360,6 +10662,7 @@ impl World {
                 scene: self.scene_for(session)?,
                 container_contents: None,
                 trade_contents: None,
+                reward_odds: None,
                 output: Some(format!(
                     "It is hour {} of day {} (world tick {}).\r\n",
                     self.logical_tick % 24,
@@ -9438,6 +10741,7 @@ impl World {
                     scene: self.scene_for(session)?,
                     container_contents: None,
                     trade_contents: None,
+                    reward_odds: None,
                     output: None,
                     changed_character: Some(self.character_snapshot(session)?),
                     domain_events: events,
@@ -9575,7 +10879,7 @@ impl World {
                 }
                 Ok(SceneItem {
                     id: view_item_id.clone(),
-                    label: item.name.clone(),
+                    label: self.item_effective_name(selector)?,
                     description: item.description.clone(),
                     rarity: item.rarity.as_str().into(),
                     item_level: item.item_level,
@@ -9585,6 +10889,7 @@ impl World {
                     total_weight_grams,
                     transfer_policy: item.transfer_policy,
                     bound_to_you: false,
+                    affix: self.item_affix_view(selector),
                     container_capacity: item
                         .container
                         .as_ref()
@@ -9948,8 +11253,14 @@ impl World {
                     )
                 })
                 .transpose()?;
+            let affix_details = self.item_affix(first).map_or_else(String::new, |affix| {
+                format!(
+                    "; affix {} (attack {:+}, healing {:+})",
+                    affix.label, affix.attack_bonus_delta, affix.heal_amount_delta
+                )
+            });
             Ok((
-                item.name.clone(),
+                self.item_effective_name(first)?,
                 item.rarity,
                 item.item_level,
                 item.weight_grams,
@@ -9965,6 +11276,7 @@ impl World {
                         character_id: owner
                     } if owner == character.id
                 ),
+                affix_details,
             ))
         })
         .collect::<Result<Vec<_>, WorldError>>()?;
@@ -10002,6 +11314,7 @@ impl World {
                 container_capacity,
                 transfer_policy,
                 bound_to_you,
+                affix_details,
             ) in item_rows
             {
                 let stack_slots = if slots == 1 {
@@ -10019,7 +11332,7 @@ impl World {
                     )
                 });
                 output.push_str(&format!(
-                    "- {quantity} × {name} [{}; level {level}; {unit_weight} g each; {slots} {stack_slots}; {total_weight} g total; policy {}{}{container}; ref {reference}]\r\n",
+                    "- {quantity} × {name} [{}; level {level}; {unit_weight} g each; {slots} {stack_slots}; {total_weight} g total; policy {}{}{affix_details}{container}; ref {reference}]\r\n",
                     rarity.as_str(),
                     transfer_policy.as_str(),
                     if bound_to_you { "; bound to you" } else { "" },
@@ -10058,10 +11371,17 @@ impl World {
                             capacity.max_weight_grams,
                         )
                     });
+                let name = self.item_effective_name(item_id)?;
+                let affix_details = self.item_affix(item_id).map_or_else(String::new, |affix| {
+                    format!(
+                        "; affix {} (attack {:+}, healing {:+})",
+                        affix.label, affix.attack_bonus_delta, affix.heal_amount_delta
+                    )
+                });
                 output.push_str(&format!(
-                    "- {}: 1 × {} [{}; level {}; {} g each; {slots} {stack_slots}; {total_weight} g total; policy {}{}{container}; ref {}]\r\n",
+                    "- {}: 1 × {} [{}; level {}; {} g each; {slots} {stack_slots}; {total_weight} g total; policy {}{}{affix_details}{container}; ref {}]\r\n",
                     slot.as_str(),
-                    item.name,
+                    name,
                     item.rarity.as_str(),
                     item.item_level,
                     item.weight_grams,
@@ -10375,6 +11695,7 @@ impl World {
                     scene: self.scene_for(session)?,
                     container_contents: None,
                     trade_contents: None,
+                    reward_odds: None,
                     output: Some(output),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -10400,6 +11721,7 @@ impl World {
                 scene: self.scene_for(session)?,
                 container_contents: None,
                 trade_contents: None,
+                reward_odds: None,
                 output: Some("Available quest: first-hunt — defeat one hostile creature; reward 25 coin and 50 experience.\r\n".into()),
                 changed_character: None,
                 domain_events: Vec::new(),
@@ -10420,6 +11742,7 @@ impl World {
                     scene: self.scene_for(session)?,
                     container_contents: None,
                     trade_contents: None,
+                    reward_odds: None,
                     output: Some(output),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -10531,6 +11854,7 @@ impl World {
                     scene: self.scene_for(session)?,
                     container_contents: None,
                     trade_contents: None,
+                    reward_odds: None,
                     output: Some(format!(
                         "You have {coins} coin; {} reserved and {} spendable.\r\n",
                         self.reserved_coins(character_id),
@@ -10555,6 +11879,7 @@ impl World {
                     scene: self.scene_for(session)?,
                     container_contents: None,
                     trade_contents: None,
+                    reward_odds: None,
                     output: Some(format!("Lantern Market:\r\n{output}")),
                     changed_character: None,
                     domain_events: Vec::new(),
@@ -10655,6 +11980,7 @@ impl World {
             scene: self.scene_for(session)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some(output),
             changed_character: None,
             domain_events: vec![event],
@@ -11175,7 +12501,8 @@ impl World {
             .item_gameplay_for(&item_id)
             .cloned()
             .map_err(|_| WorldError::ItemNotUsable)?;
-        if definition.heal_amount == 0 && definition.effect.is_none() {
+        let heal_amount = self.item_effective_heal_amount(&item_id)?;
+        if heal_amount == 0 && definition.effect.is_none() {
             return Err(WorldError::ItemNotUsable);
         }
         let character = self.character(session)?;
@@ -11184,7 +12511,7 @@ impl World {
         let room_id = room_checked(&self.entities, character.location)?
             .stable_id
             .clone();
-        let item_name = self.item_prototype_for(&item_id)?.name.clone();
+        let item_name = self.item_effective_name(&item_id)?;
         let state = self
             .character_gameplay
             .get_mut(&character_id)
@@ -11205,7 +12532,7 @@ impl World {
         state.vitals.health = state
             .vitals
             .health
-            .saturating_add(definition.heal_amount.max(0))
+            .saturating_add(heal_amount.max(0))
             .min(state.vitals.max_health);
         let healed = state.vitals.health.saturating_sub(previous_health);
         if healed > 0 {
@@ -11259,7 +12586,7 @@ impl World {
         let room_id = room_checked(&self.entities, character.location)?
             .stable_id
             .clone();
-        let item_name = self.item_prototype_for(&item_id)?.name.clone();
+        let item_name = self.item_effective_name(&item_id)?;
         let previous_item_id = self
             .character_gameplay
             .get(&character_id)
@@ -11281,7 +12608,7 @@ impl World {
         self.validate_prospective_item_locations(&prospective, [character_id])?;
         let mut events = Vec::new();
         if let Some(previous_item_id) = &previous_item_id {
-            let previous_name = self.item_prototype_for(previous_item_id)?.name.clone();
+            let previous_name = self.item_effective_name(previous_item_id)?;
             events.push(DomainEvent::Gameplay {
                 event: GameplayEvent::ItemUnequipped {
                     character_id,
@@ -11333,10 +12660,7 @@ impl World {
             .get(&slot)
             .cloned()
             .ok_or(WorldError::EquipmentSlotEmpty)?;
-        let item_name = {
-            let item = self.item_prototype_for(&item_id)?;
-            item.name.clone()
-        };
+        let item_name = self.item_effective_name(&item_id)?;
         let mut prospective = self.item_instances.clone();
         prospective
             .get_mut(&item_id)
@@ -11380,6 +12704,7 @@ impl World {
             scene: self.scene_for(session)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some(output),
             changed_character: None,
             domain_events: events,
@@ -11658,6 +12983,7 @@ impl World {
             scene: self.scene_for(session)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some(match (take, selection.quantity) {
                 (true, 1) => format!("You take the {item_name}.\r\n"),
                 (false, 1) => format!("You drop the {item_name}.\r\n"),
@@ -11686,7 +13012,7 @@ impl World {
         let item_ids = self.resolve_item_selection(session, selection, candidates)?;
         self.ensure_items_unreserved(&item_ids)?;
         let first_item_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
-        let item_name = self.item_prototype_for(first_item_id)?.name.clone();
+        let item_name = self.item_effective_name(first_item_id)?;
         let mut prospective = self.item_instances.clone();
         for item_id in &item_ids {
             prospective
@@ -11712,6 +13038,7 @@ impl World {
             scene: self.scene_for(session)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some(if selection.quantity == 1 {
                 format!("You give the {item_name} to {}.\r\n", recipient.name)
             } else {
@@ -12071,7 +13398,7 @@ impl World {
                 }
                 Ok(PlayerItemView {
                     id: item_selector.clone(),
-                    label: prototype.name.clone(),
+                    label: self.item_effective_name(first)?,
                     description: prototype.description.clone(),
                     rarity: prototype.rarity.as_str().into(),
                     item_level: prototype.item_level,
@@ -12090,6 +13417,7 @@ impl World {
                     ),
                     can_give: false,
                     can_trade: false,
+                    affix: self.item_affix_view(first),
                     container_capacity: prototype
                         .container
                         .as_ref()
@@ -12175,6 +13503,7 @@ impl World {
                 capacity,
             }),
             trade_contents: None,
+            reward_odds: None,
             output: Some(output),
             changed_character: None,
             domain_events: Vec::new(),
@@ -12211,7 +13540,7 @@ impl World {
             return Err(WorldError::LootUnavailable);
         }
         let first_id = item_ids.first().ok_or(WorldError::InvalidEntity)?;
-        let item_name = self.item_prototype_for(first_id)?.name.clone();
+        let item_name = self.item_effective_name(first_id)?;
         let character = self.character(session)?;
         let actor_id = character.id;
         let actor_name = character.name.clone();
@@ -12252,6 +13581,7 @@ impl World {
             scene: self.scene_for(session)?,
             container_contents: None,
             trade_contents: None,
+            reward_odds: None,
             output: Some(if put {
                 format!(
                     "You put {} × {item_name} in the container.\r\n",
@@ -13089,7 +14419,10 @@ impl World {
                     });
                 }
                 {
-                    if !reserved_group && (item.heal_amount != 0 || item.effect.is_some()) {
+                    if !reserved_group
+                        && (self.item_effective_heal_amount(selector)? != 0
+                            || item.effect.is_some())
+                    {
                         actions.push(SceneAction {
                             label: "Use".into(),
                             command: format!("use {id}"),
@@ -13101,10 +14434,20 @@ impl World {
                             command: format!("equip {id}"),
                         });
                     }
+                    if !reserved_group && self.item_is_openable_reward(selector, character.id) {
+                        actions.push(SceneAction {
+                            label: "Abrir".into(),
+                            command: format!("open {id}"),
+                        });
+                        actions.push(SceneAction {
+                            label: "Probabilidades".into(),
+                            command: format!("reward odds {id} 1"),
+                        });
+                    }
                 }
                 Ok(PlayerItemView {
                     id,
-                    label: item.name.clone(),
+                    label: self.item_effective_name(selector)?,
                     description: item.description.clone(),
                     rarity: item.rarity.as_str().into(),
                     item_level: item.item_level,
@@ -13133,6 +14476,7 @@ impl World {
                     ),
                     can_give: transferable && reserved_for_trade == 0,
                     can_trade: transferable && !reserved_group,
+                    affix: self.item_affix_view(selector),
                     container_capacity: item
                         .container
                         .as_ref()
@@ -13159,7 +14503,7 @@ impl World {
                 Ok(EquippedItemView {
                     id: opaque_id(observer.salt, "item", item_id.as_str()),
                     slot: slot.as_str().into(),
-                    label: item.name.clone(),
+                    label: self.item_effective_name(item_id)?,
                     rarity: item.rarity.as_str().into(),
                     item_level: item.item_level,
                     weight_grams: item.weight_grams,
@@ -13176,6 +14520,7 @@ impl World {
                             character_id: owner
                         } if owner == character.id
                     ),
+                    affix: self.item_affix_view(item_id),
                     container_capacity: item
                         .container
                         .as_ref()
@@ -14418,16 +15763,21 @@ fn derive_stack_groups<'a>(
     prototypes: &HashMap<String, ItemPrototype>,
     item_ids: impl Iterator<Item = &'a ItemInstanceId>,
 ) -> Result<Vec<ItemStackGroup>, WorldError> {
-    let mut by_prototype = BTreeMap::<(String, ItemBinding), Vec<ItemInstanceId>>::new();
+    let mut by_prototype =
+        BTreeMap::<(String, ItemBinding, Vec<AppliedItemAffix>), Vec<ItemInstanceId>>::new();
     for item_id in item_ids {
         let instance = instances.get(item_id).ok_or(WorldError::InvalidEntity)?;
         by_prototype
-            .entry((instance.prototype_id.clone(), instance.binding))
+            .entry((
+                instance.prototype_id.clone(),
+                instance.binding,
+                instance.item_affixes.clone(),
+            ))
             .or_default()
             .push(item_id.clone());
     }
     let mut groups = Vec::new();
-    for ((prototype_id, binding), mut members) in by_prototype {
+    for ((prototype_id, binding, _), mut members) in by_prototype {
         let prototype = prototypes
             .get(&prototype_id)
             .ok_or(WorldError::InvalidEntity)?;
@@ -14826,6 +16176,31 @@ fn canonical_item_binding(digest: &mut Sha256, binding: ItemBinding) {
     }
 }
 
+fn canonical_item_affixes(
+    digest: &mut Sha256,
+    affixes: &[AppliedItemAffix],
+) -> Result<(), WorldError> {
+    canonical_u64(
+        digest,
+        u64::try_from(affixes.len()).map_err(|_| WorldError::InvalidRuntimeSnapshot)?,
+    );
+    for affix in affixes {
+        canonical_str(digest, &affix.affix_id)?;
+        canonical_str(digest, &affix.definition_digest_sha256)?;
+        canonical_str(digest, &affix.pool_id)?;
+        canonical_str(digest, &affix.pool_digest_sha256)?;
+        canonical_str(digest, &affix.record_digest_sha256)?;
+        canonical_str(digest, &affix.label)?;
+        digest.update([match affix.position {
+            AffixPosition::Prefix => 0,
+            AffixPosition::Suffix => 1,
+        }]);
+        digest.update(affix.attack_bonus_delta.to_be_bytes());
+        digest.update(affix.heal_amount_delta.to_be_bytes());
+    }
+    Ok(())
+}
+
 fn canonical_item_location(
     digest: &mut Sha256,
     location: &SharedItemLocation,
@@ -14888,6 +16263,115 @@ fn validate_item_bindings(
         };
         if !valid {
             return Err(WorldError::InvalidEntity);
+        }
+    }
+    Ok(())
+}
+
+fn validate_restored_item_affixes(
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    prototypes: &HashMap<String, ItemPrototype>,
+) -> Result<(), WorldError> {
+    for instance in instances.values() {
+        let prototype = prototypes
+            .get(&instance.prototype_id)
+            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+        if !instance.item_affixes.is_empty()
+            && (prototype.stack_policy != ItemStackPolicy::Unique
+                || prototype.max_stack_units != 1
+                || prototype.sealed_loot_table_id.is_some())
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        for applied in &instance.item_affixes {
+            if (applied.attack_bonus_delta != 0 && prototype.equipment_slot.is_none())
+                || (applied.heal_amount_delta != 0 && !prototype.consumable)
+                || prototype
+                    .attack_bonus
+                    .checked_add(applied.attack_bonus_delta)
+                    .is_none_or(|value| {
+                        !(0..=i32::try_from(MAX_STAT_VALUE).expect("stat cap fits i32"))
+                            .contains(&value)
+                    })
+                || prototype
+                    .heal_amount
+                    .checked_add(applied.heal_amount_delta)
+                    .is_none_or(|value| {
+                        !(0..=i32::try_from(MAX_STAT_VALUE).expect("stat cap fits i32"))
+                            .contains(&value)
+                    })
+            {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_restored_sealed_items(
+    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
+    provenance: &BTreeMap<ItemInstanceId, ItemProvenance>,
+    ground_loot: &BTreeMap<ItemInstanceId, GroundLootReservation>,
+    prototypes: &HashMap<String, ItemPrototype>,
+) -> Result<(), WorldError> {
+    for (item_id, instance) in instances {
+        let prototype = prototypes
+            .get(&instance.prototype_id)
+            .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+        if prototype.sealed_loot_table_id.is_none() {
+            continue;
+        }
+        let ItemProvenance::NpcLoot {
+            drop_id,
+            sealed_loot_table_id,
+            ..
+        } = provenance
+            .get(item_id)
+            .ok_or(WorldError::InvalidRuntimeSnapshot)?
+        else {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        };
+        if sealed_loot_table_id.as_ref() != prototype.sealed_loot_table_id.as_ref()
+            || !instance.item_affixes.is_empty()
+        {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        match &instance.location {
+            SharedItemLocation::Room(room_id) => {
+                let reservation = ground_loot
+                    .get(item_id)
+                    .ok_or(WorldError::InvalidRuntimeSnapshot)?;
+                if instance.binding != ItemBinding::Unbound
+                    || reservation.root_item_id != *item_id
+                    || reservation.room_id != *room_id
+                    || reservation.drop_id != *drop_id
+                {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+            SharedItemLocation::Carried(_) | SharedItemLocation::Contained(_) => {
+                let owner = item_effective_owner(instances, item_id)
+                    .map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
+                if !matches!(
+                    (owner, instance.binding),
+                    (Some(owner), ItemBinding::Character { character_id }) if owner == character_id
+                ) {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+            SharedItemLocation::Consumed => {
+                if !matches!(
+                    instance.binding,
+                    ItemBinding::Character { character_id } if character_id.0 > 0
+                ) {
+                    return Err(WorldError::InvalidRuntimeSnapshot);
+                }
+            }
+            SharedItemLocation::Staged
+            | SharedItemLocation::Equipped(_, _)
+            | SharedItemLocation::HeldByNpc(_) => {
+                return Err(WorldError::InvalidRuntimeSnapshot);
+            }
         }
     }
     Ok(())
@@ -15504,6 +16988,87 @@ fn safe_definition_text(value: &str, maximum_bytes: usize) -> bool {
             .any(|character| character.is_control() || character == '\u{7f}')
 }
 
+fn valid_digest_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn canonical_sha256(value: &impl Serialize) -> Result<String, WorldError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| WorldError::InvalidGameplayDefinition)?;
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").map_err(|_| WorldError::InvalidGameplayDefinition)?;
+    }
+    Ok(encoded)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppliedItemAffixRecord<'a> {
+    affix_id: &'a str,
+    definition_digest_sha256: &'a str,
+    pool_id: &'a str,
+    pool_digest_sha256: &'a str,
+    label: &'a str,
+    position: AffixPosition,
+    attack_bonus_delta: i32,
+    heal_amount_delta: i32,
+}
+
+fn applied_affix_record_sha256(affix: &AppliedItemAffix) -> Result<String, WorldError> {
+    canonical_sha256(&AppliedItemAffixRecord {
+        affix_id: &affix.affix_id,
+        definition_digest_sha256: &affix.definition_digest_sha256,
+        pool_id: &affix.pool_id,
+        pool_digest_sha256: &affix.pool_digest_sha256,
+        label: &affix.label,
+        position: affix.position,
+        attack_bonus_delta: affix.attack_bonus_delta,
+        heal_amount_delta: affix.heal_amount_delta,
+    })
+}
+
+fn affix_pool_applies(
+    pool_id: &str,
+    prototype: &ItemPrototype,
+    pools: &BTreeMap<String, AffixPool>,
+    affixes: &BTreeMap<String, AffixDefinition>,
+) -> bool {
+    prototype.stack_policy == ItemStackPolicy::Unique
+        && prototype.max_stack_units == 1
+        && prototype.sealed_loot_table_id.is_none()
+        && pools.get(pool_id).is_some_and(|pool| {
+            pool.entries.iter().all(|entry| match entry.kind {
+                AffixPoolEntryKind::Nothing => true,
+                AffixPoolEntryKind::Affix => entry
+                    .affix_id
+                    .as_ref()
+                    .and_then(|id| affixes.get(id))
+                    .is_some_and(|affix| {
+                        (affix.attack_bonus_delta == 0 || prototype.equipment_slot.is_some())
+                            && (affix.heal_amount_delta == 0 || prototype.consumable)
+                            && prototype
+                                .attack_bonus
+                                .checked_add(affix.attack_bonus_delta)
+                                .is_some_and(|value| {
+                                    (0..=i32::try_from(MAX_STAT_VALUE).expect("stat cap fits i32"))
+                                        .contains(&value)
+                                })
+                            && prototype
+                                .heal_amount
+                                .checked_add(affix.heal_amount_delta)
+                                .is_some_and(|value| {
+                                    (0..=i32::try_from(MAX_STAT_VALUE).expect("stat cap fits i32"))
+                                        .contains(&value)
+                                })
+                    }),
+            })
+        })
+}
+
 fn safe_definition_multiline_text(value: &str, maximum_bytes: usize) -> bool {
     let trimmed = value.trim();
     !trimmed.is_empty()
@@ -15958,6 +17523,7 @@ fn gameplay_event_room(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::ItemEquipped { room_id, .. }
         | GameplayEvent::ItemUnequipped { room_id, .. }
         | GameplayEvent::ItemUsed { room_id, .. }
+        | GameplayEvent::RewardOpened { room_id, .. }
         | GameplayEvent::CharacterHealed { room_id, .. }
         | GameplayEvent::CharacterRestored { room_id, .. }
         | GameplayEvent::EffectApplied { room_id, .. }
@@ -15983,6 +17549,7 @@ fn gameplay_event_character(event: &GameplayEvent) -> Option<CharacterId> {
         | GameplayEvent::ItemEquipped { character_id, .. }
         | GameplayEvent::ItemUnequipped { character_id, .. }
         | GameplayEvent::ItemUsed { character_id, .. }
+        | GameplayEvent::RewardOpened { character_id, .. }
         | GameplayEvent::CharacterHealed { character_id, .. }
         | GameplayEvent::CharacterRestored { character_id, .. }
         | GameplayEvent::EffectApplied { character_id, .. }
@@ -16026,6 +17593,7 @@ fn gameplay_event_npc(event: &GameplayEvent) -> Option<&str> {
         | GameplayEvent::ItemEquipped { .. }
         | GameplayEvent::ItemUnequipped { .. }
         | GameplayEvent::ItemUsed { .. }
+        | GameplayEvent::RewardOpened { .. }
         | GameplayEvent::CharacterHealed { .. }
         | GameplayEvent::CharacterRestored { .. }
         | GameplayEvent::EffectApplied { .. }
@@ -16040,6 +17608,7 @@ fn gameplay_event_item(event: &GameplayEvent) -> Option<&ItemInstanceId> {
         | GameplayEvent::ItemEquipped { item_id, .. }
         | GameplayEvent::ItemUnequipped { item_id, .. }
         | GameplayEvent::ItemUsed { item_id, .. } => Some(item_id),
+        GameplayEvent::RewardOpened { source_item_id, .. } => Some(source_item_id),
         GameplayEvent::TickAdvanced { .. }
         | GameplayEvent::NpcSpawned { .. }
         | GameplayEvent::CombatStarted { .. }
@@ -16390,6 +17959,26 @@ fn project_gameplay_event(
             },
             Some(item_id(item)),
         ),
+        GameplayEvent::RewardOpened {
+            character_id: character,
+            character_name,
+            source_item_id,
+            source_item_name,
+            item_names,
+            ..
+        } => (
+            character_id(*character),
+            None,
+            if viewer_id == *character {
+                format!(
+                    "Abres {source_item_name} y obtienes: {}.",
+                    item_names.join(", ")
+                )
+            } else {
+                format!("{character_name} abre {source_item_name}.")
+            },
+            Some(item_id(source_item_id)),
+        ),
         GameplayEvent::CharacterHealed {
             character_id: character,
             character_name,
@@ -16518,6 +18107,7 @@ mod tests {
             max_stack_units: 1,
             container: None,
             transfer_policy: ItemTransferPolicy::Transferable,
+            sealed_loot_table_id: None,
         }
     }
 
@@ -16531,6 +18121,119 @@ mod tests {
             prototype_id: prototype_id.into(),
             location,
         }
+    }
+
+    fn sealed_reward_definition() -> WorldDefinition {
+        let mut seal = item_prototype(
+            "reward:sealed-cache",
+            "sealed cache",
+            "A reward earned in combat and sealed against rerolls.",
+            &["cache", "seal"],
+        );
+        seal.consumable = true;
+        seal.transfer_policy = ItemTransferPolicy::CharacterBound;
+        seal.sealed_loot_table_id = Some("reward:cache-table".into());
+        let mut sword = item_prototype(
+            "reward:sword",
+            "iron sword",
+            "A deterministic reward blade.",
+            &["sword", "blade"],
+        );
+        sword.equipment_slot = Some(EquipmentSlot::Weapon);
+        sword.attack_bonus = 1;
+        sword.slot_cost = 2;
+        WorldDefinition {
+            start_room_id: "test:start".into(),
+            item_prototypes: vec![seal, sword],
+            initial_item_instances: Vec::new(),
+            rooms: vec![RoomDefinition {
+                stable_id: "test:start".into(),
+                title: "Reward Test".into(),
+                prose: vec!["A bounded reward test room.".into()],
+                image: None,
+                audio: None,
+                item_ids: Vec::new(),
+                exits: Vec::new(),
+            }],
+        }
+    }
+
+    fn sealed_reward_world(seed: u64) -> (World, SessionId, ItemInstanceId) {
+        let (mut world, session) = connect_definition(sealed_reward_definition());
+        world.set_rng_seed(seed);
+        world
+            .configure_affixes(
+                vec![AffixDefinition {
+                    id: "reward:keen".into(),
+                    label: "afilada".into(),
+                    position: AffixPosition::Prefix,
+                    attack_bonus_delta: 2,
+                    heal_amount_delta: 0,
+                }],
+                vec![AffixPoolDefinition {
+                    id: "reward:weapon-affix".into(),
+                    entries: vec![AffixPoolEntry {
+                        kind: AffixPoolEntryKind::Affix,
+                        id: "reward:keen-outcome".into(),
+                        weight: 3,
+                        affix_id: Some("reward:keen".into()),
+                    }],
+                }],
+            )
+            .unwrap();
+        world
+            .configure_loot(
+                vec![LootTableDefinition {
+                    id: "reward:cache-table".into(),
+                    digest_sha256: "d".repeat(64),
+                    guaranteed: vec![LootGuaranteedDefinition {
+                        id: "reward:sword-outcome".into(),
+                        item_prototype_id: "reward:sword".into(),
+                        quantity: 1,
+                        affix_pool_id: Some("reward:weapon-affix".into()),
+                    }],
+                    pools: vec![LootPoolDefinition {
+                        id: "reward:empty-draw".into(),
+                        rolls: 2,
+                        entries: vec![LootEntryDefinition {
+                            kind: LootEntryKind::Nothing,
+                            id: "reward:nothing".into(),
+                            weight: 2,
+                            item_prototype_id: None,
+                            min_quantity: None,
+                            max_quantity: None,
+                            affix_pool_id: None,
+                        }],
+                    }],
+                }],
+                Vec::new(),
+            )
+            .unwrap();
+        let source = world
+            .create_staged_item_instance("reward:sealed-cache")
+            .unwrap();
+        let instance = world.item_instances.get_mut(&source).unwrap();
+        instance.location = SharedItemLocation::Carried(CharacterId(701));
+        instance.binding = ItemBinding::Character {
+            character_id: CharacterId(701),
+        };
+        world.item_provenance.insert(
+            source.clone(),
+            ItemProvenance::NpcLoot {
+                drop_id: LootDropId(1),
+                npc_spawn_id: "reward:earned-source".into(),
+                loot_table_id: "reward:earned-table".into(),
+                table_digest_sha256: "e".repeat(64),
+                entry_id: "reward:earned-cache".into(),
+                pool_id: Some("reward:earned-pool".into()),
+                sealed_loot_table_id: Some("reward:cache-table".into()),
+                roll_index: 0,
+                quantity_index: 0,
+                generated_tick: 0,
+            },
+        );
+        world.next_loot_drop_id = LootDropId(2);
+        (world, session, source)
     }
 
     fn redact_and_validate_opaque_item_refs(mut text: &str) -> String {
@@ -16575,6 +18278,22 @@ mod tests {
     ) -> serde_json::Value {
         let mut value = serde_json::to_value(snapshot).unwrap();
         value["snapshotVersion"] = serde_json::json!(version);
+        if version <= 6 {
+            value.as_object_mut().unwrap().remove("nextRewardOpenId");
+            for instance in value["itemInstances"].as_object_mut().unwrap().values_mut() {
+                instance.as_object_mut().unwrap().remove("itemAffixes");
+            }
+            for provenance in value["itemProvenance"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+            {
+                provenance
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("sealedLootTableId");
+            }
+        }
         if version <= 4 {
             let root = value.as_object_mut().unwrap();
             root.remove("nextTradeId");
@@ -16610,8 +18329,8 @@ mod tests {
                     instance.as_object_mut().unwrap().remove("binding");
                 }
             }
-            4..=6 => {}
-            _ => panic!("test helper only supports runtime snapshot v1-v6"),
+            4..=7 => {}
+            _ => panic!("test helper only supports runtime snapshot v1-v7"),
         }
         value
     }
@@ -17074,6 +18793,25 @@ mod tests {
             parse_action("x lantern"),
             Ok(PlayerAction::Examine("lantern".into()))
         );
+        assert_eq!(
+            parse_action("open o0123456789abcdef"),
+            Ok(PlayerAction::OpenReward("o0123456789abcdef".into()))
+        );
+        assert_eq!(
+            parse_action("reward odds o0123456789abcdef"),
+            Ok(PlayerAction::RewardOdds {
+                target: "o0123456789abcdef".into(),
+                page: 1,
+            })
+        );
+        assert_eq!(
+            parse_action("reward odds sealed cache 12"),
+            Ok(PlayerAction::RewardOdds {
+                target: "sealed cache".into(),
+                page: 12,
+            })
+        );
+        assert!(parse_action("reward odds sealed cache 0").is_err());
         assert_eq!(
             parse_action("take   "),
             Err(ParseActionError::MissingTarget { command: "take" })
@@ -19186,6 +20924,7 @@ mod tests {
                 prototype_id: "test:token".into(),
                 location: RuntimeItemLocation::Staged,
                 binding: ItemBinding::Unbound,
+                item_affixes: Vec::new(),
             },
         );
         assert!(matches!(
@@ -19224,6 +20963,7 @@ mod tests {
                 prototype_id: "test:token".into(),
                 location: RuntimeItemLocation::Staged,
                 binding: ItemBinding::Unbound,
+                item_affixes: Vec::new(),
             },
         );
         stale_sequence.next_item_instance_sequence = 100;
@@ -20150,10 +21890,10 @@ mod tests {
         let (world, _) = connected_world();
         let json = serde_json::to_string(&world.runtime_snapshot()).unwrap();
         assert_eq!(
-            decode_world_runtime_snapshot(6, &json)
+            decode_world_runtime_snapshot(WORLD_RUNTIME_SNAPSHOT_VERSION, &json)
                 .unwrap()
                 .snapshot_version,
-            6
+            WORLD_RUNTIME_SNAPSHOT_VERSION
         );
         assert!(decode_world_runtime_snapshot(4, &json).is_err());
         let legacy_v3 = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 3);
@@ -20162,7 +21902,7 @@ mod tests {
             decode_world_runtime_snapshot(3, &legacy_v3_json)
                 .unwrap()
                 .snapshot_version,
-            6
+            WORLD_RUNTIME_SNAPSHOT_VERSION
         );
         let mut v3_binding_smuggling = legacy_v3;
         v3_binding_smuggling["itemInstances"]
@@ -20229,7 +21969,7 @@ mod tests {
         let legacy_v4 = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 4);
         let upgraded =
             decode_world_runtime_snapshot(4, &serde_json::to_string(&legacy_v4).unwrap()).unwrap();
-        assert_eq!(upgraded.snapshot_version, 6);
+        assert_eq!(upgraded.snapshot_version, WORLD_RUNTIME_SNAPSHOT_VERSION);
         assert_eq!(upgraded.next_trade_id, TradeId(1));
         assert!(upgraded.trades.is_empty());
         let mut smuggled_v4 = legacy_v4;
@@ -20251,7 +21991,7 @@ mod tests {
             )
             .is_err()
         );
-        let mut nested_trade: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut nested_trade = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 6);
         nested_trade["nextTradeId"] = serde_json::json!(2);
         nested_trade["trades"]["1"] = serde_json::to_value(TradeSnapshot {
             id: TradeId(1),
@@ -21248,7 +22988,10 @@ mod tests {
             requested.domain_events.as_slice(),
             [DomainEvent::TradeRequested { trade }] if trade.state_revision == 1
         ));
-        assert_eq!(world.runtime_snapshot().snapshot_version, 6);
+        assert_eq!(
+            world.runtime_snapshot().snapshot_version,
+            WORLD_RUNTIME_SNAPSHOT_VERSION
+        );
         assert_eq!(world.runtime_snapshot().next_trade_id, TradeId(2));
         let mut replay_events = requested.domain_events.clone();
         let opened = world
@@ -22455,7 +24198,7 @@ mod tests {
             .unwrap();
         let snapshot = world.runtime_snapshot();
         let encoded = serde_json::to_string(&snapshot).unwrap();
-        assert!(encoded.contains("\"snapshotVersion\":6"));
+        assert!(encoded.contains("\"snapshotVersion\":7"));
         assert!(encoded.contains("\"binding\":{\"kind\":\"character\",\"characterId\":701}"));
         let mut restored = World::from_definition(policy_definition()).unwrap();
         restored.restore_runtime_snapshot(snapshot.clone()).unwrap();
@@ -22750,11 +24493,13 @@ mod tests {
                     id: "game:first".into(),
                     item_prototype_id: "game:potion".into(),
                     quantity: 32,
+                    affix_pool_id: None,
                 },
                 LootGuaranteedDefinition {
                     id: "game:second".into(),
                     item_prototype_id: "game:potion".into(),
                     quantity: 32,
+                    affix_pool_id: None,
                 },
             ],
             pools: Vec::new(),
@@ -22807,6 +24552,7 @@ mod tests {
                         id: "game:potion-drop".into(),
                         item_prototype_id: "game:potion".into(),
                         quantity: 1,
+                        affix_pool_id: None,
                     }],
                     pools: Vec::new(),
                 }],
@@ -22912,6 +24658,7 @@ mod tests {
                             item_prototype_id: Some("game:potion".into()),
                             min_quantity: Some(32),
                             max_quantity: Some(32),
+                            affix_pool_id: None,
                         }],
                     }],
                 }],
@@ -23333,7 +25080,683 @@ mod tests {
     }
 
     #[test]
-    fn cold_replay_fails_closed_for_every_snapshot_v6_loot_ledger_event() {
+    fn sealed_reward_open_and_odds_are_atomic_opaque_and_exact() {
+        let (mut world, session, source) = sealed_reward_world(41);
+        let before = world.runtime_snapshot();
+        let inventory = world.player_state_view(session).unwrap().inventory;
+        let seal = inventory
+            .iter()
+            .find(|item| item.label == "sealed cache")
+            .unwrap();
+        assert!(seal.actions.iter().any(|action| {
+            action.label == "Abrir" && action.command == format!("open {}", seal.id)
+        }));
+        assert!(seal.actions.iter().any(|action| {
+            action.label == "Probabilidades"
+                && action.command == format!("reward odds {} 1", seal.id)
+        }));
+
+        let odds_outcome = world
+            .apply(
+                session,
+                PlayerAction::RewardOdds {
+                    target: seal.id.clone(),
+                    page: 1,
+                },
+            )
+            .unwrap();
+        let odds_text = odds_outcome.output.unwrap();
+        assert!(odds_text.contains("garantizado; afijo aleatorio"));
+        assert!(odds_text.contains(
+            "Tirada 1: 2 tirada(s); sin recompensa; cantidad 0..=0; probabilidad 2/2 por tirada"
+        ));
+        assert!(
+            odds_text
+                .contains("posición prefix; ataque +2; curación +0; probabilidad 3/3 condicional")
+        );
+        let odds = odds_outcome.reward_odds.unwrap();
+        assert_eq!(odds.guaranteed.len(), 1);
+        assert_eq!(odds.weighted.len(), 1);
+        assert_eq!(odds.affixes.len(), 1);
+        assert_eq!(odds.affixes[0].conditional_probability_numerator, 3);
+        assert_eq!(odds.affixes[0].conditional_probability_denominator, 3);
+        let encoded_odds = serde_json::to_string(&odds).unwrap();
+        assert!(!encoded_odds.contains("reward:weapon-affix"));
+        assert!(!encoded_odds.contains("reward:keen"));
+
+        let opened = world
+            .apply(session, PlayerAction::OpenReward(seal.id.clone()))
+            .unwrap();
+        assert!(matches!(
+            opened.domain_events.as_slice(),
+            [DomainEvent::Gameplay {
+                event: GameplayEvent::RewardOpened {
+                    open_id: RewardOpenId(1),
+                    ..
+                }
+            }]
+        ));
+        assert_eq!(
+            world.item_instances[&source].location,
+            SharedItemLocation::Consumed
+        );
+        let reward_id = world
+            .item_provenance
+            .iter()
+            .find_map(|(item_id, provenance)| {
+                matches!(provenance, ItemProvenance::SealedReward { .. }).then_some(item_id.clone())
+            })
+            .unwrap();
+        assert_eq!(
+            world.item_effective_name(&reward_id).unwrap(),
+            "afilada iron sword"
+        );
+        assert_eq!(world.item_effective_attack_bonus(&reward_id).unwrap(), 3);
+        assert_eq!(world.item_instances[&reward_id].item_affixes.len(), 1);
+        let after = world.runtime_snapshot();
+        assert!(matches!(
+            world.apply(session, PlayerAction::OpenReward(seal.id.clone())),
+            Err(WorldError::ItemNotFound(_))
+        ));
+        assert_eq!(world.runtime_snapshot(), after);
+
+        world.restore_checkpoint({
+            let mut replay = sealed_reward_world(41).0;
+            let checkpoint = replay.checkpoint();
+            let replay_session = SessionId(71);
+            replay
+                .apply(
+                    replay_session,
+                    PlayerAction::OpenReward("sealed cache".into()),
+                )
+                .unwrap();
+            checkpoint
+        });
+        assert_eq!(world.runtime_snapshot(), before);
+    }
+
+    #[test]
+    fn sealed_reward_capacity_failure_cannot_reroll_or_consume() {
+        let (mut world, session, source) = sealed_reward_world(73);
+        world
+            .character_gameplay
+            .get_mut(&CharacterId(701))
+            .unwrap()
+            .inventory_capacity
+            .max_slots = 1;
+        let before = world.runtime_snapshot();
+        assert!(matches!(
+            world.apply(session, PlayerAction::OpenReward("sealed cache".into())),
+            Err(WorldError::InventoryCapacityExceeded)
+        ));
+        assert_eq!(world.runtime_snapshot(), before);
+        assert_eq!(
+            world.item_instances[&source].location,
+            SharedItemLocation::Carried(CharacterId(701))
+        );
+        assert_eq!(world.next_reward_open_id, RewardOpenId(1));
+    }
+
+    #[test]
+    fn sealed_reward_survives_source_pruning_and_affix_authoring_changes() {
+        let (mut world, session, source) = sealed_reward_world(91);
+        world
+            .apply(session, PlayerAction::OpenReward("sealed cache".into()))
+            .unwrap();
+        let reward_id = world
+            .item_provenance
+            .iter()
+            .find_map(|(item_id, provenance)| {
+                matches!(provenance, ItemProvenance::SealedReward { .. }).then_some(item_id.clone())
+            })
+            .unwrap();
+        let source_digest = match &world.item_provenance[&reward_id] {
+            ItemProvenance::SealedReward {
+                source_npc_loot_digest_sha256,
+                ..
+            } => source_npc_loot_digest_sha256.clone(),
+            _ => unreachable!(),
+        };
+        world.prune_consumed_runtime_items().unwrap();
+        assert!(!world.item_instances.contains_key(&source));
+        let snapshot = world.runtime_snapshot();
+        assert!(valid_digest_sha256(&source_digest));
+
+        let mut restored = World::from_definition(sealed_reward_definition()).unwrap();
+        restored.restore_runtime_snapshot(snapshot).unwrap();
+        assert_eq!(
+            restored.item_effective_name(&reward_id).unwrap(),
+            "afilada iron sword"
+        );
+        assert!(matches!(
+            &restored.item_provenance[&reward_id],
+            ItemProvenance::SealedReward {
+                source_npc_loot_digest_sha256,
+                ..
+            } if source_npc_loot_digest_sha256 == &source_digest
+        ));
+    }
+
+    #[test]
+    fn snapshot_v6_rejects_affix_and_sealed_provenance_smuggling() {
+        let (world, _, _) = sealed_reward_world(11);
+        let mut legacy = runtime_snapshot_json_for_version(&world.runtime_snapshot(), 6);
+        legacy["itemProvenance"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap()["sealedLootTableId"] = serde_json::json!("reward:cache-table");
+        assert!(decode_world_runtime_snapshot(6, &legacy.to_string()).is_err());
+        legacy["itemProvenance"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("sealedLootTableId");
+        let instance = legacy["itemInstances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        instance["itemAffixes"] = serde_json::json!([]);
+        assert!(decode_world_runtime_snapshot(6, &legacy.to_string()).is_err());
+
+        let mut forged = world.runtime_snapshot();
+        let source = forged.item_instances.keys().next().unwrap().clone();
+        forged.item_instances.get_mut(&source).unwrap().item_affixes = vec![AppliedItemAffix {
+            affix_id: "reward:forged".into(),
+            definition_digest_sha256: "0".repeat(64),
+            pool_id: "reward:forged-pool".into(),
+            pool_digest_sha256: "1".repeat(64),
+            record_digest_sha256: "2".repeat(64),
+            label: "forged".into(),
+            position: AffixPosition::Prefix,
+            attack_bonus_delta: 1,
+            heal_amount_delta: 0,
+        }];
+        assert!(matches!(
+            validate_world_runtime_snapshot_semantics(&forged),
+            Err(WorldError::InvalidRuntimeSnapshot)
+        ));
+    }
+
+    #[test]
+    fn sealed_restore_rejects_forged_provenance_location_binding_and_reservation() {
+        fn assert_restore_rejected(snapshot: WorldRuntimeSnapshot) {
+            validate_world_runtime_snapshot_semantics(&snapshot).unwrap();
+            let mut restored = World::from_definition(sealed_reward_definition()).unwrap();
+            assert!(matches!(
+                restored.restore_runtime_snapshot(snapshot),
+                Err(WorldError::InvalidRuntimeSnapshot)
+            ));
+        }
+
+        let (world, _, source) = sealed_reward_world(13);
+        let base = world.runtime_snapshot();
+        let mut correct = World::from_definition(sealed_reward_definition()).unwrap();
+        correct.restore_runtime_snapshot(base.clone()).unwrap();
+        for marker in [None, Some("reward:other-table".to_owned())] {
+            let mut forged = base.clone();
+            let ItemProvenance::NpcLoot {
+                sealed_loot_table_id,
+                ..
+            } = forged.item_provenance.get_mut(&source).unwrap()
+            else {
+                unreachable!();
+            };
+            *sealed_loot_table_id = marker;
+            assert_restore_rejected(forged);
+        }
+        for forged_provenance in [
+            ItemProvenance::AuthoredInitial,
+            ItemProvenance::LegacySnapshot { source_version: 5 },
+            ItemProvenance::RuntimeCreated { created_tick: 0 },
+            ItemProvenance::SealedReward {
+                open_id: RewardOpenId(1),
+                source_item_id: ItemInstanceId("runtime:999".into()),
+                source_npc_loot_digest_sha256: "a".repeat(64),
+                sealed_prototype_id: "reward:former-seal".into(),
+                loot_table_id: "reward:forged-table".into(),
+                table_digest_sha256: "b".repeat(64),
+                entry_id: "reward:forged-entry".into(),
+                pool_id: None,
+                roll_index: 0,
+                quantity_index: 0,
+                generated_tick: 0,
+            },
+        ] {
+            let mut forged = base.clone();
+            if matches!(forged_provenance, ItemProvenance::SealedReward { .. }) {
+                forged.next_reward_open_id = RewardOpenId(2);
+            }
+            forged
+                .item_provenance
+                .insert(source.clone(), forged_provenance);
+            assert_restore_rejected(forged);
+        }
+
+        let invalid_states = [
+            (RuntimeItemLocation::Staged, ItemBinding::Unbound),
+            (
+                RuntimeItemLocation::Room {
+                    room_id: "test:start".into(),
+                },
+                ItemBinding::Unbound,
+            ),
+            (
+                RuntimeItemLocation::Carried {
+                    character_id: CharacterId(701),
+                },
+                ItemBinding::Unbound,
+            ),
+            (
+                RuntimeItemLocation::Carried {
+                    character_id: CharacterId(701),
+                },
+                ItemBinding::Character {
+                    character_id: CharacterId(702),
+                },
+            ),
+            (
+                RuntimeItemLocation::Equipped {
+                    character_id: CharacterId(701),
+                    slot: EquipmentSlot::Weapon,
+                },
+                ItemBinding::Character {
+                    character_id: CharacterId(701),
+                },
+            ),
+            (
+                RuntimeItemLocation::HeldByNpc {
+                    npc_id: "reward:holder".into(),
+                },
+                ItemBinding::Unbound,
+            ),
+            (RuntimeItemLocation::Consumed, ItemBinding::Unbound),
+        ];
+        for (location, binding) in invalid_states {
+            let mut forged = base.clone();
+            let instance = forged.item_instances.get_mut(&source).unwrap();
+            instance.location = location;
+            instance.binding = binding;
+            assert_restore_rejected(forged);
+        }
+
+        let mut wrong_reservation = base;
+        let instance = wrong_reservation.item_instances.get_mut(&source).unwrap();
+        instance.location = RuntimeItemLocation::Room {
+            room_id: "test:start".into(),
+        };
+        instance.binding = ItemBinding::Unbound;
+        wrong_reservation.next_loot_drop_id = LootDropId(3);
+        wrong_reservation.ground_loot.insert(
+            source.clone(),
+            GroundLootReservation {
+                drop_id: LootDropId(2),
+                root_item_id: source,
+                room_id: "test:start".into(),
+                cohort: vec![CharacterId(701)],
+                beneficiary: Some(CharacterId(701)),
+                passed: BTreeSet::new(),
+                created_tick: 0,
+                claim_until_tick: LOOT_EXCLUSIVE_TICKS,
+                despawn_at_tick: LOOT_DESPAWN_TICKS,
+            },
+        );
+        assert_restore_rejected(wrong_reservation);
+    }
+
+    #[test]
+    fn sealed_snapshot_groups_are_bounded_consistent_and_affix_records_self_verify() {
+        let (mut world, session, _) = sealed_reward_world(29);
+        world
+            .apply(session, PlayerAction::OpenReward("sealed cache".into()))
+            .unwrap();
+        let base = world.runtime_snapshot();
+        let reward_id = base
+            .item_provenance
+            .iter()
+            .find_map(|(item_id, provenance)| {
+                matches!(provenance, ItemProvenance::SealedReward { .. }).then_some(item_id.clone())
+            })
+            .unwrap();
+
+        let mut sixteen = base.clone();
+        for quantity_index in 1..MAX_SEALED_REWARD_UNITS {
+            let sequence = sixteen.next_item_instance_sequence;
+            sixteen.next_item_instance_sequence += 1;
+            let item_id = ItemInstanceId(format!("runtime:{sequence}"));
+            sixteen
+                .item_instances
+                .insert(item_id.clone(), sixteen.item_instances[&reward_id].clone());
+            let mut provenance = sixteen.item_provenance[&reward_id].clone();
+            match &mut provenance {
+                ItemProvenance::SealedReward {
+                    quantity_index: index,
+                    ..
+                } => *index = u16::try_from(quantity_index).unwrap(),
+                _ => unreachable!(),
+            }
+            sixteen.item_provenance.insert(item_id, provenance);
+        }
+        validate_world_runtime_snapshot_semantics(&sixteen).unwrap();
+
+        let mut seventeen = sixteen.clone();
+        let sequence = seventeen.next_item_instance_sequence;
+        seventeen.next_item_instance_sequence += 1;
+        let extra_id = ItemInstanceId(format!("runtime:{sequence}"));
+        seventeen.item_instances.insert(
+            extra_id.clone(),
+            seventeen.item_instances[&reward_id].clone(),
+        );
+        let mut extra_provenance = seventeen.item_provenance[&reward_id].clone();
+        match &mut extra_provenance {
+            ItemProvenance::SealedReward {
+                entry_id,
+                quantity_index,
+                ..
+            } => {
+                *entry_id = "reward:seventeenth".into();
+                *quantity_index = 0;
+            }
+            _ => unreachable!(),
+        }
+        seventeen.item_provenance.insert(extra_id, extra_provenance);
+        assert!(validate_world_runtime_snapshot_semantics(&seventeen).is_err());
+
+        let mut mixed = base.clone();
+        let sequence = mixed.next_item_instance_sequence;
+        mixed.next_item_instance_sequence += 1;
+        let mixed_id = ItemInstanceId(format!("runtime:{sequence}"));
+        mixed
+            .item_instances
+            .insert(mixed_id.clone(), mixed.item_instances[&reward_id].clone());
+        let mut mixed_provenance = mixed.item_provenance[&reward_id].clone();
+        match &mut mixed_provenance {
+            ItemProvenance::SealedReward {
+                loot_table_id,
+                entry_id,
+                ..
+            } => {
+                *loot_table_id = "reward:other-table".into();
+                *entry_id = "reward:other-entry".into();
+            }
+            _ => unreachable!(),
+        }
+        mixed.item_provenance.insert(mixed_id, mixed_provenance);
+        assert!(validate_world_runtime_snapshot_semantics(&mixed).is_err());
+
+        let mut corrupted_pool = base.clone();
+        corrupted_pool
+            .item_instances
+            .get_mut(&reward_id)
+            .unwrap()
+            .item_affixes[0]
+            .pool_digest_sha256 = "0".repeat(64);
+        assert!(validate_world_runtime_snapshot_semantics(&corrupted_pool).is_err());
+        let mut corrupted_record = base;
+        corrupted_record
+            .item_instances
+            .get_mut(&reward_id)
+            .unwrap()
+            .item_affixes[0]
+            .record_digest_sha256 = "0".repeat(64);
+        assert!(validate_world_runtime_snapshot_semantics(&corrupted_record).is_err());
+    }
+
+    #[test]
+    fn affix_modifier_caps_match_authoring_at_zero_one_thousand_and_overflow() {
+        let mut world = World::from_definition(sealed_reward_definition()).unwrap();
+        for invalid in [
+            AffixDefinition {
+                id: "reward:negative".into(),
+                label: "negative".into(),
+                position: AffixPosition::Prefix,
+                attack_bonus_delta: -1,
+                heal_amount_delta: 0,
+            },
+            AffixDefinition {
+                id: "reward:empty".into(),
+                label: "empty".into(),
+                position: AffixPosition::Prefix,
+                attack_bonus_delta: 0,
+                heal_amount_delta: 0,
+            },
+            AffixDefinition {
+                id: "reward:too-large".into(),
+                label: "too large".into(),
+                position: AffixPosition::Prefix,
+                attack_bonus_delta: MAX_AFFIX_MODIFIER + 1,
+                heal_amount_delta: 0,
+            },
+        ] {
+            assert!(matches!(
+                world.configure_affixes(vec![invalid], Vec::new()),
+                Err(WorldError::InvalidGameplayDefinition)
+            ));
+        }
+        world
+            .configure_affixes(
+                vec![AffixDefinition {
+                    id: "reward:cap".into(),
+                    label: "maximum".into(),
+                    position: AffixPosition::Prefix,
+                    attack_bonus_delta: MAX_AFFIX_MODIFIER,
+                    heal_amount_delta: 0,
+                }],
+                Vec::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn suppressed_and_admitted_npc_affixes_consume_identical_rng() {
+        let (mut admitted, _) = phase_two_world(123, 1, 10);
+        let (mut suppressed, _) = phase_two_world(123, 1, 10);
+        for world in [&mut admitted, &mut suppressed] {
+            world
+                .configure_affixes(
+                    vec![AffixDefinition {
+                        id: "game:keen".into(),
+                        label: "keen".into(),
+                        position: AffixPosition::Prefix,
+                        attack_bonus_delta: 1,
+                        heal_amount_delta: 0,
+                    }],
+                    vec![AffixPoolDefinition {
+                        id: "game:weapon-affix".into(),
+                        entries: vec![AffixPoolEntry {
+                            kind: AffixPoolEntryKind::Affix,
+                            id: "game:keen-outcome".into(),
+                            weight: 1,
+                            affix_id: Some("game:keen".into()),
+                        }],
+                    }],
+                )
+                .unwrap();
+            world
+                .configure_loot(
+                    vec![LootTableDefinition {
+                        id: "game:guardian-table".into(),
+                        digest_sha256: "f".repeat(64),
+                        guaranteed: vec![LootGuaranteedDefinition {
+                            id: "game:sword-outcome".into(),
+                            item_prototype_id: "game:sword".into(),
+                            quantity: 1,
+                            affix_pool_id: Some("game:weapon-affix".into()),
+                        }],
+                        pools: Vec::new(),
+                    }],
+                    vec![LootSourceDefinition {
+                        kind: LootSourceKind::NpcSpawn,
+                        id: "game:guardian-source".into(),
+                        npc_spawn_id: "game:guardian".into(),
+                        loot_table_id: "game:guardian-table".into(),
+                        rights: LootRightsPolicy::CreditedCharacter,
+                    }],
+                )
+                .unwrap();
+        }
+        for index in 0..MAX_GROUND_LOOT_RESERVATIONS {
+            let item_id = ItemInstanceId(format!("test:saturated-{index}"));
+            suppressed.ground_loot.insert(
+                item_id.clone(),
+                GroundLootReservation {
+                    drop_id: LootDropId(99),
+                    root_item_id: item_id,
+                    room_id: "game:arena".into(),
+                    cohort: vec![CharacterId(900)],
+                    beneficiary: Some(CharacterId(900)),
+                    passed: BTreeSet::new(),
+                    created_tick: 0,
+                    claim_until_tick: LOOT_EXCLUSIVE_TICKS,
+                    despawn_at_tick: LOOT_DESPAWN_TICKS,
+                },
+            );
+        }
+        let mut admitted_events = Vec::new();
+        admitted
+            .resolve_npc_defeat(
+                0,
+                "game:guardian",
+                CharacterId(900),
+                "Adventurer",
+                "game:arena",
+                &mut admitted_events,
+            )
+            .unwrap();
+        let mut suppressed_events = Vec::new();
+        suppressed
+            .resolve_npc_defeat(
+                0,
+                "game:guardian",
+                CharacterId(900),
+                "Adventurer",
+                "game:arena",
+                &mut suppressed_events,
+            )
+            .unwrap();
+        assert_eq!(admitted.rng.state, suppressed.rng.state);
+        assert_eq!(admitted.next_loot_drop_id, suppressed.next_loot_drop_id);
+        assert_eq!(admitted.rng.next_u64(), suppressed.rng.next_u64());
+        let generated = admitted
+            .item_instances
+            .values()
+            .find(|instance| {
+                instance.prototype_id == "game:sword" && !instance.item_affixes.is_empty()
+            })
+            .unwrap();
+        assert_eq!(generated.item_affixes[0].label, "keen");
+        assert!(suppressed_events.iter().any(|event| matches!(
+            event,
+            DomainEvent::Gameplay {
+                event: GameplayEvent::LootGenerationSuppressed { .. }
+            }
+        )));
+    }
+
+    #[test]
+    fn affixed_items_project_effective_use_and_equip_actions() {
+        let (mut reward_world, reward_session, _) = sealed_reward_world(17);
+        reward_world
+            .apply(
+                reward_session,
+                PlayerAction::OpenReward("sealed cache".into()),
+            )
+            .unwrap();
+        let reward = reward_world
+            .player_state_view(reward_session)
+            .unwrap()
+            .inventory
+            .into_iter()
+            .find(|item| item.affix.is_some())
+            .unwrap();
+        assert_eq!(reward.label, "afilada iron sword");
+        assert!(reward.actions.iter().any(|action| action.label == "Equip"));
+        let equipped = reward_world
+            .apply(reward_session, PlayerAction::Equip(reward.id))
+            .unwrap();
+        assert!(equipped.output.unwrap().contains("afilada iron sword"));
+        assert!(matches!(
+            equipped.domain_events.last(),
+            Some(DomainEvent::Gameplay {
+                event: GameplayEvent::ItemEquipped { item_name, .. }
+            }) if item_name == "afilada iron sword"
+        ));
+
+        let (mut consumable_world, consumable_session) = phase_two_world(19, 1, 10);
+        consumable_world
+            .apply(
+                consumable_session,
+                PlayerAction::Take(ItemSelection::one("potion")),
+            )
+            .unwrap();
+        let potion_id = ItemInstanceId("game:potion".into());
+        let definition = AffixDefinition {
+            id: "game:restorative".into(),
+            label: "restorative".into(),
+            position: AffixPosition::Suffix,
+            attack_bonus_delta: 0,
+            heal_amount_delta: 2,
+        };
+        let pool = AffixPoolDefinition {
+            id: "game:tonic-affix".into(),
+            entries: vec![AffixPoolEntry {
+                kind: AffixPoolEntryKind::Affix,
+                id: "game:restorative-outcome".into(),
+                weight: 1,
+                affix_id: Some(definition.id.clone()),
+            }],
+        };
+        consumable_world
+            .item_prototypes
+            .get_mut("game:potion")
+            .unwrap()
+            .heal_amount = 0;
+        consumable_world
+            .item_prototypes
+            .get_mut("game:potion")
+            .unwrap()
+            .effect = None;
+        let mut applied = AppliedItemAffix {
+            affix_id: definition.id.clone(),
+            definition_digest_sha256: canonical_sha256(&definition).unwrap(),
+            pool_id: pool.id.clone(),
+            pool_digest_sha256: canonical_sha256(&pool).unwrap(),
+            record_digest_sha256: String::new(),
+            label: definition.label,
+            position: definition.position,
+            attack_bonus_delta: 0,
+            heal_amount_delta: 2,
+        };
+        applied.record_digest_sha256 = applied_affix_record_sha256(&applied).unwrap();
+        consumable_world
+            .item_instances
+            .get_mut(&potion_id)
+            .unwrap()
+            .item_affixes = vec![applied];
+        let potion = consumable_world
+            .player_state_view(consumable_session)
+            .unwrap()
+            .inventory
+            .into_iter()
+            .find(|item| item.affix.is_some())
+            .unwrap();
+        assert_eq!(potion.label, "red potion restorative");
+        assert!(potion.actions.iter().any(|action| action.label == "Use"));
+        let used = consumable_world
+            .apply(consumable_session, PlayerAction::Use(potion.id))
+            .unwrap();
+        assert!(used.output.unwrap().contains("red potion restorative"));
+    }
+
+    #[test]
+    fn cold_replay_fails_closed_for_every_snapshot_v7_loot_ledger_event() {
         let (mut world, _) = connected_world();
         let item_id = ItemInstanceId("demo:blue-lantern".into());
         let events = vec![
@@ -23363,6 +25786,16 @@ mod tests {
             GameplayEvent::LootEncounterCancelled {
                 npc_id: "demo:npc".into(),
                 npc_name: "npc".into(),
+                room_id: "demo:lantern-square".into(),
+            },
+            GameplayEvent::RewardOpened {
+                open_id: RewardOpenId(1),
+                character_id: CharacterId(101),
+                character_name: "Tester".into(),
+                source_item_id: ItemInstanceId("runtime:1".into()),
+                source_item_name: "sealed cache".into(),
+                item_ids: vec![ItemInstanceId("runtime:2".into())],
+                item_names: vec!["forged reward".into()],
                 room_id: "demo:lantern-square".into(),
             },
         ];
