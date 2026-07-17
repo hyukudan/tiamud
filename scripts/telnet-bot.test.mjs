@@ -140,7 +140,11 @@ test('Telnet bot registers, creates, logs in, moves, speaks, reconnects, and qui
         }
         if (line === 'north') location = 'gate';
         if (line === 'south') location = 'square';
-        if (line.startsWith('say ')) connection.write(`You say, "${line.slice(4)}"\r\n`);
+        for (const voice of ['say', 'yell', 'shout']) {
+          if (line.startsWith(`${voice} `)) {
+            connection.write(`You ${voice}, "${line.slice(voice.length + 1)}"\r\n`);
+          }
+        }
         writeScene(connection, location);
         return current;
       }
@@ -162,7 +166,7 @@ test('Telnet bot registers, creates, logs in, moves, speaks, reconnects, and qui
   );
   try {
     await bot.bootstrap();
-    for (let round = 0; round < 16; round += 1) await bot.runRound();
+    for (let round = 0; round < 24; round += 1) await bot.runRound();
     await bot.close();
   } finally {
     await bot.close();
@@ -176,11 +180,13 @@ test('Telnet bot registers, creates, logs in, moves, speaks, reconnects, and qui
   );
   assert(sessions.some((session) => session.lines.includes('register')));
   assert(sessions.some((session) => session.lines.includes('login')));
-  assert(sessions.flatMap((session) => session.lines).some((line) => line.startsWith('say ')));
+  for (const voice of ['say', 'yell', 'shout']) {
+    assert(sessions.flatMap((session) => session.lines).some((line) => line.startsWith(`${voice} `)));
+    assert(latencies.includes(`command.${voice}`));
+  }
   assert(sessions.flatMap((session) => session.replies).some((event) => event.command === DO));
   assert(latencies.includes('auth.register'));
   assert(latencies.includes('auth.login'));
-  assert(latencies.includes('command.say'));
 });
 
 function writeScene(socket, location) {

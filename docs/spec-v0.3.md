@@ -372,10 +372,11 @@ una superficie durable separada: 64 mensajes y 128 KiB por buzón, páginas de
 10, caducidad de 30 días, cuotas por cuenta de 20/h y 50/día y denuncia con
 evidencia de 90 días. Usa `mail.*`, texto Telnet y `Tiamud.Mail 1`; la
 aceptación no revela ignore/block, ban o capacidad. No existen historial
-general durable, shout/yell espacial, emotes globales/de grupo, telepatía de grupo/offline,
-follow/assist/rescue, selección general de aliados ni XP/misión compartida. El
-reparto de botín implementado se limita a la cohorte próxima y round-robin de
-4A.
+general durable, emotes globales/de grupo, telepatía de grupo/offline,
+follow/assist/rescue, selección general de aliados ni XP/misión compartida. La
+voz espacial `shout`/`yell` está implementada como fase 5E. El reparto de botín
+implementado se limita a la cohorte próxima
+y round-robin de 4A.
 
 La fase 5B añade hasta 32 `socialEmotes` en WorldPack v9/AreaPack v8. Cada uno
 es local a la sala y usa plantillas cerradas distintas para actor, objetivo y
@@ -420,6 +421,29 @@ orden. WorldPack v9, AreaPack v8, WorldProject v2 y snapshot v7 no cambian. No
 hay edición, hilos, búsqueda, markup, adjuntos, suscripciones, push ni tablones
 de party/guild/staff/sala/área. El contrato está en
 [ADR 0018](decisions/0018-bounded-moderable-community-boards.md).
+
+La fase 5E define `yell <mensaje>` y `shout <mensaje>` como voz efímera sobre
+el grafo de salas. `yell` alcanza distancias `0..=1` y `shout` `0..=3`; la
+sala del emisor es distancia cero. Un BFS determinista recorre solo salidas
+dirigidas no secretas, visita cada sala una vez y se detiene tras 259 salas
+incluido el origen. Ciclos o caminos convergentes no duplican copias. Ningún
+transporte proyecta primera dirección, distancia, ruta o sala de origen.
+
+El cuerpo ocupa `1..=512` bytes UTF-8 visibles. Web reserva las acciones
+exactas `social.yell` y `social.shout`, ambas solo con `message`; Telnet usa los
+comandos de texto y GMCP reutiliza `Comm.Channel.Text` con canal `yell` o
+`shout`. Mute y el bucket común impiden emitir. Ignore, block bilateral y
+`condition.deaf` suprimen por receptor `say`, `yell` y `shout`; un personaje
+sordo sí puede hablar y la confirmación del actor no revela qué copias se
+entregaron.
+
+`OnTalk` se ejecuta exactamente una vez en la sala origen. La entrega empieza
+solo tras confirmar sus efectos; un rollback publica cero mensajes. La voz no
+actualiza `reply`, no crea historial, suscripción o replay y no entra en SQL,
+snapshot, correo, tablones o auditoría. WorldPack v9, AreaPack v8, WorldProject
+v2, snapshot v7 y esquema SQL v13 permanecen iguales. El contrato está en
+[ADR 0019](decisions/0019-bounded-spatial-voice.md); implementación y evidencia
+final están completadas.
 
 La autoridad ejecutable de staff es independiente de la ficha y usa una de
 doce capacidades cerradas: `reports.view`, `reports.resolve`,
@@ -583,6 +607,7 @@ secuencia ni se infieren de prosa. Referencia:
 | Comunicación fase 5B | Emotes locales authored con plantillas cerradas y render no recursivo, targeting local cerrado sin objetivo/opcional/obligatorio, ignore/block por receptor, commit antes de entrega y paridad Web/Telnet/GMCP; sin texto libre, persistencia ni emotes globales/de grupo |
 | Comunicación fase 5C | Correo offline explícito con cuotas por cuenta, buzón/caducidad/paginación acotados, referencias opacas, aceptación que no filtra política/capacidad, denuncia con evidencia de 90 días y paridad Web/Telnet/`Tiamud.Mail 1`; sin historial general, outbox, adjuntos ni correo grupal |
 | Comunicación fase 5D | Tablones públicos `general`/`newbie` con páginas, cuota, capacidad, retención, borrado propio, denuncia única y evidencia staff acotados; paridad Web/Telnet/`Tiamud.Board 1`, fallback GMCP UTF-8 y confirmación Web correlacionada; gate final superado |
+| Comunicación fase 5E | `yell` radio uno y `shout` radio tres implementados mediante BFS dirigido, determinista, sin salidas secretas y máximo 259; acciones Web exactas, Telnet/GMCP, sordera por receptor y entrega post-commit; puerta final superada |
 | Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; PostgreSQL v13 real cubierto, operación de producción específica de instalación |
 | Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
 | Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
@@ -657,6 +682,12 @@ real pasa adaptador+mover 19/19 y servidor focused 5/5. Web pasa check 0/0, 122
 Vitest, build y 46/46 Playwright soportado (23 Chromium, 23 Firefox); pasan 88
 Node, humo, advisories/sources y licencias/avisos 307 Rust/76 web. Auditoría: 0
 P1/P2/P3. No se ejecutaron WebKit, lector manual, carga/soak mixtos ni soak 24h.
+
+La fase 5E pasa 695 pruebas Rust, 123 Vitest, 46/46 Playwright soportado, 88
+Node, formato, clippy, build, humo y cadena de suministro; la auditoría deja 0
+P1/P2/P3 abiertos. El
+[registro 5E](project/log/2026-07-17-bounded-spatial-voice-phase-5e.md) conserva
+la evidencia ejecutada y las puertas no cubiertas.
 
 Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
 cuando las puertas de integración cambien.
@@ -788,6 +819,21 @@ Comunicación 5D:
 9. JSON Web con claves duplicadas falla a cualquier profundidad; post/delete/
    report solo cambian la UI tras `action.result` correlacionado, sin perder
    borradores en rechazo ni aceptar duplicados pendientes.
+
+Comunicación 5E — demostrada sobre el árbol integrado:
+
+1. `yell` y `shout` aceptan exactamente 1..=512 bytes y las formas Web no
+   admiten campos fuera de `message`.
+2. El BFS incluye origen, respeta radio uno/tres, sigue aristas dirigidas no
+   secretas, deduplica ciclos/convergencias y no supera 259 salas.
+3. Texto, Web y `Comm.Channel.Text` entregan canal, actor y cuerpo sin rumbo,
+   distancia, ruta o identidad interna de sala.
+4. Mute/bucket bloquean emisión; ignore/block/deaf suprimen solo la copia del
+   receptor y nunca alteran la confirmación del actor.
+5. `OnTalk` corre una vez en origen; commit precede al fan-out y rollback
+   publica cero copias.
+6. No cambian WorldPack/AreaPack/WorldProject, snapshot, esquema SQL, `reply`,
+   retención ni suscripciones.
 
 ## Trabajo aplazado o rechazado
 

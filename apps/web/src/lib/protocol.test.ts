@@ -232,6 +232,26 @@ describe('protocol messages', () => {
       .toThrow('bounded visible UTF-8 text');
   });
 
+  it('creates only exact bounded yell and shout action forms', () => {
+    for (const action of ['social.yell', 'social.shout'] as const) {
+      expect(createActionPerform(action, { message: 'Hold the northern gate.' }, action))
+        .toMatchObject({
+          data: { action, message: 'Hold the northern gate.' },
+        });
+      expect(() => createActionPerform(action, undefined, `${action}-missing`))
+        .toThrow('exact closed message field');
+      expect(() => createActionPerform(
+        action,
+        { message: 'Hold.', target: 'Bram' },
+        `${action}-extra`,
+      )).toThrow('exact closed message field');
+      expect(() => createActionPerform(action, { message: '' }, `${action}-empty`))
+        .toThrow('bounded visible UTF-8 text');
+      expect(() => createActionPerform(action, { message: 'é'.repeat(257) }, `${action}-bytes`))
+        .toThrow('bounded visible UTF-8 text');
+    }
+  });
+
   it('creates only exact authored emote actions', () => {
     expect(createActionPerform('social.emote.list', undefined, 'emotes')).toMatchObject({
       data: { action: 'social.emote.list', requestId: 'emotes' },
@@ -1656,7 +1676,10 @@ describe('protocol messages', () => {
     if (additive?.type !== 'chat.message') throw new Error('expected chat message');
     expect('blocked' in additive.data).toBe(false);
 
-    for (const channel of ['announcement', 'telepathy', 'emote', 'party', 'general', 'newbie', 'staff'] as const) {
+    for (const channel of [
+      'announcement', 'say', 'yell', 'shout', 'tell', 'telepathy', 'emote', 'party', 'general',
+      'newbie', 'staff',
+    ] as const) {
       expect(parseServerMessage(JSON.stringify({
         v: 1,
         type: 'chat.message',

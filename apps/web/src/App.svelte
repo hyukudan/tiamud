@@ -389,6 +389,10 @@
         return `${message.sender} announces`;
       case 'say':
         return `${message.sender} says`;
+      case 'yell':
+        return `${message.sender} yells`;
+      case 'shout':
+        return `${message.sender} shouts`;
       case 'tell':
         return `${message.sender} tells you`;
       case 'telepathy':

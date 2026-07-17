@@ -102,8 +102,17 @@ describe el baseline vigente de personajes, inventario y medios.
   2.000/8 MiB globales. El autor-personaje puede borrar; otra cuenta puede
   crear la única denuncia global, cuya evidencia temporal entra en la cola
   staff. Web, Telnet y `Tiamud.Board 1` comparten dominio sin fan-out ni
-  `Comm.Channel.Text`. No hay historial general, shout/yell, hilos/edición/
-  búsqueda de tablones, emotes globales/de grupo ni telepatía de grupo/offline.
+  `Comm.Channel.Text`. La fase 5E está implementada: `yell` usa radio uno y
+  `shout` radio tres mediante BFS dirigido determinista que incluye origen,
+  excluye salidas secretas, visita como máximo 259 salas y no revela rumbo o
+  distancia. El mensaje ocupa 1..=512 bytes; Web reserva `social.yell` y
+  `social.shout` exactos, texto Telnet usa los verbos y GMCP reutiliza
+  `Comm.Channel.Text`. Mute/bucket bloquean emisión; ignore, block bilateral y
+  `condition.deaf` suprimen `say`/`yell`/`shout` por receptor sin impedir que
+  un sordo hable ni cambiar la confirmación del actor. `OnTalk` se ejecuta una
+  vez en origen y la entrega comienza post-commit. No hay historial general,
+  persistencia de voz, hilos/edición/búsqueda de tablones, emotes globales/de
+  grupo ni telepatía de grupo/offline.
   La línea Telnet máxima es 8 KiB; un detalle GMCP sobredimensionado por escape
   conserva resumen, prefijo UTF-8 y overflow, mientras texto conserva el cuerpo
   completo. Web rechaza claves JSON duplicadas recursivamente y espera
@@ -251,6 +260,14 @@ advisories/sources y licencias/avisos 307 Rust/76 web también pasan. Auditoría
 0 P1/P2/P3. No se ejecutaron WebKit por bibliotecas ausentes, lector manual,
 carga/soak mixtos ni soak de 24 h. TLS/backup/recuperación PostgreSQL de
 producción siguen siendo específicos de instalación.
+
+ADR 0019 y la fase 5E de voz espacial están implementados. WorldPack v9,
+AreaPack v8, WorldProject v2, snapshot v7 y SQL v13 no cambian. Core, actor,
+Web, Telnet/GMCP, cliente oficial y bot demuestran radio 1/3, BFS dirigido,
+ciclos y convergencia, exclusión de salidas secretas, máximo 259,
+mute/bucket, ignore/block/deaf y rollback sin entrega. El
+[registro 5E](docs/project/log/2026-07-17-bounded-spatial-voice-phase-5e.md)
+conserva la evidencia integrada y los límites no ejecutados.
 
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil

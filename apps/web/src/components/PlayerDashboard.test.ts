@@ -287,6 +287,9 @@ describe('PlayerDashboard', () => {
       'Confirmed trade', 'Request trade',
       'Invite or manage an adventurer', 'Revoke invitation', 'Remove from party',
       'Transfer leadership', 'Disband party', 'Message to party',
+      'Voice reach', 'Say — this room', 'Yell — this and adjacent rooms',
+      'Shout — up to three exits away', 'Voice message', 'Send voice',
+      'Direct online recipient', 'Private direct message', 'Tell',
       'Reply to your latest direct message', 'World channels', 'Channel',
       'Authored emotes', 'Emote command', 'Nearby character', 'Perform emote',
       'General', 'Newbie', 'Staff', 'Nearby recipient', 'Transferable',
@@ -349,6 +352,9 @@ describe('PlayerDashboard', () => {
       expect(dashboardSource).toContain(action);
     }
     expect(dashboardSource).toContain('{ channel: communityChannel, message }');
+    expect(dashboardSource).toContain("let voiceReach = $state<'say' | 'yell' | 'shout'>('say')");
+    expect(dashboardSource).toContain('`social.${voiceReach}`');
+    expect(dashboardSource).toContain('`tell ${target} ${text}`');
     expect(dashboardSource).toContain('{ target }');
     expect(dashboardSource).toContain('target ? { emote, target } : { emote }');
     expect(dashboardSource).not.toContain("'social.emote', { message");

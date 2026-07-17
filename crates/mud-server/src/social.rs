@@ -31,6 +31,8 @@ pub const MAX_MODERATION_DURATION_SECONDS: u64 = 365 * 24 * 60 * 60;
 pub enum SocialChannel {
     Announcement,
     Say,
+    Yell,
+    Shout,
     Tell,
     Telepathy,
     Emote,
@@ -292,14 +294,10 @@ pub async fn apply_social(
         SocialAction::Say(message) => {
             let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
             ensure_chat_allowed(runtime, store, actor.id).await?;
-            let connected = world.connected_characters()?;
-            let actor_presence = connected
+            let audience = world.local_voice_audience(session)?;
+            let recipients = audience
                 .iter()
-                .find(|candidate| candidate.session_id == session)
-                .ok_or(tiamud_core::WorldError::UnknownSession)?;
-            let recipients = connected.iter().filter(|candidate| {
-                candidate.character_id != actor.id && candidate.room_id == actor_presence.room_id
-            });
+                .filter(|candidate| candidate.character_id != actor.id);
             plan_allowed(
                 &mut deliveries,
                 store,
@@ -315,6 +313,54 @@ pub async fn apply_social(
             .await?;
             Ok(SocialOutcome {
                 output: format!("You say, \"{message}\"\r\n"),
+            })
+        }
+        SocialAction::Yell(message) => {
+            let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
+            ensure_chat_allowed(runtime, store, actor.id).await?;
+            let audience = world.yell_audience(session)?;
+            let recipients = audience
+                .iter()
+                .filter(|candidate| candidate.character_id != actor.id);
+            plan_allowed(
+                &mut deliveries,
+                store,
+                actor.id,
+                recipients,
+                SocialMessage {
+                    channel: SocialChannel::Yell,
+                    sender: actor.name.clone(),
+                    text: message.clone(),
+                },
+                None,
+            )
+            .await?;
+            Ok(SocialOutcome {
+                output: format!("You yell, \"{message}\"\r\n"),
+            })
+        }
+        SocialAction::Shout(message) => {
+            let message = normalise_text(&message, MAX_CHAT_MESSAGE_BYTES)?;
+            ensure_chat_allowed(runtime, store, actor.id).await?;
+            let audience = world.shout_audience(session)?;
+            let recipients = audience
+                .iter()
+                .filter(|candidate| candidate.character_id != actor.id);
+            plan_allowed(
+                &mut deliveries,
+                store,
+                actor.id,
+                recipients,
+                SocialMessage {
+                    channel: SocialChannel::Shout,
+                    sender: actor.name.clone(),
+                    text: message.clone(),
+                },
+                None,
+            )
+            .await?;
+            Ok(SocialOutcome {
+                output: format!("You shout, \"{message}\"\r\n"),
             })
         }
         SocialAction::PartySay(message) => {
@@ -953,7 +999,7 @@ fn help_text(topic: Option<&str>) -> String {
         )
         .to_owned(),
         Some(topic) if topic.eq_ignore_ascii_case("social") => concat!(
-            "Social: say <message>, tell <name> <message>, reply <message>, who.\r\n",
+            "Social: say <message>, yell <message>, shout <message>, tell <name> <message>, reply <message>, who.\r\n",
             "Telepathy: telepathy <ability-id> <name> <message> when the world grants it.\r\n",
             "Emotes: emotes lists authored gestures; emote <command> [character] performs one.\r\n",
             "Mail: mail list [page], mail read/delete <id>, mail send <name> | <subject> | <body>, mail report <id> | <reason>.\r\n",
@@ -977,7 +1023,7 @@ fn help_text(topic: Option<&str>) -> String {
             "Movement: north/east/south/west/up/down, look.\r\n",
             "Items: inventory, take/drop/give [quantity], contents, put/get [quantity], examine, use, equip, unequip.\r\n",
             "Trade: request, offer, review and double-confirm a same-room exchange; help trade.\r\n",
-            "Social: say, tell, reply, telepathy, emotes, mail, boards, party say, channels, who, ignore, block, report.\r\n",
+            "Social: say, yell, shout, tell, reply, telepathy, emotes, mail, boards, party say, channels, who, ignore, block, report.\r\n",
             "More: help social, help trade.\r\n"
         )
         .to_owned(),
@@ -1031,6 +1077,20 @@ mod tests {
             .unwrap(),
             json!({"channel": "emote", "sender": "Aria", "text": "Aria salutes Borin."})
         );
+        for (channel, expected) in [
+            (SocialChannel::Yell, "yell"),
+            (SocialChannel::Shout, "shout"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(SocialMessage {
+                    channel,
+                    sender: "Aria".into(),
+                    text: "A bounded warning.".into(),
+                })
+                .unwrap(),
+                json!({"channel": expected, "sender": "Aria", "text": "A bounded warning."})
+            );
+        }
     }
 
     #[test]

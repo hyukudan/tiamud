@@ -1363,9 +1363,11 @@ fn output_queue_bytes(output: &TelnetOutputQueue, bytes: Vec<u8>) -> io::Result<
     output.bytes(OutputPriority::Interactive, bytes)
 }
 
-const SOCIAL_CHANNEL_NAMES: [&str; 9] = [
+const SOCIAL_CHANNEL_NAMES: [&str; 11] = [
     "announcement",
     "say",
+    "yell",
+    "shout",
     "tell",
     "telepathy",
     "emote",
@@ -1379,6 +1381,8 @@ fn social_channel_name(channel: SocialChannel) -> &'static str {
     match channel {
         SocialChannel::Announcement => "announcement",
         SocialChannel::Say => "say",
+        SocialChannel::Yell => "yell",
+        SocialChannel::Shout => "shout",
         SocialChannel::Tell => "tell",
         SocialChannel::Telepathy => "telepathy",
         SocialChannel::Emote => "emote",
@@ -4211,7 +4215,7 @@ mod tests {
             .expect("Comm support must advertise the complete channel list");
         assert_eq!(
             String::from_utf8(channel_list.clone()).unwrap(),
-            r#"Comm.Channel.List {"channels":["announcement","say","tell","telepathy","emote","party","general","newbie","staff"]}"#
+            r#"Comm.Channel.List {"channels":["announcement","say","yell","shout","tell","telepathy","emote","party","general","newbie","staff"]}"#
         );
         assert!(
             payloads
@@ -5152,10 +5156,12 @@ mod tests {
     }
 
     #[test]
-    fn telnet_social_text_names_all_nine_channels_and_renders_emotes_as_complete_text() {
+    fn telnet_social_text_names_all_eleven_channels_and_renders_emotes_as_complete_text() {
         let cases = [
             (SocialChannel::Announcement, "announcement"),
             (SocialChannel::Say, "say"),
+            (SocialChannel::Yell, "yell"),
+            (SocialChannel::Shout, "shout"),
             (SocialChannel::Tell, "tell"),
             (SocialChannel::Telepathy, "telepathy"),
             (SocialChannel::Emote, "emote"),
@@ -5309,7 +5315,7 @@ mod tests {
     }
 
     #[test]
-    fn gmcp_social_delivery_is_bounded_for_all_nine_channels() {
+    fn gmcp_social_delivery_is_bounded_for_all_eleven_channels() {
         let mut session = TelnetSession::default();
         session.begin_initial_negotiation();
         session.handle(vec![TelnetEvent::Negotiation {
@@ -5324,6 +5330,8 @@ mod tests {
         let cases = [
             (SocialChannel::Announcement, "announcement"),
             (SocialChannel::Say, "say"),
+            (SocialChannel::Yell, "yell"),
+            (SocialChannel::Shout, "shout"),
             (SocialChannel::Tell, "tell"),
             (SocialChannel::Telepathy, "telepathy"),
             (SocialChannel::Emote, "emote"),

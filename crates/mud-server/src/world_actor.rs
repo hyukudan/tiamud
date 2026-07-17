@@ -1530,6 +1530,8 @@ async fn apply(
         let talks = matches!(
             &action,
             tiamud_core::SocialAction::Say(_)
+                | tiamud_core::SocialAction::Yell(_)
+                | tiamud_core::SocialAction::Shout(_)
                 | tiamud_core::SocialAction::PartySay(_)
                 | tiamud_core::SocialAction::Tell { .. }
                 | tiamud_core::SocialAction::Reply(_)
@@ -6814,6 +6816,37 @@ mod tests {
         world
     }
 
+    fn spatial_voice_test_world() -> World {
+        let room = |index: u8, exits: Vec<(Direction, u8)>| RoomDefinition {
+            stable_id: format!("voice:r{index}"),
+            title: format!("Voice room {index}"),
+            prose: vec![format!("Bounded voice room {index}.")],
+            image: None,
+            audio: None,
+            item_ids: Vec::new(),
+            exits: exits
+                .into_iter()
+                .map(|(direction, target)| tiamud_core::ExitDefinition {
+                    direction,
+                    target_room_id: format!("voice:r{target}"),
+                })
+                .collect(),
+        };
+        World::from_definition(WorldDefinition {
+            start_room_id: "voice:r0".into(),
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
+            rooms: vec![
+                room(0, vec![(Direction::East, 1)]),
+                room(1, vec![(Direction::West, 0), (Direction::East, 2)]),
+                room(2, vec![(Direction::West, 1), (Direction::East, 3)]),
+                room(3, vec![(Direction::West, 2), (Direction::East, 4)]),
+                room(4, vec![(Direction::West, 3)]),
+            ],
+        })
+        .unwrap()
+    }
+
     async fn create_telepathy_character(
         world: &WorldHandle,
         name: &str,
@@ -6867,6 +6900,148 @@ mod tests {
 
     fn drain_deliveries(inbox: &mut DeliveryInbox) {
         while inbox.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn spatial_voice_routes_by_radius_and_shares_policy_and_chat_bucket() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(spatial_voice_test_world(), store)
+            .await
+            .unwrap();
+        let sender = world.enter("Sender".into()).await.unwrap();
+        let mut local = world.enter("Local".into()).await.unwrap();
+        let mut near = world.enter("Near".into()).await.unwrap();
+        let mut mid = world.enter("Mid".into()).await.unwrap();
+        let mut far = world.enter("Far".into()).await.unwrap();
+        let mut beyond = world.enter("Beyond".into()).await.unwrap();
+        world
+            .apply(near.session_id, PlayerAction::Move(Direction::East))
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            world
+                .apply(mid.session_id, PlayerAction::Move(Direction::East))
+                .await
+                .unwrap();
+        }
+        for _ in 0..3 {
+            world
+                .apply(far.session_id, PlayerAction::Move(Direction::East))
+                .await
+                .unwrap();
+        }
+        for _ in 0..4 {
+            world
+                .apply(beyond.session_id, PlayerAction::Move(Direction::East))
+                .await
+                .unwrap();
+        }
+
+        let yelled = world
+            .apply(
+                sender.session_id,
+                PlayerAction::Social(SocialAction::Yell("Near warning".into())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            yelled.output.as_deref(),
+            Some("You yell, \"Near warning\"\r\n")
+        );
+        for inbox in [&mut local.deliveries, &mut near.deliveries] {
+            let message = next_social(inbox).await;
+            assert_eq!(message.channel, crate::social::SocialChannel::Yell);
+            assert_eq!(message.sender, "Sender");
+            assert_eq!(message.text, "Near warning");
+        }
+        for inbox in [
+            &mut mid.deliveries,
+            &mut far.deliveries,
+            &mut beyond.deliveries,
+        ] {
+            assert!(has_no_social(inbox).await);
+        }
+
+        world
+            .apply(
+                sender.session_id,
+                PlayerAction::Social(SocialAction::Shout("Three-room warning".into())),
+            )
+            .await
+            .unwrap();
+        for inbox in [
+            &mut local.deliveries,
+            &mut near.deliveries,
+            &mut mid.deliveries,
+            &mut far.deliveries,
+        ] {
+            let message = next_social(inbox).await;
+            assert_eq!(message.channel, crate::social::SocialChannel::Shout);
+            assert_eq!(message.text, "Three-room warning");
+        }
+        assert!(has_no_social(&mut beyond.deliveries).await);
+
+        world
+            .apply(
+                local.session_id,
+                PlayerAction::Social(SocialAction::Ignore("Sender".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                sender.session_id,
+                PlayerAction::Social(SocialAction::Yell("Policy warning".into())),
+            )
+            .await
+            .unwrap();
+        assert!(has_no_social(&mut local.deliveries).await);
+        assert_eq!(
+            next_social(&mut near.deliveries).await.text,
+            "Policy warning"
+        );
+
+        world
+            .apply(
+                near.session_id,
+                PlayerAction::Social(SocialAction::Block("Sender".into())),
+            )
+            .await
+            .unwrap();
+        world
+            .apply(
+                sender.session_id,
+                PlayerAction::Social(SocialAction::Shout("Blocked warning".into())),
+            )
+            .await
+            .unwrap();
+        assert!(has_no_social(&mut local.deliveries).await);
+        assert!(has_no_social(&mut near.deliveries).await);
+        for inbox in [&mut mid.deliveries, &mut far.deliveries] {
+            assert_eq!(next_social(inbox).await.text, "Blocked warning");
+        }
+        assert!(has_no_social(&mut beyond.deliveries).await);
+
+        assert!(matches!(
+            world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Social(SocialAction::Yell(
+                        "a".repeat(crate::social::MAX_CHAT_MESSAGE_BYTES + 1)
+                    )),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::InvalidSocialInput))
+        ));
+        assert!(matches!(
+            world
+                .apply(
+                    sender.session_id,
+                    PlayerAction::Social(SocialAction::Yell("One too many".into())),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::ChatRateLimited))
+        ));
     }
 
     #[tokio::test]
@@ -7279,10 +7454,14 @@ mod tests {
                 id: "script:transactional-talk".into(),
                 room_id: "demo:lantern-square".into(),
                 hooks: BTreeSet::from([ScriptHook::OnTalk]),
-                capabilities: BTreeSet::from([ScriptCapability::SetFlag]),
+                capabilities: BTreeSet::from([
+                    ScriptCapability::Narrate,
+                    ScriptCapability::SetFlag,
+                ]),
                 limits: ScriptLimits::default(),
                 source: r#"
                     function on_talk(ctx)
+                        tiamud.emit('narrate', 'self', 'The square answers once.')
                         tiamud.emit('set_flag', 'self', 'spoke')
                     end
                 "#
@@ -7300,35 +7479,47 @@ mod tests {
         .unwrap();
         let sender = world.enter("Sender".into()).await.unwrap();
         let mut recipient = world.enter("Recipient".into()).await.unwrap();
+        let mut remote = world.enter("Remote".into()).await.unwrap();
+        world
+            .apply(remote.session_id, PlayerAction::Move(Direction::North))
+            .await
+            .unwrap();
         store.fail_saves.store(true, Ordering::SeqCst);
 
         assert!(matches!(
             world
                 .apply(
                     sender.session_id,
-                    PlayerAction::Social(SocialAction::Say("not committed".into())),
+                    PlayerAction::Social(SocialAction::Yell("not committed".into())),
                 )
                 .await,
             Err(GameError::Persistence(_))
         ));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), recipient.deliveries.recv())
-                .await
-                .is_err()
-        );
+        assert!(has_no_social(&mut recipient.deliveries).await);
+        assert!(has_no_social(&mut remote.deliveries).await);
 
         store.fail_saves.store(false, Ordering::SeqCst);
-        world
+        let applied = world
             .apply(
                 sender.session_id,
-                PlayerAction::Social(SocialAction::Say("committed".into())),
+                PlayerAction::Social(SocialAction::Yell("committed".into())),
             )
             .await
             .unwrap();
         assert_eq!(
+            applied
+                .output
+                .as_deref()
+                .unwrap()
+                .matches("The square answers once.")
+                .count(),
+            1
+        );
+        assert_eq!(
             next_social(&mut recipient.deliveries).await.text,
             "committed"
         );
+        assert_eq!(next_social(&mut remote.deliveries).await.text, "committed");
     }
 
     #[tokio::test]

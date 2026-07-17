@@ -391,6 +391,13 @@ plaintext choice. Exercise registration, login, character creation and
 selection, an authored ability, movement, combat, social state, restart and
 readiness before publishing the host.
 
+La voz espacial 5E no cambia esquema ni retiene cuerpos y ha pasado su puerta
+integrada automatizada. Un smoke operativo específico deberá situar
+personajes en origen, un vecino, una sala a dos saltos y otra tras una salida
+secreta; comprobar `yell` radio uno, `shout` radio tres, exclusión secreta y
+supresión por `condition.deaf`, tanto en Web como en texto/GMCP. Ese escenario
+manual no se ejecutó como parte de 5E y no debe inferirse del smoke general.
+
 ### Move an existing SQLite installation
 
 To change an existing installation, stop Tiamud, create and verify a current
@@ -442,12 +449,11 @@ The repository's retained [PostgreSQL 18 schema-v8 acceptance
 run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the earlier v8 adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
 authenticated restart against a separate disposable server process. Separately,
-an isolated checksummed PostgreSQL 18.4 instance passes the v13 adapter suite
-19/19 after correcting a v6 fixture defect. That validates real schema/store
-paths but does not yet prove the server board flow or a real v13 mover. Focused
-v11/v12/v13 migration, store and transfer tests cover the runtime-snapshot cap,
-subscriptions, additive staff tables, bounded mail and bounded board tables,
-but they do not replace this exercise or establish monitoring,
+an isolated checksummed PostgreSQL 18.4 instance passes the v13 adapter and
+real mover suite 19/19 after correcting a v6 fixture defect, including a
+representative current SQLite source. Focused real-server tests also cover the
+board/runtime flow and concurrent advisory-lock quota path. These checks do not
+establish monitoring,
 TLS, PostgreSQL backup/restore or point-in-time recovery for a production
 installation.
 

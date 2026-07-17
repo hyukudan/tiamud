@@ -58,6 +58,8 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   propio, denuncia y retención acotadas.
   `staff` exige perfil `moderator`, `administrator` o `implementor`. Navegador,
   Telnet y GMCP comparten la misma política social.
+  La voz espacial `yell`/`shout` está implementada como fase 5E con alcance
+  dirigido y acotado, sin revelar la topología del mundo.
 - **Staff por capacidades:** cinco perfiles operativos, doce capacidades
   cerradas, cola y resolución de reportes, acciones de diagnóstico/reparación
   del mundo y auditoría append-only. El perfil puede añadir un título narrativo,
@@ -303,7 +305,7 @@ implementado de la hoja de ruta.
 
 | Sistema | Implementado | Pendiente |
 | --- | --- | --- |
-| Conversación | `say` local; `tell` online; `reply` al último remitente válido mientras siga conectado; telepatía directa online como habilidad authored con recurso/cooldowns y bloqueo por sala; emotes de sala authored mediante plantillas cerradas y sin texto libre; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`; correo offline separado, privado y paginado, con 64 mensajes/128 KiB/30 días, cuotas por cuenta y evidencia de denuncia durante 90 días; tablones públicos `general`/`newbie`, bajo demanda y sin fan-out, con páginas, cuotas, capacidad y retención de 90 días. | Historial general durable, shout/yell espacial, emotes globales/de grupo, hilos/edición/búsqueda de tablones y telepatía de grupo/offline. `tell` no es telepatía, correo ni tablón. |
+| Conversación | `say` local; `yell` de radio uno y `shout` de radio tres mediante BFS dirigido, determinista, sin salidas secretas y limitado a 259 salas; `tell` online; `reply` al último remitente válido mientras siga conectado; telepatía directa online como habilidad authored con recurso/cooldowns y bloqueo por sala; emotes de sala authored mediante plantillas cerradas y sin texto libre; `who`, `help`, ignore, block y report; chat de grupo; canales suscritos `general`, `newbie`, `staff`; correo offline separado, privado y paginado, con 64 mensajes/128 KiB/30 días, cuotas por cuenta y evidencia de denuncia durante 90 días; tablones públicos `general`/`newbie`, bajo demanda y sin fan-out, con páginas, cuotas, capacidad y retención de 90 días. | Quedan fuera historial general durable, emotes globales/de grupo, hilos/edición/búsqueda de tablones y telepatía de grupo/offline. `tell` no es telepatía, correo ni tablón. |
 | Grupos | Hasta seis miembros; crear, invitar, aceptar, revocar, expulsar, transferir, disolver, salir, consultar y `party say`. La membresía persiste offline; accept/revoke/kick/transfer resuelven por nombre conectado. Una cohorte congelada de miembros próximos y vivos participa en el reparto round-robin del botín. | Gestión dirigida de miembros desconectados, follow, assist/rescue, selección general de aliados, XP/crédito de misión compartidos y reparto need/greed, master-loot o por contribución. |
 | Canales | Suscripción persistente en SQLite/PostgreSQL v13; `staff` exige perfil `moderator`, `administrator` o `implementor` al unirse, enviar y recibir; `helper` y `builder` no acceden. `announcement` es entrega de servidor, no un canal al que el jugador se suscribe o escribe. Web, texto Telnet y `Comm.Channel.Text` GMCP son equivalentes. Los tablones son otra superficie y nunca reutilizan el archivo del canal. | Historial, retención, búsqueda, moderación de archivo y canales definidos por WorldPack. |
 | Staff | Perfiles `helper`, `builder`, `moderator`, `administrator`, `implementor`; título narrativo opcional; 12 capacidades cerradas; cola/resolución de reportes; inspect/where/goto/transfer/restore/announce/audit y asignación explícita, con motivo y auditoría append-only. El primer registro es `implementor`; admins migrados quedan `administrator`. Cambiar perfil reinicia el bundle y solo se actúa sobre un rango estrictamente inferior. Las acciones de mundo resuelven un personaje conectado. | OLC seguro, spawn/purge y operaciones de host. Roles `Player`/`Moderator`/`Admin` quedan como tier legado de moderación/percepción: por sí solos nunca autorizan comandos ni acceso a `staff`. |
@@ -367,6 +369,32 @@ borrar su entrada y otra cuenta puede denunciarla una sola vez; staff ve
 evidencia temporal acotada mediante la cola existente. No hay edición, hilos,
 búsqueda, adjuntos ni tablones de sala/área. Véase
 [ADR 0018](docs/decisions/0018-bounded-moderable-community-boards.md).
+
+La fase 5E define voz espacial efímera sin convertirla en un canal global.
+`yell` visita la sala de origen y las adyacentes; `shout` llega hasta radio
+tres. Ambos recorren solo salidas dirigidas no secretas, visitan como máximo
+259 salas y no revelan rumbo, distancia o ruta. Cada mensaje ocupa hasta 512
+bytes y comparte mute, bucket, ignore/block y buzones con conversación. Un
+receptor con `condition.deaf` no oye `say`, `yell` o `shout`, pero puede hablar;
+la confirmación del actor no delata quién recibió. `OnTalk` se ejecuta una sola
+vez en origen y la entrega empieza tras el commit.
+
+```mermaid
+flowchart LR
+    accTitle: Alcance de la voz espacial 5E
+    accDescr: Yell alcanza la sala origen y un salto; shout llega a tres saltos. Ambos usan salidas dirigidas no secretas, deduplican salas y nunca publican la ruta.
+
+    O[Origen · distancia 0] --> E[Salidas no secretas]
+    E --> Y[Yell · radio 1]
+    E --> S[Shout · radio 3]
+    Y --> C[Visitados únicos · máximo 259]
+    S --> C
+    C --> D[Entrega post-commit<br/>sin dirección ni distancia]
+```
+
+El contrato está aceptado en [ADR 0019](docs/decisions/0019-bounded-spatial-voice.md),
+pero la implementación y su evidencia integrada siguen en curso; esta sección
+no las da por superadas.
 
 La telepatía directa online es una habilidad de autoría: exige conocimiento,
 recurso y cooldown, puede bloquear salas, comparte mute/rate/ignore/block y
@@ -745,6 +773,21 @@ auditoría deja 0 P1/P2/P3 abiertos. No se ejecutaron WebKit por faltar
 bibliotecas del host, lector manual, carga/soak mixtos ni soak de 24 horas.
 Consulta el [registro de fase 5D](docs/project/log/2026-07-17-bounded-moderable-community-boards-phase-5d.md).
 
+La fase 5E está implementada y no cambia WorldPack v9, AreaPack v8,
+WorldProject v2, snapshot v7 ni esquema SQL v13. Sus formas cerradas son
+`yell <mensaje>`/`shout <mensaje>` en texto y `social.yell`/`social.shout` con
+solo `message` en Web; GMCP reutiliza `Comm.Channel.Text`. La búsqueda BFS y
+la entrega aplican el contrato de ADR 0019. El árbol final pasa 695/695 pruebas
+Rust (149 core, 284 servidor, 132 WorldPack y 130 restantes), clippy estricto,
+formato y diff; Web pasa check 0/0, 123 Vitest, build y 46/46 Playwright
+soportado (23 Chromium y 23 Firefox). También pasan 88 Node, humo,
+`cargo deny check advisories sources` y licencias/avisos 307 Rust/76 web. La
+auditoría deja 0 P1/P2/P3 abiertos. PostgreSQL real no se repitió porque 5E no
+cambia esquema ni persistencia; tampoco se ejecutaron WebKit por las
+bibliotecas ausentes del host, lector manual, carga/soak ni soak de 24 horas.
+Consulta el
+[registro 5E](docs/project/log/2026-07-17-bounded-spatial-voice-phase-5e.md).
+
 Sobre el árbol integrado 5C pasan formato/diff/clippy y 669/669 pruebas Rust:
 142 core, 268 servidor, 132 WorldPack y 127 restantes. La web pasa check 0/0,
 117/117 Vitest, build y 44/44 Playwright soportado (22 Chromium y 22 Firefox);
@@ -776,7 +819,8 @@ Puertas externas pendientes:
 
 Siguientes líneas técnicas y de producto:
 
-- añadir `shout`/`yell` espacial acotado sin convertirlo en otro canal global;
+- implementar carga/reemplazo/LRU de áreas por las fases y salvaguardas del
+  ADR 0005, empezando por catálogo y bundles verificables;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
 - considerar need/greed, master-loot o contribución solo tras modelar sus

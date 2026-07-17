@@ -183,10 +183,11 @@ export class TiamudTelnetBot {
     await this.#command('south', 'Lantern Square', 'command.south');
     this.#location = 'square';
     if (this.#roundCounter % 8 === 1) {
+      const voice = ['say', 'yell', 'shout'][Math.floor((this.#roundCounter - 1) / 8) % 3];
       await this.#command(
-        `say Telnet soak pulse ${this.#index}-${this.#roundCounter}`,
-        'You say',
-        'command.say',
+        `${voice} Telnet soak pulse ${this.#index}-${this.#roundCounter}`,
+        `You ${voice}`,
+        `command.${voice}`,
       );
     }
     await this.#command('look', 'Lantern Square', 'command.look.square');

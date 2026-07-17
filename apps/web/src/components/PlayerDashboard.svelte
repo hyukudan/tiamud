@@ -49,7 +49,9 @@
     oncommand, onaction, onability, onpromote, ontalent,
   }: Props = $props();
   let socialTarget = $state('');
+  let voiceReach = $state<'say' | 'yell' | 'shout'>('say');
   let chatText = $state('');
+  let tellText = $state('');
   let partyTarget = $state('');
   let partyMessage = $state('');
   let replyMessage = $state('');
@@ -326,12 +328,19 @@
     return `${value >= 0 ? '+' : ''}${value}`;
   }
 
-  function sendChat(): void {
+  function sendVoice(): void {
     const text = chatText.trim();
     if (!text) return;
-    const target = socialTarget.trim();
-    oncommand(target ? `tell ${target} ${text}` : `say ${text}`);
+    onaction(`social.${voiceReach}`, { message: text }, `${voiceReach} ${text}`);
     chatText = '';
+  }
+
+  function sendTell(): void {
+    const text = tellText.trim();
+    const target = socialTarget.trim();
+    if (!target || !text) return;
+    oncommand(`tell ${target} ${text}`);
+    tellText = '';
   }
 
   function invite(): void {
@@ -1608,11 +1617,27 @@
             </li>
           {/each}
         </ul>
-        <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendChat(); }}>
-          <label for="chat-target">Recipient <span>(blank means say)</span></label>
-          <input id="chat-target" maxlength="64" bind:value={socialTarget} placeholder="Everyone nearby" />
-          <label for="chat-text">Message</label>
-          <div><input id="chat-text" maxlength="512" bind:value={chatText} /><button type="submit" disabled={!chatText.trim()}>Send</button></div>
+        <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendVoice(); }}>
+          <label for="voice-reach">Voice reach</label>
+          <select id="voice-reach" bind:value={voiceReach} aria-describedby="voice-reach-help">
+            <option value="say">Say — this room</option>
+            <option value="yell">Yell — this and adjacent rooms</option>
+            <option value="shout">Shout — up to three exits away</option>
+          </select>
+          <label for="chat-text">Voice message</label>
+          <div><input id="chat-text" maxlength="512" bind:value={chatText} /><button type="submit" disabled={!chatText.trim()}>Send voice</button></div>
+          <small id="voice-reach-help">Say stays in this room. Yell reaches one exit away; shout reaches up to three. Secret exits never carry voice.</small>
+        </form>
+        <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendTell(); }}>
+          <label for="chat-target">Direct online recipient</label>
+          <input id="chat-target" list="direct-message-recipients" maxlength="64" bind:value={socialTarget} />
+          <datalist id="direct-message-recipients">
+            {#each telepathyRecipients as recipient (recipient.id)}
+              <option value={recipient.name}></option>
+            {/each}
+          </datalist>
+          <label for="tell-text">Private direct message</label>
+          <div><input id="tell-text" maxlength="512" bind:value={tellText} /><button type="submit" disabled={!socialTarget.trim() || !tellText.trim()}>Tell</button></div>
         </form>
         <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendReply(); }}>
           <label for="reply-text">Reply to your latest direct message</label>

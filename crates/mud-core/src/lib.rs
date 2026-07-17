@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slotmap::{SlotMap, new_key_type};
 use std::borrow::Borrow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use thiserror::Error;
 
@@ -516,6 +516,8 @@ impl SocialChannelName {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SocialAction {
     Say(String),
+    Yell(String),
+    Shout(String),
     PartySay(String),
     Tell {
         target: String,
@@ -857,6 +859,18 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if normalised == "say" {
         return Err(ParseActionError::MissingTarget { command: "say" });
+    }
+    if let Some(message) = command_tail(input, "yell") {
+        return Ok(PlayerAction::Social(SocialAction::Yell(message)));
+    }
+    if normalised == "yell" {
+        return Err(ParseActionError::MissingTarget { command: "yell" });
+    }
+    if let Some(message) = command_tail(input, "shout") {
+        return Ok(PlayerAction::Social(SocialAction::Shout(message)));
+    }
+    if normalised == "shout" {
+        return Err(ParseActionError::MissingTarget { command: "shout" });
     }
     for command in ["party say", "gsay", "gtell"] {
         if let Some(message) = command_tail_phrase(input, command) {
@@ -1683,6 +1697,10 @@ pub struct ConnectedCharacter {
     pub name: String,
     pub room_id: String,
 }
+
+pub const YELL_MAX_ROOM_HOPS: u8 = 1;
+pub const SHOUT_MAX_ROOM_HOPS: u8 = 3;
+pub const MAX_SPATIAL_VOICE_ROOMS: usize = 1 + 6 + 36 + 216;
 
 /// Server-internal result of an authoritative telepathy ability preflight.
 ///
@@ -14239,6 +14257,91 @@ impl World {
             .collect()
     }
 
+    /// Returns the connected, hearing audience in the actor's current room.
+    ///
+    /// Deafness affects only reception: a deaf actor may still speak and gets
+    /// the same private acknowledgement as any other actor.
+    pub fn local_voice_audience(
+        &self,
+        session: SessionId,
+    ) -> Result<Vec<ConnectedCharacter>, WorldError> {
+        self.voice_audience(session, 0)
+    }
+
+    /// Returns the connected, hearing audience reached by a bounded yell.
+    pub fn yell_audience(&self, session: SessionId) -> Result<Vec<ConnectedCharacter>, WorldError> {
+        self.voice_audience(session, YELL_MAX_ROOM_HOPS)
+    }
+
+    /// Returns the connected, hearing audience reached by a bounded shout.
+    pub fn shout_audience(
+        &self,
+        session: SessionId,
+    ) -> Result<Vec<ConnectedCharacter>, WorldError> {
+        self.voice_audience(session, SHOUT_MAX_ROOM_HOPS)
+    }
+
+    fn voice_audience(
+        &self,
+        session: SessionId,
+        max_hops: u8,
+    ) -> Result<Vec<ConnectedCharacter>, WorldError> {
+        debug_assert!(max_hops <= SHOUT_MAX_ROOM_HOPS);
+        let origin = self.character(session)?.location;
+        room_checked(&self.entities, origin)?;
+        let mut reachable = HashSet::from([origin]);
+        let mut pending = VecDeque::from([(origin, 0_u8)]);
+
+        while let Some((room_id, hops)) = pending.pop_front() {
+            if hops >= max_hops {
+                continue;
+            }
+            let room = room_checked(&self.entities, room_id)?;
+            for (direction, target) in &room.exits {
+                // Secret-exit authorship is authoritative here. Acoustic
+                // propagation never uses observer perception and therefore
+                // cannot reveal or traverse a secret connection.
+                if self
+                    .secret_exits
+                    .contains_key(&(room.stable_id.clone(), *direction))
+                {
+                    continue;
+                }
+                room_checked(&self.entities, *target)?;
+                if reachable.insert(*target) {
+                    if reachable.len() > MAX_SPATIAL_VOICE_ROOMS {
+                        return Err(WorldError::InvalidEntity);
+                    }
+                    pending.push_back((*target, hops + 1));
+                }
+            }
+        }
+
+        let reachable_stable_ids = reachable
+            .into_iter()
+            .map(|room_id| room_checked(&self.entities, room_id).map(|room| room.stable_id.clone()))
+            .collect::<Result<HashSet<_>, _>>()?;
+        self.connected_characters()?
+            .into_iter()
+            .filter(|candidate| reachable_stable_ids.contains(&candidate.room_id))
+            .filter_map(
+                |candidate| match self.character_can_hear_voice(candidate.character_id) {
+                    Ok(true) => Some(Ok(candidate)),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                },
+            )
+            .collect()
+    }
+
+    fn character_can_hear_voice(&self, character_id: CharacterId) -> Result<bool, WorldError> {
+        let gameplay = self
+            .character_gameplay
+            .get(&character_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        Ok(perception_senses(gameplay).contains(&Sense::Hearing))
+    }
+
     /// Resolves one authored local emote without mutating or persisting state.
     ///
     /// The returned room audience is a transient routing plan. A target must
@@ -19616,6 +19719,18 @@ mod tests {
             )))
         );
         assert_eq!(
+            parse_action("yell Hold the Near Gate!"),
+            Ok(PlayerAction::Social(SocialAction::Yell(
+                "Hold the Near Gate!".into()
+            )))
+        );
+        assert_eq!(
+            parse_action("shout Hold Every Gate!"),
+            Ok(PlayerAction::Social(SocialAction::Shout(
+                "Hold Every Gate!".into()
+            )))
+        );
+        assert_eq!(
             parse_action("tell Aria Meet Me There"),
             Ok(PlayerAction::Social(SocialAction::Tell {
                 target: "Aria".into(),
@@ -19673,7 +19788,14 @@ mod tests {
             parse_action("party disband"),
             Ok(PlayerAction::Party(PartyAction::Disband))
         );
-        for command in ["party say", "reply", "channel join", "channel say general"] {
+        for command in [
+            "yell",
+            "shout",
+            "party say",
+            "reply",
+            "channel join",
+            "channel say general",
+        ] {
             assert!(matches!(
                 parse_action(command),
                 Err(ParseActionError::MissingTarget { .. })
@@ -21266,6 +21388,256 @@ mod tests {
             .restore_character_gameplay(CharacterId(902), perceptive)
             .unwrap();
         assert!(world.scene_for(arena_observer).unwrap().audio.is_none());
+    }
+
+    #[test]
+    fn spatial_voice_is_directed_bounded_secret_safe_and_deafness_only_filters_receivers() {
+        let room = |id: &str, exits: Vec<(Direction, &str)>| RoomDefinition {
+            stable_id: id.into(),
+            title: id.into(),
+            prose: vec![format!("Room {id}.")],
+            image: None,
+            audio: None,
+            item_ids: Vec::new(),
+            exits: exits
+                .into_iter()
+                .map(|(direction, target_room_id)| ExitDefinition {
+                    direction,
+                    target_room_id: target_room_id.into(),
+                })
+                .collect(),
+        };
+        let mut world = World::from_definition(WorldDefinition {
+            start_room_id: "voice:r0".into(),
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
+            rooms: vec![
+                room("voice:r0", vec![(Direction::East, "voice:r1")]),
+                room(
+                    "voice:r1",
+                    vec![(Direction::West, "voice:r0"), (Direction::East, "voice:r2")],
+                ),
+                room(
+                    "voice:r2",
+                    vec![(Direction::West, "voice:r1"), (Direction::East, "voice:r3")],
+                ),
+                room(
+                    "voice:r3",
+                    vec![(Direction::West, "voice:r2"), (Direction::East, "voice:r4")],
+                ),
+                room("voice:r4", vec![(Direction::West, "voice:r3")]),
+                // This one-way edge points toward the origin. A directed BFS
+                // from r0 must not infer an unauthored reverse connection.
+                room("voice:inbound", vec![(Direction::West, "voice:r0")]),
+            ],
+        })
+        .unwrap();
+        let connect =
+            |world: &mut World, session: u64, character: i64, name: &str, room_id: &str| {
+                world
+                    .connect(
+                        SessionId(session),
+                        CharacterSnapshot {
+                            id: CharacterId(character),
+                            account_id: AccountId(character),
+                            name: name.into(),
+                            room_id: room_id.into(),
+                            item_locations: BTreeMap::new(),
+                        },
+                    )
+                    .unwrap();
+            };
+        connect(&mut world, 1, 1, "Actor", "voice:r0");
+        connect(&mut world, 2, 2, "Local", "voice:r0");
+        connect(&mut world, 3, 3, "Near", "voice:r1");
+        connect(&mut world, 4, 4, "Mid", "voice:r2");
+        connect(&mut world, 5, 5, "Far", "voice:r3");
+        connect(&mut world, 6, 6, "Beyond", "voice:r4");
+        connect(&mut world, 7, 7, "Inbound", "voice:inbound");
+        connect(&mut world, 8, 8, "Deaf", "voice:r1");
+        let mut deaf = world.character_gameplay_snapshot(SessionId(8)).unwrap();
+        deaf.script_flags.insert("condition.deaf".into());
+        world
+            .restore_character_gameplay(CharacterId(8), deaf)
+            .unwrap();
+
+        let names = |audience: Vec<ConnectedCharacter>| {
+            audience
+                .into_iter()
+                .map(|candidate| candidate.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(world.local_voice_audience(SessionId(1)).unwrap()),
+            vec!["Actor", "Local"]
+        );
+        assert_eq!(
+            names(world.yell_audience(SessionId(1)).unwrap()),
+            vec!["Actor", "Local", "Near"]
+        );
+        assert_eq!(
+            names(world.shout_audience(SessionId(1)).unwrap()),
+            vec!["Actor", "Local", "Near", "Mid", "Far"]
+        );
+
+        world
+            .configure_secret_exit("voice:r1", Direction::East, 1)
+            .unwrap();
+        assert_eq!(
+            names(world.shout_audience(SessionId(1)).unwrap()),
+            vec!["Actor", "Local", "Near"]
+        );
+
+        // Deafness does not prevent emission or remove the actor's private
+        // acknowledgement path: only receivers are filtered.
+        assert_eq!(
+            names(world.shout_audience(SessionId(8)).unwrap()),
+            vec!["Actor", "Local", "Near"]
+        );
+    }
+
+    #[test]
+    fn shout_traversal_accepts_the_exact_structural_room_cap() {
+        let directions = [
+            Direction::North,
+            Direction::East,
+            Direction::South,
+            Direction::West,
+            Direction::Up,
+            Direction::Down,
+        ];
+        let mut exits = (0..MAX_SPATIAL_VOICE_ROOMS)
+            .map(|_| Vec::new())
+            .collect::<Vec<Vec<ExitDefinition>>>();
+        let mut next_room = 1_usize;
+        let mut level = vec![0_usize];
+        for _ in 0..SHOUT_MAX_ROOM_HOPS {
+            let mut next_level = Vec::new();
+            for parent in level {
+                for direction in directions {
+                    let child = next_room;
+                    next_room += 1;
+                    exits[parent].push(ExitDefinition {
+                        direction,
+                        target_room_id: format!("cap:r{child}"),
+                    });
+                    next_level.push(child);
+                }
+            }
+            level = next_level;
+        }
+        assert_eq!(next_room, MAX_SPATIAL_VOICE_ROOMS);
+        let mut world = World::from_definition(WorldDefinition {
+            start_room_id: "cap:r0".into(),
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
+            rooms: exits
+                .into_iter()
+                .enumerate()
+                .map(|(index, exits)| RoomDefinition {
+                    stable_id: format!("cap:r{index}"),
+                    title: format!("Cap room {index}"),
+                    prose: Vec::new(),
+                    image: None,
+                    audio: None,
+                    item_ids: Vec::new(),
+                    exits,
+                })
+                .collect(),
+        })
+        .unwrap();
+        for index in 0..MAX_SPATIAL_VOICE_ROOMS {
+            let identity = i64::try_from(index + 1).unwrap();
+            world
+                .connect(
+                    SessionId(u64::try_from(index + 1).unwrap()),
+                    CharacterSnapshot {
+                        id: CharacterId(identity),
+                        account_id: AccountId(identity),
+                        name: format!("Listener {index}"),
+                        room_id: format!("cap:r{index}"),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            world.shout_audience(SessionId(1)).unwrap().len(),
+            MAX_SPATIAL_VOICE_ROOMS
+        );
+    }
+
+    #[test]
+    fn spatial_voice_visits_cycles_and_convergent_paths_only_once() {
+        let room = |id: &str, exits: Vec<(Direction, &str)>| RoomDefinition {
+            stable_id: id.into(),
+            title: id.into(),
+            prose: Vec::new(),
+            image: None,
+            audio: None,
+            item_ids: Vec::new(),
+            exits: exits
+                .into_iter()
+                .map(|(direction, target)| ExitDefinition {
+                    direction,
+                    target_room_id: target.into(),
+                })
+                .collect(),
+        };
+        let mut world = World::from_definition(WorldDefinition {
+            start_room_id: "diamond:origin".into(),
+            item_prototypes: Vec::new(),
+            initial_item_instances: Vec::new(),
+            rooms: vec![
+                room(
+                    "diamond:origin",
+                    vec![
+                        (Direction::North, "diamond:left"),
+                        (Direction::East, "diamond:right"),
+                    ],
+                ),
+                room("diamond:left", vec![(Direction::East, "diamond:join")]),
+                room("diamond:right", vec![(Direction::North, "diamond:join")]),
+                // This edge closes a cycle back to the origin after the two
+                // branches converge at the same room.
+                room("diamond:join", vec![(Direction::South, "diamond:origin")]),
+            ],
+        })
+        .unwrap();
+        for (session, name, room_id) in [
+            (1_u64, "Actor", "diamond:origin"),
+            (2, "At join", "diamond:join"),
+        ] {
+            world
+                .connect(
+                    SessionId(session),
+                    CharacterSnapshot {
+                        id: CharacterId(i64::try_from(session).unwrap()),
+                        account_id: AccountId(i64::try_from(session).unwrap()),
+                        name: name.into(),
+                        room_id: room_id.into(),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let audience = world.shout_audience(SessionId(1)).unwrap();
+        assert_eq!(
+            audience
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Actor", "At join"]
+        );
+        assert_eq!(
+            audience
+                .iter()
+                .filter(|candidate| candidate.room_id == "diamond:join")
+                .count(),
+            1
+        );
     }
 
     #[test]

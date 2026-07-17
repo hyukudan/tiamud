@@ -17,7 +17,8 @@ const MAX_SCENE_PRESENTATION_ENTITIES = 12;
 const MAX_SCENE_PRESENTATION_POSES = 32;
 const MAX_ENTITY_SOURCE_REFERENCES = 2;
 const SOCIAL_CHANNELS = new Set([
-  'announcement', 'say', 'tell', 'telepathy', 'emote', 'party', 'general', 'newbie', 'staff',
+  'announcement', 'say', 'yell', 'shout', 'tell', 'telepathy', 'emote', 'party', 'general',
+  'newbie', 'staff',
 ]);
 const MEDIA_CHANNELS = new Set(['music', 'ambience', 'effects']);
 
@@ -139,10 +140,11 @@ export class TiamudBot {
       : this.#scene;
     requiredExit(square, 'north');
     if (this.#roundCounter % 8 === 1) {
+      const voice = ['say', 'yell', 'shout'][Math.floor((this.#roundCounter - 1) / 8) % 3];
       await this.#command(
-        `say Soak pulse ${this.#index}-${this.#roundCounter}`,
+        `${voice} Soak pulse ${this.#index}-${this.#roundCounter}`,
         undefined,
-        'command.say',
+        `command.${voice}`,
       );
     }
     await this.#command('look', undefined, 'command.look.square');

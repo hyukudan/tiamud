@@ -23,7 +23,8 @@ sobre la aceptación de la especificación histórica.
   También existe correo offline explícito con buzón, cuotas, caducidad y
   denuncia acotados, y existen tablones públicos `general`/`newbie` con
   retención, cuota, capacidad y evidencia moderable propias. No existe
-  historial general durable de conversación.
+  historial general durable de conversación. La voz espacial 5E implementa
+  `yell`/`shout` con puerta final retenida.
 - Sí existen los perfiles `helper`, `builder`, `moderator`, `administrator` e
   `implementor`, doce capacidades cerradas y un título narrativo opcional. La
   XP, la ficha, WorldPack, el perfil visible y el rol legado nunca sustituyen
@@ -52,7 +53,8 @@ están implementadas. También están implementadas 4A, botín repetible con
 derechos y procedencia, y 4B, sellos ganados y afijos deterministas.
 Las fases 5A, telepatía directa authored, 5B, emotes de sala authored, 5C,
 correo offline acotado, y 5D, tablones comunitarios acotados, también están
-implementadas. La puerta integrada final de 5D aún no está retenida.
+implementadas y 5D conserva su puerta final. La fase 5E, voz espacial acotada,
+también está implementada y conserva su puerta final.
 
 ## Estado verificado en el código
 
@@ -353,6 +355,9 @@ flowchart LR
     BoardGuard --> BoardQuota[Cuota 5/h · 20/d]
     BoardQuota --> Store
     Store --> Public[board.catalog · list · entry<br/>sesión solicitante]
+    Voice[PlayerAction yell · shout] --> BFS[BFS dirigido no secreto<br/>radio 1 · 3 · máximo 259]
+    BFS --> Safety
+    BFS --> Delivery
 ```
 
 ### Fase 1 entregada
@@ -366,15 +371,16 @@ flowchart LR
    permisos, rate limit, mute, ignore/block y entrega mediante buzones
    acotados. La suscripción persiste en ambos adaptadores; `staff` exige perfil
    `moderator`, `administrator` o `implementor`.
-5. Pendiente `shout`/`yell` como propagación espacial definida por el mundo y
-   acotada, no como otro nombre para el canal global.
+5. Implementados `shout`/`yell` 5E como propagación espacial dirigida y acotada, no
+   como otro nombre para el canal global.
 6. Implementados emotes de sala authored con plantillas estrictas que nunca
    convierten texto del jugador en ANSI, HTML, MXP o instrucciones evaluables.
 
-Web usa acciones estructuradas y representa los nueve valores de
+Web usa acciones estructuradas y representa los once valores de
 `SocialMessage`; Telnet comparte los comandos de texto y proyecta cada entrega
 como texto y como `Comm.Channel.Text` cuando GMCP `Comm` está negociado. Esta
-paridad no convierte GMCP en una segunda autoridad.
+paridad no convierte GMCP en una segunda autoridad. `Yell` y `Shout` forman
+parte del vocabulario cerrado actual.
 
 Guild/clan chat puede seguir después. Los tablones ya tienen retención,
 límites, moderación, eliminación y reglas públicas propias; no incluyen
@@ -460,6 +466,23 @@ acotada es fail-closed al arrancar y periódica no fatal. WorldPack v9, AreaPack
 v8, WorldProject v2 y snapshot v7 no cambian. No hay edición, hilos, búsqueda,
 markup, adjuntos, push ni tablones de party/guild/staff/sala/área. El contrato
 está en [ADR 0018](../decisions/0018-bounded-moderable-community-boards.md).
+
+### Fase 5E — voz espacial acotada — implementada
+
+`yell <mensaje>` cubre la sala origen y un salto; `shout <mensaje>` llega hasta
+tres. El BFS sigue solo salidas dirigidas no secretas, deduplica ciclos y rutas
+convergentes y se detiene al visitar 259 salas. No publica rumbo, distancia,
+ruta ni sala de origen. Web reserva `social.yell`/`social.shout` con únicamente
+`message` de 1..=512 bytes; Telnet conserva texto y GMCP reutiliza
+`Comm.Channel.Text`.
+
+Mute y el bucket común impiden emitir. Ignore, block bilateral y
+`condition.deaf` suprimen `say`/`yell`/`shout` por receptor; un personaje sordo
+puede hablar y la confirmación del actor no revela quién oyó. `OnTalk` corre
+una vez en origen y la entrega comienza tras commit; rollback entrega cero
+copias. No hay retención, `reply`, suscripción, SQL ni cambios de WorldPack,
+AreaPack o snapshot. [ADR 0019](../decisions/0019-bounded-spatial-voice.md)
+define el contrato; código, cobertura y puerta integrada están terminados.
 
 ## Staff: rango visible, capacidad real
 
@@ -594,6 +617,7 @@ master-loot y reparto por contribución requieren otro diseño.
 | Sistema | Estado actual | Cuándo considerarlo |
 | --- | --- | --- |
 | Emotes/sociales | Emotes de sala authored implementados con plantillas cerradas, targeting local y paridad Web/Telnet/GMCP. | Emotes globales/de grupo solo con audiencia, percepción, cuotas y privacidad explícitas. |
+| Voz espacial | ADR 0019 y fase 5E implementados para `yell` radio uno y `shout` radio tres, BFS dirigido no secreto y máximo 259; paridad core, Web, Telnet/GMCP y bot con puerta integrada. | Archivo, dirección/distancia y acústica authored quedan fuera. |
 | Mail y tablones | Correo offline 5C y tablones públicos 5D implementados con superficies separadas, retención, cuotas, capacidad y evidencia moderable. | Hilos, edición, búsqueda o tablones authored/privados solo con propiedad y ciclo de vida explícitos; nunca convertir chat o buzón en archivo público. |
 | Guilds/clanes | Ausente. | Tras estabilizar parties, canales y autoridad comunitaria. |
 | Puertas y llaves | Ausentes como sistema general; los contenedores de inventario sí existen. | Cuando el estado abierto/cerrado, acceso y llaves tenga autoría/persistencia explícita. |
@@ -709,7 +733,8 @@ diseño adicional. Cajas, llaves y tiradas pagadas permanecen fuera.
 - 5A telepatía directa authored: implementada;
 - 5B emotes authored con plantillas y audiencias seguras: implementada;
 - 5C correo offline con cuotas/retención/moderación: implementada;
-- 5D tablones moderables: implementada; puerta integrada final pendiente de retener;
+- 5D tablones moderables: implementada y con puerta integrada retenida;
+- 5E voz espacial `yell`/`shout`: implementada y con puerta integrada retenida;
 - guilds según necesidades observadas;
 - crafting/auction/housing solo con sinks, cuotas y moderación;
 - OLC únicamente sobre el pipeline de artefactos revisados.

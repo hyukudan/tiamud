@@ -311,6 +311,18 @@ las mismas reglas de autorización y percepción; una acción estructurada no es
 un atajo confiable. Accept/revoke/kick/transfer resuelven `target` como nombre
 de un personaje conectado, no como administración de membresía offline.
 
+La fase 5E implementa dos acciones adicionales:
+
+| Acción | Campos exactos adicionales |
+| --- | --- |
+| `social.yell` | `message` |
+| `social.shout` | `message` |
+
+`message` ocupa `1..=512` bytes UTF-8 visibles. Estas formas no admiten
+`target`, `channel`, radio, dirección, distancia ni campos adicionales, aunque
+uno conocido llegue como `null`. Sus equivalentes de texto son
+`yell <mensaje>` y `shout <mensaje>`.
+
 El correo usa formas cerradas separadas:
 
 | Acción | Campos exactos adicionales |
@@ -595,7 +607,7 @@ traffic.
 | `board.entry` | Publicación pública completa, solo para quien la solicita. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
-| `chat.message` | Entrega autorizada de `announcement`, `say`, `tell`, `telepathy`, `emote`, `party`, `general`, `newbie` o `staff`. |
+| `chat.message` | Entrega autorizada de `announcement`, `say`, `yell`, `shout`, `tell`, `telepathy`, `emote`, `party`, `general`, `newbie` o `staff`. |
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
@@ -1103,9 +1115,10 @@ Telnet conserva la narración textual completa. Si negoció `Char.Items`, emisor
 y receptor reciben listas de inventario regeneradas independientemente con su
 propia sal; el observador de sala no recibe una lista ajena.
 
-`chat.message.data` contiene `channel` (`announcement`, `say`, `tell`,
-`telepathy`, `emote`, `party`, `general`, `newbie` o `staff`), `sender` y texto plano
-acotado. Ignore y block
+`chat.message.data` contiene `channel` (`announcement`, `say`, `yell`, `shout`,
+`tell`, `telepathy`, `emote`, `party`, `general`, `newbie` o `staff`), `sender` y texto plano
+acotado.
+Ignore y block
 por cualquiera de las partes se aplican antes de entregar. Mute/ban y rate
 limit se aplican en servidor. `general`, `newbie` y `staff` requieren
 suscripción durable en esquema v13; `staff` exige además perfil `moderator`,
@@ -1131,6 +1144,17 @@ del texto renderizado. Ignore/block puede suprimir receptores sin
 cambiar la confirmación del actor ni la percepción autorizada de terceros.
 No crea historial, `reply`, evento durable, snapshot o fila SQL.
 
+`yell` y `shout` proceden únicamente de `social.yell` y `social.shout`. El
+servidor calcula un BFS dirigido y determinista que incluye la sala origen:
+radio uno para `yell`, radio tres para `shout`, máximo 259 salas únicas y cero
+travesías de salidas secretas. El mensaje no contiene dirección, distancia,
+ruta ni sala de origen. Ignore, block bilateral y `condition.deaf` suprimen la
+copia de cada receptor para `say`/`yell`/`shout`; la sordera no impide emitir y
+la confirmación del actor no cambia. Mute y el bucket común se comprueban antes
+de ejecutar `OnTalk` una sola vez en origen. Solo un commit correcto inicia el
+fan-out; rollback entrega cero copias. No existe retención, replay,
+suscripción, `reply`, SQL o snapshot para estos canales.
+
 `mail` no es un `chat.message`: se consulta bajo demanda y persiste hasta 30
 días en un buzón de 64 mensajes/128 KiB. La cuota por cuenta es 20 intentos por
 hora y 50 por día. Una entrega suprimida por ignore/block, ban o capacidad usa
@@ -1145,7 +1169,8 @@ La decisión de persistencia, privacidad y retención completa está en
 
 Telnet representa el mismo `SocialMessage` autorizado como texto acotado. Si
 negoció GMCP `Comm`, recibe también `Comm.Channel.Text` con el mismo alcance,
-incluido `announcement`, y los campos `talker` y `text`; GMCP no evita
+incluidos `announcement`, `yell` y `shout`, y los campos
+`talker` y `text`; GMCP no evita
 autorización ni crea otra fuente de verdad. Cuando MXP está negociado, texto,
 remitentes y narrativa de dominio se escapan como datos exactamente una vez;
 texto plano y el JSON GMCP conservan el contenido original.

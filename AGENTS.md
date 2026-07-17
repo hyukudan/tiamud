@@ -226,8 +226,17 @@ matriz, memoria y documentación pública a la vez.
   prefijo UTF-8 del cuerpo y metadatos de overflow bajo el mismo tope; texto
   conserva el cuerpo completo. Web rechaza claves JSON duplicadas a cualquier
   profundidad y solo aplica post/delete/report tras `action.result`
-  correlacionado, conservando borradores en fallo. No hay historial
-  general durable, shout/yell o telepatía de grupo/offline.
+  correlacionado, conservando borradores en fallo. La fase 5E implementa
+  `yell` de radio uno y `shout` de radio tres: BFS
+  dirigido determinista sobre la sala origen, sin atravesar salidas secretas,
+  con máximo de 259 salas y sin proyectar dirección o distancia. Texto y Web
+  aceptan mensajes de 1..=512 bytes; Web usa `social.yell`/`social.shout`
+  exactos, Telnet conserva los comandos y GMCP reutiliza `Comm.Channel.Text`.
+  Mute y el bucket común bloquean emisión; ignore, block bilateral y
+  `condition.deaf` suprimen por receptor `say`/`yell`/`shout` sin impedir que
+  el sordo hable ni cambiar la confirmación del actor. `OnTalk` se ejecuta una
+  vez en origen y la entrega empieza post-commit. No hay historial general
+  durable, persistencia de voz ni telepatía de grupo/offline.
   WorldPack v9/AreaPack v8 añaden hasta
   32 emotes locales authored: `emotes` lista y `emote <comando> [personaje]`
   renderiza plantillas cerradas por perspectiva, sin texto libre, persistencia
@@ -470,6 +479,16 @@ backup/restore, monitorización y recuperación PostgreSQL de producción siguen
 siendo responsabilidad de cada instalación. Véase el
 [registro 5D](docs/project/log/2026-07-17-bounded-moderable-community-boards-phase-5d.md).
 
+### Voz espacial 5E implementada
+
+[ADR 0019](docs/decisions/0019-bounded-spatial-voice.md) está implementado sin
+cambiar WorldPack v9, AreaPack v8, WorldProject v2, snapshot v7 ni esquema SQL
+v13. Core, actor, Web, Telnet/GMCP, cliente y bot demuestran radio 1/3, BFS
+dirigido, ciclos/convergencia, exclusión de salidas secretas, máximo de 259
+salas, mute/bucket, ignore/block/deaf y rollback con cero entregas. La evidencia
+integrada se conserva en el
+[registro 5E](docs/project/log/2026-07-17-bounded-spatial-voice-phase-5e.md).
+
 ### Evidencia histórica retenida
 
 La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
@@ -659,9 +678,10 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
   verificada;
 - sin entrenamiento general, migración general de IDs, multiclase, sprite de
   jugador, heal cue del servidor ni lápida de derrota;
-- fases social 1, telepatía 5A, emotes authored 5B, correo offline 5C y
-  tablones comunitarios 5D implementadas; sin historial general, shout/yell,
-  telepatía de grupo/offline ni emotes globales/de grupo;
+- fases social 1, telepatía 5A, emotes authored 5B, correo offline 5C,
+  tablones comunitarios 5D y voz espacial 5E implementadas; sin historial
+  general, telepatía de grupo/offline ni
+  emotes globales/de grupo;
 - fase staff 2 implementada; sin OLC, spawn/purge, acceso al host ni autoridad
   obtenible por rol legado, título, XP o WorldPack;
 - fase 4B de inventario/botín implementada: prototipos/instancias, creación durable,

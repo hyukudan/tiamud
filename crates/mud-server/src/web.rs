@@ -2993,6 +2993,14 @@ fn special_social_action_has_exact_fields(data: &Value) -> bool {
         return true;
     };
     match fields.get("action").and_then(Value::as_str) {
+        Some("social.yell" | "social.shout") => {
+            const EXACT_FIELDS: [&str; 3] = ["requestId", "action", "message"];
+            fields.len() == EXACT_FIELDS.len()
+                && fields
+                    .keys()
+                    .all(|field| EXACT_FIELDS.contains(&field.as_str()))
+                && fields.get("message").is_some_and(Value::is_string)
+        }
         Some("social.telepathy") => {
             const EXACT_FIELDS: [&str; 5] =
                 ["requestId", "action", "abilityId", "target", "message"];
@@ -3641,6 +3649,27 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
                 .map(SocialAction::Say)
                 .map(PlayerAction::Social)
                 .ok_or_else(|| "Social say requires message.".to_owned())
+        }
+        "social.yell" | "social.shout" => {
+            no_target()?;
+            if has_progression_fields()
+                || data.ability_id.is_some()
+                || data.channel.is_some()
+                || data.duration_seconds.is_some()
+                || data.reason.is_some()
+                || data.role.is_some()
+            {
+                return Err(format!("Action {action:?} has unexpected fields."));
+            }
+            let message = data
+                .message
+                .clone()
+                .ok_or_else(|| format!("Action {action:?} requires message."))?;
+            Ok(PlayerAction::Social(if action == "social.yell" {
+                SocialAction::Yell(message)
+            } else {
+                SocialAction::Shout(message)
+            }))
         }
         "social.tell" => {
             let target = social_target()?;
@@ -5234,8 +5263,16 @@ mod tests {
     }
 
     #[test]
-    fn structured_party_reply_and_channel_actions_map_exactly() {
+    fn structured_spatial_party_reply_and_channel_actions_map_exactly() {
         let cases = [
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"yell","action":"social.yell","message":"The gate is open."}}"#,
+                PlayerAction::Social(SocialAction::Yell("The gate is open.".into())),
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"shout","action":"social.shout","message":"Return to the square!"}}"#,
+                PlayerAction::Social(SocialAction::Shout("Return to the square!".into())),
+            ),
             (
                 r#"{"v":1,"type":"action.perform","data":{"requestId":"party-disband","action":"party.disband"}}"#,
                 PlayerAction::Party(PartyAction::Disband),
@@ -5490,6 +5527,31 @@ mod tests {
             r#"{"v":1,"type":"action.perform","data":{"requestId":"extra-tell","action":"social.tell","target":"Aria","channel":"general","message":"Hello"}}"#,
         ] {
             assert!(requested_action(message).action.is_err(), "{message}");
+        }
+
+        for (message, expected) in [
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"missing-yell","action":"social.yell"}}"#,
+                ClientMessageError::InvalidEnvelope,
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"null-yell","action":"social.yell","message":null}}"#,
+                ClientMessageError::InvalidEnvelope,
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"extra-shout","action":"social.shout","message":"Hello","target":"Aria"}}"#,
+                ClientMessageError::InvalidEnvelope,
+            ),
+            (
+                r#"{"v":1,"type":"action.perform","data":{"requestId":"duplicate-shout","action":"social.shout","message":"Hello","message":"Again"}}"#,
+                ClientMessageError::MalformedJson,
+            ),
+        ] {
+            assert_eq!(
+                parse_client_message(message).unwrap_err(),
+                expected,
+                "{message}",
+            );
         }
 
         assert_eq!(

@@ -1270,6 +1270,18 @@ test('party and channel panels send structured social actions', async ({ page })
   await page.goto('/');
   await page.getByRole('button', { name: /Continue as Aria/i }).click();
 
+  await expect(page.getByLabel('Voice reach')).toHaveValue('say');
+  await page.getByLabel('Voice message').fill('Keep close.');
+  await page.getByRole('button', { name: 'Send voice' }).click();
+  await page.getByLabel('Voice reach').selectOption('yell');
+  await page.getByLabel('Voice message').fill('The gate is open.');
+  await page.getByRole('button', { name: 'Send voice' }).click();
+  await page.getByLabel('Voice reach').selectOption('shout');
+  await page.getByLabel('Voice message').fill('Return to the square!');
+  await page.getByRole('button', { name: 'Send voice' }).click();
+  await expect(page.getByLabel('Direct online recipient')).toBeVisible();
+  await expect(page.getByLabel('Private direct message')).toBeVisible();
+
   await page.locator('summary').filter({ hasText: 'Party' }).click();
   await page.getByLabel('Message to party').fill('Hold the bridge.');
   await page.getByRole('button', { name: 'Send to party' }).click();
@@ -1292,6 +1304,9 @@ test('party and channel panels send structured social actions', async ({ page })
     const state = window as Window & { mockActions?: Array<{ data?: unknown }> };
     return state.mockActions?.map((entry) => entry.data);
   })).toEqual([
+    expect.objectContaining({ action: 'social.say', message: 'Keep close.' }),
+    expect.objectContaining({ action: 'social.yell', message: 'The gate is open.' }),
+    expect.objectContaining({ action: 'social.shout', message: 'Return to the square!' }),
     expect.objectContaining({ action: 'party.say', message: 'Hold the bridge.' }),
     expect.objectContaining({ action: 'party.revoke', target: 'Bram' }),
     expect.objectContaining({ action: 'party.kick', target: 'Bram' }),

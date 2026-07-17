@@ -19,10 +19,14 @@ describe('Tiamud entry flow', () => {
     expect(appSource).not.toContain("notice = { level: 'info', message: message.data.text }");
   });
 
-  it('labels local, direct, authored-emote, party, and world-channel social messages in history', () => {
+  it('labels local, spatial, direct, authored-emote, party, and channel messages in history', () => {
     expect(appSource).toContain("case 'announcement'");
     expect(appSource).toContain('`${message.sender} announces`');
     expect(appSource).toContain("case 'say'");
+    expect(appSource).toContain("case 'yell'");
+    expect(appSource).toContain('`${message.sender} yells`');
+    expect(appSource).toContain("case 'shout'");
+    expect(appSource).toContain('`${message.sender} shouts`');
     expect(appSource).toContain("case 'tell'");
     expect(appSource).toContain("case 'telepathy'");
     expect(appSource).toContain("case 'emote'");

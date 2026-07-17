@@ -357,7 +357,8 @@ test('strict bot accepts bounded combat cues and rejects unrelated or extended c
 
 test('strict bot accepts every social scope and bounded access notice codes', () => {
   for (const channel of [
-    'announcement', 'say', 'tell', 'telepathy', 'emote', 'party', 'general', 'newbie', 'staff',
+    'announcement', 'say', 'yell', 'shout', 'tell', 'telepathy', 'emote', 'party', 'general',
+    'newbie', 'staff',
   ]) {
     assert.equal(
       parseEnvelope('chat.message', { channel, sender: 'Tiamud', text: 'Ready.' }).data.channel,

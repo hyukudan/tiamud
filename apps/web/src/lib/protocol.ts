@@ -274,6 +274,8 @@ export type CommunityChannel = 'general' | 'newbie' | 'staff';
 export type SocialMessageChannel =
   | 'announcement'
   | 'say'
+  | 'yell'
+  | 'shout'
   | 'tell'
   | 'telepathy'
   | 'emote'
@@ -2654,6 +2656,8 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
         (
           channel !== 'announcement' &&
           channel !== 'say' &&
+          channel !== 'yell' &&
+          channel !== 'shout' &&
           channel !== 'tell' &&
           channel !== 'telepathy' &&
           channel !== 'emote' &&
@@ -2726,6 +2730,9 @@ export function createActionPerform(
   fields: ActionPerformFields | undefined,
   requestId: string,
 ): ActionPerform {
+  if (action === 'social.yell' || action === 'social.shout') {
+    validateSpatialVoiceActionFields(action, fields);
+  }
   if (action === 'social.telepathy') validateTelepathyActionFields(fields);
   if (action === 'social.emote' || action === 'social.emote.list') {
     validateEmoteActionFields(action, fields);
@@ -2775,6 +2782,19 @@ export function createActionPerform(
     type: 'action.perform',
     data: { requestId, action, ...fields },
   };
+}
+
+function validateSpatialVoiceActionFields(
+  action: 'social.yell' | 'social.shout',
+  fields: ActionPerformFields | undefined,
+): void {
+  const actual = Object.keys(fields ?? {});
+  if (actual.length !== 1 || actual[0] !== 'message') {
+    throw new RangeError(`${action} requires its exact closed message field`);
+  }
+  if (!boundedVisibleUtf8(fields?.message, 512)) {
+    throw new RangeError(`${action} message must be bounded visible UTF-8 text`);
+  }
 }
 
 function validateMailActionFields(action: string, fields: ActionPerformFields | undefined): void {
