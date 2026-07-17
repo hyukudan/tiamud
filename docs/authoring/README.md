@@ -3,8 +3,9 @@
 This is the current English entry point for creating Tiamud content. The
 runtime consumes one canonical **WorldPack v9**. Authors can maintain that
 world as strict **AreaPack v8** modules under a **WorldProjectManifest v2** and
-compose them offline; areas are not services and are not loaded independently
-at runtime.
+compose them offline. Phase 6A is **implemented** and adds a separate local
+catalog-and-bundle publication path for reviewed area revisions. Areas are not
+services and are still not loaded independently at runtime.
 
 The Rust types, validators and tests in `crates/world-pack` are the exact schema
 authority. These pages explain the supported workflow and link to detailed
@@ -23,6 +24,8 @@ design documents instead of duplicating every field.
 The reviewed example is:
 
 - project: [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json);
+- local area-release metadata:
+  [`worlds/lantern-square.area-release.json`](../../worlds/lantern-square.area-release.json);
 - area modules: [`worlds/areas/`](../../worlds/areas/);
 - canonical artifact: [`worlds/lantern-square.world.json`](../../worlds/lantern-square.world.json).
 
@@ -55,6 +58,91 @@ cargo run --locked -p world-pack --bin tiamud-world -- diff \
 
 Do not publish merely because a document parses. Review prose, licenses,
 alternative text, hidden-state behavior, balance and the semantic diff first.
+
+## Local area catalog and bundles (phase 6A, implemented)
+
+Phase 6A does not replace `compose` or change WorldPack v9, AreaPack v8 or
+WorldProject v2. It prepares a second, offline-only representation for a later
+runtime design:
+
+- one local catalog is bounded to 1 MiB and 256 entries;
+- the release manifest is bounded to 256 KiB; all three JSON envelopes are
+  strict, reject duplicate keys recursively and cap nesting at depth 16;
+- each area bundle is canonical JSON bounded to 16 MiB, and the sum of entry
+  sizes is also bounded to 16 MiB;
+- release metadata binds one area revision to its ownership, dependencies,
+  portals and exact digests;
+- `contentLicense=CC-BY-4.0` covers world content, prose and media, while
+  `scriptLicense=MIT OR Apache-2.0` separately covers Lua/software;
+- `unsigned_local` must be selected explicitly and is not a remote signature
+  or a redistribution claim; and
+- content-addressed blobs are immutable, while the local current pointer is
+  replaced atomically.
+
+`AreaPack.dependsOn` remains the exhaustive authoring declaration that permits
+cross-area references. It is not copied verbatim into `hardDependencies`:
+catalog v1 derives hard dependencies only from non-`RoomExit` cross-area
+references. Cross-area room exits become `portals` and do not pin residency;
+`softDependencies` is empty in v1. Each portal retains its cardinal
+`sourceExit`.
+
+The Rust API names the strict envelopes `AreaReleaseManifest`,
+`AreaBundle` and `AreaCatalog`; `build_area_release` constructs a
+`VerifiedAreaRelease`, while `verify_area_release` checks the complete catalog,
+bundle set and monolithic WorldPack fallback together. Each bundle embeds a
+strict `CompiledArea` and binds it with `compiledAreaSha256`.
+
+```sh
+cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
+  worlds/lantern-square.project.json \
+  --release worlds/lantern-square.area-release.json \
+  --registry build/area-registry
+```
+
+`area-publish` prints the exact content-addressed catalog path. The reviewed
+fixture publishes three bundles and catalog
+`e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6`:
+
+```sh
+cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
+  --catalog build/area-registry/area-catalogs/71b3f0f3493d91254d4ce1ed60c147e9f0f480ca204f62f05b3fd05d92e6e3f1/e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6.catalog.json \
+  --registry build/area-registry
+```
+
+The registry layout is
+`area-catalogs/<world-key>/<catalog-digest>.catalog.json`,
+`area-bundles/<world-key>/<area-key>/<bundle-digest>.area.json`,
+`area-worlds/<world-key>/<world-digest>.world.json`, and the atomic pointer
+`area-active/<world-key>.json`. World and area keys are SHA-256 of the exact
+UTF-8 IDs. The pointer records `schema`, `worldId`, `catalogSha256` and the
+relative `catalog` path. "Active" here means the locally selected editorial
+publication, not a bundle loaded by the world actor.
+
+Cooperating publishers for one world serialize through a per-world advisory
+`fd-lock` and re-read the active revision while holding it. Verification
+preflights the checked aggregate byte budget before bundle I/O. Reused
+identical blobs are reopened and durably resynchronized. `area-verify` is
+read-only, does not create a missing registry and accepts only the exact path
+printed by publication.
+
+`unsigned_local` assumes a local registry on a trusted host with cooperating
+publishers. The advisory lock is not a security boundary against a process
+that ignores it or can mutate the registry; hostile-writer TOCTOU races are
+outside this trust mode.
+
+Use the existing `compose` workflow above as the authoritative way to build
+the one WorldPack loaded by the server. Phase 6A
+does not fetch over a network, compress or remotely sign artifacts, and the
+server does not load, activate, replace, unload or evict these bundles. Those
+are distinct later phases of
+[ADR 0005](../decisions/0005-hot-area-lifecycle.md).
+
+The final gate passes 144/144 `world-pack` tests, including 10/10 CLI tests,
+and 707/707 Rust workspace tests. Workspace strict clippy, formatting/diff,
+Rust 1.88 MSRV check, the three-bundle fixture E2E, smoke, cargo-deny
+advisories/sources and license/notices for 308 Rust and 76 web dependencies
+also pass. Phase 6A does not change Web, protocol, runtime, snapshots or SQL;
+it adds no new Web or PostgreSQL gate claim.
 
 ## Authoring principles
 

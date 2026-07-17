@@ -104,8 +104,34 @@ matriz, memoria y documentación pública a la vez.
   `TIAMUD_WORLD_PACK` selecciona uno externo revisado; si no, se usa el
   embebido.
 - `tiamud-world compose` realiza composición modular determinista sin conexión.
-  Carga/reemplazo caliente y expulsión LRU **no están implementados**. ADR 0005
-  es diseño futuro.
+  La fase 6A está **implementada** y añade una ruta local separada de catálogo y
+  bundles: manifiesto de release de hasta 256 KiB, catálogo de hasta 1 MiB/256
+  entradas, bundles JSON canónicos de hasta 16 MiB y suma de entradas de hasta
+  16 MiB; los tres sobres limitan JSON a profundidad 16 y rechazan claves
+  duplicadas recursivamente. Los metadatos registran área/revisión,
+  propiedad/dependencias/portales/digests, confianza
+  `unsigned_local`, `contentLicense=CC-BY-4.0` para mundo/prosa/medios,
+  `scriptLicense=MIT OR Apache-2.0` para Lua/software, blobs inmutables y
+  puntero atómico. No deduzcas por ello carga, activación, reemplazo, descarga
+  o LRU en runtime, red, compresión ni firma remota: siguen **sin
+  implementar**.
+- En 6A, `AreaPack.dependsOn` sigue siendo declaración editorial exhaustiva.
+  `hardDependencies` deriva solo de referencias cruzadas no-`RoomExit`; cada
+  `RoomExit` cruzado se proyecta como `portals` y no fija residencia.
+  `softDependencies` está vacío en el catálogo v1.
+- El bundle incluye un `CompiledArea` estricto y su `compiledAreaSha256`; cada
+  portal conserva `sourceExit` cardinal. El CLI exacto es `tiamud-world
+  area-publish <project> --release <json> --registry <dir>` y `area-verify
+  --catalog <path> --registry <dir>`. El verificador exige la ruta
+  content-addressed exacta dentro de `area-catalogs/`. El puntero
+  `area-active/<sha256(worldId)>.json` selecciona una publicación editorial
+  local, no una revisión cargada por el actor.
+- `area-publish` serializa publicadores cooperantes mediante un lock advisory
+  `fd-lock` por mundo, prevalida conteo/suma antes de E/S, resincroniza un blob
+  idéntico existente y publica el path exacto por stdout. `area-verify` es
+  read-only. `unsigned_local` exige registro local en host confiable: el lock
+  no protege frente a un proceso que lo ignore ni frente a un escritor hostil;
+  esas carreras TOCTOU quedan fuera de 6A.
 - La autoría mide UTF-8 por bytes: título de sala 1..=128 y descripción
   1..=8.192; rechaza controles inseguros y normaliza entradas legacy antes de
   validar. No subas estos topes para hacer caber prosa generada.
@@ -488,6 +514,17 @@ dirigido, ciclos/convergencia, exclusión de salidas secretas, máximo de 259
 salas, mute/bucket, ignore/block/deaf y rollback con cero entregas. La evidencia
 integrada se conserva en el
 [registro 5E](docs/project/log/2026-07-17-bounded-spatial-voice-phase-5e.md).
+
+### Evidencia integrada de catálogo y bundles locales 6A
+
+La fase 6A pasa 144/144 pruebas de `world-pack`, incluidas 10/10 del CLI, y
+707/707 pruebas Rust del workspace. También pasan formato/diff, clippy estricto
+del workspace, check MSRV con Rust 1.88, el E2E de tres bundles cuyo catálogo
+es `e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6`,
+humo, `cargo deny check advisories sources` y licencias/avisos 308 Rust/76 web.
+No cambia Web, protocolo, runtime, snapshot ni SQL y no aporta una nueva puerta
+Web/PostgreSQL. Véase el
+[registro 6A](docs/project/log/2026-07-17-area-catalog-bundles-phase-6a.md).
 
 ### Evidencia histórica retenida
 

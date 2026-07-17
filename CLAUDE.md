@@ -34,7 +34,30 @@ describe el baseline vigente de personajes, inventario y medios.
   broadcast. Conserva orden, recuperación por lag y rollback de checkpoint.
 - WorldPack v9 y AreaPack v8 son actuales; WorldProject permanece en v2.
   WorldPack v8/v7/v6/v5/v4/v3/v2, AreaPack v7/v6/v5/v4/v3/v2/v1 y Envy se normalizan en fronteras explícitas. El servidor carga un paquete
-  completo; ADR 0005 para carga caliente/LRU es futuro.
+  completo. La fase 6A de ADR 0005 está **implementada** como publicación local
+  separada: manifiesto de release <=256 KiB, catálogo <=1 MiB/256 entradas,
+  bundles JSON canónicos <=16 MiB y suma <=16 MiB; los tres sobres limitan
+  profundidad JSON a 16 y rechazan duplicados recursivos. Los metadatos por
+  área/revisión conservan ownership, dependencias,
+  portales, digests, `unsigned_local` explícito,
+  `contentLicense=CC-BY-4.0` para mundo/prosa/medios y
+  `scriptLicense=MIT OR Apache-2.0` para Lua/software, blobs inmutables y
+  puntero atómico. No implementa carga/activación/reemplazo/descarga/LRU en
+  runtime, red, compresión ni firma remota; esas fases siguen pendientes.
+  `AreaPack.dependsOn` conserva la declaración editorial exhaustiva, pero
+  `hardDependencies` deriva solo de cross-references no-`RoomExit`; los
+  `RoomExit` cruzados van a `portals` y no fijan residencia.
+  `softDependencies` está vacío en v1.
+  El bundle incorpora `CompiledArea` estricto con `compiledAreaSha256` y los
+  portales conservan `sourceExit`. CLI: `tiamud-world area-publish <project>
+  --release <json> --registry <dir>` y `area-verify --catalog <path> --registry
+  <dir>`. El segundo exige el path content-addressed exacto dentro de
+  `area-catalogs/`; `area-active/` es un puntero editorial local, no activación
+  del runtime.
+  `area-publish` usa lock advisory `fd-lock` por mundo, preflight agregado,
+  resincronización durable de blobs idénticos y stdout con el path exacto;
+  `area-verify` es read-only. `unsigned_local` presupone registro local y host
+  confiable: escritor hostil, lock ignorado y TOCTOU adversarial quedan fuera.
 - El personaje v3 incluye linaje, trasfondo, clase base/avanzada, XP global,
   historial, talentos, reservas, promociones, recursos, cooldowns,
   resistencias y estados de extremo a extremo.
@@ -268,6 +291,15 @@ ciclos y convergencia, exclusión de salidas secretas, máximo 259,
 mute/bucket, ignore/block/deaf y rollback sin entrega. El
 [registro 5E](docs/project/log/2026-07-17-bounded-spatial-voice-phase-5e.md)
 conserva la evidencia integrada y los límites no ejecutados.
+
+La fase local 6A está implementada. Pasa 144/144 pruebas de `world-pack`,
+10/10 CLI, 707/707 Rust workspace, formato/diff, clippy workspace estricto,
+MSRV Rust 1.88, E2E de tres bundles con catálogo
+`e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6`,
+humo, advisories/sources y licencias/avisos 308 Rust/76 web. No cambia Web,
+protocolo, runtime, snapshot ni SQL y no acredita una nueva puerta
+Web/PostgreSQL. Véase el
+[registro 6A](docs/project/log/2026-07-17-area-catalog-bundles-phase-6a.md).
 
 La evidencia histórica anterior informa 409 pruebas Rust, 158 de servidor, 96
 web y 28 escenarios Chromium/Firefox; PostgreSQL 18.4 **esquema v8**, perfil

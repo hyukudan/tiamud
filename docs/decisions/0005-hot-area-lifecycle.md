@@ -1,6 +1,7 @@
 # ADR 0005: ciclo de vida de áreas cargables en caliente
 
-- Estado: arquitectura objetivo aceptada; implementación pendiente.
+- Estado: arquitectura objetivo aceptada; fase 6A local implementada; residencia,
+  activación y descarga en runtime pendientes.
 - Fecha: 2026-07-15.
 - Alcance: catálogo, activación, sustitución y descarga de áreas del mundo.
 
@@ -9,7 +10,7 @@
 Cuando se aceptó esta decisión, Tiamud dividía la autoría en un
 `WorldProjectManifest` v1 y módulos `AreaPack` v1 que componían un
 `WorldPackDocument` v2. La frontera vigente ha evolucionado a manifiesto v2,
-AreaPack v4 y WorldPack v5, pero conserva el mismo comportamiento relevante:
+AreaPack v8 y WorldPack v9, pero conserva el mismo comportamiento relevante:
 `tiamud-world compose` valida el grafo completo sin conexión y el servidor
 consume un solo artefacto plano al arrancar.
 
@@ -20,7 +21,8 @@ durante la partida. En la implementación actual:
 
 - el servidor valida y carga un WorldPack completo antes de abrir la red;
 - las salas y entidades no conservan propiedad de área en el runtime;
-- no existe catálogo de bundles, estado de residencia ni presupuesto LRU;
+- la fase 6A local de catálogo y bundles está implementada, pero el servidor no la
+  consume y no existe estado de residencia ni presupuesto LRU;
 - publicar o revertir selecciona el artefacto para un arranque posterior; y
 - cambiar el mundo exige reiniciar el proceso.
 
@@ -36,9 +38,10 @@ Se adopta como arquitectura objetivo un modelo híbrido:
 
 1. La autoría seguirá dividida en `AreaPack` y conservará la composición global
    sin conexión como ruta estable, simple y reproducible.
-2. Una futura ruta de runtime publicará bundles de área inmutables y
-   direccionados por contenido, acompañados por un catálogo pequeño siempre
-   residente.
+2. La fase 6A publica sin conexión bundles de área inmutables y direccionados
+   por contenido, acompañados por un catálogo local pequeño. Una fase 6B o
+   posterior podrá preparar su consumo en runtime y residencia, pero no forma
+   parte de 6A.
 3. Una revisión se preparará y validará fuera del actor del mundo. Solo una
    transición explícita del actor podrá activarla.
 4. Las áreas con actividad se fijarán en memoria. Las vacías podrán descargarse
@@ -51,10 +54,15 @@ Se adopta como arquitectura objetivo un modelo híbrido:
    información jugable seguirán siendo completas sin esos recursos.
 
 Esta decisión no exige otro cambio de formato ni altera el runtime actual.
-WorldPack v5/AreaPack v4 siguen siendo la frontera hasta que una implementación
-futura de áreas calientes acepte un ADR y migración propios.
+WorldPack v9/AreaPack v8 siguen siendo la frontera; catálogo y bundle usan su
+propio sobre versionado y no convierten AreaPack en un protocolo de activación.
 
-## Catálogo residente
+La fase 6A mantiene además un WorldPack v9 monolítico, content-addressed y
+verificado como respaldo. Su puntero local de publicación se llama `area-active`
+por analogía editorial; no significa que un área esté activa o residente en el
+actor de mundo.
+
+## Catálogo residente objetivo y sobre local 6A
 
 El catálogo contiene metadatos, no salas ni scripts ejecutables. Cada entrada
 identifica como mínimo:
@@ -70,8 +78,48 @@ identifica como mínimo:
 - estado de revisión, procedencia, licencia y, cuando exista distribución
   remota, identidad de firma.
 
-El catálogo completo tendrá límites de bytes y entradas. Se validará de forma
-atómica antes de reemplazar su versión activa. Un área o entidad solo tendrá un
+El sobre local v1 de 6A concreta ese objetivo de forma más estrecha:
+
+- un manifiesto de release ocupa hasta 256 KiB, el catálogo hasta 1 MiB/256
+  entradas, cada bundle hasta 16 MiB y su suma hasta 16 MiB;
+- `worldId` vive en catálogo y bundle; la entrada identifica `areaId` y
+  `revision` sin repetirlo;
+- manifiesto, catálogo y bundle son JSON estricto de profundidad máxima 16 y
+  rechazan claves duplicadas recursivamente;
+- `storedBytes` es igual a `expandedBytes`: v1 no comprime;
+- `AreaPack.dependsOn` conserva la declaración editorial exhaustiva, pero
+  `hardDependencies` deriva solo de referencias cruzadas no-`RoomExit`; los
+  `RoomExit` se representan como `portals`, conservan `sourceExit` y no fijan
+  residencia;
+- `softDependencies` permanece vacío en v1;
+- el bundle liga un `CompiledArea` estricto mediante `compiledAreaSha256`;
+- `contentLicense` separa la licencia de mundo/prosa/medios de
+  `scriptLicense` para Lua/software; el fixture original de Tiamud usa
+  respectivamente `CC-BY-4.0` y `MIT OR Apache-2.0`; y
+- `trustMode=unsigned_local` es obligatorio y explícito. No equivale a firma
+  remota ni autoriza redistribución.
+
+Los blobs viven bajo `area-catalogs/`, `area-bundles/` y `area-worlds/`, en
+rutas derivadas de SHA-256. Solo después de reabrir y verificar el conjunto se
+sustituye atómicamente el puntero local `area-active/`. 6A no incluye red,
+compresión, firma remota, carga, activación, reemplazo, descarga ni LRU en
+runtime.
+
+Los publicadores cooperantes se serializan mediante un lock advisory `fd-lock`
+por mundo y revalidan la revisión activa dentro del lock. El verificador hace
+preflight checked del conteo y presupuesto agregado antes de abrir bundles;
+un blob idéntico existente se reabre y resincroniza durablemente. `area-verify`
+es read-only y exige la ruta exacta que `area-publish` publica por stdout.
+
+`unsigned_local` presupone un registro local en un host confiable. El lock no
+es una frontera contra un proceso que lo ignore o pueda mutar el registro; un
+escritor hostil y sus carreras TOCTOU quedan fuera de este modo. La evidencia
+final se conserva en el
+[registro 6A](../project/log/2026-07-17-area-catalog-bundles-phase-6a.md).
+
+El catálogo completo conserva límites de bytes y entradas. V1 se valida de
+forma atómica antes de reemplazar su puntero local; una futura versión residente
+deberá conservar la misma propiedad. Un área o entidad solo tendrá un
 propietario por generación de mundo. Los IDs estables no se reutilizarán con un
 significado distinto.
 
@@ -299,9 +347,11 @@ opcional descargada no vuelve por sí sola no-ready al proceso.
 
 1. **Base ya entregada:** autoría AreaPack, manifiesto de proyecto, composición
    determinista, digests, ownership y aristas cruzadas; runtime monolítico.
-2. **Catálogo y bundles:** esquema versionado, firma/procedencia, herramienta de
-   publicación y verificador sin activación caliente.
-3. **Carga bajo demanda sin descarga:** arenas inmutables, portales, pins,
+2. **Catálogo y bundles, fase 6A implementada:** esquema versionado local,
+   procedencia, licencias separadas, trust `unsigned_local`, publicación
+   inmutable, puntero atómico y verificador sin activación caliente. Firma y
+   registro remotos no pertenecen a esta fase.
+3. **Carga aditiva bajo demanda sin descarga, fase 6B:** arenas inmutables, portales, pins,
    compatibilidad y recuperación; mantener todas las áreas usadas residentes.
 4. **Sustitución caliente:** staging, generaciones, drenaje y rollback por lote,
    primero para áreas vacías y sin migraciones.

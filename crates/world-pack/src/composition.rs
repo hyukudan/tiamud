@@ -580,8 +580,8 @@ fn normalize_v3_area_items(value: &mut serde_json::Value) -> Result<(), String> 
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AreaOwnership {
     pub rooms: Vec<String>,
     pub item_prototypes: Vec<String>,
@@ -618,7 +618,15 @@ pub struct AreaComposition {
     /// SHA-256 of the exact reviewed AreaPack source bytes.
     pub source_sha256: String,
     pub depends_on: Vec<String>,
+    pub asset_manifests: Vec<AreaAssetManifestDigest>,
     pub ownership: AreaOwnership,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AreaAssetManifestDigest {
+    pub path: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -681,6 +689,9 @@ pub struct ComposedWorld {
     pub document: WorldPackDocument,
     pub artifact: Vec<u8>,
     pub report: CompositionReport,
+    /// Canonical AreaPack v8 inputs, ordered by stable area id. This remains an
+    /// offline authoring surface and is never consumed by the game runtime.
+    pub area_packs: Vec<AreaPack>,
 }
 
 #[derive(Debug, Error)]
@@ -1141,6 +1152,7 @@ fn compose_loaded(
             id: pack.id.clone(),
             source_sha256: area.source_sha256.clone(),
             depends_on: sorted(pack.depends_on.clone()),
+            asset_manifests: area_asset_manifest_digests(manifest_path, manifest_dir, pack)?,
             ownership: AreaOwnership {
                 rooms: sorted(pack.rooms.iter().map(|value| value.id.clone()).collect()),
                 item_prototypes: sorted(
@@ -1461,11 +1473,169 @@ fn compose_loaded(
         areas: ownership,
         cross_area_references,
     };
+    let area_packs = areas.iter().map(|area| area.pack.clone()).collect();
     Ok(ComposedWorld {
         document,
         artifact,
         report,
+        area_packs,
     })
+}
+
+pub(crate) fn ownership_for_area(pack: &AreaPack) -> AreaOwnership {
+    AreaOwnership {
+        rooms: sorted(pack.rooms.iter().map(|value| value.id.clone()).collect()),
+        item_prototypes: sorted(
+            pack.item_prototypes
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        initial_item_instances: sorted(
+            pack.initial_item_instances
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        npc_prototypes: sorted(
+            pack.npc_prototypes
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        npc_spawns: sorted(
+            pack.npc_spawns
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        loot_tables: sorted(
+            pack.loot_tables
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        loot_sources: sorted(
+            pack.loot_sources
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        affixes: sorted(pack.affixes.iter().map(|value| value.id.clone()).collect()),
+        affix_pools: sorted(
+            pack.affix_pools
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        archetypes: sorted(
+            pack.archetypes
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        lineages: sorted(pack.lineages.iter().map(|value| value.id.clone()).collect()),
+        backgrounds: sorted(
+            pack.backgrounds
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        base_classes: sorted(
+            pack.base_classes
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        advanced_classes: sorted(
+            pack.advanced_classes
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        talent_graphs: sorted(
+            pack.talent_graphs
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        talent_nodes: sorted(
+            pack.talent_graphs
+                .iter()
+                .flat_map(|graph| graph.nodes.iter().map(|node| node.id.clone()))
+                .collect(),
+        ),
+        abilities: sorted(
+            pack.abilities
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        social_emotes: sorted(
+            pack.social_emotes
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        npc_ability_sets: sorted(
+            pack.npc_ability_sets
+                .iter()
+                .map(|value| value.npc_prototype_id.clone())
+                .collect(),
+        ),
+        room_media: sorted(
+            pack.room_media
+                .iter()
+                .map(|value| value.room_id.clone())
+                .collect(),
+        ),
+        entity_media: sorted(
+            pack.entity_media
+                .iter()
+                .map(EntityMediaDefinition::key)
+                .collect(),
+        ),
+        room_perception: sorted(
+            pack.room_perception
+                .iter()
+                .map(|value| value.room_id.clone())
+                .collect(),
+        ),
+        scene_variant_sets: sorted(
+            pack.scene_variants
+                .iter()
+                .map(|value| value.room_id.clone())
+                .collect(),
+        ),
+        scene_variants: sorted(
+            pack.scene_variants
+                .iter()
+                .flat_map(|set| set.variants.iter().map(|variant| variant.id.clone()))
+                .collect(),
+        ),
+        scripts: sorted(pack.scripts.iter().map(|value| value.id.clone()).collect()),
+        content_tests: sorted(
+            pack.content_tests
+                .iter()
+                .map(|value| value.name.clone())
+                .collect(),
+        ),
+    }
+}
+
+pub(crate) fn cross_area_references_for_packs(packs: &[AreaPack]) -> Vec<AreaCrossReference> {
+    let loaded = packs
+        .iter()
+        .cloned()
+        .map(|pack| LoadedArea {
+            source_sha256: String::new(),
+            pack,
+        })
+        .collect::<Vec<_>>();
+    let mut references = derive_cross_area_references(&loaded);
+    references.sort();
+    references.dedup();
+    references
 }
 
 fn canonical_project_digest(manifest: &WorldProjectManifest) -> Result<String, CompositionError> {
@@ -2214,6 +2384,38 @@ fn add_edge(
     }
 }
 
+fn area_asset_manifest_digests(
+    manifest_path: &Path,
+    manifest_dir: &Path,
+    pack: &AreaPack,
+) -> Result<Vec<AreaAssetManifestDigest>, CompositionError> {
+    let roots = project_asset_roots(manifest_path, manifest_dir);
+    let mut paths = pack
+        .rooms
+        .iter()
+        .filter_map(|room| room.asset_manifest.clone())
+        .chain(
+            pack.scene_variants
+                .iter()
+                .flat_map(|set| &set.variants)
+                .filter_map(|variant| variant.asset_manifest.clone()),
+        )
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            let resolved = locate_asset(&roots, &path)?;
+            let bytes = read_bounded(&resolved, 256 * 1024, "image manifest")?;
+            Ok(AreaAssetManifestDigest {
+                path,
+                sha256: sha256_hex(&bytes),
+            })
+        })
+        .collect()
+}
+
 fn validate_project_assets(
     manifest_path: &Path,
     manifest_dir: &Path,
@@ -2415,7 +2617,7 @@ fn safe_identifier(value: &str) -> bool {
 /// Existing runtime WorldPack readers intentionally tolerate future fields.
 /// AreaPack v8 does not: this format-specific key audit makes every structured
 /// authoring record fail closed without changing runtime deserialization.
-fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionError> {
+pub(crate) fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), CompositionError> {
     let Some(area) = audit_object(
         value,
         &[

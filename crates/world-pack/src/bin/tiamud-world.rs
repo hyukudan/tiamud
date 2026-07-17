@@ -1,17 +1,18 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
 #[cfg(feature = "editorial-ai")]
-use std::{env, fs::File, io::Read, time::Duration};
+use std::{env, fs::File, time::Duration};
 
 #[cfg(feature = "editorial-ai")]
 use clap::Args;
 use clap::{Parser, Subcommand, ValueEnum};
+use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -22,11 +23,18 @@ use tiamud_editorial_ai::{
     MAX_TIMEOUT, ProviderConfig,
 };
 use world_pack::{
-    CompositionError, ConditionContext, DocumentToolError, PreviewFormat, TimePeriod, Weather,
-    WorldPack, WorldPackDiagnostic, WorldPackDocument, compose_world_project,
+    AreaCatalog, AreaCatalogError, CompositionError, ConditionContext, DocumentToolError,
+    MAX_AREA_COUNT, MAX_TOTAL_AREA_BYTES, PreviewFormat, TimePeriod, Weather, WorldPack,
+    WorldPackDiagnostic, WorldPackDocument, build_area_release, compose_world_project,
+    parse_area_catalog, parse_area_release_manifest, verify_area_release,
 };
 
 const MAX_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_AREA_RELEASE_INPUT_BYTES: usize = 256 * 1024;
+const MAX_AREA_CATALOG_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_AREA_BUNDLE_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_AREA_WORLD_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_AREA_POINTER_BYTES: usize = 16 * 1024;
 #[cfg(feature = "editorial-ai")]
 const MAX_EDITORIAL_ARTIFACT_BYTES: usize = 512 * 1024;
 #[cfg(feature = "editorial-ai")]
@@ -102,6 +110,21 @@ enum Command {
         world: String,
         #[arg(long)]
         sha256: String,
+    },
+    /// Publish immutable AreaPack bundles, their catalog, and a monolithic fallback.
+    AreaPublish {
+        project: PathBuf,
+        #[arg(long)]
+        release: PathBuf,
+        #[arg(long)]
+        registry: PathBuf,
+    },
+    /// Verify one content-addressed area catalog and every referenced local blob.
+    AreaVerify {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        registry: PathBuf,
     },
     #[cfg(feature = "editorial-ai")]
     /// Ask an optional editorial backend for an unreviewed, authoring-only draft.
@@ -356,6 +379,15 @@ enum CliError {
     WrongPublishedWorld(String),
     #[error("published artifact digest does not match its bytes")]
     PublishedDigestMismatch,
+    #[error("area catalog operation failed: {0}")]
+    AreaCatalog(#[from] AreaCatalogError),
+    #[error("invalid area registry: {0}")]
+    InvalidAreaRegistry(String),
+    #[error("could not acquire area publication lock {path:?}: {source}")]
+    AreaPublicationLock {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[cfg(feature = "editorial-ai")]
     #[error("invalid editorial AI configuration: {0}")]
     InvalidAiConfiguration(String),
@@ -386,6 +418,15 @@ struct ActivePublication {
     world_id: String,
     sha256: String,
     artifact: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActiveAreaCatalog {
+    schema: u8,
+    world_id: String,
+    catalog_sha256: String,
+    catalog: String,
 }
 
 fn main() -> ExitCode {
@@ -562,6 +603,21 @@ fn run(cli: Cli) -> Result<(), CliError> {
             }
             activate_publication(&registry, &world, &sha256, &path)?;
             println!("rolled world {world:?} back to sha256:{sha256}");
+        }
+        Command::AreaPublish {
+            project,
+            release,
+            registry,
+        } => publish_area_release(&project, &release, &registry)?,
+        Command::AreaVerify { catalog, registry } => {
+            let (catalog, digest) = load_verified_area_catalog(&catalog, &registry)?;
+            println!(
+                "verified area catalog {:?} revision {} as sha256:{} ({} area bundle(s))",
+                catalog.world_id,
+                catalog.catalog_revision,
+                digest,
+                catalog.entries.len()
+            );
         }
         #[cfg(feature = "editorial-ai")]
         Command::AiDraft(arguments) => {
@@ -1117,6 +1173,714 @@ fn write_artifact_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> 
     result
 }
 
+fn publish_area_release(
+    project: &Path,
+    release_path: &Path,
+    registry: &Path,
+) -> Result<(), CliError> {
+    let composed = compose_world_project(project).map_err(|source| CliError::Composition {
+        path: project.to_owned(),
+        source: Box::new(source),
+    })?;
+    let release_bytes = read_bounded_regular_file(
+        release_path,
+        MAX_AREA_RELEASE_INPUT_BYTES,
+        "area release manifest",
+    )?;
+    let release = parse_area_release_manifest(&release_bytes)?;
+    // This advisory lock serializes cooperating local `tiamud-world`
+    // publishers for one world. It intentionally is not a security boundary
+    // against a process that ignores locks or can mutate the registry.
+    let lock_path = area_publication_lock_path(registry, &composed.report.project_id);
+    let lock_file = open_area_publication_lock(registry, &lock_path)?;
+    let mut publication_lock = RwLock::new(lock_file);
+    let _publication_guard =
+        publication_lock
+            .write()
+            .map_err(|source| CliError::AreaPublicationLock {
+                path: lock_path,
+                source,
+            })?;
+    let previous = load_active_area_catalog(registry, &composed.report.project_id)?;
+    let verified = build_area_release(&composed, &release, previous.as_ref())?;
+    verify_area_release(
+        &verified.catalog,
+        &verified.bundles,
+        &verified.world_artifact,
+    )?;
+
+    let world_path = area_world_blob_path(
+        registry,
+        &verified.catalog.world_id,
+        &verified.catalog.world_artifact_sha256,
+    );
+    write_immutable_area_blob(
+        registry,
+        &world_path,
+        &verified.world_artifact,
+        &verified.catalog.world_artifact_sha256,
+        MAX_AREA_WORLD_INPUT_BYTES,
+    )?;
+    for (area_id, bytes) in &verified.bundles {
+        let entry = verified
+            .catalog
+            .entries
+            .iter()
+            .find(|entry| &entry.area_id == area_id)
+            .ok_or_else(|| {
+                CliError::InvalidAreaRegistry(format!(
+                    "verified bundle {area_id:?} has no catalog entry"
+                ))
+            })?;
+        let path = area_bundle_blob_path(
+            registry,
+            &verified.catalog.world_id,
+            area_id,
+            &entry.bundle_sha256,
+        );
+        write_immutable_area_blob(
+            registry,
+            &path,
+            bytes,
+            &entry.bundle_sha256,
+            MAX_AREA_BUNDLE_INPUT_BYTES,
+        )?;
+    }
+    let catalog_path = area_catalog_blob_path(
+        registry,
+        &verified.catalog.world_id,
+        &verified.catalog_sha256,
+    );
+    write_immutable_area_blob(
+        registry,
+        &catalog_path,
+        &verified.catalog_bytes,
+        &verified.catalog_sha256,
+        MAX_AREA_CATALOG_INPUT_BYTES,
+    )?;
+
+    // Re-open every immutable blob through the same bounded, no-symlink path
+    // used by `area-verify`. The active pointer is the final durable write.
+    let (stored, stored_digest) = load_verified_area_catalog(&catalog_path, registry)?;
+    if stored != verified.catalog || stored_digest != verified.catalog_sha256 {
+        return Err(CliError::InvalidAreaRegistry(
+            "stored catalog differs from the verified release".into(),
+        ));
+    }
+    activate_area_catalog(registry, &stored, &stored_digest, &catalog_path)?;
+    println!(
+        "{}",
+        area_publish_success_message(&stored, &stored_digest, &catalog_path)
+    );
+    Ok(())
+}
+
+fn area_publish_success_message(catalog: &AreaCatalog, digest: &str, path: &Path) -> String {
+    format!(
+        "published area catalog {:?} revision {} as sha256:{} with {} immutable bundle(s) at {:?}",
+        catalog.world_id,
+        catalog.catalog_revision,
+        digest,
+        catalog.entries.len(),
+        path
+    )
+}
+
+fn load_active_area_catalog(
+    registry: &Path,
+    world_id: &str,
+) -> Result<Option<AreaCatalog>, CliError> {
+    let pointer_path = active_area_catalog_path(registry, world_id);
+    match fs::symlink_metadata(&pointer_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CliError::Read {
+                path: pointer_path,
+                source,
+            });
+        }
+        Ok(_) => {}
+    }
+    let bytes = read_bounded_registry_file(
+        registry,
+        &pointer_path,
+        MAX_AREA_POINTER_BYTES,
+        "active area catalog pointer",
+    )?;
+    let pointer: ActiveAreaCatalog = serde_json::from_slice(&bytes).map_err(|error| {
+        CliError::InvalidAreaRegistry(format!("invalid active catalog pointer JSON: {error}"))
+    })?;
+    if pointer.schema != 1 || pointer.world_id != world_id {
+        return Err(CliError::InvalidAreaRegistry(
+            "active catalog pointer has the wrong schema or world".into(),
+        ));
+    }
+    validate_digest(&pointer.catalog_sha256)?;
+    let catalog_path = area_catalog_blob_path(registry, world_id, &pointer.catalog_sha256);
+    let expected_relative = registry_relative_path(registry, &catalog_path)?;
+    if pointer.catalog != expected_relative {
+        return Err(CliError::InvalidAreaRegistry(
+            "active catalog pointer does not name its content-addressed catalog".into(),
+        ));
+    }
+    let (catalog, digest) = load_verified_area_catalog(&catalog_path, registry)?;
+    if digest != pointer.catalog_sha256 || catalog.world_id != world_id {
+        return Err(CliError::InvalidAreaRegistry(
+            "active catalog pointer digest/world mismatch".into(),
+        ));
+    }
+    Ok(Some(catalog))
+}
+
+fn load_verified_area_catalog(
+    catalog_path: &Path,
+    registry: &Path,
+) -> Result<(AreaCatalog, String), CliError> {
+    let catalog_bytes = read_bounded_registry_file(
+        registry,
+        catalog_path,
+        MAX_AREA_CATALOG_INPUT_BYTES,
+        "area catalog",
+    )?;
+    let catalog_digest = sha256_hex(&catalog_bytes);
+    let catalog = parse_area_catalog(&catalog_bytes)?;
+    preflight_area_catalog_read_budget(&catalog)?;
+    let expected_catalog_path =
+        area_catalog_blob_path(registry, &catalog.world_id, &catalog_digest);
+    if catalog_path != expected_catalog_path {
+        return Err(CliError::InvalidAreaRegistry(
+            "catalog path is not its exact content-addressed registry path".into(),
+        ));
+    }
+
+    let world_path =
+        area_world_blob_path(registry, &catalog.world_id, &catalog.world_artifact_sha256);
+    let world_artifact = read_bounded_registry_file(
+        registry,
+        &world_path,
+        MAX_AREA_WORLD_INPUT_BYTES,
+        "monolithic WorldPack fallback",
+    )?;
+    let mut bundles = BTreeMap::new();
+    for entry in &catalog.entries {
+        let path = area_bundle_blob_path(
+            registry,
+            &catalog.world_id,
+            &entry.area_id,
+            &entry.bundle_sha256,
+        );
+        let bytes = read_bounded_registry_file(
+            registry,
+            &path,
+            MAX_AREA_BUNDLE_INPUT_BYTES,
+            "area bundle",
+        )?;
+        if bundles.insert(entry.area_id.clone(), bytes).is_some() {
+            return Err(CliError::InvalidAreaRegistry(format!(
+                "duplicate area {:?} in catalog",
+                entry.area_id
+            )));
+        }
+    }
+    verify_area_release(&catalog, &bundles, &world_artifact)?;
+    Ok((catalog, catalog_digest))
+}
+
+fn preflight_area_catalog_read_budget(catalog: &AreaCatalog) -> Result<(), CliError> {
+    if catalog.entries.is_empty() || catalog.entries.len() > MAX_AREA_COUNT {
+        return Err(CliError::InvalidAreaRegistry(format!(
+            "area catalog must contain between 1 and {MAX_AREA_COUNT} bundle entries"
+        )));
+    }
+    let mut total = 0_u64;
+    for entry in &catalog.entries {
+        if entry.stored_bytes == 0 || entry.stored_bytes > MAX_AREA_BUNDLE_INPUT_BYTES as u64 {
+            return Err(CliError::InvalidAreaRegistry(format!(
+                "area bundle {:?} declares an invalid stored byte size",
+                entry.area_id
+            )));
+        }
+        total = total.checked_add(entry.stored_bytes).ok_or_else(|| {
+            CliError::InvalidAreaRegistry("area bundle byte sum overflows".into())
+        })?;
+        if total > MAX_TOTAL_AREA_BYTES {
+            return Err(CliError::InvalidAreaRegistry(format!(
+                "area bundle set declares {total} stored bytes; the limit is {MAX_TOTAL_AREA_BYTES} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn activate_area_catalog(
+    registry: &Path,
+    catalog: &AreaCatalog,
+    digest: &str,
+    catalog_path: &Path,
+) -> Result<(), CliError> {
+    validate_digest(digest)?;
+    let pointer_path = active_area_catalog_path(registry, &catalog.world_id);
+    let parent = pointer_path
+        .parent()
+        .expect("active area catalog pointer has a parent");
+    ensure_area_registry_directory(registry, parent)?;
+    let pointer = ActiveAreaCatalog {
+        schema: 1,
+        world_id: catalog.world_id.clone(),
+        catalog_sha256: digest.to_owned(),
+        catalog: registry_relative_path(registry, catalog_path)?,
+    };
+    let mut bytes = serde_json::to_vec_pretty(&pointer).map_err(|error| {
+        CliError::InvalidAreaRegistry(format!("could not encode active catalog pointer: {error}"))
+    })?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_AREA_POINTER_BYTES {
+        return Err(CliError::InvalidAreaRegistry(
+            "active catalog pointer exceeds its byte limit".into(),
+        ));
+    }
+    let file_name = pointer_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("active-area-catalog");
+    let (temporary, mut file) = reserve_temporary(parent, file_name)?;
+    let result = (|| {
+        file.write_all(&bytes).map_err(|source| CliError::Write {
+            path: temporary.clone(),
+            source,
+        })?;
+        file.sync_all().map_err(|source| CliError::Write {
+            path: temporary.clone(),
+            source,
+        })?;
+        drop(file);
+        fs::rename(&temporary, &pointer_path).map_err(|source| CliError::Write {
+            path: pointer_path.clone(),
+            source,
+        })?;
+        sync_directory(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn area_catalog_blob_path(registry: &Path, world_id: &str, digest: &str) -> PathBuf {
+    registry
+        .join("area-catalogs")
+        .join(world_storage_id(world_id))
+        .join(format!("{digest}.catalog.json"))
+}
+
+fn area_bundle_blob_path(registry: &Path, world_id: &str, area_id: &str, digest: &str) -> PathBuf {
+    registry
+        .join("area-bundles")
+        .join(world_storage_id(world_id))
+        .join(area_storage_id(area_id))
+        .join(format!("{digest}.area.json"))
+}
+
+fn area_world_blob_path(registry: &Path, world_id: &str, digest: &str) -> PathBuf {
+    registry
+        .join("area-worlds")
+        .join(world_storage_id(world_id))
+        .join(format!("{digest}.world.json"))
+}
+
+fn active_area_catalog_path(registry: &Path, world_id: &str) -> PathBuf {
+    registry
+        .join("area-active")
+        .join(format!("{}.json", world_storage_id(world_id)))
+}
+
+fn area_publication_lock_path(registry: &Path, world_id: &str) -> PathBuf {
+    registry
+        .join("area-locks")
+        .join(format!("{}.lock", world_storage_id(world_id)))
+}
+
+fn open_area_publication_lock(registry: &Path, path: &Path) -> Result<fs::File, CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::InvalidAreaRegistry("area lock has no parent".into()))?;
+    ensure_area_registry_directory(registry, parent)?;
+
+    let mut create = OpenOptions::new();
+    create.read(true).write(true).create_new(true);
+    match create.open(path) {
+        Ok(file) => {
+            file.sync_all().map_err(|source| CliError::Write {
+                path: path.to_owned(),
+                source,
+            })?;
+            sync_directory(parent)?;
+            Ok(file)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let before = fs::symlink_metadata(path).map_err(|source| CliError::Read {
+                path: path.to_owned(),
+                source,
+            })?;
+            if before.file_type().is_symlink() || !before.file_type().is_file() {
+                return Err(CliError::InvalidAreaRegistry(
+                    "area publication lock is not a regular non-symlink file".into(),
+                ));
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|source| CliError::Read {
+                    path: path.to_owned(),
+                    source,
+                })?;
+            let opened = file.metadata().map_err(|source| CliError::Read {
+                path: path.to_owned(),
+                source,
+            })?;
+            if !opened.file_type().is_file() {
+                return Err(CliError::InvalidAreaRegistry(
+                    "area publication lock changed while it was opened".into(),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if before.dev() != opened.dev() || before.ino() != opened.ino() {
+                    return Err(CliError::InvalidAreaRegistry(
+                        "area publication lock changed while it was opened".into(),
+                    ));
+                }
+            }
+            Ok(file)
+        }
+        Err(source) => Err(CliError::Write {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn area_storage_id(area_id: &str) -> String {
+    sha256_hex(area_id.as_bytes())
+}
+
+fn write_immutable_area_blob(
+    registry: &Path,
+    path: &Path,
+    bytes: &[u8],
+    expected_digest: &str,
+    maximum: usize,
+) -> Result<(), CliError> {
+    validate_digest(expected_digest)?;
+    if bytes.len() > maximum || sha256_hex(bytes) != expected_digest {
+        return Err(CliError::InvalidAreaRegistry(
+            "immutable area blob violates its size or digest contract".into(),
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::InvalidAreaRegistry("area blob has no parent".into()))?;
+    ensure_area_registry_directory(registry, parent)?;
+    match write_artifact_atomically(path, bytes) {
+        Ok(()) => Ok(()),
+        Err(CliError::OutputExists(_)) => {
+            let existing = read_bounded_registry_file(
+                registry,
+                path,
+                maximum,
+                "existing immutable area blob",
+            )?;
+            if existing == bytes {
+                sync_existing_registry_file(registry, path, "existing immutable area blob")?;
+                Ok(())
+            } else {
+                Err(CliError::PublishedDigestMismatch)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_area_registry_directory(registry: &Path, directory: &Path) -> Result<(), CliError> {
+    if !directory.starts_with(registry) {
+        return Err(CliError::InvalidAreaRegistry(
+            "area registry path escapes its configured root".into(),
+        ));
+    }
+    ensure_directory_without_symlink(registry)?;
+    let relative = directory.strip_prefix(registry).map_err(|_| {
+        CliError::InvalidAreaRegistry("area registry path escapes its configured root".into())
+    })?;
+    let mut current = registry.to_owned();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(CliError::InvalidAreaRegistry(
+                "area registry path contains a traversal component".into(),
+            ));
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => {
+                return Err(CliError::InvalidAreaRegistry(format!(
+                    "registry component {:?} is not a real directory",
+                    current
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::create_dir(&current) {
+                    Ok(()) => {
+                        let parent = current.parent().unwrap_or(registry);
+                        sync_directory(parent)?;
+                        sync_directory(&current)?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        ensure_directory_without_symlink(&current)?;
+                    }
+                    Err(source) => {
+                        return Err(CliError::Write {
+                            path: current,
+                            source,
+                        });
+                    }
+                }
+            }
+            Err(source) => {
+                return Err(CliError::Write {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_directory_without_symlink(path: &Path) -> Result<(), CliError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            Ok(())
+        }
+        Ok(_) => Err(CliError::InvalidAreaRegistry(format!(
+            "registry component {path:?} is not a real directory"
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_dir_all_durable(path)?;
+            let metadata = fs::symlink_metadata(path).map_err(|source| CliError::Read {
+                path: path.to_owned(),
+                source,
+            })?;
+            if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+                Ok(())
+            } else {
+                Err(CliError::InvalidAreaRegistry(format!(
+                    "registry component {path:?} is not a real directory"
+                )))
+            }
+        }
+        Err(source) => Err(CliError::Read {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn read_bounded_registry_file(
+    registry: &Path,
+    path: &Path,
+    maximum: usize,
+    kind: &'static str,
+) -> Result<Vec<u8>, CliError> {
+    if !path.starts_with(registry) {
+        return Err(CliError::InvalidAreaRegistry(format!(
+            "{kind} path escapes its configured registry"
+        )));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::InvalidAreaRegistry(format!("{kind} has no parent")))?;
+    ensure_existing_registry_directory(registry, parent)?;
+    read_bounded_regular_file(path, maximum, kind)
+}
+
+fn ensure_existing_registry_directory(registry: &Path, directory: &Path) -> Result<(), CliError> {
+    if !directory.starts_with(registry) {
+        return Err(CliError::InvalidAreaRegistry(
+            "registry read path escapes its configured root".into(),
+        ));
+    }
+    ensure_existing_directory_without_symlink(registry)?;
+    let relative = directory.strip_prefix(registry).map_err(|_| {
+        CliError::InvalidAreaRegistry("registry read path escapes its configured root".into())
+    })?;
+    let mut current = registry.to_owned();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(CliError::InvalidAreaRegistry(
+                "registry read path contains a traversal component".into(),
+            ));
+        };
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current).map_err(|source| CliError::Read {
+            path: current.clone(),
+            source,
+        })?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(CliError::InvalidAreaRegistry(format!(
+                "registry component {:?} is not a real directory",
+                current
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_existing_directory_without_symlink(path: &Path) -> Result<(), CliError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| CliError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        Err(CliError::InvalidAreaRegistry(format!(
+            "registry component {path:?} is not a real directory"
+        )))
+    }
+}
+
+fn sync_existing_registry_file(
+    registry: &Path,
+    path: &Path,
+    kind: &'static str,
+) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::InvalidAreaRegistry(format!("{kind} has no parent")))?;
+    ensure_existing_registry_directory(registry, parent)?;
+    let before = fs::symlink_metadata(path).map_err(|source| CliError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    if before.file_type().is_symlink() || !before.file_type().is_file() {
+        return Err(CliError::InvalidAreaRegistry(format!(
+            "{kind} is not a regular non-symlink file"
+        )));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|source| CliError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+    let opened = file.metadata().map_err(|source| CliError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    if !opened.file_type().is_file() {
+        return Err(CliError::InvalidAreaRegistry(format!(
+            "{kind} changed while it was opened"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != opened.dev() || before.ino() != opened.ino() {
+            return Err(CliError::InvalidAreaRegistry(format!(
+                "{kind} changed while it was opened"
+            )));
+        }
+    }
+    file.sync_all().map_err(|source| CliError::Write {
+        path: path.to_owned(),
+        source,
+    })?;
+    sync_directory(parent)
+}
+
+fn read_bounded_regular_file(
+    path: &Path,
+    maximum: usize,
+    kind: &'static str,
+) -> Result<Vec<u8>, CliError> {
+    let before = fs::symlink_metadata(path).map_err(|source| CliError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    if before.file_type().is_symlink() || !before.file_type().is_file() {
+        return Err(CliError::InvalidAreaRegistry(format!(
+            "{kind} is not a regular non-symlink file"
+        )));
+    }
+    if before.len() > maximum as u64 {
+        return Err(CliError::TooLarge {
+            path: path.to_owned(),
+            size: before.len(),
+            maximum: maximum as u64,
+        });
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|source| CliError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+    let opened = file.metadata().map_err(|source| CliError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    if !opened.file_type().is_file() || opened.len() > maximum as u64 {
+        return Err(CliError::InvalidAreaRegistry(format!(
+            "{kind} changed while it was opened"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != opened.dev() || before.ino() != opened.ino() {
+            return Err(CliError::InvalidAreaRegistry(format!(
+                "{kind} changed while it was opened"
+            )));
+        }
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    Read::by_ref(&mut file)
+        .take((maximum + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|source| CliError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+    if bytes.len() > maximum {
+        return Err(CliError::TooLarge {
+            path: path.to_owned(),
+            size: bytes.len() as u64,
+            maximum: maximum as u64,
+        });
+    }
+    Ok(bytes)
+}
+
+fn registry_relative_path(registry: &Path, path: &Path) -> Result<String, CliError> {
+    let relative = path.strip_prefix(registry).map_err(|_| {
+        CliError::InvalidAreaRegistry("registry pointer path escapes its root".into())
+    })?;
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(CliError::InvalidAreaRegistry(
+            "registry pointer path contains traversal".into(),
+        ));
+    }
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
 fn world_storage_id(world_id: &str) -> String {
     sha256_hex(world_id.as_bytes())
 }
@@ -1376,6 +2140,33 @@ mod tests {
             .command,
             Command::Rollback { .. }
         ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "tiamud-world",
+                "area-publish",
+                "world.project.json",
+                "--release",
+                "area-release.json",
+                "--registry",
+                "registry"
+            ])
+            .unwrap()
+            .command,
+            Command::AreaPublish { .. }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "tiamud-world",
+                "area-verify",
+                "--catalog",
+                "registry/area-catalogs/world/catalog.json",
+                "--registry",
+                "registry"
+            ])
+            .unwrap()
+            .command,
+            Command::AreaVerify { .. }
+        ));
         #[cfg(feature = "editorial-ai")]
         assert!(matches!(
             Cli::try_parse_from([
@@ -1518,6 +2309,317 @@ mod tests {
             fs::read(divergent_path).unwrap(),
             b"existing divergent bytes"
         );
+    }
+
+    fn lantern_project_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("worlds/lantern-square.project.json")
+    }
+
+    fn write_area_release(
+        path: &Path,
+        catalog_revision: u64,
+        square_revision: u64,
+        square_reviewer: &str,
+    ) {
+        let release = serde_json::json!({
+            "schemaVersion": 1,
+            "trustMode": "unsigned_local",
+            "catalogRevision": catalog_revision,
+            "areas": [
+                {
+                    "areaId": "archive",
+                    "revision": 1,
+                    "contentLicense": "CC-BY-4.0",
+                    "scriptLicense": "MIT OR Apache-2.0",
+                    "reviewer": "Tiamud maintainers",
+                    "reviewedAt": "2026-07-17T00:00:00Z",
+                    "provenance": "Reviewed original Tiamud source."
+                },
+                {
+                    "areaId": "north-gate",
+                    "revision": 2,
+                    "contentLicense": "CC-BY-4.0",
+                    "scriptLicense": "MIT OR Apache-2.0",
+                    "reviewer": "Tiamud maintainers",
+                    "reviewedAt": "2026-07-17T00:00:00Z",
+                    "provenance": "Reviewed original Tiamud source."
+                },
+                {
+                    "areaId": "square",
+                    "revision": square_revision,
+                    "contentLicense": "CC-BY-4.0",
+                    "scriptLicense": "MIT OR Apache-2.0",
+                    "reviewer": square_reviewer,
+                    "reviewedAt": "2026-07-17T00:00:00Z",
+                    "provenance": "Reviewed original Tiamud source."
+                }
+            ]
+        });
+        fs::write(path, serde_json::to_vec(&release).unwrap()).unwrap();
+    }
+
+    fn published_area_catalog_path(registry: &Path, world_id: &str) -> PathBuf {
+        let pointer: ActiveAreaCatalog = serde_json::from_slice(
+            &fs::read(active_area_catalog_path(registry, world_id)).unwrap(),
+        )
+        .unwrap();
+        registry.join(pointer.catalog)
+    }
+
+    #[test]
+    fn area_publication_is_immutable_verified_and_revision_guarded() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        let release = temp.path().join("release.json");
+        write_area_release(&release, 1, 3, "Tiamud maintainers");
+
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release: release.clone(),
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+        let first_catalog_path = published_area_catalog_path(&registry, "lantern-square");
+        let first_catalog_bytes = fs::read(&first_catalog_path).unwrap();
+        let (first_catalog, first_digest) =
+            load_verified_area_catalog(&first_catalog_path, &registry).unwrap();
+        let success =
+            area_publish_success_message(&first_catalog, &first_digest, &first_catalog_path);
+        assert!(success.contains(&format!("at {first_catalog_path:?}")));
+        run(Cli {
+            command: Command::AreaVerify {
+                catalog: first_catalog_path.clone(),
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+
+        // Changing reviewed metadata changes the immutable bundle and therefore
+        // requires a strictly newer area revision as well as a catalog revision.
+        write_area_release(&release, 2, 3, "Second reviewer");
+        assert!(matches!(
+            run(Cli {
+                command: Command::AreaPublish {
+                    project: lantern_project_path(),
+                    release: release.clone(),
+                    registry: registry.clone(),
+                },
+            }),
+            Err(CliError::AreaCatalog(
+                AreaCatalogError::RevisionNotAdvanced { .. }
+            ))
+        ));
+        assert_eq!(fs::read(&first_catalog_path).unwrap(), first_catalog_bytes);
+        assert_eq!(
+            published_area_catalog_path(&registry, "lantern-square"),
+            first_catalog_path
+        );
+
+        write_area_release(&release, 2, 4, "Second reviewer");
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release,
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+        let second_catalog_path = published_area_catalog_path(&registry, "lantern-square");
+        assert_ne!(second_catalog_path, first_catalog_path);
+        assert_eq!(fs::read(first_catalog_path).unwrap(), first_catalog_bytes);
+        run(Cli {
+            command: Command::AreaVerify {
+                catalog: second_catalog_path,
+                registry,
+            },
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn area_verify_rejects_aggregate_bundle_budget_before_blob_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        let release_path = temp.path().join("release.json");
+        write_area_release(&release_path, 1, 3, "Tiamud maintainers");
+        let composed = compose_world_project(lantern_project_path()).unwrap();
+        let release = parse_area_release_manifest(&fs::read(release_path).unwrap()).unwrap();
+        let mut catalog = build_area_release(&composed, &release, None)
+            .unwrap()
+            .catalog;
+
+        // Each entry remains below the individual 16 MiB limit, but the set
+        // exceeds the aggregate budget. Verification must reject the catalog
+        // before trying to open the absent WorldPack or any bundle.
+        for entry in &mut catalog.entries {
+            entry.stored_bytes = MAX_TOTAL_AREA_BYTES / 2;
+        }
+        let bytes = serde_json::to_vec(&catalog).unwrap();
+        let digest = sha256_hex(&bytes);
+        let path = area_catalog_blob_path(&registry, &catalog.world_id, &digest);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+
+        let error = load_verified_area_catalog(&path, &registry).unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::InvalidAreaRegistry(reason)
+                if reason.contains("area bundle set declares")
+        ));
+        assert!(!registry.join("area-worlds").exists());
+        assert!(!registry.join("area-bundles").exists());
+    }
+
+    #[test]
+    fn area_verify_does_not_create_a_missing_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("missing-registry");
+        let catalog = area_catalog_blob_path(&registry, "demo", &"a".repeat(64));
+
+        assert!(
+            run(Cli {
+                command: Command::AreaVerify {
+                    catalog,
+                    registry: registry.clone(),
+                },
+            })
+            .is_err()
+        );
+        assert!(!registry.exists());
+    }
+
+    #[test]
+    fn identical_existing_area_blob_is_reused_after_durable_resync() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        let bytes = b"reviewed immutable area bytes";
+        let digest = sha256_hex(bytes);
+        let path = area_bundle_blob_path(&registry, "demo", "square", &digest);
+
+        write_immutable_area_blob(&registry, &path, bytes, &digest, bytes.len()).unwrap();
+        write_immutable_area_blob(&registry, &path, bytes, &digest, bytes.len()).unwrap();
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn concurrent_area_publishers_serialize_and_revalidate_active_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        let first_release = temp.path().join("release-1.json");
+        write_area_release(&first_release, 1, 3, "Initial reviewer");
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release: first_release,
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+
+        let release_a = temp.path().join("release-2-a.json");
+        let release_b = temp.path().join("release-2-b.json");
+        write_area_release(&release_a, 2, 4, "Concurrent reviewer A");
+        write_area_release(&release_b, 2, 4, "Concurrent reviewer B");
+
+        // Hold the same per-world advisory lock so both publishers are ready
+        // concurrently before either can inspect the active revision.
+        let lock_path = area_publication_lock_path(&registry, "lantern-square");
+        let lock_file = open_area_publication_lock(&registry, &lock_path).unwrap();
+        let mut held_lock = RwLock::new(lock_file);
+        let held_guard = held_lock.write().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let spawn = |release: PathBuf| {
+            let registry = registry.clone();
+            let ready_tx = ready_tx.clone();
+            std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                run(Cli {
+                    command: Command::AreaPublish {
+                        project: lantern_project_path(),
+                        release,
+                        registry,
+                    },
+                })
+                .map_err(|error| error.to_string())
+            })
+        };
+        let publisher_a = spawn(release_a);
+        let publisher_b = spawn(release_b);
+        ready_rx.recv().unwrap();
+        ready_rx.recv().unwrap();
+        drop(held_guard);
+
+        let outcomes = [publisher_a.join().unwrap(), publisher_b.join().unwrap()];
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        let rejected = outcomes
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .unwrap();
+        assert!(rejected.contains("catalog revision 2 must be newer than active revision 2"));
+
+        let active = load_active_area_catalog(&registry, "lantern-square")
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.catalog_revision, 2);
+    }
+
+    #[test]
+    fn area_verify_rejects_tampered_blob_and_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry");
+        let release = temp.path().join("release.json");
+        write_area_release(&release, 1, 3, "Tiamud maintainers");
+        run(Cli {
+            command: Command::AreaPublish {
+                project: lantern_project_path(),
+                release,
+                registry: registry.clone(),
+            },
+        })
+        .unwrap();
+        let catalog_path = published_area_catalog_path(&registry, "lantern-square");
+        let catalog = parse_area_catalog(&fs::read(&catalog_path).unwrap()).unwrap();
+        let entry = &catalog.entries[0];
+        let bundle_path = area_bundle_blob_path(
+            &registry,
+            &catalog.world_id,
+            &entry.area_id,
+            &entry.bundle_sha256,
+        );
+        let original = fs::read(&bundle_path).unwrap();
+        fs::write(&bundle_path, [original.as_slice(), b" "].concat()).unwrap();
+        assert!(
+            run(Cli {
+                command: Command::AreaVerify {
+                    catalog: catalog_path.clone(),
+                    registry: registry.clone(),
+                },
+            })
+            .is_err()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            fs::write(&bundle_path, original).unwrap();
+            let outside = temp.path().join("outside-catalog.json");
+            fs::write(&outside, fs::read(&catalog_path).unwrap()).unwrap();
+            fs::remove_file(&catalog_path).unwrap();
+            symlink(&outside, &catalog_path).unwrap();
+            assert!(matches!(
+                run(Cli {
+                    command: Command::AreaVerify {
+                        catalog: catalog_path,
+                        registry,
+                    },
+                }),
+                Err(CliError::InvalidAreaRegistry(_))
+            ));
+        }
     }
 
     #[cfg(feature = "editorial-ai")]

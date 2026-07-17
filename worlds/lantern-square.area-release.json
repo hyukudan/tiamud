@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "trustMode": "unsigned_local",
+  "catalogRevision": 1,
+  "areas": [
+    {
+      "areaId": "archive",
+      "revision": 1,
+      "contentLicense": "CC-BY-4.0",
+      "scriptLicense": "MIT OR Apache-2.0",
+      "reviewer": "Tiamud maintainers",
+      "reviewedAt": "2026-07-17T00:00:00Z",
+      "provenance": "Original reviewed Tiamud world content maintained in this repository."
+    },
+    {
+      "areaId": "north-gate",
+      "revision": 1,
+      "contentLicense": "CC-BY-4.0",
+      "scriptLicense": "MIT OR Apache-2.0",
+      "reviewer": "Tiamud maintainers",
+      "reviewedAt": "2026-07-17T00:00:00Z",
+      "provenance": "Original reviewed Tiamud world content maintained in this repository."
+    },
+    {
+      "areaId": "square",
+      "revision": 1,
+      "contentLicense": "CC-BY-4.0",
+      "scriptLicense": "MIT OR Apache-2.0",
+      "reviewer": "Tiamud maintainers",
+      "reviewedAt": "2026-07-17T00:00:00Z",
+      "provenance": "Original reviewed Tiamud world content maintained in this repository."
+    }
+  ]
+}

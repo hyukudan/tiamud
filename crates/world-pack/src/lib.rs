@@ -6,10 +6,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod area_catalog;
 mod authoring;
 mod composition;
 mod progression;
 
+pub use area_catalog::{
+    AREA_BUNDLE_SCHEMA_VERSION, AREA_CATALOG_SCHEMA_VERSION, AREA_RELEASE_SCHEMA_VERSION,
+    AreaBundle, AreaCatalog, AreaCatalogEntry, AreaCatalogError, AreaCompatibility, AreaPortal,
+    AreaPortalDirection, AreaReleaseEntry, AreaReleaseManifest, CompiledArea, ContentDigest,
+    ReleaseTrustMode, VerifiedAreaRelease, build_area_release, parse_area_bundle,
+    parse_area_catalog, parse_area_release_manifest, verify_area_release,
+};
 pub use authoring::{
     AudioChannel, AudioCue, Condition, ConditionContext, ConditionField, ConditionValidationError,
     ConditionValidationErrors, ConditionValue, ContentTest, ContentTestExpectation,
@@ -22,11 +30,11 @@ pub use authoring::{
     ScriptLimitsDefinition, TimePeriod, Weather, WorldPackDiff, WorldPackDocument,
 };
 pub use composition::{
-    AREA_PACK_SCHEMA_VERSION, AreaComposition, AreaCrossReference, AreaCrossReferenceKind,
-    AreaOwnership, AreaPack, ComposedWorld, CompositionError, CompositionReport, MAX_AREA_COUNT,
-    MAX_AREA_FILE_BYTES, MAX_COMPOSED_WORLD_BYTES, MAX_PROJECT_MANIFEST_BYTES,
-    MAX_TOTAL_AREA_BYTES, ProjectArea, WORLD_PROJECT_SCHEMA_VERSION, WorldProjectManifest,
-    compose_world_project,
+    AREA_PACK_SCHEMA_VERSION, AreaAssetManifestDigest, AreaComposition, AreaCrossReference,
+    AreaCrossReferenceKind, AreaOwnership, AreaPack, ComposedWorld, CompositionError,
+    CompositionReport, MAX_AREA_COUNT, MAX_AREA_FILE_BYTES, MAX_COMPOSED_WORLD_BYTES,
+    MAX_PROJECT_MANIFEST_BYTES, MAX_TOTAL_AREA_BYTES, ProjectArea, WORLD_PROJECT_SCHEMA_VERSION,
+    WorldProjectManifest, compose_world_project,
 };
 pub use progression::{
     AdvancedClassDefinition, BackgroundDefinition, BaseClassDefinition,

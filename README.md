@@ -73,8 +73,9 @@ baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
   medios, movimiento, contraste y lector de pantalla.
 - **Autoría modular:** AreaPack v8 permite dividir un mundo en áreas; la
   composición sin conexión de WorldProject v2 produce un WorldPack v9
-  canónico, determinista y revisable. El servidor aún carga un único paquete
-  completo al arrancar.
+  canónico, determinista y revisable. La fase 6A implementa una ruta local
+  separada para catalogar revisiones y bundles de área
+  verificables. El servidor aún carga un único paquete completo al arrancar.
 - **Operación en un host:** adaptadores PostgreSQL/SQLite, credenciales
   Argon2id, sesiones revocables, colas acotadas, salud, métricas Prometheus,
   apagado ordenado, copia/restauración SQLite y traslado explícito a PostgreSQL.
@@ -392,9 +393,9 @@ flowchart LR
     C --> D[Entrega post-commit<br/>sin dirección ni distancia]
 ```
 
-El contrato está aceptado en [ADR 0019](docs/decisions/0019-bounded-spatial-voice.md),
-pero la implementación y su evidencia integrada siguen en curso; esta sección
-no las da por superadas.
+El contrato de [ADR 0019](docs/decisions/0019-bounded-spatial-voice.md) está
+implementado; su puerta integrada y los límites no ejecutados se conservan en
+el [registro 5E](docs/project/log/2026-07-17-bounded-spatial-voice-phase-5e.md).
 
 La telepatía directa online es una habilidad de autoría: exige conocimiento,
 recurso y cooldown, puede bloquear salas, comparte mute/rate/ignore/block y
@@ -464,13 +465,100 @@ cargo run --locked -p world-pack --bin tiamud-world -- compose \
   --output build/worlds/lantern-square.composed.world.json
 ```
 
+La ruta 6A implementada usa el manifiesto revisado de releases para publicar
+el catálogo, los bundles y el WorldPack monolítico de respaldo en un registro
+local:
+
+```sh
+cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
+  worlds/lantern-square.project.json \
+  --release worlds/lantern-square.area-release.json \
+  --registry build/area-registry
+```
+
+El comando informa por stdout la ruta content-addressed exacta. El fixture
+revisado de Lantern Square publica tres bundles y el catálogo
+`e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6`:
+
+```sh
+cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
+  --catalog build/area-registry/area-catalogs/71b3f0f3493d91254d4ce1ed60c147e9f0f480ca204f62f05b3fd05d92e6e3f1/e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6.catalog.json \
+  --registry build/area-registry
+```
+
 Esto es más eficiente para autoría, revisión, caché y compilación incremental
 que mantener un único archivo fuente. No implica carga caliente. El servidor
 actual valida y carga un paquete completo antes de abrir los puntos de escucha.
-La carga/reemplazo de áreas en caliente y la descarga/LRU cuando no hay
-jugadores son arquitectura futura de
-[ADR 0005](docs/decisions/0005-hot-area-lifecycle.md), no funcionalidad
-publicada.
+
+La fase 6A de [ADR 0005](docs/decisions/0005-hot-area-lifecycle.md) está
+**implementada**. Su alcance es exclusivamente editorial y local: un catálogo acotado
+de hasta 1 MiB y 256 entradas describe revisiones de área; cada bundle es JSON
+canónico de hasta 16 MiB y la suma de sus entradas también queda limitada a
+16 MiB. Los metadatos fijan propiedad, dependencias, portales y digests por
+área/revisión y separan `contentLicense=CC-BY-4.0` para mundo, prosa y medios
+de `scriptLicense=MIT OR Apache-2.0` para Lua/software. El modo de confianza
+`unsigned_local` debe declararse de forma explícita: no equivale a una firma ni
+autoriza distribución remota. La publicación conserva blobs inmutables y cambia
+el puntero local solo de forma atómica.
+
+`AreaPack.dependsOn` sigue siendo la declaración editorial exhaustiva que
+habilita referencias cruzadas. En el catálogo, `hardDependencies` contiene solo
+las referencias cruzadas que no son `RoomExit`; las salidas entre áreas se
+registran como `portals` y no implican residencia. `softDependencies` queda
+vacío en la versión 1.
+
+Cada bundle conserva tanto el AreaPack v8 revisable como un `CompiledArea`
+estricto con las definiciones que posee esa área; `compiledAreaSha256` liga esa
+proyección a los bytes publicados. Cada portal retiene también su
+`sourceExit` cardinal, además de origen, destino, peer y revisión mínima.
+
+El registro usa rutas derivadas por SHA-256, no IDs sin sanear:
+`area-catalogs/<world-key>/<catalog-digest>.catalog.json`,
+`area-bundles/<world-key>/<area-key>/<bundle-digest>.area.json` y
+`area-worlds/<world-key>/<world-digest>.world.json`. Solo después de reabrir y
+verificar todos esos blobs se reemplaza atómicamente
+`area-active/<world-key>.json`, que contiene `schema`, `worldId`,
+`catalogSha256` y la ruta relativa `catalog`. Aquí «active» significa revisión
+editorial seleccionada en el registro local, no área activa en el runtime.
+
+Los publicadores cooperantes de un mismo mundo se serializan mediante un lock
+advisory `fd-lock` bajo `area-locks/` y vuelven a leer la revisión activa dentro
+del lock. Antes de E/S de bundles, el verificador prevalida de forma checked su
+conteo y suma declarada. Un blob idéntico existente se reabre, verifica y
+resincroniza de forma durable; `area-verify` es read-only, no crea un registro
+ausente y exige el path exacto que `area-publish` imprime por stdout.
+
+`unsigned_local` presupone un registro local en un host confiable y
+publicadores cooperantes. El lock no es una frontera de seguridad ante un
+proceso que lo ignore o pueda mutar el registro; un escritor hostil y las
+carreras TOCTOU que provoque quedan fuera de este modo de confianza.
+
+```mermaid
+flowchart LR
+    accTitle: Fronteras de autoría y publicación local de áreas
+    accDescr: Los mismos módulos AreaPack pueden componerse en un WorldPack monolítico o prepararse como bundles locales verificables; solo el WorldPack completo entra hoy en el servidor.
+
+    Areas[AreaPack v8<br/>módulos revisados] --> Project[WorldProject v2]
+    Project --> Compose[Composición sin conexión]
+    Compose --> World[WorldPack v9 canónico]
+    World --> Runtime[Servidor actual<br/>carga completa al arrancar]
+    Areas --> Bundle[Bundles locales<br/>JSON canónico e inmutable]
+    Bundle --> Catalog[Catálogo local<br/>metadatos + digests]
+    Catalog -. no activa .-> Runtime
+```
+
+Esta fase no carga, activa, sustituye, descarga ni expulsa áreas en ejecución;
+tampoco introduce red, descarga de cliente/servidor, compresión o firma remota.
+La carga/reemplazo caliente y la descarga/LRU cuando no hay jugadores siguen
+siendo fases futuras del ADR, no funcionalidad publicada.
+
+La puerta final pasa 144/144 pruebas de `world-pack`, incluidas 10/10 del CLI,
+y 707/707 pruebas Rust del workspace; también pasan formato, `git diff
+--check`, clippy estricto del workspace, check MSRV con Rust 1.88, el E2E local
+de tres bundles y el catálogo anterior, humo, `cargo deny check advisories
+sources` y licencias/avisos para 308 dependencias Rust y 76 web. 6A no cambia
+Web, protocolo, runtime, snapshot ni SQL, por lo que no se atribuye una nueva
+puerta Web o PostgreSQL.
 
 El vocabulario v9 separa la definición reusable en `itemPrototypes` de cada
 unidad inicial en `initialItemInstances`. Una instancia empieza en una sala,
@@ -819,8 +907,8 @@ Puertas externas pendientes:
 
 Siguientes líneas técnicas y de producto:
 
-- implementar carga/reemplazo/LRU de áreas por las fases y salvaguardas del
-  ADR 0005, empezando por catálogo y bundles verificables;
+- implementar 6B como carga aditiva local bajo demanda, sin reemplazo ni
+  descarga, por las salvaguardas del ADR 0005;
 - consolidar la superficie de staff por capacidades ya implementada, sin
   convertir roles, títulos narrativos, XP o WorldPack en autoridad;
 - considerar need/greed, master-loot o contribución solo tras modelar sus
