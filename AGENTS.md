@@ -4,6 +4,18 @@ Este archivo se aplica a todo el repositorio. Es el contrato de trabajo para
 agentes de programación y contribuidores. Debe permanecer alineado con el
 código actual, las decisiones aceptadas y la evidencia retenida.
 
+## Contenido
+
+- [Lectura inicial](#lectura-inicial)
+- [Identidad del producto y repositorio](#identidad-del-producto-y-repositorio)
+- [Baseline implementado](#baseline-implementado)
+- [Restricciones de diseño no negociables](#restricciones-de-diseño-no-negociables)
+- [Mapa del repositorio](#mapa-del-repositorio)
+- [Flujo de cambios](#flujo-de-cambios)
+- [Verificación](#verificación)
+- [Límites actuales honestos](#límites-actuales-honestos)
+- [Criterio de finalización](#criterio-de-finalización)
+
 ## Lectura inicial
 
 Antes de un cambio material, lee en este orden:
@@ -25,7 +37,7 @@ Precedencia de fuentes:
 - la memoria es el resumen durable y punto de relevo;
 - los registros fechados describen la entrega de aquel momento y pueden quedar
   superados;
-- `docs/spec-v0.2.md` es la especificación histórica en castellano, no el
+- `docs/archive/spec-v0.2.md` es la especificación histórica en castellano, no el
   contrato vigente de personajes, medios o sistemas sociales.
 
 No deduzcas implementación porque un ADR o una hoja de ruta describa algo. No
@@ -455,159 +467,14 @@ matriz, memoria y documentación pública a la vez.
   proveedor predeterminado; endpoints locales usan loopback y remotos HTTPS.
   Ningún borrador se publica sin validación y revisión humana.
 
-### Evidencia retenida de inventario 3A–3D
+### Evidencia integrada y retenida por fase
 
-La evidencia histórica de inventario 3A supera formato, pruebas bloqueadas del
-workspace y clippy estricto. Las suites enfocadas pasan 77 pruebas de core, 80
-de WorldPack, 28 del importador y 195 de `tiamud-server`; la web pasa
-`svelte-check` con 0 errores/avisos, 100/100 unitarias, build y 30/30 escenarios
-Playwright soportados (15 Chromium y 15 Firefox). Licencias y avisos generados
-de 307 dependencias Rust y 76 web también pasan. La suite Node del harness pasa;
-humo, carga CI exacta de 16 usuarios
-(16 bootstraps/32 rondas, 15 WebSocket + uno Telnet) y soak corto de 30 s con
-dos usuarios (64 rondas, readiness 8/8) terminan sin errores y con todos los
-veredictos en `pass`. No se ejecutaron PostgreSQL real v10, WebKit local ni soak
-de 24 horas. La evidencia operacional procede de un árbol dirty precommit: es
-diagnóstico local, no evidencia publicable ni de CI.
-
-La entrega histórica de fase 3B implementó WorldPack v5,
-AreaPack v4, snapshot v3, pilas derivadas, contenedores acotados y paridad de
-acciones/proyecciones. Aquel árbol integrado pasó formato/check/clippy, 499/499
-pruebas Rust (88 core, 93 WorldPack, 28 importador, 202 servidor y 88
-restantes), 103/103 web, 30/30 Playwright Chromium/Firefox, 80/80 Node, humo,
-carga CI 16 usuarios y soak corto de 66 rondas/10 readiness. También pasaron
-`cargo-deny`, licencias y avisos 307 Rust/76 web. No hubo PostgreSQL real v10,
-WebKit local ni soak de 24 horas; no conviertas este pase local precommit en
-evidencia de CI o producción.
-
-La fase 3C quedó implementada en su árbol integrado mediante snapshot v4, vínculo
-durable, tres políticas de transferencia y `give` atómico en Web, Telnet y
-GMCP. Lantern Square contiene 9 prototipos y 10 instancias iniciales; su
-WorldPack canónico ocupa 49.603 bytes y tiene SHA-256
-`f3ab27cb93a2b3c80fe0a9a6ecf8acdd856a45ec1edbda257dd33046a21772c8`.
-En aquel árbol pasaron 513/513 pruebas Rust: 93 core, 95 WorldPack, 28 importador,
-207 servidor y 90 restantes. También pasaron `svelte-check` con 0 errores y 0
-avisos, 103/103 pruebas web, 81/81 Node y 32/32 escenarios Playwright
-soportados, 16 Chromium y 16 Firefox. WebKit no arrancó en aquel gate por
-bibliotecas GTK/GStreamer ausentes. No se ejecutaron PostgreSQL real v10 ni
-soak de 24 horas; esta comprobación local sobre un árbol dirty no es evidencia
-de CI, release o producción.
-
-La fase histórica 3D quedó implementada mediante snapshot v5 y
-reservas durables de objetos/moneda, revisión y digest canónicos, doble
-confirmación, liquidación simultánea y recuperación restart-safe. La evidencia
-integrada pasa 550 pruebas Rust: 102 core (80+3+14+5), 97 WorldPack, 28
-importador, 231 servidor y 92 restantes —incluidas 23 admin—; también 107
-Vitest y 83 Node/bot.
-El pase Playwright final completa 36/36 escenarios, 18 Chromium y 18 Firefox.
-No convierte
-PostgreSQL real v10, WebKit local ni el soak de 24 horas en ejecutados.
-
-### Evidencia integrada de botín 4A
-
-La fase 4A usa WorldPack v6, AreaPack v5, snapshot v6 y esquema SQL v11. El
-artefacto canónico de Lantern Square contiene tres salas, nueve prototipos,
-nueve instancias iniciales, una tabla y una fuente; ocupa 50.498 bytes y su
-SHA-256 es
-`3d6c7f40e7a5e56d509b46aeb89439aeea8f5a3168d249dd46609df1fe54c816`.
-El árbol integrado pasa 587/587 pruebas Rust (113 core, 240 servidor, 112
-WorldPack y 122 restantes), formato y clippy estricto; `svelte-check` 0/0,
-109/109 Vitest, 84/84 Node/bot y 19/19 escenarios Chromium. También pasan
-`cargo-deny`, licencias y avisos 307 Rust/76 web, humo, la carga exacta de CI
-con 16 bootstraps/32 rondas y un soak corto de 30 s con 58 rondas, 127 acciones
-y readiness 8/8. No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector
-de pantalla ni soak de 24 horas; la evidencia local precommit no es una
-aceptación de release.
-
-### Evidencia integrada de recompensas y afijos 4B
-
-La fase 4B usa WorldPack v7, AreaPack v6, WorldProject v2, snapshot v7 y
-esquema SQL v11. El artefacto canónico de Lantern Square contiene tres salas,
-diez prototipos, nueve instancias iniciales, dos tablas, una fuente, un afijo y
-un pool; ocupa 52.349 bytes y su SHA-256 es
-`183e7bc012a9214d68350c1f8fc1f8e6e505bb35c408c14e734901a671b5c7ef`.
-El árbol integrado pasa 608/608 pruebas Rust (122 core, 245 servidor, 117
-WorldPack y 124 restantes), formato, check, build y clippy estricto; 112/112
-Vitest, 86/86 Node/bot y 40/40 escenarios Playwright, 20 Chromium y 20 Firefox.
-También pasan `cargo-deny`, licencias/avisos 307 Rust/76 web, humo, carga 16/32
-con 15 WebSocket+1 Telnet, cero errores y 55.365.632 bytes de crecimiento RSS
-bajo 96 MiB, y soak corto de 30 s con 58 rondas, 127 acciones, readiness 8/8,
-cero errores, 45.211.648 bytes totales y 1.536.000 sostenidos. Es evidencia
-local precommit dirty: el verificador de aceptación rechaza correctamente el
-reporte corto por duración/perfil/warmup/árbol no limpio, no por fallo
-funcional. No acredita PostgreSQL real v11, WebKit, lector manual ni soak 24 h.
-
-### Evidencia integrada de telepatía 5A
-
-La fase 5A usa WorldPack v8, AreaPack v7, WorldProject v2, snapshot v7 y
-esquema SQL v11. `tiamud:mind-whisper` demuestra coste/cooldown y
-`demo:archive` interferencia authored. El artefacto canónico mide 53.040 bytes
-y tiene SHA-256
-`109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
-El árbol integrado pasa 630/630 pruebas Rust (131 core, 252 servidor, 123
-WorldPack y 124 restantes), formato/diff/clippy; check web 0/0, 113/113
-Vitest, build, 86/86 Node/bot y 42/42 Playwright soportado (21 Chromium y 21
-Firefox). También pasan `cargo-deny` y licencias/avisos 307 Rust/76 web. No se
-ejecutaron PostgreSQL real v11, WebKit, lector manual ni soak de 24 h.
-
-### Evidencia integrada de emotes authored 5B
-
-La fase 5B usa WorldPack v9, AreaPack v8, WorldProject v2, snapshot v7 y
-esquema SQL v11. `tiamud:smile` demuestra plantillas cerradas y objetivo local
-opcional. La recomposición canónica es byte a byte idéntica, mide 53.567 bytes
-y tiene SHA-256
-`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
-El árbol integrado pasa 652/652 pruebas Rust (139 core, 257 servidor, 132
-WorldPack y 124 restantes), formato/diff/clippy; check web 0/0, 114/114
-Vitest, build, 86/86 Node/bot y 44/44 Playwright soportado (22 Chromium y 22
-Firefox). También pasan `cargo-deny` y licencias/avisos 307 Rust/76 web. La
-auditoría adversarial cerró render recursivo, divergencia validador/runtime y
-escape MXP incompleto; quedan 0 P1/P2/P3 abiertos. No se ejecutaron PostgreSQL
-real v11, WebKit, lector manual, carga/soak ni soak de 24 h.
-
-### Evidencia integrada de correo offline 5C
-
-La fase 5C mantiene WorldPack v9, AreaPack v8, WorldProject v2 y snapshot v7,
-pero avanza SQLite/PostgreSQL al esquema v12. El correo es una superficie
-durable separada con buzón, bytes, páginas, caducidad y cuotas por cuenta
-acotados; referencias públicas aleatorias; entrega suprimida no reveladora; y
-evidencia denunciada de 90 días sin navegación staff de buzones. Web, texto
-Telnet, `Tiamud.Mail 1` y el bot estricto comparten el contrato.
-
-El árbol integrado pasa 669/669 pruebas Rust (142 core, 268 servidor, 132
-WorldPack y 127 restantes), formato/diff/clippy; check web 0/0, 117/117 Vitest,
-build, 87/87 Node y 44/44 Playwright soportado (22 Chromium y 22 Firefox).
-También pasan humo, `cargo deny check advisories sources` y licencias/avisos
-307 Rust/76 web. La auditoría adversarial deja 0 P1/P2/P3 abiertos. No se
-ejecutaron PostgreSQL real v12/mover, WebKit, lector manual, carga/soak ni soak
-de 24 h. Véase el
-[registro 5C](docs/project/log/2026-07-17-bounded-offline-mail-phase-5c.md).
-
-### Evidencia integrada de tablones comunitarios 5D
-
-La fase 5D mantiene WorldPack v9, AreaPack v8, WorldProject v2 y snapshot v7,
-pero avanza SQLite/PostgreSQL al esquema v13. `general` y `newbie` son
-tablones globales públicos, acotados, consultables bajo demanda y separados de
-chat y correo. La implementación incluye cuota y capacidad transaccionales,
-purga fail-closed al arrancar, denuncia única con evidencia temporal,
-resolución mediante la cola staff, paridad Web/Telnet/`Tiamud.Board 1` y panel
-accesible sin HTML/Markdown remoto. La auditoría cerró pérdida silenciosa del
-detalle GMCP, línea Telnet insuficiente, claves JSON duplicadas y mutación Web
-optimista: ahora hay fallback UTF-8 explícito, límite de línea 8 KiB, rechazo
-recursivo y confirmación correlacionada que preserva borradores.
-
-El árbol final pasa formato/diff/clippy estricto y 691/691 pruebas Rust: 146
-core, 283 servidor, 132 WorldPack y 130 restantes. PostgreSQL 18.4 real pasa
-19/19 en adaptador+mover v13, incluida migración de una base actual
-representativa; las 283 de servidor incluyen flujo board/runtime y lock
-advisory concurrente reales, además de 5/5 focused PostgreSQL. Web pasa check
-0/0, 122 Vitest, build y 46/46 Playwright soportado (23 Chromium y 23 Firefox);
-Node pasa 88, además de humo, advisories/sources y licencias/avisos 307 Rust/76
-web. La auditoría deja 0 P1/P2/P3 abiertos. No se ejecutaron WebKit por faltar
-bibliotecas del host, lector manual, carga/soak mixtos ni soak de 24 h. TLS,
-backup/restore, monitorización y recuperación PostgreSQL de producción siguen
-siendo responsabilidad de cada instalación. Véase el
-[registro 5D](docs/project/log/2026-07-17-bounded-moderable-community-boards-phase-5d.md).
+La evidencia de pruebas integrada y retenida por fase (inventario 3A–3D, botín
+4A, recompensas/afijos 4B, telepatía 5A, emotes 5B, correo 5C, tablones 5D,
+catálogo 6A e histórica) se conserva en
+[`docs/project/PROJECT_MEMORY.md`](docs/project/PROJECT_MEMORY.md); los conteos
+exactos y el estado por fase son autoridad de
+[`docs/project/COMPLETION_MATRIX.md`](docs/project/COMPLETION_MATRIX.md).
 
 ### Voz espacial 5E implementada
 
@@ -618,17 +485,6 @@ dirigido, ciclos/convergencia, exclusión de salidas secretas, máximo de 259
 salas, mute/bucket, ignore/block/deaf y rollback con cero entregas. La evidencia
 integrada se conserva en el
 [registro 5E](docs/project/log/2026-07-17-bounded-spatial-voice-phase-5e.md).
-
-### Evidencia integrada de catálogo y bundles locales 6A
-
-La fase 6A pasa 144/144 pruebas de `world-pack`, incluidas 10/10 del CLI, y
-707/707 pruebas Rust del workspace. También pasan formato/diff, clippy estricto
-del workspace, check MSRV con Rust 1.88, el E2E de tres bundles cuyo catálogo
-es `e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6`,
-humo, `cargo deny check advisories sources` y licencias/avisos 308 Rust/76 web.
-No cambia Web, protocolo, runtime, snapshot ni SQL y no aporta una nueva puerta
-Web/PostgreSQL. Véase el
-[registro 6A](docs/project/log/2026-07-17-area-catalog-bundles-phase-6a.md).
 
 ### Carga local aditiva de áreas 6B implementada
 
@@ -672,30 +528,11 @@ CAS de retiro/rehidratación en ambos adaptadores. Existe una ruta interna del
 actor para retirar una unidad vacía de la misma revisión y rehidratarla ante
 entrada; recovery falla cerrado si manifiesto y checkpoints no coinciden. La
 fase permanece parcial hasta completar el E2E de restart, una superficie
-operativa acotada y la medición de ahorro real. La puerta local pasa 792/792
-pruebas Rust; además PostgreSQL v15 pasa 22/22 del adaptador+mover + 8/8 del servidor.
+operativa acotada y la medición de ahorro real. La puerta local pasa; los
+conteos exactos por fase son autoridad de
+[`COMPLETION_MATRIX.md`](docs/project/COMPLETION_MATRIX.md) (6D: core 157,
+servidor 337/337, PostgreSQL v15 22/22 del adaptador+mover y 8/8 del servidor).
 No existe LRU ni política automática de memoria.
-
-### Evidencia histórica retenida
-
-La memoria fechada conserva este baseline de 2026-07-16. Vincula aquel árbol,
-no autoriza saltarse pruebas tras cambios:
-
-- 409 pruebas Rust bloqueadas y clippy estricto; 158 pruebas enfocadas de
-  `tiamud-server`.
-- 96 pruebas web y 28 escenarios combinados Chromium/Firefox.
-- PostgreSQL 18.4 validó **esquema v8**, restauración SQLite, mover, juego mixto
-  y reinicio autenticado. No se relabela como aceptación v10.
-- Perfil mixto de 30 s en `2b18cfe`: 66 rondas, 145 acciones, 10/10 readiness,
-  cero errores/drops y cero buzones vivos al apagar.
-- Fuzz del parser Telnet: 3.081.428 ejecuciones en 121 s sin crash, timeout, OOM
-  ni artefacto de fallo.
-- Una captura Chromium autenticada real detectó y cerró defectos de auth y
-  cancelación del manifiesto. El hero es decorativo; la captura de juego es
-  evidencia de producto.
-
-GitHub Actions puede fallar antes de ejecutar por facturación/límite de gasto.
-Inspecciona el job real; no conviertas una insignia en evidencia.
 
 ## Restricciones de diseño no negociables
 
