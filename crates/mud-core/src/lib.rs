@@ -475,6 +475,14 @@ pub enum StaffAction {
         target: String,
         reason: String,
     },
+    RetireArea {
+        area: String,
+        reason: String,
+    },
+    RehydrateArea {
+        area: String,
+        reason: String,
+    },
     Announce {
         message: String,
         reason: String,
@@ -1498,6 +1506,25 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
             enabled,
             reason,
         }));
+    }
+    type StaffAreaConstructor = fn(String, String) -> StaffAction;
+    let staff_area_commands: [(&str, StaffAreaConstructor); 2] = [
+        ("staff area retire", |area, reason| {
+            StaffAction::RetireArea { area, reason }
+        }),
+        ("staff area rehydrate", |area, reason| {
+            StaffAction::RehydrateArea { area, reason }
+        }),
+    ];
+    for (command, constructor) in staff_area_commands {
+        if let Some(rest) = command_tail_phrase(input, command) {
+            let (area, reason) = split_staff_reason(&rest)
+                .ok_or(ParseActionError::MissingTarget { command: "staff" })?;
+            return Ok(PlayerAction::Staff(constructor(area, reason)));
+        }
+        if normalised == command {
+            return Err(ParseActionError::MissingTarget { command: "staff" });
+        }
     }
     if normalised == "staff capability" || normalised.starts_with("staff ") {
         return Err(ParseActionError::MissingTarget { command: "staff" });
@@ -7517,6 +7544,18 @@ impl World {
                 self.room_light.remove(room_id);
                 self.secret_exits
                     .retain(|(secret_room_id, _), _| secret_room_id != room_id);
+            }
+            // Per-session map memory is durable runtime state, not a durable
+            // room. A retired room leaves `stable_rooms`, so any observer that
+            // discovered it would otherwise resolve a dangling id when the map
+            // is projected. Reconcile it at this teardown boundary exactly like
+            // the other resident indexes above; a rehydrated room is
+            // rediscovered on re-entry. `observer_views` is part of the
+            // lifecycle checkpoint, so a later failure rolls this back too.
+            for observer in self.observer_views.values_mut() {
+                observer
+                    .discovered_rooms
+                    .retain(|room_id| !prepared.retired_room_ids.contains(room_id));
             }
             for npc_id in &prepared.retired_npc_ids {
                 self.npcs
@@ -22400,6 +22439,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_staff_area_lifecycle_commands_with_mandatory_reasons() {
+        assert_eq!(
+            parse_action("staff area retire square | draining for maintenance"),
+            Ok(PlayerAction::Staff(StaffAction::RetireArea {
+                area: "square".into(),
+                reason: "draining for maintenance".into(),
+            }))
+        );
+        assert_eq!(
+            parse_action("staff area rehydrate square | restoring after maintenance"),
+            Ok(PlayerAction::Staff(StaffAction::RehydrateArea {
+                area: "square".into(),
+                reason: "restoring after maintenance".into(),
+            }))
+        );
+        assert_eq!(
+            parse_action("staff area retire square"),
+            Err(ParseActionError::MissingTarget { command: "staff" })
+        );
+        assert_eq!(
+            parse_action("STAFF AREA RETIRE Square | why"),
+            Ok(PlayerAction::Staff(StaffAction::RetireArea {
+                area: "Square".into(),
+                reason: "why".into(),
+            }))
+        );
+    }
+
+    #[test]
     fn staff_profiles_use_explicit_ranks_and_closed_default_bundles() {
         assert!(
             StaffProfileKey::Helper.authority_rank() < StaffProfileKey::Moderator.authority_rank()
@@ -22772,6 +22840,42 @@ mod tests {
         let npc = &world.npcs["area-b:keeper"];
         assert_eq!(npc.health, npc.max_health);
         assert_eq!(npc.respawn_at_tick, None);
+    }
+
+    #[test]
+    fn area_retirement_prunes_discovered_rooms_so_projection_never_dangles() {
+        let (mut world, _rehydrate_batch, unit, session) = retirement_fixture();
+        // The observer previously visited the retired unit's room, so its map
+        // memory references a room that retirement removes from `stable_rooms`.
+        world
+            .observer_views
+            .get_mut(&session)
+            .expect("connected observer")
+            .discovered_rooms
+            .insert("area-b:start".into());
+        // Both projections resolve `discovered_rooms` strictly and would fail
+        // with `InvalidEntity` if the retired room lingered in the map.
+        assert!(world.player_state_view(session).is_ok());
+
+        let prepared = world.prepare_area_retirement(unit).unwrap();
+        let checkpoint_sha256 = canonical_sha256(&prepared.checkpoint).unwrap();
+        world
+            .apply_prepared_area_retirement(prepared, checkpoint_sha256)
+            .unwrap();
+
+        assert!(!world.stable_rooms.contains_key("area-b:start"));
+        assert!(
+            !world
+                .observer_views
+                .get(&session)
+                .expect("observer survives retirement")
+                .discovered_rooms
+                .contains("area-b:start"),
+            "retired room must be pruned from the observer's map memory"
+        );
+        // The dangling reference is gone: the full player projection succeeds.
+        world.player_state_view(session).unwrap();
+        world.scene_for(session).unwrap();
     }
 
     #[test]

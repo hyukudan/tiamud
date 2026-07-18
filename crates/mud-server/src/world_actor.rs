@@ -67,6 +67,10 @@ pub enum GameError {
     MailRecipientUnavailable,
     #[error("the action's script hook was rejected")]
     ScriptHookRejected,
+    #[error("that area cannot be retired or rehydrated right now")]
+    AreaOperationBusy,
+    #[error("that area retirement or rehydration request is invalid")]
+    AreaOperationInvalid,
     #[error("world actor startup failed during {stage}: {reason}")]
     Startup { stage: &'static str, reason: String },
 }
@@ -135,6 +139,14 @@ pub struct EnteredWorld {
     pub(crate) presentation: ScenePresentation,
     pub player: PlayerStateView,
     pub deliveries: DeliveryInbox,
+}
+
+struct AreaOperatorAuthority {
+    account_id: AccountId,
+    actor_name: String,
+    scene: SceneView,
+    presentation: ScenePresentation,
+    player: PlayerStateView,
 }
 
 #[derive(Debug)]
@@ -267,6 +279,11 @@ enum Command {
     },
     InspectAreaQuiescence {
         reply: oneshot::Sender<AreaGenerationQuiescence>,
+    },
+    ResolveAreaOperator {
+        session: SessionId,
+        capability: tiamud_core::StaffCapability,
+        reply: oneshot::Sender<Result<AreaOperatorAuthority, GameError>>,
     },
     ActivatePreparedGeneration {
         prepared: Box<PreparedGenerationCutover>,
@@ -907,6 +924,21 @@ impl WorldHandle {
                             connected_sessions: world.connected_sessions().len(),
                         });
                     }
+                    Command::ResolveAreaOperator {
+                        session,
+                        capability,
+                        reply,
+                    } => {
+                        let result = resolve_area_operator(
+                            &world,
+                            &runtime_content,
+                            &session_roles,
+                            &session_staff_accesses,
+                            session,
+                            capability,
+                        );
+                        let _ = reply.send(result);
+                    }
                     Command::ActivatePreparedGeneration {
                         prepared,
                         transition,
@@ -1301,6 +1333,18 @@ impl WorldHandle {
         session: SessionId,
         action: PlayerAction,
     ) -> Result<AppliedAction, GameError> {
+        // Area lifecycle operations dispatch actor commands from this transport
+        // layer; routing them through the actor's `apply` would re-enter the
+        // actor and deadlock. Intercept them before any route lease is taken.
+        match &action {
+            PlayerAction::Staff(tiamud_core::StaffAction::RetireArea { area, reason }) => {
+                return self.staff_retire_area(session, area, reason).await;
+            }
+            PlayerAction::Staff(tiamud_core::StaffAction::RehydrateArea { area, reason }) => {
+                return self.staff_rehydrate_area(session, area, reason).await;
+            }
+            _ => {}
+        }
         // One route lease spans the initial actor call, an optional deferred
         // load and install, and the single retry. An admitted action therefore
         // cannot observe two catalog generations.
@@ -1378,7 +1422,98 @@ impl WorldHandle {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    async fn resolve_area_operator(
+        &self,
+        session: SessionId,
+        capability: tiamud_core::StaffCapability,
+    ) -> Result<AreaOperatorAuthority, GameError> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(Command::ResolveAreaOperator {
+                session,
+                capability,
+                reply,
+            })
+            .await
+            .map_err(|_| GameError::ActorStopped)?;
+        receive.await.map_err(|_| GameError::ActorStopped)?
+    }
+
+    async fn staff_retire_area(
+        &self,
+        session: SessionId,
+        area: &str,
+        reason: &str,
+    ) -> Result<AppliedAction, GameError> {
+        let area = crate::staff::normalise_text(area, 128)?;
+        let reason =
+            crate::staff::normalise_text(reason, crate::persistence::MAX_SOCIAL_REASON_BYTES)?;
+        let authority = self
+            .resolve_area_operator(session, tiamud_core::StaffCapability::StaffAssign)
+            .await?;
+        self.retire_area(&area)
+            .await
+            .map_err(map_area_operation_error)?;
+        self.store
+            .append_staff_audit(crate::persistence::StaffAuditRecord {
+                actor_account_id: authority.account_id,
+                target_account_id: None,
+                capability: tiamud_core::StaffCapability::StaffAssign,
+                action: "staff_area_retire".to_owned(),
+                reason: reason.clone(),
+                details: serde_json::json!({
+                    "actor_name": authority.actor_name.clone(),
+                    "area": area,
+                }),
+            })
+            .await?;
+        Ok(area_operation_applied(
+            authority,
+            "Area retirement accepted.\r\n",
+        ))
+    }
+
+    async fn staff_rehydrate_area(
+        &self,
+        session: SessionId,
+        area: &str,
+        reason: &str,
+    ) -> Result<AppliedAction, GameError> {
+        let area = crate::staff::normalise_text(area, 128)?;
+        let reason =
+            crate::staff::normalise_text(reason, crate::persistence::MAX_SOCIAL_REASON_BYTES)?;
+        let authority = self
+            .resolve_area_operator(session, tiamud_core::StaffCapability::StaffAssign)
+            .await?;
+        let router = self
+            .area_router
+            .as_ref()
+            .ok_or(GameError::AreaOperationInvalid)?;
+        let route = router
+            .try_route(None)
+            .map_err(|_| GameError::AreaOperationBusy)?;
+        self.rehydrate_retired_area(route.coordinator(), &area)
+            .await?;
+        drop(route);
+        self.store
+            .append_staff_audit(crate::persistence::StaffAuditRecord {
+                actor_account_id: authority.account_id,
+                target_account_id: None,
+                capability: tiamud_core::StaffCapability::StaffAssign,
+                action: "staff_area_rehydrate".to_owned(),
+                reason: reason.clone(),
+                details: serde_json::json!({
+                    "actor_name": authority.actor_name.clone(),
+                    "area": area,
+                }),
+            })
+            .await?;
+        Ok(area_operation_applied(
+            authority,
+            "Area rehydration accepted.\r\n",
+        ))
+    }
+
     pub(crate) async fn retire_area(
         &self,
         area_id: &str,
@@ -2988,6 +3123,64 @@ fn current_state(
         runtime_content.resolve_entity_presentation(world, session),
         world.player_state_view(session)?,
     ))
+}
+
+fn resolve_area_operator(
+    world: &World,
+    runtime_content: &RuntimeContent,
+    session_roles: &HashMap<SessionId, AccountRole>,
+    session_staff_accesses: &HashMap<SessionId, StaffAccess>,
+    session: SessionId,
+    capability: tiamud_core::StaffCapability,
+) -> Result<AreaOperatorAuthority, GameError> {
+    let actor = world.character_snapshot(session)?;
+    let access = session_staff_accesses
+        .get(&session)
+        .ok_or(StoreError::StaffForbidden)?;
+    crate::staff::ensure_capability(access, capability)?;
+    let role = session_roles
+        .get(&session)
+        .copied()
+        .unwrap_or(AccountRole::Player);
+    let mut scene = world.current_scene(session)?;
+    runtime_content.resolve_scene(world, session, role, &mut scene);
+    let presentation = runtime_content.resolve_entity_presentation(world, session);
+    let player = world.player_state_view(session)?;
+    Ok(AreaOperatorAuthority {
+        account_id: access.account_id,
+        actor_name: actor.name,
+        scene,
+        presentation,
+        player,
+    })
+}
+
+fn map_area_operation_error(error: AreaRetirementOperationError) -> GameError {
+    match error {
+        AreaRetirementOperationError::Busy => GameError::AreaOperationBusy,
+        AreaRetirementOperationError::Invalid => GameError::AreaOperationInvalid,
+        AreaRetirementOperationError::Persistence(error) => GameError::Persistence(error),
+        AreaRetirementOperationError::DurableAuthorityAmbiguous
+        | AreaRetirementOperationError::ActorStopped => GameError::ActorStopped,
+    }
+}
+
+fn area_operation_applied(authority: AreaOperatorAuthority, output: &str) -> AppliedAction {
+    AppliedAction {
+        scene: authority.scene,
+        presentation: authority.presentation,
+        player: authority.player,
+        output: Some(output.to_owned()),
+        container_contents: None,
+        trade_contents: None,
+        reward_odds: None,
+        mail_page: None,
+        mail_message: None,
+        board_catalog: None,
+        board_page: None,
+        board_entry: None,
+        events: Vec::new(),
+    }
 }
 
 fn project_view_events(
@@ -8466,6 +8659,106 @@ mod tests {
                 .filter(|entry| entry.action == "staff_announce")
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn staff_area_retire_requires_capability_and_writes_no_audit_when_denied() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        let admin = world
+            .register_account("Admin".into(), "correct horse battery staple".into())
+            .await
+            .unwrap();
+        let player = world
+            .register_account("Player".into(), "another correct horse battery".into())
+            .await
+            .unwrap();
+        let _admin_character = world
+            .create_authenticated_character(admin.token.as_str().into(), "Aster".into())
+            .await
+            .unwrap();
+        let player_character = world
+            .create_authenticated_character(player.token.as_str().into(), "Bryn".into())
+            .await
+            .unwrap();
+        let player_entered = world
+            .enter_authenticated_character(player.token.as_str().into(), player_character.id)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            world
+                .apply(
+                    player_entered.session_id,
+                    PlayerAction::Staff(tiamud_core::StaffAction::RetireArea {
+                        area: "square".into(),
+                        reason: "cleanup".into(),
+                    }),
+                )
+                .await,
+            Err(GameError::Persistence(StoreError::StaffForbidden))
+        ));
+
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .staff_audit
+                .iter()
+                .filter(|entry| entry.action == "staff_area_retire")
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn staff_area_retire_maps_missing_router_to_invalid_without_audit() {
+        let store = Arc::new(MemoryStore::default());
+        let world = WorldHandle::spawn(World::demo(), store.clone())
+            .await
+            .unwrap();
+        // The first registered account is provisioned as `implementor`, which
+        // holds `StaffAssign`.
+        let admin = world
+            .register_account("Admin".into(), "correct horse battery staple".into())
+            .await
+            .unwrap();
+        let admin_character = world
+            .create_authenticated_character(admin.token.as_str().into(), "Aster".into())
+            .await
+            .unwrap();
+        let admin_entered = world
+            .enter_authenticated_character(admin.token.as_str().into(), admin_character.id)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            world
+                .apply(
+                    admin_entered.session_id,
+                    PlayerAction::Staff(tiamud_core::StaffAction::RetireArea {
+                        area: "square".into(),
+                        reason: "cleanup".into(),
+                    }),
+                )
+                .await,
+            Err(GameError::AreaOperationInvalid)
+        ));
+
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap()
+                .staff_audit
+                .iter()
+                .filter(|entry| entry.action == "staff_area_retire")
+                .count(),
+            0
         );
     }
 

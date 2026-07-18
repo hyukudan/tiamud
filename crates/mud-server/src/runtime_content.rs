@@ -176,7 +176,6 @@ impl RuntimeContent {
     /// The delta therefore cannot remove content owned by another area merely
     /// by reusing its room, entity or script identity. This operation does not
     /// decide whether an area may retire and does not publish a runtime change.
-    #[allow(dead_code)] // 6D staging API; actor integration is deliberately separate.
     pub(crate) fn uninstall_delta(
         &mut self,
         delta: &RuntimeContentDelta,

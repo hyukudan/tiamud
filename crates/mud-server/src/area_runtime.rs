@@ -2750,6 +2750,207 @@ mod tests {
         store.shutdown().await.unwrap();
     }
 
+    async fn catalog_mode_implementor_handle(
+        published: &PublishedRegistry,
+        database: &std::path::Path,
+    ) -> (
+        Arc<SqliteCharacterStore>,
+        WorldHandle,
+        crate::world_actor::EnteredWorld,
+        tiamud_core::AccountId,
+    ) {
+        let current = published.coordinator();
+        let base = coordinator_generation_id(&current);
+        let store = Arc::new(SqliteCharacterStore::open(database).await.unwrap());
+        let durable_base = DurableAreaGeneration {
+            world_id: current.generation().catalog().world_id.clone(),
+            active_catalog_sha256: base.as_str().to_owned(),
+            previous_catalog_sha256: None,
+            activation_sequence: 1,
+        };
+        store
+            .bind_area_generation_if_absent(durable_base.clone())
+            .await
+            .unwrap();
+        let recovery = store.load_startup_world_recovery().await.unwrap();
+        // Additive bootstrap keeps the coordinator's residence model consistent
+        // with on-demand loads, so a later boundary retirement reverts the
+        // neighbour's cross-area exits back to deferred exactly.
+        let bootstrap = current.bootstrap_world(false).await.unwrap();
+        let handle = WorldHandle::spawn_with_scheduler_content_areas_and_recovery(
+            bootstrap.world,
+            store.clone(),
+            WorldSchedulerConfig::default(),
+            bootstrap.runtime_content,
+            Some(current),
+            recovery,
+            bootstrap.created_dynamic_state,
+        )
+        .await
+        .unwrap();
+        // The first registered account is bootstrapped as `implementor`, which
+        // holds the closed `StaffAssign` capability reused by the area surface.
+        let admin = handle
+            .register_account("Admin".into(), "correct horse battery staple".into())
+            .await
+            .unwrap();
+        let character = handle
+            .create_authenticated_character(admin.token.as_str().into(), "Aster".into())
+            .await
+            .unwrap();
+        let entered = handle
+            .enter_authenticated_character(admin.token.as_str().into(), character.id)
+            .await
+            .unwrap();
+        (store, handle, entered, admin.account.id)
+    }
+
+    async fn count_area_lifecycle_audit(
+        store: &SqliteCharacterStore,
+        account_id: tiamud_core::AccountId,
+        action: &str,
+    ) -> usize {
+        let entries = store
+            .staff_audit_entries(crate::persistence::StaffAuditRecord {
+                actor_account_id: account_id,
+                target_account_id: None,
+                capability: tiamud_core::StaffCapability::StaffAudit,
+                action: "staff_audit_view".to_owned(),
+                reason: "verify area lifecycle audit".to_owned(),
+                details: serde_json::json!({"actor_name": "Aster"}),
+            })
+            .await
+            .unwrap();
+        entries
+            .into_iter()
+            .filter(|entry| entry.action == action)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn staff_area_retire_of_start_area_is_rejected_without_expelling_the_operator() {
+        let published = PublishedRegistry::real_lantern_square();
+        let start_area = published
+            .coordinator()
+            .generation()
+            .room_owner(&published.release.catalog.start_room_id)
+            .unwrap()
+            .to_owned();
+        let database = published.registry.join("retire-start.sqlite3");
+        let (store, handle, entered, account_id) =
+            catalog_mode_implementor_handle(&published, &database).await;
+
+        let result = handle
+            .apply(
+                entered.session_id,
+                tiamud_core::PlayerAction::Staff(tiamud_core::StaffAction::RetireArea {
+                    area: start_area.clone(),
+                    reason: "should be rejected".into(),
+                }),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::world_actor::GameError::AreaOperationBusy)
+            ),
+            "unexpected retire result: {result:?}"
+        );
+
+        // The operator's session is untouched: it is still connected and the
+        // area holds no durable checkpoint or lifecycle audit.
+        assert!(
+            handle
+                .inspect_area_quiescence()
+                .await
+                .unwrap()
+                .connected_sessions
+                >= 1
+        );
+        assert!(store.load_area_checkpoints().await.unwrap().is_empty());
+        assert_eq!(
+            count_area_lifecycle_audit(&store, account_id, "staff_area_retire").await,
+            0
+        );
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn staff_retire_of_empty_content_area_projects_scene_and_rehydrates() {
+        let published = PublishedRegistry::real_lantern_square();
+        let database = published.registry.join("retire-empty.sqlite3");
+        let (store, handle, entered, account_id) =
+            catalog_mode_implementor_handle(&published, &database).await;
+        let session = entered.session_id;
+
+        // Load `north-gate` on demand by walking into it, then walk back so the
+        // unit is resident but empty of connected characters and retirable.
+        handle
+            .apply(
+                session,
+                tiamud_core::PlayerAction::Move(tiamud_core::Direction::North),
+            )
+            .await
+            .unwrap();
+        handle
+            .apply(
+                session,
+                tiamud_core::PlayerAction::Move(tiamud_core::Direction::South),
+            )
+            .await
+            .unwrap();
+
+        let retire = handle
+            .apply(
+                session,
+                tiamud_core::PlayerAction::Staff(tiamud_core::StaffAction::RetireArea {
+                    area: "north-gate".into(),
+                    reason: "draining for maintenance".into(),
+                }),
+            )
+            .await
+            .expect("retire must commit");
+        let _ = retire;
+        assert!(
+            !store.load_area_checkpoints().await.unwrap().is_empty(),
+            "retirement must leave a durable checkpoint"
+        );
+        assert_eq!(
+            count_area_lifecycle_audit(&store, account_id, "staff_area_retire").await,
+            1
+        );
+
+        // The bug: projecting the scene immediately after retirement must not
+        // fail with World(InvalidEntity) because of a dangling reference.
+        let scene = handle.apply(session, tiamud_core::PlayerAction::Look).await;
+        assert!(
+            scene.is_ok(),
+            "scene projection after retire failed: {scene:?}"
+        );
+
+        // Rehydrate and confirm the content returns: the operator can walk north
+        // into `north-gate` again.
+        handle
+            .apply(
+                session,
+                tiamud_core::PlayerAction::Staff(tiamud_core::StaffAction::RehydrateArea {
+                    area: "north-gate".into(),
+                    reason: "restoring after maintenance".into(),
+                }),
+            )
+            .await
+            .expect("rehydrate must commit");
+        let entered_north = handle
+            .apply(
+                session,
+                tiamud_core::PlayerAction::Move(tiamud_core::Direction::North),
+            )
+            .await
+            .expect("walk into rehydrated area");
+        assert_eq!(entered_north.scene.title, "The North Gate");
+        handle.shutdown().await.unwrap();
+    }
+
     #[test]
     fn bounded_public_errors_do_not_render_content_identifiers() {
         let secret_area = "private:area-id";

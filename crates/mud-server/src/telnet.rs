@@ -1002,6 +1002,12 @@ fn public_error(error: &GameError) -> String {
         | GameError::World(tiamud_core::WorldError::AreaLoadRequired(_)) => {
             "The destination is not available right now.".to_owned()
         }
+        GameError::AreaOperationBusy => {
+            "That area is busy and cannot be retired or rehydrated right now.".to_owned()
+        }
+        GameError::AreaOperationInvalid => {
+            "That area retirement or rehydration request is not valid.".to_owned()
+        }
         GameError::MailRecipientUnavailable => "That mail recipient is not available.".to_owned(),
         GameError::GiveUnavailable => "That item transfer is not available.".to_owned(),
         GameError::World(tiamud_core::WorldError::LootUnavailable) => {

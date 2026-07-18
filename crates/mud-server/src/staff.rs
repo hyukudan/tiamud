@@ -318,6 +318,11 @@ pub async fn apply_staff(
                 announcement: None,
             })
         }
+        StaffAction::RetireArea { .. } | StaffAction::RehydrateArea { .. } => {
+            Err(GameError::from(StoreError::InvalidStaffState(
+                "area lifecycle is handled by the operations surface".to_owned(),
+            )))
+        }
     }
 }
 
@@ -401,7 +406,10 @@ async fn authorize_target(
     normalise_text(&reason, MAX_SOCIAL_REASON_BYTES).map_err(GameError::from)
 }
 
-fn ensure_capability(access: &StaffAccess, capability: StaffCapability) -> Result<(), StoreError> {
+pub(crate) fn ensure_capability(
+    access: &StaffAccess,
+    capability: StaffCapability,
+) -> Result<(), StoreError> {
     access
         .capabilities
         .contains(&capability)
@@ -626,7 +634,7 @@ fn bounded_output(mut output: String) -> String {
     output
 }
 
-fn normalise_text(value: &str, maximum: usize) -> Result<String, StoreError> {
+pub(crate) fn normalise_text(value: &str, maximum: usize) -> Result<String, StoreError> {
     let value = value.trim();
     if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
         Err(StoreError::InvalidStaffInput)
