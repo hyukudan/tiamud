@@ -1,6 +1,9 @@
 # ADR 0024: plan de cierre de la aceptación 6D
 
-- Estado: propuesta (borrador para revisión humana; no implementada)
+- Estado: aceptada — implementación parcial. Gate 2 (superficie de
+  retirada/rehidratación por staff) implementado el 2026-07-18, incluida la
+  corrección del teardown que impedía la proyección tras retirar. Gates 1, 3, 4
+  y 5 siguen pendientes; ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
 - Fecha: 2026-07-18
 - Desarrolla: [ADR 0022](0022-reversible-area-unit-retirement.md)
 - Continúa: [ADR 0005](0005-hot-area-lifecycle.md)
@@ -102,27 +105,49 @@ Criterios medibles y verificables:
 - formato/diff, clippy estricto de workspace, MSRV Rust 1.88, cargo-deny,
   licencias/avisos y reauditoría 0 P1/P2, con un registro fechado retenido.
 
-## Puerta 2 — Superficie operativa acotada (local)
+## Puerta 2 — Superficie operativa acotada (implementada 2026-07-18)
 
-Objetivo: exponer una superficie **solo local** que permita **solicitar** el
-retiro de una unidad vacía y sin pins y **observar** el estado de
-unidad/pin/checkpoint, sin acoplar la retirada al protocolo de juego.
+Objetivo: exponer una superficie acotada que permita **solicitar** el retiro y
+la rehidratación de una unidad vacía y sin pins, con autorización explícita y
+auditoría.
 
-Criterios medibles y verificables:
+**Reconciliación de diseño.** El borrador inicial exigía una superficie «solo
+local» sin comando de red. Se revisó: la moderación de fase 2 (`inspect`,
+`where`, `goto`, `transfer`, `restore`, `announce`, `audit`) ya opera mediante
+comandos de staff que viajan por el protocolo de juego, autorizados por
+capacidad cerrada y auditados. Acoplar la retirada 6D a ese mismo patrón es más
+coherente que un CLI/SIGHUP separado y no relaja ninguna garantía. Por tanto la
+superficie es un **comando de staff con capacidad**, no un canal local aparte.
 
-- comandos operativos y/o SIGHUP locales solicitan el retiro de una unidad vacía
-  y sin pins y consultan estado de unidades, pins por clase/edad y checkpoints;
-- **no** se añade comando Web, Telnet, GMCP ni de personaje para retirar,
-  rehidratar u observar la política;
-- una solicitud sobre una unidad con cualquier pin devuelve `busy`, reabre
-  admisiones y **nunca** expulsa, mueve ni desconecta jugadores;
-- el área propietaria de `startRoomId` nunca es candidata y la superficie lo
-  rechaza explícitamente;
-- las métricas usan enums cerrados de baja cardinalidad; **ninguna** etiqueta
-  Prometheus contiene área, mundo, revisión, digest, epoch ni ruta;
-- pruebas deterministas cubren `busy`, éxito, rechazo del área inicial y
-  observación coherente del estado; y
-- formato/diff, clippy, MSRV, licencias y reauditoría 0 P1/P2 pasan.
+Implementado y verificado:
+
+- comandos `staff area retire <área> | <motivo>` y
+  `staff area rehydrate <área> | <motivo>`, parseados en `parse_action` y con
+  paridad Web/Telnet;
+- autorización por la capacidad cerrada existente `StaffAssign` (perfiles
+  administrator/implementor), sin añadir una 13.ª capacidad ni brecha de
+  migración; la acción concreta se desambigua en el registro de auditoría;
+- reutiliza **exactamente** las guardas existentes (área inicial, personaje
+  conectado, combate, trade, estado transitorio de NPC, referencias cruzadas de
+  SCC): una unidad con cualquier pin devuelve `busy`/`invalid`, reabre
+  admisiones y **nunca** expulsa, mueve ni desconecta jugadores; `prepare` es
+  read-only y no muta ante rechazo;
+- orden atómico: capacidad → operación (CAS/checkpoint existente, exactly-once,
+  restart-safe) → auditoría append-only **solo en éxito**; sin fila de auditoría
+  ante fallo;
+- proyección de cliente acotada, sin IDs/digests internos;
+- **corrección de teardown**: la retirada ahora poda las salas retiradas de la
+  memoria de mapa por sesión (`ObserverView.discovered_rooms`), de modo que la
+  proyección tras retirar ya no falla `InvalidEntity`; se revierte exacto por el
+  checkpoint de ciclo de vida;
+- pruebas deterministas cubren `busy`, éxito, rechazo del área inicial, falta de
+  capacidad, y un extremo-a-extremo retirada→proyección→rehidratación con
+  catálogo y SQLite reales; el servidor pasa además con PostgreSQL real. Formato,
+  clippy estricto y fmt pasan.
+
+Pendiente en esta puerta: una superficie de **observación** del estado de
+unidad/pin/checkpoint y métricas Prometheus de baja cardinalidad con enums
+cerrados y sin etiquetas de área/mundo/revisión/digest.
 
 ## Puerta 3 — E2E de ACK perdido 6D y fallos ambiguos
 
