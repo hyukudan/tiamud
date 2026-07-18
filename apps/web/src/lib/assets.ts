@@ -1,3 +1,4 @@
+import { isRecord } from './guards';
 import { localizedImageAlt, type SceneImage } from './protocol';
 
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -27,9 +28,6 @@ export interface SceneAssetReference {
   assetRoot: string;
   assetHash: string;
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const isPositiveInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value > 0;

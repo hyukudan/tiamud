@@ -2,6 +2,7 @@ import { render } from 'svelte/server';
 import { describe, expect, it } from 'vitest';
 import App from './App.svelte';
 import appSource from './App.svelte?raw';
+import historyFormatSource from './lib/app/history-format.ts?raw';
 
 describe('Tiamud entry flow', () => {
   it('shows account access at the illustrated gate and does not expose guest entry', () => {
@@ -20,19 +21,19 @@ describe('Tiamud entry flow', () => {
   });
 
   it('labels local, spatial, direct, authored-emote, party, and channel messages in history', () => {
-    expect(appSource).toContain("case 'announcement'");
-    expect(appSource).toContain('`${message.sender} announces`');
-    expect(appSource).toContain("case 'say'");
-    expect(appSource).toContain("case 'yell'");
-    expect(appSource).toContain('`${message.sender} yells`');
-    expect(appSource).toContain("case 'shout'");
-    expect(appSource).toContain('`${message.sender} shouts`');
-    expect(appSource).toContain("case 'tell'");
-    expect(appSource).toContain("case 'telepathy'");
-    expect(appSource).toContain("case 'emote'");
-    expect(appSource).toContain("return 'Emote'");
-    expect(appSource).toContain("case 'party'");
-    expect(appSource).toContain('in #${message.channel}');
+    expect(historyFormatSource).toContain("case 'announcement'");
+    expect(historyFormatSource).toContain('`${message.sender} announces`');
+    expect(historyFormatSource).toContain("case 'say'");
+    expect(historyFormatSource).toContain("case 'yell'");
+    expect(historyFormatSource).toContain('`${message.sender} yells`');
+    expect(historyFormatSource).toContain("case 'shout'");
+    expect(historyFormatSource).toContain('`${message.sender} shouts`');
+    expect(historyFormatSource).toContain("case 'tell'");
+    expect(historyFormatSource).toContain("case 'telepathy'");
+    expect(historyFormatSource).toContain("case 'emote'");
+    expect(historyFormatSource).toContain("return 'Emote'");
+    expect(historyFormatSource).toContain("case 'party'");
+    expect(historyFormatSource).toContain('in #${message.channel}');
     expect(appSource).toContain('socialHistoryLabel(message.data)');
   });
 

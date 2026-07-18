@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { PlayerStateSnapshot } from '../lib/protocol';
 import PlayerDashboard from './PlayerDashboard.svelte';
 import dashboardSource from './PlayerDashboard.svelte?raw';
+import mailModuleSource from '../lib/dashboard/mail.ts?raw';
 
 const player: PlayerStateSnapshot = {
   revision: 4,
@@ -364,7 +365,7 @@ describe('PlayerDashboard', () => {
     expect(dashboardSource).toContain("'item.give'");
     expect(dashboardSource).toContain("'reward.open'");
     expect(dashboardSource).toContain("'reward.odds'");
-    expect(dashboardSource).toContain('\\u007f-\\u009f');
+    expect(mailModuleSource).toContain('\\u007f-\\u009f');
     expect(dashboardSource).toContain('recipient: recipient.id');
     expect(dashboardSource).toContain('<option value="staff">');
     expect(dashboardSource).not.toContain('<option value="announcement">');

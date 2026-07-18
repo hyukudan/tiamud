@@ -1,3 +1,5 @@
+import { isRecord } from './guards';
+
 export interface Account {
   id: number;
   name: string;
@@ -51,9 +53,6 @@ export const ACCESS_STORAGE_KEY = 'tiamud.access.v1';
 
 type FetchLike = typeof fetch;
 type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function parseAccount(value: unknown): Account {
   if (!isRecord(value) || typeof value.id !== 'number' || typeof value.name !== 'string') {
@@ -245,6 +244,13 @@ export function sessionHasExpired(session: Pick<AuthenticatedSession, 'expiresAt
   return !Number.isFinite(expiryMs) || Date.now() >= expiryMs;
 }
 
+// SECURITY NOTE: `readStoredAccess`/`writeStoredAccess` persist the access
+// token via the injected `StorageLike` (localStorage in the browser). Any
+// script running in the page can read localStorage, so the token is exposed to
+// XSS token theft. The mitigation is to move the token into an HttpOnly, Secure,
+// SameSite cookie, which requires a backend/protocol change and is intentionally
+// deferred to a future ADR. This comment is a deliberate marker of that accepted
+// trade-off, not a bug to silently fix in this pass.
 export function readStoredAccess(storage: StorageLike): StoredAccess | undefined {
   let candidate: unknown;
   try {

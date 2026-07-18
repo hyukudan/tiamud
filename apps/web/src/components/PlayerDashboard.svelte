@@ -18,6 +18,15 @@
     SceneAction,
     TradeContentsData,
   } from '../lib/protocol';
+  import {
+    exactProbability,
+    humanizeId,
+    resourceCostLabel,
+    signedDelta,
+    statusLabel,
+  } from '../lib/dashboard/format';
+  import { mailDate, mailVisibleText } from '../lib/dashboard/mail';
+  import { clampItemQuantity, clampTradeQuantity } from '../lib/dashboard/quantity';
 
   interface Props {
     value?: PlayerStateSnapshot;
@@ -127,17 +136,6 @@
     pendingBoardReportRequest = undefined;
   });
 
-  const statusLabel = (status: PlayerStateSnapshot['quests'][number]['status']): string => ({
-    available: 'Available',
-    active: 'Active',
-    readyToClaim: 'Reward ready',
-    completed: 'Completed',
-  })[status];
-
-  const humanizeId = (id: string): string => id.split(/[_:.-]+/).filter(Boolean)
-    .map((part) => (part[0]?.toUpperCase() ?? '') + part.slice(1))
-    .join(' ');
-
   function perform(action: SceneAction): void {
     const [verb = '', ...tail] = action.command.trim().split(/\s+/);
     const target = tail.join(' ') || undefined;
@@ -191,14 +189,6 @@
     oncommand(action.command);
   }
 
-  function boundedItemQuantity(maximum: number): number {
-    return Math.max(1, Math.min(256, maximum, Math.trunc(itemQuantity) || 1));
-  }
-
-  function boundedTradeQuantity(maximum: number): number {
-    return Math.max(1, Math.min(128, maximum, Math.trunc(tradeOfferQuantity) || 1));
-  }
-
   $effect(() => {
     const trade = value?.trade;
     if (trade && trade.stateRevision !== lastTradeRevision) {
@@ -238,7 +228,7 @@
   function offerTradeItem(item: PlayerItemSnapshot): void {
     const trade = value?.trade;
     if (!trade || !item.canTrade || item.availableQuantity === 0) return;
-    const quantity = boundedTradeQuantity(item.availableQuantity);
+    const quantity = clampTradeQuantity(tradeOfferQuantity, item.availableQuantity);
     onaction(
       'trade.item.set',
       { tradeId: trade.id, target: item.id, quantity },
@@ -274,7 +264,7 @@
 
   function putItem(item: PlayerItemSnapshot): void {
     if (!destinationContainer || destinationContainer === item.id) return;
-    const quantity = boundedItemQuantity(item.quantity);
+    const quantity = clampItemQuantity(itemQuantity, item.quantity);
     onaction(
       'item.put',
       { target: item.id, container: destinationContainer, quantity },
@@ -284,7 +274,7 @@
 
   function getItem(item: ContainerItemSnapshot): void {
     if (!containerContents) return;
-    const quantity = boundedItemQuantity(item.quantity);
+    const quantity = clampItemQuantity(itemQuantity, item.quantity);
     onaction(
       'item.get',
       { target: item.id, container: containerContents.container, quantity },
@@ -296,7 +286,7 @@
     if (!giveRecipient) return;
     const recipient = nearbyRecipients.find((character) => character.id === giveRecipient);
     if (!recipient) return;
-    const quantity = boundedItemQuantity(item.quantity);
+    const quantity = clampItemQuantity(itemQuantity, item.quantity);
     onaction(
       'item.give',
       { target: item.id, recipient: recipient.id, quantity },
@@ -318,14 +308,6 @@
 
   function requestRewardOdds(selector: string, page: number): void {
     onaction('reward.odds', { target: selector, page }, `reward odds ${selector} ${page}`);
-  }
-
-  function exactProbability(numerator: number, denominator: number): string {
-    return `${numerator}/${denominator} (${((numerator * 100) / denominator).toFixed(2)}%)`;
-  }
-
-  function signedDelta(value: number): string {
-    return `${value >= 0 ? '+' : ''}${value}`;
   }
 
   function sendVoice(): void {
@@ -401,12 +383,6 @@
       explicitTarget: 'Choose a target',
     })[ability.targeting];
 
-  function resourceCostLabel(
-    cost: PlayerStateSnapshot['character']['abilities'][number]['resourceCosts'][number],
-  ): string {
-    return `${cost.amount} ${cost.label}`;
-  }
-
   function abilityTarget(abilityId: string): string | undefined {
     const selected = abilityTargetById[abilityId];
     return selected && abilityTargets.some((target) => target.id === selected) ? selected : undefined;
@@ -442,12 +418,6 @@
     );
     emoteTarget = '';
   }
-
-  const mailVisibleText = (value: string, maximum: number): boolean => {
-    const text = value.trim();
-    return text === value && text.length > 0 && new TextEncoder().encode(text).length <= maximum &&
-      !/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(text);
-  };
 
   function sendMail(): void {
     if (!mailVisibleText(mailTarget, 64) || mailTarget.includes('|') ||
@@ -497,11 +467,6 @@
     );
     if (requestId) pendingBoardReportRequest = requestId;
   }
-
-  const mailDate = (unixSeconds: number): string => new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(new Date(unixSeconds * 1_000));
 </script>
 
 <aside class="player-dashboard" aria-label="Character and world panels">

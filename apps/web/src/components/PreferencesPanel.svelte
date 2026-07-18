@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ClientPreferences } from '../lib/preferences';
+  import { applyPreferenceChange, type ClientPreferences } from '../lib/preferences';
 
   let {
     value,
@@ -10,7 +10,7 @@
   } = $props();
 
   const update = <K extends keyof ClientPreferences>(key: K, next: ClientPreferences[K]) =>
-    onchange({ ...value, [key]: next });
+    onchange(applyPreferenceChange(value, key, next));
 </script>
 
 <details class="preferences-panel">

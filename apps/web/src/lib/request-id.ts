@@ -18,6 +18,12 @@ function bytesAsUuid(bytes: Uint8Array): string {
  * browser contexts as well as browsers with `crypto.randomUUID()`.
  */
 export function createRequestId(
+  // The DOM lib types `globalThis.crypto` as the full `Crypto` interface, but
+  // this module only relies on the structural subset `CryptoLike` (optional
+  // `randomUUID`/`getRandomValues`). The double cast narrows a wider,
+  // known-compatible type down to that structural shape; every use below is
+  // feature-detected and guarded at runtime, so the cast cannot introduce
+  // unsound access.
   cryptoLike: CryptoLike | undefined = globalThis.crypto as unknown as CryptoLike,
 ): string {
   if (typeof cryptoLike?.randomUUID === 'function') {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  applyPreferenceChange,
   DEFAULT_PREFERENCES,
   loadPreferences,
   motionReduced,
@@ -41,5 +42,34 @@ describe('client preferences', () => {
     expect(motionReduced({ ...DEFAULT_PREFERENCES, reduceMotion: true }, false)).toBe(true);
     expect(motionReduced({ ...DEFAULT_PREFERENCES, screenReader: true }, false)).toBe(true);
     expect(multimediaAllowed({ ...DEFAULT_PREFERENCES, screenReader: true })).toBe(false);
+  });
+});
+
+describe('applyPreferenceChange', () => {
+  it('changes only the targeted boolean key and leaves the rest equal', () => {
+    const result = applyPreferenceChange(DEFAULT_PREFERENCES, 'images', false);
+    expect(result.images).toBe(false);
+    expect(result.audio).toBe(DEFAULT_PREFERENCES.audio);
+    expect(result.fontScale).toBe(DEFAULT_PREFERENCES.fontScale);
+    expect(result.effectsVolume).toBe(DEFAULT_PREFERENCES.effectsVolume);
+  });
+
+  it('does not mutate the input object', () => {
+    const value = { ...DEFAULT_PREFERENCES };
+    const result = applyPreferenceChange(value, 'images', false);
+    expect(value.images).toBe(true);
+    expect(result).not.toBe(value);
+  });
+
+  it('changes fontScale to 125', () => {
+    const result = applyPreferenceChange(DEFAULT_PREFERENCES, 'fontScale', 125);
+    expect(result.fontScale).toBe(125);
+    expect(result.images).toBe(DEFAULT_PREFERENCES.images);
+  });
+
+  it('changes a numeric volume', () => {
+    const result = applyPreferenceChange(DEFAULT_PREFERENCES, 'musicVolume', 30);
+    expect(result.musicVolume).toBe(30);
+    expect(result.effectsVolume).toBe(DEFAULT_PREFERENCES.effectsVolume);
   });
 });

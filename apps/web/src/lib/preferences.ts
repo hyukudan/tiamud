@@ -24,6 +24,12 @@ export const DEFAULT_PREFERENCES: ClientPreferences = {
   effectsVolume: 70,
 };
 
+export const applyPreferenceChange = <K extends keyof ClientPreferences>(
+  value: ClientPreferences,
+  key: K,
+  next: ClientPreferences[K],
+): ClientPreferences => ({ ...value, [key]: next });
+
 const STORAGE_KEY = 'tiamud.preferences.v1';
 
 const isBoolean = (value: unknown): value is boolean => typeof value === 'boolean';

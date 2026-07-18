@@ -1,3 +1,5 @@
+import { isRecord } from './guards';
+
 export const PROTOCOL_VERSION = 1 as const;
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
@@ -755,9 +757,6 @@ export type ActionPerform = Envelope<
 export type SyncRequest = Envelope<'sync.request', { afterSeq: number }>;
 
 export type ClientHeartbeat = Envelope<'client.heartbeat', { nonce: number }>;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;

@@ -18,7 +18,6 @@
     SceneEntityVisualSource,
     SceneSnapshot,
     ServerNoticeData,
-    SocialMessageData,
     SyncRecoveryData,
     TradeContentsData,
   } from './lib/protocol';
@@ -44,7 +43,6 @@
   import {
     TiamudConnection,
     websocketUrl,
-    type BrowserCapabilities,
   } from './lib/socket';
   import {
     loadPreferences,
@@ -73,6 +71,14 @@
     visualSourceForCue,
     type ActiveScenePresentationCue,
   } from './lib/scene-presentation';
+  import { capabilitiesFor } from './lib/app/capabilities';
+  import {
+    connectionLabelFor,
+    itemActionName,
+    socialHistoryLabel,
+  } from './lib/app/history-format';
+  import { directVisualSource, visualSourceUrl } from './lib/app/visual-source';
+  import { computeCommandSuggestions } from './lib/app/command-suggestions';
 
   interface HistoryEntry {
     id: string;
@@ -145,13 +151,7 @@
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const reduceVisualMotion = $derived(motionReduced(preferences, systemReducedMotion));
 
-  const connectionLabel = $derived(
-    connectionState === 'connected'
-      ? 'Connected'
-      : connectionState === 'connecting'
-        ? 'Connecting…'
-        : 'Disconnected — reconnecting…',
-  );
+  const connectionLabel = $derived(connectionLabelFor(connectionState));
   const browserLocale = typeof navigator === 'undefined' ? 'en' : navigator.language;
   const localizedSceneImage = $derived(
     scene?.image
@@ -195,31 +195,12 @@
   const overflowVisualEntities = $derived(visualLayout.overflow.slice(0, 5).flatMap((id) =>
     visualEntities.find((entity) => entity.id === id) ?? [],
   ));
-  const commandSuggestions = $derived.by(() => {
-    const commands = [
-      'look',
-      'inventory',
-      'loot',
-      'north',
-      'east',
-      'south',
-      'west',
-      'up',
-      'down',
-      'say ',
-      'tell ',
-      'who',
-      'help',
-      'ignore ',
-      'unignore ',
-      'block ',
-      'unblock ',
-      'report ',
-      ...(scene?.exits.map((exit) => exit.command) ?? []),
-      ...rememberedCommands.toReversed(),
-    ];
-    return [...new Set(commands)].slice(0, 24);
-  });
+  const commandSuggestions = $derived.by(() =>
+    computeCommandSuggestions(
+      scene?.exits.map((exit) => exit.command) ?? [],
+      rememberedCommands,
+    ),
+  );
 
   $effect(() => {
     const assetKey = sceneAssetKey;
@@ -263,18 +244,9 @@
     if (next.audio && !preferences.audio) audioController?.unlockFromGesture();
     audioController?.updatePreferences(next);
     preferences = next;
-    connection?.updateCapabilities(capabilitiesFor(next));
-  }
-
-  function capabilitiesFor(value: ClientPreferences): BrowserCapabilities {
-    return {
-      images: multimediaAllowed(value),
-      reducedMotion: motionReduced(
-        value,
-        window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-      ),
-      audio: value.audio,
-    };
+    connection?.updateCapabilities(
+      capabilitiesFor(next, window.matchMedia('(prefers-reduced-motion: reduce)').matches),
+    );
   }
 
   function replaceHistory(next: HistoryEntry[], activity = 1): void {
@@ -381,39 +353,6 @@
         };
       }
     }
-  }
-
-  function socialHistoryLabel(message: SocialMessageData): string {
-    switch (message.channel) {
-      case 'announcement':
-        return `${message.sender} announces`;
-      case 'say':
-        return `${message.sender} says`;
-      case 'yell':
-        return `${message.sender} yells`;
-      case 'shout':
-        return `${message.sender} shouts`;
-      case 'tell':
-        return `${message.sender} tells you`;
-      case 'telepathy':
-        return `${message.sender} reaches your mind`;
-      case 'emote':
-        return 'Emote';
-      case 'party':
-        return `${message.sender} to the party`;
-      default:
-        return `${message.sender} in #${message.channel}`;
-    }
-  }
-
-  function directVisualSource(
-    source: SceneEntityVisualSource | undefined,
-  ): SceneEntityVisualSource | undefined {
-    return source && (source.avif || source.webp || source.png) ? source : undefined;
-  }
-
-  function visualSourceUrl(source: SceneEntityVisualSource): string {
-    return source.png ?? source.webp ?? source.avif ?? '';
   }
 
   function clearEntityVisualCue(entityId: string): void {
@@ -769,16 +708,6 @@
     command = '';
   }
 
-  function itemActionName(commandValue: string): string | undefined {
-    const normalized = commandValue.trim().toLowerCase();
-    if (normalized.startsWith('reward odds ')) return 'reward.odds';
-    const verb = normalized.split(/\s+/, 1)[0];
-    if (verb === 'open') return 'reward.open';
-    return verb && ['take', 'drop', 'examine', 'use', 'equip', 'unequip', 'contents'].includes(verb)
-      ? `item.${verb}`
-      : undefined;
-  }
-
   function navigateCommandHistory(event: KeyboardEvent): void {
     if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
     if (rememberedCommands.length === 0) return;
@@ -843,7 +772,7 @@
             clearCredentials,
           ),
         },
-        capabilitiesFor(preferences),
+        capabilitiesFor(preferences, window.matchMedia('(prefers-reduced-motion: reduce)').matches),
       );
       connection.connect();
     }
