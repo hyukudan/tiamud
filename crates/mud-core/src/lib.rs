@@ -3146,6 +3146,14 @@ impl From<ItemProvenanceV6> for ItemProvenance {
     }
 }
 
+/// Returns `true` when a distribution mode is the fail-safe `RoundRobin`
+/// default, so snapshot v9 omits the field for encounters that never opted into
+/// an advanced mode. This keeps a defeat that uses the unchanged phase 4A path
+/// byte-identical to its v8 encoding.
+fn is_round_robin_distribution(mode: &loot_distribution::LootDistributionMode) -> bool {
+    matches!(mode, loot_distribution::LootDistributionMode::RoundRobin)
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LootEncounter {
@@ -3156,6 +3164,55 @@ pub struct LootEncounter {
     pub cohort: Vec<CharacterId>,
     pub room_id: String,
     pub started_tick: u64,
+    /// Snapshot v9. The group loot distribution mode that governs how each
+    /// resolved root selects its beneficiary. `RoundRobin` (the default) is the
+    /// unchanged phase 4A behaviour; `NeedGreed` and `MasterLoot` consult the
+    /// per-root declarations/assignments below and fall back to round-robin when
+    /// no advanced winner exists.
+    #[serde(default, skip_serializing_if = "is_round_robin_distribution")]
+    pub distribution: loot_distribution::LootDistributionMode,
+    /// Snapshot v9. Per-root `need`/`greed`/`pass` declarations keyed by the
+    /// resolved root instance, then by the declaring cohort member. Empty is the
+    /// fail-safe default and always resolves through the round-robin path.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub loot_declarations:
+        BTreeMap<ItemInstanceId, BTreeMap<CharacterId, loot_distribution::LootDecision>>,
+    /// Snapshot v9. Per-root master-loot assignments made by the party leader,
+    /// keyed by the resolved root instance. Empty is the fail-safe default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub master_assignments: BTreeMap<ItemInstanceId, CharacterId>,
+}
+
+/// Exact loot-encounter shape produced through snapshot v8. It predates the v9
+/// group-distribution fields and, via `deny_unknown_fields`, rejects any v8
+/// payload that smuggles a v9 loot field. The v8 -> v9 upgrade normalizes it to
+/// the `RoundRobin` default with empty declarations and assignments.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LootEncounterV8 {
+    pub npc_spawn_id: String,
+    pub initiator: CharacterId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub party_id: Option<u64>,
+    pub cohort: Vec<CharacterId>,
+    pub room_id: String,
+    pub started_tick: u64,
+}
+
+impl From<LootEncounterV8> for LootEncounter {
+    fn from(value: LootEncounterV8) -> Self {
+        Self {
+            npc_spawn_id: value.npc_spawn_id,
+            initiator: value.initiator,
+            party_id: value.party_id,
+            cohort: value.cohort,
+            room_id: value.room_id,
+            started_tick: value.started_tick,
+            distribution: loot_distribution::LootDistributionMode::RoundRobin,
+            loot_declarations: BTreeMap::new(),
+            master_assignments: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3205,7 +3262,7 @@ pub struct DurableCharacterSnapshot {
     pub gameplay: CharacterGameplaySnapshot,
 }
 
-pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 8;
+pub const WORLD_RUNTIME_SNAPSHOT_VERSION: u32 = 9;
 pub const MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES: usize = 1_048_576;
 pub const MAX_WORLD_RUNTIME_SNAPSHOT_BYTES: usize = 2_097_152;
 const MAX_ACTIVE_EFFECTS: usize = 32;
@@ -3556,7 +3613,7 @@ pub struct WorldRuntimeSnapshotV7 {
     pub trades: BTreeMap<TradeId, TradeSnapshot>,
     pub next_loot_drop_id: LootDropId,
     pub item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
-    pub loot_encounters: BTreeMap<String, LootEncounter>,
+    pub loot_encounters: BTreeMap<String, LootEncounterV8>,
     pub ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
     pub party_loot_cursors: BTreeMap<u64, u64>,
     pub next_reward_open_id: RewardOpenId,
@@ -3589,6 +3646,35 @@ pub struct WorldRuntimeSnapshot {
     pub area_residency: BTreeMap<String, AreaRuntimeResidence>,
 }
 
+/// Exact snapshot shape produced through additive area loading (v8). It carries
+/// the area residency manifest of v8 but predates the v9 group-distribution
+/// loot fields, so its encounters use [`LootEncounterV8`] and reject any v9
+/// field via `deny_unknown_fields`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldRuntimeSnapshotV8 {
+    pub snapshot_version: u32,
+    pub revision: u64,
+    pub logical_tick: u64,
+    pub rng_state: u64,
+    pub next_item_instance_sequence: u64,
+    pub item_instances: BTreeMap<ItemInstanceId, RuntimeItemInstanceSnapshot>,
+    pub npcs: BTreeMap<String, NpcRuntimeSnapshot>,
+    #[serde(default)]
+    pub adventure: AdventureRuntimeSnapshot,
+    #[serde(default)]
+    pub progression_flags: BTreeSet<String>,
+    pub next_trade_id: TradeId,
+    pub trades: BTreeMap<TradeId, TradeSnapshot>,
+    pub next_loot_drop_id: LootDropId,
+    pub item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
+    pub loot_encounters: BTreeMap<String, LootEncounterV8>,
+    pub ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
+    pub party_loot_cursors: BTreeMap<u64, u64>,
+    pub next_reward_open_id: RewardOpenId,
+    pub area_residency: BTreeMap<String, AreaRuntimeResidence>,
+}
+
 /// Exact snapshot shape produced by repeatable-loot phase 4A. It cannot opt
 /// into affixes, sealed provenance or the reward-open counter introduced by
 /// v7.
@@ -3610,7 +3696,7 @@ pub struct WorldRuntimeSnapshotV6 {
     pub trades: BTreeMap<TradeId, TradeSnapshot>,
     pub next_loot_drop_id: LootDropId,
     pub item_provenance: BTreeMap<ItemInstanceId, ItemProvenanceV6>,
-    pub loot_encounters: BTreeMap<String, LootEncounter>,
+    pub loot_encounters: BTreeMap<String, LootEncounterV8>,
     pub ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
     pub party_loot_cursors: BTreeMap<u64, u64>,
 }
@@ -3884,7 +3970,11 @@ impl WorldRuntimeSnapshot {
                 .into_iter()
                 .map(|(id, provenance)| (id, provenance.into()))
                 .collect(),
-            loot_encounters: snapshot.loot_encounters,
+            loot_encounters: snapshot
+                .loot_encounters
+                .into_iter()
+                .map(|(npc_id, encounter)| (npc_id, encounter.into()))
+                .collect(),
             ground_loot: snapshot.ground_loot,
             party_loot_cursors: snapshot.party_loot_cursors,
             next_reward_open_id: RewardOpenId(1),
@@ -3918,11 +4008,52 @@ impl WorldRuntimeSnapshot {
             trades: snapshot.trades,
             next_loot_drop_id: snapshot.next_loot_drop_id,
             item_provenance: snapshot.item_provenance,
-            loot_encounters: snapshot.loot_encounters,
+            loot_encounters: snapshot
+                .loot_encounters
+                .into_iter()
+                .map(|(npc_id, encounter)| (npc_id, encounter.into()))
+                .collect(),
             ground_loot: snapshot.ground_loot,
             party_loot_cursors: snapshot.party_loot_cursors,
             next_reward_open_id: snapshot.next_reward_open_id,
             area_residency,
+        };
+        validate_world_runtime_snapshot_semantics(&upgraded)?;
+        Ok(upgraded)
+    }
+
+    /// Upgrade an exact snapshot v8 payload to the current v9 shape. v8 already
+    /// carries the area residency manifest, so unlike v7 no external identities
+    /// are supplied. Every loot encounter normalizes to the `RoundRobin` default
+    /// with empty declarations/assignments; the rest of the state is preserved
+    /// verbatim and revalidated.
+    pub fn upgrade_v8(snapshot: WorldRuntimeSnapshotV8) -> Result<Self, WorldError> {
+        if snapshot.snapshot_version != 8 {
+            return Err(WorldError::InvalidRuntimeSnapshot);
+        }
+        let upgraded = Self {
+            snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
+            revision: snapshot.revision,
+            logical_tick: snapshot.logical_tick,
+            rng_state: snapshot.rng_state,
+            next_item_instance_sequence: snapshot.next_item_instance_sequence,
+            item_instances: snapshot.item_instances,
+            npcs: snapshot.npcs,
+            adventure: snapshot.adventure,
+            progression_flags: snapshot.progression_flags,
+            next_trade_id: snapshot.next_trade_id,
+            trades: snapshot.trades,
+            next_loot_drop_id: snapshot.next_loot_drop_id,
+            item_provenance: snapshot.item_provenance,
+            loot_encounters: snapshot
+                .loot_encounters
+                .into_iter()
+                .map(|(npc_id, encounter)| (npc_id, encounter.into()))
+                .collect(),
+            ground_loot: snapshot.ground_loot,
+            party_loot_cursors: snapshot.party_loot_cursors,
+            next_reward_open_id: snapshot.next_reward_open_id,
+            area_residency: snapshot.area_residency,
         };
         validate_world_runtime_snapshot_semantics(&upgraded)?;
         Ok(upgraded)
@@ -3993,7 +4124,8 @@ impl WorldRuntimeSnapshotV2 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompatibleWorldRuntimeSnapshot {
-    V8(WorldRuntimeSnapshot),
+    V9(WorldRuntimeSnapshot),
+    V8(WorldRuntimeSnapshotV8),
     V7(WorldRuntimeSnapshotV7),
     V6(WorldRuntimeSnapshotV6),
     V5(WorldRuntimeSnapshotV5),
@@ -4038,6 +4170,9 @@ impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
             8 => serde_json::from_value(value)
                 .map(Self::V8)
                 .map_err(serde::de::Error::custom),
+            9 => serde_json::from_value(value)
+                .map(Self::V9)
+                .map_err(serde::de::Error::custom),
             _ => Err(serde::de::Error::custom("unsupported snapshotVersion")),
         }
     }
@@ -4046,7 +4181,8 @@ impl<'de> Deserialize<'de> for CompatibleWorldRuntimeSnapshot {
 impl CompatibleWorldRuntimeSnapshot {
     pub fn into_current(self) -> Result<WorldRuntimeSnapshot, WorldError> {
         match self {
-            Self::V8(snapshot) => Ok(snapshot),
+            Self::V9(snapshot) => Ok(snapshot),
+            Self::V8(snapshot) => WorldRuntimeSnapshot::upgrade_v8(snapshot),
             // The generic path is the monolithic compatibility path. Catalog
             // recovery decodes the exact v7 DTO separately and supplies its
             // verified resident manifest to `upgrade_v7`.
@@ -4079,6 +4215,7 @@ pub fn decode_world_runtime_snapshot(
     let compatible: CompatibleWorldRuntimeSnapshot =
         serde_json::from_str(json).map_err(|_| WorldError::InvalidRuntimeSnapshot)?;
     let payload_version = match &compatible {
+        CompatibleWorldRuntimeSnapshot::V9(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V8(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V7(snapshot) => snapshot.snapshot_version,
         CompatibleWorldRuntimeSnapshot::V6(snapshot) => snapshot.snapshot_version,
@@ -4483,6 +4620,31 @@ pub fn validate_world_runtime_snapshot_semantics(
             || !encounter.cohort.contains(&encounter.initiator)
             || encounter.cohort.iter().any(|id| id.0 <= 0)
             || !encounter.cohort.windows(2).all(|pair| pair[0] < pair[1])
+            // v9 group-distribution fields fail closed. Declarations only exist
+            // under `NeedGreed` and assignments only under `MasterLoot`; every
+            // per-root key is a valid instance id and every declared/assigned
+            // identity belongs to the frozen cohort.
+            || (encounter.distribution != loot_distribution::LootDistributionMode::NeedGreed
+                && !encounter.loot_declarations.is_empty())
+            || (encounter.distribution != loot_distribution::LootDistributionMode::MasterLoot
+                && !encounter.master_assignments.is_empty())
+            || encounter.loot_declarations.len() > MAX_GROUND_LOOT_RESERVATIONS
+            || encounter.master_assignments.len() > MAX_GROUND_LOOT_RESERVATIONS
+            || encounter
+                .loot_declarations
+                .iter()
+                .any(|(root_id, declarations)| {
+                    !valid_item_instance_id(root_id.as_str())
+                        || declarations.is_empty()
+                        || declarations.len() > encounter.cohort.len()
+                        || declarations
+                            .keys()
+                            .any(|member| !encounter.cohort.contains(member))
+                })
+            || encounter.master_assignments.iter().any(|(root_id, member)| {
+                !valid_item_instance_id(root_id.as_str())
+                    || !encounter.cohort.contains(member)
+            })
         {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
@@ -10420,7 +10582,42 @@ impl World {
             if self.ground_loot.len() >= MAX_GROUND_LOOT_RESERVATIONS {
                 return Err(WorldError::InvalidDomainTransition);
             }
-            let beneficiary = if round_robin_party.is_some() {
+            // The distribution mode governs beneficiary selection. `RoundRobin`
+            // is the unchanged phase 4A path. `NeedGreed`/`MasterLoot` consult
+            // the durable per-root declarations/assignments and resolve
+            // deterministically; a mode that produces no advanced winner (no
+            // declaration, all `pass`, or no assignment) falls back to the
+            // exact round-robin path below, so a root can never be stuck. Empty
+            // declarations never draw the RNG, so an encounter that never opted
+            // into an advanced mode is byte-identical to its 4A behaviour.
+            let advanced_winner = match encounter.distribution {
+                loot_distribution::LootDistributionMode::RoundRobin => None,
+                loot_distribution::LootDistributionMode::NeedGreed => {
+                    match encounter.loot_declarations.get(root_item_id) {
+                        Some(declarations) => match loot_distribution::resolve_need_greed(
+                            &cohort,
+                            declarations,
+                            &mut self.rng,
+                        )? {
+                            loot_distribution::LootResolution::Winner(id) => Some(id),
+                            loot_distribution::LootResolution::FallbackRoundRobin => None,
+                        },
+                        None => None,
+                    }
+                }
+                loot_distribution::LootDistributionMode::MasterLoot => {
+                    match loot_distribution::resolve_master_loot(
+                        &cohort,
+                        encounter.master_assignments.get(root_item_id).copied(),
+                    )? {
+                        loot_distribution::LootResolution::Winner(id) => Some(id),
+                        loot_distribution::LootResolution::FallbackRoundRobin => None,
+                    }
+                }
+            };
+            let beneficiary = if let Some(winner) = advanced_winner {
+                Some(winner)
+            } else if round_robin_party.is_some() {
                 let index = usize::try_from(cursor % u64::try_from(cohort.len()).unwrap_or(1))
                     .map_err(|_| WorldError::InvalidDomainTransition)?;
                 cursor = cursor
@@ -10500,6 +10697,9 @@ impl World {
                 cohort: vec![character_id],
                 room_id: room_id.to_owned(),
                 started_tick: tick,
+                distribution: loot_distribution::LootDistributionMode::RoundRobin,
+                loot_declarations: BTreeMap::new(),
+                master_assignments: BTreeMap::new(),
             });
         let mut loot = loot;
         loot.sort();
@@ -14763,6 +14963,9 @@ impl World {
                 cohort,
                 room_id: room_id.to_owned(),
                 started_tick: self.logical_tick,
+                distribution: loot_distribution::LootDistributionMode::RoundRobin,
+                loot_declarations: BTreeMap::new(),
+                master_assignments: BTreeMap::new(),
             },
         );
         Ok(())
@@ -21750,6 +21953,19 @@ mod tests {
     ) -> serde_json::Value {
         let mut value = serde_json::to_value(snapshot).unwrap();
         value["snapshotVersion"] = serde_json::json!(version);
+        if version <= 8
+            && let Some(encounters) = value
+                .get_mut("lootEncounters")
+                .and_then(|v| v.as_object_mut())
+        {
+            for encounter in encounters.values_mut() {
+                if let Some(object) = encounter.as_object_mut() {
+                    object.remove("distribution");
+                    object.remove("lootDeclarations");
+                    object.remove("masterAssignments");
+                }
+            }
+        }
         if version <= 7 {
             value.as_object_mut().unwrap().remove("areaResidency");
         }
@@ -21804,8 +22020,8 @@ mod tests {
                     instance.as_object_mut().unwrap().remove("binding");
                 }
             }
-            4..=8 => {}
-            _ => panic!("test helper only supports runtime snapshot v1-v8"),
+            4..=9 => {}
+            _ => panic!("test helper only supports runtime snapshot v1-v9"),
         }
         value
     }
@@ -28753,7 +28969,7 @@ mod tests {
             .unwrap();
         let snapshot = world.runtime_snapshot();
         let encoded = serde_json::to_string(&snapshot).unwrap();
-        assert!(encoded.contains("\"snapshotVersion\":8"));
+        assert!(encoded.contains("\"snapshotVersion\":9"));
         assert!(encoded.contains("\"binding\":{\"kind\":\"character\",\"characterId\":701}"));
         let mut restored = World::from_definition(policy_definition()).unwrap();
         restored.restore_runtime_snapshot(snapshot.clone()).unwrap();
@@ -29036,6 +29252,198 @@ mod tests {
                 CharacterId(900),
             ]
         );
+    }
+
+    #[test]
+    fn snapshot_v9_round_trips_and_decodes_at_current_version() {
+        let (world, _) = connected_world();
+        let snapshot = world.runtime_snapshot();
+        assert_eq!(snapshot.snapshot_version, WORLD_RUNTIME_SNAPSHOT_VERSION);
+        assert_eq!(WORLD_RUNTIME_SNAPSHOT_VERSION, 9);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        // A direct serde round-trip is lossless.
+        let restored: WorldRuntimeSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, snapshot);
+        // The version-directed decoder accepts the current payload verbatim.
+        let decoded = decode_world_runtime_snapshot(WORLD_RUNTIME_SNAPSHOT_VERSION, &json).unwrap();
+        assert_eq!(decoded, snapshot);
+        // A column/payload version disagreement still fails closed.
+        assert!(decode_world_runtime_snapshot(8, &json).is_err());
+    }
+
+    #[test]
+    fn snapshot_upgrade_v8_normalizes_loot_distribution_and_preserves_state() {
+        // The v8 -> v9 loot-encounter conversion defaults to round-robin with no
+        // declarations or assignments.
+        let converted: LootEncounter = LootEncounterV8 {
+            npc_spawn_id: "game:guardian".into(),
+            initiator: CharacterId(910),
+            party_id: Some(5),
+            cohort: vec![CharacterId(910), CharacterId(911)],
+            room_id: "game:arena".into(),
+            started_tick: 3,
+        }
+        .into();
+        assert_eq!(
+            converted.distribution,
+            loot_distribution::LootDistributionMode::RoundRobin
+        );
+        assert!(converted.loot_declarations.is_empty());
+        assert!(converted.master_assignments.is_empty());
+        assert_eq!(converted.initiator, CharacterId(910));
+        assert_eq!(converted.cohort, vec![CharacterId(910), CharacterId(911)]);
+
+        // An exact v8 payload upgrades to v9 with the rest of the state intact.
+        let (world, _) = connected_world();
+        let snapshot = world.runtime_snapshot();
+        let legacy_v8 = runtime_snapshot_json_for_version(&snapshot, 8);
+        let upgraded =
+            decode_world_runtime_snapshot(8, &serde_json::to_string(&legacy_v8).unwrap()).unwrap();
+        assert_eq!(upgraded.snapshot_version, WORLD_RUNTIME_SNAPSHOT_VERSION);
+        assert!(upgraded.loot_encounters.values().all(|encounter| {
+            encounter.distribution == loot_distribution::LootDistributionMode::RoundRobin
+                && encounter.loot_declarations.is_empty()
+                && encounter.master_assignments.is_empty()
+        }));
+        assert_eq!(upgraded.item_instances, snapshot.item_instances);
+        assert_eq!(upgraded.item_provenance, snapshot.item_provenance);
+        assert_eq!(upgraded.npcs, snapshot.npcs);
+        assert_eq!(upgraded.revision, snapshot.revision);
+        assert_eq!(upgraded.rng_state, snapshot.rng_state);
+        assert_eq!(upgraded.area_residency, snapshot.area_residency);
+        assert_eq!(upgraded, snapshot);
+    }
+
+    #[test]
+    fn snapshot_v8_rejects_smuggled_v9_loot_distribution_field() {
+        let (world, _) = connected_world();
+        let snapshot = world.runtime_snapshot();
+        // A well-formed v8 loot encounter carrying the v9 `distribution` field.
+        let smuggled_encounter = serde_json::json!({
+            "npcSpawnId": "ghost:target",
+            "initiator": 1,
+            "cohort": [1],
+            "roomId": "ghost:room",
+            "startedTick": 0,
+            "distribution": "need_greed",
+        });
+        // Declared as v8, the field is unknown and deserialization fails closed
+        // before any semantic validation runs.
+        let mut v8 = runtime_snapshot_json_for_version(&snapshot, 8);
+        v8["lootEncounters"]["ghost:target"] = smuggled_encounter.clone();
+        assert!(decode_world_runtime_snapshot(8, &serde_json::to_string(&v8).unwrap()).is_err());
+        // The same field is legitimate under v9, proving the rejection is
+        // version-specific rather than a generic parse failure.
+        let mut v9 = serde_json::to_value(&snapshot).unwrap();
+        v9["lootEncounters"]["ghost:target"] = smuggled_encounter;
+        let decoded = decode_world_runtime_snapshot(
+            WORLD_RUNTIME_SNAPSHOT_VERSION,
+            &serde_json::to_string(&v9).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.loot_encounters["ghost:target"].distribution,
+            loot_distribution::LootDistributionMode::NeedGreed
+        );
+    }
+
+    #[test]
+    fn need_greed_governs_reservation_while_round_robin_stays_unchanged() {
+        let (mut world, _) = phase_two_world(1, 1, 1);
+        for id in [910_i64, 911] {
+            world
+                .connect(
+                    SessionId(id as u64),
+                    CharacterSnapshot {
+                        id: CharacterId(id),
+                        account_id: AccountId(id),
+                        name: format!("Cohort {id}"),
+                        room_id: "game:arena".into(),
+                        item_locations: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+        world.adventure.next_party_id = 6;
+        world.adventure.parties.insert(
+            5,
+            PartySnapshot {
+                id: 5,
+                leader: CharacterId(910),
+                members: vec![CharacterId(910), CharacterId(911)],
+                invitations: BTreeMap::new(),
+            },
+        );
+
+        // Need/greed: member 911 needs, member 910 only greeds. Need must win
+        // regardless of the round-robin cursor, and the advanced path must not
+        // perturb that cursor.
+        let need_root = world.create_staged_item_instance("game:sword").unwrap();
+        world
+            .set_item_location(&need_root, SharedItemLocation::Room("game:arena".into()))
+            .unwrap();
+        let mut declarations = BTreeMap::new();
+        declarations.insert(
+            need_root.clone(),
+            BTreeMap::from([
+                (CharacterId(910), loot_distribution::LootDecision::Greed),
+                (CharacterId(911), loot_distribution::LootDecision::Need),
+            ]),
+        );
+        let need_greed_encounter = LootEncounter {
+            npc_spawn_id: "game:guardian".into(),
+            initiator: CharacterId(910),
+            party_id: Some(5),
+            cohort: vec![CharacterId(910), CharacterId(911)],
+            room_id: "game:arena".into(),
+            started_tick: 0,
+            distribution: loot_distribution::LootDistributionMode::NeedGreed,
+            loot_declarations: declarations,
+            master_assignments: BTreeMap::new(),
+        };
+        world
+            .reserve_ground_loot(
+                LootDropId(1),
+                std::slice::from_ref(&need_root),
+                &need_greed_encounter,
+                LootRightsPolicy::PartyRoundRobin,
+                "game:arena",
+                5,
+            )
+            .unwrap();
+        assert_eq!(
+            world.ground_loot[&need_root].beneficiary,
+            Some(CharacterId(911))
+        );
+        assert!(!world.party_loot_cursors.contains_key(&5));
+
+        // A plain round-robin encounter keeps the exact phase 4A behaviour: the
+        // first root goes to the smallest cohort identity at cursor 0 and the
+        // cursor advances by one.
+        let rr_root = world.create_staged_item_instance("game:sword").unwrap();
+        world
+            .set_item_location(&rr_root, SharedItemLocation::Room("game:arena".into()))
+            .unwrap();
+        let round_robin_encounter = LootEncounter {
+            distribution: loot_distribution::LootDistributionMode::RoundRobin,
+            loot_declarations: BTreeMap::new(),
+            ..need_greed_encounter.clone()
+        };
+        world
+            .reserve_ground_loot(
+                LootDropId(2),
+                std::slice::from_ref(&rr_root),
+                &round_robin_encounter,
+                LootRightsPolicy::PartyRoundRobin,
+                "game:arena",
+                6,
+            )
+            .unwrap();
+        assert_eq!(
+            world.ground_loot[&rr_root].beneficiary,
+            Some(CharacterId(910))
+        );
+        assert_eq!(world.party_loot_cursors.get(&5), Some(&1));
     }
 
     #[test]
