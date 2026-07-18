@@ -14,6 +14,7 @@ use std::{
     collections::BTreeSet,
     future::Future,
     io,
+    ops::ControlFlow,
     path::Path,
     sync::Arc,
     thread,
@@ -1624,6 +1625,1093 @@ pub(super) enum Request {
     },
 }
 
+/// Per-backend command logic for the single shared writer-thread dispatch loop.
+///
+/// The SQLite and PostgreSQL adapters own byte-for-byte identical message
+/// loops that differ only in (a) which borrow of the connection each helper
+/// receives and (b) the SQL dialect of the inline `Health` probe. This trait
+/// captures every command as one method whose body stays per-backend, so the
+/// enum match and the uniform `reply.send(..)` plumbing live in exactly one
+/// place ([`dispatch_persistence_request`]).
+pub(super) trait PersistenceCommandHandler {
+    fn health(&mut self) -> Result<(), StoreError>;
+    fn finish_register_account(
+        &mut self,
+        name: String,
+        password_hash: String,
+    ) -> Result<AuthenticatedSession, StoreError>;
+    fn prepare_login_account(&mut self, name: String) -> Result<Option<PreparedLogin>, StoreError>;
+    fn finish_login_account(
+        &mut self,
+        prepared: PreparedLogin,
+    ) -> Result<AuthenticatedSession, StoreError>;
+    fn resolve_session(&mut self, token: String) -> Result<AccountSnapshot, StoreError>;
+    fn revoke_session(&mut self, token: String) -> Result<(), StoreError>;
+    #[cfg(test)]
+    fn load_or_create_account(&mut self, name: String) -> Result<AccountSnapshot, StoreError>;
+    fn list_characters(
+        &mut self,
+        account_id: AccountId,
+    ) -> Result<Vec<CharacterSnapshot>, StoreError>;
+    fn load_or_create_character(
+        &mut self,
+        account_id: AccountId,
+        name: String,
+        start_room: String,
+        initial_gameplay: Box<CharacterGameplaySnapshot>,
+    ) -> Result<CharacterSnapshot, StoreError>;
+    fn load_character(
+        &mut self,
+        account_id: AccountId,
+        character_id: CharacterId,
+    ) -> Result<CharacterSnapshot, StoreError>;
+    fn save(&mut self, snapshot: CharacterSnapshot) -> Result<(), StoreError>;
+    fn load_character_gameplay(
+        &mut self,
+        character_id: CharacterId,
+    ) -> Result<CharacterGameplaySnapshot, StoreError>;
+    fn load_character_gameplay_batch(
+        &mut self,
+        character_ids: Vec<CharacterId>,
+        limits: StartupGameplayLoadLimits,
+    ) -> Result<Vec<DurableCharacterGameplay>, StoreError>;
+    fn ensure_character_ids_exist_batch(
+        &mut self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<(), StoreError>;
+    fn load_runtime_snapshot(&mut self) -> Result<Option<WorldRuntimeSnapshot>, StoreError>;
+    fn load_startup_world_recovery(&mut self) -> Result<StartupWorldRecovery, StoreError>;
+    fn has_durable_character_authority(&mut self) -> Result<bool, StoreError>;
+    fn load_area_generation(&mut self) -> Result<Option<DurableAreaGeneration>, StoreError>;
+    fn bind_area_generation_if_absent(
+        &mut self,
+        generation: DurableAreaGeneration,
+    ) -> Result<DurableAreaGeneration, StoreError>;
+    fn commit_area_generation_activation(
+        &mut self,
+        runtime: WorldRuntimeSnapshot,
+        expected_current: DurableAreaGeneration,
+        next: DurableAreaGeneration,
+    ) -> Result<(), StoreError>;
+    fn load_area_checkpoints(&mut self) -> Result<Vec<DurableAreaCheckpoint>, StoreError>;
+    fn commit_area_retirement(
+        &mut self,
+        runtime: WorldRuntimeSnapshot,
+        expected_generation: DurableAreaGeneration,
+        checkpoint: DurableAreaCheckpoint,
+    ) -> Result<(), StoreError>;
+    fn commit_area_rehydration(
+        &mut self,
+        runtime: WorldRuntimeSnapshot,
+        expected_generation: DurableAreaGeneration,
+        checkpoint: DurableAreaCheckpoint,
+    ) -> Result<(), StoreError>;
+    fn load_domain_events(&mut self) -> Result<Vec<DomainEvent>, StoreError>;
+    fn commit_action(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError>;
+    fn commit_staff_action(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+    fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError>;
+    fn social_target(&mut self, name: String) -> Result<SocialProfile, StoreError>;
+    fn social_delivery_allowed(
+        &mut self,
+        sender: CharacterId,
+        recipient: CharacterId,
+    ) -> Result<bool, StoreError>;
+    fn set_social_relation(
+        &mut self,
+        actor: CharacterId,
+        target: CharacterId,
+        relation: SocialRelationKind,
+        enabled: bool,
+    ) -> Result<(), StoreError>;
+    fn social_channel_subscriptions(
+        &mut self,
+        character_id: CharacterId,
+    ) -> Result<Vec<SocialChannelName>, StoreError>;
+    fn social_channel_subscribers(
+        &mut self,
+        channel: SocialChannelName,
+    ) -> Result<Vec<CharacterId>, StoreError>;
+    fn set_social_channel_subscription(
+        &mut self,
+        character_id: CharacterId,
+        channel: SocialChannelName,
+        subscribed: bool,
+    ) -> Result<(), StoreError>;
+    fn send_mail(
+        &mut self,
+        sender: CharacterId,
+        target_name: String,
+        public_id: String,
+        subject: String,
+        body: String,
+    ) -> Result<MailSendResult, StoreError>;
+    fn mailbox_page(&mut self, recipient: CharacterId, page: u32) -> Result<MailPage, StoreError>;
+    fn read_mail(
+        &mut self,
+        recipient: CharacterId,
+        public_id: String,
+    ) -> Result<MailMessage, StoreError>;
+    fn delete_mail(&mut self, recipient: CharacterId, public_id: String) -> Result<(), StoreError>;
+    fn report_mail(
+        &mut self,
+        recipient: CharacterId,
+        public_id: String,
+        reason: String,
+    ) -> Result<i64, StoreError>;
+    fn purge_expired_mail(&mut self) -> Result<u64, StoreError>;
+    fn list_board_posts(
+        &mut self,
+        actor: CharacterId,
+        board: BoardKey,
+        page: u32,
+    ) -> Result<BoardPage, StoreError>;
+    fn read_board_post(
+        &mut self,
+        actor: CharacterId,
+        public_id: String,
+    ) -> Result<BoardEntry, StoreError>;
+    fn publish_board_post(
+        &mut self,
+        actor: CharacterId,
+        board: BoardKey,
+        public_id: String,
+        subject: String,
+        body: String,
+    ) -> Result<BoardEntry, StoreError>;
+    fn delete_board_post(
+        &mut self,
+        actor: CharacterId,
+        public_id: String,
+    ) -> Result<(), StoreError>;
+    fn report_board_post(
+        &mut self,
+        actor: CharacterId,
+        public_id: String,
+        reason: String,
+    ) -> Result<i64, StoreError>;
+    fn purge_expired_boards(&mut self) -> Result<u64, StoreError>;
+    fn report_character(
+        &mut self,
+        actor: CharacterId,
+        target: CharacterId,
+        reason: String,
+    ) -> Result<(), StoreError>;
+    fn moderate_character(
+        &mut self,
+        actor: CharacterId,
+        target: CharacterId,
+        action: ModerationAction,
+    ) -> Result<(), StoreError>;
+    fn staff_access(&mut self, character_id: CharacterId) -> Result<StaffAccess, StoreError>;
+    fn staff_reports(&mut self, audit: StaffAuditRecord) -> Result<Vec<StaffReport>, StoreError>;
+    fn resolve_staff_report(
+        &mut self,
+        report_id: i64,
+        resolution: StaffReportResolution,
+        resolution_reason: String,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+    fn set_staff_profile(
+        &mut self,
+        target_account: AccountId,
+        profile: Option<StaffProfileKey>,
+        lore_title: Option<String>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+    fn set_staff_capability(
+        &mut self,
+        target_account: AccountId,
+        capability: StaffCapability,
+        enabled: bool,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+    fn staff_audit_entries(
+        &mut self,
+        audit: StaffAuditRecord,
+    ) -> Result<Vec<StaffAuditEntry>, StoreError>;
+    fn append_staff_audit(&mut self, audit: StaffAuditRecord) -> Result<(), StoreError>;
+    #[cfg(test)]
+    fn audit_log(&mut self) -> Result<Vec<AuditEntry>, StoreError>;
+}
+
+/// Owns the single writer-thread `match request { .. }` shared by every
+/// backend. Each arm forwards to the handler and performs the uniform
+/// `let _ = reply.send(..)` discard; `Shutdown` returns
+/// [`ControlFlow::Break`] so the caller's loop stops and the handler (and its
+/// connection) drops at scope end, exactly as the previous per-backend
+/// `drop(connection); return;` did.
+pub(super) fn dispatch_persistence_request<H: PersistenceCommandHandler>(
+    handler: &mut H,
+    request: Request,
+) -> ControlFlow<()> {
+    match request {
+        Request::Shutdown { reply } => {
+            let _ = reply.send(Ok(()));
+            return ControlFlow::Break(());
+        }
+        Request::Health { reply } => {
+            let _ = reply.send(handler.health());
+        }
+        Request::FinishRegisterAccount {
+            name,
+            password_hash,
+            reply,
+        } => {
+            let _ = reply.send(handler.finish_register_account(name, password_hash));
+        }
+        Request::PrepareLoginAccount { name, reply } => {
+            let _ = reply.send(handler.prepare_login_account(name));
+        }
+        Request::FinishLoginAccount { prepared, reply } => {
+            let _ = reply.send(handler.finish_login_account(prepared));
+        }
+        Request::ResolveSession { token, reply } => {
+            let _ = reply.send(handler.resolve_session(token));
+        }
+        Request::RevokeSession { token, reply } => {
+            let _ = reply.send(handler.revoke_session(token));
+        }
+        #[cfg(test)]
+        Request::LoadOrCreateAccount { name, reply } => {
+            let _ = reply.send(handler.load_or_create_account(name));
+        }
+        Request::ListCharacters { account_id, reply } => {
+            let _ = reply.send(handler.list_characters(account_id));
+        }
+        Request::LoadOrCreateCharacter {
+            account_id,
+            name,
+            start_room,
+            initial_gameplay,
+            reply,
+        } => {
+            let _ = reply.send(handler.load_or_create_character(
+                account_id,
+                name,
+                start_room,
+                initial_gameplay,
+            ));
+        }
+        Request::LoadCharacter {
+            account_id,
+            character_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.load_character(account_id, character_id));
+        }
+        Request::Save { snapshot, reply } => {
+            let _ = reply.send(handler.save(snapshot));
+        }
+        Request::LoadCharacterGameplay {
+            character_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.load_character_gameplay(character_id));
+        }
+        Request::LoadCharacterGameplayBatch {
+            character_ids,
+            limits,
+            reply,
+        } => {
+            let _ = reply.send(handler.load_character_gameplay_batch(character_ids, limits));
+        }
+        Request::EnsureCharacterIdsExistBatch {
+            character_ids,
+            reply,
+        } => {
+            let _ = reply.send(handler.ensure_character_ids_exist_batch(character_ids));
+        }
+        Request::LoadRuntimeSnapshot { reply } => {
+            let _ = reply.send(handler.load_runtime_snapshot());
+        }
+        Request::LoadStartupWorldRecovery { reply } => {
+            let _ = reply.send(handler.load_startup_world_recovery());
+        }
+        Request::HasDurableCharacterAuthority { reply } => {
+            let _ = reply.send(handler.has_durable_character_authority());
+        }
+        Request::LoadAreaGeneration { reply } => {
+            let _ = reply.send(handler.load_area_generation());
+        }
+        Request::BindAreaGenerationIfAbsent { generation, reply } => {
+            let _ = reply.send(handler.bind_area_generation_if_absent(generation));
+        }
+        Request::CommitAreaGenerationActivation {
+            runtime,
+            expected_current,
+            next,
+            reply,
+        } => {
+            let _ = reply.send(handler.commit_area_generation_activation(
+                runtime,
+                expected_current,
+                next,
+            ));
+        }
+        Request::LoadAreaCheckpoints { reply } => {
+            let _ = reply.send(handler.load_area_checkpoints());
+        }
+        Request::CommitAreaRetirement {
+            runtime,
+            expected_generation,
+            checkpoint,
+            reply,
+        } => {
+            let _ = reply.send(handler.commit_area_retirement(
+                runtime,
+                expected_generation,
+                checkpoint,
+            ));
+        }
+        Request::CommitAreaRehydration {
+            runtime,
+            expected_generation,
+            checkpoint,
+            reply,
+        } => {
+            let _ = reply.send(handler.commit_area_rehydration(
+                runtime,
+                expected_generation,
+                checkpoint,
+            ));
+        }
+        Request::LoadDomainEvents { reply } => {
+            let _ = reply.send(handler.load_domain_events());
+        }
+        Request::CommitAction {
+            characters,
+            runtime,
+            events,
+            reply,
+        } => {
+            let _ = reply.send(handler.commit_action(characters, runtime, events));
+        }
+        Request::CommitStaffAction {
+            characters,
+            runtime,
+            events,
+            audit,
+            reply,
+        } => {
+            let _ = reply.send(handler.commit_staff_action(characters, runtime, events, audit));
+        }
+        Request::SocialProfile {
+            character_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.social_profile(character_id));
+        }
+        Request::SocialTarget { name, reply } => {
+            let _ = reply.send(handler.social_target(name));
+        }
+        Request::SocialDeliveryAllowed {
+            sender,
+            recipient,
+            reply,
+        } => {
+            let _ = reply.send(handler.social_delivery_allowed(sender, recipient));
+        }
+        Request::SetSocialRelation {
+            actor,
+            target,
+            relation,
+            enabled,
+            reply,
+        } => {
+            let _ = reply.send(handler.set_social_relation(actor, target, relation, enabled));
+        }
+        Request::SocialChannelSubscriptions {
+            character_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.social_channel_subscriptions(character_id));
+        }
+        Request::SocialChannelSubscribers { channel, reply } => {
+            let _ = reply.send(handler.social_channel_subscribers(channel));
+        }
+        Request::SetSocialChannelSubscription {
+            character_id,
+            channel,
+            subscribed,
+            reply,
+        } => {
+            let _ = reply.send(handler.set_social_channel_subscription(
+                character_id,
+                channel,
+                subscribed,
+            ));
+        }
+        Request::SendMail {
+            sender,
+            target_name,
+            public_id,
+            subject,
+            body,
+            reply,
+        } => {
+            let _ = reply.send(handler.send_mail(sender, target_name, public_id, subject, body));
+        }
+        Request::MailboxPage {
+            recipient,
+            page,
+            reply,
+        } => {
+            let _ = reply.send(handler.mailbox_page(recipient, page));
+        }
+        Request::ReadMail {
+            recipient,
+            public_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.read_mail(recipient, public_id));
+        }
+        Request::DeleteMail {
+            recipient,
+            public_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.delete_mail(recipient, public_id));
+        }
+        Request::ReportMail {
+            recipient,
+            public_id,
+            reason,
+            reply,
+        } => {
+            let _ = reply.send(handler.report_mail(recipient, public_id, reason));
+        }
+        Request::PurgeExpiredMail { reply } => {
+            let _ = reply.send(handler.purge_expired_mail());
+        }
+        Request::ListBoardPosts {
+            actor,
+            board,
+            page,
+            reply,
+        } => {
+            let _ = reply.send(handler.list_board_posts(actor, board, page));
+        }
+        Request::ReadBoardPost {
+            actor,
+            public_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.read_board_post(actor, public_id));
+        }
+        Request::PublishBoardPost {
+            actor,
+            board,
+            public_id,
+            subject,
+            body,
+            reply,
+        } => {
+            let _ = reply.send(handler.publish_board_post(actor, board, public_id, subject, body));
+        }
+        Request::DeleteBoardPost {
+            actor,
+            public_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.delete_board_post(actor, public_id));
+        }
+        Request::ReportBoardPost {
+            actor,
+            public_id,
+            reason,
+            reply,
+        } => {
+            let _ = reply.send(handler.report_board_post(actor, public_id, reason));
+        }
+        Request::PurgeExpiredBoards { reply } => {
+            let _ = reply.send(handler.purge_expired_boards());
+        }
+        Request::ReportCharacter {
+            actor,
+            target,
+            reason,
+            reply,
+        } => {
+            let _ = reply.send(handler.report_character(actor, target, reason));
+        }
+        Request::ModerateCharacter {
+            actor,
+            target,
+            action,
+            reply,
+        } => {
+            let _ = reply.send(handler.moderate_character(actor, target, action));
+        }
+        Request::StaffAccess {
+            character_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.staff_access(character_id));
+        }
+        Request::StaffReports { audit, reply } => {
+            let _ = reply.send(handler.staff_reports(audit));
+        }
+        Request::ResolveStaffReport {
+            report_id,
+            resolution,
+            resolution_reason,
+            audit,
+            reply,
+        } => {
+            let _ = reply.send(handler.resolve_staff_report(
+                report_id,
+                resolution,
+                resolution_reason,
+                audit,
+            ));
+        }
+        Request::SetStaffProfile {
+            target_account,
+            profile,
+            lore_title,
+            audit,
+            reply,
+        } => {
+            let _ =
+                reply.send(handler.set_staff_profile(target_account, profile, lore_title, audit));
+        }
+        Request::SetStaffCapability {
+            target_account,
+            capability,
+            enabled,
+            audit,
+            reply,
+        } => {
+            let _ = reply.send(handler.set_staff_capability(
+                target_account,
+                capability,
+                enabled,
+                audit,
+            ));
+        }
+        Request::StaffAuditEntries { audit, reply } => {
+            let _ = reply.send(handler.staff_audit_entries(audit));
+        }
+        Request::AppendStaffAudit { audit, reply } => {
+            let _ = reply.send(handler.append_staff_audit(audit));
+        }
+        #[cfg(test)]
+        Request::AuditLog { reply } => {
+            let _ = reply.send(handler.audit_log());
+        }
+    }
+    ControlFlow::Continue(())
+}
+
+/// SQLite handler: each method reproduces the exact call the writer loop used
+/// to inline, including the shared (`&`) vs mutable (`&mut`) connection borrow
+/// per command and the SQLite-dialect `Health` probe.
+struct SqliteCommandHandler {
+    connection: Connection,
+}
+
+impl PersistenceCommandHandler for SqliteCommandHandler {
+    fn health(&mut self) -> Result<(), StoreError> {
+        self.connection
+            .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            .map(|_| ())
+            .map_err(StoreError::from)
+    }
+
+    fn finish_register_account(
+        &mut self,
+        name: String,
+        password_hash: String,
+    ) -> Result<AuthenticatedSession, StoreError> {
+        finish_register_account(
+            &mut self.connection,
+            &name,
+            &password_hash,
+            unix_timestamp(),
+        )
+    }
+
+    fn prepare_login_account(&mut self, name: String) -> Result<Option<PreparedLogin>, StoreError> {
+        prepare_login_account(&self.connection, &name)
+    }
+
+    fn finish_login_account(
+        &mut self,
+        prepared: PreparedLogin,
+    ) -> Result<AuthenticatedSession, StoreError> {
+        finish_login_account(&mut self.connection, &prepared, unix_timestamp())
+    }
+
+    fn resolve_session(&mut self, token: String) -> Result<AccountSnapshot, StoreError> {
+        resolve_session(&self.connection, &token, unix_timestamp())
+    }
+
+    fn revoke_session(&mut self, token: String) -> Result<(), StoreError> {
+        revoke_session(&self.connection, &token, unix_timestamp())
+    }
+
+    #[cfg(test)]
+    fn load_or_create_account(&mut self, name: String) -> Result<AccountSnapshot, StoreError> {
+        load_or_create_account(&self.connection, &name)
+    }
+
+    fn list_characters(
+        &mut self,
+        account_id: AccountId,
+    ) -> Result<Vec<CharacterSnapshot>, StoreError> {
+        list_characters(&self.connection, account_id)
+    }
+
+    fn load_or_create_character(
+        &mut self,
+        account_id: AccountId,
+        name: String,
+        start_room: String,
+        initial_gameplay: Box<CharacterGameplaySnapshot>,
+    ) -> Result<CharacterSnapshot, StoreError> {
+        load_or_create_character_with_gameplay(
+            &self.connection,
+            account_id,
+            &name,
+            &start_room,
+            &initial_gameplay,
+        )
+    }
+
+    fn load_character(
+        &mut self,
+        account_id: AccountId,
+        character_id: CharacterId,
+    ) -> Result<CharacterSnapshot, StoreError> {
+        load_character(&self.connection, account_id, character_id)
+    }
+
+    fn save(&mut self, snapshot: CharacterSnapshot) -> Result<(), StoreError> {
+        save(&self.connection, &snapshot)
+    }
+
+    fn load_character_gameplay(
+        &mut self,
+        character_id: CharacterId,
+    ) -> Result<CharacterGameplaySnapshot, StoreError> {
+        load_character_gameplay(&self.connection, character_id)
+    }
+
+    fn load_character_gameplay_batch(
+        &mut self,
+        character_ids: Vec<CharacterId>,
+        limits: StartupGameplayLoadLimits,
+    ) -> Result<Vec<DurableCharacterGameplay>, StoreError> {
+        load_character_gameplay_batch(&self.connection, character_ids, limits)
+    }
+
+    fn ensure_character_ids_exist_batch(
+        &mut self,
+        character_ids: Vec<CharacterId>,
+    ) -> Result<(), StoreError> {
+        ensure_character_ids_exist_batch(&self.connection, character_ids)
+    }
+
+    fn load_runtime_snapshot(&mut self) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
+        load_runtime_snapshot(&self.connection)
+    }
+
+    fn load_startup_world_recovery(&mut self) -> Result<StartupWorldRecovery, StoreError> {
+        load_startup_world_recovery(&mut self.connection)
+    }
+
+    fn has_durable_character_authority(&mut self) -> Result<bool, StoreError> {
+        has_durable_character_authority(&self.connection)
+    }
+
+    fn load_area_generation(&mut self) -> Result<Option<DurableAreaGeneration>, StoreError> {
+        load_area_generation(&self.connection)
+    }
+
+    fn bind_area_generation_if_absent(
+        &mut self,
+        generation: DurableAreaGeneration,
+    ) -> Result<DurableAreaGeneration, StoreError> {
+        bind_area_generation_if_absent(&mut self.connection, &generation)
+    }
+
+    fn commit_area_generation_activation(
+        &mut self,
+        runtime: WorldRuntimeSnapshot,
+        expected_current: DurableAreaGeneration,
+        next: DurableAreaGeneration,
+    ) -> Result<(), StoreError> {
+        commit_area_generation_activation(&mut self.connection, &runtime, &expected_current, &next)
+    }
+
+    fn load_area_checkpoints(&mut self) -> Result<Vec<DurableAreaCheckpoint>, StoreError> {
+        load_area_checkpoints(&self.connection)
+    }
+
+    fn commit_area_retirement(
+        &mut self,
+        runtime: WorldRuntimeSnapshot,
+        expected_generation: DurableAreaGeneration,
+        checkpoint: DurableAreaCheckpoint,
+    ) -> Result<(), StoreError> {
+        commit_area_retirement(
+            &mut self.connection,
+            &runtime,
+            &expected_generation,
+            &checkpoint,
+        )
+    }
+
+    fn commit_area_rehydration(
+        &mut self,
+        runtime: WorldRuntimeSnapshot,
+        expected_generation: DurableAreaGeneration,
+        checkpoint: DurableAreaCheckpoint,
+    ) -> Result<(), StoreError> {
+        commit_area_rehydration(
+            &mut self.connection,
+            &runtime,
+            &expected_generation,
+            &checkpoint,
+        )
+    }
+
+    fn load_domain_events(&mut self) -> Result<Vec<DomainEvent>, StoreError> {
+        load_domain_events(&self.connection)
+    }
+
+    fn commit_action(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError> {
+        commit_action(&mut self.connection, &characters, &runtime, &events)
+    }
+
+    fn commit_staff_action(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        events: Vec<DomainEvent>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        commit_staff_action(
+            &mut self.connection,
+            &characters,
+            &runtime,
+            &events,
+            audit,
+            unix_timestamp(),
+        )
+    }
+
+    fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
+        social_profile(&self.connection, character_id, unix_timestamp())
+    }
+
+    fn social_target(&mut self, name: String) -> Result<SocialProfile, StoreError> {
+        social_target(&self.connection, &name, unix_timestamp())
+    }
+
+    fn social_delivery_allowed(
+        &mut self,
+        sender: CharacterId,
+        recipient: CharacterId,
+    ) -> Result<bool, StoreError> {
+        social_delivery_allowed(&self.connection, sender, recipient)
+    }
+
+    fn set_social_relation(
+        &mut self,
+        actor: CharacterId,
+        target: CharacterId,
+        relation: SocialRelationKind,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        set_social_relation(
+            &mut self.connection,
+            actor,
+            target,
+            relation,
+            enabled,
+            unix_timestamp(),
+        )
+    }
+
+    fn social_channel_subscriptions(
+        &mut self,
+        character_id: CharacterId,
+    ) -> Result<Vec<SocialChannelName>, StoreError> {
+        social_channel_subscriptions(&self.connection, character_id)
+    }
+
+    fn social_channel_subscribers(
+        &mut self,
+        channel: SocialChannelName,
+    ) -> Result<Vec<CharacterId>, StoreError> {
+        social_channel_subscribers(&self.connection, channel)
+    }
+
+    fn set_social_channel_subscription(
+        &mut self,
+        character_id: CharacterId,
+        channel: SocialChannelName,
+        subscribed: bool,
+    ) -> Result<(), StoreError> {
+        set_social_channel_subscription(
+            &mut self.connection,
+            character_id,
+            channel,
+            subscribed,
+            unix_timestamp(),
+        )
+    }
+
+    fn send_mail(
+        &mut self,
+        sender: CharacterId,
+        target_name: String,
+        public_id: String,
+        subject: String,
+        body: String,
+    ) -> Result<MailSendResult, StoreError> {
+        send_mail(
+            &mut self.connection,
+            sender,
+            &target_name,
+            &public_id,
+            &subject,
+            &body,
+            unix_timestamp(),
+        )
+    }
+
+    fn mailbox_page(&mut self, recipient: CharacterId, page: u32) -> Result<MailPage, StoreError> {
+        mailbox_page(&self.connection, recipient, page, unix_timestamp())
+    }
+
+    fn read_mail(
+        &mut self,
+        recipient: CharacterId,
+        public_id: String,
+    ) -> Result<MailMessage, StoreError> {
+        read_mail(
+            &mut self.connection,
+            recipient,
+            &public_id,
+            unix_timestamp(),
+        )
+    }
+
+    fn delete_mail(&mut self, recipient: CharacterId, public_id: String) -> Result<(), StoreError> {
+        delete_mail(
+            &mut self.connection,
+            recipient,
+            &public_id,
+            unix_timestamp(),
+        )
+    }
+
+    fn report_mail(
+        &mut self,
+        recipient: CharacterId,
+        public_id: String,
+        reason: String,
+    ) -> Result<i64, StoreError> {
+        report_mail(
+            &mut self.connection,
+            recipient,
+            &public_id,
+            &reason,
+            unix_timestamp(),
+        )
+    }
+
+    fn purge_expired_mail(&mut self) -> Result<u64, StoreError> {
+        purge_expired_mail(&mut self.connection, unix_timestamp())
+    }
+
+    fn list_board_posts(
+        &mut self,
+        actor: CharacterId,
+        board: BoardKey,
+        page: u32,
+    ) -> Result<BoardPage, StoreError> {
+        list_board_posts(&self.connection, actor, board, page, unix_timestamp())
+    }
+
+    fn read_board_post(
+        &mut self,
+        actor: CharacterId,
+        public_id: String,
+    ) -> Result<BoardEntry, StoreError> {
+        read_board_post(&self.connection, actor, &public_id, unix_timestamp())
+    }
+
+    fn publish_board_post(
+        &mut self,
+        actor: CharacterId,
+        board: BoardKey,
+        public_id: String,
+        subject: String,
+        body: String,
+    ) -> Result<BoardEntry, StoreError> {
+        publish_board_post(
+            &mut self.connection,
+            actor,
+            board,
+            &public_id,
+            &subject,
+            &body,
+            unix_timestamp(),
+        )
+    }
+
+    fn delete_board_post(
+        &mut self,
+        actor: CharacterId,
+        public_id: String,
+    ) -> Result<(), StoreError> {
+        delete_board_post(&mut self.connection, actor, &public_id, unix_timestamp())
+    }
+
+    fn report_board_post(
+        &mut self,
+        actor: CharacterId,
+        public_id: String,
+        reason: String,
+    ) -> Result<i64, StoreError> {
+        report_board_post(
+            &mut self.connection,
+            actor,
+            &public_id,
+            &reason,
+            unix_timestamp(),
+        )
+    }
+
+    fn purge_expired_boards(&mut self) -> Result<u64, StoreError> {
+        purge_expired_boards(&mut self.connection, unix_timestamp())
+    }
+
+    fn report_character(
+        &mut self,
+        actor: CharacterId,
+        target: CharacterId,
+        reason: String,
+    ) -> Result<(), StoreError> {
+        report_character(
+            &mut self.connection,
+            actor,
+            target,
+            &reason,
+            unix_timestamp(),
+        )
+    }
+
+    fn moderate_character(
+        &mut self,
+        actor: CharacterId,
+        target: CharacterId,
+        action: ModerationAction,
+    ) -> Result<(), StoreError> {
+        moderate_character(
+            &mut self.connection,
+            actor,
+            target,
+            action,
+            unix_timestamp(),
+        )
+    }
+
+    fn staff_access(&mut self, character_id: CharacterId) -> Result<StaffAccess, StoreError> {
+        staff_access(&self.connection, character_id)
+    }
+
+    fn staff_reports(&mut self, audit: StaffAuditRecord) -> Result<Vec<StaffReport>, StoreError> {
+        staff_reports(&mut self.connection, audit, unix_timestamp())
+    }
+
+    fn resolve_staff_report(
+        &mut self,
+        report_id: i64,
+        resolution: StaffReportResolution,
+        resolution_reason: String,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        resolve_staff_report(
+            &mut self.connection,
+            report_id,
+            resolution,
+            &resolution_reason,
+            audit,
+            unix_timestamp(),
+        )
+    }
+
+    fn set_staff_profile(
+        &mut self,
+        target_account: AccountId,
+        profile: Option<StaffProfileKey>,
+        lore_title: Option<String>,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        set_staff_profile(
+            &mut self.connection,
+            target_account,
+            profile,
+            lore_title.as_deref(),
+            audit,
+            unix_timestamp(),
+        )
+    }
+
+    fn set_staff_capability(
+        &mut self,
+        target_account: AccountId,
+        capability: StaffCapability,
+        enabled: bool,
+        audit: StaffAuditRecord,
+    ) -> Result<(), StoreError> {
+        set_staff_capability(
+            &mut self.connection,
+            target_account,
+            capability,
+            enabled,
+            audit,
+            unix_timestamp(),
+        )
+    }
+
+    fn staff_audit_entries(
+        &mut self,
+        audit: StaffAuditRecord,
+    ) -> Result<Vec<StaffAuditEntry>, StoreError> {
+        staff_audit_entries(&mut self.connection, audit, unix_timestamp())
+    }
+
+    fn append_staff_audit(&mut self, audit: StaffAuditRecord) -> Result<(), StoreError> {
+        append_staff_audit_transaction(&mut self.connection, audit, unix_timestamp())
+    }
+
+    #[cfg(test)]
+    fn audit_log(&mut self) -> Result<Vec<AuditEntry>, StoreError> {
+        audit_log(&self.connection)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct PreparedLogin {
     pub(super) account_id: AccountId,
@@ -1722,7 +2810,7 @@ impl SqliteCharacterStore {
         thread::Builder::new()
             .name("sqlite-writer".into())
             .spawn(move || {
-                let mut connection = match (|| -> Result<Connection, StoreError> {
+                let connection = match (|| -> Result<Connection, StoreError> {
                     let mut connection = Connection::open(path)?;
                     initialise(&mut connection)?;
                     Ok(connection)
@@ -1737,508 +2825,10 @@ impl SqliteCharacterStore {
                     }
                 };
 
+                let mut handler = SqliteCommandHandler { connection };
                 while let Some(request) = rx.blocking_recv() {
-                    match request {
-                        Request::Shutdown { reply } => {
-                            drop(connection);
-                            let _ = reply.send(Ok(()));
-                            return;
-                        }
-                        Request::Health { reply } => {
-                            let result = connection
-                                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                                .map(|_| ())
-                                .map_err(StoreError::from);
-                            let _ = reply.send(result);
-                        }
-                        Request::FinishRegisterAccount {
-                            name,
-                            password_hash,
-                            reply,
-                        } => {
-                            let _ = reply.send(finish_register_account(
-                                &mut connection,
-                                &name,
-                                &password_hash,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::PrepareLoginAccount { name, reply } => {
-                            let _ = reply.send(prepare_login_account(&connection, &name));
-                        }
-                        Request::FinishLoginAccount { prepared, reply } => {
-                            let _ = reply.send(finish_login_account(
-                                &mut connection,
-                                &prepared,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::ResolveSession { token, reply } => {
-                            let _ =
-                                reply.send(resolve_session(&connection, &token, unix_timestamp()));
-                        }
-                        Request::RevokeSession { token, reply } => {
-                            let _ =
-                                reply.send(revoke_session(&connection, &token, unix_timestamp()));
-                        }
-                        #[cfg(test)]
-                        Request::LoadOrCreateAccount { name, reply } => {
-                            let _ = reply.send(load_or_create_account(&connection, &name));
-                        }
-                        Request::ListCharacters { account_id, reply } => {
-                            let _ = reply.send(list_characters(&connection, account_id));
-                        }
-                        Request::LoadOrCreateCharacter {
-                            account_id,
-                            name,
-                            start_room,
-                            initial_gameplay,
-                            reply,
-                        } => {
-                            let _ = reply.send(load_or_create_character_with_gameplay(
-                                &connection,
-                                account_id,
-                                &name,
-                                &start_room,
-                                &initial_gameplay,
-                            ));
-                        }
-                        Request::LoadCharacter {
-                            account_id,
-                            character_id,
-                            reply,
-                        } => {
-                            let _ =
-                                reply.send(load_character(&connection, account_id, character_id));
-                        }
-                        Request::Save { snapshot, reply } => {
-                            let _ = reply.send(save(&connection, &snapshot));
-                        }
-                        Request::LoadCharacterGameplay {
-                            character_id,
-                            reply,
-                        } => {
-                            let _ = reply.send(load_character_gameplay(&connection, character_id));
-                        }
-                        Request::LoadCharacterGameplayBatch {
-                            character_ids,
-                            limits,
-                            reply,
-                        } => {
-                            let _ = reply.send(load_character_gameplay_batch(
-                                &connection,
-                                character_ids,
-                                limits,
-                            ));
-                        }
-                        Request::EnsureCharacterIdsExistBatch {
-                            character_ids,
-                            reply,
-                        } => {
-                            let _ = reply
-                                .send(ensure_character_ids_exist_batch(&connection, character_ids));
-                        }
-                        Request::LoadRuntimeSnapshot { reply } => {
-                            let _ = reply.send(load_runtime_snapshot(&connection));
-                        }
-                        Request::LoadStartupWorldRecovery { reply } => {
-                            let _ = reply.send(load_startup_world_recovery(&mut connection));
-                        }
-                        Request::HasDurableCharacterAuthority { reply } => {
-                            let _ = reply.send(has_durable_character_authority(&connection));
-                        }
-                        Request::LoadAreaGeneration { reply } => {
-                            let _ = reply.send(load_area_generation(&connection));
-                        }
-                        Request::BindAreaGenerationIfAbsent { generation, reply } => {
-                            let _ = reply
-                                .send(bind_area_generation_if_absent(&mut connection, &generation));
-                        }
-                        Request::CommitAreaGenerationActivation {
-                            runtime,
-                            expected_current,
-                            next,
-                            reply,
-                        } => {
-                            let _ = reply.send(commit_area_generation_activation(
-                                &mut connection,
-                                &runtime,
-                                &expected_current,
-                                &next,
-                            ));
-                        }
-                        Request::LoadAreaCheckpoints { reply } => {
-                            let _ = reply.send(load_area_checkpoints(&connection));
-                        }
-                        Request::CommitAreaRetirement {
-                            runtime,
-                            expected_generation,
-                            checkpoint,
-                            reply,
-                        } => {
-                            let _ = reply.send(commit_area_retirement(
-                                &mut connection,
-                                &runtime,
-                                &expected_generation,
-                                &checkpoint,
-                            ));
-                        }
-                        Request::CommitAreaRehydration {
-                            runtime,
-                            expected_generation,
-                            checkpoint,
-                            reply,
-                        } => {
-                            let _ = reply.send(commit_area_rehydration(
-                                &mut connection,
-                                &runtime,
-                                &expected_generation,
-                                &checkpoint,
-                            ));
-                        }
-                        Request::LoadDomainEvents { reply } => {
-                            let _ = reply.send(load_domain_events(&connection));
-                        }
-                        Request::CommitAction {
-                            characters,
-                            runtime,
-                            events,
-                            reply,
-                        } => {
-                            let _ = reply.send(commit_action(
-                                &mut connection,
-                                &characters,
-                                &runtime,
-                                &events,
-                            ));
-                        }
-                        Request::CommitStaffAction {
-                            characters,
-                            runtime,
-                            events,
-                            audit,
-                            reply,
-                        } => {
-                            let _ = reply.send(commit_staff_action(
-                                &mut connection,
-                                &characters,
-                                &runtime,
-                                &events,
-                                audit,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::SocialProfile {
-                            character_id,
-                            reply,
-                        } => {
-                            let _ = reply.send(social_profile(
-                                &connection,
-                                character_id,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::SocialTarget { name, reply } => {
-                            let _ = reply.send(social_target(&connection, &name, unix_timestamp()));
-                        }
-                        Request::SocialDeliveryAllowed {
-                            sender,
-                            recipient,
-                            reply,
-                        } => {
-                            let _ =
-                                reply.send(social_delivery_allowed(&connection, sender, recipient));
-                        }
-                        Request::SetSocialRelation {
-                            actor,
-                            target,
-                            relation,
-                            enabled,
-                            reply,
-                        } => {
-                            let _ = reply.send(set_social_relation(
-                                &mut connection,
-                                actor,
-                                target,
-                                relation,
-                                enabled,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::SocialChannelSubscriptions {
-                            character_id,
-                            reply,
-                        } => {
-                            let _ =
-                                reply.send(social_channel_subscriptions(&connection, character_id));
-                        }
-                        Request::SocialChannelSubscribers { channel, reply } => {
-                            let _ = reply.send(social_channel_subscribers(&connection, channel));
-                        }
-                        Request::SetSocialChannelSubscription {
-                            character_id,
-                            channel,
-                            subscribed,
-                            reply,
-                        } => {
-                            let _ = reply.send(set_social_channel_subscription(
-                                &mut connection,
-                                character_id,
-                                channel,
-                                subscribed,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::SendMail {
-                            sender,
-                            target_name,
-                            public_id,
-                            subject,
-                            body,
-                            reply,
-                        } => {
-                            let _ = reply.send(send_mail(
-                                &mut connection,
-                                sender,
-                                &target_name,
-                                &public_id,
-                                &subject,
-                                &body,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::MailboxPage {
-                            recipient,
-                            page,
-                            reply,
-                        } => {
-                            let _ = reply.send(mailbox_page(
-                                &connection,
-                                recipient,
-                                page,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::ReadMail {
-                            recipient,
-                            public_id,
-                            reply,
-                        } => {
-                            let _ = reply.send(read_mail(
-                                &mut connection,
-                                recipient,
-                                &public_id,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::DeleteMail {
-                            recipient,
-                            public_id,
-                            reply,
-                        } => {
-                            let _ = reply.send(delete_mail(
-                                &mut connection,
-                                recipient,
-                                &public_id,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::ReportMail {
-                            recipient,
-                            public_id,
-                            reason,
-                            reply,
-                        } => {
-                            let _ = reply.send(report_mail(
-                                &mut connection,
-                                recipient,
-                                &public_id,
-                                &reason,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::PurgeExpiredMail { reply } => {
-                            let _ =
-                                reply.send(purge_expired_mail(&mut connection, unix_timestamp()));
-                        }
-                        Request::ListBoardPosts {
-                            actor,
-                            board,
-                            page,
-                            reply,
-                        } => {
-                            let _ = reply.send(list_board_posts(
-                                &connection,
-                                actor,
-                                board,
-                                page,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::ReadBoardPost {
-                            actor,
-                            public_id,
-                            reply,
-                        } => {
-                            let _ = reply.send(read_board_post(
-                                &connection,
-                                actor,
-                                &public_id,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::PublishBoardPost {
-                            actor,
-                            board,
-                            public_id,
-                            subject,
-                            body,
-                            reply,
-                        } => {
-                            let _ = reply.send(publish_board_post(
-                                &mut connection,
-                                actor,
-                                board,
-                                &public_id,
-                                &subject,
-                                &body,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::DeleteBoardPost {
-                            actor,
-                            public_id,
-                            reply,
-                        } => {
-                            let _ = reply.send(delete_board_post(
-                                &mut connection,
-                                actor,
-                                &public_id,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::ReportBoardPost {
-                            actor,
-                            public_id,
-                            reason,
-                            reply,
-                        } => {
-                            let _ = reply.send(report_board_post(
-                                &mut connection,
-                                actor,
-                                &public_id,
-                                &reason,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::PurgeExpiredBoards { reply } => {
-                            let _ =
-                                reply.send(purge_expired_boards(&mut connection, unix_timestamp()));
-                        }
-                        Request::ReportCharacter {
-                            actor,
-                            target,
-                            reason,
-                            reply,
-                        } => {
-                            let _ = reply.send(report_character(
-                                &mut connection,
-                                actor,
-                                target,
-                                &reason,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::ModerateCharacter {
-                            actor,
-                            target,
-                            action,
-                            reply,
-                        } => {
-                            let _ = reply.send(moderate_character(
-                                &mut connection,
-                                actor,
-                                target,
-                                action,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::StaffAccess {
-                            character_id,
-                            reply,
-                        } => {
-                            let _ = reply.send(staff_access(&connection, character_id));
-                        }
-                        Request::StaffReports { audit, reply } => {
-                            let _ =
-                                reply.send(staff_reports(&mut connection, audit, unix_timestamp()));
-                        }
-                        Request::ResolveStaffReport {
-                            report_id,
-                            resolution,
-                            resolution_reason,
-                            audit,
-                            reply,
-                        } => {
-                            let _ = reply.send(resolve_staff_report(
-                                &mut connection,
-                                report_id,
-                                resolution,
-                                &resolution_reason,
-                                audit,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::SetStaffProfile {
-                            target_account,
-                            profile,
-                            lore_title,
-                            audit,
-                            reply,
-                        } => {
-                            let _ = reply.send(set_staff_profile(
-                                &mut connection,
-                                target_account,
-                                profile,
-                                lore_title.as_deref(),
-                                audit,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::SetStaffCapability {
-                            target_account,
-                            capability,
-                            enabled,
-                            audit,
-                            reply,
-                        } => {
-                            let _ = reply.send(set_staff_capability(
-                                &mut connection,
-                                target_account,
-                                capability,
-                                enabled,
-                                audit,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::StaffAuditEntries { audit, reply } => {
-                            let _ = reply.send(staff_audit_entries(
-                                &mut connection,
-                                audit,
-                                unix_timestamp(),
-                            ));
-                        }
-                        Request::AppendStaffAudit { audit, reply } => {
-                            let _ = reply.send(append_staff_audit_transaction(
-                                &mut connection,
-                                audit,
-                                unix_timestamp(),
-                            ));
-                        }
-                        #[cfg(test)]
-                        Request::AuditLog { reply } => {
-                            let _ = reply.send(audit_log(&connection));
-                        }
+                    if dispatch_persistence_request(&mut handler, request).is_break() {
+                        break;
                     }
                 }
             })
