@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest';
 import type { PlayerStateSnapshot } from '../lib/protocol';
 import PlayerDashboard from './PlayerDashboard.svelte';
 import dashboardSource from './PlayerDashboard.svelte?raw';
+import partyPanelSource from './PartyPanel.svelte?raw';
+import boardsPanelSource from './BoardsPanel.svelte?raw';
+import mailPanelSource from './OfflineMailPanel.svelte?raw';
 import mailModuleSource from '../lib/dashboard/mail.ts?raw';
 
 const player: PlayerStateSnapshot = {
@@ -343,14 +346,24 @@ describe('PlayerDashboard', () => {
 
   it('wires party and world-channel controls to structured actions', () => {
     for (const action of [
-      'party.say', 'party.revoke', 'party.kick', 'party.transfer', 'party.disband',
       'social.reply', 'social.channel.list', 'social.channel.join',
       'social.channel.leave', 'social.channel.say',
       'social.telepathy', 'social.emote.list', 'social.emote',
-      'mail.list', 'mail.read', 'mail.delete', 'mail.send', 'mail.report',
-      'board.catalog', 'board.list', 'board.read', 'board.delete', 'board.post', 'board.report',
     ]) {
       expect(dashboardSource).toContain(action);
+    }
+    for (const action of [
+      'party.say', 'party.revoke', 'party.kick', 'party.transfer', 'party.disband',
+    ]) {
+      expect(partyPanelSource).toContain(action);
+    }
+    for (const action of ['mail.list', 'mail.read', 'mail.delete', 'mail.send', 'mail.report']) {
+      expect(mailPanelSource).toContain(action);
+    }
+    for (const action of [
+      'board.catalog', 'board.list', 'board.read', 'board.delete', 'board.post', 'board.report',
+    ]) {
+      expect(boardsPanelSource).toContain(action);
     }
     expect(dashboardSource).toContain('{ channel: communityChannel, message }');
     expect(dashboardSource).toContain("let voiceReach = $state<'say' | 'yell' | 'shout'>('say')");
@@ -430,15 +443,15 @@ describe('PlayerDashboard', () => {
   });
 
   it('keeps board drafts until correlated success and blocks duplicate submissions', () => {
-    expect(dashboardSource).toContain('pendingBoardPostRequest');
-    expect(dashboardSource).toContain('pendingBoardReportRequest');
-    expect(dashboardSource).toContain('result.requestId === pendingBoardPostRequest');
-    expect(dashboardSource).toContain('result.requestId === pendingBoardReportRequest');
-    expect(dashboardSource).toContain('if (result.ok)');
-    expect(dashboardSource).toContain('disabled={Boolean(pendingBoardPostRequest)');
-    expect(dashboardSource).toContain('disabled={Boolean(pendingBoardReportRequest)');
-    expect(dashboardSource).toContain("if (connectionState === 'connected') return");
-    expect(dashboardSource).toMatch(
+    expect(boardsPanelSource).toContain('pendingBoardPostRequest');
+    expect(boardsPanelSource).toContain('pendingBoardReportRequest');
+    expect(boardsPanelSource).toContain('result.requestId === pendingBoardPostRequest');
+    expect(boardsPanelSource).toContain('result.requestId === pendingBoardReportRequest');
+    expect(boardsPanelSource).toContain('if (result.ok)');
+    expect(boardsPanelSource).toContain('disabled={Boolean(pendingBoardPostRequest)');
+    expect(boardsPanelSource).toContain('disabled={Boolean(pendingBoardReportRequest)');
+    expect(boardsPanelSource).toContain("if (connectionState === 'connected') return");
+    expect(boardsPanelSource).toMatch(
       /connectionState === 'connected'[\s\S]*?pendingBoardPostRequest = undefined;[\s\S]*?pendingBoardReportRequest = undefined;/,
     );
   });

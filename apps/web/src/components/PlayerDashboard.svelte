@@ -4,7 +4,6 @@
     ActionResultData,
     BoardCatalogData,
     BoardEntryData,
-    BoardKey,
     BoardListData,
     CommunityChannel,
     ConnectionState,
@@ -25,22 +24,11 @@
     signedDelta,
     statusLabel,
   } from '../lib/dashboard/format';
-  import { mailDate, mailVisibleText } from '../lib/dashboard/mail';
   import { clampItemQuantity, clampTradeQuantity } from '../lib/dashboard/quantity';
-  import {
-    greedCommand,
-    LOOT_MODE_LABELS,
-    lootMasterCommand,
-    lootMasterMemberValid,
-    lootModeCommand,
-    lootRollCommand,
-    needCommand,
-    parseLootRoll,
-    passCommand,
-    rootIsMaster,
-    rootIsNeedGreed,
-  } from '../lib/dashboard/loot';
-  import type { LootDistributionMode } from '../lib/dashboard/loot';
+  import BoardsPanel from './BoardsPanel.svelte';
+  import GroupLootPanel from './GroupLootPanel.svelte';
+  import OfflineMailPanel from './OfflineMailPanel.svelte';
+  import PartyPanel from './PartyPanel.svelte';
 
   interface Props {
     value?: PlayerStateSnapshot;
@@ -76,8 +64,6 @@
   let voiceReach = $state<'say' | 'yell' | 'shout'>('say');
   let chatText = $state('');
   let tellText = $state('');
-  let partyTarget = $state('');
-  let partyMessage = $state('');
   let replyMessage = $state('');
   let communityChannel = $state<CommunityChannel>('general');
   let communityMessage = $state('');
@@ -86,16 +72,6 @@
   let telepathyMessageById = $state<Record<string, string>>({});
   let emoteCommand = $state('');
   let emoteTarget = $state('');
-  let mailTarget = $state('');
-  let mailSubject = $state('');
-  let mailBody = $state('');
-  let mailReportReason = $state('');
-  let boardSelection = $state<BoardKey>('general');
-  let boardSubject = $state('');
-  let boardBody = $state('');
-  let boardReportReason = $state('');
-  let pendingBoardPostRequest = $state<string>();
-  let pendingBoardReportRequest = $state<string>();
   let itemQuantity = $state(1);
   let destinationContainer = $state('');
   let giveRecipient = $state('');
@@ -103,7 +79,6 @@
   let tradeCoins = $state(0);
   let tradeOfferQuantity = $state(1);
   let lastTradeRevision = $state(0);
-  let lootMasterMember = $state('');
   const carriedContainers = $derived(value?.inventory.filter((item) => item.containerCapacity) ?? []);
   const nearbyRecipients = $derived(
     value?.social.online.filter((character) => character.nearby && !character.selfCharacter) ?? [],
@@ -126,33 +101,6 @@
   const additionalAttributes = $derived(
     value?.character.attributes.filter((attribute) => attribute.id !== 'strength' && attribute.id !== 'defence') ?? [],
   );
-  const selectedBoard = $derived(
-    boardCatalog?.boards.find((board) => board.key === boardSelection),
-  );
-  const lootView = $derived(lootRoll ? parseLootRoll(lootRoll) : undefined);
-
-  $effect(() => {
-    const result = actionResult;
-    if (!result?.requestId) return;
-    if (result.requestId === pendingBoardPostRequest) {
-      if (result.ok) {
-        boardSubject = '';
-        boardBody = '';
-      }
-      pendingBoardPostRequest = undefined;
-    }
-    if (result.requestId === pendingBoardReportRequest) {
-      if (result.ok) boardReportReason = '';
-      pendingBoardReportRequest = undefined;
-    }
-  });
-
-  $effect(() => {
-    if (connectionState === 'connected') return;
-    pendingBoardPostRequest = undefined;
-    pendingBoardReportRequest = undefined;
-  });
-
   function perform(action: SceneAction): void {
     const [verb = '', ...tail] = action.command.trim().split(/\s+/);
     const target = tail.join(' ') || undefined;
@@ -342,31 +290,6 @@
     tellText = '';
   }
 
-  function invite(): void {
-    const target = partyTarget.trim();
-    if (!target) return;
-    onaction('party.invite', { target }, `party invite ${target}`);
-    partyTarget = '';
-  }
-
-  function partyTargetAction(action: 'revoke' | 'kick' | 'transfer'): void {
-    const target = partyTarget.trim();
-    if (!target) return;
-    const actionName = {
-      revoke: 'party.revoke',
-      kick: 'party.kick',
-      transfer: 'party.transfer',
-    }[action];
-    onaction(actionName, { target }, `party ${action} ${target}`);
-  }
-
-  function sendPartyMessage(): void {
-    const message = partyMessage.trim();
-    if (!message) return;
-    onaction('party.say', { message }, 'party message');
-    partyMessage = '';
-  }
-
   function sendReply(): void {
     const message = replyMessage.trim();
     if (!message) return;
@@ -436,54 +359,6 @@
     emoteTarget = '';
   }
 
-  function sendMail(): void {
-    if (!mailVisibleText(mailTarget, 64) || mailTarget.includes('|') ||
-      !mailVisibleText(mailSubject, 128) || mailSubject.includes('|') ||
-      !mailVisibleText(mailBody, 2_048)) return;
-    onaction(
-      'mail.send',
-      { target: mailTarget, subject: mailSubject, body: mailBody },
-      `mail to ${mailTarget}`,
-    );
-    mailSubject = '';
-    mailBody = '';
-  }
-
-  function reportOpenMail(): void {
-    if (!mailMessage || !mailVisibleText(mailReportReason, 2_048)) return;
-    onaction(
-      'mail.report',
-      { mailId: mailMessage.id, reason: mailReportReason },
-      `report mail ${mailMessage.id}`,
-    );
-    mailReportReason = '';
-  }
-
-  function loadBoard(page = 1): void {
-    onaction('board.list', { board: boardSelection, page }, `board ${boardSelection} page ${page}`);
-  }
-
-  function publishBoardPost(): void {
-    if (pendingBoardPostRequest || !selectedBoard?.canPost || !mailVisibleText(boardSubject, 128) ||
-      boardSubject.includes('|') || !mailVisibleText(boardBody, 4_096)) return;
-    const requestId = onaction(
-      'board.post',
-      { board: boardSelection, subject: boardSubject, body: boardBody },
-      `post to board ${boardSelection}`,
-    );
-    if (requestId) pendingBoardPostRequest = requestId;
-  }
-
-  function reportBoardEntry(): void {
-    if (pendingBoardReportRequest || !boardEntry?.canReport ||
-      !mailVisibleText(boardReportReason, 2_048)) return;
-    const requestId = onaction(
-      'board.report',
-      { postId: boardEntry.postId, reason: boardReportReason },
-      `report board post ${boardEntry.postId}`,
-    );
-    if (requestId) pendingBoardReportRequest = requestId;
-  }
 </script>
 
 <aside class="player-dashboard" aria-label="Character and world panels">
@@ -1276,341 +1151,18 @@
       </div>
     </details>
 
-    <details class="dashboard-panel">
-      <summary>Party <span>{value.party?.members.length ?? 0}</span></summary>
-      <div class="panel-body">
-        {#if value.party}
-          <ul class="dashboard-list">
-            {#each value.party.members as member (member.id)}
-              <li><span><strong>{member.name}</strong>{member.leader ? ' · leader' : ''}</span><small>{member.online ? 'Online' : 'Away'}</small></li>
-            {/each}
-          </ul>
-          <div class="dashboard-actions">
-            {#each value.party.actions as action (action.command)}
-              <button type="button" onclick={() => perform(action)}>{action.label}</button>
-            {/each}
-          </div>
-          {#if value.party.leader}
-            <form class="inline-form" onsubmit={(event) => { event.preventDefault(); invite(); }}>
-              <label for="party-target">Invite or manage an adventurer</label>
-              <input id="party-target" maxlength="64" bind:value={partyTarget} aria-describedby="party-target-help" />
-              <small id="party-target-help">Enter the exact character name.</small>
-              <div class="dashboard-actions">
-                <button type="submit" disabled={!partyTarget.trim()}>Invite</button>
-                <button type="button" disabled={!partyTarget.trim()} onclick={() => partyTargetAction('revoke')}>Revoke invitation</button>
-                <button type="button" disabled={!partyTarget.trim()} onclick={() => partyTargetAction('kick')}>Remove from party</button>
-                <button type="button" disabled={!partyTarget.trim()} onclick={() => partyTargetAction('transfer')}>Transfer leadership</button>
-              </div>
-            </form>
-            {#if !value.party.actions.some((action) => action.command.trim().toLowerCase() === 'party disband')}
-              <button type="button" onclick={() => onaction('party.disband', undefined, 'party disband')}>Disband party</button>
-            {/if}
-          {/if}
-          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendPartyMessage(); }}>
-            <label for="party-message">Message to party</label>
-            <div><input id="party-message" maxlength="512" bind:value={partyMessage} /><button type="submit" disabled={!partyMessage.trim()}>Send to party</button></div>
-          </form>
-        {:else}
-          <p class="empty-copy">You are travelling alone.</p>
-          <button type="button" onclick={() => onaction('party.create', undefined, 'party create')}>Create party</button>
-        {/if}
-        {#if value.partyInvites.length > 0}
-          <h3>Invitations</h3>
-          <ul class="dashboard-list">
-            {#each value.partyInvites as invite (invite.leaderName)}
-              <li>
-                <span>From <strong>{invite.leaderName}</strong> · {invite.expiresInTicks} ticks</span>
-                <div class="dashboard-actions">
-                  {#each invite.actions as action (action.command)}
-                    <button type="button" onclick={() => perform(action)}>{action.label}</button>
-                  {/each}
-                </div>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    </details>
+    <PartyPanel
+      party={value.party}
+      partyInvites={value.partyInvites}
+      {onaction}
+      onperform={perform}
+    />
 
-    <details class="dashboard-panel">
-      <summary>
-        Group loot
-        <span>{lootView ? LOOT_MODE_LABELS[lootView.mode] : 'not loaded'}</span>
-      </summary>
-      <div class="panel-body">
-        <div class="panel-heading-row">
-          <h3>Group loot</h3>
-          <button type="button" onclick={() => oncommand(lootRollCommand())}>Refresh</button>
-        </div>
-        <div class="dashboard-actions" aria-label="Loot distribution mode">
-          <button
-            type="button"
-            aria-pressed={lootView?.mode === 'round_robin'}
-            onclick={() => oncommand(lootModeCommand('round_robin'))}
-          >Round-robin</button>
-          <button
-            type="button"
-            aria-pressed={lootView?.mode === 'need_greed'}
-            onclick={() => oncommand(lootModeCommand('need_greed'))}
-          >Need / Greed</button>
-          <button
-            type="button"
-            aria-pressed={lootView?.mode === 'master_loot'}
-            onclick={() => oncommand(lootModeCommand('master_loot'))}
-          >Master-loot</button>
-        </div>
-        <p class="empty-copy">Changing the distribution mode requires the party leader.</p>
-        {#if !lootView}
-          <p class="empty-copy">Run &ldquo;loot roll&rdquo; to see the current distribution.</p>
-        {:else if lootView.empty}
-          <p class="empty-copy">No carried loot to divide for {lootView.npcName}.</p>
-        {:else}
-          {#if lootView.mode === 'master_loot'}
-            <div class="inline-form">
-              <label for="loot-master-member">Assign to</label>
-              <input id="loot-master-member" maxlength="64" bind:value={lootMasterMember} />
-            </div>
-            <p class="empty-copy">Assigning items requires the party leader.</p>
-          {/if}
-          <ul class="dashboard-list" aria-label={`Group loot for ${lootView.npcName}`}>
-            {#each lootView.roots as root (root.ref)}
-              <li>
-                <strong>{root.name}</strong>
-                {#if lootView.mode === 'need_greed' && rootIsNeedGreed(root)}
-                  <p>{root.need} need · {root.greed} greed · {root.pass} pass · {root.pending} pending</p>
-                  <div class="dashboard-actions">
-                    <button type="button" onclick={() => oncommand(needCommand(root.ref))}>Need</button>
-                    <button type="button" onclick={() => oncommand(greedCommand(root.ref))}>Greed</button>
-                    <button type="button" onclick={() => oncommand(passCommand(root.ref))}>Pass</button>
-                  </div>
-                {:else if lootView.mode === 'master_loot' && rootIsMaster(root)}
-                  <p>{root.assignedTo ? `Assigned to ${root.assignedTo}` : 'Unassigned'}</p>
-                  <div class="dashboard-actions">
-                    <button
-                      type="button"
-                      disabled={!lootMasterMemberValid(lootMasterMember)}
-                      onclick={() => oncommand(lootMasterCommand(root.ref, lootMasterMember))}
-                    >Assign</button>
-                  </div>
-                {/if}
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    </details>
+    <GroupLootPanel {lootRoll} {oncommand} />
 
-    <details class="dashboard-panel board-panel">
-      <summary>
-        Tablones
-        <span>{boardList ? `${boardList.totalPosts}/${boardList.capacity}` : 'not loaded'}</span>
-      </summary>
-      <div class="panel-body">
-        <div class="panel-heading-row">
-          <h3>Community boards</h3>
-          <button
-            type="button"
-            onclick={() => onaction('board.catalog', undefined, 'board catalog')}
-          >Load boards</button>
-        </div>
-        {#if boardCatalog}
-          <p>Posts are public, text-only and retained for {boardCatalog.retentionDays} days.</p>
-          <div class="inline-form board-selector">
-            <label for="board-selection">Board</label>
-            <select id="board-selection" bind:value={boardSelection}>
-              {#each boardCatalog.boards as board (board.key)}
-                <option value={board.key}>{board.label}</option>
-              {/each}
-            </select>
-            <p>{selectedBoard?.description}</p>
-            <button type="button" onclick={() => loadBoard()}>Open board</button>
-          </div>
+    <BoardsPanel {boardCatalog} {boardList} {boardEntry} {actionResult} {connectionState} {onaction} />
 
-          {#if boardList?.board === boardSelection}
-            {#if boardList.posts.length > 0}
-              <ul class="dashboard-list" aria-label={`${selectedBoard?.label ?? boardSelection} posts`}>
-                {#each boardList.posts as post (post.postId)}
-                  <li>
-                    <div>
-                      <strong>{post.subject}</strong>
-                      <p>By {post.author} · {mailDate(post.createdAt)}</p>
-                      <small>Expires {mailDate(post.expiresAt)}</small>
-                    </div>
-                    <div class="dashboard-actions">
-                      <button
-                        type="button"
-                        onclick={() => onaction('board.read', { postId: post.postId }, `read board post ${post.postId}`)}
-                      >Read</button>
-                      {#if post.canDelete}
-                        <button
-                          type="button"
-                          onclick={() => onaction('board.delete', { postId: post.postId }, `delete board post ${post.postId}`)}
-                        >Delete</button>
-                      {/if}
-                    </div>
-                  </li>
-                {/each}
-              </ul>
-            {:else}
-              <p class="empty-copy">There are no posts on this page.</p>
-            {/if}
-            <div class="dashboard-actions" aria-label="Board pages">
-              <button
-                type="button"
-                disabled={boardList.page <= 1}
-                onclick={() => loadBoard(boardList.page - 1)}
-              >Previous</button>
-              <span>Page {boardList.page} / {boardList.totalPages}</span>
-              <button
-                type="button"
-                disabled={boardList.page >= boardList.totalPages}
-                onclick={() => loadBoard(boardList.page + 1)}
-              >Next</button>
-            </div>
-          {/if}
-
-          {#if boardEntry?.board === boardSelection}
-            <article class="board-entry" aria-labelledby="open-board-subject">
-              <h3 id="open-board-subject">{boardEntry.subject}</h3>
-              <p>By {boardEntry.author} · {mailDate(boardEntry.createdAt)}</p>
-              <p class="board-body">{boardEntry.body}</p>
-              <div class="dashboard-actions">
-                {#if boardEntry.canDelete}
-                  <button
-                    type="button"
-                    onclick={() => onaction('board.delete', { postId: boardEntry.postId }, `delete board post ${boardEntry.postId}`)}
-                  >Delete this post</button>
-                {/if}
-              </div>
-              {#if boardEntry.canReport}
-                <form class="inline-form" onsubmit={(event) => { event.preventDefault(); reportBoardEntry(); }}>
-                  <label for="board-report-reason">Report this post</label>
-                  <textarea
-                    id="board-report-reason"
-                    maxlength="2048"
-                    rows="3"
-                    bind:value={boardReportReason}
-                  ></textarea>
-                  <button
-                    type="submit"
-                    disabled={Boolean(pendingBoardReportRequest) ||
-                      !mailVisibleText(boardReportReason, 2_048)}
-                  >Send report</button>
-                </form>
-              {/if}
-            </article>
-          {/if}
-
-          <form class="inline-form" onsubmit={(event) => { event.preventDefault(); publishBoardPost(); }}>
-            <h3>Publish to {selectedBoard?.label ?? boardSelection}</h3>
-            <label for="board-subject">Subject</label>
-            <input id="board-subject" maxlength="128" bind:value={boardSubject} />
-            <label for="board-body">Post</label>
-            <textarea id="board-body" maxlength="4096" rows="7" bind:value={boardBody}></textarea>
-            {#if selectedBoard && !selectedBoard.canPost}
-              <small role="status">Posting is unavailable while this character is muted or banned.</small>
-            {:else}
-              <small>No Markdown, HTML, links, images or attachments are interpreted.</small>
-            {/if}
-            <button
-              type="submit"
-              disabled={Boolean(pendingBoardPostRequest) || !selectedBoard?.canPost ||
-                !mailVisibleText(boardSubject, 128) ||
-                boardSubject.includes('|') || !mailVisibleText(boardBody, 4_096)}
-            >Publish post</button>
-          </form>
-        {:else}
-          <p class="empty-copy">Load the bounded public board catalog when you need it.</p>
-        {/if}
-      </div>
-    </details>
-
-    <details class="dashboard-panel">
-      <summary>
-        Offline mail
-        <span>{mailList ? `${mailList.unreadCount} unread · ${mailList.totalMessages}/${mailList.capacity}` : 'not loaded'}</span>
-      </summary>
-      <div class="panel-body">
-        <div class="panel-heading-row">
-          <h3>Inbox</h3>
-          <button type="button" onclick={() => onaction('mail.list', undefined, 'mail inbox')}>Refresh</button>
-        </div>
-        {#if mailList}
-          {#if mailList.messages.length > 0}
-            <ul class="dashboard-list" aria-label="Offline mail inbox">
-              {#each mailList.messages as message (message.id)}
-                <li>
-                  <div>
-                    <strong>{message.read ? '' : 'Unread · '}{message.subject}</strong>
-                    <p>From {message.sender} · {mailDate(message.createdAt)}</p>
-                    <small>Expires {mailDate(message.expiresAt)}</small>
-                  </div>
-                  <div class="dashboard-actions">
-                    <button
-                      type="button"
-                      onclick={() => onaction('mail.read', { mailId: message.id }, `read mail ${message.id}`)}
-                    >Read</button>
-                    <button
-                      type="button"
-                      onclick={() => onaction('mail.delete', { mailId: message.id }, `delete mail ${message.id}`)}
-                    >Delete</button>
-                  </div>
-                </li>
-              {/each}
-            </ul>
-          {:else}
-            <p class="empty-copy">Your inbox is empty.</p>
-          {/if}
-          {#if mailList.totalPages > 1}
-            <div class="dashboard-actions" aria-label="Mail pages">
-              <button
-                type="button"
-                disabled={mailList.page <= 1}
-                onclick={() => onaction('mail.list', { page: mailList.page - 1 }, 'previous mail page')}
-              >Previous</button>
-              <span>Page {mailList.page} / {mailList.totalPages}</span>
-              <button
-                type="button"
-                disabled={mailList.page >= mailList.totalPages}
-                onclick={() => onaction('mail.list', { page: mailList.page + 1 }, 'next mail page')}
-              >Next</button>
-            </div>
-          {/if}
-        {:else}
-          <p class="empty-copy">Load your bounded, 30-day inbox when you need it.</p>
-        {/if}
-
-        {#if mailMessage}
-          <article aria-labelledby="open-mail-subject">
-            <h3 id="open-mail-subject">{mailMessage.subject}</h3>
-            <p>From {mailMessage.sender} · {mailDate(mailMessage.createdAt)}</p>
-            <p class="mail-body">{mailMessage.body}</p>
-            <form class="inline-form" onsubmit={(event) => { event.preventDefault(); reportOpenMail(); }}>
-              <label for="mail-report-reason">Report this message</label>
-              <textarea id="mail-report-reason" maxlength="2048" rows="3" bind:value={mailReportReason}></textarea>
-              <button type="submit" disabled={!mailVisibleText(mailReportReason, 2_048)}>Send report</button>
-            </form>
-          </article>
-        {/if}
-
-        <form class="inline-form" onsubmit={(event) => { event.preventDefault(); sendMail(); }}>
-          <h3>Send offline mail</h3>
-          <label for="mail-target">Exact character name</label>
-          <input id="mail-target" maxlength="64" bind:value={mailTarget} />
-          <label for="mail-subject">Subject</label>
-          <input id="mail-subject" maxlength="128" bind:value={mailSubject} />
-          <label for="mail-body">Message</label>
-          <textarea id="mail-body" maxlength="2048" rows="5" bind:value={mailBody}></textarea>
-          <small>Mail expires after 30 days. Delivery acknowledgements do not reveal ignore or mailbox state.</small>
-          <button
-            type="submit"
-            disabled={!mailVisibleText(mailTarget, 64) || mailTarget.includes('|') ||
-              !mailVisibleText(mailSubject, 128) || mailSubject.includes('|') ||
-              !mailVisibleText(mailBody, 2_048)}
-          >Send mail</button>
-        </form>
-      </div>
-    </details>
+    <OfflineMailPanel {mailList} {mailMessage} {onaction} />
 
     <details class="dashboard-panel">
       <summary>Coin and market <span>{value.economy.spendableCoins} spendable</span></summary>
