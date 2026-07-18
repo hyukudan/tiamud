@@ -323,13 +323,15 @@ matriz, memoria y documentación pública a la vez.
   recompensas antes de consumir y confirmar todo en un commit; cualquier fallo
   restaura el checkpoint exacto. `reward odds <sello> [página]` expone
   fracciones exactas en páginas de 20 sin IDs/digests internos. Web, Telnet y
-  `Char.Reward 1` GMCP comparten acciones y proyección. Need/greed,
-  master-loot y contribución son fases posteriores; cajas, llaves, moneda
-  premium, pity o tiradas pagadas no pertenecen al baseline.
+  `Char.Reward 1` GMCP comparten acciones y proyección. Need/greed y
+  master-loot están implementados parcialmente para loot fijo (ADR 0023; ver la
+  matriz); el reparto por contribución sigue siendo posterior; cajas, llaves,
+  moneda premium, pity o tiradas pagadas no pertenecen al baseline.
 - Los grupos admiten hasta seis miembros y soportan
   create/invite/accept/revoke/kick/transfer/disband/leave/status y `party say`
-  (`gsay`/`gtell`). No hay follow/assist/rescue, selección general de aliados,
-  XP/crédito de misión compartidos ni reparto avanzado de botín.
+  (`gsay`/`gtell`). No hay follow/assist/rescue, selección general de aliados ni
+  XP/crédito de misión compartidos; el reparto need/greed y master-loot existe
+  (ADR 0023, parcial) pero no el reparto por contribución.
 - La membresía permanece al desconectar y el snapshot muestra miembros offline,
   pero accept/revoke/kick/transfer resuelven un nombre conectado. No afirmes
   administración dirigida de un líder/invitado/miembro desconectado.
@@ -719,7 +721,8 @@ cargo +nightly-2026-07-01 fuzz run telnet_parser -- \
   pilas derivadas, contenedores con capacidad/profundidad acotadas, cantidades,
   paginación, rareza, `itemLevel`, vínculo, políticas, `give`, trade confirmado,
   botín repetible, procedencia, round-robin, pass, recompensas selladas ganadas
-  y afijos deterministas; sin need/greed, contribución ni master-loot;
+  y afijos deterministas; need/greed y master-loot parciales (ADR 0023) sin
+  reparto por contribución;
 - backup/TLS/monitorización/recuperación PostgreSQL dependen del operador;
 - marca/dominios y derechos de terceros siguen siendo trabajo legal externo.
 

@@ -28,6 +28,8 @@ implementación por fase vive en
 | [0020](0020-additive-local-area-loading.md) | Additive local area loading | Aceptado | Áreas 6B |
 | [0021](0021-quiescent-area-generation-cutover.md) | Quiescent area generation cutover | Aceptado | Áreas 6C |
 | [0022](0022-reversible-area-unit-retirement.md) | Reversible area-unit retirement | Aceptado (implementación parcial) | Áreas 6D |
+| [0023](0023-need-greed-and-master-loot-distribution.md) | Need/greed and master-loot distribution | Aceptado (implementación parcial) | Botín 4C |
+| [0024](0024-phase-6d-acceptance-closure-plan.md) | Phase 6D acceptance closure plan | Propuesta | Áreas 6D |
 
 El estado de fase (`Complete`/`Partial`) es autoridad de
 [`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).

@@ -1,6 +1,8 @@
 # ADR 0023: reparto de botín need/greed y master-loot
 
-- Estado: propuesta (borrador para revisión humana; no implementada)
+- Estado: aceptada — implementación parcial (dominio, Telnet/GMCP y web
+  para loot fijo; ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md)
+  para el estado y los límites exactos)
 - Fecha: 2026-07-18
 - Alcance: inventario y botín, fase de reparto avanzado
 - Desarrolla: [ADR 0013](0013-repeatable-loot-rights-and-provenance.md)
