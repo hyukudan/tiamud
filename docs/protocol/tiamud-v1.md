@@ -218,6 +218,29 @@ rejections. It clears saved credentials only for expired or invalid sessions;
 the other codes preserve an otherwise reusable login and return the player to
 character entry with a safe explanation.
 
+```mermaid
+sequenceDiagram
+    accTitle: Authenticated pre-welcome handshake
+    accDescr: The first frame within ten seconds must be a valid client.hello. The server rechecks bearer session, ownership, ban state and the single-live-character lease. Success sends sequenced server.welcome, scene.snapshot and player.snapshot. A rejection sends a sequenced server.notice with one stable access code and closes the connection.
+
+    participant C as Client
+    participant S as Server
+
+    C->>S: client.hello (first frame, within 10 s)
+    S->>S: resolve/recheck bearer session, ownership,<br/>ban state and single-live-character lease
+    alt entry accepted
+        S-->>C: server.welcome (sequenced)
+        S-->>C: scene.snapshot
+        S-->>C: player.snapshot
+        Note over C,S: connection enters play with a fresh observer salt
+    else entry rejected (pre-welcome)
+        S-->>C: server.notice with one stable access.* code
+        Note over C,S: access.protocol_rejected, access.session_expired,<br/>access.session_invalid, access.character_invalid,<br/>access.character_incompatible, access.character_connected,<br/>access.session_limit, access.temporarily_unavailable
+        S--xC: close connection
+        Note over C: official client stops auto-reconnect; clears saved<br/>credentials only for expired/invalid sessions
+    end
+```
+
 ## Client messages
 
 ### Text command
@@ -572,6 +595,28 @@ the matching pair and advances its accepted sequence through the player part.
 An incomplete/mismatched older pair is discarded. v1 intentionally does not
 retain/replay missing events. The official client closes and reconnects if no
 complete recovery pair arrives within ten seconds.
+
+```mermaid
+sequenceDiagram
+    accTitle: Snapshot recovery pair
+    accDescr: A sync.request with afterSeq is answered by a sync.scene and a sync.player frame that echo afterSeq and share a syncId. Scene and player parts coalesce independently, a newer request replaces an older incomplete pair, and the client applies state only after it holds the matching pair. No matching pair within ten seconds closes and reconnects.
+
+    participant C as Client
+    participant S as Server
+
+    C->>S: sync.request{afterSeq}
+    S-->>C: sync.scene{syncId, afterSeq, scene}
+    S-->>C: sync.player{syncId, afterSeq, player, complete}
+    Note over C: parts coalesce independently;<br/>apply state only with the matching syncId pair,<br/>advance accepted seq through the player part
+    alt newer sync.request before pair completes
+        C->>S: sync.request{afterSeq'}
+        Note over C: older incomplete pair discarded,<br/>newer request replaces it
+        S-->>C: sync.scene{syncId', afterSeq'}
+        S-->>C: sync.player{syncId', afterSeq', complete}
+    else no complete pair within 10 s
+        Note over C,S: client closes and reconnects;<br/>v1 does not retain/replay missing events
+    end
+```
 
 ### Heartbeat acknowledgement
 

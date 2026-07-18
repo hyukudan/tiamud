@@ -4,7 +4,7 @@ Estado: especificación de implementación en prelanzamiento, 2026-07-17.
 
 Este documento registra las decisiones actuales de producto y arquitectura de
 Tiamud. Sustituye la planificación de personajes y multimedia de la
-[especificación histórica v0.2](spec-v0.2.md). Los ADR aceptados y el código
+[especificación histórica v0.2](archive/spec-v0.2.md). Los ADR aceptados y el código
 implementado prevalecen cuando este resumen sea menos específico.
 
 ## Contrato de producto
@@ -89,6 +89,33 @@ la pareja está incompleta. La fase 6A publica catálogo y bundles canónicos,
 inmutables y verificables. La fase 6B fija antes de listeners una generación
 identificada por el SHA-256 de los bytes canónicos exactos del catálogo y no
 vuelve a observar el puntero editorial `area-active`.
+
+El ciclo de vida completo va de la selección de modo a la retirada reversible
+por unidad:
+
+```mermaid
+stateDiagram-v2
+    accTitle: Ciclo de vida de areas 6A-6D
+    accDescr: El arranque elige de forma excluyente modo monolitico o catalogo. En modo catalogo, 6A publica bundles inmutables, 6B fija y hace crecer la residencia, 6C sustituye la generacion completa mediante un corte quiescente con rollback, y 6D retira y rehidrata la misma revision de una unidad vacia.
+
+    [*] --> Monolitico: TIAMUD_WORLD_PACK o embebido
+    [*] --> Catalogo: TIAMUD_AREA_REGISTRY mas TIAMUD_AREA_CATALOG
+    Monolitico --> [*]: ruta valida para mundos pequenos
+    Catalogo --> Publicado6A: 6A publica catalogo y bundles inmutables
+    Publicado6A --> ActivaG0: 6B fija la generacion por SHA-256 antes de listeners
+    ActivaG0 --> ActivaG0: 6B crece la residencia bajo demanda, solo anade
+    ActivaG0 --> ActivaG0: 6D retira o rehidrata la misma revision de una unidad vacia
+    ActivaG0 --> StagingG1: 6C SIGHUP prepara la generacion completa candidata
+    StagingG1 --> ActivaG0: verificacion o compatibilidad fallida
+    StagingG1 --> Draining: candidata completa preparada
+    Draining --> ActivaG0: hay sesiones o leases, resultado busy
+    Draining --> Committing: cero sesiones y cero leases
+    Committing --> ActivaG1: CAS de snapshot mas generacion confirmado
+    Committing --> ActivaG0: fallo o CAS rechazado antes del commit
+    Committing --> FailStop: commit ambiguo no reconciliable, readiness 503
+    ActivaG1 --> StagingG0: rollback via area-select mas SIGHUP
+    FailStop --> [*]: reinicio y recuperacion durable
+```
 
 Con `WorldRuntimeSnapshot` y ledger vacíos, el servidor instala el área
 propietaria de `startRoomId` y su cierre transitivo de dependencias duras. Si
@@ -185,8 +212,9 @@ snapshot antes de publicar, y startup valida ambos antes de readiness.
 
 6D permanece `Partial`: faltan superficie operativa, presupuesto/LRU,
 histéresis, E2E específico de ACK perdido y medición RSS.
-La puerta local pasa 792/792 Rust y servidor 337/337; PostgreSQL v15 pasa 22/22 del
-adaptador+mover y 8/8 del servidor, web 125/check/build y auditoría 0 P1/P2.
+Los conteos exactos de pruebas y el estado por fase son autoridad única de
+[`docs/project/COMPLETION_MATRIX.md`](project/COMPLETION_MATRIX.md); la evidencia
+local retenida no es evidencia de CI, release ni producción.
 Siguen fuera el reemplazo de revisión, jugadores durante
 retirada, migraciones, GC, red, compresión y firma remota. Los contratos están en
 [ADR 0020](decisions/0020-additive-local-area-loading.md) y

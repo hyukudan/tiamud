@@ -562,6 +562,25 @@ si todavía contiene G0 reabre la anterior. Cualquier otro valor o error de
 lectura deja el router en `Committing`, detiene el actor y mantiene readiness
 503 sin aceptar tráfico hasta reinicio y recuperación de la autoridad durable.
 
+El árbol de decisión del operador durante un corte es:
+
+```mermaid
+flowchart TD
+    A["area-publish: copia backend verificada y catalogo inmutable"] --> B["SIGHUP local"]
+    B --> C["relee area-active, verifica release, staging privado con gauges aislados"]
+    C --> D["cierra admisiones"]
+    D --> E{"cero sesiones y cero leases?"}
+    E -->|"no"| E1["busy: reabre admisiones, conserva generacion activa, reintentar"]
+    E -->|"si"| F{"lock cooperativo de lectura libre?"}
+    F -->|"ocupado"| F1["aborta el intento, conserva generacion activa, reintentar"]
+    F -->|"libre"| G["revalida puntero bajo lock, restaura snapshot v8 sobre candidata"]
+    G --> H["CAS: snapshot mas puntero de generacion en una transaccion"]
+    H --> I{"resultado del commit"}
+    I -->|"G1 durable"| J["publica candidata, intercambia mundo/contenido/coordinador, reabre admisiones"]
+    I -->|"G0 aun"| K["reabre la generacion anterior"]
+    I -->|"ambiguo o error de lectura"| L["Committing: detiene el actor, readiness 503 hasta reinicio y recuperacion durable"]
+```
+
 Para rollback, no edites a mano `area-active`. Selecciona un catálogo inmutable
 retenido y solicita el mismo corte:
 

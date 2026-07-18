@@ -191,6 +191,25 @@ prepara el resto como un único `PreparedAreaBatch`. Leer blobs, verificar
 digests, decodificar, convertir `CompiledArea`, validar referencias y compilar
 Lua ocurre fuera del actor y sin acceso a su estado mutable.
 
+```mermaid
+stateDiagram-v2
+    accTitle: Ciclo de vida acotado de un trabajo del coordinador
+    accDescr: Cada clave catalogSha256 mas areaId coalesce trabajos duplicados. Una nueva clave ocupa hasta ocho ranuras pendientes y hasta dos preparaciones activas. Un trabajo termina preparado, fallido, expirado a los cinco segundos o cancelado, y ningun final no preparado muta estado.
+
+    [*] --> Coalesced: clave catalogSha256 mas areaId ya en curso
+    Coalesced --> [*]: comparte staging y resultado sin ocupar nueva ranura
+    [*] --> Pending: clave nueva, hasta ocho pendientes ademas de las activas
+    Pending --> Active: ranura libre, hasta dos preparaciones activas
+    Pending --> Cancelled: cola llena o ultimo solicitante desaparecido
+    Active --> Prepared: lectura, verificacion y compilacion OK con cierre hasta 32
+    Active --> Failed: fallo de lectura, verificacion, compilacion o cierre mayor que 32
+    Active --> TimedOut: cinco segundos desde la admision
+    Prepared --> [*]: InstallPreparedAreas entregado al actor
+    Failed --> [*]: arena privada descartada sin mutar World, residencia ni snapshot
+    TimedOut --> [*]: marca terminal, resultado tardio de spawn_blocking descartado
+    Cancelled --> [*]: staging descartado sin mutacion
+```
+
 ## Instalación atómica en el actor
 
 El coordinador entrega un comando interno
@@ -244,6 +263,44 @@ checkpoint, valida el máximo de raíces y marca el lote como estado dinámico.
 Si NPC e instancia llegan juntos, se aplica la misma unión al crear el NPC. En
 ambos órdenes la relación queda completa o se restaura íntegra; nunca queda una
 instancia `HeldByNpc` que el NPC no pueda resolver como botín.
+
+El flujo completo de una demanda —desde el movimiento hacia un `DeferredExit`
+hasta el reintento único— recorre el cliente, el servidor, el coordinador fuera
+del actor y el propio actor sin exponer nunca la mecánica de carga:
+
+```mermaid
+sequenceDiagram
+    accTitle: Carga aditiva de un area bajo demanda 6B
+    accDescr: Un movimiento hacia un DeferredExit produce AreaLoadRequired antes de mutar estado. El servidor delega la demanda al coordinador, que coalesce por clave y prepara fuera del actor. El actor instala el lote completo bajo un checkpoint conjunto y el servidor reintenta la accion original una sola vez.
+
+    participant C as Cliente
+    participant S as Servidor
+    participant K as Coordinador (fuera del actor)
+    participant P as Preparador (spawn_blocking)
+    participant A as Actor (escritor unico)
+
+    C->>S: accion de movimiento (WS/Telnet/GMCP)
+    S->>A: PlayerAction
+    A->>A: destino es DeferredExit
+    Note over A: AreaLoadRequired se calcula antes de mover,<br/>hooks, revision, RNG, tick, eventos o persistencia
+    A-->>S: AreaLoadRequired (interno, no cruza el transporte)
+    S->>K: demanda de carga del cierre duro
+    K->>K: coalescing por clave catalogSha256 mas areaId
+    K->>P: preparar PreparedAreaBatch
+    P->>P: leer blobs, verificar digests, decodificar,<br/>CompiledArea, validar refs, compilar Lua
+    alt preparacion correcta
+        P-->>K: PreparedAreaBatch
+        K->>A: InstallPreparedAreas{expectedGeneration, batch}
+        A->>A: revalida precondiciones y aplica WorldLifecycleCheckpoint<br/>(World + RuntimeContent + AreaResidency), resuelve portales
+        A-->>S: instalacion correcta
+        S->>A: reintenta la accion original una sola vez
+        A-->>C: resultado normal de la accion
+    else fallo, saturacion o timeout
+        P-->>K: arena descartada sin mutacion
+        K-->>S: fallo
+        S-->>C: error generico: el destino no esta disponible ahora
+    end
+```
 
 ## Persistencia y recuperación
 
