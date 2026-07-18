@@ -1,1033 +1,1028 @@
-# Especificación técnica de Tiamud v0.3
+# Tiamud technical specification v0.3
 
-Estado: especificación de implementación en prelanzamiento, 2026-07-17.
+Status: pre-release implementation specification, 2026-07-17.
 
-Este documento registra las decisiones actuales de producto y arquitectura de
-Tiamud. Sustituye la planificación de personajes y multimedia de la
-[especificación histórica v0.2](archive/spec-v0.2.md). Los ADR aceptados y el código
-implementado prevalecen cuando este resumen sea menos específico.
+This document records the current product and architecture decisions for
+Tiamud. It supersedes the character and multimedia planning of the
+[historical v0.2 specification](archive/spec-v0.2.md). Accepted ADRs and
+implemented code prevail where this summary is less specific.
 
-## Contrato de producto
+## Product contract
 
-Tiamud es un mundo textual multijugador persistente con presentación ilustrada
-opcional. Un estado de mundo autoritativo sirve al navegador, Telnet y clientes
-MUD compatibles.
+Tiamud is a persistent multiplayer text world with optional illustrated
+presentation. An authoritative world state serves the browser, Telnet and
+compatible MUD clients.
 
-El producto debe seguir siendo:
+The product must remain:
 
-- completamente jugable como texto plano;
-- orientado al navegador sin convertirlo en autoridad;
-- sencillo de ejecutar en un equipo corriente;
-- determinista y acotado en toda frontera no confiable;
-- definido por datos para mundo, personajes y medios;
-- accesible sin imágenes, color, audio ni movimiento;
-- compatible con importación Envy/Merc revisada, sin ejecutar programas
-  históricos ni presuponer derechos; e
-- independiente de IA, GPU, Kubernetes, Redis o cloud obligatorios.
+- fully playable as plain text;
+- browser-oriented without making the browser an authority;
+- simple to run on an ordinary machine;
+- deterministic and bounded at every untrusted boundary;
+- data-defined for world, characters and media;
+- accessible without images, color, audio or motion;
+- compatible with reviewed Envy/Merc import, without running historical
+  programs or presuming rights; and
+- independent of mandatory AI, GPU, Kubernetes, Redis or cloud.
 
-La IA puede ayudar al desarrollo o autoría sin conexión. Es opcional, acotada,
-revisada y nunca participa en el juego autoritativo.
+AI may assist development or authoring offline. It is optional, bounded,
+reviewed and never participates in authoritative play.
 
-## Despliegue y persistencia
+## Deployment and persistence
 
-Un servidor Rust posee un actor de mundo y expone HTTP/WebSocket y Telnet. Los
-recursos web pueden servirse desde el proceso o un proxy en el mismo host.
-PostgreSQL se recomienda para instalaciones públicas nuevas; SQLite es la
-alternativa local sin servicio. Se selecciona uno y nunca se hace doble
-escritura.
+A Rust server owns a world actor and exposes HTTP/WebSocket and Telnet. Web
+assets can be served from the process or a proxy on the same host. PostgreSQL is
+recommended for new public installations; SQLite is the local, service-free
+alternative. One is selected and dual-writing never happens.
 
-Ambos adaptadores implementan el esquema v15. Conserva las relaciones sociales
-y de staff de v9/v10 y amplía de forma transaccional el límite físico del
-snapshot opaco actual a 2 MiB. Los snapshots legacy v1–v5 continúan limitados a
-1 MiB al decodificarse; v6, v7 y v8 admiten 2 MiB. El traslado
-SQLite→PostgreSQL copia estas relaciones, la identidad durable de generación y
-los checkpoints de unidades de área junto con el runtime en una transacción.
-La aceptación runtime histórica retenida es v8
-y no se relabela como v13. PostgreSQL 18.4 real pasa 19/19 en adaptador+mover
-v13, incluida migración representativa; esa evidencia no se relabela como v14.
-El servidor cubre flujo board/runtime y concurrencia advisory reales. La
-aceptación actual v14 pasa 20/20 pruebas del adaptador y 7/7 enfocadas del
-servidor, incluida la CAS de generación; su humo liga G0 y valida `noop`,
-readiness, Web, Telnet y dos áreas residentes. Esa evidencia es de esquema v14
-y no se relabela como v15. Véase el
-[registro PostgreSQL v14/PWA](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+Both adapters implement schema v15. It preserves the social and staff relations
+of v9/v10 and transactionally widens the physical bound of the current opaque
+snapshot to 2 MiB. Legacy snapshots v1–v5 remain limited to 1 MiB when decoded;
+v6, v7 and v8 admit 2 MiB. The SQLite→PostgreSQL move copies these relations,
+the durable generation identity and the area-unit checkpoints together with the
+runtime in one transaction. The retained historical runtime acceptance is v8 and
+is not relabeled as v13. Real PostgreSQL 18.4 passes 19/19 on the v13
+adapter+mover, including a representative migration; that evidence is not
+relabeled as v14. The server covers the real board/runtime flow and advisory
+concurrency. The current v14 acceptance passes 20/20 adapter tests and 7/7
+focused server tests, including the generation CAS; its smoke binds G0 and
+validates `noop`, readiness, Web, Telnet and two resident areas. That evidence is
+schema v14 and is not relabeled as v15. See the
+[PostgreSQL v14/PWA log](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
 
-La operación está en [single-host.md](operations/single-host.md). Microservicios
-y orquestación no son objetivo sin carga medida que lo justifique.
+Operations are in [single-host.md](operations/single-host.md). Microservices and
+orchestration are not a goal without measured load that justifies them.
 
-## Datos de mundo y autoría
+## World data and authoring
 
-WorldPack v9 es el objetivo canónico. AreaPack v8 permite composición modular
-estricta bajo WorldProject v2. WorldPack v8/v7/v6/v5/v4/v3/v2, AreaPack
-v7/v6/v5/v4/v3/v2/v1 y Envy/Merc se normalizan al importar o componer; el dominio
-no conserva vocabulario heredado ni inventa sellos, afijos, telepatía o emotes.
+WorldPack v9 is the canonical target. AreaPack v8 allows strict modular
+composition under WorldProject v2. WorldPack v8/v7/v6/v5/v4/v3/v2, AreaPack
+v7/v6/v5/v4/v3/v2/v1 and Envy/Merc are normalized on import or composition; the
+domain keeps no legacy vocabulary and invents no seals, affixes, telepathy or
+emotes.
 
-Propiedades obligatorias:
+Mandatory properties:
 
-- IDs estables, namespaced, en minúscula;
-- estructuras acotadas y validación de referencias;
-- artefactos y digests canónicos deterministas;
-- pruebas de contenido y vistas previas revisadas;
-- sin conversión de imagen online ni IA generativa en juego;
-- origen, licencia, procedencia y revisión de medios; y
-- resolución en servidor de secretos y variantes de percepción.
+- stable, namespaced, lowercase IDs;
+- bounded structures and reference validation;
+- deterministic canonical artifacts and digests;
+- reviewed content tests and previews;
+- no online image conversion or generative AI in play;
+- media origin, license, provenance and review; and
+- server-side resolution of secrets and perception variants.
 
-Los títulos de sala y sus variantes ocupan `1..=128` bytes; las descripciones
-base o de variante ocupan `1..=8192`
-bytes. Se validan como UTF-8 normalizado y texto seguro; los límites son de
-bytes, no de puntos de código.
+Room titles and their variants occupy `1..=128` bytes; base or variant
+descriptions occupy `1..=8192`
+bytes. They are validated as normalized UTF-8 and safe text; the limits are on
+bytes, not code points.
 
-Consulta [world-authoring.md](world-authoring.md) y
+See [world-authoring.md](world-authoring.md) and
 [character-progression-v3.md](design/character-progression-v3.md).
 
-### Catálogo, carga aditiva, corte completo y retirada reversible 6A–6D
+### Catalog, additive loading, full cutover and reversible retirement 6A–6D
 
-WorldPack monolítico continúa siendo una ruta de ejecución válida. La ruta
-alternativa local requiere juntas `TIAMUD_AREA_REGISTRY` y
-`TIAMUD_AREA_CATALOG`; es excluyente con `TIAMUD_WORLD_PACK` y falla cerrada si
-la pareja está incompleta. La fase 6A publica catálogo y bundles canónicos,
-inmutables y verificables. La fase 6B fija antes de listeners una generación
-identificada por el SHA-256 de los bytes canónicos exactos del catálogo y no
-vuelve a observar el puntero editorial `area-active`.
+Monolithic WorldPack remains a valid execution path. The alternative local path
+requires `TIAMUD_AREA_REGISTRY` and `TIAMUD_AREA_CATALOG` together; it is
+exclusive with `TIAMUD_WORLD_PACK` and fails closed if the pair is incomplete.
+Phase 6A publishes canonical, immutable and verifiable catalog and bundles.
+Phase 6B fixes, before listeners, a generation identified by the SHA-256 of the
+exact canonical catalog bytes and does not observe the editorial `area-active`
+pointer again.
 
-El ciclo de vida completo va de la selección de modo a la retirada reversible
-por unidad:
+The full lifecycle runs from mode selection to per-unit reversible retirement:
 
 ```mermaid
 stateDiagram-v2
-    accTitle: Ciclo de vida de areas 6A-6D
-    accDescr: El arranque elige de forma excluyente modo monolitico o catalogo. En modo catalogo, 6A publica bundles inmutables, 6B fija y hace crecer la residencia, 6C sustituye la generacion completa mediante un corte quiescente con rollback, y 6D retira y rehidrata la misma revision de una unidad vacia.
+    accTitle: Area lifecycle 6A-6D
+    accDescr: Startup exclusively chooses monolithic or catalog mode. In catalog mode, 6A publishes immutable bundles, 6B fixes and grows residency, 6C replaces the whole generation via a quiescent cutover with rollback, and 6D retires and rehydrates the same revision of an empty unit.
 
-    [*] --> Monolitico: TIAMUD_WORLD_PACK o embebido
-    [*] --> Catalogo: TIAMUD_AREA_REGISTRY mas TIAMUD_AREA_CATALOG
-    Monolitico --> [*]: ruta valida para mundos pequenos
-    Catalogo --> Publicado6A: 6A publica catalogo y bundles inmutables
-    Publicado6A --> ActivaG0: 6B fija la generacion por SHA-256 antes de listeners
-    ActivaG0 --> ActivaG0: 6B crece la residencia bajo demanda, solo anade
-    ActivaG0 --> ActivaG0: 6D retira o rehidrata la misma revision de una unidad vacia
-    ActivaG0 --> StagingG1: 6C SIGHUP prepara la generacion completa candidata
-    StagingG1 --> ActivaG0: verificacion o compatibilidad fallida
-    StagingG1 --> Draining: candidata completa preparada
-    Draining --> ActivaG0: hay sesiones o leases, resultado busy
-    Draining --> Committing: cero sesiones y cero leases
-    Committing --> ActivaG1: CAS de snapshot mas generacion confirmado
-    Committing --> ActivaG0: fallo o CAS rechazado antes del commit
-    Committing --> FailStop: commit ambiguo no reconciliable, readiness 503
-    ActivaG1 --> StagingG0: rollback via area-select mas SIGHUP
-    FailStop --> [*]: reinicio y recuperacion durable
+    [*] --> Monolithic: TIAMUD_WORLD_PACK or embedded
+    [*] --> Catalog: TIAMUD_AREA_REGISTRY plus TIAMUD_AREA_CATALOG
+    Monolithic --> [*]: valid path for small worlds
+    Catalog --> Published6A: 6A publishes immutable catalog and bundles
+    Published6A --> ActiveG0: 6B fixes the generation by SHA-256 before listeners
+    ActiveG0 --> ActiveG0: 6B grows residency on demand, add-only
+    ActiveG0 --> ActiveG0: 6D retires or rehydrates the same revision of an empty unit
+    ActiveG0 --> StagingG1: 6C SIGHUP prepares the whole candidate generation
+    StagingG1 --> ActiveG0: failed verification or compatibility
+    StagingG1 --> Draining: complete candidate prepared
+    Draining --> ActiveG0: sessions or leases present, busy result
+    Draining --> Committing: zero sessions and zero leases
+    Committing --> ActiveG1: CAS of snapshot plus generation confirmed
+    Committing --> ActiveG0: failure or CAS rejected before commit
+    Committing --> FailStop: unreconcilable ambiguous commit, readiness 503
+    ActiveG1 --> StagingG0: rollback via area-select plus SIGHUP
+    FailStop --> [*]: restart and durable recovery
 ```
 
-Con `WorldRuntimeSnapshot` y ledger vacíos, el servidor instala el área
-propietaria de `startRoomId` y su cierre transitivo de dependencias duras. Si
-existe cualquiera de esas autoridades, carga la generación completa antes de
-restore o replay. Un `RoomExit` entre áreas no es una dependencia dura: la sala
-origen conserva un `DeferredExit` con destino y revisión exigida. Intentar
-cruzarlo produce un resultado interno antes de mutar mundo, revisión, tick,
-RNG, hooks, eventos o persistencia. Tras preparar e instalar, la misma acción
-se reautoriza y reintenta una sola vez. Una ubicación durable conocida puede
-provocar carga; una sala que el catálogo no posee falla cerrada, sin fallback a
+With an empty `WorldRuntimeSnapshot` and ledger, the server installs the area
+that owns `startRoomId` and its transitive closure of hard dependencies. If any
+of those authorities exists, it loads the whole generation before restore or
+replay. A `RoomExit` between areas is not a hard dependency: the source room
+keeps a `DeferredExit` with destination and required revision. Attempting to
+cross it produces an internal result before mutating world, revision, tick, RNG,
+hooks, events or persistence. After preparing and installing, the same action is
+reauthorized and retried exactly once. A known durable location may trigger a
+load; a room the catalog does not own fails closed, with no fallback to
 `startRoomId`.
 
-El coordinador único comparte trabajos por `(catalogSha256, areaId)`, admite
-dos preparaciones activas, ocho pendientes adicionales, cinco segundos desde
-admisión y un cierre duro máximo de 32 áreas. Lee, verifica, convierte y
-compila Lua fuera del actor. El actor publica todo el lote o ninguno bajo un
-checkpoint conjunto de `World`, `RuntimeContent` y residencia. Una instalación
-estática no escribe snapshot; si aparecen instancias o NPC iniciales que forman
-  parte de snapshot v8, se confirma su estado mediante la transacción durable
-existente antes de publicar. El resultado público es genérico y las métricas
-no usan IDs, revisiones, digests o generaciones como labels.
+The single coordinator shares jobs by `(catalogSha256, areaId)`, admits two
+active preparations, eight additional pending, five seconds from admission and a
+hard maximum closure of 32 areas. It reads, verifies, converts and compiles Lua
+outside the actor. The actor publishes the whole batch or none under a joint
+checkpoint of `World`, `RuntimeContent` and residency. A static install writes no
+snapshot; if initial instances or NPCs that are part of snapshot v8 appear, their
+state is committed via the existing durable transaction before publishing. The
+public result is generic and metrics do not use IDs, revisions, digests or
+generations as labels.
 
-La fase 6B solo hace crecer la residencia hasta apagar. 6C permite sustituir
-**la generación completa**, no un área individual. En modo
-catálogo, la primera ejecución liga antes de readiness el `worldId`, digest
-activo y secuencia de activación en el singleton SQL v15
-`world_area_generation`. Un arranque posterior deriva la ruta exacta desde el
-registro y ese digest durable, aunque el puntero editorial `area-active` haya
-cambiado. El baseline actual usa `WorldRuntimeSnapshot` v8 y no aparece otra autoridad
-de objetos, NPC, botín o personajes.
+Phase 6B only grows residency until shutdown. 6C allows replacing **the whole
+generation**, not an individual area. In catalog mode, the first run binds,
+before readiness, the `worldId`, active digest and activation sequence in the SQL
+v15 singleton `world_area_generation`. A later startup derives the exact path
+from the registry and that durable digest, even if the editorial `area-active`
+pointer has changed. The current baseline uses `WorldRuntimeSnapshot` v8 and no
+other authority for items, NPCs, loot or characters appears.
 
-Al migrar desde 6B/esquema v13 con recovery compartido o personajes, la fila
-v14 nace vacía: el primer arranque debe conservar el catálogo G0 exacto y
-verificar su liga durable.
-Cambiar a G1 a la vez impediría comparar contra una identidad anterior que v13
-no guardaba y eludiría la puerta de compatibilidad/CAS. G1 se publica o
-selecciona solo después de la liga verificada de G0. Ese primer arranque requiere
-`TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>` coincidente con el
-catálogo; la variable se elimina tras ligar.
+When migrating from 6B/schema v13 with shared recovery or characters, the v14 row
+is born empty: the first startup must preserve the exact G0 catalog and verify
+its durable binding.
+Switching to G1 at the same time would prevent comparing against a prior identity
+that v13 did not store and would bypass the compatibility/CAS gate. G1 is
+published or selected only after the verified binding of G0. That first startup
+requires
+`TIAMUD_ACK_LEGACY_AREA_GENERATION=<exact-sha256-G0>` matching the catalog; the
+variable is removed after binding.
 
-`StartupWorldRecovery::Empty` no garantiza que falte autoridad durable: puede
-haber personajes aunque no exista snapshot ni ledger. Sin liga generacional,
-recovery compartido o cualquier personaje durable exige el ACK exacto del G0
-conocido de 6B. Una base vacía o con cuentas pero sin personajes ni recovery de
-mundo puede ligar sin ACK. Monolítico con autoridad de mundo/personaje→catálogo
-no es una migración 6C implícita. El ACK se rechaza en modo monolítico, con liga
-existente, sin recovery/personaje que reconocer o ante digest distinto.
-`CharacterStore::has_durable_character_authority` aplica esa comprobación en
-SQLite, PostgreSQL, el wrapper medido y memoria de pruebas.
+`StartupWorldRecovery::Empty` does not guarantee that durable authority is
+missing: there may be characters even if no snapshot or ledger exists. Without a
+generational binding, shared recovery or any durable character requires the exact
+ACK of the known 6B G0. An empty base, or one with accounts but no characters or
+world recovery, can bind without ACK. Monolithic with world/character
+authority→catalog is not an implicit 6C migration. The ACK is rejected in
+monolithic mode, with an existing binding, without recovery/character to
+acknowledge, or against a different digest.
+`CharacterStore::has_durable_character_authority` applies that check in SQLite,
+PostgreSQL, the measured wrapper and test memory.
 
-Un SIGHUP local abre `area-active`, vuelve a leer sus bytes para detectar una
-publicación cooperante concurrente, verifica la release completa y construye
-fuera del actor un `World`, `RuntimeContent` y coordinador privados. La candidata
-no publica gauges: las métricas siguen describiendo la generación activa hasta
-el swap confirmado. Una activación normal exige `catalogRevision` creciente y
-revisión mayor para cada bundle modificado. El comando
+A local SIGHUP opens `area-active`, rereads its bytes to detect a concurrent
+cooperating publication, verifies the full release and builds, outside the actor,
+a private `World`, `RuntimeContent` and coordinator. The candidate publishes no
+gauges: metrics keep describing the active generation until the confirmed swap. A
+normal activation requires an increasing `catalogRevision` and a higher revision
+for each modified bundle. The command
 `tiamud-world area-select --catalog <path> --registry <dir>`
-hace explícita la selección de una generación inmutable anterior; el SIGHUP
-posterior recorre la misma barrera como rollback y siempre incrementa la
-secuencia durable. Tras el staging, el runtime adquiere el lock cooperativo de
-lectura usado por `area-publish`/`area-select`, revalida el puntero bajo ese
-lock y lo retiene hasta resolver el CAS; lock ocupado aborta el intento.
-En Solaris, runtime y publicadores usan el mismo protocolo de registro `fcntl`
-compatible con `fd-lock`, no dos familias de locks que puedan ignorarse.
+makes the selection of a previous immutable generation explicit; the subsequent
+SIGHUP traverses the same barrier as rollback and always increments the durable
+sequence. After staging, the runtime acquires the cooperative read lock used by
+`area-publish`/`area-select`, revalidates the pointer under that lock and holds it
+until the CAS resolves; a held lock aborts the attempt.
+On Solaris, runtime and publishers use the same `fcntl` registry protocol
+compatible with `fd-lock`, not two families of locks that can ignore each other.
 
-6C no aporta migración semántica: exige el mismo mundo y `startRoomId`, RNG y
-reglas completas, prototipos/instancias iniciales, NPC/spawns/sets, botín,
-afijos, conjunto de áreas, ownership, IDs de sala y VNUM legacy; todas las
-entradas declaran `persistentMigrationVersion == 0`. Puede cambiar prosa,
-títulos, salidas, recursos, percepción, variantes, presentación y scripts Lua
-síncronos ya validados.
+6C provides no semantic migration: it requires the same world and `startRoomId`,
+RNG and full rules, initial prototypes/instances, NPCs/spawns/sets, loot,
+affixes, area set, ownership, room IDs and legacy VNUMs; all entries declare
+`persistentMigrationVersion == 0`. It may change prose, titles, exits, resources,
+perception, variants, presentation and already-validated synchronous Lua scripts.
 
-Antes del corte se cierran admisiones, se exige que 6D no conserve unidades
-retiradas y se requieren cero sesiones y cero leases
-de entrada, acción o carga. Si hay actividad, el resultado es `busy`: no se
-expulsa, desconecta ni teletransporta a nadie. El actor captura el snapshot v8
-actual, lo restaura sobre la candidata y confirma mediante compare-and-swap el
-snapshot y el puntero de generación en una sola transacción. Solo entonces
-intercambia en memoria mundo, contenido y coordinador y reabre admisiones. Un
-fallo definitivo anterior al commit, incluido un CAS rechazado, conserva la
-generación anterior. Un resultado de commit ambiguo se resuelve releyendo la
-autoridad SQL: G1 durable se publica, G0 se reabre y cualquier otro valor o
-error de lectura deja el router en `Committing`, detiene el actor y mantiene
-readiness 503 sin admisiones hasta reinicio/recuperación durable.
+Before the cutover, admissions are closed, 6D is required to keep no retired
+units, and zero sessions and zero leases for entry, action or load are required.
+If there is activity, the result is `busy`: nobody is kicked, disconnected or
+teleported. The actor captures the current v8 snapshot, restores it over the
+candidate and commits, via compare-and-swap, the snapshot and the generation
+pointer in a single transaction. Only then does it swap world, content and
+coordinator in memory and reopen admissions. A definitive failure before the
+commit, including a rejected CAS, preserves the previous generation. An ambiguous
+commit result is resolved by rereading the SQL authority: a durable G1 is
+published, G0 is reopened and any other value or read error leaves the router in
+`Committing`, stops the actor and holds readiness 503 without admissions until
+restart/durable recovery.
 
-6D añade una ruta interna separada para retirar y rehidratar la **misma
-revisión** de una unidad vacía: SCC del grafo duro más su cierre inverso. El
-área inicial y cualquier pin vivo impiden el retiro. Snapshot v8 registra
-`Resident|Retired`; SQL v15 añade `world_area_checkpoints`. El checkpoint
-conserva NPC idle/respawn, raíces regionales y subárboles, procedencia, afijos y
-botín de suelo; lo portado/equipado sigue global. Rehidratación no rebobina
-tick, RNG, revisión ni allocators. El CAS confirma o consume checkpoint y
-snapshot antes de publicar, y startup valida ambos antes de readiness.
+6D adds a separate internal path to retire and rehydrate the **same revision** of
+an empty unit: the SCC of the hard graph plus its reverse closure. The initial
+area and any live pin prevent retirement. Snapshot v8 records `Resident|Retired`;
+SQL v15 adds `world_area_checkpoints`. The checkpoint retains idle/respawn NPCs,
+regional roots and subtrees, provenance, affixes and ground loot; what is
+carried/equipped stays global. Rehydration does not rewind tick, RNG, revision or
+allocators. The CAS confirms or consumes checkpoint and snapshot before
+publishing, and startup validates both before readiness.
 
-6D permanece `Partial`: faltan superficie operativa, presupuesto/LRU,
-histéresis, E2E específico de ACK perdido y medición RSS.
-Los conteos exactos de pruebas y el estado por fase son autoridad única de
-[`docs/project/COMPLETION_MATRIX.md`](project/COMPLETION_MATRIX.md); la evidencia
-local retenida no es evidencia de CI, release ni producción.
-Siguen fuera el reemplazo de revisión, jugadores durante
-retirada, migraciones, GC, red, compresión y firma remota. Los contratos están en
-[ADR 0020](decisions/0020-additive-local-area-loading.md) y
-[ADR 0021](decisions/0021-quiescent-area-generation-cutover.md), y 6D en
+6D remains `Partial`: it lacks an operational surface, budget/LRU, hysteresis, a
+specific lost-ACK E2E and RSS measurement.
+The exact test counts and per-phase status are the single authority of
+[`docs/project/COMPLETION_MATRIX.md`](project/COMPLETION_MATRIX.md); the retained
+local evidence is not CI, release or production evidence.
+Still out of scope are revision replacement, players during
+retirement, migrations, GC, networking, compression and remote signing. The
+contracts are in
+[ADR 0020](decisions/0020-additive-local-area-loading.md) and
+[ADR 0021](decisions/0021-quiescent-area-generation-cutover.md), and 6D in
 [ADR 0022](decisions/0022-reversible-area-unit-retirement.md).
 
-### Objetos, inventario y botín 3A–4B
+### Items, inventory and loot 3A–4B
 
-WorldPack v9 separa `itemPrototypes`, que contienen contenido y reglas
-reutilizables, de `initialItemInstances`, que asignan cada unidad durable a una
-sala, un `npc_spawn`, `staged` o a otra instancia contenedor. En runtime
-`ItemInstanceId` es una cadena tipada interna; las instancias nuevas usan una
-secuencia monotónica incluida en checkpoint, rollback y snapshot. Los clientes
-nunca reciben esa identidad ni `prototypeId`: Web, Telnet y GMCP operan con IDs
-opacos derivados de una sal criptográficamente aleatoria nueva por sesión.
+WorldPack v9 separates `itemPrototypes`, which contain reusable content and
+rules, from `initialItemInstances`, which assign each durable unit to a room, an
+`npc_spawn`, `staged` or another container instance. At runtime `ItemInstanceId`
+is an internal typed string; new instances use a monotonic sequence included in
+checkpoint, rollback and snapshot. Clients never receive that identity or
+`prototypeId`: Web, Telnet and GMCP operate with opaque IDs derived from a
+cryptographically random salt that is new per session.
 
-`entityMedia(kind=item)` referencia un prototipo reusable; el servidor aplica
-esa presentación solo a sus instancias ya visibles. En cambio,
-`roomPerception.hiddenItems` referencia la instancia concreta. La percepción se
-resuelve antes de agrupar, por lo que una unidad oculta no incrementa la
-cantidad visible.
+`entityMedia(kind=item)` references a reusable prototype; the server applies that
+presentation only to its already-visible instances. In contrast,
+`roomPerception.hiddenItems` references the concrete instance. Perception is
+resolved before grouping, so a hidden unit does not increase the visible
+quantity.
 
-Cada prototipo declara peso, coste de slot, rareza cerrada
-`common|uncommon|rare|epic|legendary`, `itemLevel`, política de pila y política
-de transferencia. `unique` exige `maxStackUnits: 1`; `fungible` admite
-`2..=1000`. Las pilas son vistas deterministas por
-ubicación/prototipo/vínculo, ordenadas por ID de instancia y partidas por ese
-máximo. No se persisten `quantity`, identidad de pila ni una lista duplicada de
-miembros:
+Each prototype declares weight, slot cost, closed rarity
+`common|uncommon|rare|epic|legendary`, `itemLevel`, stack policy and transfer
+policy. `unique` requires `maxStackUnits: 1`; `fungible` admits `2..=1000`. Stacks
+are deterministic views by location/prototype/binding, ordered by instance ID and
+split by that maximum. `quantity`, stack identity and a duplicated member list are
+not persisted:
 
 ```text
 stackSlots = ceil(quantity / maxStackUnits) × slotCost
 totalWeightGrams = quantity × weightGrams
 ```
 
-Un contenedor debe ser una instancia `unique`, no consumible, con
-`maxSlots: 1..=1000` y `maxWeightGrams: 0..=1_000_000`. Sus slots cuentan hijos
-directos ya agrupados; su peso usado cuenta todos los descendientes. El peso
-del personaje incluye raíces portadas/equipadas y todo su contenido, mientras
-sus slots solo cuentan raíces portadas. El grafo rechaza autorreferencias,
-ciclos, referencias inválidas y una quinta arista de profundidad.
+A container must be a `unique`, non-consumable instance with
+`maxSlots: 1..=1000` and `maxWeightGrams: 0..=1_000_000`. Its slots count already
+grouped direct children; its used weight counts all descendants. The character's
+weight includes carried/equipped roots and all their contents, while its slots
+only count carried roots. The graph rejects self-references, cycles, invalid
+references and a fifth depth edge.
 
 ```mermaid
 flowchart TD
-    Character[Personaje] -->|raíz carried: slots + peso| Bag[Bolsa única]
-    Bag -->|hijos directos: slots agrupados| PotionA[Tónica A]
-    Bag --> PotionB[Tónica B]
-    Bag --> Box[Caja hija]
-    Box --> Map[Mapa]
-    PotionA -. una pila derivada x2 .- PotionB
-    Character -. peso recursivo .-> Map
+    Character[Character] -->|carried root: slots + weight| Bag[Unique bag]
+    Bag -->|direct children: grouped slots| PotionA[Tonic A]
+    Bag --> PotionB[Tonic B]
+    Bag --> Box[Child box]
+    Box --> Map[Map]
+    PotionA -. one derived stack x2 .- PotionB
+    Character -. recursive weight .-> Map
 ```
 
-Antes de mutar se valida una ubicación prospectiva completa; un error no mueve
-ninguna unidad ni avanza revisión, RNG o contador. `take` y `drop` aceptan una
-cantidad opcional, `put <objeto> in <contenedor>` mueve raíces portadas y
-`get <objeto> from <contenedor>` solo hijos directos. Cada mutación admite
-1..=256 unidades. `contents` pagina veinte grupos y evita incrustar árboles
-recursivos en las fichas o escenas.
+Before mutating, a full prospective location is validated; an error moves no unit
+and advances no revision, RNG or counter. `take` and `drop` accept an optional
+quantity, `put <item> in <container>` moves carried roots and
+`get <item> from <container>` only direct children. Each mutation admits
+1..=256 units. `contents` paginates twenty groups and avoids embedding recursive
+trees in the sheets or scenes.
 
-WorldPack v9 y AreaPack v8 actuales, igual que WorldPack v8/v7/v6/v5 y AreaPack
-v7/v6/v5/v4, aceptan el vocabulario cerrado `transferable`, `character_bound` y
-`non_transferable`; WorldPack v4, AreaPack v3 y formatos anteriores solo
-normalizan `transferable`. El propietario efectivo de una
-instancia se obtiene siguiendo como máximo cuatro aristas de contención hasta
-una raíz portada o equipada. La primera adquisición por un personaje liga
-atómicamente la raíz y cada descendiente `character_bound`. Un objeto ligado
-no se desliga ni se reasigna; `non_transferable` no guarda dueño ligado, pero
-no puede abandonar al personaje que lo posee. `drop` y todo cambio de dueño
-exigen que el subárbol completo sea `transferable`; introducir, extraer,
-equipar, desequipar o consumir dentro del grafo del mismo dueño conserva el
-vínculo.
+The current WorldPack v9 and AreaPack v8, like WorldPack v8/v7/v6/v5 and AreaPack
+v7/v6/v5/v4, accept the closed vocabulary `transferable`, `character_bound` and
+`non_transferable`; WorldPack v4, AreaPack v3 and earlier formats only normalize
+`transferable`. The effective owner of an instance is obtained by following at
+most four containment edges up to a carried or equipped root. The first
+acquisition by a character atomically binds the root and every `character_bound`
+descendant. A bound item is not unbound or reassigned; `non_transferable` keeps no
+bound owner but cannot leave the character that owns it. `drop` and every owner
+change require the whole subtree to be `transferable`; inserting, extracting,
+equipping, unequipping or consuming within the same owner's graph preserves the
+binding.
 
 ```text
-give [cantidad] <objeto> to <personaje>
+give [quantity] <item> to <character>
 ```
 
-`give` mueve únicamente raíces portadas a un receptor distinto, conectado y en
-la misma sala. Acepta un selector opaco o un nombre exacto no ambiguo, valida
-capacidad de emisor y receptor, y respeta ignore del receptor y block bilateral.
-La ubicación de todas las raíces y el evento `ItemsGiven` se confirman como una
-sola mutación antes de proyectar salida. No es un intercambio: `trade` usa una
-negociación bilateral distinta.
+`give` moves only carried roots to a distinct, connected receiver in the same
+room. It accepts an opaque selector or an exact unambiguous name, validates
+sender and receiver capacity, and respects the receiver's ignore and bilateral
+block. The location of all roots and the `ItemsGiven` event are committed as a
+single mutation before projecting output. It is not an exchange: `trade` uses a
+distinct bilateral negotiation.
 
-El escrow de trade es una reserva durable, no otra ubicación o saldo. Objetos
-y moneda permanecen con su propietario; el índice derivado bloquea raíz,
-descendientes y gasto reservado. Cada personaje participa como máximo en un
-trade, hay hasta 64 globales, 8 líneas por participante y 128 raíces entre
-ambos. Solicitud y negociación caducan a 20 y 120 ticks respectivamente.
+The trade escrow is a durable reservation, not another location or balance. Items
+and currency stay with their owner; the derived index locks the root,
+descendants and reserved spend. Each character participates in at most one trade,
+there are up to 64 global, 8 lines per participant and 128 roots between both.
+Request and negotiation expire at 20 and 120 ticks respectively.
 
-Dos personajes conectados, en la misma sala, fuera de combate/derrota y
-permitidos por ignore/block pueden negociar. Todo cambio material incrementa
-una revisión, recalcula la base canónica y borra confirmaciones. Dos identidades
-distintas deben confirmar la misma revisión y digest; entonces el actor valida
-prospectivamente ambos grafos, capacidades y saldos y publica los dos lotes, los
-dos agregados, la eliminación del trade y su evento en un solo commit. No hay
-movimiento parcial ni reembolso al cancelar.
+Two connected characters, in the same room, out of combat/defeat and permitted by
+ignore/block can negotiate. Every material change increments a revision,
+recomputes the canonical base and clears confirmations. Two distinct identities
+must confirm the same revision and digest; then the actor prospectively validates
+both graphs, capacities and balances and publishes the two batches, the two
+aggregates, the trade removal and its event in a single commit. There is no
+partial move or refund on cancellation.
 
-Separación, combate, derrota, desconexión, ban, cambio social, expiración o
-reserva inválida cancelan de forma cerrada. Tras reinicio se cargan y validan
-los participantes adicionales con presupuesto acotado, se cancelan todos los
-trades restaurados y se confirma el snapshot limpio antes de readiness. Web,
-texto Telnet, `Char.Trade 1` GMCP y el bot estricto usan selectores privados
-opacos, cantidad disponible/reservada y saldo total/reservado/gastable.
+Separation, combat, defeat, disconnection, ban, social change, expiration or an
+invalid reservation cancel closed. After restart the additional participants are
+loaded and validated with a bounded budget, all restored trades are cancelled and
+the clean snapshot is confirmed before readiness. Web, Telnet text, `Char.Trade 1`
+GMCP and the strict bot use opaque private selectors, available/reserved quantity
+and total/reserved/spendable balance.
 
-Rareza, nivel, peso unitario/total, cantidad, slots y capacidad aparecen como
-texto en escena, inventario, equipo y contenidos. El color nunca es la única
-señal. Web usa `container.contents`; Telnet ofrece texto equivalente y GMCP
-proyecta `Char.Items.List` con ubicación `container`.
+Rarity, level, unit/total weight, quantity, slots and capacity appear as text in
+scene, inventory, equipment and contents. Color is never the only signal. Web
+uses `container.contents`; Telnet offers equivalent text and GMCP projects
+`Char.Items.List` with location `container`.
 
-`WorldRuntimeSnapshot` v8 conserva de v7 `itemInstances`, su grafo de ubicaciones,
-el vínculo obligatorio por instancia, el siguiente contador de instancia,
-`nextTradeId`, las reservas de trade, RNG, `itemAffixes`,
-`nextRewardOpenId` y cinco campos de botín: `nextLootDropId`,
-`itemProvenance`, `lootEncounters`, `groundLoot` y `partyLootCursors`. La
-procedencia distingue además las recompensas `SealedReward`. El vínculo tiene
-exactamente una de estas formas:
+`WorldRuntimeSnapshot` v8 retains from v7 `itemInstances`, its location graph,
+the mandatory per-instance binding, the next instance counter,
+`nextTradeId`, the trade reservations, RNG, `itemAffixes`,
+`nextRewardOpenId` and five loot fields: `nextLootDropId`,
+`itemProvenance`, `lootEncounters`, `groundLoot` and `partyLootCursors`.
+Provenance additionally distinguishes `SealedReward` rewards. The binding has
+exactly one of these forms:
 
 ```json
 {"kind":"unbound"}
 {"kind":"character","characterId":42}
 ```
 
-El decoder lee primero `snapshotVersion` y usa DTO explícitos v1–v8; v1–v3 se
-convierten a `unbound`, v4 produce un estado de trade vacío y v1–v5 reciben
-procedencia `legacy_snapshot { sourceVersion }` sin inventar derechos. Campos
-de v6 se convierten estrictamente a v7 con `itemAffixes: []` en cada instancia y
-`nextRewardOpenId: 1`. Campos posteriores inyectados en una versión antigua,
-referencias huérfanas, ciclos,
-profundidad, política/vínculo, trades, procedencia, derechos, reservas o
-contadores inválidos bloquean el arranque. La restauración conserva instancias
-iniciales nuevas del WorldPack y superpone el estado durable, sin resucitar
-instancias runtime ausentes.
+The decoder reads `snapshotVersion` first and uses explicit DTOs v1–v8; v1–v3 are
+converted to `unbound`, v4 produces an empty trade state and v1–v5 receive
+provenance `legacy_snapshot { sourceVersion }` without inventing rights. v6 fields
+are strictly converted to v7 with `itemAffixes: []` on each instance and
+`nextRewardOpenId: 1`. Later fields injected into an old version, orphan
+references, cycles,
+depth, policy/binding, trades, provenance, rights, reservations or invalid
+counters block startup. Restoration keeps new initial instances from the
+WorldPack and overlays the durable state, without resurrecting absent runtime
+instances.
 
-Antes de abrir listeners se valida por lotes la unión de identidades referidas
-por el snapshot. Para propietarios raíz e IDs ligados se cargan fichas y se
-comprueban existencia, equipo, grafo y capacidad sin convertir identidades
-desconectadas en personajes activos; para cohortes o beneficiarios que solo
-aparecen en botín se realiza una consulta `existence-only`. Después se cancelan
-los encuentros de botín aún abiertos y su estado de combate en un commit previo
-a readiness; los derechos `groundLoot` ya resueltos sobreviven intactos. SQLite
-y PostgreSQL confirman el snapshot como única autoridad global en su transacción
-de esquema v15; no hay tabla espejo de loot o escrow ni doble escritura.
+Before opening listeners, the union of identities referenced by the snapshot is
+validated in batches. For root owners and bound IDs, sheets are loaded and
+existence, equipment, graph and capacity are checked without turning disconnected
+identities into active characters; for cohorts or beneficiaries that appear only
+in loot, an `existence-only` query is performed. Then the still-open loot
+encounters and their combat state are cancelled in a commit prior to readiness;
+already-resolved `groundLoot` rights survive intact. SQLite and PostgreSQL commit
+the snapshot as the single global authority in their schema v15 transaction; there
+is no mirror loot or escrow table and no dual write.
 
-Los límites principales son 1.024 prototipos y 8.192 instancias iniciales por
-WorldPack, 65.536 instancias runtime, 1 MiB para un snapshot legacy v1–v5 y 2
-MiB para los snapshots v6–v8. El presupuesto agregado de
-fichas de
-propietarios inspeccionadas al arrancar sigue siendo 1 MiB y cada ficha tiene
-un máximo de 64 KiB. Lantern Square contiene 3 salas, 10 prototipos, 9
-instancias iniciales, 2 tablas, 1 fuente, 1 afijo, 1 pool, 1 habilidad
-telepática y 1 emote de sala; el WorldPack canónico ocupa 53.567
-bytes y tiene SHA-256
+The main limits are 1,024 prototypes and 8,192 initial instances per WorldPack,
+65,536 runtime instances, 1 MiB for a legacy v1–v5 snapshot and 2 MiB for the
+v6–v8 snapshots. The aggregate budget of inspected owner
+sheets at startup remains 1 MiB and each sheet has a maximum of 64 KiB. Lantern
+Square contains 3 rooms, 10 prototypes, 9 initial instances, 2 tables, 1 source,
+1 affix, 1 pool, 1 telepathic ability and 1 room emote; the canonical WorldPack
+occupies 53,567 bytes and has SHA-256
 `9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
 
-WorldPack v7/AreaPack v6 admiten drops garantizados y pools ponderados con
-pesos enteros. Las entradas se ordenan canónicamente y cada selección usa
-rejection sampling, evitando sesgo de módulo. Una fuente `npc_spawn` se
-resuelve una sola vez por derrota; botín fijo y generable suman como máximo 64
-raíces. Tirada, RNG, contador, procedencia, derechos, NPC, XP, eventos y
-snapshot se confirman o revierten juntos.
+WorldPack v7/AreaPack v6 admit guaranteed drops and weighted pools with integer
+weights. Entries are canonically ordered and each selection uses rejection
+sampling, avoiding modulo bias. An `npc_spawn` source resolves once per defeat;
+fixed and generable loot add up to at most 64 roots. Roll, RNG, counter,
+provenance, rights, NPC, XP, events and snapshot are committed or reverted
+together.
 
-La política `credited_character` reserva todas las raíces al iniciador. La
-política `party_round_robin` congela al empezar el encuentro una cohorte de
-hasta seis personajes próximos, conectados y vivos, siempre con el iniciador;
-en la derrota vuelve a comprobar proximidad y party de los acompañantes. Un
-cursor durable reparte las raíces y `loot pass <referencia>` cede una a la
-siguiente identidad elegible sin renovar el plazo. El derecho es exclusivo
-durante 20 ticks, pasa a público después y lo no reclamado se retira al tick
-120. Need/greed, master-loot y reparto por contribución no forman parte de 4A.
+The `credited_character` policy reserves all roots to the initiator. The
+`party_round_robin` policy freezes, when the encounter begins, a cohort of up to
+six nearby, connected and living characters, always with the initiator; on defeat
+it rechecks the companions' proximity and party. A durable cursor distributes the
+roots and `loot pass <reference>` yields one to the next eligible identity without
+renewing the deadline. The right is exclusive for 20 ticks, becomes public
+afterward and what is unclaimed is removed at tick 120. Need/greed, master-loot
+and contribution-based distribution are not part of 4A.
 
-Cada raíz conserva procedencia cerrada `authored_initial`, `legacy_snapshot`,
-`runtime_created` o `npc_loot` con digest canónico de tabla. Si tras la poda no
-cabe el peor caso bajo los presupuestos de instancias/derechos, las raíces
-fijas tienen prioridad y la generación restante se suprime de forma durable:
-la derrota y XP se confirman, RNG y `dropId` avanzan y un reinicio no permite
-reroll. En la frontera histórica 4A todavía no existían afijos ni recompensas
-selladas; las cajas, llaves o tiradas pagadas ya quedaban fuera del baseline.
+Each root keeps closed provenance `authored_initial`, `legacy_snapshot`,
+`runtime_created` or `npc_loot` with a canonical table digest. If, after pruning,
+the worst case does not fit under the instance/rights budgets, fixed roots have
+priority and the remaining generation is durably suppressed:
+defeat and XP are committed, RNG and `dropId` advance and a restart does not allow
+a reroll. At the historical 4A boundary there were no affixes or sealed rewards
+yet; boxes, keys or paid rolls were already out of the baseline.
 
-La fase 4B está implementada en WorldPack v7/AreaPack v6. Un sello es un
-prototipo `unique`, consumible, `character_bound`, no estructural y sin efectos,
-que no admite instancia inicial. Debe ser generado por una tabla normal
-asociada a un NPC; su tabla sellada no puede ser `lootSource` directa ni
-producir otro sello. Cada apertura genera 1..=16 unidades y admite hasta 1.024
-filas de probabilidad base y condicional visibles mediante `reward odds`.
+Phase 4B is implemented in WorldPack v7/AreaPack v6. A seal is a `unique`,
+consumable, `character_bound`, non-structural prototype with no effects, which
+admits no initial instance. It must be generated by a normal table associated
+with an NPC; its sealed table cannot be a direct `lootSource` or produce another
+seal. Each opening generates 1..=16 units and admits up to 1,024 base and
+conditional probability rows visible via `reward odds`.
 
-Una entrada normal o sellada de cantidad exactamente uno puede referenciar un
-pool que elija, con pesos enteros y sin sesgo, un único afijo o `nothing` para
-un prototipo `unique`, `maxStackUnits: 1` y no sellado. El WorldPack admite 512
-afijos, 256 pools, 64 entradas por pool y 4.096 entradas ponderadas totales;
-cada etiqueta ocupa hasta 64 bytes y cada delta positivo de ataque o curación
-es como máximo 1.000. La compatibilidad del tipo y los caps efectivos se
-validan antes de publicar y al cargar.
+A normal or sealed entry of quantity exactly one can reference a pool that
+selects, with integer weights and without bias, a single affix or `nothing` for a
+`unique`, `maxStackUnits: 1` and unsealed prototype. The WorldPack admits 512
+affixes, 256 pools, 64 entries per pool and 4,096 total weighted entries; each
+label occupies up to 64 bytes and each positive attack or healing delta is at
+most 1,000. Type compatibility and effective caps are validated before publishing
+and on load.
 
-`open` confirma juntos consumo del sello, RNG, contador, creación, afijo,
-vínculo, capacidad, procedencia y evento; un fallo restaura el checkpoint
-exacto. En botín normal, la tirada de afijo se consume aunque la generación
-termine suprimida para impedir reroll por capacidad. Las copias durables del
-afijo conservan digests de definición, pool y registro, mientras IDs internos,
-RNG, contadores y digests no se proyectan. Web, Telnet y GMCP comparten esta
-autoridad y muestran estadísticas autorizadas mediante referencias opacas. El
-contrato está en el
+`open` commits together seal consumption, RNG, counter, creation, affix, binding,
+capacity, provenance and event; a failure restores the exact checkpoint. In
+normal loot, the affix roll is consumed even if the generation ends up suppressed
+to prevent a capacity reroll. Durable copies of the affix keep definition, pool
+and registry digests, while internal IDs, RNG, counters and digests are not
+projected. Web, Telnet and GMCP share this authority and show authorized stats via
+opaque references. The contract is in
 [ADR 0014](decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
-Pity, need/greed, master-loot, reparto por contribución, cajas, llaves y tiradas
-pagadas permanecen fuera.
+Pity, need/greed, master-loot, contribution-based distribution, boxes, keys and
+paid rolls remain out.
 
-## Modelo de personaje
+## Character model
 
 ```text
-baseline neutral de ficha
-  + concesiones de creación del linaje
-  + concesiones del trasfondo opcional
-  + concesiones de creación de clase base
-  + concesiones de nivel de clase activa
-  + rangos adquiridos de talentos de linaje/clase
-  + concesiones únicas de promoción avanzada
-  = ficha permanente
+neutral sheet baseline
+  + lineage creation grants
+  + optional background grants
+  + base class creation grants
+  + active class level grants
+  + acquired lineage/class talent ranks
+  + unique advanced-promotion grants
+  = permanent sheet
 
-equipo + estados activos se aplican después
+equipment + active states apply afterward
 ```
 
-El baseline neutral no aporta atributos, skills o capacidad oculta. La clase
-base define el inicio real, con adiciones de linaje/trasfondo. La creación llena
-vida y recursos una vez; aumentar capacidad después conserva valores actuales.
+The neutral baseline contributes no attributes, skills or hidden capacity. The
+base class defines the real start, with lineage/background additions. Creation
+fills life and resources once; increasing capacity afterward keeps current values.
 
-Términos canónicos: linaje, trasfondo, clase base, talento/especialización y
-clase avanzada. `Race` y `archetype` solo son sinónimos de importación/UI.
+Canonical terms: lineage, background, base class, talent/specialization and
+advanced class. `Race` and `archetype` are only import/UI synonyms.
 
-La primera versión usa:
+The first version uses:
 
-- una curva acumulada de XP/nivel global;
-- una clase activa;
-- reservas acotadas separadas para clase y linaje;
-- adquisición de talento distinta de promoción;
-- requisitos declarativos y concesiones verificadas;
-- linaje/trasfondo inmutables tras crear; y
-- sin multiclase, XP de clase, promoción reversible ni scripts arbitrarios de
-  concesiones permanentes.
+- a cumulative global XP/level curve;
+- one active class;
+- separate bounded pools for class and lineage;
+- talent acquisition distinct from promotion;
+- declarative requirements and verified grants;
+- immutable lineage/background after creation; and
+- no multiclass, class XP, reversible promotion or arbitrary permanent-grant
+  scripts.
 
-Evolución de linaje desarrolla nodos acotados, no sustituye el linaje. La
-promoción avanzada cambia identidad atómicamente conservando XP/nivel.
+Lineage evolution develops bounded nodes, it does not replace the lineage.
+Advanced promotion changes identity atomically while preserving XP/level.
 
-| Dimensión | Definiciones de demostración |
+| Dimension | Demonstration definitions |
 | --- | --- |
-| Linajes | Mortal, Stonekin, Embermarked |
-| Trasfondos | Caravan Scout, Archive Apprentice, City Guard |
-| Clases base | Wanderer, Vanguard, Arcanist |
-| Clases avanzadas | Pathfinder, Bastion, Stormcaller, Spellblade |
+| Lineages | Mortal, Stonekin, Embermarked |
+| Backgrounds | Caravan Scout, Archive Apprentice, City Guard |
+| Base classes | Wanderer, Vanguard, Arcanist |
+| Advanced classes | Pathfinder, Bastion, Stormcaller, Spellblade |
 
-La curva de ejemplo define `100 × (level - 1)²` para niveles 2–10. Pathfinder,
-Bastion y Stormcaller parten de su base al nivel 5; Spellblade permite entrada
-Vanguard o Arcanist al nivel 6 con requisitos alcanzables.
+The example curve defines `100 × (level - 1)²` for levels 2–10. Pathfinder,
+Bastion and Stormcaller start from their base at level 5; Spellblade allows a
+Vanguard or Arcanist entry at level 6 with achievable requirements.
 
-Gramática, grafos e invariantes son normativos en el
-[diseño v3](design/character-progression-v3.md) y
+Grammar, graphs and invariants are normative in the
+[v3 design](design/character-progression-v3.md) and
 [ADR 0007](decisions/0007-worldpack-v3-character-model.md).
 
-## Combate, habilidades y seguridad de progresión
+## Combat, abilities and progression safety
 
-Acciones marciales, hechizos y utilidad comparten un modelo acotado con costes,
-cooldowns, objetivos, daño/curación, resistencias y estados temporales. Los NPC
-usan definiciones iguales y decisión determinista por reglas, nunca IA
-generativa runtime.
+Martial actions, spells and utility share a bounded model with costs,
+cooldowns, targets, damage/healing, resistances and temporary states. NPCs use
+identical definitions and deterministic rule-based decisions, never runtime
+generative AI.
 
-`martial`, `spell`, `utility` son categorías comunes a WorldPack, Rust y wire
-del navegador. `innate` pre-v3 no forma parte del modelo limpio.
+`martial`, `spell`, `utility` are categories common to WorldPack, Rust and the
+browser wire. Pre-v3 `innate` is not part of the clean model.
 
-Autoría y runtime validan límites acumulados. Aumentar vida máxima no cura;
-aumentar capacidad de recurso no rellena y una reserva nueva empieza vacía.
-Las acciones permanentes se aplican atómicamente y una sola vez.
+Authoring and runtime validate cumulative limits. Increasing maximum life does
+not heal; increasing resource capacity does not refill and a new pool starts
+empty. Permanent actions apply atomically and exactly once.
 
-La recompensa hard-coded de skill de combate y la misión de demostración son
-deuda de política del ejemplo. Deben pasar a señales/recompensas de autoría
-antes de un contrato de contenido estable.
+The hard-coded combat-skill reward and the demonstration quest are policy debt of
+the example. They must move to authored signals/rewards before a stable content
+contract.
 
-## Sistemas sociales, grupos, staff y botín
+## Social systems, groups, staff and loot
 
-La fase social 1 está implementada. `say` es local; `tell` llega a un personaje
-conectado; `reply` usa en memoria el ID del último remitente cuyo `tell` se
-entregó. Los grupos de hasta seis miembros persisten
-create/invite/accept/revoke/kick/transfer/disband/leave/status y ofrecen
+Social phase 1 is implemented. `say` is local; `tell` reaches a connected
+character; `reply` uses in memory the ID of the last sender whose `tell` was
+delivered. Groups of up to six members persist
+create/invite/accept/revoke/kick/transfer/disband/leave/status and offer
 `party say`, `gsay`, `gtell`.
 
-`general`, `newbie`, `staff` exigen suscripción durable. Unirse, enviar y
-recibir `staff` requiere perfil `moderator`, `administrator` o `implementor`;
-`helper` y `builder` no acceden. La membresía del grupo sobrevive a la
-desconexión, pero accept/revoke/kick/transfer resuelven un nombre conectado y no
-administran un objetivo offline.
+`general`, `newbie`, `staff` require a durable subscription. Joining, sending and
+receiving `staff` requires a `moderator`, `administrator` or `implementor`
+profile; `helper` and `builder` do not access it. Group membership survives
+disconnection, but accept/revoke/kick/transfer resolve a connected name and do not
+administer an offline target.
 
-La fase 5A añade telepatía directa online sin convertir `tell` en otra cosa.
-WorldPack v8/AreaPack v7 pueden marcar una habilidad `spell|utility`,
-`single_ally`, sin daño/curación/estado, con al menos un coste positivo,
-cooldown positivo y hasta 64 salas bloqueadas. El actor debe conocerla y estar
-vivo, libre de stun/recuperación y en una sala permitida. Recurso, cooldown de
-habilidad y cooldown global se confirman antes de entregar. Ignore/block,
-estado o sala del receptor suprimen la entrega sin revelarlo; el pensamiento y
-destino no persisten y no actualizan `reply`.
+Phase 5A adds direct online telepathy without turning `tell` into something else.
+WorldPack v8/AreaPack v7 can mark a `spell|utility`,
+`single_ally` ability, without damage/healing/state, with at least one positive
+cost, positive cooldown and up to 64 blocked rooms. The actor must know it and be
+alive, free of stun/recovery and in a permitted room. Resource, ability cooldown
+and global cooldown are committed before delivery. The receiver's ignore/block,
+state or room suppress delivery without revealing it; the thought and destination
+do not persist and do not update `reply`.
 
-La misma política, rate limit, mute, ignore/block y buzones por sesión sirve a
-acciones web, comandos Telnet y `Comm.Channel.Text` GMCP. El correo offline es
-una superficie durable separada: 64 mensajes y 128 KiB por buzón, páginas de
-10, caducidad de 30 días, cuotas por cuenta de 20/h y 50/día y denuncia con
-evidencia de 90 días. Usa `mail.*`, texto Telnet y `Tiamud.Mail 1`; la
-aceptación no revela ignore/block, ban o capacidad. No existen historial
-general durable, emotes globales/de grupo, telepatía de grupo/offline,
-follow/assist/rescue, selección general de aliados ni XP/misión compartida. La
-voz espacial `shout`/`yell` está implementada como fase 5E. El reparto de botín
-implementado se limita a la cohorte próxima
-y round-robin de 4A.
+The same policy, rate limit, mute, ignore/block and per-session mailboxes serve
+web actions, Telnet commands and `Comm.Channel.Text` GMCP. Offline mail is a
+separate durable surface: 64 messages and 128 KiB per mailbox, pages of
+10, 30-day expiry, per-account quotas of 20/h and 50/day and a report with
+90-day evidence. It uses `mail.*`, Telnet text and `Tiamud.Mail 1`; acceptance
+does not reveal ignore/block, ban or capacity. There is no durable general
+history, global/group emotes, group/offline telepathy,
+follow/assist/rescue, general ally selection or shared XP/quest. Spatial
+`shout`/`yell` voice is implemented as phase 5E. The implemented loot
+distribution is limited to the nearby cohort
+and round-robin of 4A.
 
-La fase 5B añade hasta 32 `socialEmotes` en WorldPack v9/AreaPack v8. Cada uno
-es local a la sala y usa plantillas cerradas distintas para actor, objetivo y
-observadores, con solo `{actor}`/`{target}`, render máximo de 512 bytes y
-sustitución en una pasada que no reinterpreta nombres. `emotes` lista y
-`emote <comando> [personaje]` ejecuta; Web usa `social.emote.list` y
-`social.emote`. No hay texto libre. Un objetivo es otro personaje conectado,
-no ambiguo y en la misma sala. Ignore/block suprime por receptor, `OnTalk` se
-confirma antes de entregar y el canal `emote` comparte Web, Telnet y GMCP sin
-entrar en eventos, `reply`, snapshots, auditoría, historial o SQL.
+Phase 5B adds up to 32 `socialEmotes` in WorldPack v9/AreaPack v8. Each one
+is local to the room and uses distinct closed templates for actor, target and
+observers, with only `{actor}`/`{target}`, a maximum render of 512 bytes and
+one-pass substitution that does not reinterpret names. `emotes` lists and
+`emote <command> [character]` executes; Web uses `social.emote.list` and
+`social.emote`. There is no free text. A target is another connected character,
+unambiguous and in the same room. Ignore/block suppresses per receiver, `OnTalk`
+is committed before delivery and the `emote` channel shares Web, Telnet and GMCP
+without entering events, `reply`, snapshots, audit, history or SQL.
 
-El contrato durable y de privacidad de 5C se fija en
+The durable and privacy contract of 5C is fixed in
 [ADR 0017](decisions/0017-bounded-offline-mail.md).
 
-La fase 5D añade dos tablones globales públicos, `general` y `newbie`, sin
-convertir canales o correo en un historial. Texto ofrece `board`, `board list`,
-`read`, `post`, `delete` y `report`; Web usa acciones `board.*` exactas y GMCP
-negocia `Tiamud.Board 1`. Catálogo, páginas y detalle solo regresan a la sesión
-solicitante: no hay fan-out, notificación ni `Comm.Channel.Text`.
+Phase 5D adds two public global boards, `general` and `newbie`, without turning
+channels or mail into a history. Text offers `board`, `board list`,
+`read`, `post`, `delete` and `report`; Web uses exact `board.*` actions and GMCP
+negotiates `Tiamud.Board 1`. Catalog, pages and detail return only to the
+requesting session: there is no fan-out, notification or `Comm.Channel.Text`.
 
-Telnet acepta líneas acotadas a 8 KiB para alojar el comando de publicación y
-un cuerpo máximo; una línea mayor se descarta entera. Cada paquete GMCP sigue
-acotado a 8 KiB. Si el JSON escapado de `Tiamud.Board.Entry` no cabe, el mismo
-paquete conserva el resumen, un prefijo UTF-8 del cuerpo y metadatos
-`truncated`/`overflow`; el texto Telnet conserva el cuerpo completo.
+Telnet accepts lines bounded to 8 KiB to hold the post command and a maximum
+body; a longer line is discarded entirely. Each GMCP packet remains bounded to 8
+KiB. If the escaped JSON of `Tiamud.Board.Entry` does not fit, the same packet
+keeps the summary, a UTF-8 prefix of the body and `truncated`/`overflow`
+metadata; the Telnet text keeps the full body.
 
-Cada página contiene diez resúmenes y admite páginas 1..=100; cada post vive 90
-días. Una cuenta mantiene hasta 64 posts y consume una cuota transaccional de
-5/h y 20/día. Cada tablón admite 1.000 posts/4 MiB y el conjunto 2.000/8 MiB.
-Mute, ban y el bucket social impiden publicar; ignore/block no alteran un
-contenido deliberadamente público. El mismo personaje autor puede borrar y
-otra cuenta puede presentar la única denuncia global del post. La evidencia
-vive 90 días, con máximo de ocho reportes abiertos de tablón por cuenta
-denunciante y 10.000 evidencias globales, y se resuelve con las capacidades
-staff existentes; `action_taken` elimina el post vivo.
+Each page contains ten summaries and admits pages 1..=100; each post lives 90
+days. An account keeps up to 64 posts and consumes a transactional quota of
+5/h and 20/day. Each board admits 1,000 posts/4 MiB and the set 2,000/8 MiB.
+Mute, ban and the social bucket prevent posting; ignore/block do not alter
+deliberately public content. The same author-character can delete and
+another account can file the single global report of the post. Evidence
+lives 90 days, with a maximum of eight open board reports per reporting
+account and 10,000 global evidences, and is resolved with the existing
+staff capabilities; `action_taken` removes the live post.
 
-SQLite/PostgreSQL v13 añaden `social_board_posts`, `social_board_usage` y
-`social_board_report_evidence`, y `report_kind='board'`. La purga combinada
-trabaja en lotes de hasta 256, falla cerrada al arrancar y es no fatal pero
-observable cada hora. El mover copia padre, hijos, posts, evidencia y cuota en
-orden. WorldPack v9, AreaPack v8, WorldProject v2 y snapshot v7 no cambian. No
-hay edición, hilos, búsqueda, markup, adjuntos, suscripciones, push ni tablones
-de party/guild/staff/sala/área. El contrato está en
+SQLite/PostgreSQL v13 add `social_board_posts`, `social_board_usage` and
+`social_board_report_evidence`, and `report_kind='board'`. The combined purge
+works in batches of up to 256, fails closed at startup and is non-fatal but
+observable every hour. The mover copies parent, children, posts, evidence and
+quota in order. WorldPack v9, AreaPack v8, WorldProject v2 and snapshot v7 do not
+change. There is no editing, threads, search, markup, attachments, subscriptions,
+push or party/guild/staff/room/area boards. The contract is in
 [ADR 0018](decisions/0018-bounded-moderable-community-boards.md).
 
-La fase 5E define `yell <mensaje>` y `shout <mensaje>` como voz efímera sobre
-el grafo de salas. `yell` alcanza distancias `0..=1` y `shout` `0..=3`; la
-sala del emisor es distancia cero. Un BFS determinista recorre solo salidas
-dirigidas no secretas, visita cada sala una vez y se detiene tras 259 salas
-incluido el origen. Ciclos o caminos convergentes no duplican copias. Ningún
-transporte proyecta primera dirección, distancia, ruta o sala de origen.
+Phase 5E defines `yell <message>` and `shout <message>` as ephemeral voice over
+the room graph. `yell` reaches distances `0..=1` and `shout` `0..=3`; the
+emitter's room is distance zero. A deterministic BFS traverses only directed
+non-secret exits, visits each room once and stops after 259 rooms including the
+origin. Cycles or convergent paths do not duplicate copies. No transport projects
+first direction, distance, route or origin room.
 
-El cuerpo ocupa `1..=512` bytes UTF-8 visibles. Web reserva las acciones
-exactas `social.yell` y `social.shout`, ambas solo con `message`; Telnet usa los
-comandos de texto y GMCP reutiliza `Comm.Channel.Text` con canal `yell` o
-`shout`. Mute y el bucket común impiden emitir. Ignore, block bilateral y
-`condition.deaf` suprimen por receptor `say`, `yell` y `shout`; un personaje
-sordo sí puede hablar y la confirmación del actor no revela qué copias se
-entregaron.
+The body occupies `1..=512` visible UTF-8 bytes. Web reserves the exact actions
+`social.yell` and `social.shout`, both with only `message`; Telnet uses the text
+commands and GMCP reuses `Comm.Channel.Text` with channel `yell` or
+`shout`. Mute and the common bucket prevent emission. Ignore, bilateral block and
+`condition.deaf` suppress per receiver `say`, `yell` and `shout`; a deaf character
+can still speak and the actor's confirmation does not reveal which copies were
+delivered.
 
-`OnTalk` se ejecuta exactamente una vez en la sala origen. La entrega empieza
-solo tras confirmar sus efectos; un rollback publica cero mensajes. La voz no
-actualiza `reply`, no crea historial, suscripción o replay y no entra en SQL,
-snapshot, correo, tablones o auditoría. WorldPack v9, AreaPack v8, WorldProject
-v2, snapshot v7 y esquema SQL v13 permanecen iguales. El contrato está en
-[ADR 0019](decisions/0019-bounded-spatial-voice.md); implementación y evidencia
-final están completadas.
+`OnTalk` runs exactly once in the origin room. Delivery begins only after
+confirming its effects; a rollback publishes zero messages. Voice does not
+update `reply`, creates no history, subscription or replay and does not enter SQL,
+snapshot, mail, boards or audit. WorldPack v9, AreaPack v8, WorldProject
+v2, snapshot v7 and SQL schema v13 remain unchanged. The contract is in
+[ADR 0019](decisions/0019-bounded-spatial-voice.md); implementation and final
+evidence are complete.
 
-La autoridad ejecutable de staff es independiente de la ficha y usa una de
-doce capacidades cerradas: `reports.view`, `reports.resolve`,
+The executable staff authority is independent of the sheet and uses one of
+twelve closed capabilities: `reports.view`, `reports.resolve`,
 `moderation.mute`, `moderation.ban`, `staff.assign`, `staff.inspect`,
 `staff.where`, `staff.goto`, `staff.transfer`, `staff.restore`,
-`staff.announce`, `staff.audit`. Nunca se obtiene por XP, nivel, clase,
-talentos o WorldPack.
+`staff.announce`, `staff.audit`. It is never obtained via XP, level, class,
+talents or WorldPack.
 
-Los perfiles operativos cerrados son `helper`, `builder`, `moderator`,
-`administrator`, `implementor`. Siembran bundles revisados de capacidades y
-pueden llevar un `lore_title` opcional; perfil y título no sustituyen la
-comprobación de capacidad. Los roles `Player`, `Moderator`, `Admin` se
-conservan solo como tier legado para moderación y percepción: por sí solos
-nunca autorizan un comando ni abren el canal `staff`. Ese canal requiere perfil
-`moderator`, `administrator` o `implementor`; `helper` y `builder` no acceden.
-La primera cuenta registrada recibe `implementor`; las cuentas Admin migradas
-reciben `administrator`. Cambiar perfil elimina las asignaciones anteriores y
-siembra exactamente el bundle del perfil nuevo. La jerarquía impide actuar
-sobre la propia cuenta o un rango igual/superior.
+The closed operational profiles are `helper`, `builder`, `moderator`,
+`administrator`, `implementor`. They seed reviewed capability bundles and can
+carry an optional `lore_title`; profile and title do not replace the capability
+check. The roles `Player`, `Moderator`, `Admin` are kept only as a legacy tier
+for moderation and perception: by themselves they never authorize a command or
+open the `staff` channel. That channel requires a `moderator`, `administrator` or
+`implementor` profile; `helper` and `builder` do not access it. The first
+registered account receives `implementor`; migrated Admin accounts receive
+`administrator`. Changing profile removes the previous assignments and seeds
+exactly the new profile's bundle. The hierarchy prevents acting on one's own
+account or an equal/higher rank.
 
-La fase 2 implementa cola de reportes y resolución `dismissed`,
-`action_taken` o `no_action`; `inspect`, `where`, `goto`, `transfer`,
-`restore`, `announce`, consulta de auditoría y asignación explícita de
-perfil/capacidad. Todas exigen motivo. Las acciones que tocan el mundo resuelven
-un personaje conectado; asignaciones y reportes usan identidad durable. Las
-mutaciones sensibles y su auditoría se confirman atómicamente, y `staff_audit`
-rechaza actualización y borrado.
+Phase 2 implements a report queue and resolution `dismissed`,
+`action_taken` or `no_action`; `inspect`, `where`, `goto`, `transfer`,
+`restore`, `announce`, audit query and explicit assignment of
+profile/capability. All require a reason. Actions that touch the world resolve
+a connected character; assignments and reports use a durable identity. Sensitive
+mutations and their audit are committed atomically, and `staff_audit`
+rejects update and delete.
 
-Sintaxis textual normativa de fase 2:
+Normative phase 2 text syntax:
 
 ```text
 staff
 staff status
-staff reports <motivo>
-staff resolve <id> <dismissed|action_taken|no_action> <motivo>
-staff inspect <nombre> | <motivo>
-staff where <nombre> | <motivo>
-staff goto <nombre> | <motivo>
-staff transfer <nombre> | <motivo>
-staff restore <nombre> | <motivo>
-staff announce <texto> | <motivo>
-staff audit <motivo>
-staff profile <nombre> <helper|builder|moderator|administrator|implementor|none> <título|none> | <motivo>
-staff capability <grant|revoke> <nombre> <capacidad> | <motivo>
+staff reports <reason>
+staff resolve <id> <dismissed|action_taken|no_action> <reason>
+staff inspect <name> | <reason>
+staff where <name> | <reason>
+staff goto <name> | <reason>
+staff transfer <name> | <reason>
+staff restore <name> | <reason>
+staff announce <text> | <reason>
+staff audit <reason>
+staff profile <name> <helper|builder|moderator|administrator|implementor|none> <title|none> | <reason>
+staff capability <grant|revoke> <name> <capability> | <reason>
 ```
 
-Web expone acciones estructuradas estrictas equivalentes. Telnet usa el mismo
-analizador; los anuncios llegan como `announcement` en texto, Web
-`chat.message` y GMCP `Comm.Channel.Text`.
+Web exposes strict equivalent structured actions. Telnet uses the same parser;
+announcements arrive as `announcement` in text, Web `chat.message` and GMCP
+`Comm.Channel.Text`.
 
-Los objetos separan prototipo reutilizable e instancia durable con ubicación y
-vínculo autoritarios. Los NPC poseen instancias de botín fijo validadas y las
-transfieren al morir. Capacidad por slots/peso, rareza textual, `itemLevel`,
-pilas fungibles derivadas, contenedores acotados, cantidades, consulta paginada,
-tres políticas de transferencia y `give` atómico están implementados. También
-lo está el trade confirmado mediante reservas durables, revisión/digest y
-liquidación simultánea. 4A añade tablas enteras fixed+repeatable, procedencia,
-derechos de 20 ticks, reparto de grupo round-robin, `loot pass`, publicidad y
-despawn al tick 120. 4B añade sellos ganados con `open`/`reward odds` y un
-afijo acotado para botín único normal o sellado. Need/greed, master-loot,
-contribución y pity no están implementados. Cajas de botín pagadas o tiradas
-con moneda prémium quedan fuera del baseline.
+Items separate a reusable prototype and a durable instance with authoritative
+location and binding. NPCs own validated fixed-loot instances and transfer them
+on death. Capacity by slots/weight, textual rarity, `itemLevel`, derived fungible
+stacks, bounded containers, quantities, paginated query, three transfer policies
+and atomic `give` are implemented. So is the trade confirmed via durable
+reservations, revision/digest and simultaneous settlement. 4A adds whole
+fixed+repeatable tables, provenance, 20-tick rights, round-robin group
+distribution, `loot pass`, advertisement and despawn at tick 120. 4B adds seals
+earned with `open`/`reward odds` and a bounded affix for unique normal or sealed
+loot. Need/greed, master-loot, contribution and pity are not implemented. Paid
+loot boxes or premium-currency rolls remain out of the baseline.
 
-Consulta la [hoja de ruta social/staff/botín](design/social-staff-and-loot-roadmap.md).
+See the [social/staff/loot roadmap](design/social-staff-and-loot-roadmap.md).
 
-## Escenas semánticas y medios
+## Semantic scenes and media
 
-Una escena es una proyección semántica segura ante percepción. Prosa y
-entidades estructuradas contienen todo. La imagen atmosférica es opcional.
+A scene is a perception-safe semantic projection. Prose and structured entities
+contain everything. The atmospheric image is optional.
 
-El compositor añade solo presentación a entidades visibles:
+The compositor adds only presentation to visible entities:
 
-- poses transparentes revisadas de objetos/NPC;
-- huella, prioridad y capa normalizadas;
-- slots deterministas y zonas seguras en cliente;
-- máximo de diez sprites y overflow semántico;
-- pistas cortas `attack`/`hit`/`defeat` derivadas por servidor (`heal` queda
-  reservado en cliente); y
-- gating completo para lector, Save-Data, movimiento, colores y multimedia.
+- reviewed transparent poses of items/NPCs;
+- normalized footprint, priority and layer;
+- deterministic slots and client-safe zones;
+- a maximum of ten sprites and semantic overflow;
+- short `attack`/`hit`/`defeat` hints derived by the server (`heal` remains
+  reserved in the client); and
+- full gating for reader, Save-Data, motion, colors and multimedia.
 
-Las anotaciones viajan como sidecar web, no en `SceneView`, evitando expansión
-GMCP y fugas. El servidor decide visibilidad/sprite; manifiestos, geometría; el
-navegador, colocación adaptable. Layout es función pura del snapshot.
+Annotations travel as a web sidecar, not in `SceneView`, avoiding GMCP
+expansion and leaks. The server decides visibility/sprite; manifests, geometry;
+the browser, adaptive placement. Layout is a pure function of the snapshot.
 
-El juego nunca espera medios. Las pistas decaen a `idle` y no se reproducen tras
-resync. Un snapshot de la misma vista retiene la pista solo si el NPC opaco
-sigue presentado; retirada/cambio/resync limpia. No hay jugador compuesto ni
-lápida persistente en v1. Consulta
-[scene-compositor-v1.md](design/scene-compositor-v1.md) y
+The game never waits on media. Hints decay to `idle` and do not play after
+resync. A snapshot of the same view retains the hint only if the opaque NPC is
+still presented; retirement/change/resync clears it. There is no composed player
+or persistent tombstone in v1. See
+[scene-compositor-v1.md](design/scene-compositor-v1.md) and
 [ADR 0008](decisions/0008-optional-scene-compositor.md).
 
-## Formatos multimedia
+## Multimedia formats
 
-- Atmósfera opaca: AVIF, luego WebP/JPEG.
-- Sprite transparente: WebP alfa + PNG.
-- AVIF alfa: aplazado hasta demostrar ruta RGBA determinista útil.
-- Atmósfera transparente/lossless: PNG.
-- SVG/HTML/CSS/JavaScript, hosts remotos arbitrarios y `data:` inline:
-  rechazados.
+- Opaque atmosphere: AVIF, then WebP/JPEG.
+- Transparent sprite: WebP alpha + PNG.
+- AVIF alpha: deferred until a useful deterministic RGBA path is demonstrated.
+- Transparent/lossless atmosphere: PNG.
+- SVG/HTML/CSS/JavaScript, arbitrary remote hosts and inline `data:`:
+  rejected.
 
-Recursos mismo-origen, inmutables y direccionados por contenido. Poses estáticas
-en v1; animación CSS acotada. Vídeo, WebP animado y composición runtime quedan
-aplazados.
+Same-origin, immutable, content-addressed resources. Static poses in v1; bounded
+CSS animation. Video, animated WebP and runtime composition are deferred.
 
-## Protocolo
+## Protocol
 
-`tiamud.v1` WebSocket sigue experimental. Clientes reciben IDs opacos derivados
-de una sal criptográficamente aleatoria nueva por sesión, además de revisiones
-y secuencias por sesión. Texto y percepción preceden cada representación.
+`tiamud.v1` WebSocket remains experimental. Clients receive opaque IDs derived
+from a cryptographically random salt that is new per session, plus revisions
+and per-session sequences. Text and perception precede every representation.
 
-Salvaguardas implementadas:
+Implemented safeguards:
 
-- 16 KiB compactos por frame WebSocket de salida;
-- rechazo recursivo de claves JSON duplicadas en cualquier objeto WebSocket
-  antes de deserializarlo;
-- ventana semántica determinista de escena de 14 KiB en Web y 48 KiB en
-  Telnet, priorizando botín propio, público y reservado ajeno antes de truncar
-  entidades/prosa con un aviso explícito;
-- batches de como máximo 16 eventos proyectados, con coalescing y snapshot
-  autoritativo cuando una ráfaga es mayor; y
-- recuperación correlacionada `sync.scene`/`sync.player`, aplicada como par; y
-- escena GMCP grande degradada a escena mínima más aviso acotado, nunca silencio.
+- 16 KiB compact per outbound WebSocket frame;
+- recursive rejection of duplicate JSON keys in any WebSocket object
+  before deserializing it;
+- a deterministic semantic scene window of 14 KiB in Web and 48 KiB in
+  Telnet, prioritizing own, public and others' reserved loot before truncating
+  entities/prose with an explicit notice;
+- batches of at most 16 projected events, with coalescing and an authoritative
+  snapshot when a burst is larger; and
+- correlated `sync.scene`/`sync.player` recovery, applied as a pair; and
+- a large GMCP scene degraded to a minimal scene plus a bounded notice, never
+  silence.
 
-Antes del primer hito público, cambios densos deberían migrar a batches
-atómicos `baseRevision`/`revision`. Las pistas decoran `message.append`; no crean
-secuencia ni se infieren de prosa. Referencia:
+Before the first public milestone, dense changes should migrate to atomic
+`baseRevision`/`revision` batches. Hints decorate `message.append`; they do not
+create a sequence and are not inferred from prose. Reference:
 [tiamud-v1.md](protocol/tiamud-v1.md).
 
-## Invariantes de accesibilidad y seguridad
+## Accessibility and safety invariants
 
-- Una imagen nunca contiene información exclusiva.
-- Modo lector desactiva arte decorativo salvo petición explícita.
-- Texto de jugador no se convierte en ANSI/MXP/HTML/CSS/URL/alt sin escape y
-  validación contextual.
-- Gráficos terminales requieren capacidad y consentimiento explícitos.
-- Recursos pesados viajan por HTTPS, no GMCP/Telnet.
-- Parsers, subnegociaciones, profundidad JSON, colas, scripts, recursos y
-  descompresión tienen límites.
-- Entidades ocultas, salas secretas y variantes no resueltas no se precargan.
-- El navegador no aplica optimistamente publicación, borrado o denuncia de
-  tablón: espera `action.result` correlacionado, acota pendientes, conserva
-  borradores ante fallo e invalida vistas solo tras éxito.
+- An image never contains exclusive information.
+- Reader mode disables decorative art unless explicitly requested.
+- Player text is not converted to ANSI/MXP/HTML/CSS/URL/alt without escape and
+  contextual validation.
+- Terminal graphics require explicit capability and consent.
+- Heavy resources travel over HTTPS, not GMCP/Telnet.
+- Parsers, subnegotiations, JSON depth, queues, scripts, resources and
+  decompression have limits.
+- Hidden entities, secret rooms and unresolved variants are not preloaded.
+- The browser does not optimistically apply board posting, deletion or report:
+  it waits for a correlated `action.result`, bounds pending items, keeps
+  drafts on failure and invalidates views only after success.
 
-## Estado de implementación
+## Implementation status
 
-| Área | Estado al actualizar v0.3 |
+| Area | Status at v0.3 update |
 | --- | --- |
-| Combate y habilidades acotadas | Baseline implementado y probado |
-| Límites acumulados y nivel sin relleno | Implementado y probado |
-| WorldPack v9/AreaPack v8/WorldProject v2, validador, normalizador y catálogo | Integrado; entradas WorldPack v8/v7/v6/v5/v4/v3/v2 y AreaPack v7/v6/v5/v4/v3/v2/v1 se normalizan sin inventar sellos, afijos, telepatía, emotes ni loot ausente |
-| Áreas 6A/6B/6C | Catálogo/bundles locales, carga aditiva y sustitución quiescente completa implementados. 6C añade identidad SQL v14, startup exacto, SIGHUP, staging privado, compatibilidad sin migración, cero sesiones/leases, CAS snapshot+puntero y rollback explícito. La puerta pasa 774 pruebas Rust/329 servidor y la reauditoría 0 P1/0 P2; el humo SQLite G0→G1→G0/restart está retenido. PostgreSQL 18 real pasa 20/20 pruebas del adaptador y 7/7 del servidor con CAS v14; su humo liga G0 secuencia 1 y valida `noop`, readiness, Web, Telnet y dos áreas residentes. Sin reemplazo/descarga por área ni LRU |
-| Áreas 6D | Parcial: snapshot v8, SQL v15, checkpoints, SCC/cierre inverso, pins, retirada/rehidratación interna de la misma revisión y recovery fail-closed implementados. Pasan servidor 337/337 y PostgreSQL v15 22/22+8/8; sin superficie operativa, presupuesto/LRU, medición RSS ni puerta integral agregada |
-| Linaje/clase/talento/promoción y persistencia | Implementado y probado |
-| Creación v3 navegador/Telnet | Default/none/explícito implementado |
-| Ficha, talentos y promociones web | Implementado y probado |
-| Recuperación dividida, frame gate y fallback GMCP | Implementado y probado |
-| Compositor navegador y accesibilidad | Implementado y probado |
-| Identidad PWA | Manifiesto, favicon, iconos 192/512, maskable y Apple Touch implementados; 125 Vitest, check 0/0 y build. Playwright retenido permanece en 46 escenarios, sin pase nuevo atribuido |
-| Perfil de sprite transparente | WebP alfa + PNG implementado |
-| Sidecar de entidades seguro | Implementado; sin sprites de muestra |
-| Pistas de combate | Ataque/golpe/derrota NPC; sin jugador/heal/lápida |
-| Social fase 1 y esquema v15 actual | Grupos/chat/reply/canales y paridad Web/Telnet/GMCP implementados; PostgreSQL v13/v14 real permanece como evidencia histórica, no como pase v15 |
-| Comunicación fase 5A | Telepatía directa online authored con coste/cooldowns, bloqueo por sala, supresión privada, commit antes de entrega y paridad Web/Telnet/GMCP; la telepatía no persiste ni entrega offline/grupal |
-| Comunicación fase 5B | Emotes locales authored con plantillas cerradas y render no recursivo, targeting local cerrado sin objetivo/opcional/obligatorio, ignore/block por receptor, commit antes de entrega y paridad Web/Telnet/GMCP; sin texto libre, persistencia ni emotes globales/de grupo |
-| Comunicación fase 5C | Correo offline explícito con cuotas por cuenta, buzón/caducidad/paginación acotados, referencias opacas, aceptación que no filtra política/capacidad, denuncia con evidencia de 90 días y paridad Web/Telnet/`Tiamud.Mail 1`; sin historial general, outbox, adjuntos ni correo grupal |
-| Comunicación fase 5D | Tablones públicos `general`/`newbie` con páginas, cuota, capacidad, retención, borrado propio, denuncia única y evidencia staff acotados; paridad Web/Telnet/`Tiamud.Board 1`, fallback GMCP UTF-8 y confirmación Web correlacionada; gate final superado |
-| Comunicación fase 5E | `yell` radio uno y `shout` radio tres implementados mediante BFS dirigido, determinista, sin salidas secretas y máximo 259; acciones Web exactas, Telnet/GMCP, sordera por receptor y entrega post-commit; puerta final superada |
-| Staff fase 2 | Perfiles/capacidades, reportes, acciones acotadas, razones, Web/Telnet y auditoría append-only implementados; PostgreSQL v14 real cubierto, operación de producción específica de instalación |
-| Inventario fase 3A | Prototype/instance, snapshot v2 migrado desde v1, slots/peso, rareza/`itemLevel`, IDs opacos y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
-| Inventario fase 3B | Pilas derivadas, contenedores acotados, snapshot v3 migrado desde v1/v2, cantidades/paginación y paridad Web/Telnet/GMCP implementados; puertas locales integradas superadas |
-| Inventario fase 3C | Snapshot v4 con vínculo durable y migración v1-v3, tres políticas, `give` atómico, opacidad y paridad Web/Telnet/GMCP implementados; puertas locales soportadas superadas |
-| Inventario fase 3D | Snapshot v5 migrado desde v4, reservas durables, doble confirmación y liquidación simultánea de objetos/moneda en Web/Telnet/GMCP; puertas integradas y Playwright final 36/36 superados |
-| Botín fase 4A | Snapshot v6 migrado estrictamente desde v1–v5, tablas enteras fixed+repeatable, rejection sampling, procedencia, round-robin/pass, 20/120 ticks, privacidad y paridad Web/Telnet/GMCP implementados |
-| Botín fase 4B | WorldPack v7/AreaPack v6 y snapshot v7; sellos ganados, `open`, odds exactas, afijo único normal/sellado, rollback, caps y opacidad implementados |
-| Proyección densa acotada | Ventanas semánticas Web/Telnet, batches de 16 y coalescing con snapshot autoritativo implementados; no es un journal/replay general de eventos |
+| Combat and bounded abilities | Baseline implemented and tested |
+| Cumulative limits and level without refill | Implemented and tested |
+| WorldPack v9/AreaPack v8/WorldProject v2, validator, normalizer and catalog | Integrated; WorldPack v8/v7/v6/v5/v4/v3/v2 and AreaPack v7/v6/v5/v4/v3/v2/v1 entries normalize without inventing seals, affixes, telepathy, emotes or absent loot |
+| Areas 6A/6B/6C | Local catalog/bundles, additive loading and full quiescent replacement implemented. 6C adds SQL v14 identity, exact startup, SIGHUP, private staging, migration-free compatibility, zero sessions/leases, snapshot+pointer CAS and explicit rollback. The gate passes 774 Rust tests/329 server and the reaudit 0 P1/0 P2; the SQLite smoke G0→G1→G0/restart is retained. Real PostgreSQL 18 passes 20/20 adapter tests and 7/7 server tests with v14 CAS; its smoke binds G0 sequence 1 and validates `noop`, readiness, Web, Telnet and two resident areas. No per-area replacement/unload or LRU |
+| Areas 6D | Partial: snapshot v8, SQL v15, checkpoints, SCC/reverse closure, pins, internal same-revision retirement/rehydration and fail-closed recovery implemented. Server passes 337/337 and PostgreSQL v15 22/22+8/8; no operational surface, budget/LRU, RSS measurement or aggregated integral gate |
+| Lineage/class/talent/promotion and persistence | Implemented and tested |
+| v3 browser/Telnet creation | Default/none/explicit implemented |
+| Web sheet, talents and promotions | Implemented and tested |
+| Split recovery, frame gate and GMCP fallback | Implemented and tested |
+| Browser compositor and accessibility | Implemented and tested |
+| PWA identity | Manifest, favicon, 192/512 icons, maskable and Apple Touch implemented; 125 Vitest, check 0/0 and build. Retained Playwright remains at 46 scenarios, with no new pass attributed |
+| Transparent sprite profile | WebP alpha + PNG implemented |
+| Safe entity sidecar | Implemented; no sample sprites |
+| Combat hints | NPC attack/hit/defeat; no player/heal/tombstone |
+| Social phase 1 and current schema v15 | Groups/chat/reply/channels and Web/Telnet/GMCP parity implemented; real PostgreSQL v13/v14 remains historical evidence, not a v15 pass |
+| Communication phase 5A | Authored direct online telepathy with cost/cooldowns, per-room blocking, private suppression, commit before delivery and Web/Telnet/GMCP parity; telepathy does not persist or deliver offline/group |
+| Communication phase 5B | Authored local emotes with closed templates and non-recursive render, closed local targeting without none/optional/required, per-receiver ignore/block, commit before delivery and Web/Telnet/GMCP parity; no free text, persistence or global/group emotes |
+| Communication phase 5C | Explicit offline mail with per-account quotas, bounded mailbox/expiry/pagination, opaque references, acceptance that does not leak policy/capacity, report with 90-day evidence and Web/Telnet/`Tiamud.Mail 1` parity; no general history, outbox, attachments or group mail |
+| Communication phase 5D | Public `general`/`newbie` boards with bounded pages, quota, capacity, retention, own deletion, single report and staff evidence; Web/Telnet/`Tiamud.Board 1` parity, UTF-8 GMCP fallback and correlated Web confirmation; final gate passed |
+| Communication phase 5E | `yell` radius one and `shout` radius three implemented via directed, deterministic BFS, without secret exits and maximum 259; exact Web actions, Telnet/GMCP, per-receiver deafness and post-commit delivery; final gate passed |
+| Staff phase 2 | Profiles/capabilities, reports, bounded actions, reasons, Web/Telnet and append-only audit implemented; real PostgreSQL v14 covered, installation-specific production operation |
+| Inventory phase 3A | Prototype/instance, snapshot v2 migrated from v1, slots/weight, rarity/`itemLevel`, opaque IDs and Web/Telnet/GMCP parity implemented; supported integrated local gates passed |
+| Inventory phase 3B | Derived stacks, bounded containers, snapshot v3 migrated from v1/v2, quantities/pagination and Web/Telnet/GMCP parity implemented; supported integrated local gates passed |
+| Inventory phase 3C | Snapshot v4 with durable binding and v1-v3 migration, three policies, atomic `give`, opacity and Web/Telnet/GMCP parity implemented; supported local gates passed |
+| Inventory phase 3D | Snapshot v5 migrated from v4, durable reservations, double confirmation and simultaneous settlement of items/currency in Web/Telnet/GMCP; integrated gates and final Playwright 36/36 passed |
+| Loot phase 4A | Snapshot v6 strictly migrated from v1–v5, whole fixed+repeatable tables, rejection sampling, provenance, round-robin/pass, 20/120 ticks, privacy and Web/Telnet/GMCP parity implemented |
+| Loot phase 4B | WorldPack v7/AreaPack v6 and snapshot v7; earned seals, `open`, exact odds, unique normal/sealed affix, rollback, caps and opacity implemented |
+| Bounded dense projection | Web/Telnet semantic windows, batches of 16 and coalescing with authoritative snapshot implemented; it is not a general event journal/replay |
 
-En la evidencia histórica integrada de fase 3A pasan formato, pruebas bloqueadas del workspace
-y clippy estricto; 77 pruebas de core, 80 de WorldPack, 28 del importador y 195
-del servidor; `svelte-check` sin errores ni avisos, 100/100 pruebas web y build;
-30/30 escenarios Playwright soportados; y las comprobaciones de licencias y
-avisos generados para 307 dependencias Rust y 76 web. No se ejecutaron
-PostgreSQL real v10, WebKit local ni soak de 24 horas. Estas puertas locales no
-demuestran por sí solas publicación o CI.
+In the integrated historical evidence of phase 3A, format, workspace locked tests
+and strict clippy pass; 77 core tests, 80 WorldPack, 28 importer and 195
+server; `svelte-check` with no errors or warnings, 100/100 web tests and build;
+30/30 supported Playwright scenarios; and the license and generated-notice checks
+for 307 Rust and 76 web dependencies. Real PostgreSQL v10, local WebKit and a
+24-hour soak were not run. These local gates do not by themselves prove
+publication or CI.
 
-La evidencia histórica integrada de 3B pasó formato/check/clippy, 499/499
-pruebas Rust, 103/103 web, 30/30 Playwright Chromium/Firefox, 80/80 Node, humo,
-carga CI y soak corto. También pasaron `cargo-deny`, licencias y avisos 307
-Rust/76 web. No se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24
-horas; las puertas locales no demuestran por sí solas publicación o CI.
+The integrated historical evidence of 3B passed format/check/clippy, 499/499
+Rust tests, 103/103 web, 30/30 Playwright Chromium/Firefox, 80/80 Node, smoke,
+CI load and short soak. `cargo-deny`, licenses and notices 307 Rust/76 web also
+passed. Real PostgreSQL v10, local WebKit and a 24-hour soak were not run; the
+local gates do not by themselves prove publication or CI.
 
-En el árbol integrado de fase 3C pasaron 513/513 pruebas Rust: 93 core, 95
-WorldPack, 28 importador, 207 servidor y 90 restantes. También pasaron
-`svelte-check` con 0 errores y 0 avisos, 103/103 pruebas web, 81/81 Node y
-32/32 escenarios Playwright soportados, 16 Chromium y 16 Firefox. WebKit no
-arrancó en aquel gate por bibliotecas GTK/GStreamer ausentes. No se ejecutaron
-PostgreSQL real v10 ni soak de 24 horas; estas comprobaciones locales sobre un
-árbol dirty no demuestran CI, publicación o producción.
+In the integrated tree of phase 3C, 513/513 Rust tests passed: 93 core, 95
+WorldPack, 28 importer, 207 server and 90 remaining. `svelte-check` with 0 errors
+and 0 warnings, 103/103 web tests, 81/81 Node and
+32/32 supported Playwright scenarios, 16 Chromium and 16 Firefox, also passed.
+WebKit did not start in that gate due to missing GTK/GStreamer libraries.
+Real PostgreSQL v10 and a 24-hour soak were not run; these local checks over a
+dirty tree do not prove CI, publication or production.
 
-En el árbol integrado de fase 3D pasan formato, clippy estricto y 550 pruebas
-Rust: 102 core, 97 WorldPack, 28 importador, 231 servidor y 92 restantes del
-workspace, incluidas 23 admin. También pasan `svelte-check`, build, 107 Vitest
-y 83 Node/bot. El pase Playwright final completa 36/36 escenarios, 18 Chromium
-y 18 Firefox. Pasan licencias, avisos, humo, carga de 16 usuarios/32
-rondas sin errores y soak corto de 30 s con 44 rondas, 97 acciones y 8/8
-readiness. No se ejecutaron PostgreSQL real v10, WebKit local ni soak de 24
-horas; estas puertas locales no demuestran CI, publicación o producción.
+In the integrated tree of phase 3D, format, strict clippy and 550 Rust tests
+pass: 102 core, 97 WorldPack, 28 importer, 231 server and 92 remaining of the
+workspace, including 23 admin. `svelte-check`, build, 107 Vitest
+and 83 Node/bot also pass. The final Playwright pass completes 36/36 scenarios,
+18 Chromium and 18 Firefox. Licenses, notices, smoke, 16-user/32-round load
+without errors and a short 30 s soak with 44 rounds, 97 actions and 8/8
+readiness pass. Real PostgreSQL v10, local WebKit and a 24-hour soak were not
+run; these local gates do not prove CI, publication or production.
 
-En el árbol integrado de fase 4A pasan formato, clippy estricto y 587 pruebas
-Rust: 113 core, 240 servidor, 112 WorldPack y 122 restantes. También pasan
-109 Vitest, 84 Node/bot, 19 escenarios Chromium, licencias y
-avisos de 307 dependencias Rust/76 web, `cargo-deny` advisories/sources y humo.
-La carga exacta completa 16 bootstraps/32 rondas con cero errores y 57.774.080
-bytes de crecimiento RSS bajo el límite de 96 MiB; el soak corto de 30 s
-completa 58 rondas, 127 acciones, readiness 8/8 y cero errores sin crecimiento
-continuo. No se ejecutaron PostgreSQL real v11, Firefox, WebKit, lector real ni
-soak de 24 horas; esta evidencia local no demuestra release o producción.
+In the integrated tree of phase 4A, format, strict clippy and 587 Rust tests
+pass: 113 core, 240 server, 112 WorldPack and 122 remaining. 109 Vitest, 84
+Node/bot, 19 Chromium scenarios, licenses and
+notices for 307 Rust dependencies/76 web, `cargo-deny` advisories/sources and
+smoke also pass. The exact full load completes 16 bootstraps/32 rounds with zero
+errors and 57,774,080 bytes of RSS growth under the 96 MiB limit; the short 30 s
+soak completes 58 rounds, 127 actions, readiness 8/8 and zero errors without
+continuous growth. Real PostgreSQL v11, Firefox, WebKit, a real reader and a
+24-hour soak were not run; this local evidence does not prove release or
+production.
 
-En el árbol integrado de fase 5A pasan formato/diff/clippy y 630 pruebas Rust:
-131 core, 252 servidor, 123 WorldPack y 124 restantes. La web pasa check 0/0,
-113 Vitest, build y 42/42 Playwright soportado (21 Chromium y 21 Firefox); la
-suite Node/bot pasa 86/86. También pasan `cargo-deny`, licencias y avisos 307
-Rust/76 web. El WorldPack v8 canónico mide 53.040 bytes y tiene SHA-256
+In the integrated tree of phase 5A, format/diff/clippy and 630 Rust tests pass:
+131 core, 252 server, 123 WorldPack and 124 remaining. The web passes check 0/0,
+113 Vitest, build and 42/42 supported Playwright (21 Chromium and 21 Firefox); the
+Node/bot suite passes 86/86. `cargo-deny`, licenses and notices 307
+Rust/76 web also pass. The canonical WorldPack v8 measures 53,040 bytes and has
+SHA-256
 `109670f74056ab67d711fba520f7ad74d1cd16b8c72c06bd257839d89827dbc6`.
-No se ejecutaron PostgreSQL real v11, WebKit, lector manual ni soak de 24 h.
+Real PostgreSQL v11, WebKit, a manual reader and a 24 h soak were not run.
 
-En el árbol integrado de fase 5B pasan formato/diff/clippy y 652 pruebas Rust:
-139 core, 257 servidor, 132 WorldPack y 124 restantes. La web pasa check 0/0,
-114 Vitest, build y 44/44 Playwright soportado (22 Chromium y 22 Firefox); la
-suite Node/bot pasa 86/86. También pasan `cargo-deny`, licencias y avisos 307
-Rust/76 web. La recomposición WorldPack v9/AreaPack v8 es idéntica, mide 53.567
-bytes y tiene SHA-256
+In the integrated tree of phase 5B, format/diff/clippy and 652 Rust tests pass:
+139 core, 257 server, 132 WorldPack and 124 remaining. The web passes check 0/0,
+114 Vitest, build and 44/44 supported Playwright (22 Chromium and 22 Firefox); the
+Node/bot suite passes 86/86. `cargo-deny`, licenses and notices 307
+Rust/76 web also pass. The WorldPack v9/AreaPack v8 recomposition is identical,
+measures 53,567 bytes and has SHA-256
 `9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
-No se ejecutaron PostgreSQL real v11, WebKit, lector manual, carga/soak ni soak
-de 24 h.
+Real PostgreSQL v11, WebKit, a manual reader, load/soak or a 24 h soak were not
+run.
 
-En el árbol final de fase 5D pasan formato/diff/clippy estricto y 691 pruebas
-Rust (146 core, 283 servidor, 132 WorldPack, 130 restantes). PostgreSQL 18.4
-real pasa adaptador+mover 19/19 y servidor focused 5/5. Web pasa check 0/0, 122
-Vitest, build y 46/46 Playwright soportado (23 Chromium, 23 Firefox); pasan 88
-Node, humo, advisories/sources y licencias/avisos 307 Rust/76 web. Auditoría: 0
-P1/P2/P3. No se ejecutaron WebKit, lector manual, carga/soak mixtos ni soak 24h.
+In the final tree of phase 5D, format/diff/strict clippy and 691 Rust tests
+(146 core, 283 server, 132 WorldPack, 130 remaining) pass. Real PostgreSQL 18.4
+passes adapter+mover 19/19 and focused server 5/5. Web passes check 0/0, 122
+Vitest, build and 46/46 supported Playwright (23 Chromium, 23 Firefox); 88
+Node, smoke, advisories/sources and licenses/notices 307 Rust/76 web pass. Audit: 0
+P1/P2/P3. WebKit, a manual reader, mixed load/soak or a 24h soak were not run.
 
-La fase 5E pasa 695 pruebas Rust, 123 Vitest, 46/46 Playwright soportado, 88
-Node, formato, clippy, build, humo y cadena de suministro; la auditoría deja 0
-P1/P2/P3 abiertos. El
-[registro 5E](project/log/2026-07-17-bounded-spatial-voice-phase-5e.md) conserva
-la evidencia ejecutada y las puertas no cubiertas.
+Phase 5E passes 695 Rust tests, 123 Vitest, 46/46 supported Playwright, 88
+Node, format, clippy, build, smoke and supply chain; the audit leaves 0
+P1/P2/P3 open. The
+[5E log](project/log/2026-07-17-bounded-spatial-voice-phase-5e.md) retains
+the executed evidence and the uncovered gates.
 
-Una pieza aislada no es una funcionalidad end-to-end. Actualiza documentación
-cuando las puertas de integración cambien.
+An isolated piece is not an end-to-end feature. Update documentation
+when the integration gates change.
 
-## Puertas de aceptación
+## Acceptance gates
 
-Personajes v3:
+Characters v3:
 
-1. Selección de linaje/trasfondo/clase en navegador y texto.
-2. Ficha acotada idéntica en cada persistencia.
-3. XP concede puntos sin curar/recargar.
-4. Talentos/exclusiones atómicos y durables.
-5. Cada clase avanzada tiene ruta alcanzable.
-6. Spellblade cubierto desde Vanguard y Arcanist.
-7. Grafos inválidos/cíclicos/sobre límite no publican.
-8. V2/Envy normaliza determinista o falla con diagnóstico.
+1. Lineage/background/class selection in browser and text.
+2. Identical bounded sheet in each persistence.
+3. XP grants points without healing/refilling.
+4. Atomic and durable talents/exclusions.
+5. Each advanced class has an achievable path.
+6. Spellblade covered from Vanguard and Arcanist.
+7. Invalid/cyclic/over-limit graphs do not publish.
+8. V2/Envy normalizes deterministically or fails with diagnostics.
 
 Compositor:
 
-1. Assets solo para entidades visibles.
-2. Assets inválidos no cambian listas/acciones.
-3. Layout determinista, adaptable, acotado y overflow textual.
-4. Lector/Save-Data no descarga sprites.
-5. Movimiento reducido muestra resultado estático.
-6. Pistas derivadas de eventos y eliminadas en resync.
-7. Sin exceder presupuesto WebSocket/GMCP.
-8. Telnet plano completo y limpio.
+1. Assets only for visible entities.
+2. Invalid assets do not change lists/actions.
+3. Deterministic, adaptive, bounded layout and textual overflow.
+4. Reader/Save-Data does not download sprites.
+5. Reduced motion shows a static result.
+6. Event-derived hints removed on resync.
+7. No exceeding the WebSocket/GMCP budget.
+8. Full and clean plain Telnet.
 
-Inventario 3B:
+Inventory 3B:
 
-1. Pilas derivadas nunca crean cantidad o identidad durable duplicada.
-2. Límites de pila y slots/peso se cumplen con aritmética comprobada.
-3. El peso recursivo incluye descendientes y los slots solo hijos directos.
-4. Ciclos, profundidad 5 y sobrecapacidad fallan sin mutación parcial.
-5. Selectores opacos y percepción preceden a la agrupación.
-6. Cantidad máxima 256 y `contents` máximo 20 grupos por página.
-7. Snapshot v1/v2/v3 falla cerrado y conserva propietarios offline válidos.
-8. Web, texto Telnet y GMCP expresan los mismos hechos autorizados.
+1. Derived stacks never create duplicated durable quantity or identity.
+2. Stack and slot/weight limits are enforced with checked arithmetic.
+3. Recursive weight includes descendants and slots only direct children.
+4. Cycles, depth 5 and over-capacity fail without a partial mutation.
+5. Opaque selectors and perception precede grouping.
+6. Maximum quantity 256 and `contents` maximum 20 groups per page.
+7. Snapshot v1/v2/v3 fails closed and preserves valid offline owners.
+8. Web, Telnet text and GMCP express the same authorized facts.
 
-Inventario 3C:
+Inventory 3C:
 
-1. Snapshot v4 exige un vínculo cerrado por instancia; v1-v3 migran a
-   `unbound` y rechazan campos de otra versión.
-2. Adquirir liga recursivamente y una política restringida no puede eludirse
-   mediante un contenedor, drop, give, replay o rollback.
-3. `give` mueve 1..=256 raíces portadas entre personajes distintos, conectados
-   y próximos, con capacidad bilateral y una sola revisión/evento.
-4. Ignore y block impiden la entrega sin revelar cuál de esas políticas existe.
-5. Un fallo de commit, capacidad, política, desconexión previa o selector no
-   válido no publica estado, evento ni salida parcial.
-6. Ningún propietario durable se proyecta; emisor y receptor reciben selectores
-   opacos propios, el observador local solo narración y el remoto nada.
-7. Web, texto Telnet, GMCP, SQLite, PostgreSQL, admin y mover comparten decoder,
-   autorización y semántica.
+1. Snapshot v4 requires a closed per-instance binding; v1-v3 migrate to
+   `unbound` and reject fields from another version.
+2. Acquisition binds recursively and a restricted policy cannot be bypassed
+   via a container, drop, give, replay or rollback.
+3. `give` moves 1..=256 carried roots between distinct, connected
+   and nearby characters, with bilateral capacity and a single revision/event.
+4. Ignore and block prevent delivery without revealing which of those policies exists.
+5. A commit, capacity, policy, prior-disconnection or invalid-selector failure
+   publishes no partial state, event or output.
+6. No durable owner is projected; sender and receiver receive their own opaque
+   selectors, the local observer only narration and the remote one nothing.
+7. Web, Telnet text, GMCP, SQLite, PostgreSQL, admin and mover share decoder,
+   authorization and semantics.
 
-Inventario 3D:
+Inventory 3D:
 
-1. Snapshot v5 exige forma canónica, IDs y reservas acotadas; v4 solo migra a
-   contador inicial y mapa vacío, sin schema-smuggling.
-2. Cada raíz y subárbol reservado queda bloqueado, y el saldo gastable excluye
-   toda moneda ofrecida sin crear otra autoridad.
-3. Una mutación material incrementa una revisión y elimina confirmaciones; dos
-   identidades distintas confirman la misma revisión y digest.
-4. La liquidación simultánea valida ambos inventarios y saldos finales antes de
-   confirmar personajes, snapshot y evento en una transacción.
-5. Sala, conexión, combate/derrota, ignore/block, política, capacidad,
-   expiración y desconexión se vuelven a comprobar de forma cerrada.
-6. Reinicio carga participantes adicionales con presupuesto acotado, valida y
-   cancela reservas antes de readiness; replay no reaplica monedas.
-7. Web, texto Telnet, `Char.Trade 1`, páginas GMCP, bot, SQLite, PostgreSQL,
-   admin y mover comparten acciones, límites, decoder y opacidad por sesión.
+1. Snapshot v5 requires canonical form, IDs and bounded reservations; v4 only
+   migrates to an initial counter and empty map, without schema-smuggling.
+2. Each root and reserved subtree is locked, and the spendable balance excludes
+   all offered currency without creating another authority.
+3. A material mutation increments a revision and clears confirmations; two
+   distinct identities confirm the same revision and digest.
+4. Simultaneous settlement validates both inventories and final balances before
+   committing characters, snapshot and event in one transaction.
+5. Room, connection, combat/defeat, ignore/block, policy, capacity,
+   expiration and disconnection are rechecked closed.
+6. Restart loads additional participants with a bounded budget, validates and
+   cancels reservations before readiness; replay does not reapply currency.
+7. Web, Telnet text, `Char.Trade 1`, GMCP pages, bot, SQLite, PostgreSQL,
+   admin and mover share actions, limits, decoder and per-session opacity.
 
-Botín 4A:
+Loot 4A:
 
-1. WorldPack v6/AreaPack v5 validan referencias, pesos enteros y el peor caso
-   fijo+generado de 64 raíces; versiones anteriores rechazan campos 4A.
-2. Snapshot v6 conserva procedencia, encuentros, derechos y cursor; v1–v5 se
-   migran con forma exacta bajo 1 MiB y v6 queda acotado a 2 MiB.
-3. La misma semilla y snapshot producen el mismo resultado mediante rejection
-   sampling; un commit fallido revierte RNG, contador, NPC, XP y objetos.
-4. Cohorte, round-robin y `loot pass` preservan derechos ante reconexión y
-   reinicio; la exclusividad vence al tick 20 y el despawn al 120.
-5. Capacidad insuficiente suprime generación, avanza la tirada de forma durable
-   y nunca bloquea la derrota ni permite reroll.
-6. Web, Telnet y GMCP proyectan solo `yours`, `reserved` o público mediante IDs
-   opacos; no revelan beneficiario, cohorte, tabla, procedencia o drop durable.
-7. Escenas densas respetan ventanas semánticas Web 14 KiB/Telnet 48 KiB,
-   batches de 16, aviso/coalescing y recuperación mediante snapshot autoritativo.
+1. WorldPack v6/AreaPack v5 validate references, integer weights and the worst
+   fixed+generated case of 64 roots; earlier versions reject 4A fields.
+2. Snapshot v6 preserves provenance, encounters, rights and cursor; v1–v5 are
+   migrated with the exact form under 1 MiB and v6 is bounded to 2 MiB.
+3. The same seed and snapshot produce the same result via rejection
+   sampling; a failed commit reverts RNG, counter, NPC, XP and items.
+4. Cohort, round-robin and `loot pass` preserve rights across reconnection and
+   restart; exclusivity expires at tick 20 and despawn at 120.
+5. Insufficient capacity suppresses generation, advances the roll durably
+   and never blocks the defeat or allows a reroll.
+6. Web, Telnet and GMCP project only `yours`, `reserved` or public via opaque
+   IDs; they do not reveal beneficiary, cohort, table, provenance or durable drop.
+7. Dense scenes respect Web 14 KiB/Telnet 48 KiB semantic windows,
+   batches of 16, notice/coalescing and recovery via an authoritative snapshot.
 
-Botín 4B:
+Loot 4B:
 
-1. WorldPack v7/AreaPack v6 validan sellos earned-only, pools de afijos,
-   referencias, compatibilidad, máximos de 16 unidades y 1.024 filas de odds;
-   formatos anteriores rechazan campos 4B.
-2. Snapshot v7 conserva `itemAffixes`, procedencia sellada y contador de
-   apertura; v6 migra exactamente con afijos vacíos/contador uno, v1–v5 quedan
-   bajo 1 MiB y v6–v7 bajo 2 MiB.
-3. `reward odds` publica probabilidades authored exactas y paginadas; no revela
-   RNG, identidades internas, contadores ni digests de procedencia/afijo.
-4. `open` confirma o revierte juntos sello, RNG, contador, objetos, afijos,
-   vínculos, capacidad, procedencia y evento; un fallo no deja consumo parcial.
-5. Botín normal y sellado comparten selección ponderada entera sin sesgo y un
-   afijo máximo por unidad única; una tirada normal se consume aunque el drop
-   termine suprimido.
-6. Web, Telnet y GMCP comparten acciones, límites, páginas y referencias opacas.
-7. Pity, need/greed, master-loot, reparto por contribución y recompensas pagadas
-   no forman parte de esta fase.
+1. WorldPack v7/AreaPack v6 validate earned-only seals, affix pools,
+   references, compatibility, maximums of 16 units and 1,024 odds rows;
+   earlier formats reject 4B fields.
+2. Snapshot v7 preserves `itemAffixes`, sealed provenance and opening
+   counter; v6 migrates exactly with empty affixes/counter one, v1–v5 stay
+   under 1 MiB and v6–v7 under 2 MiB.
+3. `reward odds` publishes exact authored and paginated probabilities; it does not
+   reveal RNG, internal identities, counters or provenance/affix digests.
+4. `open` commits or reverts together seal, RNG, counter, items, affixes,
+   bindings, capacity, provenance and event; a failure leaves no partial consumption.
+5. Normal and sealed loot share unbiased integer weighted selection and one
+   maximum affix per unique unit; a normal roll is consumed even if the drop
+   ends up suppressed.
+6. Web, Telnet and GMCP share actions, limits, pages and opaque references.
+7. Pity, need/greed, master-loot, contribution-based distribution and paid rewards
+   are not part of this phase.
 
-Comunicación 5D:
+Communication 5D:
 
-1. Catálogo cerrado, páginas 1..=100 de diez, IDs públicos opacos y DTO exactos
-   funcionan igual en texto, Web y `Tiamud.Board 1`, siempre pull-only.
-2. Texto visible y campos respetan 128/4.096/2.048 bytes; controles peligrosos,
-   marcas bidi y `|` en asunto fallan antes de persistir.
-3. Cuotas 5/h y 20/día, cap 64 por cuenta, 1.000/4 MiB por tablón y 2.000/8
-   MiB globales se calculan sobre posts vivos y no admiten carreras de exceso.
-4. Mute/ban/bucket bloquean publicación; leer, borrar propio y denunciar siguen
-   disponibles, e ignore/block nunca modifican visibilidad o paginación pública.
-5. Solo el mismo personaje autor borra; una cuenta distinta crea como máximo
-   una denuncia global, con caps 8/10.000 y evidencia independiente de 90 días.
-6. SQLite/PostgreSQL v13, migración v12→v13, restore y mover conservan FKs,
-   reportes, cuota, publicaciones y evidencia; la purga nunca es necesaria para
-   aplicar expiración lógica.
-7. El navegador presenta texto seguro en un panel accesible separado, sin
-   `{@html}`, Markdown, autolinks, recursos remotos ni estado leído/no leído.
-8. Telnet admite el post máximo dentro de 8 KiB; `Tiamud.Board.Entry` conserva
-   resumen, prefijo UTF-8 y metadatos de overflow si el JSON escapado supera 8
-   KiB, mientras texto conserva el cuerpo completo.
-9. JSON Web con claves duplicadas falla a cualquier profundidad; post/delete/
-   report solo cambian la UI tras `action.result` correlacionado, sin perder
-   borradores en rechazo ni aceptar duplicados pendientes.
+1. Closed catalog, pages 1..=100 of ten, opaque public IDs and exact DTOs
+   work identically in text, Web and `Tiamud.Board 1`, always pull-only.
+2. Visible text and fields respect 128/4,096/2,048 bytes; dangerous controls,
+   bidi marks and `|` in the subject fail before persisting.
+3. Quotas 5/h and 20/day, cap 64 per account, 1,000/4 MiB per board and 2,000/8
+   MiB global are computed over live posts and admit no over-limit races.
+4. Mute/ban/bucket block posting; reading, deleting one's own and reporting stay
+   available, and ignore/block never modify public visibility or pagination.
+5. Only the same author-character deletes; a distinct account creates at most
+   one global report, with caps 8/10,000 and independent 90-day evidence.
+6. SQLite/PostgreSQL v13, v12→v13 migration, restore and mover preserve FKs,
+   reports, quota, posts and evidence; the purge is never necessary to
+   apply logical expiration.
+7. The browser presents safe text in a separate accessible panel, without
+   `{@html}`, Markdown, autolinks, remote resources or read/unread state.
+8. Telnet admits the maximum post within 8 KiB; `Tiamud.Board.Entry` preserves
+   summary, UTF-8 prefix and overflow metadata if the escaped JSON exceeds 8
+   KiB, while text preserves the full body.
+9. Web JSON with duplicate keys fails at any depth; post/delete/
+   report only change the UI after a correlated `action.result`, without losing
+   drafts on rejection or accepting pending duplicates.
 
-Comunicación 5E — demostrada sobre el árbol integrado:
+Communication 5E — demonstrated over the integrated tree:
 
-1. `yell` y `shout` aceptan exactamente 1..=512 bytes y las formas Web no
-   admiten campos fuera de `message`.
-2. El BFS incluye origen, respeta radio uno/tres, sigue aristas dirigidas no
-   secretas, deduplica ciclos/convergencias y no supera 259 salas.
-3. Texto, Web y `Comm.Channel.Text` entregan canal, actor y cuerpo sin rumbo,
-   distancia, ruta o identidad interna de sala.
-4. Mute/bucket bloquean emisión; ignore/block/deaf suprimen solo la copia del
-   receptor y nunca alteran la confirmación del actor.
-5. `OnTalk` corre una vez en origen; commit precede al fan-out y rollback
-   publica cero copias.
-6. No cambian WorldPack/AreaPack/WorldProject, snapshot, esquema SQL, `reply`,
-   retención ni suscripciones.
+1. `yell` and `shout` accept exactly 1..=512 bytes and the Web forms do not
+   admit fields outside `message`.
+2. The BFS includes the origin, respects radius one/three, follows directed
+   non-secret edges, deduplicates cycles/convergences and does not exceed 259 rooms.
+3. Text, Web and `Comm.Channel.Text` deliver channel, actor and body without
+   direction, distance, route or internal room identity.
+4. Mute/bucket block emission; ignore/block/deaf suppress only the receiver's
+   copy and never alter the actor's confirmation.
+5. `OnTalk` runs once at the origin; commit precedes the fan-out and rollback
+   publishes zero copies.
+6. WorldPack/AreaPack/WorldProject, snapshot, SQL schema, `reply`,
+   retention and subscriptions do not change.
 
-Áreas 6C — implementada y con puerta funcional cerrada:
+Areas 6C — implemented and with a closed functional gate:
 
-1. Startup liga una primera generación y, después, recupera por digest la
-   autoridad SQL v14 aunque `area-active` anuncie otra; una fuente monolítica
-   no puede abrir una base ya ligada a catálogo.
-2. SIGHUP verifica puntero estable, catálogo, fallback y bundles completos y
-   construye la candidata fuera del actor; tamper o cambio de puntero conserva
-   la generación activa.
-3. Gameplay, RNG, objetos iniciales, NPC, loot, afijos, áreas, ownership, IDs
-   de sala/VNUM y migración cero son incompatibilidades cerradas; los cambios
-   permitidos de prosa, salida y presentación se restauran con el snapshot.
-4. Cero sesiones y cero leases son condición de commit. Actividad devuelve
-   `busy` sin desconectar ni publicar estado parcial; un resultado tardío de la
-   generación anterior no puede instalarse en la nueva.
-5. SQLite/PostgreSQL confirman snapshot v7 y puntero durable por CAS en la misma
-   transacción. Un rechazo definitivo conserva la generación previa; un
-   resultado ambiguo relee SQL y publica G1, reabre G0 o queda fail-stop en
-   `Committing` con readiness 503.
-6. Activación creciente y rollback explícito incrementan la secuencia durable;
-   `area-select` solo selecciona un blob ya publicado, nunca migra datos.
-7. Métricas y errores públicos no exponen mundo, área, revisión, ruta o digest;
-   el staging no sobrescribe gauges de la generación activa. La puerta pasa 774
-   pruebas Rust —329 del servidor—, formato/diff, clippy, MSRV, cargo-deny,
-   licencias/avisos 308 Rust/76 web, Svelte 0/0 y 125 Vitest; la reauditoría
-   queda en 0 P1/0 P2. PostgreSQL 18 real pasa 20/20 pruebas del adaptador y 7/7
-   del servidor, incluida la CAS v14. El humo SQLite cubre
-   liga/noop/activación/rollback, restart, readiness/Web/Telnet, métricas y
-   shutdown; el humo PostgreSQL liga G0 secuencia 1 y valida `noop`, readiness,
-   Web, Telnet, dos áreas residentes y cierre limpio.
+1. Startup binds a first generation and, afterward, recovers by digest the
+   SQL v14 authority even if `area-active` announces another; a monolithic
+   source cannot open a base already bound to a catalog.
+2. SIGHUP verifies a stable pointer, catalog, fallback and complete bundles and
+   builds the candidate outside the actor; tamper or a pointer change preserves
+   the active generation.
+3. Gameplay, RNG, initial items, NPCs, loot, affixes, areas, ownership, room
+   IDs/VNUMs and zero migration are closed incompatibilities; the permitted
+   changes of prose, exit and presentation are restored with the snapshot.
+4. Zero sessions and zero leases are a commit condition. Activity returns
+   `busy` without disconnecting or publishing partial state; a late result of the
+   previous generation cannot be installed into the new one.
+5. SQLite/PostgreSQL commit snapshot v7 and the durable pointer via CAS in the same
+   transaction. A definitive rejection preserves the previous generation; an
+   ambiguous result rereads SQL and publishes G1, reopens G0 or is fail-stop in
+   `Committing` with readiness 503.
+6. Increasing activation and explicit rollback increment the durable sequence;
+   `area-select` only selects an already-published blob, never migrates data.
+7. Public metrics and errors do not expose world, area, revision, path or digest;
+   staging does not overwrite gauges of the active generation. The gate passes 774
+   Rust tests —329 in the server—, format/diff, clippy, MSRV, cargo-deny,
+   licenses/notices 308 Rust/76 web, Svelte 0/0 and 125 Vitest; the reaudit
+   remains at 0 P1/0 P2. Real PostgreSQL 18 passes 20/20 adapter tests and 7/7
+   server tests, including the v14 CAS. The SQLite smoke covers
+   bind/noop/activation/rollback, restart, readiness/Web/Telnet, metrics and
+   shutdown; the PostgreSQL smoke binds G0 sequence 1 and validates `noop`, readiness,
+   Web, Telnet, two resident areas and a clean shutdown.
 
-## Trabajo aplazado o rechazado
+## Deferred or rejected work
 
-Aplazado hasta necesidad demostrada: transformaciones, culturas, respec,
-rangos de clase, editor de grafos, simulación de balance, medios animados,
-gráficos raster terminales, sustitución de revisión y política/LRU **por
-área**. La carga local aditiva 6B y el corte completo quiescente 6C ya existen;
-6D solo aporta una vertical interna parcial de retirada/rehidratación de la
-misma revisión. El compositor necesita sprites
-revisados; avatar, heal cue y lápida son mejoras opcionales. Need/greed,
-master-loot, reparto por contribución y pity requieren diseño adicional.
+Deferred until demonstrated need: transformations, cultures, respec,
+class ranks, graph editor, balance simulation, animated media,
+terminal raster graphics, revision replacement and **per-area** policy/LRU.
+Additive local loading 6B and the full quiescent cutover 6C already exist;
+6D only provides a partial internal vertical of same-revision
+retirement/rehydration. The compositor needs reviewed
+sprites; avatar, heal cue and tombstone are optional improvements. Need/greed,
+master-loot, contribution-based distribution and pity require additional design.
 
-Rechazado como baseline: Kubernetes, microservicios, Redis, object storage
-obligatorio, generación de imagen runtime, decisiones LLM runtime, layout de
-píxeles en servidor, física espacial continua, Canvas/WebGL para diez sprites,
-scripts generales de progresión y blobs multimedia por Telnet.
-También quedan fuera las cajas, llaves o tiradas pagadas.
+Rejected as baseline: Kubernetes, microservices, Redis, mandatory object
+storage, runtime image generation, runtime LLM decisions, server-side pixel
+layout, continuous spatial physics, Canvas/WebGL for ten sprites,
+general progression scripts and multimedia blobs over Telnet.
+Boxes, keys or paid rolls also remain out.

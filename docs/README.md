@@ -1,43 +1,51 @@
-# Documentación de Tiamud
+# Tiamud documentation
 
-Este directorio reúne la documentación técnica y de proyecto de Tiamud:
-contrato entre agentes, especificación, guías de autoría, decisiones de
-arquitectura, diseño, operación, protocolo y meta-documentos de estado.
+This directory holds Tiamud's technical and project documentation: the
+agent contract, specification, authoring guides, architecture decisions,
+design, operation, protocol and status meta-documents.
 
-## Orden de orientación
+## Language policy
 
-1. [`../AGENTS.md`](../AGENTS.md) — contrato canónico entre agentes.
-2. [`project/PROJECT_MEMORY.md`](project/PROJECT_MEMORY.md) — memoria e
-   historia del proyecto.
-3. [`project/COMPLETION_MATRIX.md`](project/COMPLETION_MATRIX.md) — matriz de
-   finalización.
-4. ADR pertinentes en [`decisions/`](decisions/).
-5. El diseño/especificación pertinente y la implementación y pruebas
-   actuales.
+The public-facing documents — this index, the specification, authoring guides,
+protocol, operation guides and design docs — are maintained in **English** to
+reach a wider audience. The internal governance documents — `../AGENTS.md`,
+`../CLAUDE.md`, `project/PROJECT_MEMORY.md`, `project/COMPLETION_MATRIX.md`, the
+ADRs under `decisions/` and the dated logs under `project/log/` — are
+maintained in **Spanish**. The archived `archive/spec-v0.2.md` stays in Spanish
+as a historical snapshot.
 
-## Fuente única de verdad
+## Orientation order
 
-`project/COMPLETION_MATRIX.md` es la AUTORIDAD ÚNICA para los conteos de
-pruebas, las versiones (WorldPack/AreaPack/snapshot/esquema SQL) y el estado
-de cada fase (`Complete`/`Partial`). Ante conflicto entre la matriz y
-cualquier texto de README, CLAUDE.md, AGENTS.md o un ADR antiguo, prevalece
-la matriz. Los ADR aceptados siguen gobernando las decisiones de
-arquitectura.
+1. [`../AGENTS.md`](../AGENTS.md) — canonical agent contract.
+2. [`project/PROJECT_MEMORY.md`](project/PROJECT_MEMORY.md) — project memory and
+   history.
+3. [`project/COMPLETION_MATRIX.md`](project/COMPLETION_MATRIX.md) — completion
+   matrix.
+4. The relevant ADRs in [`decisions/`](decisions/).
+5. The relevant design/specification, and the current implementation and tests.
 
-## Mapa de docs/
+## Single source of truth
 
-| Carpeta/Archivo | Propósito |
+`project/COMPLETION_MATRIX.md` is the SOLE AUTHORITY for test counts, versions
+(WorldPack/AreaPack/snapshot/SQL schema) and each phase's status
+(`Complete`/`Partial`). When the matrix conflicts with any text in the README,
+CLAUDE.md, AGENTS.md or an older ADR, the matrix prevails. Accepted ADRs still
+govern architecture decisions.
+
+## Map of docs/
+
+| Folder/File | Purpose |
 | --- | --- |
-| [`../AGENTS.md`](../AGENTS.md) | Contrato canónico entre agentes: invariantes, verificación y límites honestos. |
-| [`spec-v0.3.md`](spec-v0.3.md) | Especificación vigente (personajes, inventario, medios). |
-| [`archive/spec-v0.2.md`](archive/spec-v0.2.md) | Especificación histórica en castellano (archivada; contexto, no vigente). |
-| [`world-authoring.md`](world-authoring.md) | Guía de autoría de mundos (WorldPack/AreaPack). |
-| [`authoring/`](authoring/) | Guía de autoría dividida por temas (README, media, mundos modulares, progresión/combate, validación/publicación, flujo). |
-| [`decisions/`](decisions/) | Architecture Decision Records (ADR 0001–0022). Ver [`decisions/README.md`](decisions/README.md). |
-| [`design/`](design/) | Documentos de diseño y hojas de ruta (progresión v3, compositor de escenas, hoja social/staff/loot). |
-| [`operations/`](operations/) | Runbooks de operación (releases, despliegue en un único equipo, pruebas de soak). |
-| [`protocol/`](protocol/) | Especificación de protocolo (`tiamud-v1.md`). |
-| [`project/`](project/) | Meta-documentos de proyecto: `PROJECT_MEMORY.md`, `COMPLETION_MATRIX.md`, `NAME_DOMAIN_PRECHECK.md` y `log/`. |
-| [`project/log/`](project/log/) | Registros fechados por fase/hito. Ver [`project/log/README.md`](project/log/README.md). |
-| [`images/`](images/) | Recursos gráficos del README (logo, capturas). |
-| [`reviews/`](reviews/) | Revisiones externas/auditoría (serie "Fable"). (No versionado como fuente de estado.) |
+| [`../AGENTS.md`](../AGENTS.md) | Canonical agent contract: invariants, verification and honest limits (Spanish). |
+| [`spec-v0.3.md`](spec-v0.3.md) | Current specification (characters, inventory, media). |
+| [`archive/spec-v0.2.md`](archive/spec-v0.2.md) | Historical specification in Spanish (archived; context, not current). |
+| [`world-authoring.md`](world-authoring.md) | World authoring guide (WorldPack/AreaPack). |
+| [`authoring/`](authoring/) | Authoring guide split by topic (README, media, modular worlds, progression/combat, validation/publishing, workflow). |
+| [`decisions/`](decisions/) | Architecture Decision Records (ADR 0001–0024, Spanish). See [`decisions/README.md`](decisions/README.md). |
+| [`design/`](design/) | Design documents and roadmaps (v3 progression, scene compositor, social/staff/loot roadmap). |
+| [`operations/`](operations/) | Operations runbooks (releases, single-host deployment, soak testing). |
+| [`protocol/`](protocol/) | Protocol specification (`tiamud-v1.md`). |
+| [`project/`](project/) | Project meta-documents (Spanish): `PROJECT_MEMORY.md`, `COMPLETION_MATRIX.md`, `NAME_DOMAIN_PRECHECK.md` and `log/`. |
+| [`project/log/`](project/log/) | Dated logs per phase/milestone (Spanish). See [`project/log/README.md`](project/log/README.md). |
+| [`images/`](images/) | README graphic assets (logo, captures). |
+| [`reviews/`](reviews/) | External reviews/audit (the "Fable" series). (Not versioned as a status source.) |

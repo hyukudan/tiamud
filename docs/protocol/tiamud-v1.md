@@ -138,23 +138,23 @@ cannot displace an accepted command result.
 
 ### Additive v1 rollout policy
 
-`tiamud.v1` aún no ha alcanzado su primer hito de compatibilidad ni se ha usado
-en producción pública. Durante este intervalo de prelanzamiento, las fases 4A y
-4B sustituyen deliberadamente el contrato fuente de forma incompatible: el
-servidor y el cliente oficial deben proceder del mismo checkout. No existe una
-capacidad negociada que haga compatible un cliente anterior con los campos o
-enums de 4A y 4B, y no debe afirmarse esa compatibilidad.
+`tiamud.v1` has not yet reached its first compatibility milestone nor been used
+in public production. During this pre-release interval, phases 4A and 4B
+deliberately replace the source contract in an incompatible way: the server and
+the official client must come from the same checkout. There is no negotiated
+capability that makes an older client compatible with the 4A and 4B fields or
+enums, and that compatibility must not be claimed.
 
-La política aditiva siguiente será vinculante a partir del primer hito explícito
-de compatibilidad. Desde ese hito, los esquemas cliente-servidor permanecerán
-estrictos: un cliente no podrá sondear acciones nuevas mediante campos
-desconocidos. Los nombres de capacidad serán el punto de extensión explícito,
-pero anunciar una capacidad desconocida no tendrá efecto hasta que el servidor
-la implemente. La evolución servidor-cliente será aditiva solo dentro de una
-forma reconocida. El cliente oficial descartará campos desconocidos dentro de
-un envelope/payload reconocido mientras valida y conserva todos los conocidos;
-esto permitirá añadir presentación o información opcional sin cambiar el
-significado del mensaje v1.
+The following additive policy will be binding starting from the first explicit
+compatibility milestone. From that milestone on, the client-server schemas will
+remain strict: a client will not be able to probe for new actions through
+unknown fields. Capability names will be the explicit extension point, but
+advertising an unknown capability will have no effect until the server
+implements it. Server-to-client evolution will be additive only within a
+recognized shape. The official client will discard unknown fields inside a
+recognized envelope/payload while validating and preserving all known ones;
+this will allow adding optional presentation or information without changing the
+meaning of the v1 message.
 
 A new required field, enum value, independently sequenced message type or
 behavior that an older client must understand is not a safe field addition. It
@@ -253,27 +253,26 @@ sequenceDiagram
 }
 ```
 
-El comando ocupa como máximo 1024 bytes y no contiene caracteres de control.
-Llega al mismo analizador de `PlayerAction` que Telnet.
+The command is at most 1024 bytes and contains no control characters. It reaches
+the same `PlayerAction` parser as Telnet.
 
-La entrega textual de objetos usa exactamente:
+Textual item delivery uses exactly:
 
 ```text
-give [cantidad] <objeto> to <personaje>
+give [quantity] <item> to <character>
 ```
 
-La cantidad predeterminada es uno y debe estar en `1..=256`. Objeto y receptor
-pueden ser selectores opacos de la sesión; el receptor también puede ser un
-nombre exacto no ambiguo. El servidor exige que sea otro personaje conectado y
-en la misma sala y vuelve a validar política, subárbol, capacidad e
-ignore/block.
+The default quantity is one and must be in `1..=256`. Item and recipient may be
+opaque session selectors; the recipient may also be an unambiguous exact name.
+The server requires another connected character in the same room and rechecks
+policy, subtree, capacity and ignore/block.
 
-### Acción estructurada
+### Structured action
 
-El servidor analiza el JSON WebSocket con detección recursiva de claves
-duplicadas. Dos apariciones de una clave en cualquier objeto, también anidado,
-rechazan el frame antes de construir el payload tipado; ninguna acción depende
-de la semántica last-key-wins del parser.
+The server parses the WebSocket JSON with recursive duplicate-key detection. Two
+occurrences of a key in any object, nested included, reject the frame before
+building the typed payload; no action depends on the parser's last-key-wins
+semantics.
 
 ```json
 {
@@ -283,7 +282,7 @@ de la semántica last-key-wins del parser.
 }
 ```
 
-Nombres de acción implementados:
+Implemented action names:
 
 ```text
 look, inventory, move
@@ -314,117 +313,115 @@ trade.request, trade.accept, trade.decline, trade.item.set, trade.item.remove,
 trade.coins.set, trade.contents, trade.confirm, trade.status, trade.cancel
 ```
 
-Según la acción, el payload estricto también puede contener `message`,
+Depending on the action, the strict payload may also contain `message`,
 `channel` (`general`, `newbie` or `staff`), `durationSeconds`, `reason` or
-`role` (`player`, `moderator`, `admin`). `party.revoke`, `party.kick` y
-`party.transfer` usan `target`; `party.say` y `social.reply` usan `message`;
-alta/baja de canal usa `channel`, y el envío requiere `channel` y `message`.
-`social.telepathy` exige exactamente `abilityId`, `target` y `message`: el ID
-authored ocupa como máximo 64 bytes, el personaje 64 y el pensamiento UTF-8
-visible 512. No acepta campos de combate, canal ni persistencia, aunque un
-campo adicional conocido llegue como `null`. Una habilidad cuyo propósito es
-`telepathy` se rechaza en `combat.ability`; no existe una segunda ruta genérica.
-`social.emote.list` no admite campos de acción. `social.emote` exige `emote`,
-un comando authored ASCII de 1–32 bytes con patrón `[a-z][a-z0-9-]*`, y admite únicamente `target`, un
-nombre UTF-8 de hasta 64 bytes. No acepta `message`: la frase procede de las
-plantillas revisadas del WorldPack y el objetivo, cuando el gesto lo admite o
-exige, debe ser otro personaje conectado y no ambiguo de la misma sala.
-Los campos inesperados y objetivos ausentes/prohibidos se rechazan. Se aplican
-las mismas reglas de autorización y percepción; una acción estructurada no es
-un atajo confiable. Accept/revoke/kick/transfer resuelven `target` como nombre
-de un personaje conectado, no como administración de membresía offline.
+`role` (`player`, `moderator`, `admin`). `party.revoke`, `party.kick` and
+`party.transfer` use `target`; `party.say` and `social.reply` use `message`;
+channel join/leave uses `channel`, and sending requires `channel` and `message`.
+`social.telepathy` requires exactly `abilityId`, `target` and `message`: the
+authored ID is at most 64 bytes, the character 64 and the visible UTF-8 thought
+512. It accepts no combat, channel or persistence fields, even when a known
+additional field arrives as `null`. An ability whose purpose is `telepathy` is
+rejected on `combat.ability`; there is no second generic path.
+`social.emote.list` accepts no action fields. `social.emote` requires `emote`,
+an authored ASCII command of 1–32 bytes matching `[a-z][a-z0-9-]*`, and accepts
+only `target`, a UTF-8 name of up to 64 bytes. It does not accept `message`: the
+phrase comes from the WorldPack's reviewed templates and the target, when the
+gesture allows or requires one, must be another connected, unambiguous character
+in the same room. Unexpected fields and missing/forbidden targets are rejected.
+The same authorization and perception rules apply; a structured action is not a
+reliable shortcut. Accept/revoke/kick/transfer resolve `target` as the name of a
+connected character, not as offline membership administration.
 
-La fase 5E implementa dos acciones adicionales:
+Phase 5E implements two additional actions:
 
-| Acción | Campos exactos adicionales |
+| Action | Exact additional fields |
 | --- | --- |
 | `social.yell` | `message` |
 | `social.shout` | `message` |
 
-`message` ocupa `1..=512` bytes UTF-8 visibles. Estas formas no admiten
-`target`, `channel`, radio, dirección, distancia ni campos adicionales, aunque
-uno conocido llegue como `null`. Sus equivalentes de texto son
-`yell <mensaje>` y `shout <mensaje>`.
+`message` is `1..=512` visible UTF-8 bytes. These shapes accept no `target`,
+`channel`, radius, direction, distance or additional fields, even when a known
+one arrives as `null`. Their text equivalents are `yell <message>` and
+`shout <message>`.
 
-El correo usa formas cerradas separadas:
+Mail uses separate closed shapes:
 
-| Acción | Campos exactos adicionales |
+| Action | Exact additional fields |
 | --- | --- |
-| `mail.list` | Ninguno o `page` |
+| `mail.list` | None or `page` |
 | `mail.read` | `mailId` |
 | `mail.delete` | `mailId` |
 | `mail.send` | `target`, `subject`, `body` |
 | `mail.report` | `mailId`, `reason` |
 
-`mailId` es `m` seguido de 32 dígitos hexadecimales minúsculos; `page` está en
-1..7. Pedir una página posterior a `totalPages` es válido y devuelve una lista
-vacía, lo que evita que el total cambiante convierta la navegación en error.
-Objetivo/asunto/cuerpo/motivo ocupan como máximo 64/128/2.048/2.048
-bytes UTF-8 visibles, sin controles ni marcas bidi de formato. El nombre
-objetivo coincide exactamente, incluidas mayúsculas/minúsculas. La barra `|`
-se reserva como separador en objetivo/asunto, pero cuerpo y motivo pueden
-conservarla. Las acciones
-textuales equivalentes son `mail [list [página]]`, `mail read/delete <ref>`,
-`mail send <personaje> | <asunto> | <cuerpo>` y
-`mail report <ref> | <motivo>`. Enviar comparte mute y bucket social; las
-demás operaciones no. Un `requestId` repetido solo reproduce la misma firma
-exacta y la respuesta estructurada privada pertenece a esa sesión.
+`mailId` is `m` followed by 32 lowercase hexadecimal digits; `page` is in
+1..7. Requesting a page past `totalPages` is valid and returns an empty list,
+which prevents a changing total from turning navigation into an error.
+Target/subject/body/reason are at most 64/128/2,048/2,048 visible UTF-8 bytes,
+with no controls or bidi formatting marks. The target name matches exactly,
+case included. The pipe `|` is reserved as a separator in target/subject, but
+body and reason may keep it. The equivalent text actions are
+`mail [list [page]]`, `mail read/delete <ref>`,
+`mail send <character> | <subject> | <body>` and
+`mail report <ref> | <reason>`. Sending shares the social mute and bucket; the
+other operations do not. A repeated `requestId` only replays the same exact
+signature, and the private structured response belongs to that session.
 
-Los tablones usan formas cerradas separadas:
+Boards use separate closed shapes:
 
-| Acción | Campos exactos adicionales |
+| Action | Exact additional fields |
 | --- | --- |
-| `board.catalog` | Ninguno |
+| `board.catalog` | None |
 | `board.list` | `board`, `page` |
 | `board.read` | `postId` |
 | `board.post` | `board`, `subject`, `body` |
 | `board.delete` | `postId` |
 | `board.report` | `postId`, `reason` |
 
-`board` es `general` o `newbie`; `postId` es `b` seguido de 32 dígitos
-hexadecimales minúsculos y `page` está en `1..=100`. Asunto, cuerpo y motivo
-ocupan como máximo 128/4.096/2.048 bytes UTF-8 visibles. Controles C0/C1, DEL y
-marcas bidi se rechazan. `|` se prohíbe en asunto porque separa el comando de
-texto, pero cuerpo y motivo pueden conservarlo. Las formas textuales exactas
-son `board`, `board list <general|newbie> [página]`, `board read/delete <ref>`,
-`board post <tablón> | <asunto> | <cuerpo>` y
-`board report <ref> | <motivo>`.
+`board` is `general` or `newbie`; `postId` is `b` followed by 32 lowercase
+hexadecimal digits and `page` is in `1..=100`. Subject, body and reason are at
+most 128/4,096/2,048 visible UTF-8 bytes. C0/C1 controls, DEL and bidi marks are
+rejected. `|` is forbidden in the subject because it separates the text command,
+but body and reason may keep it. The exact text shapes are `board`,
+`board list <general|newbie> [page]`, `board read/delete <ref>`,
+`board post <board> | <subject> | <body>` and
+`board report <ref> | <reason>`.
 
-Catálogo, lista y lectura no mutan ni se publican a otras sesiones. `post`
-comparte mute, ban y bucket social antes de la cuota durable propia; las demás
-acciones no. Un `requestId` repetido exige la misma firma, incluido todo el
-cuerpo, y solo reproduce la respuesta de aquella sesión.
+Catalog, list and read do not mutate nor publish to other sessions. `post`
+shares the social mute, ban and bucket before its own durable quota; the other
+actions do not. A repeated `requestId` requires the same signature, including
+the entire body, and only replays that session's response.
 
-El navegador registra de forma acotada `board.post`, `board.delete` y
-`board.report` pendientes y no aplica su efecto al mero envío. Espera el
-`action.result` cuyo `requestId` coincida: solo `ok: true` invalida la lista,
-retira el detalle borrado o marca la entrada como denunciada. Un fallo conserva
-la vista y los borradores; los formularios de publicación/denuncia bloquean un
-segundo envío mientras su solicitud siga pendiente.
+The browser records pending `board.post`, `board.delete` and `board.report` in a
+bounded way and does not apply their effect on the mere submission. It waits for
+the `action.result` whose `requestId` matches: only `ok: true` invalidates the
+list, removes the deleted detail or marks the entry as reported. A failure
+preserves the view and the drafts; the post/report forms block a second
+submission while their request is still pending.
 
-Salvo `staff.status`, que solo muestra la asignación propia, cada acción
-`staff.*` exige una capacidad concreta y `reason`; las acciones dirigidas
-vuelven a comprobar además la jerarquía en el actor. Un rol legado nunca basta.
-La resolución usa `reportId` positivo y `resolution`
-(`dismissed`, `action_taken` o `no_action`). `staff.profile.set` exige
-`target`, `profile` y `loreTitle`, donde estos dos últimos aceptan `null` para
-retirar la asignación o el título; los perfiles no nulos son `helper`,
-`builder`, `moderator`, `administrator` e `implementor`.
-`staff.capability.set` exige `target`, `enabled` y una capacidad de este
-vocabulario cerrado: `reports.view`, `reports.resolve`, `moderation.mute`,
+Except for `staff.status`, which only shows the caller's own assignment, every
+`staff.*` action requires a concrete capability and `reason`; targeted actions
+additionally recheck the hierarchy at the actor. A legacy role is never enough.
+Resolution uses a positive `reportId` and `resolution`
+(`dismissed`, `action_taken` or `no_action`). `staff.profile.set` requires
+`target`, `profile` and `loreTitle`, where the latter two accept `null` to
+remove the assignment or the title; the non-null profiles are `helper`,
+`builder`, `moderator`, `administrator` and `implementor`.
+`staff.capability.set` requires `target`, `enabled` and a capability from this
+closed vocabulary: `reports.view`, `reports.resolve`, `moderation.mute`,
 `moderation.ban`, `staff.assign`, `staff.inspect`, `staff.where`, `staff.goto`,
-`staff.transfer`, `staff.restore`, `staff.announce` o `staff.audit`. El objetivo
-está limitado a 64 bytes, el motivo a 1.024 y el título narrativo a 128. Los
-campos que no pertenecen a la acción se rechazan.
+`staff.transfer`, `staff.restore`, `staff.announce` or `staff.audit`. The target
+is limited to 64 bytes, the reason to 1,024 and the lore title to 128. Fields
+that do not belong to the action are rejected.
 
-Las acciones de objeto usan combinaciones cerradas de `target`, `container`,
-`recipient`, `quantity` y `page`. `quantity` es opcional, vale uno por defecto y
-debe estar en `1..=256`. `item.put`/`item.get` exigen ambos selectores opacos;
-`item.contents` exige `container`, admite una página positiva y prohíbe
-cantidad. `item.give` exige `target` y `recipient`, admite cantidad y prohíbe
-contenedor/página. `recipient` ocupa como máximo 64 bytes, no contiene controles
-y se rechaza para cualquier otra acción. Todos los campos admitidos forman
-parte de la firma de deduplicación:
+Item actions use closed combinations of `target`, `container`, `recipient`,
+`quantity` and `page`. `quantity` is optional, defaults to one and must be in
+`1..=256`. `item.put`/`item.get` require both opaque selectors; `item.contents`
+requires `container`, allows a positive page and forbids quantity. `item.give`
+requires `target` and `recipient`, allows quantity and forbids container/page.
+`recipient` is at most 64 bytes, contains no controls and is rejected for any
+other action. All accepted fields are part of the deduplication signature:
 
 ```json
 {"v":1,"type":"action.perform","data":{
@@ -446,45 +443,45 @@ parte de la firma de deduplicación:
 }}
 ```
 
-Para `item.give`, `target`, `recipient` y `quantity` participan en la firma.
-Repetir `requestId` con la misma firma devuelve el resultado cacheado sin
-reejecutar; cambiar cualquiera de esos valores con el mismo ID es un error de
-protocolo. Los selectores opacos pertenecen a la sesión que los creó; la caché
-continúa indexada por personaje/`requestId` y solo puede reproducir la misma
-firma exacta según las reglas generales descritas más abajo.
+For `item.give`, `target`, `recipient` and `quantity` participate in the
+signature. Repeating `requestId` with the same signature returns the cached
+result without re-executing; changing any of those values with the same ID is a
+protocol error. Opaque selectors belong to the session that created them; the
+cache stays indexed by character/`requestId` and can only replay the same exact
+signature per the general rules described below.
 
-Las acciones de botín tienen formas cerradas:
+Loot actions have closed shapes:
 
-| Acción | Campos exactos adicionales |
+| Action | Exact additional fields |
 | --- | --- |
-| `loot.status` | Ninguno |
+| `loot.status` | None |
 | `loot.pass` | `target` |
 
-`target` es el selector opaco o nombre exacto visible de una raíz reservada y
-ocupa como máximo 256 bytes sin controles. Forma parte de la firma de
-deduplicación; cambiarlo bajo el mismo `requestId` se rechaza. `loot.pass` solo
-puede ceder un derecho propio a la siguiente identidad de la cohorte congelada,
-no renueva el plazo y no revela esa identidad al cliente.
+`target` is the opaque selector or visible exact name of a reserved root and is
+at most 256 bytes with no controls. It is part of the deduplication signature;
+changing it under the same `requestId` is rejected. `loot.pass` can only cede an
+own right to the next identity in the frozen cohort, does not renew the deadline
+and does not reveal that identity to the client.
 
-Las recompensas selladas usan formas separadas y cerradas:
+Sealed rewards use separate, closed shapes:
 
-| Acción | Campos exactos adicionales |
+| Action | Exact additional fields |
 | --- | --- |
 | `reward.open` | `target` |
 | `reward.odds` | `target`, `page` |
 
-`target` identifica una recompensa sellada que el personaje lleva y `page` es
-positivo. Ambos forman parte de la firma de deduplicación. Los comandos de
-texto equivalentes, compartidos por Web y Telnet, son `open <selector>` y
-`reward odds <selector> [página]`; al omitir la página textual se usa la
-primera. Abrir vuelve a comprobar autoridad, espacio y peso y confirma en una
-sola mutación durable el consumo del sello y la creación de todo el resultado.
-Consultar probabilidades no muta el mundo.
+`target` identifies a sealed reward the character carries and `page` is
+positive. Both are part of the deduplication signature. The equivalent text
+commands, shared by Web and Telnet, are `open <selector>` and
+`reward odds <selector> [page]`; omitting the text page uses the first. Opening
+rechecks authority, space and weight and confirms, in a single durable mutation,
+the consumption of the seal and the creation of the entire result. Querying
+odds does not mutate the world.
 
-El intercambio confirmado usa estas formas cerradas; todo selector es opaco y
-pertenece a la sesión que lo proyectó:
+Confirmed trading uses these closed shapes; every selector is opaque and belongs
+to the session that projected it:
 
-| Acción | Campos exactos adicionales |
+| Action | Exact additional fields |
 | --- | --- |
 | `trade.request` | `recipient` |
 | `trade.accept` | `tradeId` |
@@ -497,24 +494,25 @@ pertenece a la sesión que lo proyectó:
 | `trade.status` | `tradeId` |
 | `trade.cancel` | `tradeId` |
 
-`quantity` vale `1..=128`, `coins` `0..=1.000.000.000`, `page` es positivo y
-`stateRevision` debe ser la revisión positiva exacta vista. La solicitud exige
-un receptor opaco conectado y cercano; las demás acciones exigen el trade
-opaco privado. Todos los campos forman parte de la firma de deduplicación.
-Repetir una asignación idéntica o una confirmación ya registrada por la misma
-identidad es un no-op; cambiar la firma bajo el mismo `requestId` se rechaza.
+`quantity` is `1..=128`, `coins` `0..=1,000,000,000`, `page` is positive and
+`stateRevision` must be the exact positive revision seen. The request requires a
+connected, nearby opaque recipient; the other actions require the private opaque
+trade. All fields are part of the deduplication signature. Repeating an
+identical assignment or a confirmation already recorded by the same identity is
+a no-op; changing the signature under the same `requestId` is rejected.
 
-Los comandos equivalentes son `trade request`, `trade accept|decline|status|cancel`,
-`trade offer item [cantidad]`, `trade remove item`, `trade offer coins`,
-`trade contents` y `trade confirm <revisión>`. El texto describe el estado sin
-depender de Web ni GMCP.
+The equivalent commands are `trade request`,
+`trade accept|decline|status|cancel`, `trade offer item [quantity]`,
+`trade remove item`, `trade offer coins`, `trade contents` and
+`trade confirm <revision>`. The text describes the state without depending on
+Web or GMCP.
 
-Los equivalentes de texto usan `party say` (`gsay`/`gtell`), `party revoke`,
+The text equivalents use `party say` (`gsay`/`gtell`), `party revoke`,
 `party kick`, `party transfer`, `party disband`, `reply`, `telepathy`, `emotes`,
-`emote <comando> [personaje]`, `channel(s)`, `channel join`, `channel leave` y
-`channel say`. Los alias `gossip`, `newbie` y
-`wiznet` envían a `general`, `newbie`, `staff`. Unirse, enviar o recibir
-`staff` exige perfil `moderator`, `administrator` o `implementor`.
+`emote <command> [character]`, `channel(s)`, `channel join`, `channel leave` and
+`channel say`. The aliases `gossip`, `newbie` and `wiznet` send to `general`,
+`newbie`, `staff`. Joining, sending to or receiving `staff` requires a
+`moderator`, `administrator` or `implementor` profile.
 
 An ability use has its own additive `abilityId` field; it does not overload the
 opaque target:
@@ -642,17 +640,17 @@ traffic.
 | `entity.upsert`, `entity.remove` | Changed visible item/NPC. |
 | `vitals.update` | Complete current character sheet/vitals/resources/abilities fragment. |
 | `inventory.patch` | Complete current inventory/equipment fragment. |
-| `container.contents` | Página autorizada de hasta 20 grupos hijos directos, con capacidad del contenedor. |
-| `trade.contents` | Página privada autorizada de hasta 20 grupos hijos directos de un contenedor ofrecido. |
-| `reward.odds` | Página privada de probabilidades exactas de una recompensa sellada portada. |
-| `mail.list` | Página privada de hasta diez cabeceras del buzón offline. |
-| `mail.message` | Carta privada completa marcada como leída. |
-| `board.catalog` | Dos descriptores públicos de tablón y permiso actual de publicación. |
-| `board.list` | Página pública de hasta diez resúmenes, solo para quien la solicita. |
-| `board.entry` | Publicación pública completa, solo para quien la solicita. |
+| `container.contents` | Authorized page of up to 20 direct child groups, with the container's capacity. |
+| `trade.contents` | Authorized private page of up to 20 direct child groups of an offered container. |
+| `reward.odds` | Private page of exact odds for a carried sealed reward. |
+| `mail.list` | Private page of up to ten headers from the offline mailbox. |
+| `mail.message` | Complete private letter marked as read. |
+| `board.catalog` | Two public board descriptors and the current posting permission. |
+| `board.list` | Public page of up to ten summaries, only for the requester. |
+| `board.entry` | Complete public post, only for the requester. |
 | `map.snapshot` | Complete current discovered map. |
 | `message.append` | Perception-filtered narrative domain event. |
-| `chat.message` | Entrega autorizada de `announcement`, `say`, `yell`, `shout`, `tell`, `telepathy`, `emote`, `party`, `general`, `newbie` o `staff`. |
+| `chat.message` | Authorized delivery of `announcement`, `say`, `yell`, `shout`, `tell`, `telepathy`, `emote`, `party`, `general`, `newbie` or `staff`. |
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
@@ -662,11 +660,10 @@ critical results. When a connection cannot drain critical output within the
 bounded queue/write timeout, the server closes it explicitly. An
 actor/broadcast lag is recovered with a notice and authoritative snapshots.
 
-Una entrega de dominio proyecta como máximo 16 eventos narrativos por batch.
-Si una ráfaga contiene más, Web y Telnet emiten un único aviso acotado,
-coalescen la narración excedente y conservan un snapshot autoritativo crítico;
-el cliente no debe inferir que el aviso sea un journal ni solicitar replay de
-los eventos omitidos.
+A domain delivery projects at most 16 narrative events per batch. If a burst
+contains more, Web and Telnet emit a single bounded notice, coalesce the excess
+narration and preserve a critical authoritative snapshot; the client must not
+infer that the notice is a journal nor request replay of the omitted events.
 
 Before `server.welcome`, a rejected connection is reported as the typed error
 notice documented under the authenticated handshake. Codes after welcome are
@@ -726,23 +723,22 @@ IDs. Scene revision belongs to the authorized view. Hidden items/NPCs/exits,
 private flags, author variant IDs and conditions are filtered before this
 payload exists.
 
-`loot` solo aparece en un objeto de suelo con derecho exclusivo. Su forma es
-`{"access":"yours","expiresInTicks":1..20}` para el beneficiario o
-`{"access":"reserved"}` para cualquier tercero; un objeto público omite el
-campo. El servidor elimina `Take`/`Pass` cuando el observador no puede usarlos.
-Nunca se proyectan `CharacterId`, `PartyId`, cohorte, drop, tabla, digest o
-procedencia durable. Las pilas se particionan por acceso antes de asignar su
-selector, por lo que una referencia no mezcla unidades propias, reservadas y
-públicas.
+`loot` appears only on a ground item with an exclusive right. Its shape is
+`{"access":"yours","expiresInTicks":1..20}` for the beneficiary or
+`{"access":"reserved"}` for any third party; a public item omits the field. The
+server removes `Take`/`Pass` when the observer cannot use them. `CharacterId`,
+`PartyId`, cohort, drop, table, digest and durable provenance are never
+projected. Stacks are partitioned by access before their selector is assigned,
+so a reference never mixes own, reserved and public units.
 
-La autoría limita el título de sala a 128 bytes y la descripción a 8.192
-bytes. Además, antes de serializar, Web reduce cada escena a una ventana
-semántica de 14 KiB y Telnet a 48 KiB. El orden de retención es determinista:
-botín propio, objetos públicos y botín reservado ajeno, seguido del resto de
-entidades/prosa según el presupuesto. Toda reducción añade un aviso textual y
-la siguiente proyección autoritativa revela gradualmente el contenido restante.
-La ventana Web deja margen para el envelope físico de 16 KiB; no aumenta ese
-límite de frame.
+Authoring limits the room title to 128 bytes and the description to 8,192 bytes.
+In addition, before serializing, Web reduces each scene to a 14 KiB semantic
+window and Telnet to 48 KiB. The retention order is deterministic: own loot,
+public items and others' reserved loot, followed by the rest of the
+entities/prose as the budget allows. Any reduction adds a textual notice and the
+next authoritative projection gradually reveals the remaining content. The Web
+window leaves room for the physical 16 KiB envelope; it does not raise that
+frame limit.
 
 `image` is optional. Its content-addressed root-relative URLs and contextual
 localized alt text are presentation only. The official client resolves exact
@@ -997,9 +993,9 @@ The rest of the snapshot contains:
 - optional `trade`: one private requested/negotiating trade with opaque ID and
   counterparty, ticks remaining, revision, both confirmation flags, both
   bounded offers and `canAccept`/`canConfirm`;
-- `social.online`: ID opaco, nombre visible y booleanos `selfCharacter` y
-  `nearby`. `nearby` solo ayuda a construir selectores de receptor; el servidor
-  vuelve a comprobar conexión y sala al ejecutar.
+- `social.online`: opaque ID, visible name and the `selfCharacter` and `nearby`
+  booleans. `nearby` only helps build recipient selectors; the server rechecks
+  connection and room on execution.
 
 Quest/commodity slugs are stable public content identifiers rather than hidden
 world entity IDs. Persistence-only moderation/account state and private script
@@ -1022,128 +1018,127 @@ resistance at most 90 percent; cooldown/status duration at most 10,000 ticks.
 These are projection/parser limits, not policy hints for clients to bypass
 server validation.
 
-Los objetos de escena, inventario, equipo y contenidos conservan
-`weightGrams` como peso unitario y añaden `quantity`, `stackSlots` y
-`totalWeightGrams`. Una instancia contenedor añade `containerCapacity` con
-slots/peso usados y máximos. Una pila no es identidad wire durable: su selector
-opaco representa el grupo visible actual y puede cambiar al variar sesión,
-ubicación o miembros. `container.contents` contiene `container`, `page`,
-`totalPages`, `capacity` e `items`; cada página incluye como máximo veinte
-grupos y debe caber en el límite normal de 16 KiB.
+Scene, inventory, equipment and contents items keep `weightGrams` as the unit
+weight and add `quantity`, `stackSlots` and `totalWeightGrams`. A container
+instance adds `containerCapacity` with used and maximum slots/weight. A stack is
+not durable wire identity: its opaque selector represents the current visible
+group and may change when the session, location or members vary.
+`container.contents` contains `container`, `page`, `totalPages`, `capacity` and
+`items`; each page includes at most twenty groups and must fit within the normal
+16 KiB limit.
 
-Una unidad única modificada añade `affix` con `label`, `position`
-(`prefix` o `suffix`), `attackBonusDelta` y `healAmountDelta`. El nombre
-proyectado de ese objeto ya incorpora el prefijo o sufijo. La vista nunca
-publica el ID de definición, el pool, hashes ni procedencia durable del afijo;
-el modificador es presentación y estadística autorizadas, no autoridad de
-autoría. Los objetos sin modificador omiten `affix`.
+A modified unique unit adds `affix` with `label`, `position` (`prefix` or
+`suffix`), `attackBonusDelta` and `healAmountDelta`. That item's projected name
+already incorporates the prefix or suffix. The view never publishes the affix's
+definition ID, pool, hashes or durable provenance; the modifier is authorized
+presentation and statistics, not authoring authority. Items with no modifier
+omit `affix`.
 
-En inventario, `availableQuantity` y `reservedForTrade` separan unidades
-mutables de las reservadas y `canTrade` solo propone raíces completamente
-transferibles no bloqueadas. La oferta proyecta líneas agrupadas con selector,
-etiqueta, cantidad y marca de contenedor, sin `ItemInstanceId`, prototipo ni
-participante durable. `trade.contents` contiene `tradeId`, `container`, `page`,
-`totalPages`, `capacity` e `items`. La vista y cada selector se regeneran con
-la sal de la sesión; la contraparte no recibe IDs internos ni política social.
+In inventory, `availableQuantity` and `reservedForTrade` separate mutable units
+from reserved ones and `canTrade` only proposes fully transferable, unlocked
+roots. The offer projects grouped lines with selector, label, quantity and
+container mark, without `ItemInstanceId`, prototype or durable participant.
+`trade.contents` contains `tradeId`, `container`, `page`, `totalPages`,
+`capacity` and `items`. The view and each selector are regenerated with the
+session's salt; the counterparty receives no internal IDs or social policy.
 
-Cada objeto incluye obligatoriamente `transferPolicy`, con valor
-`transferable`, `character_bound` o `non_transferable`, y el booleano
-`boundToYou`. Este último solo puede ser verdadero para `character_bound` y
-nunca revela el `CharacterId` durable del propietario. Los objetos de inventario
-añaden el booleano obligatorio `canGive`, calculado sobre todo el subárbol; un
-contenido de contenedor siempre lleva `canGive: false` porque no es una raíz
-portada directamente, y el equipo no publica ese campo. Las acciones
-autorizadas siguen indicando `Drop`; `canGive`, no una acción textual
-incompleta, decide si el cliente ofrece `Give`.
+Every item mandatorily includes `transferPolicy`, with value `transferable`,
+`character_bound` or `non_transferable`, and the boolean `boundToYou`. The
+latter can only be true for `character_bound` and never reveals the owner's
+durable `CharacterId`. Inventory items add the mandatory boolean `canGive`,
+computed over the entire subtree; a container's content always carries
+`canGive: false` because it is not a directly carried root, and equipment does
+not publish that field. The authorized actions still list `Drop`; `canGive`, not
+an incomplete text action, decides whether the client offers `Give`.
 
-En GMCP, `Char.Items.List` proyecta `transferPolicy` y `boundToYou` para
-`location: "inv"`, `"worn"` y `"container"`. Inventario y contenedor incluyen
-también `canGive`; inventario añade disponibilidad/reserva y `canTrade`, y en
-contenedor entrega/trade siempre son falsos. `Char.Trade 1` y
-`Char.Trade.Contents` proyectan el mismo estado privado y los mismos fallbacks
-acotados que el texto. Cada regeneración usa la sal de la sesión Telnet y no
-transporta vínculo, propietario, trade ni instancia durables.
+In GMCP, `Char.Items.List` projects `transferPolicy` and `boundToYou` for
+`location: "inv"`, `"worn"` and `"container"`. Inventory and container also
+include `canGive`; inventory adds availability/reservation and `canTrade`, and in
+a container give/trade are always false. `Char.Trade 1` and
+`Char.Trade.Contents` project the same private state and the same bounded
+fallbacks as the text. Each regeneration uses the Telnet session's salt and
+carries no durable binding, owner, trade or instance.
 
-Una respuesta Web `reward.odds` contiene `selector`, `page`, `totalPages` y
-tres listas cuya suma no supera veinte filas por página: `guaranteed`,
-`weighted` y `affixes`. Las filas garantizadas exponen etiqueta y cantidad;
-las ponderadas exponen etiqueta de pool, tiradas, etiqueta del resultado,
-cantidad mínima/máxima y `probabilityNumerator`/`probabilityDenominator`; las
-de afijo exponen resultado padre, etiqueta, posición y deltas, junto con
+A Web `reward.odds` response contains `selector`, `page`, `totalPages` and three
+lists whose sum does not exceed twenty rows per page: `guaranteed`, `weighted`
+and `affixes`. Guaranteed rows expose label and quantity; weighted ones expose
+pool label, rolls, result label, minimum/maximum quantity and
+`probabilityNumerator`/`probabilityDenominator`; affix ones expose parent
+result, label, position and deltas, along with
 `conditionalProbabilityNumerator`/`conditionalProbabilityDenominator`.
-`nothing` es una fila explícita cuando corresponde. Las fracciones enteras son
-el contrato exacto: el cliente puede mostrar además un porcentaje calculado,
-pero no sustituirlas por redondeos. `affixPoolLabel` es solo una etiqueta
-revisada opcional; no es un identificador y no debe usarse para acciones.
+`nothing` is an explicit row when applicable. The integer fractions are the
+exact contract: the client may additionally show a computed percentage, but must
+not replace them with rounding. `affixPoolLabel` is only an optional reviewed
+label; it is not an identifier and must not be used for actions.
 
-Telnet siempre recibe la misma información jugable en texto. Si negocia
-`Char.Reward 1`, recibe además `Char.Reward.Odds` con la misma página, las
-fracciones exactas y la revisión privada. Cada paquete conserva el límite GMCP
-de 8 KiB; ante un exceso se acotan solo etiquetas y se añaden
-`truncated: true` y `overflow.reason: "messageTooLarge"`, sin eliminar
-selectores, filas, deltas ni numeradores/denominadores.
+Telnet always receives the same playable information in text. If it negotiates
+`Char.Reward 1`, it additionally receives `Char.Reward.Odds` with the same page,
+the exact fractions and the private revision. Each package keeps the 8 KiB GMCP
+limit; on overflow only labels are bounded and `truncated: true` and
+`overflow.reason: "messageTooLarge"` are added, without removing selectors,
+rows, deltas or numerators/denominators.
 
-`mail.list` contiene `page`, `totalPages`, `totalMessages`, `unreadCount`,
-`capacity: 64` y hasta diez filas `{id,sender,subject,createdAt,expiresAt,read}`.
-`mail.message` añade `body`. Los tiempos son segundos Unix; el cuerpo nunca
-entra en la lista. Referencias y campos están acotados antes de serializar y
-no exponen cuentas, personajes o claves SQL. Telnet ofrece texto equivalente;
-si negocia `Tiamud.Mail 1`, recibe `Tiamud.Mail.List` o
-`Tiamud.Mail.Message`, cada paquete bajo el límite GMCP de 8 KiB. Como defensa
-en profundidad, si un valor interno no canónico hiciera crecer el JSON
-escapado, `Tiamud.Mail.Message` conserva cabecera, prefijo UTF-8 del cuerpo,
-`truncated: true` y el mismo objeto `overflow` descrito para tablones; el input
-canónico de correo limita el cuerpo a 2.048 bytes y normalmente cabe completo.
+`mail.list` contains `page`, `totalPages`, `totalMessages`, `unreadCount`,
+`capacity: 64` and up to ten rows
+`{id,sender,subject,createdAt,expiresAt,read}`. `mail.message` adds `body`. Times
+are Unix seconds; the body never enters the list. References and fields are
+bounded before serializing and do not expose accounts, characters or SQL keys.
+Telnet offers equivalent text; if it negotiates `Tiamud.Mail 1`, it receives
+`Tiamud.Mail.List` or `Tiamud.Mail.Message`, each package under the 8 KiB GMCP
+limit. As defense in depth, if a non-canonical internal value were to grow the
+escaped JSON, `Tiamud.Mail.Message` keeps the header, the body's UTF-8 prefix,
+`truncated: true` and the same `overflow` object described for boards; the
+canonical mail input limits the body to 2,048 bytes and normally fits in full.
 
-`board.catalog` contiene `retentionDays: 90` y exactamente dos filas
-`{key,label,description,canPost}` para `general` y `newbie`. `board.list`
-contiene `board`, `page`, `totalPages`, `totalPosts`, `capacity: 1000` y hasta
-diez resúmenes `{postId,board,author,subject,createdAt,expiresAt,canDelete,
-canReport}`. `totalPages` nunca es menor que uno; una página válida posterior
-al total contiene `posts: []`. `board.entry` contiene el mismo resumen más
-`body`. `canDelete` se calcula para el mismo personaje autor y `canReport` para
-otra cuenta mientras no exista la denuncia global.
+`board.catalog` contains `retentionDays: 90` and exactly two rows
+`{key,label,description,canPost}` for `general` and `newbie`. `board.list`
+contains `board`, `page`, `totalPages`, `totalPosts`, `capacity: 1000` and up to
+ten summaries `{postId,board,author,subject,createdAt,expiresAt,canDelete,
+canReport}`. `totalPages` is never less than one; a valid page past the total
+contains `posts: []`. `board.entry` contains the same summary plus `body`.
+`canDelete` is computed for the same author character and `canReport` for another
+account while the global report does not yet exist.
 
-Las respuestas no contienen cuenta, personaje durable, PK SQL, estado de
-ignore/block ni cuerpo en el listado. Svelte inserta sus cadenas como texto,
-sin HTML, Markdown o autolinks. Telnet ofrece el equivalente textual; si
-negocia `Tiamud.Board 1`, recibe `Tiamud.Board.Catalog`, `.List` o `.Entry`,
-cada paquete bajo 8 KiB contando paquete, espacio y JSON. Si el detalle
-completo excede ese máximo por escape JSON, `Tiamud.Board.Entry` conserva el
-resumen y el mayor prefijo UTF-8 de `body` que quepa, añade
-`truncated: true` y
+The responses contain no account, durable character, SQL PK, ignore/block state
+or body in the listing. Svelte inserts its strings as text, with no HTML,
+Markdown or autolinks. Telnet offers the textual equivalent; if it negotiates
+`Tiamud.Board 1`, it receives `Tiamud.Board.Catalog`, `.List` or `.Entry`, each
+package under 8 KiB counting package, space and JSON. If the complete detail
+exceeds that maximum due to JSON escaping, `Tiamud.Board.Entry` keeps the
+summary and the largest UTF-8 prefix of `body` that fits, adds `truncated: true`
+and
 `overflow: {package:"Tiamud.Board.Entry",maximumBytes:8192,originalBytes}`.
-`originalBytes` mide el cuerpo UTF-8 previo al escape. El texto Telnet conserva
-el cuerpo completo. Los tablones no producen `chat.message`, `message.append`
-ni notificación online.
+`originalBytes` measures the UTF-8 body prior to escaping. The Telnet text keeps
+the full body. Boards produce no `chat.message`, `message.append` or online
+notification.
 
 `vitals.update`, `inventory.patch` and `map.snapshot` replace their complete
 corresponding fragment at the stated revision. Other player changes use a new
 `player.snapshot`. A full scene/player snapshot may follow semantic updates to
 keep recovery deterministic under output coalescing.
 
-## Narrativa, conversación y medios
+## Narrative, conversation and media
 
-`message.append.data` contiene `revision`, `kind` (`characterMoved`,
+`message.append.data` contains `revision`, `kind` (`characterMoved`,
 `itemTaken`, `itemDropped`, `itemGiven`, `tradeRequested`, `tradeChanged`,
-`tradeCompleted`, `tradeCancelled`, `gameplay` o `adventure`), texto seguro,
-`actorId` opaco y `targetId`/`itemId` opacos opcionales. Se proyecta por separado
-para cada observador; no percibir un evento de dominio significa no recibir
-mensaje.
+`tradeCompleted`, `tradeCancelled`, `gameplay` or `adventure`), safe text,
+opaque `actorId` and optional opaque `targetId`/`itemId`. It is projected
+separately for each observer; not perceiving a domain event means not receiving
+a message.
 
-Para `itemGiven`, `actorId` identifica al emisor y `targetId` al receptor con la
-sal propia del observador. Emisor y receptor reciben además `itemId`, derivado
-con su sesión de la primera raíz transferida; no se promete que sea una
-identidad durable de pila. Otro observador de la misma sala recibe la narración
-y los personajes opacos, pero no `itemId`; un observador remoto no recibe el
-evento. El evento durable `ItemsGiven` conserva como máximo 256 IDs de raíces
-internos, nunca expuestos por este mensaje.
+For `itemGiven`, `actorId` identifies the sender and `targetId` the recipient
+with the observer's own salt. Sender and recipient additionally receive
+`itemId`, derived with their session from the first transferred root; it is not
+promised to be a durable stack identity. Another observer in the same room
+receives the narration and the opaque characters, but not `itemId`; a remote
+observer does not receive the event. The durable `ItemsGiven` event keeps at
+most 256 internal root IDs, never exposed by this message.
 
-Solicitud, cambio, confirmación y cancelación de trade solo producen narrativa
-para sus dos participantes; `tradeCompleted` añade una narración genérica para
-observadores de la misma sala. Ningún mensaje expone ofertas, cantidades,
-moneda, motivo social, `TradeId` o IDs de instancia. La ficha privada y las
-actualizaciones de inventario/economía llevan el estado autoritativo.
+Trade request, change, confirmation and cancellation produce narrative only for
+their two participants; `tradeCompleted` adds a generic narration for observers
+in the same room. No message exposes offers, quantities, currency, social
+reason, `TradeId` or instance IDs. The private sheet and the inventory/economy
+updates carry the authoritative state.
 
 ```json
 {"v":1,"type":"message.append","seq":52,"data":{
@@ -1156,69 +1151,66 @@ actualizaciones de inventario/economía llevan el estado autoritativo.
 }}
 ```
 
-Telnet conserva la narración textual completa. Si negoció `Char.Items`, emisor
-y receptor reciben listas de inventario regeneradas independientemente con su
-propia sal; el observador de sala no recibe una lista ajena.
+Telnet keeps the full textual narration. If it negotiated `Char.Items`, sender
+and recipient receive inventory lists regenerated independently with their own
+salt; the room observer does not receive someone else's list.
 
-`chat.message.data` contiene `channel` (`announcement`, `say`, `yell`, `shout`,
-`tell`, `telepathy`, `emote`, `party`, `general`, `newbie` o `staff`), `sender` y texto plano
-acotado.
-Ignore y block
-por cualquiera de las partes se aplican antes de entregar. Mute/ban y rate
-limit se aplican en servidor. `general`, `newbie` y `staff` requieren
-suscripción durable en esquema v13; `staff` exige además perfil `moderator`,
-`administrator` o `implementor` al unirse, enviar y recibir. `helper`,
-`builder` y los roles legados `Player`/`Moderator`/`Admin` no conceden ese
-acceso. `announcement` es entrega del servidor, no un canal suscribible. La
-suscripción es durable, pero el estado de `reply` y el historial son solo
-memoria.
+`chat.message.data` contains `channel` (`announcement`, `say`, `yell`, `shout`,
+`tell`, `telepathy`, `emote`, `party`, `general`, `newbie` or `staff`), `sender`
+and bounded plain text. Ignore and block by either party are applied before
+delivery. Mute/ban and rate limit are applied on the server. `general`, `newbie`
+and `staff` require a durable subscription in schema v13; `staff` additionally
+requires a `moderator`, `administrator` or `implementor` profile when joining,
+sending and receiving. `helper`, `builder` and the legacy roles
+`Player`/`Moderator`/`Admin` do not grant that access. `announcement` is server
+delivery, not a subscribable channel. The subscription is durable, but the
+`reply` state and the history are memory only.
 
-`telepathy` procede de `social.telepathy`, no de `tell`: el actor debe conocer
-la habilidad, pagar recurso y cooldowns, y estar en una sala permitida. El
-servidor confirma esa mutación antes de entregar. Ignore/block y la sala o el
-estado privado del receptor pueden suprimir la entrega sin cambiar la
-confirmación del emisor. El cuerpo, destino y `abilityId` no se incluyen en
-eventos durables; la recepción no modifica el destinatario de `reply`.
+`telepathy` comes from `social.telepathy`, not from `tell`: the actor must know
+the ability, pay resource and cooldowns, and be in a permitted room. The server
+confirms that mutation before delivering. Ignore/block and the recipient's room
+or private state may suppress delivery without changing the sender's
+confirmation. The body, destination and `abilityId` are not included in durable
+events; reception does not change the `reply` target.
 
-`emote` procede de `social.emote`: `sender` identifica al actor y `text`
-contiene la frase completa ya renderizada para ese observador. El cliente no
-antepone otra vez el remitente. El comando y nombre son descubribles mediante
-el listado, pero la plantilla, el objetivo y los IDs no se exponen como campos
-estructurados del mensaje; el nombre visible del objetivo puede formar parte
-del texto renderizado. Ignore/block puede suprimir receptores sin
-cambiar la confirmación del actor ni la percepción autorizada de terceros.
-No crea historial, `reply`, evento durable, snapshot o fila SQL.
+`emote` comes from `social.emote`: `sender` identifies the actor and `text`
+contains the complete phrase already rendered for that observer. The client does
+not prepend the sender again. The command and name are discoverable through the
+listing, but the template, the target and the IDs are not exposed as structured
+message fields; the target's visible name may be part of the rendered text.
+Ignore/block may suppress recipients without changing the actor's confirmation
+or third parties' authorized perception. It creates no history, `reply`, durable
+event, snapshot or SQL row.
 
-`yell` y `shout` proceden únicamente de `social.yell` y `social.shout`. El
-servidor calcula un BFS dirigido y determinista que incluye la sala origen:
-radio uno para `yell`, radio tres para `shout`, máximo 259 salas únicas y cero
-travesías de salidas secretas. El mensaje no contiene dirección, distancia,
-ruta ni sala de origen. Ignore, block bilateral y `condition.deaf` suprimen la
-copia de cada receptor para `say`/`yell`/`shout`; la sordera no impide emitir y
-la confirmación del actor no cambia. Mute y el bucket común se comprueban antes
-de ejecutar `OnTalk` una sola vez en origen. Solo un commit correcto inicia el
-fan-out; rollback entrega cero copias. No existe retención, replay,
-suscripción, `reply`, SQL o snapshot para estos canales.
+`yell` and `shout` come only from `social.yell` and `social.shout`. The server
+computes a directed, deterministic BFS that includes the origin room: radius one
+for `yell`, radius three for `shout`, at most 259 unique rooms and zero
+traversals of secret exits. The message contains no direction, distance, route
+or origin room. Ignore, bilateral block and `condition.deaf` suppress each
+recipient's copy for `say`/`yell`/`shout`; deafness does not prevent speaking
+and the actor's confirmation does not change. Mute and the common bucket are
+checked before running `OnTalk` once at the origin. Only a successful commit
+starts the fan-out; rollback delivers zero copies. There is no retention,
+replay, subscription, `reply`, SQL or snapshot for these channels.
 
-`mail` no es un `chat.message`: se consulta bajo demanda y persiste hasta 30
-días en un buzón de 64 mensajes/128 KiB. La cuota por cuenta es 20 intentos por
-hora y 50 por día. Una entrega suprimida por ignore/block, ban o capacidad usa
-la misma aceptación que un guardado; un objetivo desconocido, ambiguo o propio
-usa un único error genérico. Solo el destinatario lista, lee, borra o denuncia.
-Una denuncia captura evidencia durante 90 días sin habilitar exploración
-general de buzones por staff. Cada cuenta admite como máximo ocho denuncias de
-correo abiertas y el sistema conserva hasta 10.000 evidencias activas.
+`mail` is not a `chat.message`: it is queried on demand and persists up to 30
+days in a 64-message/128 KiB mailbox. The per-account quota is 20 attempts per
+hour and 50 per day. A delivery suppressed by ignore/block, ban or capacity uses
+the same acceptance as a save; an unknown, ambiguous or own target uses a single
+generic error. Only the recipient lists, reads, deletes or reports. A report
+captures evidence for 90 days without enabling general mailbox browsing by
+staff. Each account allows at most eight open mail reports and the system keeps
+up to 10,000 active pieces of evidence.
 
-La decisión de persistencia, privacidad y retención completa está en
+The full persistence, privacy and retention decision is in
 [ADR 0017](../decisions/0017-bounded-offline-mail.md).
 
-Telnet representa el mismo `SocialMessage` autorizado como texto acotado. Si
-negoció GMCP `Comm`, recibe también `Comm.Channel.Text` con el mismo alcance,
-incluidos `announcement`, `yell` y `shout`, y los campos
-`talker` y `text`; GMCP no evita
-autorización ni crea otra fuente de verdad. Cuando MXP está negociado, texto,
-remitentes y narrativa de dominio se escapan como datos exactamente una vez;
-texto plano y el JSON GMCP conservan el contenido original.
+Telnet represents the same authorized `SocialMessage` as bounded text. If it
+negotiated GMCP `Comm`, it also receives `Comm.Channel.Text` with the same
+scope, including `announcement`, `yell` and `shout`, and the `talker` and `text`
+fields; GMCP does not bypass authorization nor create another source of truth.
+When MXP is negotiated, text, senders and domain narrative are escaped as data
+exactly once; plain text and the GMCP JSON keep the original content.
 
 Audio messages are sent only when `client.hello.capabilities.audio` is true:
 
@@ -1257,25 +1249,25 @@ rendering remains authoritative and is never removed by this fallback.
 ## Limits and failure policy
 
 - HTTP/WS body, frame and message: 16 KiB.
-- escena semántica antes del envelope: 14 KiB en Web; escena semántica usada
-  para texto/GMCP/celdas: 48 KiB en Telnet. Una reducción conserva primero
-  botín propio, público y reservado ajeno y siempre publica aviso;
-- eventos proyectados por batch: 16; un exceso se coalesce con aviso y
-  snapshot autoritativo;
+- semantic scene before the envelope: 14 KiB on Web; semantic scene used for
+  text/GMCP/cells: 48 KiB on Telnet. A reduction keeps own, public and others'
+  reserved loot first and always publishes a notice;
+- projected events per batch: 16; an overflow is coalesced with a notice and an
+  authoritative snapshot;
 - Every post-authentication outbound WebSocket envelope is compact-serialized
   and checked against that same 16 KiB limit before entering the output queue.
-  La escena ya se reduce a su ventana semántica; cualquier envelope restante o
-  proyección privada individual que aún exceda el límite falla de forma cerrada
-  con motivo explícito y
+  The scene is already reduced to its semantic window; any remaining envelope or
+  individual private projection that still exceeds the limit fails closed with an
+  explicit reason and a
   `tiamud_outbound_budget_exceeded_total{transport="websocket",message="frame"}`
   increment rather than emitting an invalid frame.
 - JSON nesting: 16.
-- `command.submit` WebSocket: 1.024 bytes; línea de comando Telnet: 8 KiB,
-  descartada completa si excede el máximo; request ID: 128; action target: 256;
+- `command.submit` WebSocket: 1,024 bytes; Telnet command line: 8 KiB, discarded
+  entirely if it exceeds the maximum; request ID: 128; action target: 256;
   `recipient`: 64.
 - chat: 512 bytes; mail target/subject/body/report reason: 64/128/2,048/2,048
-  bytes; board subject/body/report reason: 128/4,096/2,048 bytes, diez posts
-  por página y páginas 1..=100; reason fields and all projected arrays/strings
+  bytes; board subject/body/report reason: 128/4,096/2,048 bytes, ten posts
+  per page and pages 1..=100; reason fields and all projected arrays/strings
   are bounded.
 - initial hello timeout: 10 seconds; WebSocket write timeout: 5 seconds.
 - three consecutive protocol/rate violations close the game session.

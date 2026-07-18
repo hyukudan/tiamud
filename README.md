@@ -3,139 +3,135 @@
 </h1>
 
 <p align="center">
-  <a href="https://github.com/hyukudan/tiamud/actions/workflows/ci.yml"><img src="https://github.com/hyukudan/tiamud/actions/workflows/ci.yml/badge.svg" alt="Integración continua"></a>
-  <a href="#licencia"><img src="https://img.shields.io/badge/licencia-MIT%20OR%20Apache--2.0-blue.svg" alt="Licencia: MIT OR Apache-2.0"></a>
+  <a href="https://github.com/hyukudan/tiamud/actions/workflows/ci.yml"><img src="https://github.com/hyukudan/tiamud/actions/workflows/ci.yml/badge.svg" alt="Continuous integration"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/MSRV-Rust%201.88-b7410e.svg" alt="MSRV: Rust 1.88"></a>
 </p>
 
-![Panorámica pictórica del cruce medieval de Tiamud al anochecer, con la lluvia reflejada en el camino, un farol azul y varias rutas hacia una ciudad distante.](docs/images/tiamud-hero.webp)
+![Panoramic painterly view of Tiamud's medieval crossroads at dusk, rain reflected on the road, a blue lantern and several routes toward a distant city.](docs/images/tiamud-hero.webp)
 
-**Motor narrativo multijugador orientado al navegador y completamente jugable
-como texto.**
+**A browser-first multiplayer narrative engine that is fully playable as text.**
 
-Tiamud es un motor en Rust, aún en prelanzamiento, para crear mundos
-multijugador persistentes. Está inspirado en EnvyMUD, Merc y la tradición de
-los MUD clásicos, pero es una implementación nueva. El cliente web oficial
-añade ilustración atmosférica, audio y controles accesibles; cada hecho y cada
-acción jugable siguen disponibles mediante prosa y estado estructurado. Un
-cliente Telnet básico continúa siendo una forma de juego de primera clase.
+Tiamud is a pre-release Rust engine for building persistent multiplayer worlds.
+It is inspired by EnvyMUD, Merc and the classic MUD tradition, but it is a new
+implementation. The official web client adds atmospheric artwork, audio and
+accessible controls; every fact and every playable action stays available
+through prose and structured state. A plain Telnet client remains a
+first-class way to play.
 
-El proyecto está diseñado primero para **un único equipo**. Un proceso sirve el
-mundo, el navegador y Telnet en un host corriente. PostgreSQL es el perfil
-recomendado para una instalación pública nueva; SQLite es la ruta implementada
-sin configuración para desarrollo, juego local y compatibilidad. Cada servidor
-abre exactamente un sistema de persistencia y nunca escribe en ambos. El
-baseline no requiere Kubernetes, Redis, almacenamiento de objetos ni IA.
+The project is designed for a **single machine** first. One process serves the
+world, the browser and Telnet on an ordinary host. PostgreSQL is the
+recommended profile for a fresh public install; SQLite is the implemented,
+zero-configuration path for development, local play and compatibility. Each
+server opens exactly one persistence system and never writes to both. The
+baseline needs no Kubernetes, Redis, object storage or AI.
 
-> Tiamud está en desarrollo activo. Existe cobertura automatizada amplia, pero
-> todavía no hay un despliegue público de producción ni una versión estable del
-> protocolo. La [matriz de completitud](docs/project/COMPLETION_MATRIX.md)
-> distingue implementación, evidencia retenida y aceptación pendiente.
+> Tiamud is under active development. Automated coverage is broad, but there is
+> still no public production deployment and no stable protocol version. The
+> [completion matrix](docs/project/COMPLETION_MATRIX.md) distinguishes
+> implementation, retained evidence and pending acceptance.
 
-## Contenido
+## Contents
 
-- [Qué funciona hoy](#qué-funciona-hoy)
-- [Arquitectura](#arquitectura)
-- [Inicio rápido](#inicio-rápido)
-- [Despliegue en un único equipo](#despliegue-en-un-único-equipo)
-- [Personajes, clases y progresión](#personajes-clases-y-progresión)
-- [Sistemas sociales, staff e inventario](#sistemas-sociales-staff-e-inventario)
-- [Escenas y multimedia](#escenas-y-multimedia)
-- [Autoría: WorldPack y AreaPack](#autoría-worldpack-y-areapack)
-- [Accesibilidad y seguridad](#accesibilidad-y-seguridad)
-- [IA opcional](#ia-opcional)
-- [Verificación](#verificación)
-- [Estado y hoja de ruta](#estado-y-hoja-de-ruta)
-- [Mapa del repositorio](#mapa-del-repositorio)
-- [Documentación](#documentación)
-- [Contribuir](#contribuir)
-- [Licencia](#licencia)
+- [What works today](#what-works-today)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Single-machine deployment](#single-machine-deployment)
+- [Characters, classes and progression](#characters-classes-and-progression)
+- [Social, staff and inventory systems](#social-staff-and-inventory-systems)
+- [Scenes and media](#scenes-and-media)
+- [Authoring: WorldPack and AreaPack](#authoring-worldpack-and-areapack)
+- [Accessibility and security](#accessibility-and-security)
+- [Optional AI](#optional-ai)
+- [Verification](#verification)
+- [Status and roadmap](#status-and-roadmap)
+- [Repository map](#repository-map)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
-## Qué funciona hoy
+## What works today
 
-- **Mundo persistente:** cuentas, personajes, salas, objetos, NPC, equipo,
-  combate, misiones, grupos, economía, tiempo lógico y clima. Los objetos
-  separan prototipos reutilizables e instancias durables, con capacidad por
-  slots/peso, pilas fungibles derivadas, contenedores acotados, botín fijo y
-  repetible, `give`, políticas de transferencia y trade bilateral confirmado.
-- **Personajes definidos por datos:** el modelo v3 modela linajes, trasfondo
-  opcional, clases base y avanzadas, curva global de XP, talentos con rango y
-  promociones atómicas. Atributos, recursos, resistencias, cooldowns y estados
-  están acotados.
-- **Grupos y conversación:** `say` local, `tell`/`reply` online, telepatía
-  directa como habilidad authored, emotes de sala definidos por el mundo, chat
-  y ciclo de grupo acotado, canales `general`/`newbie`/`staff`, correo offline
-  privado y tablones públicos `general`/`newbie`. La voz espacial `yell`/`shout`
-  (fase 5E) usa alcance dirigido y acotado sin revelar la topología del mundo.
-- **Staff por capacidades:** cinco perfiles operativos, doce capacidades
-  cerradas, cola/resolución de reportes, acciones de diagnóstico/reparación y
-  auditoría append-only. Ni título narrativo, XP, clase, WorldPack ni el rol
-  legado autorizan comandos.
-- **Una ruta autoritativa:** navegador y Telnet producen las mismas
-  `PlayerAction`, pasan por las mismas reglas y mutan un único actor de mundo.
-- **Clientes web y terminal:** Svelte 5 instalable como PWA; Telnet plano/ANSI;
-  GMCP, MSSP, MCCP2, MXP/MSLP opcional; integraciones TinTin++ y Mudlet.
-- **Multimedia segura:** imagen de escena y audio opcionales, recursos
-  inmutables direccionados por contenido, texto alternativo y preferencias de
-  medios, movimiento, contraste y lector de pantalla.
-- **Autoría modular:** AreaPack v8 divide un mundo en áreas; la composición sin
-  conexión de WorldProject v2 produce un WorldPack v9 canónico. Las fases 6A–6C
-  añaden catálogos/bundles verificables, arranque desde catálogo con carga
-  aditiva bajo demanda y sustitución quiescente de una generación completa. La
-  fase 6D, **parcial**, añade retirada reversible de unidades SCC de una misma
-  generación con checkpoint durable; aún falta presupuesto RSS, LRU y superficie
-  operativa.
-- **Operación en un host:** adaptadores PostgreSQL/SQLite, credenciales
-  Argon2id, sesiones revocables, colas acotadas, salud, métricas Prometheus,
-  apagado ordenado y traslado explícito a PostgreSQL.
+- **Persistent world:** accounts, characters, rooms, objects, NPCs, equipment,
+  combat, quests, parties, economy, logical time and weather. Objects separate
+  reusable prototypes from durable instances, with slot/weight capacity, derived
+  fungible stacks, bounded containers, fixed and repeatable loot, `give`,
+  transfer policies and confirmed bilateral trade.
+- **Data-defined characters:** the v3 model captures lineages, optional
+  background, base and advanced classes, a global XP curve, ranked talents and
+  atomic promotions. Attributes, resources, resistances, cooldowns and states
+  are all bounded.
+- **Groups and conversation:** local `say`, online `tell`/`reply`, authored
+  direct telepathy as an ability, world-defined room emotes, bounded group chat
+  and lifecycle, `general`/`newbie`/`staff` channels, private offline mail and
+  public `general`/`newbie` boards. Spatial voice `yell`/`shout` (phase 5E) uses
+  a directed, bounded radius without revealing world topology.
+- **Capability-based staff:** five operational profiles, twelve closed
+  capabilities, a report queue/resolution flow, diagnostic/repair actions and an
+  append-only audit. Neither narrative title, XP, class, WorldPack nor the legacy
+  role authorizes commands.
+- **One authoritative path:** browser and Telnet produce the same
+  `PlayerAction`, pass through the same rules and mutate a single world actor.
+- **Web and terminal clients:** Svelte 5 installable as a PWA; plain/ANSI
+  Telnet; optional GMCP, MSSP, MCCP2, MXP/MSLP; TinTin++ and Mudlet integrations.
+- **Safe media:** optional scene image and audio, immutable content-addressed
+  assets, alternative text and preferences for media, motion, contrast and
+  screen readers.
+- **Modular authoring:** AreaPack v8 splits a world into areas; the offline
+  composition of WorldProject v2 produces a canonical WorldPack v9. Phases 6A–6C
+  add verifiable catalogs/bundles, catalog boot with additive on-demand loading,
+  and quiescent replacement of a whole generation. Phase 6D, **partial**, adds
+  reversible retirement of same-generation SCC units with a durable checkpoint;
+  an RSS budget, LRU and an operator surface are still missing.
+- **Single-host operation:** PostgreSQL/SQLite adapters, Argon2id credentials,
+  revocable sessions, bounded queues, health, Prometheus metrics, graceful
+  shutdown and an explicit move to PostgreSQL.
 
-El estado por fase y las cifras exactas viven en la
-[matriz de completitud](docs/project/COMPLETION_MATRIX.md).
+Per-phase status and exact figures live in the
+[completion matrix](docs/project/COMPLETION_MATRIX.md).
 
-![Sesión autenticada de Tiamud en Lantern Square con ilustración atmosférica, prosa completa, salidas, objetos, estado del personaje e historial de comandos.](docs/images/tiamud-gameplay.webp)
+![Authenticated Tiamud session at Lantern Square with atmospheric artwork, full prose, exits, objects, character state and command history.](docs/images/tiamud-gameplay.webp)
 
-## Arquitectura
+## Architecture
 
 ```mermaid
 flowchart LR
-    accTitle: Arquitectura compartida de acciones de Tiamud
-    accDescr: Navegador y terminal comparten una ruta de dominio autorizada, la proyección por observador y un único sistema de persistencia seleccionado.
+    accTitle: Tiamud shared action architecture
+    accDescr: Browser and terminal share an authorized domain path, per-observer projection and a single selected persistence system.
 
-    Browser[Navegador<br/>HTTP + WebSocket] --> Web[Adaptador web]
-    Telnet[Telnet<br/>texto o enriquecido] --> TN[Adaptador Telnet]
+    Browser[Browser<br/>HTTP + WebSocket] --> Web[Web adapter]
+    Telnet[Telnet<br/>text or rich] --> TN[Telnet adapter]
     Web --> Action[PlayerAction]
     TN --> Action
-    Action --> Actor[Actor de mundo<br/>con escritor único]
-    Actor --> Projection[Percepción +<br/>proyección del observador]
+    Action --> Actor[World actor<br/>single writer]
+    Actor --> Projection[Perception +<br/>observer projection]
     Projection --> Web
     Projection --> TN
-    Actor <--> Store[(PostgreSQL<br/>o SQLite)]
-    Pack[WorldPack revisado<br/>o generación local durable] --> Actor
+    Actor <--> Store[(PostgreSQL<br/>or SQLite)]
+    Pack[Reviewed WorldPack<br/>or durable local generation] --> Actor
 ```
 
-Cuatro límites mantienen el motor flexible:
+Four boundaries keep the engine flexible:
 
-1. **Los transportes analizan; el dominio decide.** Una acción estructurada del
-   navegador no es un atajo para evitar reglas.
-2. **Un escritor posee el mundo.** Las colas acotadas y los checkpoints
-   durables ordenan el estado; si falla la persistencia se restaura exactamente
-   el estado anterior en memoria.
-3. **La percepción precede al protocolo.** Variantes ocultas e IDs estables no
-   salen del servidor. Cada sesión recibe IDs opacos y solo hechos autorizados.
-4. **La presentación es sustituible.** Texto, color terminal, imágenes, audio y
-   composición visual representan el mismo estado semántico.
+1. **Transports parse; the domain decides.** A structured browser action is not
+   a shortcut around the rules.
+2. **One writer owns the world.** Bounded queues and durable checkpoints order
+   state; if persistence fails, the previous in-memory state is restored
+   exactly.
+3. **Perception precedes protocol.** Hidden variants and stable IDs never leave
+   the server. Each session receives opaque IDs and only authorized facts.
+4. **Presentation is replaceable.** Text, terminal color, images, audio and
+   visual composition all represent the same semantic state.
 
-El contrato experimental del navegador está documentado en
-[`tiamud.v1`](docs/protocol/tiamud-v1.md). Ante un hueco de secuencia, el
-cliente pide una instantánea autoritativa; no inventa estado ni reproduce
-acciones a ciegas.
+The experimental browser contract is documented in
+[`tiamud.v1`](docs/protocol/tiamud-v1.md). On a sequence gap the client requests
+an authoritative snapshot; it never invents state or blindly replays actions.
 
-## Inicio rápido
+## Quick start
 
-Se necesita Git, `rustup`, compilador/enlazador C/C++, CMake, Node.js 20.19+
-(o 22.12+) y pnpm 10+. Las herramientas de carga y soak requieren Node.js 24.
-Node y pnpm solo se usan para construir el cliente, no como servicios del
-servidor compilado.
+You need Git, `rustup`, a C/C++ compiler/linker, CMake, Node.js 20.19+ (or
+22.12+) and pnpm 10+. The load and soak tooling requires Node.js 24. Node and
+pnpm are used only to build the client, not as services of the compiled server.
 
 ```sh
 git clone https://github.com/hyukudan/tiamud.git
@@ -145,147 +141,147 @@ pnpm --dir apps/web build
 TIAMUD_TELNET_MODE=plaintext cargo run --locked -p tiamud-server
 ```
 
-Abre <http://127.0.0.1:8080> o conecta Telnet a `127.0.0.1:4000`. El servidor
-Rust incluye la compilación web y el WorldPack revisado de Lantern Square.
+Open <http://127.0.0.1:8080> or connect Telnet to `127.0.0.1:4000`. The Rust
+server bundles the web build and the reviewed Lantern Square WorldPack.
 
-> Telnet sin cifrar es una excepción para desarrollo local. No debe exponerse
-> a Internet: registro y acceso viajarían sin cifrar. Telnet TLS es el modo
-> predeterminado y falla de forma cerrada sin certificado y clave válidos.
+> Unencrypted Telnet is a local-development exception. It must not be exposed to
+> the internet: registration and login would travel in the clear. Telnet TLS is
+> the default mode and fails closed without a valid certificate and key.
 
-Comandos representativos:
+Representative commands:
 
 ```text
-look / examine <objetivo>   north / east / south / west
-inventory                   take / drop / put / get [cantidad] <objeto>
-equip / unequip <objetivo>  give [cantidad] <objeto> to <personaje>
+look / examine <target>     north / east / south / west
+inventory                   take / drop / put / get [quantity] <item>
+equip / unequip <target>    give [quantity] <item> to <character>
 loot / loot pass            trade request / offer / confirm <...>
-attack <objetivo>           ability / cast <id> [objetivo]
+attack <target>             ability / cast <id> [target]
 promote <class-id>          talent learn <graph-id> <node-id>
 quest ...                   party create / invite / accept / say
 say / tell / reply          who / help / ignore / block
-telepathy <ability-id> <personaje> <mensaje>
-emote <comando> [personaje] channel say <canal> <texto>
-yell / shout <mensaje>      balance / shop / buy ...
-staff ...                   mail send <personaje> | <asunto> | <cuerpo>
-board post <tablón> | <asunto> | <cuerpo>
+telepathy <ability-id> <character> <message>
+emote <command> [character] channel say <channel> <text>
+yell / shout <message>      balance / shop / buy ...
+staff ...                   mail send <character> | <subject> | <body>
+board post <board> | <subject> | <body>
 ```
 
-La superficie completa de comandos staff, mail y board está en la
-[guía de operación](docs/operations/single-host.md) y la
-[autoría](docs/authoring/README.md).
+The full surface of staff, mail and board commands is in the
+[operations guide](docs/operations/single-host.md) and the
+[authoring guide](docs/authoring/README.md).
 
-## Despliegue en un único equipo
+## Single-machine deployment
 
-| Capa | Local/privado | Perfil público nuevo en un host |
+| Layer | Local/private | Fresh public profile on one host |
 | --- | --- | --- |
-| Navegador | HTTP en bucle local | HTTPS/WSS detrás de Caddy |
-| Terminal | `plaintext` explícito en localhost/LAN confiable | Telnet TLS directo |
-| Persistencia | SQLite sin configuración | PostgreSQL en el mismo equipo |
-| Mundo | WorldPack embebido o catálogo local 6B/6C | WorldPack externo revisado o catálogo local durable |
+| Browser | HTTP on loopback | HTTPS/WSS behind Caddy |
+| Terminal | explicit `plaintext` on localhost/trusted LAN | direct Telnet TLS |
+| Persistence | zero-config SQLite | PostgreSQL on the same machine |
+| World | embedded WorldPack or local 6B/6C catalog | reviewed external WorldPack or durable local catalog |
 
-La [guía de operación](docs/operations/single-host.md) cubre Caddy, systemd,
-Telnet TLS, variables de entorno, esquema SQL, copias, monitorización,
-actualización y reversión, incluida la migración 6B→6C con recovery/personajes.
-Los ejemplos revisados están en [`deploy/`](deploy/).
+The [operations guide](docs/operations/single-host.md) covers Caddy, systemd,
+Telnet TLS, environment variables, the SQL schema, backups, monitoring,
+upgrade and rollback, including the 6B→6C migration with recovery/characters.
+Reviewed examples live in [`deploy/`](deploy/).
 
-Si una instalación pierde toda autoridad administrativa, la recuperación
-offline documentada no se limita al rol legado: `tiamud-admin recover-admin`
-instala un `implementor` con exactamente las doce capacidades y ambas
-auditorías en una transacción, negándose si ya existe un
-`administrator`/`implementor`. El procedimiento SQLite y su equivalente
-PostgreSQL están en la
-[recuperación de emergencia](docs/operations/single-host.md#emergency-implementor-recovery).
+If an install loses all administrative authority, the documented offline
+recovery is not limited to the legacy role: `tiamud-admin recover-admin`
+installs an `implementor` with exactly the twelve capabilities and both audits
+in one transaction, refusing if an `administrator`/`implementor` already exists.
+The SQLite procedure and its PostgreSQL equivalent are in the
+[emergency recovery](docs/operations/single-host.md#emergency-implementor-recovery)
+section.
 
-`/health/live` y `/health/ready` exponen salud. `/metrics` ofrece Prometheus en
-el mismo punto de escucha, ligado por defecto a bucle local; la configuración
-de referencia de Caddy no publica métricas.
+`/health/live` and `/health/ready` expose health. `/metrics` serves Prometheus
+on the same listener, bound to loopback by default; the reference Caddy
+configuration does not publish metrics.
 
-## Personajes, clases y progresión
+## Characters, classes and progression
 
-WorldPack v9 conserva el modelo de personaje v3: compone un personaje con
-linaje, trasfondo opcional y clase base. Una XP acumulada gobierna el nivel
-global, las concesiones de clase y reservas de puntos separadas. Hay una clase
-activa y un historial ordenado, no multiclase libre.
+WorldPack v9 keeps the v3 character model: it composes a character from a
+lineage, optional background and a base class. Accumulated XP governs the global
+level, class grants and separate point reserves. There is one active class and
+an ordered history, not free multiclassing.
 
-Las promociones avanzadas pueden exigir nivel, atributos, habilidades,
-misiones, señales, linaje, clase actual o histórica, habilidades aprendidas y
-talentos previos. La promoción conserva XP/nivel, actualiza una sola vez la
-clase activa y aplica únicamente concesiones validadas. Los talentos consumen su
-reserva y respetan prerrequisitos y exclusiones. Navegador y Telnet exponen el
-mismo catálogo; Telnet recibe además la ficha mediante `Tiamud.Character` GMCP.
+Advanced promotions may require level, attributes, abilities, quests, flags,
+lineage, current or historical class, learned abilities and prior talents. A
+promotion preserves XP/level, updates the active class exactly once and applies
+only validated grants. Talents consume their reserve and respect prerequisites
+and exclusions. Browser and Telnet expose the same catalog; Telnet also receives
+the sheet through the `Tiamud.Character` GMCP package.
 
-No existe entrenamiento general por uso: el crecimiento permanente procede de
-concesiones de creación, nivel, talento y promoción. WorldPack/AreaPack de
-versiones previas y Envy/Merc solo entran por límites explícitos de
-normalización; `archetype` no es una segunda identidad y los IDs publicados son
-la frontera de migración de contenido.
+There is no general use-based training: permanent growth comes from creation,
+level, talent and promotion grants. Earlier WorldPack/AreaPack versions and
+Envy/Merc enter only through explicit normalization boundaries; `archetype` is
+not a second identity, and published IDs are the content migration boundary.
 
-Consulta el [diseño de progresión v3](docs/design/character-progression-v3.md)
-y la [guía de autoría](docs/authoring/README.md).
+See the [v3 progression design](docs/design/character-progression-v3.md) and the
+[authoring guide](docs/authoring/README.md).
 
-## Sistemas sociales, staff e inventario
+## Social, staff and inventory systems
 
-Los términos clásicos pueden ocultar sistemas distintos. Lo implementado hoy:
+Classic terms can hide distinct systems. What is implemented today:
 
-- **Conversación:** `say` local; `yell`/`shout` con BFS dirigido, determinista,
-  sin salidas secretas y acotado a 259 salas; `tell`/`reply` online; telepatía
-  directa authored con recurso/cooldowns; emotes de sala authored sin texto
-  libre; `who`, `help`, ignore, block y report; chat de grupo; canales
-  suscritos; correo offline separado y paginado con cuotas y evidencia de
-  denuncia; tablones públicos `general`/`newbie` acotados.
-- **Grupos:** hasta seis miembros; crear, invitar, aceptar, revocar, expulsar,
-  transferir, disolver, salir y `party say`. La membresía persiste offline; las
-  operaciones dirigidas resuelven un nombre conectado. Una cohorte congelada
-  participa en el reparto round-robin del botín.
-- **Staff:** perfiles `helper`/`builder`/`moderator`/`administrator`/
-  `implementor`, título narrativo opcional, doce capacidades cerradas,
-  cola/resolución de reportes, inspect/where/goto/transfer/restore/announce/audit
-  y asignación explícita con motivo y auditoría append-only. Los roles legados
-  `Player`/`Moderator`/`Admin` nunca autorizan comandos por sí solos.
-- **Inventario:** prototipos e instancias durables; pilas derivadas;
-  contenedores con slots, peso recursivo y profundidad cuatro; políticas
-  `transferable`/`character_bound`/`non_transferable`; `give` unilateral y
-  `trade` bilateral confirmado con revisión, doble confirmación y commit
-  simultáneo; afijo durable por instancia. Web, Telnet y GMCP proyectan política
-  e IDs opacos, nunca dueños ni identidades durables.
-- **Botín:** fuentes fijas, tablas enteras repetibles, recompensas selladas y
-  pools de afijos deterministas. La derrota confirma procedencia y derechos para
-  un máximo de 64 raíces; `party_round_robin`, `loot pass` y los plazos 20/120
-  son autoritativos. `reward odds`/`open` consultan y abren un sello con commit
-  único. Quedan fuera need/greed, master-loot, cajas pagadas y pity.
+- **Conversation:** local `say`; `yell`/`shout` with a directed, deterministic
+  BFS that excludes secret exits and is bounded to 259 rooms; online
+  `tell`/`reply`; authored direct telepathy with resource/cooldowns; authored
+  room emotes with no free text; `who`, `help`, ignore, block and report; group
+  chat; subscribed channels; separate paginated offline mail with quotas and
+  report evidence; bounded public `general`/`newbie` boards.
+- **Groups:** up to six members; create, invite, accept, revoke, kick,
+  transfer, disband, leave and `party say`. Membership persists offline; targeted
+  operations resolve a connected name. A frozen cohort takes part in round-robin
+  loot distribution.
+- **Staff:** `helper`/`builder`/`moderator`/`administrator`/`implementor`
+  profiles, an optional narrative title, twelve closed capabilities, a report
+  queue/resolution flow, inspect/where/goto/transfer/restore/announce/audit and
+  explicit assignment with a reason and an append-only audit. The legacy
+  `Player`/`Moderator`/`Admin` roles never authorize commands on their own.
+- **Inventory:** prototypes and durable instances; derived stacks; containers
+  with slots, recursive weight and depth four;
+  `transferable`/`character_bound`/`non_transferable` policies; unilateral `give`
+  and confirmed bilateral `trade` with revision, double confirmation and a
+  simultaneous commit; a durable per-instance affix. Web, Telnet and GMCP project
+  policy and opaque IDs, never owners or durable identities.
+- **Loot:** fixed sources, repeatable integer tables, sealed rewards and
+  deterministic affix pools. A defeat confirms provenance and rights for at most
+  64 roots; `party_round_robin`, `loot pass` and the 20/120 deadlines are
+  authoritative. `reward odds`/`open` query and open a seal with a single commit.
+  Need/greed and master-loot are partially implemented for fixed loot
+  (ADR 0023); paid boxes and pity stay out of the baseline.
 
-Detalles y contratos: [ADR 0016 emotes de sala](docs/decisions/0016-authored-room-emotes.md),
-[ADR 0017 correo offline](docs/decisions/0017-bounded-offline-mail.md),
-[ADR 0018 tablones comunitarios](docs/decisions/0018-bounded-moderable-community-boards.md),
-[ADR 0019 voz espacial](docs/decisions/0019-bounded-spatial-voice.md) y la
-[hoja de ruta social, staff y botín](docs/design/social-staff-and-loot-roadmap.md).
-La autoridad administrativa permanece separada de la progresión: XP mejora al
-personaje jugable, mientras una designación separada asigna perfil y capacidades
-con auditoría durable.
+Details and contracts:
+[ADR 0016 room emotes](docs/decisions/0016-authored-room-emotes.md),
+[ADR 0017 offline mail](docs/decisions/0017-bounded-offline-mail.md),
+[ADR 0018 community boards](docs/decisions/0018-bounded-moderable-community-boards.md),
+[ADR 0019 spatial voice](docs/decisions/0019-bounded-spatial-voice.md) and the
+[social, staff and loot roadmap](docs/design/social-staff-and-loot-roadmap.md).
+Administrative authority stays separate from progression: XP improves the
+playable character, while a separate designation assigns profile and
+capabilities with a durable audit.
 
-## Escenas y multimedia
+## Scenes and media
 
-La ilustración aporta ambiente; el texto contiene el juego. Fondos opacos
-AVIF/WebP/JPEG y sprites transparentes WebP/PNG usan manifiestos acotados con
-dimensiones, hashes, licencia, procedencia, revisión humana y texto alternativo
-localizado. Save-Data, multimedia desactivada y modo lector de pantalla evitan
-peticiones de imagen; el audio empieza apagado y necesita gesto del usuario.
-Telnet plano conserva todo; GMCP, MXP/MSLP, ANSI y gráficos nativos son
-opcionales y consentidos.
+Artwork sets the mood; text carries the game. Opaque AVIF/WebP/JPEG backgrounds
+and transparent WebP/PNG sprites use bounded manifests with dimensions, hashes,
+license, provenance, human review and localized alternative text. Save-Data,
+disabled media and screen-reader mode avoid image requests; audio starts off and
+requires a user gesture. Plain Telnet keeps everything; GMCP, MXP/MSLP, ANSI and
+native graphics are optional and consented.
 
-El pipeline y el navegador pueden componer sprites de NPC/objetos ya visibles de
-forma determinista y acotada. No hay aún sprites de demostración revisados,
-composición separada de jugadores ni lápida visual. El
-[diseño del compositor](docs/design/scene-compositor-v1.md) mantiene estos
-límites explícitos.
+The pipeline and browser can compose sprites of already-visible NPCs/objects
+deterministically and within bounds. There is not yet a reviewed demonstration
+sprite set, separate player composition or a visual tombstone. The
+[compositor design](docs/design/scene-compositor-v1.md) keeps these limits
+explicit.
 
-## Autoría: WorldPack y AreaPack
+## Authoring: WorldPack and AreaPack
 
-![Ilustración técnica de las tres salas de Lantern Square y sus módulos de medios, percepción, variantes, guiones y pruebas.](docs/images/tiamud-worldpack.webp)
+![Technical illustration of the three Lantern Square rooms and their media, perception, variant, script and test modules.](docs/images/tiamud-worldpack.webp)
 
-El entorno de ejecución consume **un WorldPack v9 canónico**. Para trabajar con
-menos acoplamiento, los autores dividen un **WorldProject v2** en **AreaPack v8**
-con dependencias y propiedad declaradas, y los componen sin conexión:
+The runtime consumes **one canonical WorldPack v9**. To work with less coupling,
+authors split a **WorldProject v2** into **AreaPack v8** with declared
+dependencies and ownership, then compose them offline:
 
 ```sh
 mkdir -p build/worlds
@@ -294,10 +290,10 @@ cargo run --locked -p world-pack --bin tiamud-world -- compose \
   --output build/worlds/lantern-square.composed.world.json
 ```
 
-La ruta local 6A cataloga revisiones y bundles de área verificables en un
-registro local. `area-publish` publica catálogo, bundles y WorldPack de respaldo
-bajo un lock advisory por mundo e imprime la ruta content-addressed exacta;
-`area-verify` es una comprobación read-only del catálogo publicado:
+The local 6A path catalogs verifiable area revisions and bundles in a local
+registry. `area-publish` publishes the catalog, bundles and a fallback WorldPack
+under a per-world advisory lock and prints the exact content-addressed path;
+`area-verify` is a read-only check of the published catalog:
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
@@ -310,72 +306,70 @@ cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
   --registry build/area-registry
 ```
 
-El catálogo acotado (≤1 MiB, 256 entradas) y sus bundles JSON canónicos
-inmutables (≤16 MiB) separan `contentLicense=CC-BY-4.0` de
-`scriptLicense=MIT OR Apache-2.0`, fijan propiedad, dependencias, portales y
-digests, y usan el modo de confianza explícito `unsigned_local` para un registro
-local en un host confiable. El modo catálogo 6B arranca desde un catálogo exacto
-y añade áreas verificadas bajo demanda; 6C sustituye una generación completa en
-un corte quiescente; 6D retira de forma reversible unidades SCC de la misma
-generación. Los detalles, invariantes y CLI están en
-[docs/world-authoring.md](docs/world-authoring.md), la
-[guía de autoría](docs/authoring/README.md) y los ADR
+The bounded catalog (≤1 MiB, 256 entries) and its immutable canonical-JSON
+bundles (≤16 MiB) separate `contentLicense=CC-BY-4.0` from
+`scriptLicense=MIT OR Apache-2.0`, pin ownership, dependencies, portals and
+digests, and use the explicit `unsigned_local` trust mode for a local registry
+on a trusted host. Catalog mode 6B boots from an exact catalog and adds verified
+areas on demand; 6C replaces a whole generation in a quiescent cutover; 6D
+reversibly retires same-generation SCC units. Details, invariants and the CLI
+are in [docs/world-authoring.md](docs/world-authoring.md), the
+[authoring guide](docs/authoring/README.md) and ADRs
 [0005](docs/decisions/0005-hot-area-lifecycle.md),
 [0020](docs/decisions/0020-additive-local-area-loading.md),
-[0021](docs/decisions/0021-quiescent-area-generation-cutover.md) y
+[0021](docs/decisions/0021-quiescent-area-generation-cutover.md) and
 [0022](docs/decisions/0022-reversible-area-unit-retirement.md).
 
-| Herramienta | Finalidad |
+| Tool | Purpose |
 | --- | --- |
-| `tiamud-world` | Componer, validar, construir, comparar, previsualizar, probar, publicar y revertir |
-| `tiamud-assets` | Compilar medios revisados y direccionados por contenido |
-| `envy-import` | Auditar/convertir de forma conservadora áreas Envy/Merc admitidas |
-| `tiamud-admin` | Integridad, migración y copia/restauración SQLite |
-| `tiamud-migrate-postgres` | Trasladar una instantánea SQLite actual a PostgreSQL vacío |
+| `tiamud-world` | Compose, validate, build, diff, preview, test, publish and roll back |
+| `tiamud-assets` | Build reviewed, content-addressed media |
+| `envy-import` | Conservatively audit/convert supported Envy/Merc areas |
+| `tiamud-admin` | Integrity, migration and SQLite backup/restore |
+| `tiamud-migrate-postgres` | Move a current SQLite snapshot into an empty PostgreSQL |
 
-Los programas importados nunca se ejecutan. Los hooks Lua usan capacidades
-declaradas y cuotas de código, memoria, instrucciones, tiempo y eventos.
+Imported programs are never executed. Lua hooks use declared capabilities and
+quotas on code, memory, instructions, time and events.
 
-## Accesibilidad y seguridad
+## Accessibility and security
 
-Todo el juego funciona con un flujo de texto plano. El navegador añade regiones
-semánticas, registro narrativo, anuncios selectivos, controles nativos de
-teclado, colores forzados y preferencias persistentes de tamaño, contraste,
-movimiento y lector de pantalla.
+The entire game works over a plain-text stream. The browser adds semantic
+regions, a narrative log, selective announcements, native keyboard controls,
+forced colors and persistent preferences for size, contrast, motion and screen
+reader.
 
-Se conservan pruebas automatizadas axe, teclado, móvil y modo lector. Sigue
-pendiente una validación manual con lector de pantalla real y una ejecución
-WebKit actual en un host compatible.
+Automated axe, keyboard, mobile and screen-reader-mode tests are retained. A
+manual validation with a real screen reader and a current WebKit run on a
+compatible host are still pending.
 
-Para un host público:
+For a public host:
 
-- usar HTTPS/WSS y Telnet TLS directo;
-- mantener privadas métricas, bases, claves, staging y copias;
-- ejecutar con una cuenta sin privilegios y probar restauraciones externas;
-- revisar licencia de cada área y recurso importado; y
-- informar vulnerabilidades según [SECURITY.md](SECURITY.md).
+- use HTTPS/WSS and direct Telnet TLS;
+- keep metrics, databases, keys, staging and backups private;
+- run under an unprivileged account and test external restores;
+- review the license of every imported area and asset; and
+- report vulnerabilities per [SECURITY.md](SECURITY.md).
 
-Mensajes, guiones, medios y salidas no confiables están acotados. Un cliente
-lento pierde primero presentación de menor valor y se desconecta si no puede
-vaciar salida crítica. `SIGTERM`/`SIGINT` cierran listeners, esperan las acciones
-aceptadas y drenan persistencia.
+Untrusted messages, scripts, media and outputs are bounded. A slow client drops
+lower-value presentation first and is disconnected if it cannot flush critical
+output. `SIGTERM`/`SIGINT` close listeners, wait for accepted actions and drain
+persistence.
 
-## IA opcional
+## Optional AI
 
-No se necesita IA para compilar, ejecutar o jugar. El crate
-[`editorial-ai`](crates/editorial-ai/README.md) puede redactar o revisar
-material de autoría fuera del bucle de juego. El proveedor predeterminado es
-`none`; los endpoints locales se limitan a bucle local y los remotos compatibles
-requieren HTTPS explícito. Todo borrador pasa la validación normal y revisión
-humana.
+No AI is needed to build, run or play. The
+[`editorial-ai`](crates/editorial-ai/README.md) crate can draft or review
+authoring material outside the game loop. The default provider is `none`; local
+endpoints are restricted to loopback and supported remote ones require explicit
+HTTPS. Every draft passes normal validation and human review.
 
-El desarrollo también declara asistencia de IA cuando es material. Un modelo
-puede proponer código, pruebas, texto o imágenes, pero no es autoridad: los
-cambios se revisan y se someten a las mismas puertas.
+Development also declares AI assistance when it is material. A model may propose
+code, tests, text or images, but it is not an authority: changes are reviewed and
+pass the same gates.
 
-## Verificación
+## Verification
 
-Puertas locales representativas:
+Representative local gates:
 
 ```sh
 pnpm --dir apps/web check
@@ -393,95 +387,97 @@ node --test scripts/bot.test.mjs scripts/verify-soak-report.test.mjs scripts/tel
 node scripts/smoke.mjs
 ```
 
-El baseline se verifica localmente por fase con formato, clippy estricto,
-pruebas de workspace, cliente web y comprobación de licencias. Las cifras
-exactas por fase, la evidencia retenida y los límites no ejecutados viven en
-[PROJECT_MEMORY.md](docs/project/PROJECT_MEMORY.md) y en los registros fechados
-de [docs/project/log/](docs/project/log/README.md).
+The baseline is verified locally per phase with formatting, strict clippy,
+workspace tests, the web client and license checks. Exact per-phase figures,
+retained evidence and unrun limits live in
+[PROJECT_MEMORY.md](docs/project/PROJECT_MEMORY.md) and in the dated logs under
+[docs/project/log/](docs/project/log/README.md).
 
-Esta evidencia es diagnóstico local, no evidencia de CI, release ni producción.
-Una prueba corta de carga no sustituye a un soak de 24 horas; WebKit no arranca
-en el host local actual por bibliotecas GTK/GStreamer/medios ausentes, y no se
-reclama un pase WebKit ni una aceptación PostgreSQL de producción sin evidencia.
+This evidence is a local diagnostic, not CI, release or production evidence. A
+short load test does not replace a 24-hour soak; WebKit does not start on the
+current local host because of missing GTK/GStreamer/media libraries, and no
+WebKit pass or production PostgreSQL acceptance is claimed without evidence.
 
-## Estado y hoja de ruta
+## Status and roadmap
 
-Tiamud está preparado bajo licencias de código abierto y permanece en
-prelanzamiento `0.1.0`; el repositorio canónico sigue privado hasta una decisión
-explícita de visibilidad. El protocolo WebSocket continúa experimental. La
-[matriz de completitud](docs/project/COMPLETION_MATRIX.md) es la autoridad sobre
-aceptación.
+Tiamud is prepared under open-source licenses and stays in the `0.1.0`
+pre-release; the canonical repository remains private until an explicit
+visibility decision. The WebSocket protocol is still experimental. The
+[completion matrix](docs/project/COMPLETION_MATRIX.md) is the authority on
+acceptance.
 
-Puertas externas pendientes:
+Pending external gates:
 
-- restablecer la ejecución alojada de GitHub Actions (actualmente bloqueada por
-  facturación/límite de gasto) y obtener un CI verde del candidato exacto;
-- ejercicio de instalación pública para TLS PostgreSQL, backup/restore,
-  monitorización y recuperación operativa;
-- soak retenido y verificado de 24 horas para el candidato exacto;
-- WebKit actual en un host compatible y prueba manual con lector de pantalla;
-- release etiquetada con procedencia OIDC verificada de forma independiente.
+- restore hosted GitHub Actions (currently blocked by billing/spend limit) and
+  obtain a green CI on the exact candidate;
+- a public-install exercise for PostgreSQL TLS, backup/restore, monitoring and
+  operational recovery;
+- a retained, verified 24-hour soak for the exact candidate;
+- a current WebKit run on a compatible host and a manual screen-reader test;
+- a tagged release with independently verified OIDC provenance.
 
-Siguientes líneas técnicas: cerrar el E2E retiro/restart, el humo PostgreSQL y
-las métricas del vertical 6D antes de diseñar política automática, presupuesto
-de memoria o LRU; consolidar staff por capacidades; modelar need/greed o
-master-loot antes de presentarlos; mantener fuera del baseline las cajas de
-botín pagadas; publicar sprites de demostración revisados; y publicar el primer
-hito explícito de compatibilidad `tiamud.v1`. La hoja completa está en la matriz
-y en [PROJECT_MEMORY.md](docs/project/PROJECT_MEMORY.md).
+Next technical lines: close the retire/restart E2E, the PostgreSQL smoke and the
+6D vertical metrics before designing an automatic policy, a memory budget or LRU;
+consolidate capability-based staff; extend need/greed and master-loot beyond
+fixed loot (rolled loot and a structured web surface remain); keep paid loot
+boxes out of the baseline; publish a reviewed demonstration sprite set; and ship
+the first explicit `tiamud.v1` compatibility milestone. The full roadmap is in
+the matrix and in [PROJECT_MEMORY.md](docs/project/PROJECT_MEMORY.md).
 
-## Mapa del repositorio
+## Repository map
 
 ```text
-apps/web/                    cliente oficial Svelte 5
-clients/                     integraciones TinTin++ y Mudlet
-crates/mud-core/             dominio y percepción independientes del transporte
-crates/mud-server/           actor, transportes, persistencia y web embebida
-crates/telnet-codec/         analizador Telnet compartido con fuzzing
-crates/cell-frame/           gráficos de celdas acotados y consentidos
-crates/persistence-*/        esquemas SQLite/PostgreSQL y traslado
-crates/world-pack/           modelo, composición y CLI de autoría
-crates/scripting/            capacidades Lua con cuotas
-crates/asset-pipeline/       pipeline de medios determinista y revisado
-crates/editorial-ai/         IA opcional solo para autoría
-crates/tiamud-admin/         integridad y recuperación del operador
-tools/envy-import/           importador histórico sin conexión
-worlds/                      WorldPacks y módulos de área revisados
-scripts/                     humo, carga, soak y licencias
-docs/                        protocolo, decisiones, operación y estado
-deploy/                      ejemplos Caddy, systemd y entorno
+apps/web/                    official Svelte 5 client
+clients/                     TinTin++ and Mudlet integrations
+crates/mud-core/             transport-independent domain and perception
+crates/mud-server/           actor, transports, persistence and embedded web
+crates/telnet-codec/         shared, fuzzed Telnet parser
+crates/cell-frame/           bounded, consented cell graphics
+crates/persistence-*/        SQLite/PostgreSQL schemas and migration
+crates/world-pack/           authoring model, composition and CLI
+crates/scripting/            quota-bounded Lua capabilities
+crates/asset-pipeline/       deterministic, reviewed media pipeline
+crates/editorial-ai/         optional authoring-only AI
+crates/tiamud-admin/         operator integrity and recovery
+tools/envy-import/           offline historical importer
+worlds/                      reviewed WorldPacks and area modules
+scripts/                     smoke, load, soak and licenses
+docs/                        protocol, decisions, operation and status
+deploy/                      Caddy, systemd and environment examples
 ```
 
-## Documentación
+## Documentation
 
-El índice completo de documentación es [docs/README.md](docs/README.md), que
-enlaza protocolo, operación, autoría, decisiones (ADR), clientes y estado.
-Puntos de entrada clave:
+The full documentation index is [docs/README.md](docs/README.md), which links
+the protocol, operation, authoring, decisions (ADRs), clients and status. Key
+entry points:
 
-- **Protocolo:** [`tiamud.v1`](docs/protocol/tiamud-v1.md) (experimental).
-- **Operación:** [host único](docs/operations/single-host.md).
-- **Autoría:** [WorldPack v9](docs/authoring/README.md) ·
-  [áreas y catálogos](docs/world-authoring.md).
-- **Estado:** [matriz de completitud](docs/project/COMPLETION_MATRIX.md) ·
-  [memoria del proyecto](docs/project/PROJECT_MEMORY.md).
-- **Especificación:** [v0.3](docs/spec-v0.3.md) (baseline vigente).
-- **Histórico:** [especificación v0.2 en castellano](docs/archive/spec-v0.2.md).
+- **Protocol:** [`tiamud.v1`](docs/protocol/tiamud-v1.md) (experimental).
+- **Operation:** [single host](docs/operations/single-host.md).
+- **Authoring:** [WorldPack v9](docs/authoring/README.md) ·
+  [areas and catalogs](docs/world-authoring.md).
+- **Status:** [completion matrix](docs/project/COMPLETION_MATRIX.md) ·
+  [project memory](docs/project/PROJECT_MEMORY.md).
+- **Specification:** [v0.3](docs/spec-v0.3.md) (current baseline).
+- **Historical:** [v0.2 specification, in Spanish](docs/archive/spec-v0.2.md).
 
-## Contribuir
+Internal governance documents (`AGENTS.md`, `CLAUDE.md`, the project memory,
+matrix, ADRs and dated logs) are maintained in Spanish; the public-facing docs
+listed above are in English.
 
-Las issues y pull requests son bienvenidas.
-El comportamiento de dominio debe ser neutral al transporte; todo input no
-confiable debe estar acotado y los cambios necesitan pruebas enfocadas y
-documentación honesta.
+## Contributing
 
-No envíes código, áreas, ayudas o medios históricos sin derechos claros de
-redistribución. Compatibilidad no significa licencia.
+Issues and pull requests are welcome. Domain behavior must be
+transport-neutral; all untrusted input must be bounded, and changes need focused
+tests and honest documentation.
 
-## Licencia
+Do not submit historical code, areas, help or media without clear redistribution
+rights. Compatibility does not imply a license.
 
-El software se ofrece a elección bajo MIT o Apache-2.0; consulta
-[LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT) y
-[LICENSE-APACHE](LICENSE-APACHE). La documentación, mundos y medios originales
-usan [CC BY 4.0](LICENSE-CONTENT.md). Los manifiestos conservan licencia y
-procedencia por recurso. Los avisos de dependencias están en
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+## License
+
+The software is offered under your choice of MIT or Apache-2.0; see
+[LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE). Documentation, original worlds and media use
+[CC BY 4.0](LICENSE-CONTENT.md). Manifests keep per-asset license and provenance.
+Dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

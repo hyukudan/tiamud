@@ -97,11 +97,11 @@ token buckets:
 These application controls complement, but do not replace, host-level firewall
 and reverse-proxy connection and request limits.
 
-WebSocket `command.submit` permanece limitado a 1.024 bytes; una línea Telnet
-admite hasta 8 KiB para que `board post` pueda transportar el asunto y cuerpo
-máximos y descarta entera cualquier línea mayor. El ingreso JSON WebSocket
-rechaza claves duplicadas a cualquier profundidad. No eleves los límites del
-proxy o listener para eludir esos controles de aplicación.
+The WebSocket `command.submit` stays limited to 1,024 bytes; a Telnet line
+admits up to 8 KiB so that `board post` can carry the maximum subject and body
+and discards any longer line entirely. WebSocket JSON ingestion rejects
+duplicate keys at any depth. Do not raise the proxy or listener limits to
+bypass those application controls.
 
 Prometheus-format metrics are available only from the server's loopback
 listener in the reference deployment:
@@ -245,48 +245,51 @@ commit and preserves all v12 IDs, links and bytes. PostgreSQL replaces its
 named constraint. Keep the v12 safety backup until catalog/list/read/post/
 delete/report, staff resolution, expiry, restart and integrity checks pass.
 
-El esquema v14 añade el singleton `world_area_generation`. Guarda el ID del
-mundo, los digests activo y anterior del catálogo, la secuencia de activación y
-el timestamp; no guarda rutas del host ni duplica estado runtime. La migración
-v13→v14 es aditiva. En aquel baseline, un corte 6C actualizaba esta fila y
-`WorldRuntimeSnapshot` v7 en la misma transacción mediante compare-and-swap;
-v15 conserva la frontera con snapshot v8.
-Conserva la copia de seguridad hasta que pasen arranque, activación, rollback
-explícito y las comprobaciones de integridad del backend elegido.
+Schema v14 adds the `world_area_generation` singleton. It stores the world ID,
+the active and previous catalog digests, the activation sequence and the
+timestamp; it stores no host paths and does not duplicate runtime state. The
+v13→v14 migration is additive. In that baseline, a 6C cutover updated this row
+and `WorldRuntimeSnapshot` v7 in the same transaction via compare-and-swap; v15
+keeps the boundary with snapshot v8.
+Keep the backup until startup, activation, explicit rollback and the selected
+backend's integrity checks pass.
 
-El esquema v15 añade `world_area_checkpoints` sin cambiar la liga generacional.
-Cada fila conserva generación, unidad, revisiones, epoch, versión, tick, JSON
-acotado y SHA-256. La migración v14→v15 crea la tabla vacía. Conserva la copia
-hasta validar que un snapshot v8 residente arranca, que un manifiesto retirado
-falla cerrado sin su checkpoint exacto y que el mover copia o rechaza cada fila
-de forma atómica. No habilites LRU ni retiros automáticos solo por migrar.
+Schema v15 adds `world_area_checkpoints` without changing the generational
+binding. Each row retains generation, unit, revisions, epoch, version, tick,
+bounded JSON and SHA-256. The v14→v15 migration creates the empty table. Keep
+the backup until you validate that a resident v8 snapshot starts, that a retired
+manifest fails closed without its exact checkpoint and that the mover copies or
+rejects each row atomically. Do not enable LRU or automatic retirements just by
+migrating.
 
-Para una instalación 6B existente, la fila v14 nace vacía y no existe forma de
-reconstruir automáticamente qué catálogo v13 estaba ejecutando. Recovery sin
-snapshot/ledger puede contener personajes; por eso el servidor consulta ambas
-autoridades. Si existe recovery compartido o cualquier personaje durable, el
-primer arranque v14 debe usar **exactamente el mismo G0** del último arranque
-v13. Procedimiento obligatorio:
+For an existing 6B installation, the v14 row is born empty and there is no way
+to automatically reconstruct which v13 catalog was running. Recovery without a
+snapshot/ledger may still contain characters; that is why the server consults
+both authorities. If shared recovery or any durable character exists, the first
+v14 startup must use **exactly the same G0** as the last v13 startup. Mandatory
+procedure:
 
-1. detén el servicio y crea/verifica copias del backend y del registro completo;
-2. registra la ruta y SHA-256 exactos de `TIAMUD_AREA_CATALOG` G0;
-3. instala/migra v14 sin publicar ni seleccionar otro catálogo;
-4. configura temporalmente
-   `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>`, arranca todavía con
-   G0 y verifica readiness, logs y la fila `world_area_generation`;
-5. elimina esa variable de la configuración del servicio después de la liga; y
-6. solo después publica o selecciona G1 y usa el SIGHUP de 6C.
+1. stop the service and create/verify backups of the backend and the full
+   registry;
+2. record the exact path and SHA-256 of the G0 `TIAMUD_AREA_CATALOG`;
+3. install/migrate v14 without publishing or selecting another catalog;
+4. temporarily set
+   `TIAMUD_ACK_LEGACY_AREA_GENERATION=<exact-sha256-G0>`, still boot with G0 and
+   verify readiness, logs and the `world_area_generation` row;
+5. remove that variable from the service configuration after binding; and
+6. only then publish or select G1 and use the 6C SIGHUP.
 
-No combines actualización de binario/esquema y cambio de catálogo. La primera
-liga v14 acepta G0 como autoridad inicial y no atraviesa compatibilidad/CAS
-contra una identidad anterior ausente; usar G1 en ese momento se saltaría la
-puerta 6C y perdería el rollback durable a G0.
+Do not combine a binary/schema upgrade and a catalog change. The first v14
+binding accepts G0 as the initial authority and does not traverse
+compatibility/CAS against an absent prior identity; using G1 at that moment
+would skip the 6C gate and lose durable rollback to G0.
 
-Una base vacía o con cuentas pero sin personajes ni recovery de mundo puede
-ligar su primera generación sin ACK. No uses esta excepción para convertir una
-autoridad monolítica existente a catálogo: 6C no define esa migración. La
-variable falla cerrada en modo monolítico, con liga existente, sin
-recovery/personaje que reconocer o si no coincide con el SHA-256 canónico.
+An empty base, or one with accounts but no characters or world recovery, can
+bind its first generation without ACK. Do not use this exception to convert an
+existing monolithic authority to a catalog: 6C does not define that migration.
+The variable fails closed in monolithic mode, with an existing binding, without
+recovery/character to acknowledge, or if it does not match the canonical
+SHA-256.
 
 The decoder applies a dual admission rule: raw legacy snapshots v1-v5 remain
 limited to 1 MiB, while v6-v8 snapshots and new commits may use up
@@ -435,12 +438,13 @@ plaintext choice. Exercise registration, login, character creation and
 selection, an authored ability, movement, combat, social state, restart and
 readiness before publishing the host.
 
-La voz espacial 5E no cambia esquema ni retiene cuerpos y ha pasado su puerta
-integrada automatizada. Un smoke operativo específico deberá situar
-personajes en origen, un vecino, una sala a dos saltos y otra tras una salida
-secreta; comprobar `yell` radio uno, `shout` radio tres, exclusión secreta y
-supresión por `condition.deaf`, tanto en Web como en texto/GMCP. Ese escenario
-manual no se ejecutó como parte de 5E y no debe inferirse del smoke general.
+Spatial voice 5E does not change the schema or retain bodies and has passed its
+automated integrated gate. A specific operational smoke should place characters
+at the origin, a neighbor, a room two hops away and another behind a secret
+exit; check `yell` radius one, `shout` radius three, secret exclusion and
+suppression by `condition.deaf`, both in Web and in text/GMCP. That manual
+scenario was not run as part of 5E and must not be inferred from the general
+smoke.
 
 ### Move an existing SQLite installation
 
@@ -484,13 +488,13 @@ state retains the inbox, usage quota and report evidence. Also publish, list,
 read, delete and report one board post; confirm post quota/evidence survive the
 move, resolve the report and verify readiness again.
 
-En la comprobación Telnet/GMCP, confirma por separado que una línea máxima de
-publicación conserva el cuerpo textual completo y que todo paquete negociado
-permanece bajo 8 KiB. Un `Tiamud.Board.Entry` cuyo escape JSON no quepa debe
-seguir siendo el mismo paquete, con resumen, prefijo UTF-8 de `body`,
-`truncated: true` y `overflow` con paquete, máximo y bytes originales. El
-fallback equivalente de `Tiamud.Mail.Message` es defensivo: el cuerpo canónico
-de correo de 2.048 bytes normalmente cabe completo.
+In the Telnet/GMCP check, separately confirm that a maximum post line preserves
+the full text body and that every negotiated packet stays under 8 KiB. A
+`Tiamud.Board.Entry` whose JSON escape does not fit must remain the same packet,
+with a summary, a UTF-8 prefix of `body`, `truncated: true` and `overflow` with
+packet, maximum and original bytes. The equivalent `Tiamud.Mail.Message`
+fallback is defensive: the canonical 2,048-byte mail body normally fits in
+full.
 The repository's retained [PostgreSQL 18 schema-v8 acceptance
 run](../project/log/2026-07-16-postgresql-v8-acceptance.md) proves the earlier v8 adapter,
 verified SQLite recovery, atomic mover, mixed runtime gameplay and durable
@@ -503,86 +507,86 @@ establish monitoring,
 TLS, PostgreSQL backup/restore or point-in-time recovery for a production
 installation.
 
-## Sustitución quiescente de generaciones de área
+## Quiescent area generation cutover
 
-Esta operación solo existe cuando el servicio usa
-`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. La primera ejecución liga el
-catálogo verificado en SQL v15 antes de readiness. En reinicios posteriores la
-fila durable prevalece: el servidor deriva la ruta exacta a partir del registro,
-`worldId` y digest aunque `area-active` apunte a una publicación distinta. Una
-base ligada a catálogo no puede arrancar en modo WorldPack monolítico. Si se
-migra desde v13, completa primero la liga de G0 descrita en la sección anterior;
-no uses este flujo para introducir G1 en el mismo primer arranque v14.
+This operation only exists when the service uses
+`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. The first run binds the verified
+catalog in SQL v15 before readiness. On later restarts the durable row prevails:
+the server derives the exact path from the registry, `worldId` and digest even
+if `area-active` points to a different publication. A catalog-bound base cannot
+start in monolithic WorldPack mode. If migrating from v13, first complete the G0
+binding described in the previous section; do not use this flow to introduce G1
+in the same first v14 startup.
 
-Una activación 6C no aplica un parche de área. Verifica y construye **la
-generación completa** fuera del actor. Debe conservar mundo/sala inicial, RNG,
-gameplay, objetos e instancias iniciales, NPC, botín, afijos, conjunto de áreas,
-ownership, IDs de sala y VNUM; no admite migración persistente. Solo prosa,
-salidas y capas de presentación/percepción/Lua síncrono validadas pueden cambiar.
+A 6C activation does not apply an area patch. It verifies and builds **the whole
+generation** outside the actor. It must preserve the world/start room, RNG,
+gameplay, initial items and instances, NPCs, loot, affixes, area set, ownership,
+room IDs and VNUMs; it does not admit persistent migration. Only prose, exits
+and validated presentation/perception/synchronous-Lua layers may change.
 
-Flujo de activación creciente:
+Increasing activation flow:
 
-1. crea y verifica la copia del backend conforme a este runbook;
-2. publica con `tiamud-world area-publish` y conserva la ruta exacta del
-   catálogo anterior;
-3. espera una ventana sin usuarios y envía SIGHUP; y
-4. inspecciona `journalctl -u tiamud` y ejecuta readiness/smoke.
+1. create and verify the backend backup per this runbook;
+2. publish with `tiamud-world area-publish` and keep the exact path of the
+   previous catalog;
+3. wait for a window with no users and send SIGHUP; and
+4. inspect `journalctl -u tiamud` and run readiness/smoke.
 
 ```sh
 sudo systemctl kill --signal=HUP tiamud
 curl --fail http://127.0.0.1:8080/health/ready
 ```
 
-SIGHUP solo reconcilia el puntero local; no es una señal de apagado y no existe
-un comando Web, Telnet, GMCP o staff equivalente. El servidor relee el puntero
-para detectar una publicación concurrente, verifica todos los blobs y hace
-staging privado con gauges aislados; las métricas públicas siguen describiendo
-la generación activa. Después cierra admisiones y exige **cero sesiones y cero
-leases**. Si hay un login, acción o carga admitida, devuelve `busy`, reabre
-admisiones y conserva la generación activa sin expulsar, mover o desconectar a
-nadie. El operador debe esperar y reintentar otro SIGHUP. Tras el staging, el
-runtime adquiere el lock cooperativo de lectura del registro usado por
-`area-publish`/`area-select`, revalida entonces el puntero, aborta el intento si
-el lock está ocupado y lo conserva hasta resolver el CAS. Un
-publicador cooperante espera en vez de cambiar `area-active` durante el corte.
-En Solaris, runtime y CLI usan el mismo protocolo de registro `fcntl` compatible
-con `fd-lock`; no dependen de locks de familias distintas.
+SIGHUP only reconciles the local pointer; it is not a shutdown signal and there
+is no equivalent Web, Telnet, GMCP or staff command. The server rereads the
+pointer to detect a concurrent publication, verifies all blobs and does private
+staging with isolated gauges; public metrics keep describing the active
+generation. It then closes admissions and requires **zero sessions and zero
+leases**. If there is an admitted login, action or load, it returns `busy`,
+reopens admissions and preserves the active generation without kicking, moving
+or disconnecting anyone. The operator must wait and retry another SIGHUP. After
+staging, the runtime acquires the cooperative read lock of the registry used by
+`area-publish`/`area-select`, then revalidates the pointer, aborts the attempt
+if the lock is held and keeps it until the CAS resolves. A cooperating publisher
+waits instead of changing `area-active` during the cutover. On Solaris, runtime
+and CLI use the same `fcntl` registry protocol compatible with `fd-lock`; they
+do not rely on locks from different families.
 
-Con quiescencia, el actor exige todas las unidades residentes y restaura el
-snapshot v8 actual sobre la candidata,
-confirma snapshot + puntero durable mediante CAS y solo entonces intercambia
-mundo, contenido runtime y coordinador. Verificación, incompatibilidad, restore
-y fallos definitivos antes del commit dejan activa la generación anterior. Una
-caída antes/después del commit recupera respectivamente la identidad
-anterior/nueva.
+Under quiescence, the actor requires all resident units and restores the current
+v8 snapshot over the candidate, commits snapshot + durable pointer via CAS and
+only then swaps world, runtime content and coordinator. Verification,
+incompatibility, restore and definitive failures before the commit leave the
+previous generation active. A crash before/after the commit recovers the
+previous/new identity respectively.
 
-Un error devuelto por el commit puede ser ambiguo y **no** demuestra rollback.
-El servidor relee `world_area_generation`: si contiene G1 publica la candidata;
-si todavía contiene G0 reabre la anterior. Cualquier otro valor o error de
-lectura deja el router en `Committing`, detiene el actor y mantiene readiness
-503 sin aceptar tráfico hasta reinicio y recuperación de la autoridad durable.
+An error returned by the commit may be ambiguous and does **not** prove
+rollback. The server rereads `world_area_generation`: if it contains G1 it
+publishes the candidate; if it still contains G0 it reopens the previous one. Any
+other value or read error leaves the router in `Committing`, stops the actor and
+holds readiness 503 without accepting traffic until restart and recovery of the
+durable authority.
 
-El árbol de decisión del operador durante un corte es:
+The operator decision tree during a cutover is:
 
 ```mermaid
 flowchart TD
-    A["area-publish: copia backend verificada y catalogo inmutable"] --> B["SIGHUP local"]
-    B --> C["relee area-active, verifica release, staging privado con gauges aislados"]
-    C --> D["cierra admisiones"]
-    D --> E{"cero sesiones y cero leases?"}
-    E -->|"no"| E1["busy: reabre admisiones, conserva generacion activa, reintentar"]
-    E -->|"si"| F{"lock cooperativo de lectura libre?"}
-    F -->|"ocupado"| F1["aborta el intento, conserva generacion activa, reintentar"]
-    F -->|"libre"| G["revalida puntero bajo lock, restaura snapshot v8 sobre candidata"]
-    G --> H["CAS: snapshot mas puntero de generacion en una transaccion"]
-    H --> I{"resultado del commit"}
-    I -->|"G1 durable"| J["publica candidata, intercambia mundo/contenido/coordinador, reabre admisiones"]
-    I -->|"G0 aun"| K["reabre la generacion anterior"]
-    I -->|"ambiguo o error de lectura"| L["Committing: detiene el actor, readiness 503 hasta reinicio y recuperacion durable"]
+    A["area-publish: verified backend backup and immutable catalog"] --> B["local SIGHUP"]
+    B --> C["reread area-active, verify release, private staging with isolated gauges"]
+    C --> D["close admissions"]
+    D --> E{"zero sessions and zero leases?"}
+    E -->|"no"| E1["busy: reopen admissions, keep active generation, retry"]
+    E -->|"yes"| F{"cooperative read lock free?"}
+    F -->|"held"| F1["abort the attempt, keep active generation, retry"]
+    F -->|"free"| G["revalidate pointer under lock, restore v8 snapshot over candidate"]
+    G --> H["CAS: snapshot plus generation pointer in one transaction"]
+    H --> I{"commit result"}
+    I -->|"G1 durable"| J["publish candidate, swap world/content/coordinator, reopen admissions"]
+    I -->|"still G0"| K["reopen the previous generation"]
+    I -->|"ambiguous or read error"| L["Committing: stop the actor, readiness 503 until restart and durable recovery"]
 ```
 
-Para rollback, no edites a mano `area-active`. Selecciona un catálogo inmutable
-retenido y solicita el mismo corte:
+For rollback, do not hand-edit `area-active`. Select a retained immutable
+catalog and request the same cutover:
 
 ```sh
 tiamud-world area-select \
@@ -591,69 +595,69 @@ tiamud-world area-select \
 sudo systemctl kill --signal=HUP tiamud
 ```
 
-La secuencia durable aumenta también al revertir. `previous_catalog_sha256`
-solo conserva la generación inmediatamente anterior; no es un historial ni
-borra blobs. Retén explícitamente los catálogos y bundles necesarios.
+The durable sequence also increases when reverting. `previous_catalog_sha256`
+only retains the immediately previous generation; it is not a history and does
+not delete blobs. Explicitly retain the catalogs and bundles you need.
 
-6C no soporta jugadores durante drenaje, migraciones directas/inversas,
-reemplazo de revisión por área, LRU, GC, registro remoto,
-compresión o firma. La puerta pasa 774 pruebas Rust —329 del servidor— y la
-reauditoría 0 P1/0 P2. Sobre PostgreSQL 18 desechable pasan 20/20 pruebas del
-adaptador y 7/7 enfocadas del servidor, incluida la CAS de generación v14. El
-humo real abre esquema 14, liga G0 `e954be…15a6` en secuencia 1, confirma
-readiness PostgreSQL/mundo, Web 200, banner Telnet, dos áreas residentes,
-SIGHUP `noop=1` y cierre actor/store limpio. El humo SQLite retenido cubre
-además activación G1, rollback G0 y restart. Conserva el mismo procedimiento
-sobre persistencia y registro desechables antes de una instalación propia y
-consulta el [registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+6C does not support players during drain, forward/reverse migrations,
+per-area revision replacement, LRU, GC, remote registry, compression or signing.
+The gate passes 774 Rust tests —329 in the server— and the reaudit 0 P1/0 P2.
+Against a disposable PostgreSQL 18, 20/20 adapter tests and 7/7 focused server
+tests pass, including the v14 generation CAS. The real smoke opens schema 14,
+binds G0 `e954be…15a6` at sequence 1, confirms PostgreSQL/world readiness, Web
+200, the Telnet banner, two resident areas, SIGHUP `noop=1` and a clean
+actor/store shutdown. The retained SQLite smoke additionally covers G1
+activation, G0 rollback and restart. Keep the same procedure over disposable
+persistence and registry before a real installation and see the
+[PostgreSQL v14/PWA acceptance log](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
 
-## Retirada reversible 6D: estado operativo parcial
+## Reversible retirement 6D: partial operational state
 
-El esquema v15 y snapshot v8 permiten que el runtime interno retire y
-rehidrate una unidad vacía de la misma revisión. No existe todavía un comando
-de operador, señal, endpoint, acción staff ni política LRU para solicitarlo. No
-edites `world_area_checkpoints` ni el manifiesto del snapshot a mano: deben
-avanzar juntos mediante el CAS del servidor.
+Schema v15 and snapshot v8 let the internal runtime retire and rehydrate an
+empty unit of the same revision. There is not yet an operator command, signal,
+endpoint, staff action or LRU policy to request it. Do not hand-edit
+`world_area_checkpoints` or the snapshot manifest: they must advance together via
+the server's CAS.
 
-Antes de considerar esta función operativa en una instalación, aunque las
-pruebas enfocadas PostgreSQL v15 pasan 22/22+8/8, falta probar el humo de
-restart y un E2E específico de ACK perdido 6D, medir descenso
-real de índices y RSS y definir presupuesto/histéresis. La evidencia PostgreSQL
-v14 anterior no cubre esta tabla. Una inconsistencia de manifiesto/checkpoint
-debe bloquear readiness; restaura el backend completo verificado en vez de
-suprimir una fila aislada.
+Before considering this feature operational in an installation, even though the
+focused PostgreSQL v15 tests pass 22/22+8/8, the restart smoke and a specific 6D
+lost-ACK E2E remain untested, and the real drop in indices and RSS and a
+budget/hysteresis definition remain to be measured. The earlier PostgreSQL v14
+evidence does not cover this table. A manifest/checkpoint inconsistency must
+block readiness; restore the full verified backend instead of removing an
+isolated row.
 
-## Actualización del binario y del mundo
+## Binary and world update
 
-1. Verifica checksum y procedencia OIDC del candidato según la
-   [guía de release](releases.md) y extráelo en staging.
-2. Crea y verifica una copia nativa PostgreSQL o la copia `tiamud-admin` de una
-   instalación SQLite.
-3. Conserva binario, WorldPack y, en modo catálogo, el registro/catálogo exacto
-   actuales bajo un directorio de rollback versionado.
-4. Detén Tiamud, instala el binario y artefactos revisados, valida el WorldPack
-   con `tiamud-world validate` y ejecuta la integridad del backend seleccionado
-   (`tiamud-admin check` solo cubre SQLite).
-5. Arranca el servicio y prueba registro, entrada, movimiento e inventario
-   contra el listener instalado, por ejemplo:
+1. Verify the candidate's checksum and OIDC provenance per the
+   [release guide](releases.md) and extract it to staging.
+2. Create and verify a native PostgreSQL backup or the `tiamud-admin` backup of
+   a SQLite installation.
+3. Keep the current binary, WorldPack and, in catalog mode, the exact
+   registry/catalog under a versioned rollback directory.
+4. Stop Tiamud, install the reviewed binary and artifacts, validate the
+   WorldPack with `tiamud-world validate` and run the selected backend's
+   integrity check (`tiamud-admin check` only covers SQLite).
+5. Start the service and test registration, entry, movement and inventory
+   against the installed listener, for example:
 
    ```sh
    node scripts/load.mjs --url http://127.0.0.1:8080 \
      --users 1 --rounds 1 --concurrency 1 --pace-ms 100
    ```
 
-   `scripts/smoke.mjs` ayuda en el gate candidato, pero inicia su propio servidor
-   temporal de debug y no demuestra el servicio instalado.
+   `scripts/smoke.mjs` helps with the candidate gate, but it starts its own
+   temporary debug server and does not exercise the installed service.
 
-Si falla validación o smoke, detén el servicio, restaura el binario y WorldPack
-anteriores, conserva la base fallida para diagnóstico y sigue la recuperación
-verificada del backend. SQLite no sobrescribe al restaurar, para no destruir
-datos forenses; PostgreSQL debe aportar una seguridad equivalente controlada
-por el operador. Un rollback de contenido 6C compatible usa `area-select` y
-SIGHUP; recuperar la base completa es una operación distinta.
+If validation or smoke fails, stop the service, restore the previous binary and
+WorldPack, keep the failed database for diagnosis and follow the verified
+backend recovery. SQLite does not overwrite on restore, so it does not destroy
+forensic data; PostgreSQL must provide an equivalent operator-controlled
+safeguard. A compatible 6C content rollback uses `area-select` and SIGHUP;
+recovering the full database is a distinct operation.
 
-Esta guía cubre proxy HTTPS/WSS, systemd, apagado ordenado, migración, copia,
-restore, readiness, métricas, release verificada y rollback. La evidencia de
-carga y memoria se describe en la [guía de soak](soak-testing.md). Configurar
-un workflow de 24 horas no equivale a ejecutarlo; conserva el informe completo
-del candidato antes de dar por satisfecho el criterio 19.
+This guide covers the HTTPS/WSS proxy, systemd, graceful shutdown, migration,
+backup, restore, readiness, metrics, verified release and rollback. Load and
+memory evidence is described in the [soak guide](soak-testing.md). Configuring a
+24-hour workflow is not the same as running it; keep the candidate's full report
+before considering criterion 19 satisfied.

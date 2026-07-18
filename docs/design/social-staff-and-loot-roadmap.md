@@ -1,147 +1,145 @@
-# Hoja de ruta de sistemas sociales, staff e inventario/botín
+# Social systems, staff, and inventory/loot roadmap
 
-Estado: auditoría de implementación y diseño de continuación, 2026-07-17.
+Status: implementation audit and continuation design, 2026-07-17.
 
-Este documento distingue lo que Tiamud implementa hoy de los sistemas que son
-habituales en algunos MUD clásicos o convenientes para un mundo persistente
-moderno. No convierte cada antecedente histórico en un requisito. El código y
-las pruebas siguen siendo la autoridad sobre comportamiento actual; la
-[matriz de completitud](../project/COMPLETION_MATRIX.md) conserva la autoridad
-sobre la aceptación de la especificación histórica.
+This document distinguishes what Tiamud implements today from the systems that
+are common in some classic MUDs or convenient for a modern persistent world. It
+does not turn every historical precedent into a requirement. The code and the
+tests remain the authority over current behavior; the
+[completion matrix](../project/COMPLETION_MATRIX.md) keeps the authority over
+acceptance of the historical specification.
 
-## Resumen ejecutivo
+## Executive summary
 
-- Sí existen grupos persistentes de hasta seis miembros: crear, invitar,
-  aceptar, revocar, expulsar, transferir liderazgo, disolver, salir y consultar
-  estado, además de `party say` con alias `gsay`/`gtell`.
-- Sí existen `reply` en línea y los canales suscritos `general`, `newbie` y
-  `staff`; este último exige perfil `moderator`, `administrator` o
-  `implementor`. También existe telepatía directa online como habilidad
-  authored con recurso, cooldown, interferencia por sala y supresión privada.
-  También existen emotes de sala authored, con plantillas cerradas por
-  perspectiva y targeting local cerrado: sin objetivo, opcional u obligatorio.
-  También existe correo offline explícito con buzón, cuotas, caducidad y
-  denuncia acotados, y existen tablones públicos `general`/`newbie` con
-  retención, cuota, capacidad y evidencia moderable propias. No existe
-  historial general durable de conversación. La voz espacial 5E implementa
-  `yell`/`shout` y tiene su puerta final completada.
-- Sí existen los perfiles `helper`, `builder`, `moderator`, `administrator` e
-  `implementor`, doce capacidades cerradas y un título narrativo opcional. La
-  XP, la ficha, WorldPack, el perfil visible y el rol legado nunca sustituyen
-  la capacidad concreta.
-- Sí existen comandos de moderación dentro del juego: reportar, silenciar,
-  expulsar, revertir sanciones y cambiar roles según autoridad.
-- Sí existen cola/resolución de reportes, inspect/where/goto/transfer/restore,
-  anuncios y consulta de auditoría, con motivos obligatorios y límites.
-- Sí existen inventario, equipo, consumibles, botín fijo de NPC, prototipos
-  reutilizables, instancias durables, capacidad por slots/peso y
-  rareza/`itemLevel` textual. También existen pilas fungibles derivadas,
-  contenedores acotados, cantidades, consulta paginada, `give` atómico y las
-  políticas `transferable`, `character_bound` y `non_transferable`. También
-  existe trade bilateral confirmado mediante reservas durables, revisión y
-  doble confirmación de objetos y moneda.
-- Sí existen tablas enteras fixed+repeatable, procedencia durable, derechos de
-  20 ticks, reparto de cohorte round-robin, `loot pass` y despawn al tick 120.
-- Sí existen recompensas selladas ganadas jugando, `open`, consulta exacta y
-  paginada con `reward odds` y un afijo acotado para botín único normal o
-  sellado. No existen need/greed, master-loot, reparto por contribución, pity,
-  cajas, llaves o tiradas pagadas.
+- Persistent parties of up to six members do exist: create, invite, accept,
+  revoke, kick, transfer leadership, disband, leave, and query status, plus
+  `party say` with the `gsay`/`gtell` aliases.
+- Online `reply` and the subscribed channels `general`, `newbie`, and `staff`
+  do exist; the last one requires a `moderator`, `administrator`, or
+  `implementor` profile. Direct online telepathy also exists as an authored
+  ability with resource, cooldown, per-room interference, and private
+  suppression. Authored room emotes also exist, with closed per-perspective
+  templates and closed local targeting: none, optional, or required. Explicit
+  offline mail with a bounded mailbox, quotas, expiry, and reporting also
+  exists, and public `general`/`newbie` boards with their own retention, quota,
+  capacity, and moderable evidence also exist. There is no durable general
+  conversation history. The 5E spatial voice implements `yell`/`shout` and has
+  its final gate completed.
+- The profiles `helper`, `builder`, `moderator`, `administrator`, and
+  `implementor` do exist, along with twelve closed capabilities and an optional
+  narrative title. XP, the character sheet, WorldPack, the visible profile, and
+  the legacy role never substitute for the concrete capability.
+- In-game moderation commands do exist: report, mute, kick, revert sanctions,
+  and change roles according to authority.
+- A report queue/resolution, inspect/where/goto/transfer/restore, announcements,
+  and audit queries do exist, with mandatory reasons and limits.
+- Inventory, equipment, consumables, fixed NPC loot, reusable prototypes,
+  durable instances, slot/weight capacity, and textual rarity/`itemLevel` do
+  exist. Derived fungible stacks, bounded containers, quantities, paginated
+  queries, atomic `give`, and the `transferable`, `character_bound`, and
+  `non_transferable` policies also exist. Confirmed bilateral trade via durable
+  reservations, revision, and double confirmation of items and currency also
+  exists.
+- Fixed+repeatable full tables, durable provenance, 20-tick rights, round-robin
+  cohort distribution, `loot pass`, and despawn at tick 120 do exist.
+- Sealed rewards earned by playing, `open`, exact and paginated queries via
+  `reward odds`, and a bounded affix for normal or sealed unique loot do exist.
+  Need/greed, master-loot, contribution-based distribution, pity, boxes, keys,
+  and paid rolls do not exist.
 
-Las fases 1, comunicación/grupo, 2, staff por capacidades, 3A, fundamento de
-objetos, 3B, pilas/contenedores, 3C, entrega/políticas, y 3D, trade confirmado,
-están implementadas. También están implementadas 4A, botín repetible con
-derechos y procedencia, y 4B, sellos ganados y afijos deterministas.
-Las fases 5A, telepatía directa authored, 5B, emotes de sala authored, 5C,
-correo offline acotado, y 5D, tablones comunitarios acotados, también están
-implementadas y 5D conserva su puerta final. La fase 5E, voz espacial acotada,
-también está implementada y conserva su puerta final.
+Phases 1, communication/group; 2, capability-based staff; 3A, item foundation;
+3B, stacks/containers; 3C, delivery/policies; and 3D, confirmed trade, are
+implemented. 4A, repeatable loot with rights and provenance, and 4B, earned
+seals and deterministic affixes, are also implemented. Phases 5A, direct
+authored telepathy; 5B, authored room emotes; 5C, bounded offline mail; and 5D,
+bounded community boards, are also implemented, and 5D keeps its final gate.
+Phase 5E, bounded spatial voice, is also implemented and keeps its final gate.
 
-## Estado verificado en el código
+## State verified in the code
 
-### Conversación y seguridad social
+### Conversation and social safety
 
-`SocialAction` ofrece `Say`, `PartySay`, `Tell`, `Reply`, listado/alta/baja/envío
-de canal, `Who`, `Help`, ignore/block, reportes, mute/ban, reversión de
-sanciones y cambio de rol. `PlayerAction::Telepathy` separa la mutación de
-habilidad del chat ordinario. `SocialChannel` contiene `Announcement`, `Say`,
-`Tell`, `Telepathy`, `Emote`, `Party`, `General`, `Newbie` y `Staff`.
+`SocialAction` offers `Say`, `PartySay`, `Tell`, `Reply`, channel
+list/subscribe/unsubscribe/send, `Who`, `Help`, ignore/block, reports, mute/ban,
+sanction reversal, and role change. `PlayerAction::Telepathy` separates the
+ability mutation from ordinary chat. `SocialChannel` contains `Announcement`,
+`Say`, `Tell`, `Telepathy`, `Emote`, `Party`, `General`, `Newbie`, and `Staff`.
 
-- `say` se entrega a otros personajes conectados en la misma sala;
-- `tell` se entrega a un personaje conectado, aunque esté en otra sala;
-- `reply` conserva en memoria el ID interno del último remitente cuyo `tell`
-  se entregó y exige que siga conectado; no es correo durable;
-- `party say` se entrega solo a los demás miembros conectados del grupo;
-- `general`, `newbie` y `staff` exigen suscripción durable; `staff` solo está
-  disponible para perfiles `moderator`, `administrator` o `implementor`, tanto
-  al unirse o enviar como al recibir; `helper` y `builder` no acceden;
-- un `tell` bloqueado o ignorado se confirma igual que uno entregado para no
-  filtrar el estado privado del receptor;
-- el texto y el destinatario están acotados, y el chat tiene rate limit;
-- la entrega usa el router directo y los buzones acotados por sesión;
-- reportes, relaciones, sanciones y suscripciones sobreviven a un reinicio.
+- `say` is delivered to other connected characters in the same room;
+- `tell` is delivered to a connected character, even in another room;
+- `reply` keeps in memory the internal ID of the last sender whose `tell` was
+  delivered and requires them to still be connected; it is not durable mail;
+- `party say` is delivered only to the other connected members of the group;
+- `general`, `newbie`, and `staff` require a durable subscription; `staff` is
+  only available to `moderator`, `administrator`, or `implementor` profiles,
+  whether joining, sending, or receiving; `helper` and `builder` have no access;
+- a blocked or ignored `tell` is confirmed just like a delivered one so as not
+  to leak the receiver's private state;
+- text and recipient are bounded, and chat is rate limited;
+- delivery uses the direct router and the session-bounded mailboxes;
+- reports, relationships, sanctions, and subscriptions survive a restart.
 
-SQLite y PostgreSQL implementan actualmente el esquema v13. Conserva
-`social_channel_subscriptions` de v9 y añade perfiles, capacidades, resolución
-cerrada de reportes y auditoría append-only de v10; v11 admite snapshots v6 y
-v7 de hasta 2 MiB sin relajar el límite legacy v1–v5 de 1 MiB; v12 añade las
-tres tablas acotadas del correo offline; v13 añade publicaciones, cuota y
-evidencia de tablones y amplía `report_kind` a `board`. El traslado sin
-conexión también los copia. La evidencia histórica PostgreSQL real sigue
-acreditando v8 y no se presenta como aceptación v13.
+SQLite and PostgreSQL currently implement schema v13. It keeps
+`social_channel_subscriptions` from v9 and adds profiles, capabilities, closed
+report resolution, and append-only audit from v10; v11 admits v6 and v7
+snapshots of up to 2 MiB without relaxing the legacy v1–v5 limit of 1 MiB; v12
+adds the three bounded tables of offline mail; v13 adds board posts, quota, and
+evidence and extends `report_kind` to `board`. The offline mover copies them
+too. The real historical PostgreSQL evidence still credits v8 and is not
+presented as v13 acceptance.
 
-Por tanto, `tell` sigue siendo el mensaje privado online clásico y no se
-presenta como telepatía. La telepatía de 5A entra por una habilidad distinta:
-consume recurso/cooldowns, admite interferencia authored y tampoco llega a un
-personaje desconectado.
+Therefore, `tell` remains the classic online private message and is not
+presented as telepathy. The 5A telepathy enters through a distinct ability: it
+consumes resource/cooldowns, admits authored interference, and likewise does not
+reach a disconnected character.
 
 ### Parties
 
-`PartyAction` implementa `Create`, `Invite`, `Accept`, `Revoke`, `Kick`,
-`Transfer`, `Disband`, `Leave` y `Status`.
+`PartyAction` implements `Create`, `Invite`, `Accept`, `Revoke`, `Kick`,
+`Transfer`, `Disband`, `Leave`, and `Status`.
 
-- máximo de seis miembros;
-- solo el líder invita, revoca, expulsa, transfiere y disuelve;
-- máximo de doce invitaciones pendientes;
-- una invitación expira tras veinte ticks lógicos;
-- la transferencia explícita exige otro miembro; si el líder sale, el
-  liderazgo pasa de forma determinista al primer miembro restante;
-- un miembro desconectado sigue perteneciendo al grupo y aparece como
-  acompañante ausente;
-- el snapshot durable conserva parties e invitaciones.
+- maximum of six members;
+- only the leader invites, revokes, kicks, transfers, and disbands;
+- maximum of twelve pending invitations;
+- an invitation expires after twenty logical ticks;
+- explicit transfer requires another member; if the leader leaves, leadership
+  passes deterministically to the first remaining member;
+- a disconnected member still belongs to the group and appears as an absent
+  companion;
+- the durable snapshot keeps parties and invitations.
 
-Accept, revoke, kick y transfer resuelven el nombre de un personaje conectado.
-La persistencia de membresía offline no implica que esas operaciones dirigidas
-puedan gestionar a un objetivo desconectado.
+Accept, revoke, kick, and transfer resolve the name of a connected character.
+Offline membership persistence does not imply that those targeted operations can
+manage a disconnected target.
 
-No hay seguimiento, asistencia/rescate, selección general de aliados ni
-crédito de misión/XP compartido. La única política de botín de grupo actual es
-round-robin sobre una cohorte próxima congelada; no hay need/greed, master-loot
-o contribución.
+There is no following, assist/rescue, general ally selection, or shared
+quest/XP credit. The only current group loot policy is round-robin over a frozen
+nearby cohort; there is no need/greed, master-loot, or contribution.
 
-### Staff y moderación
+### Staff and moderation
 
-La autorización ejecutable es de cuenta y comprueba una capacidad concreta.
-Los roles `Player`, `Moderator`, `Admin` solo conservan el tier legado de
-moderación y percepción; nunca son suficientes para ejecutar un comando ni
-abren por sí solos el canal `staff`. Ese canal exige perfil `moderator`,
-`administrator` o `implementor`; `helper` y `builder` no acceden. El primer
-registro de una base nueva conserva Admin como bootstrap legado y recibe
-perfil `implementor` con las doce capacidades. Los Admin migrados desde v9
-reciben `administrator`. Existe recuperación offline de emergencia para una
-instalación sin admin.
+Executable authorization is per-account and checks a concrete capability. The
+`Player`, `Moderator`, `Admin` roles only keep the legacy tier of moderation and
+perception; they are never sufficient to execute a command nor do they by
+themselves open the `staff` channel. That channel requires a `moderator`,
+`administrator`, or `implementor` profile; `helper` and `builder` have no
+access. The first registration of a new database keeps Admin as a legacy
+bootstrap and receives the `implementor` profile with the twelve capabilities.
+Admins migrated from v9 receive `administrator`. There is emergency offline
+recovery for an installation without an admin.
 
-Los perfiles cerrados y su bundle inicial son:
+The closed profiles and their initial bundle are:
 
-| Perfil | Bundle inicial |
+| Profile | Initial bundle |
 | --- | --- |
 | `helper` | `reports.view`, `reports.resolve` |
-| `builder` | Ninguna capacidad implícita; se asigna explícitamente lo necesario. |
-| `moderator` | Reportes más `moderation.mute`, `moderation.ban` |
-| `administrator` | Las doce capacidades. |
-| `implementor` | Las doce capacidades; rango operativo excepcional. |
+| `builder` | No implicit capability; assigned explicitly as needed. |
+| `moderator` | Reports plus `moderation.mute`, `moderation.ban` |
+| `administrator` | All twelve capabilities. |
+| `implementor` | All twelve capabilities; exceptional operative rank. |
 
-El `lore_title` opcional puede presentar “Angel”, “Semidiós”, “Dios” u otro
-título del mundo, pero no concede autoridad. Las capacidades canónicas son:
+The optional `lore_title` may present “Angel”, “Demigod”, “God”, or another
+world title, but it grants no authority. The canonical capabilities are:
 
 ```text
 reports.view       reports.resolve
@@ -151,594 +149,588 @@ staff.goto         staff.transfer      staff.restore
 staff.announce     staff.audit
 ```
 
-Cambiar un perfil borra las asignaciones anteriores y siembra exactamente el
-bundle revisado del perfil nuevo; las capacidades directas se aplican después,
-de forma explícita. Tanto la asignación como las acciones dirigidas rechazan la
-propia cuenta y cualquier objetivo de rango igual o superior.
+Changing a profile erases the previous assignments and seeds exactly the
+reviewed bundle of the new profile; direct capabilities are applied afterwards,
+explicitly. Both assignment and targeted actions reject one's own account and
+any target of equal or higher rank.
 
-Dentro del juego se pueden ejecutar `report`, `mute`, `unmute`, `ban`,
-`unban`, `role` y la superficie staff de fase 2. Todos los cambios sensibles
-exigen motivo. La cola solo contiene reportes abiertos; resolver requiere uno
-de `dismissed`, `action_taken`, `no_action` y conserva resolución, motivo,
-responsable y fecha.
+In-game one can execute `report`, `mute`, `unmute`, `ban`, `unban`, `role`, and
+the phase 2 staff surface. All sensitive changes require a reason. The queue only
+contains open reports; resolving requires one of `dismissed`, `action_taken`,
+`no_action` and keeps resolution, reason, responsible party, and date.
 
 ```text
 staff
 staff status
-staff reports <motivo>
-staff resolve <id> <dismissed|action_taken|no_action> <motivo>
-staff inspect <nombre> | <motivo>
-staff where <nombre> | <motivo>
-staff goto <nombre> | <motivo>
-staff transfer <nombre> | <motivo>
-staff restore <nombre> | <motivo>
-staff announce <texto> | <motivo>
-staff audit <motivo>
-staff profile <nombre> <helper|builder|moderator|administrator|implementor|none> <título|none> | <motivo>
-staff capability <grant|revoke> <nombre> <capacidad> | <motivo>
+staff reports <reason>
+staff resolve <id> <dismissed|action_taken|no_action> <reason>
+staff inspect <name> | <reason>
+staff where <name> | <reason>
+staff goto <name> | <reason>
+staff transfer <name> | <reason>
+staff restore <name> | <reason>
+staff announce <text> | <reason>
+staff profile <name> <helper|builder|moderator|administrator|implementor|none> <title|none> | <reason>
+staff capability <grant|revoke> <name> <capability> | <reason>
 ```
 
-Inspect/where/goto/transfer/restore resuelven un personaje conectado y no son
-administración offline. Perfil/capacidad y resolución de reportes usan
-identidad durable. Las mutaciones y su entrada de auditoría se escriben
-atómicamente; `staff_audit` es append-only por restricciones y triggers en
-ambos adaptadores. Siguen ausentes `load/spawn`, `purge`, `invis`, `holylight`,
-`snoop`, `switch`, `force` y edición online. `tiamud-admin` permanece en la
-capa de operador.
+Inspect/where/goto/transfer/restore resolve a connected character and are not
+offline administration. Profile/capability and report resolution use durable
+identity. Mutations and their audit entry are written atomically; `staff_audit`
+is append-only by constraints and triggers in both adapters. Still absent are
+`load/spawn`, `purge`, `invis`, `holylight`, `snoop`, `switch`, `force`, and
+online editing. `tiamud-admin` remains in the operator layer.
 
-### Inventario y botín
+### Inventory and loot
 
-WorldPack v9/AreaPack v8 separan `itemPrototypes` de
-`initialItemInstances`. El prototipo contiene nombre, descripción, aliases,
-equipo/ataque/curación/efecto, peso, coste de slot, rareza, nivel y políticas
-cerradas. Cada instancia durable referencia un prototipo y comienza en una
-sala, un `npc_spawn`, `staged` o dentro de otra instancia contenedor. En runtime
-puede estar además en inventario, equipada, en poder de un NPC o consumida. Los
-slots de equipo actuales son arma, cuerpo y abalorio.
+WorldPack v9/AreaPack v8 separate `itemPrototypes` from `initialItemInstances`.
+The prototype contains name, description, aliases,
+equipment/attack/healing/effect, weight, slot cost, rarity, level, and closed
+policies. Each durable instance references a prototype and starts in a room, an
+`npc_spawn`, `staged`, or inside another container instance. At runtime it can
+additionally be in inventory, equipped, held by an NPC, or consumed. The current
+equipment slots are weapon, body, and trinket.
 
-El runtime crea instancias distintas del mismo prototipo con una secuencia
-monotónica persistida. `ItemInstanceId`, `prototypeId` y spawn no salen del
-servidor; Web, Telnet y GMCP reciben un ID opaco distinto por unidad, derivado
-de una sal criptográficamente aleatoria nueva por sesión. Telnet lo muestra
-como referencia y permite usarlo como selector exacto. Una pila visible usa la
-referencia opaca de su primer miembro visible ordenado; las consultas textuales
-ambiguas fallan en vez de escoger una unidad arbitraria. La fase histórica 4A
-añadió procedencia
-durable exacta: `authored_initial`, `legacy_snapshot`, `runtime_created` o
-`npc_loot` con tabla/digest/entrada/tirada; esa procedencia nunca sale del
-servidor.
+The runtime creates distinct instances of the same prototype with a persisted
+monotonic sequence. `ItemInstanceId`, `prototypeId`, and spawn never leave the
+server; Web, Telnet, and GMCP receive a distinct opaque ID per unit, derived
+from a cryptographically random salt that is new per session. Telnet shows it as
+a reference and allows using it as an exact selector. A visible stack uses the
+opaque reference of its first ordered visible member; ambiguous textual queries
+fail instead of picking an arbitrary unit. The historical phase 4A added exact
+durable provenance: `authored_initial`, `legacy_snapshot`, `runtime_created`, or
+`npc_loot` with table/digest/entry/roll; that provenance never leaves the
+server.
 
-La presentación de un objeto se autoriza por instancia visible, pero el
-registro `entityMedia` se comparte por prototipo. La política
-`roomPerception.hiddenItems` apunta a la instancia concreta; no es una regla de
-visibilidad para todas las unidades del prototipo.
+An item's presentation is authorized per visible instance, but the
+`entityMedia` record is shared per prototype. The `roomPerception.hiddenItems`
+policy points to the concrete instance; it is not a visibility rule for all
+units of the prototype.
 
-Cada personaje tiene capacidad por slots y peso. El peso suma inventario y
-equipo y todos sus descendientes; los slots cuentan solo raíces de inventario,
-agrupadas por pila. Un contenedor `unique` no consumible cuenta slots de hijos
-directos agrupados y peso de todos sus descendientes. El grafo rechaza ciclos y
-una quinta arista. Equipar, desequipar, reemplazar, tomar, soltar, introducir y
-extraer prevalidan el estado prospectivo completo antes de mutar.
+Each character has capacity by slots and weight. Weight sums inventory and
+equipment and all of their descendants; slots count only inventory roots,
+grouped by stack. A non-consumable `unique` container counts slots of grouped
+direct children and weight of all its descendants. The graph rejects cycles and
+a fifth edge. Equip, unequip, replace, take, drop, put, and get pre-validate the
+full prospective state before mutating.
 
-Las pilas `fungible` se derivan por ubicación/prototipo/vínculo, ordenan
-unidades por ID y se dividen por `maxStackUnits`; no se persiste `quantity` ni
-un ID de pila. `take`/`drop`/`put`/`get`/`give` mueven 1..=256 unidades y
-`contents` pagina 20 grupos.
-La rareza cerrada, `itemLevel`, peso unitario/total, cantidad, slots y capacidad
-se muestran como texto; Web usa `container.contents`, Telnet texto equivalente
-y GMCP `Char.Items.List` con ubicación `container`. Las vistas añaden política,
-estado ligado y `canGive`, sin exponer el dueño durable.
+`fungible` stacks are derived by location/prototype/binding, order units by ID,
+and split by `maxStackUnits`; neither `quantity` nor a stack ID is persisted.
+`take`/`drop`/`put`/`get`/`give` move 1..=256 units and `contents` paginates 20
+groups. The closed rarity, `itemLevel`, unit/total weight, quantity, slots, and
+capacity are shown as text; Web uses `container.contents`, Telnet equivalent
+text, and GMCP `Char.Items.List` with location `container`. The views add
+policy, bound state, and `canGive`, without exposing the durable owner.
 
-El propietario efectivo se obtiene en la raíz del grafo. Al adquirir desde
-sala/NPC/staging se liga recursivamente cada descendiente `character_bound` al
-personaje; `non_transferable` restringe el cambio sin persistir un dueño. Un
-subárbol solo puede cambiar de personaje o volver al mundo si todas sus
-instancias son `transferable`, cerrando el bypass mediante contenedores.
-`give [cantidad] <objeto> to <personaje>` solo acepta raíces portadas, otro
-personaje conectado en la misma sala y capacidad bilateral. Ignore del
-receptor y block bilateral lo impiden con un error genérico. El cambio,
-snapshot y `ItemsGiven` se confirman o revierten juntos.
+The effective owner is obtained at the graph root. On acquisition from
+room/NPC/staging, each `character_bound` descendant is recursively bound to the
+character; `non_transferable` restricts the change without persisting an owner. A
+subtree can only change character or return to the world if all of its instances
+are `transferable`, closing the bypass through containers.
+`give [quantity] <item> to <character>` only accepts carried roots, another
+connected character in the same room, and bilateral capacity. The receiver's
+ignore and bilateral block prevent it with a generic error. The change,
+snapshot, and `ItemsGiven` are committed or reverted together.
 
-`trade` mantiene objetos y moneda en sus autoridades y los reserva en el
-snapshot. Admite hasta 64 negociaciones, una por personaje, 8 líneas por lado
-y 128 raíces transferibles entre ambos. Los dos participantes deben seguir
-conectados, juntos, fuera de combate y permitidos por ignore/block. Cada cambio
-material incrementa una revisión y limpia confirmaciones; dos identidades
-distintas deben confirmar la misma revisión y digest. La liquidación construye
-ambos inventarios y saldos finales antes de confirmar todo en un único commit.
-Separación, combate, derrota, desconexión, cambio social, expiración o reinicio
-cancelan de forma cerrada. Web, Telnet y `Char.Trade 1` GMCP proyectan ofertas,
-reservas y saldo gastable con IDs opacos por sesión.
+`trade` keeps items and currency in their authorities and reserves them in the
+snapshot. It admits up to 64 negotiations, one per character, 8 lines per side,
+and 128 transferable roots between the two. Both participants must remain
+connected, together, out of combat, and permitted by ignore/block. Each material
+change increments a revision and clears confirmations; two distinct identities
+must confirm the same revision and digest. Settlement builds both final
+inventories and balances before committing everything in a single commit.
+Separation, combat, defeat, disconnect, social change, expiry, or restart cancel
+it in a closed manner. Web, Telnet, and `Char.Trade 1` GMCP project offers,
+reservations, and spendable balance with session-opaque IDs.
 
-El botín fijo continúa como instancia inicial ubicada en `npc_spawn`, pero 4A
-añade una `lootSource` repetible con una `lootTable` de garantizados y pools
-ponderados enteros. Cada fuente se resuelve una sola vez por derrota mediante
-rejection sampling. Fijos y generables suman como máximo 64 raíces; tirada,
-RNG, contador, procedencia, derechos, NPC, XP, eventos y snapshot se confirman
-o revierten juntos. Si falta capacidad, lo generado se suprime de forma
-durable sin bloquear la derrota ni permitir reroll.
+Fixed loot continues as an initial instance located at `npc_spawn`, but 4A adds
+a repeatable `lootSource` with a `lootTable` of guaranteed entries and integer
+weighted pools. Each source is resolved only once per defeat via rejection
+sampling. Fixed and generable together sum at most 64 roots; roll, RNG, counter,
+provenance, rights, NPC, XP, events, and snapshot are committed or reverted
+together. If capacity is missing, what was generated is suppressed durably
+without blocking the defeat or allowing a reroll.
 
-`credited_character` reserva las raíces al iniciador. `party_round_robin`
-congela una cohorte de hasta seis personajes conectados, vivos y próximos,
-revalida a los acompañantes en la derrota y avanza un cursor durable. El
-beneficiario puede usar `loot pass`; la raíz es exclusiva durante 20 ticks,
-pública después y se retira al tick 120. Web, Telnet y GMCP solo muestran
-`yours` con ticks restantes, `reserved` sin identidad, o público; las pilas se
-parten por ese acceso.
+`credited_character` reserves the roots to the initiator. `party_round_robin`
+freezes a cohort of up to six connected, alive, and nearby characters,
+revalidates the companions on defeat, and advances a durable cursor. The
+beneficiary can use `loot pass`; the root is exclusive for 20 ticks, public
+afterwards, and is removed at tick 120. Web, Telnet, and GMCP only show `yours`
+with remaining ticks, `reserved` without identity, or public; stacks are split
+by that access.
 
-4B añade sellos `unique`, consumibles y `character_bound` que solo pueden
-obtenerse desde una tabla normal asociada a un NPC. No son instancias iniciales,
-su tabla de apertura no puede ser fuente directa ni generar otro sello, produce
-1..=16 unidades y expone como máximo 1.024 filas de probabilidad. `open` y
-`reward odds` comparten el mismo dominio en Web, Telnet y GMCP; odds informa
-las probabilidades authored exactas sin revelar RNG, IDs estables ni digests.
+4B adds `unique`, consumable, and `character_bound` seals that can only be
+obtained from a normal table associated with an NPC. They are not initial
+instances, their opening table cannot be a direct source nor generate another
+seal, it produces 1..=16 units, and it exposes at most 1,024 probability rows.
+`open` and `reward odds` share the same domain in Web, Telnet, and GMCP; odds
+reports the exact authored probabilities without revealing RNG, stable IDs, or
+digests.
 
-Las entradas normales o selladas de cantidad uno pueden referenciar un pool de
-afijos para un prototipo `unique`, no sellado. Hay como máximo un afijo por
-instancia, con 512 definiciones, 256 pools, 64 entradas por pool, 4.096 entradas
-totales, etiquetas de 64 bytes y deltas positivos de ataque/curación de hasta
-1.000. La selección ponderada es entera y sin sesgo; las copias durables
-conservan digests de definición, pool y registro sin proyectarlos. Una apertura
-confirma o revierte junta consumo, RNG, contador, creación, vínculo y capacidad.
-El fallo restaura exactamente el checkpoint. En botín normal la tirada de afijo
-se consume aunque después se suprima el drop, evitando rerolls por capacidad.
+Normal or sealed entries of quantity one can reference an affix pool for a
+`unique`, non-sealed prototype. There is at most one affix per instance, with
+512 definitions, 256 pools, 64 entries per pool, 4,096 total entries, 64-byte
+labels, and positive attack/healing deltas of up to 1,000. The weighted
+selection is integer and unbiased; the durable copies keep definition, pool, and
+record digests without projecting them. An opening commits or reverts together
+consumption, RNG, counter, creation, binding, and capacity. Failure restores
+exactly the checkpoint. In normal loot the affix roll is consumed even if the
+drop is later suppressed, avoiding capacity-based rerolls.
 
-`WorldRuntimeSnapshot` v7 persiste instancias, contención, contadores de
-identidad y apertura, afijos aplicados, vínculo, trade, RNG, procedencia normal
-o sellada, encuentros, derechos y cursores. Las lecturas v1–v5 usan DTO exactos
-bajo 1 MiB, migran con procedencia legacy y rechazan campos nuevos; v6 y v7
-admiten hasta 2 MiB. Un v6 estricto sube a v7 con `itemAffixes: []` en cada
-instancia y contador de apertura uno. SQLite y PostgreSQL confirman esa única
-autoridad en la transacción de esquema v13, sin tabla espejo de loot/escrow.
-Al restaurar se conservan nuevas instancias authored sin resucitar runtime
-ausente. La barrera valida por lotes propietarios, vínculos, cohortes y
-beneficiarios; cancela encuentros abiertos antes de readiness, pero conserva
-los derechos de suelo ya creados.
+`WorldRuntimeSnapshot` v7 persists instances, containment, identity and opening
+counters, applied affixes, binding, trade, RNG, normal or sealed provenance,
+encounters, rights, and cursors. The v1–v5 reads use exact DTOs under 1 MiB,
+migrate with legacy provenance, and reject new fields; v6 and v7 admit up to 2
+MiB. A strict v6 upgrades to v7 with `itemAffixes: []` on each instance and an
+opening counter of one. SQLite and PostgreSQL commit that single authority in
+the schema v13 transaction, without a mirror loot/escrow table. On restore, new
+authored instances are kept without resurrecting absent runtime. The barrier
+validates owners, bindings, cohorts, and beneficiaries in batches; it cancels
+open encounters before readiness, but keeps the floor rights already created.
 
-Las escenas densas conservan una ventana semántica determinista de 14 KiB en
-Web y 48 KiB en Telnet, con prioridad propia→pública→reservada y aviso de
-reducción. Cada batch proyecta como máximo 16 eventos y un exceso se coalesce
-con snapshot autoritativo; esto no introduce replay general.
+Dense scenes keep a deterministic semantic window of 14 KiB in Web and 48 KiB in
+Telnet, with own→public→reserved priority and a reduction notice. Each batch
+projects at most 16 events and an excess is coalesced with an authoritative
+snapshot; this does not introduce general replay.
 
-## Qué muestran los MUD clásicos
+## What classic MUDs show
 
-Las referencias oficiales de CircleMUD documentan familias de funciones como
-grupo y `gsay`, comunicación pública, seguimiento/asistencia/rescate, correo y
-tablones, y una superficie amplia de comandos de wizard. Sus niveles mínimos
-de comando también separan parte de la autoridad inmortal del avance mortal:
+The official CircleMUD references document families of functions such as group
+and `gsay`, public communication, following/assist/rescue, mail and boards, and
+a broad wizard command surface. Their minimum command levels also separate part
+of the immortal authority from mortal advancement:
 
-- [índice oficial del código fuente de CircleMUD](https://www.circlemud.org/pub/jelson/CircleMUD/3.x/uncompressed/current/src/);
-- [referencia cruzada oficial de funciones](https://www.circlemud.org/cdp/cxref/comm.c.html);
-- [manual oficial de comandos de wizard](https://www.circlemud.org/pub/CircleMUD/3.x/uncompressed/circle30bpl21/doc/wizhelp.pdf);
-- [notas oficiales sobre canales y niveles mínimos](https://www.circlemud.org/cdp/wtfaq/chap3-1.html);
-- [notas oficiales sobre niveles inmortales adicionales](https://www.circlemud.org/cdp/wtfaq/level.html).
+- [official index of the CircleMUD source code](https://www.circlemud.org/pub/jelson/CircleMUD/3.x/uncompressed/current/src/);
+- [official cross-reference of functions](https://www.circlemud.org/cdp/cxref/comm.c.html);
+- [official wizard command manual](https://www.circlemud.org/pub/CircleMUD/3.x/uncompressed/circle30bpl21/doc/wizhelp.pdf);
+- [official notes on channels and minimum levels](https://www.circlemud.org/cdp/wtfaq/chap3-1.html);
+- [official notes on additional immortal levels](https://www.circlemud.org/cdp/wtfaq/level.html).
 
-Estas fuentes sirven para identificar categorías, no para copiar código,
-textos de ayuda o decisiones de seguridad. Tiamud es una implementación limpia
-y conserva sus propios límites de licencia, accesibilidad, autoridad,
-persistencia y single writer.
+These sources serve to identify categories, not to copy code, help texts, or
+security decisions. Tiamud is a clean implementation and keeps its own limits of
+license, accessibility, authority, persistence, and single writer.
 
-## Comunicación implementada y ampliaciones futuras
+## Implemented communication and future extensions
 
-Las fases 1, 5A y 5B conservan una sola política social efímera; ningún canal está
-implementado de forma independiente en WebSocket, Telnet o la interfaz. La
-telepatía ya entra por esa política después de mutar gameplay de forma durable.
-El correo 5C comparte mute/bucket, pero después sigue una transacción y una
-proyección privada distintas: no entra en el router de chat. Los tablones 5D
-comparten las guardas de publicación y después usan cuota/almacenamiento
-públicos propios; solo responden a la sesión solicitante.
+Phases 1, 5A, and 5B keep a single ephemeral social policy; no channel is
+implemented independently on WebSocket, Telnet, or the interface. Telepathy
+already enters through that policy after durably mutating gameplay. The 5C mail
+shares mute/bucket, but afterwards follows a distinct transaction and a distinct
+private projection: it does not enter the chat router. The 5D boards share the
+posting guards and afterwards use their own public quota/storage; they only
+respond to the requesting session.
 
 ```mermaid
 flowchart LR
-    accTitle: Enrutamiento actual de las comunicaciones de Tiamud
-    accDescr: Chat, emotes y telepatía entregan copias efímeras mediante una política común. Correo y tablones superan guardas comunes, pero usan cuota, retención y consulta separadas: privada para correo y pública bajo demanda para tablones.
+    accTitle: Current routing of Tiamud communications
+    accDescr: Chat, emotes, and telepathy deliver ephemeral copies through a common policy. Mail and boards clear common guards, but use separate quota, retention, and query: private for mail and public on demand for boards.
 
-    Text[PlayerAction social] --> Policy[Política social común]
-    Ability[Habilidad authored de telepatía] --> Effect[Recurso + cooldown<br/>commit durable]
+    Text[PlayerAction social] --> Policy[Common social policy]
+    Ability[Authored telepathy ability] --> Effect[Resource + cooldown<br/>durable commit]
     Effect --> Policy
-    Policy --> Audience{Ámbito}
-    Audience --> Room[Sala]
+    Policy --> Audience{Scope}
+    Audience --> Room[Room]
     Audience --> Party[Party]
-    Audience --> Direct[Directo]
-    Audience --> Channel[Canal suscrito]
-    Policy --> Safety[Ignore · block · mute<br/>rate limit · permisos]
-    Room --> Delivery[Buzones acotados por sesión]
+    Audience --> Direct[Direct]
+    Audience --> Channel[Subscribed channel]
+    Policy --> Safety[Ignore · block · mute<br/>rate limit · permissions]
+    Room --> Delivery[Session-bounded mailboxes]
     Party --> Delivery
     Direct --> Delivery
     Channel --> Delivery
     Safety --> Delivery
     Mail[PlayerAction Mail] --> Guard[Mute · bucket]
-    Guard --> Quota[Cuota por cuenta]
-    Quota --> Store[(SQLite o PostgreSQL v13)]
-    Store --> Private[mail.list · mail.message<br/>sesión solicitante]
-    Board[PlayerAction Board] --> BoardGuard[Mute · ban · bucket<br/>solo al publicar]
-    BoardGuard --> BoardQuota[Cuota 5/h · 20/d]
+    Guard --> Quota[Per-account quota]
+    Quota --> Store[(SQLite or PostgreSQL v13)]
+    Store --> Private[mail.list · mail.message<br/>requesting session]
+    Board[PlayerAction Board] --> BoardGuard[Mute · ban · bucket<br/>only on posting]
+    BoardGuard --> BoardQuota[Quota 5/h · 20/d]
     BoardQuota --> Store
-    Store --> Public[board.catalog · list · entry<br/>sesión solicitante]
-    Voice[PlayerAction yell · shout] --> BFS[BFS dirigido no secreto<br/>radio 1 · 3 · máximo 259]
+    Store --> Public[board.catalog · list · entry<br/>requesting session]
+    Voice[PlayerAction yell · shout] --> BFS[Directed non-secret BFS<br/>radius 1 · 3 · max 259]
     BFS --> Safety
     BFS --> Delivery
 ```
 
-### Fase 1 entregada
+### Phase 1 delivered
 
-1. Implementado `party say <texto>` con alias `gtell`/`gsay`, usando la
-   membresía durable actual.
-2. Implementado `reply <texto>` con el ID interno en memoria del último
-   remitente válido, no un nombre ambiguo ni un ID estable expuesto.
-3. Implementados revocar invitación, expulsar, transferir y disolver.
-4. Implementados los canales suscritos `newbie`, `general` y `staff`, con
-   permisos, rate limit, mute, ignore/block y entrega mediante buzones
-   acotados. La suscripción persiste en ambos adaptadores; `staff` exige perfil
-   `moderator`, `administrator` o `implementor`.
-5. Implementados `shout`/`yell` 5E como propagación espacial dirigida y acotada, no
-   como otro nombre para el canal global.
-6. Implementados emotes de sala authored con plantillas estrictas que nunca
-   convierten texto del jugador en ANSI, HTML, MXP o instrucciones evaluables.
+1. Implemented `party say <text>` with the `gtell`/`gsay` aliases, using the
+   current durable membership.
+2. Implemented `reply <text>` with the in-memory internal ID of the last valid
+   sender, not an ambiguous name or an exposed stable ID.
+3. Implemented revoke invitation, kick, transfer, and disband.
+4. Implemented the subscribed channels `newbie`, `general`, and `staff`, with
+   permissions, rate limit, mute, ignore/block, and delivery via bounded
+   mailboxes. The subscription persists in both adapters; `staff` requires a
+   `moderator`, `administrator`, or `implementor` profile.
+5. Implemented `shout`/`yell` 5E as directed and bounded spatial propagation,
+   not as another name for the global channel.
+6. Implemented authored room emotes with strict templates that never turn player
+   text into ANSI, HTML, MXP, or evaluable instructions.
 
-Web usa acciones estructuradas y representa los once valores de
-`SocialMessage`; Telnet comparte los comandos de texto y proyecta cada entrega
-como texto y como `Comm.Channel.Text` cuando GMCP `Comm` está negociado. Esta
-paridad no convierte GMCP en una segunda autoridad. `Yell` y `Shout` forman
-parte del vocabulario cerrado actual.
+Web uses structured actions and represents the eleven values of `SocialMessage`;
+Telnet shares the text commands and projects each delivery as text and as
+`Comm.Channel.Text` when GMCP `Comm` is negotiated. This parity does not turn
+GMCP into a second authority. `Yell` and `Shout` are part of the current closed
+vocabulary.
 
-Guild/clan chat puede seguir después. Los tablones ya tienen retención,
-límites, moderación, eliminación y reglas públicas propias; no incluyen
-búsqueda, hilos, edición ni suscripciones.
+Guild/clan chat can follow later. The boards already have their own retention,
+limits, moderation, deletion, and public rules; they do not include search,
+threads, editing, or subscriptions.
 
-### Fase 5A — telepatía directa authored — implementada
+### Phase 5A — direct authored telepathy — implemented
 
-WorldPack v8/AreaPack v7 implementan una comunicación cerrada
-`telepathy/direct_online`. Una habilidad válida:
+WorldPack v8/AreaPack v7 implement a closed `telepathy/direct_online`
+communication. A valid ability:
 
-- es `spell|utility`, `single_ally` y no pertenece a un NPC;
-- tiene al menos un coste de recurso y cooldown positivo;
-- no combina daño, curación ni estados;
-- dirige un pensamiento de hasta 512 bytes a otro personaje conectado;
-- puede bloquear hasta 64 salas existentes;
-- rechaza al emisor derrotado, recuperándose, aturdido o sin recursos; y
-- confirma recurso/cooldowns antes de la entrega Web/Telnet/GMCP.
+- is `spell|utility`, `single_ally`, and does not belong to an NPC;
+- has at least one resource cost and a positive cooldown;
+- does not combine damage, healing, or statuses;
+- directs a thought of up to 512 bytes to another connected character;
+- can block up to 64 existing rooms;
+- rejects a sender who is defeated, recovering, stunned, or out of resources; and
+- confirms resource/cooldowns before Web/Telnet/GMCP delivery.
 
-Ignore/block y la receptividad del receptor se usan solo para decidir entrega:
-su resultado nunca cambia la confirmación del emisor. No hay `DomainEvent` con
-texto/destino, no se enlaza `reply` y no existe entrega offline o grupal. El
-contrato aceptado está en
+Ignore/block and the receiver's receptivity are used only to decide delivery:
+their result never changes the sender's confirmation. There is no `DomainEvent`
+with text/destination, `reply` is not linked, and there is no offline or group
+delivery. The accepted contract is in
 [ADR 0015](../decisions/0015-authored-online-telepathy.md).
 
-### Fase 5B — emotes de sala authored — implementada
+### Phase 5B — authored room emotes — implemented
 
-WorldPack v9/AreaPack v8 admiten hasta 32 emotes de audiencia `room`. Cada
-definición fija comando, nombre, targeting
-`none|optional_character|required_character` y plantillas cerradas para actor,
-objetivo y observadores. Solo existen `{actor}` y `{target}`; la sustitución se
-hace en una pasada y no reinterpreta marcadores dentro de los nombres
-insertados.
+WorldPack v9/AreaPack v8 admit up to 32 emotes with a `room` audience. Each
+definition fixes command, name, targeting
+`none|optional_character|required_character`, and closed templates for actor,
+target, and observers. Only `{actor}` and `{target}` exist; substitution is done
+in a single pass and does not reinterpret markers inside the inserted names.
 
-`emotes` lista sin consumir el bucket. `emote <comando> [personaje]` comparte
-mute y rate limit con chat y resuelve únicamente otro personaje conectado y no
-ambiguo de la misma sala. Ignore/block se aplica por receptor: no cambia la
-confirmación del actor ni la copia de terceros autorizados. `OnTalk` se ejecuta
-de forma acotada y la entrega Web/Telnet/GMCP empieza solo después del commit;
-un rollback publica cero copias.
+`emotes` lists without consuming the bucket. `emote <command> [character]`
+shares mute and rate limit with chat and resolves only another connected and
+unambiguous character in the same room. Ignore/block is applied per receiver: it
+does not change the actor's confirmation or the third-party authorized copy.
+`OnTalk` runs in a bounded manner and Web/Telnet/GMCP delivery starts only after
+the commit; a rollback publishes zero copies.
 
-No hay texto libre, IDs authored en transporte, `DomainEvent`, `reply`,
-historial, snapshot o SQL. El contrato está en
+There is no free text, authored IDs on the wire, `DomainEvent`, `reply`,
+history, snapshot, or SQL. The contract is in
 [ADR 0016](../decisions/0016-authored-room-emotes.md).
 
-### Fase 5C — correo offline acotado — implementada
+### Phase 5C — bounded offline mail — implemented
 
-`mail list/read/delete/send/report` separa la correspondencia durable de
-`tell`, `reply`, telepatía y chat. El buzón admite 64 mensajes, 128 KiB y siete
-páginas de diez; cada carta vive 30 días. Tras mute y el bucket común, los
-intentos con campos válidos consumen por cuenta una cuota de 20 por hora y 50
-por día antes de resolver el nombre.
-Ignore/block, ban y capacidad suprimen la entrega con la misma aceptación que
-un guardado, de modo que el emisor no sondea estado privado.
+`mail list/read/delete/send/report` separates durable correspondence from
+`tell`, `reply`, telepathy, and chat. The mailbox admits 64 messages, 128 KiB,
+and seven pages of ten; each letter lives 30 days. After mute and the common
+bucket, attempts with valid fields consume per account a quota of 20 per hour and
+50 per day before resolving the name. Ignore/block, ban, and capacity suppress
+delivery with the same acceptance as a save, so the sender does not probe private
+state.
 
-SQLite/PostgreSQL v12 persisten mensaje, cuota y evidencia denunciada. Solo el
-destinatario puede leer, borrar o denunciar una vez; hasta ocho denuncias de
-correo abiertas por cuenta capturan evidencia durante 90 días. Staff ve el
-asunto y un extracto acotado en la cola, no explora buzones ni registra cuerpos
-en auditoría. Web `mail.list`/`mail.message`, texto Telnet y `Tiamud.Mail 1`
-comparten dominio. No hay outbox, búsqueda, adjuntos, correo grupal ni
-notificación online. El contrato está en
+SQLite/PostgreSQL v12 persist message, quota, and reported evidence. Only the
+recipient can read, delete, or report once; up to eight open mail reports per
+account capture evidence for 90 days. Staff sees the subject and a bounded
+excerpt in the queue, does not browse mailboxes or record bodies in the audit.
+Web `mail.list`/`mail.message`, Telnet text, and `Tiamud.Mail 1` share the
+domain. There is no outbox, search, attachments, group mail, or online
+notification. The contract is in
 [ADR 0017](../decisions/0017-bounded-offline-mail.md).
 
-### Fase 5D — tablones comunitarios acotados — implementada
+### Phase 5D — bounded community boards — implemented
 
-`board` ofrece el catálogo global cerrado `general`/`newbie`; `board list`,
-`read`, `post`, `delete` y `report` comparten `PlayerAction::Board`. Web usa
-`board.catalog/list/read/post/delete/report`, Telnet el mismo texto y GMCP
-`Tiamud.Board 1`. Las respuestas `board.catalog/list/entry` son pull-only: no
-se reutiliza `Comm.Channel.Text`, no hay fan-out ni estado leído/no leído.
+`board` offers the closed global catalog `general`/`newbie`; `board list`,
+`read`, `post`, `delete`, and `report` share `PlayerAction::Board`. Web uses
+`board.catalog/list/read/post/delete/report`, Telnet the same text, and GMCP
+`Tiamud.Board 1`. The `board.catalog/list/entry` responses are pull-only:
+`Comm.Channel.Text` is not reused, there is no fan-out or read/unread state.
 
-Cada página contiene diez resúmenes, una publicación vive 90 días y la cuenta
-mantiene como máximo 64 posts. Publicar consume cuota 5/h y 20/día después de
-mute, ban y el bucket común; los topes son 1.000 posts/4 MiB por tablón y
-2.000/8 MiB globales. Ignore/block no filtran contenido público. El mismo
-personaje autor puede borrar; otra cuenta puede crear la única denuncia global
-del post. La evidencia vive 90 días, tiene caps de ocho reportes abiertos por
-cuenta denunciante y 10.000 cuerpos globales, y se integra con
-`reports.view`/`reports.resolve`; `action_taken` elimina el post vivo.
+Each page contains ten summaries, a post lives 90 days, and the account keeps at
+most 64 posts. Posting consumes a quota of 5/h and 20/day after mute, ban, and
+the common bucket; the ceilings are 1,000 posts/4 MiB per board and 2,000/8 MiB
+globally. Ignore/block do not filter public content. The same author-character
+can delete; another account can create the single global report of the post. The
+evidence lives 90 days, has caps of eight open reports per reporting account and
+10,000 global bodies, and integrates with `reports.view`/`reports.resolve`;
+`action_taken` removes the live post.
 
-SQLite/PostgreSQL v13 y el mover incluyen posts, cuota y evidencia; la purga
-acotada es fail-closed al arrancar y periódica no fatal. WorldPack v9, AreaPack
-v8, WorldProject v2 y snapshot v7 no cambian. No hay edición, hilos, búsqueda,
-markup, adjuntos, push ni tablones de party/guild/staff/sala/área. El contrato
-está en [ADR 0018](../decisions/0018-bounded-moderable-community-boards.md).
+SQLite/PostgreSQL v13 and the mover include posts, quota, and evidence; the
+bounded purge is fail-closed at startup and periodic non-fatal. WorldPack v9,
+AreaPack v8, WorldProject v2, and snapshot v7 do not change. There is no editing,
+threads, search, markup, attachments, push, or party/guild/staff/room/area
+boards. The contract is in
+[ADR 0018](../decisions/0018-bounded-moderable-community-boards.md).
 
-### Fase 5E — voz espacial acotada — implementada
+### Phase 5E — bounded spatial voice — implemented
 
-`yell <mensaje>` cubre la sala origen y un salto; `shout <mensaje>` llega hasta
-tres. El BFS sigue solo salidas dirigidas no secretas, deduplica ciclos y rutas
-convergentes y se detiene al visitar 259 salas. No publica rumbo, distancia,
-ruta ni sala de origen. Web reserva `social.yell`/`social.shout` con únicamente
-`message` de 1..=512 bytes; Telnet conserva texto y GMCP reutiliza
-`Comm.Channel.Text`.
+`yell <message>` covers the origin room and one hop; `shout <message>` reaches up
+to three. The BFS follows only directed non-secret exits, deduplicates cycles
+and convergent routes, and stops on visiting 259 rooms. It does not publish
+bearing, distance, route, or origin room. Web reserves
+`social.yell`/`social.shout` with only a `message` of 1..=512 bytes; Telnet keeps
+text and GMCP reuses `Comm.Channel.Text`.
 
-Mute y el bucket común impiden emitir. Ignore, block bilateral y
-`condition.deaf` suprimen `say`/`yell`/`shout` por receptor; un personaje sordo
-puede hablar y la confirmación del actor no revela quién oyó. `OnTalk` corre
-una vez en origen y la entrega comienza tras commit; rollback entrega cero
-copias. No hay retención, `reply`, suscripción, SQL ni cambios de WorldPack,
-AreaPack o snapshot. [ADR 0019](../decisions/0019-bounded-spatial-voice.md)
-define el contrato; código, cobertura y puerta integrada están terminados.
+Mute and the common bucket prevent emission. Ignore, bilateral block, and
+`condition.deaf` suppress `say`/`yell`/`shout` per receiver; a deaf character can
+speak and the actor's confirmation does not reveal who heard. `OnTalk` runs once
+at the origin and delivery starts after commit; a rollback delivers zero copies.
+There is no retention, `reply`, subscription, SQL, or changes to WorldPack,
+AreaPack, or snapshot. [ADR 0019](../decisions/0019-bounded-spatial-voice.md)
+defines the contract; code, coverage, and integrated gate are finished.
 
-## Staff: rango visible, capacidad real
+## Staff: visible rank, real capability
 
-Los niveles de personaje y la autoridad administrativa deben seguir siendo
-dos ejes independientes.
+Character levels and administrative authority must remain two independent axes.
 
 ```mermaid
 flowchart TB
-    accTitle: Separación objetivo entre progresión y autoridad de staff
-    accDescr: La experiencia solo cambia la ficha jugable. Una designación administrativa separada concede capacidades acotadas, puede mostrar un título de ambientación y produce auditoría para cada acción sensible.
+    accTitle: Target separation between progression and staff authority
+    accDescr: Experience only changes the playable character sheet. A separate administrative designation grants bounded capabilities, may show a flavor title, and produces an audit for each sensitive action.
 
-    subgraph Play[Progresión jugable]
-        XP[XP] --> Level[Nivel]
-        Level --> Class[Clase y talentos]
-        Class --> Power[Poder del personaje]
+    subgraph Play[Playable progression]
+        XP[XP] --> Level[Level]
+        Level --> Class[Class and talents]
+        Class --> Power[Character power]
     end
 
-    subgraph Staff[Autoridad asignada]
-        Assign[Designación explícita] --> Profile[Perfil de capacidades]
-        Assign --> Lore[Título visible opcional]
-        Profile --> Bundle[Bundle inicial revisado]
-        Assign --> Capability[Asignación directa]
+    subgraph Staff[Assigned authority]
+        Assign[Explicit designation] --> Profile[Capability profile]
+        Assign --> Lore[Optional visible title]
+        Profile --> Bundle[Reviewed initial bundle]
+        Assign --> Capability[Direct assignment]
         Bundle --> Capability
-        Capability --> Command[Comando autorizado]
-        Command --> Reason[Motivo y límites]
-        Reason --> Audit[(Auditoría durable)]
+        Capability --> Command[Authorized command]
+        Command --> Reason[Reason and limits]
+        Reason --> Audit[(Durable audit)]
     end
 ```
 
-Los perfiles canónicos son identificadores operativos no localizados. “Angel”,
-“Semidiós” o “Dios” caben como `lore_title`, nunca como autorización. La
-comprobación usa el conjunto efectivo de capacidades y la jerarquía negativa
-de perfiles; rechaza objetivos iguales o superiores aunque exista la capacidad
-funcional. Cada comando de mundo implementado exige motivo, limita el alcance,
-opera sobre un personaje conectado y deja auditoría durable.
+The canonical profiles are non-localized operative identifiers. “Angel”,
+“Demigod”, or “God” fit as a `lore_title`, never as authorization. The check uses
+the effective set of capabilities and the negative hierarchy of profiles; it
+rejects equal or higher targets even when the functional capability exists. Each
+implemented world command requires a reason, limits the scope, operates on a
+connected character, and leaves a durable audit.
 
-`force`, `snoop` y `switch` tienen riesgos de abuso y privacidad; no son
-requisitos del baseline. `load/spawn` y `purge` pueden romper la economía o la
-persistencia si no trabajan con instancias y transacciones. El apagado, backup
-y migración deben seguir en la capa operativa salvo una necesidad medida.
+`force`, `snoop`, and `switch` carry abuse and privacy risks; they are not
+baseline requirements. `load/spawn` and `purge` can break the economy or
+persistence if they do not work with instances and transactions. Shutdown,
+backup, and migration must remain in the operative layer unless there is a
+measured need.
 
-La construcción online tampoco debe mutar definiciones vivas arbitrariamente.
-Un futuro OLC debería producir un borrador AreaPack, ejecutar el validador,
-publicar un WorldPack inmutable y usar activación/rollback controlados.
+Online building also must not arbitrarily mutate live definitions. A future OLC
+should produce an AreaPack draft, run the validator, publish an immutable
+WorldPack, and use controlled activation/rollback.
 
-## Inventario, tiers e instancias
+## Inventory, tiers, and instances
 
-“Tier de inventario” puede significar rareza del objeto o capacidad de carga.
-Son sistemas distintos y deben modelarse por separado.
+“Inventory tier” can mean item rarity or carrying capacity. They are distinct
+systems and must be modeled separately.
 
 ```mermaid
 flowchart LR
-    accTitle: Inventario implementado y ampliaciones de transferencia y botín
-    accDescr: Cada unidad conserva identidad durable; pilas, contenedores, políticas, trade, tablas repetibles, sellos, afijos, procedencia y derechos son autoritativos.
+    accTitle: Implemented inventory and transfer and loot extensions
+    accDescr: Each unit keeps durable identity; stacks, containers, policies, trade, repeatable tables, seals, affixes, provenance, and rights are authoritative.
 
-    Prototype[ItemPrototype implementado<br/>nombre · reglas · rareza · peso] --> Instance[ItemInstance implementada<br/>ID durable · prototypeId · ubicación]
-    Sequence[(Secuencia persistida)] --> Instance
-    Instance --> Current[Inventario / equipo / NPC / sala / contenedor]
-    Current --> Stack[Pila derivada<br/>sin identidad durable]
-    Current --> Container[Contenedor acotado<br/>slots + peso recursivo]
-    Current --> Give[Give atómico<br/>solo subárbol transferible]
-    Policy[Política + vínculo durable] --> Give
-    Give --> Trade[Trade confirmado<br/>reserva + doble confirmación]
+    Prototype[ItemPrototype implemented<br/>name · rules · rarity · weight] --> Instance[ItemInstance implemented<br/>durable ID · prototypeId · location]
+    Sequence[(Persisted sequence)] --> Instance
+    Instance --> Current[Inventory / equipment / NPC / room / container]
+    Current --> Stack[Derived stack<br/>no durable identity]
+    Current --> Container[Bounded container<br/>slots + recursive weight]
+    Current --> Give[Atomic give<br/>transferable subtree only]
+    Policy[Policy + durable binding] --> Give
+    Give --> Trade[Confirmed trade<br/>reservation + double confirmation]
 
-    Prototype --> Table[LootTable validada<br/>fixed + weighted]
-    RNG[(RNG persistido)] --> Roll[Tirada entera determinista]
+    Prototype --> Table[Validated LootTable<br/>fixed + weighted]
+    RNG[(Persisted RNG)] --> Roll[Deterministic integer roll]
     Table --> Roll
-    Roll --> Generated[Instancia nueva + procedencia]
-    Generated --> Rights[Derecho 20 ticks]
-    Cohort[Cohorte congelada] --> RR[Round-robin + pass]
+    Roll --> Generated[New instance + provenance]
+    Generated --> Rights[20-tick right]
+    Cohort[Frozen cohort] --> RR[Round-robin + pass]
     RR --> Rights
-    Rights --> Public[Público]
+    Rights --> Public[Public]
     Public --> Despawn[Despawn tick 120]
-    Table --> NormalAffix[Afijo normal opcional<br/>máximo uno]
-    Table --> Seal[Sello ganado<br/>no fuente directa]
-    Seal --> Open[open atómico]
-    Open --> Reward[1..=16 unidades]
-    Reward --> SealedAffix[Afijo sellado opcional<br/>máximo uno]
-    AffixPool[Pool entero sin sesgo] --> NormalAffix
+    Table --> NormalAffix[Optional normal affix<br/>at most one]
+    Table --> Seal[Earned seal<br/>not a direct source]
+    Seal --> Open[atomic open]
+    Open --> Reward[1..=16 units]
+    Reward --> SealedAffix[Optional sealed affix<br/>at most one]
+    AffixPool[Unbiased integer pool] --> NormalAffix
     AffixPool --> SealedAffix
 ```
 
-### Fundamento y secuencia
+### Foundation and sequence
 
-1. Implementado: `ItemPrototype`, contenido authored estable y reutilizable.
-2. Implementado: `ItemInstance`, ID durable único, `prototypeId` y ubicación;
-   el snapshot y rollback incluyen la secuencia creadora.
-3. Implementado: inventario acotado por slots/peso, contenedores con capacidad
-   y profundidad máximas, y pilas derivadas que agrupan unidades fungibles por
-   ubicación/prototipo sin persistir cantidad.
-4. Implementado: `give` atómico para casos simples y políticas declaradas
-   `transferable`, `character_bound` y `non_transferable`, aplicadas al
-   propietario efectivo y al subárbol completo.
-5. Implementado: intercambio confirmado por ambas partes para ofertas de
-   objetos y moneda, con reserva durable acotada e invalidación ante cualquier
-   cambio material.
-6. Implementado: tablas enteras fixed+repeatable, procedencia, ventana
-   exclusiva de 20 ticks, round-robin de cohorte y `loot pass`; publicación y
-   despawn ocurren a 20/120 ticks.
-7. Implementado: sellos obtenidos jugando, probabilidades exactas, apertura
-   atómica y un afijo acotado para botín único normal o sellado.
+1. Implemented: `ItemPrototype`, stable and reusable authored content.
+2. Implemented: `ItemInstance`, unique durable ID, `prototypeId`, and location;
+   the snapshot and rollback include the creating sequence.
+3. Implemented: inventory bounded by slots/weight, containers with maximum
+   capacity and depth, and derived stacks that group fungible units by
+   location/prototype without persisting quantity.
+4. Implemented: atomic `give` for simple cases and the declared policies
+   `transferable`, `character_bound`, and `non_transferable`, applied to the
+   effective owner and the full subtree.
+5. Implemented: exchange confirmed by both parties for item and currency offers,
+   with bounded durable reservation and invalidation upon any material change.
+6. Implemented: fixed+repeatable integer tables, provenance, 20-tick exclusive
+   window, cohort round-robin, and `loot pass`; publication and despawn occur at
+   20/120 ticks.
+7. Implemented: seals earned by playing, exact probabilities, atomic opening, and
+   a bounded affix for normal or sealed unique loot.
 
-### Rareza y nivel de objeto
+### Rarity and item level
 
-La rareza cerrada `common|uncommon|rare|epic|legendary` ya forma parte del
-prototipo y se muestra como texto en navegador y Telnet/GMCP; nunca depende solo
-del color.
+The closed rarity `common|uncommon|rare|epic|legendary` is already part of the
+prototype and is shown as text in the browser and Telnet/GMCP; it never depends
+on color alone.
 
-`itemLevel`, calidad y afijos son ejes diferentes. El contrato actual no deriva
-la potencia del afijo de la rareza: valida deltas positivos acotados, tipo de
-objeto compatible y estadísticas efectivas dentro de los caps runtime. Una
-rareza alta no puede saltarse requisitos, capacidad o validación económica.
+`itemLevel`, quality, and affixes are different axes. The current contract does
+not derive affix power from rarity: it validates bounded positive deltas, a
+compatible item type, and effective statistics within the runtime caps. A high
+rarity cannot skip requirements, capacity, or economic validation.
 
-### Tablas y recompensas selladas
+### Tables and sealed rewards
 
-La fase histórica 4A implementó tablas con pesos enteros acotados, suma
-comprobada, cantidades y tiradas limitadas, `nothing`, RNG persistido con rejection sampling,
-procedencia durable y commit atómico. No incluye tablas anidadas, condiciones,
-afijos, reglas de únicos, pity ni scripts de recompensa. El peor caso fijo más
-generado se valida a 64 raíces por derrota.
+The historical phase 4A implemented tables with bounded integer weights, a
+checked sum, limited quantities and rolls, `nothing`, persisted RNG with
+rejection sampling, durable provenance, and atomic commit. It does not include
+nested tables, conditions, affixes, unique rules, pity, or reward scripts. The
+worst-case fixed plus generated is validated at 64 roots per defeat.
 
-4B está implementada con WorldPack v7/AreaPack v6 y snapshot v7. Un sello debe
-ganarse en una tabla normal de NPC; `reward odds` muestra las probabilidades
-exactas y `open` confirma o revierte atómicamente sello, RNG, contador,
-instancias, vínculos y capacidad. El afijo opcional funciona tanto en botín
-normal como sellado y queda copiado con procedencia/digests opacos. Las loot
-boxes, llaves, tiradas pagadas y pity quedan fuera del baseline; need/greed,
-master-loot y reparto por contribución requieren otro diseño.
+4B is implemented with WorldPack v7/AreaPack v6 and snapshot v7. A seal must be
+earned from a normal NPC table; `reward odds` shows the exact probabilities and
+`open` commits or reverts atomically seal, RNG, counter, instances, bindings, and
+capacity. The optional affix works in both normal and sealed loot and is copied
+with opaque provenance/digests. Loot boxes, keys, paid rolls, and pity are
+outside the baseline; need/greed, master-loot, and contribution-based
+distribution require another design.
 
-## Otros sistemas MUD candidatos
+## Other candidate MUD systems
 
-| Sistema | Estado actual | Cuándo considerarlo |
+| System | Current state | When to consider it |
 | --- | --- | --- |
-| Emotes/sociales | Emotes de sala authored implementados con plantillas cerradas, targeting local y paridad Web/Telnet/GMCP. | Emotes globales/de grupo solo con audiencia, percepción, cuotas y privacidad explícitas. |
-| Voz espacial | ADR 0019 y fase 5E implementados para `yell` radio uno y `shout` radio tres, BFS dirigido no secreto y máximo 259; paridad core, Web, Telnet/GMCP y bot con puerta integrada. | Archivo, dirección/distancia y acústica authored quedan fuera. |
-| Mail y tablones | Correo offline 5C y tablones públicos 5D implementados con superficies separadas, retención, cuotas, capacidad y evidencia moderable. | Hilos, edición, búsqueda o tablones authored/privados solo con propiedad y ciclo de vida explícitos; nunca convertir chat o buzón en archivo público. |
-| Guilds/clanes | Ausente. | Tras estabilizar parties, canales y autoridad comunitaria. |
-| Puertas y llaves | Ausentes como sistema general; los contenedores de inventario sí existen. | Cuando el estado abierto/cerrado, acceso y llaves tenga autoría/persistencia explícita. |
-| Give | Implementado para raíces portadas, misma sala, capacidad bilateral y subárbol enteramente transferible. | Ampliarlo solo si se diseña entrega remota/offline con política explícita. |
-| Trade/auction | Trade directo confirmado implementado; subasta ausente. | Subastas solo tras definir mercado offline, retención, cuotas y abuso económico. |
-| Crafting | Ausente. | Cuando haya prototipos repetibles y sinks económicos. |
-| Housing | Ausente. | Cuando el contenido necesite instancias persistentes privadas. |
-| Pets/mounts | Ausente. | Después de followers y reglas de party/NPC. |
-| Duelo/PvP | Ausente. | Solo con consentimiento, seguridad, muerte/recompensa y moderación diseñados. |
-| Facciones/reputación/idiomas | Ausente. | Como contenido data-driven cuando exista una necesidad narrativa. |
-| Remort/rebirth | Ausente. | No prioritario mientras v3 aún necesita balance y migraciones. |
-| OLC in-game | Ausente. | Como staging/validación/publicación, nunca mutación libre del runtime. |
+| Emotes/socials | Authored room emotes implemented with closed templates, local targeting, and Web/Telnet/GMCP parity. | Global/group emotes only with explicit audience, perception, quotas, and privacy. |
+| Spatial voice | ADR 0019 and phase 5E implemented for `yell` radius one and `shout` radius three, directed non-secret BFS and max 259; core, Web, Telnet/GMCP, and bot parity with an integrated gate. | Archive, bearing/distance, and authored acoustics are out of scope. |
+| Mail and boards | 5C offline mail and 5D public boards implemented with separate surfaces, retention, quotas, capacity, and moderable evidence. | Threads, editing, search, or authored/private boards only with explicit ownership and lifecycle; never turn chat or mailbox into a public archive. |
+| Guilds/clans | Absent. | After stabilizing parties, channels, and community authority. |
+| Doors and keys | Absent as a general system; inventory containers do exist. | When open/closed state, access, and keys have explicit authoring/persistence. |
+| Give | Implemented for carried roots, same room, bilateral capacity, and a fully transferable subtree. | Extend it only if remote/offline delivery with explicit policy is designed. |
+| Trade/auction | Direct confirmed trade implemented; auction absent. | Auctions only after defining offline market, retention, quotas, and economic abuse. |
+| Crafting | Absent. | When there are repeatable prototypes and economic sinks. |
+| Housing | Absent. | When content needs private persistent instances. |
+| Pets/mounts | Absent. | After followers and party/NPC rules. |
+| Duel/PvP | Absent. | Only with consent, safety, death/reward, and moderation designed. |
+| Factions/reputation/languages | Absent. | As data-driven content when a narrative need exists. |
+| Remort/rebirth | Absent. | Not a priority while v3 still needs balance and migrations. |
+| In-game OLC | Absent. | As staging/validation/publication, never free mutation of the runtime. |
 
-## Plan por fases y aceptación
+## Phased plan and acceptance
 
-### Fase 1 — comunicación y grupo — implementada
+### Phase 1 — communication and group — implemented
 
-- chat de grupo, `reply`, revocación/expulsión/transferencia/disolución;
-- canales `newbie`/`general`/`staff` suscritos y moderados;
-- paridad navegador, texto Telnet y GMCP;
-- cobertura de ignore/block/mute, límites, desconexión, perfil de `staff` y cero
-  fuga entre grupos.
+- group chat, `reply`, revocation/kick/transfer/disband;
+- subscribed and moderated `newbie`/`general`/`staff` channels;
+- browser, Telnet text, and GMCP parity;
+- coverage of ignore/block/mute, limits, disconnect, `staff` profile, and zero
+  leakage between groups.
 
-### Fase 2 — staff por capacidades — implementada
+### Phase 2 — capability-based staff — implemented
 
-- perfiles y capacidades separados de progresión;
-- cola y resolución cerrada de reportes y razones obligatorias;
-- inspect/where/goto/transfer/restore/announce/audit acotados;
-- autorización negativa, jerarquía, persistencia v10 y auditoría append-only
-  en SQLite/PostgreSQL;
-- acciones estructuradas Web y texto/announcement Telnet+GMCP equivalentes;
-- ninguna autoridad obtenible mediante XP, clase, talento o WorldPack.
+- profiles and capabilities separate from progression;
+- report queue and closed resolution and mandatory reasons;
+- bounded inspect/where/goto/transfer/restore/announce/audit;
+- negative authorization, hierarchy, v10 persistence, and append-only audit in
+  SQLite/PostgreSQL;
+- Web structured actions and equivalent Telnet+GMCP text/announcement;
+- no authority obtainable through XP, class, talent, or WorldPack.
 
-### Fase 3A — fundamento prototype/instance — implementada
+### Phase 3A — prototype/instance foundation — implemented
 
-- WorldPack v4/AreaPack v3, normalización v3/v2 y v2/v1 respectivamente;
-- prototipos reutilizables, instancias durables y contador monotónico;
-- snapshot v2, conversión explícita desde v1 y rollback exacto;
-- slots/peso, rareza/`itemLevel` textual e IDs opacos en ambos transportes;
-- en aquel corte, snapshot único en SQLite/PostgreSQL v10, sin tabla espejo.
+- WorldPack v4/AreaPack v3, v3/v2 and v2/v1 normalization respectively;
+- reusable prototypes, durable instances, and a monotonic counter;
+- snapshot v2, explicit conversion from v1, and exact rollback;
+- slots/weight, textual rarity/`itemLevel`, and opaque IDs on both transports;
+- at that cut, a single snapshot in SQLite/PostgreSQL v10, without a mirror table.
 
-### Fase 3B — pilas y contenedores — implementada
+### Phase 3B — stacks and containers — implemented
 
-- WorldPack v5/AreaPack v4 y snapshot v3 con conversión explícita v1/v2/v3;
-- pilas fungibles derivadas, sin cantidad ni identidad de pila durable;
-- contenedores únicos con slots, peso recursivo, profundidad cuatro y ciclos
-  rechazados antes de mutar;
-- cantidades máximas 256, `contents` paginado a 20 grupos y selectores opacos;
-- paridad de datos/acciones en Web, Telnet y `Char.Items.List` GMCP.
+- WorldPack v5/AreaPack v4 and snapshot v3 with explicit v1/v2/v3 conversion;
+- derived fungible stacks, without quantity or durable stack identity;
+- unique containers with slots, recursive weight, depth four, and cycles
+  rejected before mutating;
+- maximum quantities 256, `contents` paginated to 20 groups, and opaque
+  selectors;
+- data/action parity in Web, Telnet, and `Char.Items.List` GMCP.
 
-### Fase 3C — entrega y políticas — implementada
+### Phase 3C — delivery and policies — implemented
 
-- `give` atómico, propietario efectivo y políticas de transferencia
-  ejecutables;
-- binding durable en snapshot v4, migración cerrada desde v1-v3 y paridad
-  Web/Telnet/GMCP;
-- ignore/block, capacidad bilateral, replay/rollback y proyección opaca.
+- atomic `give`, effective owner, and executable transfer policies;
+- durable binding in snapshot v4, closed migration from v1-v3, and
+  Web/Telnet/GMCP parity;
+- ignore/block, bilateral capacity, replay/rollback, and opaque projection.
 
-### Fase 3D — intercambio confirmado — implementada
+### Phase 3D — confirmed exchange — implemented
 
-- reserva durable sin custodia separada, doble confirmación e invalidación ante
-  cambios;
-- límites globales/por participante, expiración, política social y cancelación
-  ante separación, combate, derrota, desconexión o reinicio;
-- liquidación simultánea de objetos/moneda, snapshot v5 y paridad
-  Web/Telnet/GMCP.
+- durable reservation without separate escrow, double confirmation, and
+  invalidation upon changes;
+- global/per-participant limits, expiry, social policy, and cancellation upon
+  separation, combat, defeat, disconnect, or restart;
+- simultaneous settlement of items/currency, snapshot v5, and Web/Telnet/GMCP
+  parity.
 
-El contrato aceptado e implementado está en
+The accepted and implemented contract is in
 [ADR 0012](../decisions/0012-confirmed-trade-reservations.md).
 
-### Fase 4A — botín repetible, derechos y procedencia — implementada
+### Phase 4A — repeatable loot, rights, and provenance — implemented
 
-- WorldPack v6/AreaPack v5/WorldProject v2 con una tabla y fuente canónicas;
-- snapshot v6 y esquema SQL v11; legacy v1–v5 limitado a 1 MiB y v6 a 2 MiB;
-- pesos enteros, rejection sampling y resolución exactly-once de botín fijo más
-  repetible, con máximo combinado de 64 raíces;
-- procedencia durable, cohorte congelada, round-robin, `loot pass`, exclusividad
-  20 ticks y despawn 120;
-- supresión por capacidad sin bloquear derrota/XP ni permitir reroll;
-- arranque que valida identidades y cancela encuentros abiertos sin borrar
-  derechos resueltos;
-- privacidad y acciones equivalentes en Web/Telnet/GMCP, con ventanas
-  semánticas 14/48 KiB y batches/coalescing de 16 eventos.
+- WorldPack v6/AreaPack v5/WorldProject v2 with a canonical table and source;
+- snapshot v6 and SQL schema v11; legacy v1–v5 limited to 1 MiB and v6 to 2 MiB;
+- integer weights, rejection sampling, and exactly-once resolution of fixed plus
+  repeatable loot, with a combined maximum of 64 roots;
+- durable provenance, frozen cohort, round-robin, `loot pass`, 20-tick
+  exclusivity, and despawn 120;
+- capacity-based suppression without blocking defeat/XP or allowing a reroll;
+- startup that validates identities and cancels open encounters without deleting
+  resolved rights;
+- privacy and equivalent actions in Web/Telnet/GMCP, with semantic windows of
+  14/48 KiB and batches/coalescing of 16 events.
 
-El contrato aceptado e implementado está en
+The accepted and implemented contract is in
 [ADR 0013](../decisions/0013-repeatable-loot-rights-and-provenance.md).
 
-### Fase 4B — selladas y afijos — implementada
+### Phase 4B — sealed and affixes — implemented
 
-- WorldPack v7/AreaPack v6/WorldProject v2, con normalización estricta de
-  formatos anteriores sin inventar sellos ni afijos;
-- sellos ganados únicamente desde botín normal de NPC, sin instancias iniciales,
-  fuente sellada directa ni cadenas sello→sello;
-- `open` y `reward odds` con probabilidades exactas, máximo 16 unidades y 1.024
-  filas visibles por tabla sellada;
-- un afijo máximo en unidades `unique` no selladas, tanto en botín normal como
-  sellado, con vocabulario, pesos, cantidades, deltas y caps cerrados;
-- RNG determinista sin sesgo, rollback exacto ante fallo de capacidad y
-  consumo de la tirada normal aunque el drop termine suprimido;
-- snapshot v7 con afijos, procedencia sellada y contador de apertura; upgrade
-  exacto desde v6, límites de 1 MiB para v1–v5 y 2 MiB para v6–v7; y
-- paridad de dominio Web/Telnet/GMCP con referencias, RNG, contadores y digests
-  internos opacos.
+- WorldPack v7/AreaPack v6/WorldProject v2, with strict normalization of earlier
+  formats without inventing seals or affixes;
+- seals earned only from normal NPC loot, without initial instances, a direct
+  sealed source, or seal→seal chains;
+- `open` and `reward odds` with exact probabilities, a maximum of 16 units, and
+  1,024 visible rows per sealed table;
+- at most one affix on non-sealed `unique` units, in both normal and sealed loot,
+  with closed vocabulary, weights, quantities, deltas, and caps;
+- deterministic unbiased RNG, exact rollback on capacity failure, and consumption
+  of the normal roll even when the drop ends up suppressed;
+- snapshot v7 with affixes, sealed provenance, and opening counter; exact upgrade
+  from v6, limits of 1 MiB for v1–v5 and 2 MiB for v6–v7; and
+- Web/Telnet/GMCP domain parity with opaque internal references, RNG, counters,
+  and digests.
 
-El contrato aceptado e implementado está en
+The accepted and implemented contract is in
 [ADR 0014](../decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
 
-Need/greed, master-loot y reparto por contribución no forman parte de 4B sin
-diseño adicional. Cajas, llaves y tiradas pagadas permanecen fuera.
+Need/greed, master-loot, and contribution-based distribution are not part of 4B
+without additional design. Boxes, keys, and paid rolls remain out.
 
-### Fase 5 — comunidad y contenido — en curso
+### Phase 5 — community and content — in progress
 
-- 5A telepatía directa authored: implementada;
-- 5B emotes authored con plantillas y audiencias seguras: implementada;
-- 5C correo offline con cuotas/retención/moderación: implementada;
-- 5D tablones moderables: implementada y con puerta integrada retenida;
-- 5E voz espacial `yell`/`shout`: implementada y con puerta integrada retenida;
-- guilds según necesidades observadas;
-- crafting/auction/housing solo con sinks, cuotas y moderación;
-- OLC únicamente sobre el pipeline de artefactos revisados.
+- 5A direct authored telepathy: implemented;
+- 5B authored emotes with templates and safe audiences: implemented;
+- 5C offline mail with quotas/retention/moderation: implemented;
+- 5D moderable boards: implemented and with a retained integrated gate;
+- 5E spatial voice `yell`/`shout`: implemented and with a retained integrated
+  gate;
+- guilds according to observed needs;
+- crafting/auction/housing only with sinks, quotas, and moderation;
+- OLC only over the reviewed-artifact pipeline.
 
-Cada fase debe preservar el single writer, una sola persistencia seleccionada,
-rollback exacto, límites de frame/cola, percepción antes de protocolo, IDs
-opacos y equivalencia funcional entre browser y Telnet.
+Each phase must preserve the single writer, a single selected persistence, exact
+rollback, frame/queue limits, perception before protocol, opaque IDs, and
+functional equivalence between browser and Telnet.

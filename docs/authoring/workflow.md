@@ -1,104 +1,103 @@
-# Flujo de autoría en un único host
+# Authoring workflow on a single host
 
-Tiamud se ejecuta en un equipo corriente. La autoría no necesita Kubernetes,
-una granja de build ni un servicio de contenido vivo. El flujo normal usa el
-repositorio, el CLI Rust y un directorio de assets revisable; después publica
-artefactos inmutables en el registro local del servidor.
+Tiamud runs on an ordinary machine. Authoring needs no Kubernetes, no build
+farm, and no live content service. The normal flow uses the repository, the Rust
+CLI, and a reviewable asset directory; it then publishes immutable artifacts to
+the server's local registry.
 
 ```text
-AreaPack v8 + assets revisados
+AreaPack v8 + reviewed assets
               |
               v
-      componer y validar
+      compose and validate
               |
               v
-    probar, previsualizar y comparar
+    test, preview, and compare
               |
               v
-      publicación inmutable 6A
+      6A immutable publication
               |
               v
- carga aditiva 6B, corte 6C o retiro interno 6D
+ 6B additive load, 6C cutover, or 6D internal retirement
 ```
 
-## Bucle recomendado
+## Recommended loop
 
-1. Trabaja en la rama canónica `main` y edita el AreaPack propietario mínimo.
-2. Compila assets raster sin conexión; registra procedencia, licencia y revisión.
-3. Compón una candidata en una ruta nueva.
-4. Valida, ejecuta pruebas embebidas y previsualiza las escenas afectadas.
-5. Compara con el artefacto revisado mediante `diff`.
-6. Ejecuta las pruebas del repositorio y solicita revisión humana.
-7. Publica catálogo y bundles inmutables con `area-publish`.
-8. Para un servidor en modo catálogo, envía SIGHUP solo durante una ventana en
-   que pueda quedar sin sesiones; conserva el catálogo previo para rollback.
+1. Work on the canonical `main` branch and edit the minimal owning AreaPack.
+2. Compile raster assets offline; record provenance, license, and review.
+3. Compose a candidate at a new path.
+4. Validate, run embedded tests, and preview the affected scenes.
+5. Compare with the reviewed artifact using `diff`.
+6. Run the repository tests and request human review.
+7. Publish the immutable catalog and bundles with `area-publish`.
+8. For a server in catalog mode, send SIGHUP only during a window when it can
+   drop to zero sessions; keep the previous catalog for rollback.
 
-El runtime no compone áreas, invoca codificadores de imagen, consulta IA ni
-descarga medios de terceros. Consulta la
-[guía de operación](../operations/single-host.md) para servicio, base de datos,
-TLS, copias y rollback.
+The runtime does not compose areas, invoke image encoders, query AI, or download
+third-party media. See the
+[operations guide](../operations/single-host.md) for service, database, TLS,
+backups, and rollback.
 
-Los AreaPack son un layout editorial multipack, no servicios desplegables. 6B
-resuelve bundles locales bajo demanda dentro de una generación. 6C abre y
-verifica la candidata completa fuera del actor y solo la activa con cero
-sesiones y cero leases; un `busy` conserva la generación anterior. El corte no
-migra datos: reglas, objetos iniciales, NPC, botín, afijos, áreas, ownership e
-IDs estables deben ser idénticos. 6D solo retira/rehidrata internamente la misma
-revisión de una unidad vacía; no existen reemplazo de revisión ni LRU operativo.
+AreaPacks are a multipack editorial layout, not deployable services. 6B resolves
+local bundles on demand within a generation. 6C opens and verifies the complete
+candidate outside the actor and only activates it with zero sessions and zero
+leases; a `busy` keeps the previous generation. The cutover does not migrate
+data: rules, initial items, NPCs, loot, affixes, areas, ownership, and stable IDs
+must be identical. 6D only retires/rehydrates the same revision of an empty unit
+internally; there is no revision replacement or operational LRU.
 
-Para un rollback explícito, selecciona un catálogo inmutable retenido y solicita
-la reconciliación local:
+For an explicit rollback, select a retained immutable catalog and request local
+reconciliation:
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- area-select \
-  --catalog <ruta-exacta-del-catalogo-retenido> \
+  --catalog <exact-path-of-the-retained-catalog> \
   --registry build/area-registry
 sudo systemctl kill --signal=HUP tiamud
 ```
 
-El servidor mantiene el lock cooperativo común con `area-publish`/`area-select`
-durante el corte hasta resolver el CAS; no ejecutes herramientas que ignoren ese
-lock sobre el registro confiable.
+The server holds the shared cooperative lock with `area-publish`/`area-select`
+during the cutover until the CAS resolves; do not run tools that ignore that
+lock over the trusted registry.
 
-## Contenido histórico
+## Historical content
 
-Los ficheros EnvyMUD/Merc son material de origen sin conexión, no datos runtime.
-Usa el [importador conservador](../../tools/envy-import/README.md), inspecciona
-cada diagnóstico y resuelve procedencia y licencia. Los registros no soportados
-quedan inertes y los programas importados nunca se ejecutan.
+EnvyMUD/Merc files are offline source material, not runtime data. Use the
+[conservative importer](../../tools/envy-import/README.md), inspect every
+diagnostic, and resolve provenance and license. Unsupported records remain inert
+and imported programs never run.
 
-## IA opcional
+## Optional AI
 
-La IA solo asiste a la autoría. El proveedor predeterminado es `none`; Ollama,
-llama.cpp locales y endpoints HTTPS compatibles explícitos son opcionales. El
-resultado es un borrador no confiable, no puede publicarse y requiere una
-decisión humana separada. Consulta la
-[guía de IA editorial](../../crates/editorial-ai/README.md).
+AI only assists authoring. The default provider is `none`; local Ollama,
+llama.cpp, and explicit compatible HTTPS endpoints are optional. The output is an
+untrusted draft, cannot be published, and requires a separate human decision. See
+the [editorial AI guide](../../crates/editorial-ai/README.md).
 
-## Frontera runtime
+## Runtime boundary
 
-El servidor carga el WorldPack embebido, `TIAMUD_WORLD_PACK` o la pareja
-`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. En modo catálogo, SQL v15 liga
-la generación durable y prevalece en restart sobre `area-active`; SIGHUP es la
-única reconciliación en vivo. `WorldRuntimeSnapshot` usa v8 y una
-activación confirma snapshot + puntero mediante CAS antes del swap en memoria.
+The server loads the embedded WorldPack, `TIAMUD_WORLD_PACK`, or the
+`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG` pair. In catalog mode, SQL v15
+binds the durable generation and prevails on restart over `area-active`; SIGHUP
+is the only live reconciliation. `WorldRuntimeSnapshot` uses v8 and an activation
+confirms snapshot + pointer via CAS before the in-memory swap.
 
-Al actualizar una instalación 6B/v13 con recovery compartido o personajes,
-conserva G0 exacto en el primer arranque v14, configura
-`TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>` y verifica su liga antes
-de retirar la variable y publicar/seleccionar G1. V13 no guardaba la identidad;
-cambiar ambos a la vez saltaría la comparación 6C.
-Recovery vacío puede contener personajes. Sin liga, recovery compartido o
-cualquier personaje obliga al ACK G0; cuentas solas sin personajes/recovery de
-mundo pueden ligar sin ACK. Una autoridad monolítica no se convierte
-implícitamente. Un commit ambiguo relee SQL y queda fail-stop con readiness 503
-si no determina G0/G1. El ACK falla cerrado en modo monolítico, con liga, sin
-recovery/personaje o ante digest distinto.
+When upgrading a 6B/v13 installation with shared recovery or characters, keep the
+exact G0 on the first v14 startup, set
+`TIAMUD_ACK_LEGACY_AREA_GENERATION=<exact-G0-sha256>` and verify its binding
+before removing the variable and publishing/selecting G1. V13 did not store the
+identity; changing both at once would skip the 6C comparison.
+Empty recovery may contain characters. Without a binding, shared recovery, or any
+character forces the G0 ACK; standalone accounts without characters/world
+recovery can bind without an ACK. A monolithic authority does not convert
+implicitly. An ambiguous commit re-reads SQL and remains fail-stop with readiness
+503 if it cannot determine G0/G1. The ACK fails closed in monolithic mode, with a
+binding, without recovery/character, or against a different digest.
 
-El contrato de artefacto permanece WorldPack v9/AreaPack v8/Project v2. Los
-snapshots raw v1–v5 admiten 1 MiB; v6–v8, 2 MiB. No hay otra autoridad de
-botín, inventario o trade ni doble escritura. La puerta 6C pasa 774 pruebas Rust
-—329 del servidor— y la reauditoría 0 P1/0 P2. PostgreSQL 18 desechable pasa
-20/20 pruebas del adaptador y 7/7 enfocadas del servidor, incluida la CAS v14;
-el humo liga G0 y valida `noop`, readiness, Web, Telnet y cierre limpio. Véase
-el [registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+The artifact contract stays WorldPack v9/AreaPack v8/Project v2. Raw snapshots
+v1–v5 allow 1 MiB; v6–v8, 2 MiB. There is no other loot, inventory, or trade
+authority and no double writes. The 6C gate passes 774 Rust tests —329 of them
+server— and the re-audit 0 P1/0 P2. Disposable PostgreSQL 18 passes 20/20
+adapter tests and 7/7 focused server tests, including the v14 CAS; the smoke test
+binds G0 and validates `noop`, readiness, Web, Telnet, and clean shutdown. See
+the [PostgreSQL v14/PWA acceptance log](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).

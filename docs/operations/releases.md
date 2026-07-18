@@ -75,7 +75,7 @@ no descarga contenido ni lo obtiene del release de GitHub.
 
 La sustitución quiescente 6C, las migraciones v13→v14→v15 y un rollback explícito deben
 probarse como parte del candidato instalado según la
-[guía de un único host](single-host.md#sustitución-quiescente-de-generaciones-de-área).
+[guía de un único host](single-host.md#quiescent-area-generation-cutover).
 Una actualización 6B/v13 sin liga pero con recovery compartido o cualquier
 personaje debe ligar G0 una sola vez mediante
 `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>` y retirar la variable.

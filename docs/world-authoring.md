@@ -1,119 +1,118 @@
-# Autoría, validación y publicación de mundos
+# World authoring, validation, and publishing
 
-Esta guía describe el contrato vigente de autoría de Tiamud: **WorldPack v9**
-como artefacto canónico de ejecución, **AreaPack v8** como módulo de autoría y
-`WorldProjectManifest` v2 como composición fuera de línea. La autoridad exacta
-son los tipos y validadores de `crates/world-pack`; el ejemplo revisado es
+This guide describes Tiamud's current authoring contract: **WorldPack v9** as
+the canonical runtime artifact, **AreaPack v8** as the authoring module, and
+`WorldProjectManifest` v2 as offline composition. The exact authority is the
+types and validators in `crates/world-pack`; the reviewed example is
 [`worlds/lantern-square.world.json`](../worlds/lantern-square.world.json).
 
-La [especificación v0.3](spec-v0.3.md) resume el producto y el
-[centro de autoría](authoring/README.md) amplía personajes, medios, percepción,
-variantes, scripts y pruebas de contenido.
+The [v0.3 specification](spec-v0.3.md) summarizes the product, and the
+[authoring hub](authoring/README.md) expands on characters, media, perception,
+variants, scripts, and content tests.
 
-## Frontera de ejecución
+## Runtime boundary
 
-El servidor elige exactamente una fuente antes de abrir listeners:
+The server picks exactly one source before opening listeners:
 
-- modo monolítico: `TIAMUD_WORLD_PACK` selecciona un
-  `WorldPackDocument` v9 completo; sin variables de mundo se usa Lantern Square
-  embebido; o
-- modo catálogo 6B: `TIAMUD_AREA_REGISTRY` y `TIAMUD_AREA_CATALOG` deben
-  definirse juntas y señalan un registro local más el path content-addressed
-  exacto de su catálogo.
+- monolithic mode: `TIAMUD_WORLD_PACK` selects a complete
+  `WorldPackDocument` v9; without world variables the embedded Lantern Square is
+  used; or
+- catalog mode 6B: `TIAMUD_AREA_REGISTRY` and `TIAMUD_AREA_CATALOG` must be
+  defined together and point to a local registry plus the exact
+  content-addressed path of its catalog.
 
-Los modos son excluyentes. Una pareja incompleta o mezclada con
-`TIAMUD_WORLD_PACK` falla cerrada; no cae al mundo embebido. `AreaPack` sigue
-siendo el módulo de autoría y 6B no compone fuentes durante el juego: consume
-el `CompiledArea` ya publicado y contrastado con el WorldPack monolítico de
-respaldo.
+The modes are mutually exclusive. An incomplete pair, or one mixed with
+`TIAMUD_WORLD_PACK`, fails closed; it does not fall back to the embedded world.
+`AreaPack` remains the authoring module, and 6B does not compose sources during
+play: it consumes the already-published `CompiledArea` checked against the
+monolithic backup WorldPack.
 
-El modo catálogo fija el SHA-256 canónico como identidad de generación. Puede
-añadir áreas verificadas bajo demanda, 6C puede sustituir la generación
-completa mediante SIGHUP local y 6D puede retirar/rehidratar internamente la
-misma revisión de una unidad vacía. Nunca parchea una revisión individual.
-La base de datos conserva la generación autoritativa: cambiar `area-active` no
-modifica por sí solo el runtime y un reinicio recupera por digest la autoridad
-durable. Los IDs publicados continúan siendo identidad, no títulos, y perder
-imagen, audio o color nunca elimina prosa o acciones jugables.
+Catalog mode fixes the canonical SHA-256 as generation identity. It can add
+verified areas on demand, 6C can replace the whole generation via a local
+SIGHUP, and 6D can internally retire/rehydrate the same revision of an empty
+unit. It never patches an individual revision. The database holds the
+authoritative generation: changing `area-active` does not by itself alter the
+runtime, and a restart recovers the durable authority by digest. Published IDs
+remain identity, not titles, and losing image, audio, or color never removes
+prose or playable actions.
 
 ```mermaid
 flowchart LR
-    accTitle: Flujo monolítico y generaciones locales de Tiamud
-    accDescr: Las áreas se componen y validan fuera de línea. El servidor elige el WorldPack completo o una generación local durable, incorpora bundles bajo demanda y puede sustituir solo la generación completa en quiescencia.
+    accTitle: Tiamud monolithic flow and local generations
+    accDescr: Areas are composed and validated offline. The server picks the full WorldPack or a durable local generation, incorporates bundles on demand, and can replace only the whole generation while quiescent.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
-    Areas[AreaPack v8<br/>1..=256 módulos] --> Compose
-    Compose --> Validate[Validación global<br/>referencias · límites · Lua]
-    Validate --> Artifact[WorldPack v9 canónico]
-    Artifact --> Monolithic[Servidor<br/>modo monolítico]
+    Areas[AreaPack v8<br/>1..=256 modules] --> Compose
+    Compose --> Validate[Global validation<br/>references · limits · Lua]
+    Validate --> Artifact[Canonical WorldPack v9]
+    Artifact --> Monolithic[Server<br/>monolithic mode]
     Validate --> Publish[area-publish 6A]
-    Publish --> Catalog[Catálogo + bundles<br/>locales e inmutables]
-    Catalog --> Durable[Generación durable 6B/6C]
-    Durable --> Server[Servidor<br/>carga aditiva]
-    Catalog --> Stage[Staging completo 6C]
-    Stage --> Quiet[Cero sesiones + leases]
+    Publish --> Catalog[Catalog + bundles<br/>local and immutable]
+    Catalog --> Durable[Durable generation 6B/6C]
+    Durable --> Server[Server<br/>additive loading]
+    Catalog --> Stage[Full staging 6C]
+    Stage --> Quiet[Zero sessions + leases]
     Quiet --> Server
-    Server --> Partial6D[Retiro/rehidratación<br/>misma revisión · 6D parcial]
-    Future[Presupuesto · LRU · reemplazo] -. fase posterior .-> Partial6D
+    Server --> Partial6D[Retire/rehydrate<br/>same revision · partial 6D]
+    Future[Budget · LRU · replacement] -. later phase .-> Partial6D
 ```
 
-## Versiones y compatibilidad
+## Versions and compatibility
 
-| Entrada | Tratamiento |
+| Input | Handling |
 | --- | --- |
-| WorldPack v9 | Formato canónico nativo. |
-| WorldPack v8/v7/v6/v5/v4/v3/v2 | Se normaliza de forma determinista a v9 antes de validar, sin inventar emotes; v2-v7 tampoco inventan comunicación, v2-v6 tampoco inventan sellos ni afijos y v2-v5 tampoco inventan tablas ni fuentes de botín. |
-| AreaPack v8 | Formato modular nativo. |
-| AreaPack v7/v6/v5/v4/v3/v2/v1 | Se normaliza a v8 antes de componer, sin inventar emotes; v1-v6 tampoco inventan comunicación, v1-v5 tampoco inventan sellos ni afijos y v1-v4 tampoco inventan tablas ni fuentes de botín. |
-| Envy/Merc | Solo pasa por `envy-import`; los programas históricos nunca se ejecutan. |
+| WorldPack v9 | Native canonical format. |
+| WorldPack v8/v7/v6/v5/v4/v3/v2 | Deterministically normalized to v9 before validation, without inventing emotes; v2-v7 also do not invent communication, v2-v6 also do not invent seals or affixes, and v2-v5 also do not invent loot tables or sources. |
+| AreaPack v8 | Native modular format. |
+| AreaPack v7/v6/v5/v4/v3/v2/v1 | Normalized to v8 before composition, without inventing emotes; v1-v6 also do not invent communication, v1-v5 also do not invent seals or affixes, and v1-v4 also do not invent loot tables or sources. |
+| Envy/Merc | Only passes through `envy-import`; the historical programs are never executed. |
 
-La compatibilidad antigua no permite escribir vocabulario legado en un
-documento nativo. WorldPack v9 y AreaPack v8 rechazan `items`, `room.items`,
-`itemRules` y `lootItemIds`: usan `itemPrototypes` e
+Legacy compatibility does not allow writing legacy vocabulary into a native
+document. WorldPack v9 and AreaPack v8 reject `items`, `room.items`,
+`itemRules`, and `lootItemIds`: use `itemPrototypes` and
 `initialItemInstances`.
 
-`lootTables` y `lootSources` nacen en WorldPack v6 y AreaPack v5. Declararlos,
-aunque estén vacíos, en WorldPack v2-v5 o AreaPack v1-v4 se rechaza como mezcla
-de esquemas. La conversión de esos formatos crea colecciones vacías: ni el
-normalizador ni `envy-import` deducen probabilidades a partir de resets o listas
-históricas ambiguas.
+`lootTables` and `lootSources` originate in WorldPack v6 and AreaPack v5.
+Declaring them, even empty, in WorldPack v2-v5 or AreaPack v1-v4 is rejected as
+schema mixing. Converting those formats creates empty collections: neither the
+normalizer nor `envy-import` infers probabilities from resets or ambiguous
+historical lists.
 
-Las recompensas selladas, `affixes`, `affixPools` y `affixPoolId` nacen en
-WorldPack v7 y AreaPack v6. Declararlos, aunque estén vacíos, en formatos
-anteriores se rechaza como mezcla de esquemas. La normalización conserva el
-botín normal de v6/v5, pero no inventa sellos, probabilidades secundarias ni
-afijos.
+Sealed rewards, `affixes`, `affixPools`, and `affixPoolId` originate in
+WorldPack v7 and AreaPack v6. Declaring them, even empty, in earlier formats is
+rejected as schema mixing. Normalization preserves the normal v6/v5 loot but
+does not invent seals, secondary probabilities, or affixes.
 
-La comunicación authored nace en WorldPack v8 y AreaPack v7. Un campo
-`ability.communication`, aunque sea una forma vacía o parcial, se rechaza en
-WorldPack v2-v7 y AreaPack v1-v6 en vez de interpretarse como una habilidad
-ordinaria. La normalización deja `communication` ausente y `envy-import` no lo
-deduce de prosa, programas o flags históricos.
+Authored communication originates in WorldPack v8 and AreaPack v7. An
+`ability.communication` field, even an empty or partial form, is rejected in
+WorldPack v2-v7 and AreaPack v1-v6 instead of being interpreted as an ordinary
+ability. Normalization leaves `communication` absent, and `envy-import` does not
+infer it from prose, programs, or historical flags.
 
-Los emotes authored nacen en WorldPack v9 y AreaPack v8. `socialEmotes`,
-aunque sea un array vacío, se rechaza en WorldPack v2-v8 y AreaPack v1-v7.
-La normalización produce una colección vacía y `envy-import` nunca convierte
-sociales, programas o prosa histórica en plantillas ejecutables.
+Authored emotes originate in WorldPack v9 and AreaPack v8. `socialEmotes`, even
+an empty array, is rejected in WorldPack v2-v8 and AreaPack v1-v7. Normalization
+produces an empty collection, and `envy-import` never converts socials,
+programs, or historical prose into executable templates.
 
-WorldPack v4 y AreaPack v3 reciben por normalización `maxStackUnits: 1`, sin
-contenedor y con `transferPolicy: transferable`. En esas versiones la política
-debe ser exactamente `transferable`; `character_bound` y `non_transferable`
-no se reinterpretan como si el formato antiguo ya conociera la vinculación de
-3C. Si una entrada antigua intenta declarar campos de 3B/3C, se rechaza en vez
-de ignorarlos: debe declarar la versión nativa correspondiente. WorldPack
-v3/v2, AreaPack v2/v1 y Envy/Merc también normalizan siempre a objetos
-transferibles y nunca infieren un vínculo desde flags históricos.
+WorldPack v4 and AreaPack v3 receive `maxStackUnits: 1` through normalization,
+with no container and `transferPolicy: transferable`. In those versions the
+policy must be exactly `transferable`; `character_bound` and `non_transferable`
+are not reinterpreted as if the old format already knew 3C binding. If an old
+entry tries to declare 3B/3C fields, it is rejected rather than ignoring them:
+it must declare the corresponding native version. WorldPack v3/v2, AreaPack
+v2/v1, and Envy/Merc also always normalize to transferable items and never infer
+binding from historical flags.
 
-Los objetos v3/v2 antiguos se convierten uno a uno, sin deduplicar por nombre o
-contenido. El prototipo y la instancia pueden conservar la misma cadena
-histórica porque pertenecen a espacios tipados diferentes. Un VNUM importado
-produce un prototipo; cada reset inequívoco produce su propia instancia.
+Old v3/v2 items are converted one-to-one, without deduplicating by name or
+content. The prototype and the instance may keep the same historical string
+because they belong to different typed spaces. An imported VNUM produces a
+prototype; each unambiguous reset produces its own instance.
 
-## Proyecto modular v2
+## Modular project v2
 
-El manifiesto contiene la identidad global, sala inicial, semilla y defaults de
-personaje. Las rutas de área son relativas, no escapan del directorio del
-proyecto y son únicas.
+The manifest holds the global identity, start room, seed, and character
+defaults. Area paths are relative, do not escape the project directory, and are
+unique.
 
 ```text
 WorldProjectManifest v2
@@ -130,7 +129,7 @@ WorldProjectManifest v2
     └── path!
 ```
 
-Ejemplo:
+Example:
 
 ```json
 {
@@ -150,9 +149,9 @@ Ejemplo:
 
 ## AreaPack v8
 
-Cada área reutiliza los mismos registros del WorldPack; no crea una segunda
-representación de salas, objetos o NPC. Solo añade `id` y `dependsOn` como
-frontera de propiedad.
+Each area reuses the same WorldPack registries; it does not create a second
+representation of rooms, items, or NPCs. It only adds `id` and `dependsOn` as an
+ownership boundary.
 
 ```text
 AreaPack v8
@@ -185,21 +184,22 @@ AreaPack v8
 └── contentTests[]?
 ```
 
-Una dependencia puede ser cíclica: dos áreas con salidas de ida y vuelta son un
-caso normal. Toda referencia estructurada a una entidad de otra área debe
-declarar su `id` en `dependsOn`. Esto incluye:
+A dependency can be cyclic: two areas with round-trip exits are a normal case.
+Every structured reference to an entity in another area must declare its `id` in
+`dependsOn`. This includes:
 
-- salidas a salas ajenas;
-- instancia→prototipo y ubicación de instancia en sala, spawn o contenedor ajenos;
-- spawn→prototipo NPC y spawn→sala;
-- tabla de botín→prototipo y fuente de botín→spawn/tabla ajenos;
-- concesiones/requisitos de progresión y habilidades;
-- multimedia, percepción, variantes, scripts y pruebas.
+- exits into rooms of another area;
+- instance→prototype and instance location in a room, spawn, or container of
+  another area;
+- spawn→NPC prototype and spawn→room;
+- loot table→prototype and loot source→spawn/table of another area;
+- progression and ability grants/requirements;
+- media, perception, variants, scripts, and tests.
 
-El compositor no inspecciona texto Lua para inventar dependencias. Las
-referencias opacas dentro de `source` son responsabilidad del autor.
+The compositor does not inspect Lua text to invent dependencies. Opaque
+references inside `source` are the author's responsibility.
 
-### Ejemplo de dos áreas conectadas
+### Example of two connected areas
 
 `areas/plaza.area.json`:
 
@@ -315,16 +315,15 @@ referencias opacas dentro de `source` son responsabilidad del autor.
 }
 ```
 
-El botín no vive en `npcPrototypes`. La ubicación `npc_spawn` de una instancia
-es botín fijo authored, asignado una sola vez y validado. El botín repetible se
-declara por separado mediante `lootTables` y `lootSources`, como se detalla más
-abajo.
+Loot does not live in `npcPrototypes`. The `npc_spawn` location of an instance
+is authored fixed loot, assigned exactly once and validated. Repeatable loot is
+declared separately through `lootTables` and `lootSources`, as detailed below.
 
 ## WorldPack v9
 
-El artefacto plano conserva identidad, catálogos de objeto, salas y gameplay.
-Las extensiones de multimedia/percepción/scripts se aplanan en el documento
-por `WorldPackDocument` aunque la estructura Rust separa el núcleo del mundo.
+The flat artifact holds identity, item catalogs, rooms, and gameplay. The
+media/perception/scripts extensions are flattened into the document by
+`WorldPackDocument`, even though the Rust structure separates the world core.
 
 ```text
 WorldPack v9
@@ -356,7 +355,7 @@ WorldPack v9
 └── contentTests[]?
 ```
 
-Un mundo mínimo sin objetos:
+A minimal world with no items:
 
 ```json
 {
@@ -374,19 +373,19 @@ Un mundo mínimo sin objetos:
 }
 ```
 
-Cada sala y variante exige un `title` de 1..=128 bytes UTF-8 seguros, sin
-caracteres de control, y una `description` de 1..=8.192 bytes UTF-8 seguros. Los saltos de
-línea y tabulaciones revisados son válidos en la descripción; una cadena vacía,
-solo whitespace, una secuencia de control insegura o un exceso de bytes se
-rechazan. Los límites cuentan bytes, no caracteres Unicode.
+Each room and variant requires a `title` of 1..=128 safe UTF-8 bytes, with no
+control characters, and a `description` of 1..=8,192 safe UTF-8 bytes. Reviewed
+line breaks and tabs are valid in the description; an empty string,
+whitespace-only, an unsafe control sequence, or a byte overflow are rejected.
+The limits count bytes, not Unicode characters.
 
-## Habilidades de comunicación y telepatía
+## Communication and telepathy abilities
 
-WorldPack v9/AreaPack v8 conserva la comunicación introducida por WorldPack
-v8/AreaPack v7 y reutiliza `AbilityDefinition`: la telepatía no es un
-canal global ni un `tell` renombrado. El personaje debe conocer la habilidad,
-tener su recurso disponible y pagar un coste positivo; la habilidad tiene un
-cooldown authored positivo y conserva el cooldown global de habilidades.
+WorldPack v9/AreaPack v8 preserves the communication introduced by WorldPack
+v8/AreaPack v7 and reuses `AbilityDefinition`: telepathy is not a global channel
+or a renamed `tell`. The character must know the ability, have its resource
+available, and pay a positive cost; the ability has a positive authored cooldown
+and keeps the global ability cooldown.
 
 ```json
 {
@@ -405,26 +404,25 @@ cooldown authored positivo y conserva el cooldown global de habilidades.
 }
 ```
 
-El vocabulario es cerrado: solo `kind: telepathy` y
-`scope: direct_online`. La habilidad debe ser `spell` o `utility`, usar
-`single_ally` y no puede combinar comunicación con daño, curación ni estados.
-Un mundo admite como máximo 32 habilidades de comunicación; cada una enumera
-hasta 64 salas bloqueadas, únicas y existentes. Una referencia a una sala de
-otra AreaPack exige la correspondiente dependencia `dependsOn`. Ningún
-`npcAbilitySet` puede incluirla.
+The vocabulary is closed: only `kind: telepathy` and `scope: direct_online`. The
+ability must be `spell` or `utility`, use `single_ally`, and cannot combine
+communication with damage, healing, or conditions. A world allows at most 32
+communication abilities; each lists up to 64 blocked rooms that are unique and
+existing. A reference to a room in another AreaPack requires the corresponding
+`dependsOn` dependency. No `npcAbilitySet` may include it.
 
-Lantern Square concede `tiamud:mind-whisper` a `tiamud:wanderer`, la clase
-predeterminada, cuyo pool de stamina permite pagarla desde nivel 1. El Archivo
-demuestra un bloqueo authored. El mensaje y el destinatario son input runtime:
-no se escriben en el WorldPack.
+Lantern Square grants `tiamud:mind-whisper` to `tiamud:wanderer`, the default
+class, whose stamina pool allows paying for it from level 1. The Archive
+demonstrates an authored block. The message and the recipient are runtime input:
+they are not written into the WorldPack.
 
-## Emotes sociales authored
+## Authored social emotes
 
-WorldPack v9 declara `gameplay.socialEmotes`; AreaPack v8 usa `socialEmotes`
-en su raíz. Hay como máximo 32 por mundo. Cada definición contiene un `id`
-namespaced de hasta 64 bytes, un `command` ASCII único que cumple
-`[a-z][a-z0-9-]*` (hasta 32 bytes), un nombre seguro de hasta 64 bytes,
-`audience: room` y `targeting: none|optional_character|required_character`.
+WorldPack v9 declares `gameplay.socialEmotes`; AreaPack v8 uses `socialEmotes`
+at its root. There are at most 32 per world. Each definition contains a
+namespaced `id` of up to 64 bytes, a unique ASCII `command` matching
+`[a-z][a-z0-9-]*` (up to 32 bytes), a safe name of up to 64 bytes,
+`audience: room`, and `targeting: none|optional_character|required_character`.
 
 ```json
 {
@@ -447,19 +445,18 @@ namespaced de hasta 64 bytes, un `command` ASCII único que cumple
 }
 ```
 
-`none` exige solo `untargeted`, `required_character` solo `targeted` y
-`optional_character` ambos. Sin objetivo, `actor` no admite placeholder y
-`others` exige `{actor}` exactamente una vez. Con objetivo, `actor` exige solo
-`{target}`, `target` solo `{actor}` y `others` uno de cada. Se rechazan llaves
-o placeholders adicionales, controles, ESC, CR/LF, `<`, `>` y `&`; el
-resultado de sustituir nombres de 64 bytes debe caber en 512 bytes. Las
-plantillas no conceden autoridad ni visibilidad: el runtime calcula la
-audiencia de la sala.
+`none` requires only `untargeted`, `required_character` only `targeted`, and
+`optional_character` both. Without a target, `actor` allows no placeholder and
+`others` requires `{actor}` exactly once. With a target, `actor` requires only
+`{target}`, `target` only `{actor}`, and `others` one of each. Additional braces
+or placeholders, controls, ESC, CR/LF, `<`, `>`, and `&` are rejected; the
+result of substituting 64-byte names must fit in 512 bytes. The templates grant
+no authority or visibility: the runtime computes the room audience.
 
-## Prototipos e instancias de objeto
+## Item prototypes and instances
 
-`itemPrototypes` define contenido reutilizable. `initialItemInstances` define
-unidades iniciales y su única ubicación.
+`itemPrototypes` defines reusable content. `initialItemInstances` defines
+initial units and their single location.
 
 ```text
 ItemPrototype
@@ -484,8 +481,8 @@ ItemPrototype
 └── transferPolicy!      transferable | character_bound | non_transferable
 
 InitialItemInstance
-├── id!                  ID durable interno
-├── prototypeId!         prototipo existente
+├── id!                  internal durable ID
+├── prototypeId!         existing prototype
 └── location!
     ├── { kind: room, roomId }
     ├── { kind: npc_spawn, npcSpawnId }
@@ -493,129 +490,128 @@ InitialItemInstance
     └── { kind: staged }
 ```
 
-Invariantes:
+Invariants:
 
-- cada instancia referencia exactamente un prototipo;
-- cada ID de instancia authored ocupa 1..=128 bytes y usa la gramática cerrada
-  de identificadores gameplay; los IDs runtime son `runtime:<u64-canónico>`;
-- cada instancia tiene una sola ubicación;
-- un prototipo no tiene ubicación;
-- dos instancias pueden compartir prototipo, nunca identidad;
-- una instancia `npc_spawn` referencia un spawn existente;
-- una instancia `container` referencia otra instancia cuyo prototipo define
-  contenedor;
-- el grafo de contención no admite autorreferencia, ciclos ni más de cuatro
-  aristas;
-- las instancias nuevas de runtime usan una secuencia durable incluida en
-  checkpoint y rollback;
-- el servidor resuelve nombre, descripción, peso, rareza y reglas desde el
-  prototipo;
-- `entityMedia(kind=item)` referencia un prototipo y puede presentar cada una
-  de sus instancias visibles;
-- `roomPerception.hiddenItems` referencia una instancia concreta;
-- Web, Telnet y GMCP reciben solo IDs opacos derivados de una sal
-  criptográficamente aleatoria nueva por sesión;
-- Telnet muestra esas referencias en escena, inventario y equipo y las acepta
-  como selector exacto; y
-- una referencia opaca selecciona la unidad o grupo exactos; una consulta
-  textual ambigua falla en vez de escoger una unidad arbitraria.
+- each instance references exactly one prototype;
+- each authored instance ID occupies 1..=128 bytes and uses the closed grammar
+  of gameplay identifiers; runtime IDs are `runtime:<canonical-u64>`;
+- each instance has a single location;
+- a prototype has no location;
+- two instances may share a prototype, never identity;
+- an `npc_spawn` instance references an existing spawn;
+- a `container` instance references another instance whose prototype defines a
+  container;
+- the containment graph allows no self-reference, cycles, or more than four
+  edges;
+- new runtime instances use a durable sequence included in checkpoint and
+  rollback;
+- the server resolves name, description, weight, rarity, and rules from the
+  prototype;
+- `entityMedia(kind=item)` references a prototype and can present each of its
+  visible instances;
+- `roomPerception.hiddenItems` references a specific instance;
+- Web, Telnet, and GMCP receive only opaque IDs derived from a fresh
+  cryptographically random salt per session;
+- Telnet shows those references in the scene, inventory, and equipment and
+  accepts them as an exact selector; and
+- an opaque reference selects the exact unit or group; an ambiguous textual
+  query fails rather than picking an arbitrary unit.
 
-La capacidad de personaje no se autoriza en el WorldPack ni se calcula en el
-cliente. Los slots del personaje cuentan raíces portadas, agrupadas por la
-pila derivada de prototipo y vínculo; el peso incluye raíces portadas/equipadas
-y todos sus descendientes. Los slots de un contenedor cuentan hijos directos
-agrupados por esa misma clave y su peso usado
-cuenta todo el subárbol, sin incluir la carcasa del propio contenedor. Equipar,
-desequipar, reemplazar, tomar, soltar, introducir y extraer prevalidan el
-resultado completo.
+Character capacity is not authorized in the WorldPack and is not computed on the
+client. The character's slots count carried roots, grouped by the stack derived
+from prototype and binding; weight includes carried/equipped roots and all their
+descendants. A container's slots count direct children grouped by that same key,
+and its used weight counts the whole subtree, excluding the container's own
+shell. Equip, unequip, replace, take, drop, put, and get prevalidate the
+complete result.
 
 ```mermaid
 flowchart TD
-    Character[Personaje] -->|slots: solo raíz| Bag[Bolsa unique]
-    Bag -->|slots directos| TonicA[Tónica]
-    Bag --> TonicB[Tónica]
-    Bag --> Box[Caja unique]
-    Box --> Map[Mapa]
-    TonicA -. pila fungible derivada x2 .- TonicB
-    Character -. peso: carcasa y descendientes .-> Map
+    Character[Character] -->|slots: root only| Bag[Unique bag]
+    Bag -->|direct slots| TonicA[Tonic]
+    Bag --> TonicB[Tonic]
+    Bag --> Box[Unique box]
+    Box --> Map[Map]
+    TonicA -. derived fungible stack x2 .- TonicB
+    Character -. weight: shell and descendants .-> Map
 ```
 
-Las pilas nunca son entidades durables. Se derivan por
-ubicación/prototipo/vínculo,
-ordenan sus instancias por ID y se dividen por `maxStackUnits`:
+Stacks are never durable entities. They are derived by
+location/prototype/binding, order their instances by ID, and split by
+`maxStackUnits`:
 
 ```text
 stackSlots = ceil(quantity / maxStackUnits) * slotCost
 totalWeightGrams = quantity * weightGrams
 ```
 
-La cantidad predeterminada es uno y una mutación acepta como máximo 256
-unidades. `put` opera sobre raíces portadas; `get` solo sobre hijos directos;
-`contents` pagina veinte grupos. Mover una instancia contenedor conserva las
-ubicaciones relativas de todo su subárbol.
+The default quantity is one, and a mutation accepts at most 256 units. `put`
+operates on carried roots; `get` only on direct children; `contents` paginates
+twenty groups. Moving a container instance preserves the relative locations of
+its entire subtree.
 
-### Propiedad efectiva y transferencia
+### Effective ownership and transfer
 
-WorldPack v9 y AreaPack v8 aceptan las tres políticas. WorldPack v5 y AreaPack
-v4 también las aceptaban en su frontera histórica. La vinculación no se escribe
-en autoría: pertenece a cada instancia runtime y se crea, valida y persiste
-cuando el personaje adquiere el objeto.
+WorldPack v9 and AreaPack v8 accept the three policies. WorldPack v5 and AreaPack
+v4 also accepted them at their historical boundary. Binding is not written in
+authoring: it belongs to each runtime instance and is created, validated, and
+persisted when the character acquires the item.
 
-- `transferable` puede cambiar de propietario o volver al mundo si todas las
-  instancias de su subárbol también son transferibles;
-- `character_bound` se vincula al `CharacterId` de la primera adquisición, no
-  se desliga ni se reasigna y conserva el vínculo al consumirse; y
-- `non_transferable` no guarda vínculo, pero una vez dentro del grafo de un
-  personaje no puede soltarse ni pasar a otro; su consumo autorizado sí puede
-  llevarlo al estado terminal `Consumed`.
+- `transferable` can change owner or return to the world if every instance in
+  its subtree is also transferable;
+- `character_bound` binds to the `CharacterId` of the first acquisition, is
+  never unbound or reassigned, and keeps the binding when consumed; and
+- `non_transferable` keeps no binding, but once inside a character's graph it
+  cannot be dropped or handed to another; its authorized consumption can move it
+  to the terminal `Consumed` state.
 
-El propietario efectivo se obtiene siguiendo hasta cuatro padres `Contained`
-hasta una raíz `Carried` o `Equipped`. Por eso una bolsa `transferable` que
-contenga un objeto ligado o no transferible puede reorganizarse dentro del
-inventario de su dueño, pero no soltarse ni entregarse. `take`, `drop`,
-`put`, `get`, equipo, consumo y la concesión autorizada de Lua prevalidan
-ubicación, vínculo, grafo y capacidad sobre una copia prospectiva completa.
+The effective owner is obtained by following up to four `Contained` parents to a
+`Carried` or `Equipped` root. That is why a `transferable` bag containing a bound
+or non-transferable item can be reorganized within its owner's inventory but not
+dropped or handed over. `take`, `drop`, `put`, `get`, equipment, consumption,
+and authorized Lua granting prevalidate location, binding, graph, and capacity
+against a complete prospective copy.
 
-La entrega directa usa la misma acción en Web y Telnet:
+Direct handoff uses the same action on Web and Telnet:
 
 ```text
-give [cantidad] <objeto> to <personaje>
+give [quantity] <item> to <character>
 ```
 
-Solo mueve raíces `Carried` y conserva cada subárbol. El receptor debe ser
-distinto, estar conectado y en la misma sala; se resuelve por selector opaco o
-nombre exacto no ambiguo. La entrega exige un subárbol completamente
-`transferable`, capacidad válida en ambos personajes y ausencia de ignore del
-receptor o block bilateral. Todo el lote de 1..=256 raíces se confirma con una
-sola mutación y commit; `canGive` y las acciones proyectadas solo ayudan a la
-interfaz, nunca sustituyen esta autorización del servidor.
+It only moves `Carried` roots and preserves each subtree. The recipient must be
+different, connected, and in the same room; they are resolved by opaque selector
+or unambiguous exact name. Handoff requires a fully `transferable` subtree, valid
+capacity in both characters, and no ignore by the recipient or bilateral block.
+The whole batch of 1..=256 roots is confirmed with a single mutation and commit;
+`canGive` and the projected actions only aid the interface, they never replace
+this server authorization.
 
-La fase 3D implementa intercambio confirmado como estado runtime, no como
-autoría del WorldPack. Solo reserva raíces `Carried` cuyo subárbol completo es
-`transferable`; no añade campos de trade, escrow ni propietario a
-`ItemPrototype` o `InitialItemInstance`. Siguen ausentes entrega offline/remota
-y los repartos need/greed, master-loot o por contribución.
+Phase 3D implements confirmed trade as runtime state, not as WorldPack authoring.
+It only reserves `Carried` roots whose entire subtree is `transferable`; it adds
+no trade, escrow, or owner fields to `ItemPrototype` or `InitialItemInstance`.
+Offline/remote handoff and need/greed, master-loot, or contribution splits
+remain absent.
 
-## Botín fijo y repetible
+## Fixed and repeatable loot
 
-Una aparición de NPC puede combinar dos fuentes que convergen en la misma
-resolución autoritativa:
+An NPC spawn can combine two sources that converge on the same authoritative
+resolution:
 
-- cada raíz inicial con ubicación `npc_spawn` es botín fijo authored y solo se
-  entrega una vez; y
-- una `lootSource` enlaza esa aparición con una `lootTable`, que se resuelve de
-  nuevo en cada derrota.
+- each initial root with an `npc_spawn` location is authored fixed loot and is
+  delivered only once; and
+- a `lootSource` links that spawn to a `lootTable`, which is resolved anew on
+  each defeat.
 
-La tabla procesa primero `guaranteed` y después `pools`, ambos ordenados por ID
-canónico. Cada pool realiza `rolls` selecciones con reemplazo. Una entrada
-`item` usa un peso entero positivo y una cantidad uniforme inclusiva entre
-`minQuantity` y `maxQuantity`; una entrada `nothing` consume la tirada sin crear
-una instancia y no admite prototipo ni cantidades. El runtime usa rejection
-sampling, no porcentajes flotantes ni módulo sesgado.
+The table processes `guaranteed` first and then `pools`, both ordered by
+canonical ID. Each pool performs `rolls` selections with replacement. An `item`
+entry uses a positive integer weight and an inclusive uniform quantity between
+`minQuantity` and `maxQuantity`; a `nothing` entry consumes the roll without
+creating an instance and allows no prototype or quantities. The runtime uses
+rejection sampling, not floating-point percentages or biased modulo.
 
-AreaPack v8 declara ambas colecciones en su nivel superior; WorldPack v9 las
-sitúa dentro de `gameplay`. El botín normal se introdujo en AreaPack v5 y
-WorldPack v6. El fragmento siguiente muestra su forma común actual:
+AreaPack v8 declares both collections at its top level; WorldPack v9 places them
+inside `gameplay`. Normal loot was introduced in AreaPack v5 and WorldPack v6.
+The following fragment shows its current common form:
 
 ```json
 {
@@ -670,43 +666,43 @@ WorldPack v6. El fragmento siguiente muestra su forma común actual:
 }
 ```
 
-En la demostración, cada derrota produce un `tiamud:road-token` y un
-`tiamud:storm-seal` garantizados y realiza una tirada: `tiamud:wolf-clasp`
-tiene peso 6000 y `nothing` 4000, es decir, 60 % frente a 40 %. Además, la instancia inicial
-`tiamud:stormglass-talon` permanece como botín fijo de la primera derrota. La
-política `party_round_robin` reparte cada raíz sucesiva por una cohorte de hasta
-seis personajes; `credited_character` reservaría todas al iniciador. La
-selección inicial no es discrecional del líder.
+In the demo, each defeat produces one guaranteed `tiamud:road-token` and one
+`tiamud:storm-seal` and performs one roll: `tiamud:wolf-clasp` has weight 6000
+and `nothing` 4000, that is, 60% versus 40%. In addition, the initial instance
+`tiamud:stormglass-talon` remains as fixed loot from the first defeat. The
+`party_round_robin` policy distributes each successive root across a cohort of up
+to six characters; `credited_character` would reserve them all for the initiator.
+The initial selection is not at the leader's discretion.
 
-Reglas de referencias y capacidad:
+Reference and capacity rules:
 
-- IDs de tabla, fuente, entrada garantizada, pool y entrada ponderada son
-  canónicos, únicos en su ámbito y ocupan 1..=128 bytes;
-- cada prototipo, aparición de NPC y tabla referenciados debe existir;
-- una aparición admite como máximo una fuente y toda tabla debe estar usada;
-- una tabla admite hasta 8 entradas garantizadas y 8 pools; cada pool, 1..=8
-  tiradas y 1..=64 entradas;
-- el WorldPack admite 256 tablas, 1.024 fuentes y 4.096 entradas ponderadas;
-- cada peso está en `1..=1.000.000` y cada cantidad en `1..=32`; y
-- el peor caso de raíces fijas más unidades repetibles para una aparición no
-  puede superar 64 por derrota.
+- table, source, guaranteed entry, pool, and weighted entry IDs are canonical,
+  unique in their scope, and occupy 1..=128 bytes;
+- each referenced prototype, NPC spawn, and table must exist;
+- a spawn allows at most one source, and every table must be used;
+- a table allows up to 8 guaranteed entries and 8 pools; each pool, 1..=8 rolls
+  and 1..=64 entries;
+- the WorldPack allows 256 tables, 1,024 sources, and 4,096 weighted entries;
+- each weight is in `1..=1.000.000` and each quantity in `1..=32`; and
+- the worst case of fixed roots plus repeatable units for one spawn cannot exceed
+  64 per defeat.
 
-## Sellos ganados y afijos (fase 4B)
+## Earned seals and affixes (phase 4B)
 
-WorldPack v9 y AreaPack v8 conservan las recompensas selladas obtenidas jugando
-y un único afijo opcional por unidad de botín `unique`, introducidos en v7/v6.
-La decisión autoritativa es
-el [ADR 0014](decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
-No son cajas pagadas: no existen compra de tiradas, llaves, pity ni una moneda
-premium implícita.
+WorldPack v9 and AreaPack v8 preserve the sealed rewards earned through play and
+a single optional affix per `unique` loot unit, introduced in v7/v6. The
+authoritative decision is
+[ADR 0014](decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md).
+These are not paid boxes: there is no roll purchase, keys, pity, or an implicit
+premium currency.
 
-Un prototipo sellado declara `sealedLootTableId` y debe ser `unique`,
-`maxStackUnits: 1`, consumible, `character_bound`, sin contenedor, equipo,
-ataque, curación ni efecto. No admite instancia inicial. Una tabla normal
-asociada a un NPC debe generarlo como recompensa; su tabla de apertura no puede
-ser una `lootSource` directa ni producir otro sello. La apertura siempre genera
-entre 1 y 16 unidades y su expansión de resultados base más afijos
-condicionales admite como máximo 1.024 filas visibles en `reward odds`.
+A sealed prototype declares `sealedLootTableId` and must be `unique`,
+`maxStackUnits: 1`, consumable, `character_bound`, with no container, equipment,
+attack, healing, or effect. It allows no initial instance. A normal table
+associated with an NPC must generate it as a reward; its opening table cannot be
+a direct `lootSource` or produce another seal. Opening always generates between
+1 and 16 units, and its expansion of base results plus conditional affixes allows
+at most 1,024 rows visible in `reward odds`.
 
 ```json
 {
@@ -768,39 +764,38 @@ condicionales admite como máximo 1.024 filas visibles en `reward odds`.
 }
 ```
 
-Hay como máximo 512 definiciones de afijo, 256 pools, 64 entradas por pool y
-4.096 entradas ponderadas en total. La etiqueta ocupa hasta 64 bytes; cada
-delta positivo de ataque o curación llega como máximo a 1.000. Un pool se
-referencia solo con cantidad exactamente uno desde un prototipo no sellado,
-`unique` y `maxStackUnits: 1`. Un delta de ataque requiere objeto equipable y
-uno de curación, consumible; el valor efectivo no puede superar los límites
-del runtime. Un objeto recibe como máximo un afijo.
+There are at most 512 affix definitions, 256 pools, 64 entries per pool, and
+4,096 weighted entries in total. The label occupies up to 64 bytes; each positive
+attack or healing delta reaches at most 1,000. A pool is referenced with a
+quantity of exactly one from an unsealed, `unique`, `maxStackUnits: 1` prototype.
+An attack delta requires an equippable item and a healing one a consumable; the
+effective value cannot exceed the runtime limits. An item receives at most one
+affix.
 
-Los pools normales y sellados usan selección ponderada entera, determinista y
-sin sesgo. La tirada de afijo normal se consume aunque después no quepa o se
-suprima el drop, para que el resultado no dependa de la capacidad observable.
-`open <sello>` consume una unidad y `reward odds <sello>` muestra las
-probabilidades exactas authored. Consumo, RNG, contador de apertura, creación,
-vínculo, capacidad y grupos de resultado —hasta 16 y coherentes con las
-instancias creadas— forman un solo commit; cualquier fallo restaura exactamente
-el sello, los contadores y el RNG.
+Normal and sealed pools use integer, deterministic, unbiased weighted selection.
+The normal affix roll is consumed even if the drop later does not fit or is
+suppressed, so the result does not depend on observable capacity.
+`open <sello>` consumes one unit and `reward odds <sello>` shows the exact
+authored probabilities. Consumption, RNG, opening counter, creation, binding,
+capacity, and result groups —up to 16 and consistent with the created
+instances— form a single commit; any failure restores exactly the seal, the
+counters, and the RNG.
 
-`WorldRuntimeSnapshot` v7 conserva por instancia el afijo aplicado y la
-procedencia `SealedReward`. Las copias durables incluyen los digests canónicos
-de definición, pool y registro, pero clientes Web, Telnet y GMCP solo reciben
-la presentación y estadísticas autorizadas: IDs estables, estado RNG,
-contadores internos y digests permanecen opacos. Los mismos afijos funcionan
-en botín normal y sellado.
+`WorldRuntimeSnapshot` v7 preserves the applied affix and the `SealedReward`
+provenance per instance. The durable copies include the canonical digests of the
+definition, pool, and registry, but Web, Telnet, and GMCP clients receive only
+the authorized presentation and stats: stable IDs, RNG state, internal counters,
+and digests stay opaque. The same affixes work on normal and sealed loot.
 
-El SHA-256 de la forma canónica exacta de cada tabla viaja al dominio. Cada
-instancia generada conserva procedencia durable con drop, aparición, tabla,
-digest, entrada, pool opcional, índices y tick. Las instancias iniciales se
-marcan como authored; las creadas por la API general conservan procedencia
-runtime propia. Esta metadata vive en `WorldRuntimeSnapshot` v7 y nunca se
-expone a clientes. Cambiar una tabla después no reescribe la procedencia de los
-objetos ya generados.
+The SHA-256 of each table's exact canonical form travels to the domain. Each
+generated instance keeps durable provenance with drop, spawn, table, digest,
+entry, optional pool, indices, and tick. Initial instances are marked as
+authored; those created by the general API keep their own runtime provenance.
+This metadata lives in `WorldRuntimeSnapshot` v7 and is never exposed to clients.
+Changing a table afterward does not rewrite the provenance of items already
+generated.
 
-## Composición, validación y digest
+## Composition, validation, and digest
 
 ```sh
 mkdir -p build/worlds
@@ -812,78 +807,76 @@ cargo run --locked -p world-pack --bin tiamud-world -- validate \
   build/worlds/lantern-square.composed.world.json
 ```
 
-La composición:
+Composition:
 
-- rechaza propiedades desconocidas también en registros anidados;
-- valida rutas relativas y evita escapes o duplicados;
-- exige IDs globales únicos, salvo el par histórico tipado
-  prototipo/instancia normalizado con la misma cadena;
-- verifica `dependsOn` para referencias estructuradas cruzadas;
-- fusiona y valida todas las referencias, límites, condiciones y scripts;
-- ordena canónicamente listas no semánticas;
-- produce bytes y reportes deterministas; y
-- escribe el destino completo de forma atómica sin sobreescribirlo.
+- rejects unknown properties, including in nested registries;
+- validates relative paths and prevents escapes or duplicates;
+- requires globally unique IDs, except the historical typed
+  prototype/instance pair normalized with the same string;
+- verifies `dependsOn` for cross-area structured references;
+- merges and validates all references, limits, conditions, and scripts;
+- canonically orders non-semantic lists;
+- produces deterministic bytes and reports; and
+- writes the complete destination atomically without overwriting it.
 
-Lantern Square se compone desde tres áreas y produce tres salas, diez
-prototipos, nueve instancias iniciales, dos tablas de botín, una fuente, un
-afijo, un pool, una habilidad de telepatía directa y un emote social authored.
-El artefacto de 53.567 bytes es byte a byte idéntico al
-WorldPack canónico y su
-SHA-256 es:
+Lantern Square is composed from three areas and produces three rooms, ten
+prototypes, nine initial instances, two loot tables, one source, one affix, one
+pool, one direct telepathy ability, and one authored social emote. The
+53,567-byte artifact is byte-for-byte identical to the canonical WorldPack, and
+its SHA-256 is:
 
 ```text
 9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75
 ```
 
-La demostración conserva `tiamud:road-token` y `tiamud:wolf-clasp` como
-`transferable`: sus IDs publicados no cambian de semántica sin migración. Los
-casos 3C son nuevas identidades: `tiamud:rain-writ`, consumible con
-`healAmount: 1` y `non_transferable`, comienza en `demo:north-gate`; y
-`tiamud:stormglass-talon`, `character_bound`, es botín fijo de
-`tiamud:gate-stalker-1`. Esa misma aparición usa reparto round-robin de party
-para el `tiamud:road-token` y el `tiamud:storm-seal` garantizados, además de la
-tirada 60 % `tiamud:wolf-clasp`/40 % `nothing` de su tabla repetible. El clasp
-normal y el talón obtenido al abrir el sello comparten una tirada de afijo:
-60 % `storm-bitten` y 40 % sin afijo.
-La clase inicial predeterminada concede además `tiamud:mind-whisper`, con coste
-de stamina y cooldown positivos; `demo:archive` demuestra su bloqueo authored.
+The demo keeps `tiamud:road-token` and `tiamud:wolf-clasp` as `transferable`:
+their published IDs do not change semantics without migration. The 3C cases are
+new identities: `tiamud:rain-writ`, consumable with `healAmount: 1` and
+`non_transferable`, starts in `demo:north-gate`; and `tiamud:stormglass-talon`,
+`character_bound`, is fixed loot from `tiamud:gate-stalker-1`. That same spawn
+uses party round-robin distribution for the guaranteed `tiamud:road-token` and
+`tiamud:storm-seal`, plus the 60% `tiamud:wolf-clasp`/40% `nothing` roll from its
+repeatable table. The normal clasp and the talon obtained by opening the seal
+share one affix roll: 60% `storm-bitten` and 40% no affix. The default starting
+class also grants `tiamud:mind-whisper`, with a positive stamina cost and
+cooldown; `demo:archive` demonstrates its authored block.
 
-Límites principales:
+Main limits:
 
-| Recurso | Límite |
+| Resource | Limit |
 | --- | ---: |
-| Manifiesto de proyecto | 1 MiB |
-| Número de áreas | 1..=256 |
-| Cada fichero de área | 16 MiB |
-| Total de fuentes de área | 16 MiB |
-| WorldPack compuesto | 16 MiB |
-| Ruta relativa | 4096 bytes |
-| Título de sala | 1..=128 bytes seguros, sin controles |
-| Descripción de sala | 1..=8.192 bytes seguros |
-| Prototipos de objeto por WorldPack | 1.024 |
-| Instancias iniciales por WorldPack | 8.192 |
-| Bytes por ID de instancia | 1..=128 |
-| Aliases por prototipo | 32 |
-| Peso de un prototipo | 0..=1.000.000 g |
-| Coste de slots de un prototipo | 1..=100 |
+| Project manifest | 1 MiB |
+| Number of areas | 1..=256 |
+| Each area file | 16 MiB |
+| Total area sources | 16 MiB |
+| Composed WorldPack | 16 MiB |
+| Relative path | 4096 bytes |
+| Room title | 1..=128 safe bytes, no controls |
+| Room description | 1..=8.192 safe bytes |
+| Item prototypes per WorldPack | 1.024 |
+| Initial instances per WorldPack | 8.192 |
+| Bytes per instance ID | 1..=128 |
+| Aliases per prototype | 32 |
+| Weight of a prototype | 0..=1.000.000 g |
+| Slot cost of a prototype | 1..=100 |
 | `itemLevel` | 1..=1.000 |
-| Unidades máximas por pila | 1.000 |
-| Slots de un contenedor | 1..=1.000 |
-| Peso de contenido por contenedor | 0..=1.000.000 g |
-| Profundidad de contención | 4 aristas |
-| Unidades movidas por acción | 256 |
-| Grupos por página de `contents` | 20 |
-| Tablas/fuentes de botín | 256 / 1.024 |
-| Garantizados/pools por tabla | 8 / 8 |
-| Tiradas/entradas por pool | 8 / 64 |
-| Entradas ponderadas globales | 4.096 |
-| Peso/cantidad de una entrada | 1..=1.000.000 / 1..=32 |
-| Raíces fijas + repetibles por derrota | 64 |
+| Max units per stack | 1.000 |
+| Slots of a container | 1..=1.000 |
+| Content weight per container | 0..=1.000.000 g |
+| Containment depth | 4 edges |
+| Units moved per action | 256 |
+| Groups per `contents` page | 20 |
+| Loot tables/sources | 256 / 1.024 |
+| Guaranteed/pools per table | 8 / 8 |
+| Rolls/entries per pool | 8 / 64 |
+| Global weighted entries | 4.096 |
+| Weight/quantity of an entry | 1..=1.000.000 / 1..=32 |
+| Fixed + repeatable roots per defeat | 64 |
 
-## Publicación 6A, ejecución aditiva 6B, corte 6C y retirada 6D
+## 6A publishing, 6B additive execution, 6C cutover, and 6D retirement
 
-El release revisado declara revisión, propiedad, dependencias, portales,
-procedencia y licencias de cada área. Se publica en un registro local:
+The reviewed release declares each area's revision, ownership, dependencies,
+portals, provenance, and licenses. It is published to a local registry:
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
@@ -892,8 +885,8 @@ cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
   --registry build/area-registry
 ```
 
-Stdout devuelve la ruta content-addressed exacta del catálogo. Verifícala sin
-mutar el registro:
+Stdout returns the exact content-addressed path of the catalog. Verify it
+without mutating the registry:
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
@@ -901,30 +894,30 @@ cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
   --registry build/area-registry
 ```
 
-El catálogo v1 admite hasta 256 entradas y 1 MiB. El manifiesto de release se
-acota a 256 KiB; cada bundle JSON canónico y la suma declarada se acotan a
-16 MiB. Los tres sobres limitan profundidad JSON a 16 y rechazan claves
-duplicadas recursivamente. `storedBytes == expandedBytes`: no existe compresión
-v1. `trustMode=unsigned_local` supone un host confiable y publicadores
-cooperantes; digest no demuestra autoría ni habilita redistribución.
+The v1 catalog allows up to 256 entries and 1 MiB. The release manifest is
+bounded to 256 KiB; each canonical JSON bundle and the declared sum are bounded
+to 16 MiB. All three envelopes limit JSON depth to 16 and reject recursively
+duplicated keys. `storedBytes == expandedBytes`: there is no v1 compression.
+`trustMode=unsigned_local` assumes a trusted host and cooperating publishers;
+a digest proves neither authorship nor redistribution rights.
 
-`AreaPack.dependsOn` es la declaración editorial exhaustiva. El catálogo
-deriva `hardDependencies` solo de referencias estructurales cruzadas que no son
-`RoomExit`; cada salida entre áreas se publica como `portals` con
-`sourceExit`, peer y revisión mínima. `softDependencies` queda vacío. El bundle
-incluye el AreaPack revisable y un `CompiledArea` estricto ligado por
-`compiledAreaSha256`. El WorldPack monolítico de respaldo demuestra que el
-conjunto completo conserva la misma semántica.
+`AreaPack.dependsOn` is the exhaustive editorial declaration. The catalog derives
+`hardDependencies` only from cross-area structural references that are not
+`RoomExit`; each cross-area exit is published as `portals` with `sourceExit`,
+peer, and minimum revision. `softDependencies` stays empty. The bundle includes
+the reviewable AreaPack and a strict `CompiledArea` bound by `compiledAreaSha256`.
+The monolithic backup WorldPack demonstrates that the full set preserves the same
+semantics.
 
-`ItemInstanceContainer` es el caso estructural que exige materialización
-simétrica: si hijo y contenedor pertenecen a áreas distintas, el publicador
-añade dependencias duras en ambos sentidos. `open_exact` las reconstruye desde
-el WorldPack de respaldo y rechaza un catálogo que no conserve el cierre
-atómico. Así nadie puede mover, llenar o ligar el contenedor antes de que
-aparezca su contenido authored.
+`ItemInstanceContainer` is the structural case that requires symmetric
+materialization: if the child and container belong to different areas, the
+publisher adds hard dependencies in both directions. `open_exact` reconstructs
+them from the backup WorldPack and rejects a catalog that does not preserve the
+atomic closure. That way no one can move, fill, or bind the container before its
+authored content appears.
 
-Para ejecutar esa generación local, usa exactamente las dos variables
-siguientes y no definas `TIAMUD_WORLD_PACK`:
+To run that local generation, use exactly the following two variables and do not
+define `TIAMUD_WORLD_PACK`:
 
 ```sh
 TIAMUD_AREA_REGISTRY=build/area-registry \
@@ -933,42 +926,41 @@ TIAMUD_TELNET_MODE=plaintext \
 cargo run --locked -p tiamud-server
 ```
 
-El servidor fija el digest del catálogo antes de listeners y no vuelve a leer
-`area-active`. En persistencia vacía instala el área de `startRoomId` y el
-cierre de `hardDependencies`; con snapshot o ledger previo instala primero la
-generación completa. Un portal hacia un área no residente permanece como
-`DeferredExit`. La entrada real prepara el cierre fuera del actor, lo instala
-atómicamente y reintenta una vez, con límites de dos trabajos activos, ocho
-pendientes, cinco segundos y 32 áreas.
+The server fixes the catalog digest before listeners and does not re-read
+`area-active`. On empty persistence it installs the `startRoomId` area and the
+`hardDependencies` closure; with a prior snapshot or ledger it installs the whole
+generation first. A portal to a non-resident area remains a `DeferredExit`. The
+actual entry prepares the closure outside the actor, installs it atomically, and
+retries once, with limits of two active jobs, eight pending, five seconds, and 32
+areas.
 
-Si desaparece el último solicitante mientras espera uno de los dos permisos,
-se notifica y cancela el trabajo en cola de inmediato. A los cinco segundos el
-solicitante recibe timeout. Un `spawn_blocking` ya iniciado no se cancela de
-forma insegura: conserva permiso y marca terminal hasta terminar y su resultado
-tardío se descarta.
+If the last requester disappears while waiting for one of the two permits, the
+queued job is notified and canceled immediately. After five seconds the requester
+receives a timeout. An already-started `spawn_blocking` is not canceled unsafely:
+it keeps its permit and marks terminal until it finishes, and its late result is
+discarded.
 
-Una instalación estática no escribe snapshot. Instancias y NPC iniciales que
-formen parte del estado dinámico se confirman con la transacción existente
-antes de activar el lote. Fallos de bundle, dependencia, timeout, saturación o
-commit restauran mundo, contenido runtime y residencia; los clientes solo ven
-un destino no disponible genérico. Todas las áreas cargadas permanecen en
-memoria hasta apagar.
+A static installation does not write a snapshot. Initial instances and NPCs that
+form part of the dynamic state are committed with the existing transaction before
+activating the batch. Bundle, dependency, timeout, saturation, or commit failures
+restore the world, runtime content, and residency; clients only see a generic
+unavailable destination. All loaded areas remain in memory until shutdown.
 
-Una instancia inicial `NpcSpawn` puede vivir en otra área que el NPC. La
-instalación la incorpora al botín fijo tanto si ambos llegan juntos como si el
-NPC ya residía, valida los límites y marca el lote como dinámico para confirmar
-la relación antes de publicarla.
+An initial `NpcSpawn` instance can live in an area other than the NPC. The
+installation incorporates it into the fixed loot whether both arrive together or
+the NPC already resided, validates the limits, and marks the batch as dynamic to
+commit the relationship before publishing it.
 
-Ni 6A ni 6B permiten que un portal normal cargue transitivamente sus vecinos.
-La fase 6C mínima sustituye una generación completa sin reiniciar. Después de
-publicar una revisión creciente, SIGHUP solicita reconciliar el puntero local:
+Neither 6A nor 6B lets a normal portal transitively load its neighbors. Minimal
+phase 6C replaces a whole generation without restarting. After publishing an
+increasing revision, SIGHUP requests reconciling the local pointer:
 
 ```sh
 sudo systemctl kill --signal=HUP tiamud
 ```
 
-Para rollback, conserva el catálogo inmutable anterior, selecciónalo de forma
-explícita y envía el mismo SIGHUP:
+For rollback, keep the previous immutable catalog, select it explicitly, and send
+the same SIGHUP:
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- area-select \
@@ -977,57 +969,58 @@ cargo run --locked -p world-pack --bin tiamud-world -- area-select \
 sudo systemctl kill --signal=HUP tiamud
 ```
 
-El servidor abre y verifica el puntero dos veces, verifica catálogo, fallback
-y bundles y construye un mundo/contenido/coordinador privados completos. La
-compatibilidad exige `worldId`, nombre, `startRoomId`, RNG, gameplay, objetos e
-instancias iniciales, NPC, botín, afijos, áreas, ownership, IDs de sala y VNUM
-legacy idénticos, además de `persistentMigrationVersion == 0`. Una activación
-normal exige revisiones crecientes; un rollback recorre la dirección inversa
-solo por la selección explícita. Pueden cambiar títulos, prosa, salidas,
-recursos, percepción, variantes, medios y scripts síncronos validados.
+The server opens and verifies the pointer twice, verifies the catalog, fallback,
+and bundles, and builds a complete private world/content/coordinator.
+Compatibility requires identical `worldId`, name, `startRoomId`, RNG, gameplay,
+initial items and instances, NPCs, loot, affixes, areas, ownership, room IDs, and
+legacy VNUMs, plus `persistentMigrationVersion == 0`. A normal activation requires
+increasing revisions; a rollback traverses the reverse direction only by explicit
+selection. Titles, prose, exits, resources, perception, variants, media, and
+validated synchronous scripts may change.
 
-El corte cierra admisiones y requiere cero sesiones y cero leases. Si existe
-actividad devuelve `busy`, no expulsa jugadores y conserva la generación
-anterior. Con quiescencia exige residencia completa, restaura el snapshot v8
-actual sobre la candidata, confirma por CAS snapshot + identidad SQL v15 y solo
-entonces intercambia el
-estado en memoria. La primera ejecución liga la generación; en restart la fila
-durable prevalece sobre un `area-active` más reciente.
+The cutover closes admissions and requires zero sessions and zero leases. If
+activity exists it returns `busy`, does not evict players, and keeps the previous
+generation. With quiescence it requires full residency, restores the current v8
+snapshot over the candidate, commits by CAS the snapshot + SQL v15 identity, and
+only then swaps the in-memory state. The first run binds the generation; on
+restart the durable row prevails over a more recent `area-active`.
 
-Un fallo definitivo antes del commit conserva la generación anterior. Si el
-commit devuelve un resultado ambiguo, el servidor relee SQL: publica G1 si
-quedó durable, reabre G0 si no y, ante otro valor o error, queda fail-stop en
-`Committing` con el actor detenido y readiness 503 hasta recuperación.
+A definitive failure before the commit keeps the previous generation. If the
+commit returns an ambiguous result, the server re-reads SQL: it publishes G1 if
+it became durable, reopens G0 if not, and, on any other value or error, remains
+fail-stop in `Committing` with the actor stopped and readiness 503 until recovery.
 
-Una instalación 6B/v13 con recovery compartido o personajes debe arrancar v14
-con G0 exacto y `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>`. Verifica la
-liga, retira la variable y solo entonces introduce G1. La fila v14 nace vacía;
-cambiar binario/esquema y catálogo a la vez aceptaría G1 como autoridad inicial
-sin compatibilidad/CAS contra el G0 que v13 no retenía.
+A 6B/v13 installation with shared recovery or characters must boot v14 with the
+exact G0 and `TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>`. Verify the
+binding, remove the variable, and only then introduce G1. The v14 row is born
+empty; changing binary/schema and catalog at the same time would accept G1 as the
+initial authority without compatibility/CAS against the G0 that v13 did not
+retain.
 
-Recovery sin snapshot/ledger puede coexistir con personajes. Sin liga durable,
-recovery compartido o cualquier personaje obliga al ACK exacto de G0; una base
-vacía o con cuentas sin personajes/recovery de mundo puede ligar sin ACK.
-Monolítico con autoridad→catálogo no pertenece a 6C. El ACK se rechaza en modo
-monolítico, con liga, sin recovery/personaje o ante digest distinto.
+Recovery without snapshot/ledger can coexist with characters. Without a durable
+binding, shared recovery, or any character forces the exact G0 ACK; an empty
+database or one with accounts but no characters/world recovery can bind without
+an ACK. Monolithic with authority→catalog does not belong to 6C. The ACK is
+rejected in monolithic mode, with a binding, without recovery/character, or on a
+different digest.
 
-6D implementa una ruta interna parcial de checkpoint, retirada y rehidratación
-de la misma revisión de una unidad vacía. No implementa reemplazo de revisión,
-jugadores durante retirada, migraciones, LRU, GC, red, compresión o firma. El
-gate pasa 774 pruebas Rust —329 del servidor— y la reauditoría 0 P1/0 P2. El
-humo SQLite está retenido. PostgreSQL 18 desechable pasa 20/20 pruebas del
-adaptador y 7/7 enfocadas del servidor, incluida la CAS v14; su humo liga G0 y
-valida `noop`, readiness, Web, Telnet, dos áreas residentes y cierre limpio.
-Véanse el
-[registro de aceptación PostgreSQL v14/PWA](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md),
-[ADR 0005](decisions/0005-hot-area-lifecycle.md) y
-[ADR 0020](decisions/0020-additive-local-area-loading.md) y
-[ADR 0021](decisions/0021-quiescent-area-generation-cutover.md), y el estado
-parcial 6D está en [ADR 0022](decisions/0022-reversible-area-unit-retirement.md).
+6D implements a partial internal path of checkpoint, retirement, and rehydration
+of the same revision of an empty unit. It does not implement revision replacement,
+players during retirement, migrations, LRU, GC, network, compression, or signing.
+The gate passes 774 Rust tests —329 from the server— and the re-audit 0 P1/0 P2.
+The SQLite smoke is retained. Disposable PostgreSQL 18 passes 20/20 adapter tests
+and 7/7 focused server tests, including the v14 CAS; its smoke binds G0 and
+validates `noop`, readiness, Web, Telnet, two resident areas, and a clean
+shutdown. See the
+[PostgreSQL v14/PWA acceptance log](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md),
+[ADR 0005](decisions/0005-hot-area-lifecycle.md), and
+[ADR 0020](decisions/0020-additive-local-area-loading.md) and
+[ADR 0021](decisions/0021-quiescent-area-generation-cutover.md), and the partial
+6D state is in [ADR 0022](decisions/0022-reversible-area-unit-retirement.md).
 
-## Flujo editorial
+## Editorial workflow
 
-`tiamud-world` comparte el mismo normalizador y validador en todos sus comandos:
+`tiamud-world` shares the same normalizer and validator across all its commands:
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- validate mundo.json
@@ -1037,82 +1030,76 @@ cargo run --locked -p world-pack --bin tiamud-world -- build mundo.json --output
 cargo run --locked -p world-pack --bin tiamud-world -- diff anterior.json nuevo.json
 ```
 
-Publicación y rollback usan artefactos inmutables por digest. El puntero
-`area-active` es selección editorial y SIGHUP es su única reconciliación local
-en ejecución. La fila SQL v15, no ese fichero mutable, decide recovery. Una
-selección anterior requiere `area-select`; no se interpreta una revisión menor
-accidental como permiso de rollback. El corte retiene el mismo lock cooperativo
-del registro que `area-publish` y `area-select` hasta resolver el CAS durable.
+Publishing and rollback use immutable artifacts by digest. The `area-active`
+pointer is an editorial selection, and SIGHUP is its only local reconciliation
+while running. The SQL v15 row, not that mutable file, decides recovery. A prior
+selection requires `area-select`; an accidental lower revision is not interpreted
+as permission to roll back. The cutover holds the same cooperative registry lock
+as `area-publish` and `area-select` until the durable CAS is resolved.
 
-Antes de publicar:
+Before publishing:
 
-1. compón las áreas y revisa el `CompositionReport`;
-2. valida el artefacto y sus recursos;
-3. ejecuta pruebas de contenido y previews textuales;
-4. verifica licencia/procedencia de cada input y medio;
-5. compara el diff canónico;
-6. publica por digest sin sobrescribir; y
-7. prueba arranque y rollback con una persistencia desechable.
+1. compose the areas and review the `CompositionReport`;
+2. validate the artifact and its resources;
+3. run content tests and textual previews;
+4. verify the license/provenance of each input and medium;
+5. compare the canonical diff;
+6. publish by digest without overwriting; and
+7. test startup and rollback with a disposable persistence.
 
-Los recursos multimedia son presentación inmutable, mismo origen y
-direccionada por contenido. Lua se compila y ejecuta con capacidades/cuotas; no
-tiene sistema de archivos, red, procesos ni módulos nativos. La IA editorial es
-opcional, fuera de ejecución y siempre produce un borrador que requiere
-validación y revisión humana.
+Media resources are immutable presentation, same-origin, and content-addressed.
+Lua is compiled and executed with capabilities/quotas; it has no filesystem,
+network, processes, or native modules. Editorial AI is optional, out of the
+runtime, and always produces a draft that requires validation and human review.
 
-## Persistencia y evolución del formato
+## Persistence and format evolution
 
-WorldPack define el mundo inicial; `WorldRuntimeSnapshot` v8 define dónde están
-las instancias después de jugar, su `binding` obligatorio, los contadores de
-identidad y apertura, los afijos aplicados, las reservas de trade, la
-procedencia normal o sellada, los encuentros de botín, los derechos sobre suelo
-y los cursores round-robin. El decoder elige primero por
-`snapshotVersion` y compara esa versión original con la columna SQL. DTO
-explícitos v1-v5 convierten de forma estricta: v1-v3 producen
-`binding: { kind: "unbound" }` y v4 añade trade vacío. Al llegar a v6, cada
-origen v1-v5 añade botín vacío y procedencia
-`legacy_snapshot { sourceVersion }` para todas sus instancias. Un v6 exacto
-convierte a v7 con `itemAffixes: []` en cada instancia y
-`nextRewardOpenId: 1`.
-Todas fallan cerradas ante campos cruzados. En particular, inyectar `binding`
-en v3, trade en v4, procedencia/derechos v6 en v5 o afijos/contador de apertura
-v7 en v6 no adelanta su versión.
-También se rechazan referencias, ciclos, profundidad, capacidad, contador,
-propietario, vínculo, participante, reserva, cohorte o procedencia inválidos.
+WorldPack defines the initial world; `WorldRuntimeSnapshot` v8 defines where the
+instances are after play, their mandatory `binding`, the identity and opening
+counters, the applied affixes, the trade reservations, the normal or sealed
+provenance, the loot encounters, the ground rights, and the round-robin cursors.
+The decoder first picks by `snapshotVersion` and compares that original version
+with the SQL column. Explicit v1-v5 DTOs convert strictly: v1-v3 produce
+`binding: { kind: "unbound" }` and v4 adds an empty trade. On reaching v6, each
+v1-v5 origin adds empty loot and provenance
+`legacy_snapshot { sourceVersion }` for all its instances. An exact v6 converts
+to v7 with `itemAffixes: []` on each instance and `nextRewardOpenId: 1`.
+All fail closed on cross fields. In particular, injecting `binding` in v3, trade
+in v4, v6 provenance/rights in v5, or v7 affixes/opening counter in v6 does not
+advance its version.
+Invalid references, cycles, depth, capacity, counter, owner, binding,
+participant, reservation, cohort, or provenance are also rejected.
 
-SQLite y PostgreSQL usan esquema v15. `world_area_generation` guarda solo
-`worldId`, digest activo, digest anterior, secuencia de activación y timestamp;
-las rutas se derivan del registro configurado. Una transición 6C actualiza esa
-fila y el snapshot v8 en la misma transacción mediante compare-and-swap. No es
-otra autoridad del mundo y el traslado SQLite→PostgreSQL la conserva.
-`world_area_checkpoints` conserva solo el estado dinámico de unidades 6D
-retiradas y se confirma/consume atómicamente con el manifiesto v8; el mover
-valida y copia sus filas.
+SQLite and PostgreSQL use schema v15. `world_area_generation` stores only
+`worldId`, active digest, previous digest, activation sequence, and timestamp;
+paths are derived from the configured registry. A 6C transition updates that row
+and the v8 snapshot in the same transaction via compare-and-swap. It is not
+another world authority, and the SQLite→PostgreSQL migration preserves it.
+`world_area_checkpoints` keeps only the dynamic state of retired 6D units and is
+committed/consumed atomically with the v8 manifest; the mover validates and
+copies its rows.
 
-Al restaurar un snapshot anterior, las instancias iniciales nuevas del
-WorldPack se conservan y el estado durable se superpone; una instancia creada
-en runtime que no figure en el snapshot no reaparece. Antes de abrir listeners
-se validan por lotes los propietarios de objetos siguiendo padres `Contained`
-hasta la raíz y todos los `CharacterId` ligados, incluidos los de objetos
-consumidos. Se comprueban sus fichas, equipos, el grafo, los vínculos y la
-capacidad, también para personajes desconectados. Los participantes de trade
-que no sean ya propietarios se cargan con un presupuesto adicional cerrado;
-las identidades que solo aparecen en cohortes o derechos de botín se comprueban
-mediante consultas de existencia por lotes. Se cancelan trades y encuentros de
-botín abiertos antes de readiness, pero los derechos ya generados sobreviven al
-reinicio. Esos agregados temporales no quedan en el mundo activo.
+When restoring a previous snapshot, the WorldPack's new initial instances are
+preserved and the durable state is overlaid; a runtime-created instance not
+present in the snapshot does not reappear. Before opening listeners, item owners
+are validated in batches by following `Contained` parents to the root, together
+with all bound `CharacterId`s, including those of consumed items. Their sheets,
+equipment, the graph, the bindings, and capacity are checked, also for
+disconnected characters. Trade participants that are not already owners are
+loaded with an additional closed budget; identities that appear only in cohorts
+or loot rights are checked with batched existence queries. Open trades and loot
+encounters are canceled before readiness, but already-generated rights survive a
+restart. Those temporary aggregates do not remain in the active world.
 
-El runtime admite hasta 65.536 instancias. Los snapshots raw heredados v1-v5
-conservan el límite físico de 1 MiB; los snapshots v6–v8,
-así como
-cada nueva admisión/confirmación, admiten hasta 2 MiB. La suma de fichas de
-propietarios
-inspeccionadas sigue limitada a 1 MiB y cada ficha a 64 KiB. SQLite y
-PostgreSQL esquema v15 guardan el snapshot como `TEXT` opaco dentro de la
-transacción existente. La migración v10→v11 aumenta de forma transaccional la
-restricción física del singleton runtime a 2 MiB y conserva versión, JSON,
-secuencia cubierta y fecha; no convierte el JSON ni crea otra autoridad. No hay
-tabla espejo/escrow/loot, doble escritura ni `jsonb`.
+The runtime allows up to 65,536 instances. Inherited raw v1-v5 snapshots keep the
+physical limit of 1 MiB; v6–v8 snapshots, as well as each new
+admission/commit, allow up to 2 MiB. The sum of inspected owner sheets remains
+limited to 1 MiB and each sheet to 64 KiB. SQLite and PostgreSQL schema v15 store
+the snapshot as opaque `TEXT` within the existing transaction. The v10→v11
+migration transactionally raises the runtime singleton's physical constraint to
+2 MiB and preserves version, JSON, covered sequence, and date; it does not
+convert the JSON or create another authority. There is no mirror/escrow/loot
+table, double write, or `jsonb`.
 
-Tras una futura release estable, renombrar un ID requerirá alias, tombstone o
-migración explícita. Nunca recicles un ID publicado para otro significado.
+After a future stable release, renaming an ID will require an alias, tombstone,
+or explicit migration. Never recycle a published ID for another meaning.

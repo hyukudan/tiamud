@@ -1,40 +1,40 @@
-# Autoría de mundos
+# World authoring
 
-Este es el punto de entrada vigente para crear contenido de Tiamud. El runtime
-consume un **WorldPack v9** canónico. Los autores pueden mantenerlo como módulos
-**AreaPack v8** estrictos bajo un **WorldProjectManifest v2** y componerlos sin
-conexión. 6A publica un catálogo local y bundles inmutables; 6B los incorpora
-bajo demanda; 6C puede sustituir solo la generación completa durante un corte
-quiescente; 6D permite internamente retirar/rehidratar la misma revisión de una
-unidad vacía. No hay reemplazo de revisión ni LRU operativo. Las áreas no son
-servicios ni se despliegan de forma independiente.
+This is the current entry point for creating Tiamud content. The runtime consumes
+a canonical **WorldPack v9**. Authors can keep it as strict **AreaPack v8**
+modules under a **WorldProjectManifest v2** and compose them offline. 6A publishes
+a local catalog and immutable bundles; 6B incorporates them on demand; 6C can
+replace only the whole generation during a quiescent cutover; 6D internally allows
+retiring/rehydrating the same revision of an empty unit. There is no revision
+replacement or operational LRU. Areas are not services and are not deployed
+independently.
 
-Los tipos, validadores y pruebas Rust de `crates/world-pack` son la autoridad
-exacta del esquema. Estas páginas explican el flujo soportado y enlazan el
-diseño detallado sin duplicar cada campo.
+The Rust types, validators, and tests in `crates/world-pack` are the exact schema
+authority. These pages explain the supported flow and link the detailed design
+without duplicating every field.
 
-## Por dónde empezar
+## Where to start
 
-1. Lee el [flujo en un único host](workflow.md).
-2. Añade o modifica un [módulo de área](modular-worlds.md).
-3. Define prototipos reutilizables e instancias iniciales durables con la
-   [guía de esquema](../world-authoring.md#prototipos-e-instancias-de-objeto).
-4. Define [progresión, habilidades y combate](progression-and-combat.md).
-5. Compila y referencia [medios atmosféricos o sprites](media.md).
-6. Ejecuta todas las [puertas de validación y publicación](validation-and-publishing.md).
+1. Read the [single-host flow](workflow.md).
+2. Add or modify an [area module](modular-worlds.md).
+3. Define reusable prototypes and durable initial instances with the
+   [schema guide](../world-authoring.md#item-prototypes-and-instances).
+4. Define [progression, abilities, and combat](progression-and-combat.md).
+5. Compile and reference [atmospheric media or sprites](media.md).
+6. Run all the [validation and publishing gates](validation-and-publishing.md).
 
-El ejemplo revisado contiene:
+The reviewed example contains:
 
-- proyecto: [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json);
-- metadatos de release local:
+- project: [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json);
+- local release metadata:
   [`worlds/lantern-square.area-release.json`](../../worlds/lantern-square.area-release.json);
-- módulos: [`worlds/areas/`](../../worlds/areas/); y
-- artefacto canónico: [`worlds/lantern-square.world.json`](../../worlds/lantern-square.world.json).
+- modules: [`worlds/areas/`](../../worlds/areas/); and
+- canonical artifact: [`worlds/lantern-square.world.json`](../../worlds/lantern-square.world.json).
 
-## Ruta rápida
+## Fast path
 
-Ejecuta las herramientas sin conexión desde la raíz del repositorio. Los
-ficheros de salida no se reemplazan en silencio.
+Run the tools offline from the repository root. Output files are not silently
+replaced.
 
 ```sh
 mkdir -p build/worlds
@@ -58,34 +58,34 @@ cargo run --locked -p world-pack --bin tiamud-world -- diff \
   build/worlds/lantern-square.candidate.world.json
 ```
 
-No publiques solo porque un documento pueda decodificarse. Revisa antes prosa,
-licencias, texto alternativo, estado oculto, balance y diff semántico.
+Do not publish just because a document can be decoded. First review prose,
+licenses, alternative text, hidden state, balance, and the semantic diff.
 
-## Catálogo, bundles y generaciones locales (fases 6A–6D)
+## Catalog, bundles, and local generations (phases 6A–6D)
 
-6A no sustituye `compose` ni cambia WorldPack v9, AreaPack v8 o WorldProject
-v2. Añade una segunda representación local y sin conexión:
+6A does not replace `compose` or change WorldPack v9, AreaPack v8, or WorldProject
+v2. It adds a second local, offline representation:
 
-- catálogo de hasta 1 MiB y 256 entradas;
-- manifiesto de release de hasta 256 KiB; los tres sobres JSON son estrictos,
-  rechazan claves duplicadas recursivas y limitan profundidad a 16;
-- bundle canónico de hasta 16 MiB y suma de entradas también de 16 MiB;
-- metadatos que ligan revisión, ownership, dependencias, portales y digests;
-- `contentLicense=CC-BY-4.0` para mundo, prosa y medios, separado de
-  `scriptLicense=MIT OR Apache-2.0` para Lua/software;
-- `unsigned_local` explícito, que no es firma remota ni licencia de
-  redistribución; y
-- blobs inmutables por contenido con puntero local sustituido atómicamente.
+- a catalog of up to 1 MiB and 256 entries;
+- a release manifest of up to 256 KiB; the three JSON envelopes are strict,
+  reject recursive duplicate keys, and limit depth to 16;
+- a canonical bundle of up to 16 MiB and a sum of entries also of 16 MiB;
+- metadata that binds revision, ownership, dependencies, portals, and digests;
+- `contentLicense=CC-BY-4.0` for the world, prose, and media, separate from
+  `scriptLicense=MIT OR Apache-2.0` for Lua/software;
+- explicit `unsigned_local`, which is not remote signing or a redistribution
+  license; and
+- content-immutable blobs with a local pointer atomically replaced.
 
-`AreaPack.dependsOn` sigue siendo la declaración exhaustiva de autoría. El
-catálogo v1 deriva `hardDependencies` solo de referencias cruzadas que no son
-`RoomExit`; las salidas cruzadas son `portals` y no fijan residencia.
-`softDependencies` está vacío y cada portal conserva su `sourceExit` cardinal.
+`AreaPack.dependsOn` remains the exhaustive authoring declaration. The v1 catalog
+derives `hardDependencies` only from cross-references that are not `RoomExit`;
+cross-area exits are `portals` and do not fix residency. `softDependencies` is
+empty and each portal keeps its cardinal `sourceExit`.
 
-La API Rust llama a los sobres `AreaReleaseManifest`, `AreaBundle` y
-`AreaCatalog`. `build_area_release` construye un `VerifiedAreaRelease` y
-`verify_area_release` contrasta catálogo, bundles y fallback monolítico. Cada
-bundle incluye un `CompiledArea` estricto ligado por `compiledAreaSha256`.
+The Rust API calls the envelopes `AreaReleaseManifest`, `AreaBundle`, and
+`AreaCatalog`. `build_area_release` builds a `VerifiedAreaRelease` and
+`verify_area_release` checks the catalog, bundles, and monolithic fallback. Each
+bundle includes a strict `CompiledArea` bound by `compiledAreaSha256`.
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
@@ -94,8 +94,8 @@ cargo run --locked -p world-pack --bin tiamud-world -- area-publish \
   --registry build/area-registry
 ```
 
-`area-publish` imprime la ruta content-addressed exacta. El fixture revisado
-publica tres bundles y el catálogo
+`area-publish` prints the exact content-addressed path. The reviewed fixture
+publishes three bundles and the catalog
 `e954be5b7e1d6918a1b87d5405d651f0fc52ee81996ab0c100cfcb1909ed15a6`:
 
 ```sh
@@ -104,38 +104,37 @@ cargo run --locked -p world-pack --bin tiamud-world -- area-verify \
   --registry build/area-registry
 ```
 
-El registro usa
+The registry uses
 `area-catalogs/<world-key>/<catalog-digest>.catalog.json`,
 `area-bundles/<world-key>/<area-key>/<bundle-digest>.area.json`,
-`area-worlds/<world-key>/<world-digest>.world.json` y el puntero atómico
-`area-active/<world-key>.json`. Las claves son SHA-256 de los IDs UTF-8 exactos.
-El puntero contiene `schema`, `worldId`, `catalogSha256` y la ruta relativa
-`catalog`. «Active» significa publicación editorial seleccionada, no residencia
-de un bundle en el actor.
+`area-worlds/<world-key>/<world-digest>.world.json`, and the atomic pointer
+`area-active/<world-key>.json`. The keys are the SHA-256 of the exact UTF-8 IDs.
+The pointer contains `schema`, `worldId`, `catalogSha256`, and the relative
+`catalog` path. "Active" means the selected editorial publication, not the
+residency of a bundle in the actor.
 
-Los publicadores cooperantes se serializan mediante un `fd-lock` advisory por
-mundo y releen la revisión activa dentro del lock. La verificación prevalida el
-presupuesto agregado antes de E/S; un blob idéntico se reabre y resincroniza.
-`area-verify` es read-only y solo acepta el path exacto publicado.
+Cooperating publishers are serialized through a per-world advisory `fd-lock` and
+re-read the active revision inside the lock. Verification prevalidates the
+aggregate budget before I/O; an identical blob is reopened and resynced.
+`area-verify` is read-only and only accepts the exact published path.
 
-`unsigned_local` presupone un registro y host confiables. El lock no protege
-frente a un proceso que lo ignore o pueda mutar el registro; un escritor hostil
-y sus carreras TOCTOU quedan fuera.
+`unsigned_local` assumes a trusted registry and host. The lock does not protect
+against a process that ignores it or can mutate the registry; a hostile writer
+and its TOCTOU races are out of scope.
 
-6B incorpora bundles bajo demanda y los conserva residentes. 6C abre
-`area-active` ante SIGHUP, verifica la release completa y construye en privado
-la generación candidata. Solo sustituye la generación completa con cero
-sesiones y cero leases; no expulsa a nadie. La compatibilidad exige gameplay,
-objetos iniciales, NPC, botín, afijos, áreas, ownership e IDs estables idénticos
-y migración persistente cero. Puede cambiar prosa, salidas y presentación/Lua
-síncrono validado.
+6B incorporates bundles on demand and keeps them resident. 6C opens `area-active`
+on SIGHUP, verifies the full release, and privately builds the candidate
+generation. It only replaces the whole generation with zero sessions and zero
+leases; it evicts no one. Compatibility requires identical gameplay, initial
+items, NPCs, loot, affixes, areas, ownership, and stable IDs and zero persistent
+migration. It may change prose, exits, and validated synchronous presentation/Lua.
 
-Durante el corte, el servidor retiene el mismo lock cooperativo del registro
-que `area-publish`/`area-select` hasta resolver el CAS durable.
+During the cutover, the server holds the same cooperative registry lock as
+`area-publish`/`area-select` until the durable CAS is resolved.
 
-La generación activa vive en SQL v15; snapshot v8 y puntero avanzan por CAS en
-una transacción. Para rollback selecciona un catálogo retenido y solicita el
-corte:
+The active generation lives in SQL v15; the v8 snapshot and pointer advance by CAS
+in one transaction. For rollback, select a retained catalog and request the
+cutover:
 
 ```sh
 cargo run --locked -p world-pack --bin tiamud-world -- area-select \
@@ -144,138 +143,134 @@ cargo run --locked -p world-pack --bin tiamud-world -- area-select \
 sudo systemctl kill --signal=HUP tiamud
 ```
 
-Al actualizar desde 6B/v13 con recovery compartido o personajes, arranca v14
-primero con el catálogo G0 exacto y
-`TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>`. Verifica su liga durable
-y retira la variable. La fila nueva nace vacía: introducir G1 en ese primer
-arranque lo aceptaría como autoridad inicial sin comparar la compatibilidad con
-G0. Copia backend y registro antes del cambio y publica o selecciona G1 solo
-después de ligar G0.
+When upgrading from 6B/v13 with shared recovery or characters, boot v14 first with
+the exact G0 catalog and
+`TIAMUD_ACK_LEGACY_AREA_GENERATION=<sha256-exacto-G0>`. Verify its durable binding
+and remove the variable. The new row is born empty: introducing G1 on that first
+boot would accept it as the initial authority without comparing compatibility with
+G0. Copy the backend and registry before the change, and publish or select G1 only
+after binding G0.
 
-Recovery vacío puede contener personajes. Sin liga generacional, recovery
-compartido o cualquier personaje exige el ACK exacto de G0; cuentas solas sin
-personajes/recovery de mundo pueden ligar sin ACK. Convertir un WorldPack
-monolítico con autoridad existente exige migración offline y queda fuera de 6C.
-Si un commit es ambiguo se relee SQL y, sin G0/G1 determinable, readiness queda
-503. El ACK se rechaza en modo monolítico, con liga, sin recovery/personaje o
-ante digest distinto.
+Empty recovery can contain characters. Without a generational binding, shared
+recovery, or any character forces the exact G0 ACK; accounts alone with no
+characters/world recovery can bind without an ACK. Converting a monolithic
+WorldPack with existing authority requires offline migration and is out of 6C
+scope. If a commit is ambiguous, SQL is re-read and, without a determinable
+G0/G1, readiness stays 503. The ACK is rejected in monolithic mode, with a
+binding, without recovery/character, or on a different digest.
 
-6D añade retirada/rehidratación interna de la misma revisión con snapshot v8 y
-SQL v15, pero permanece parcial. No existen reemplazo de revisión, migraciones
-de estado, LRU, GC, red, compresión o firma remota. La puerta histórica 6C pasa
-774 pruebas Rust —329 del servidor— y
-la reauditoría 0 P1/0 P2. PostgreSQL 18 desechable pasa 20/20 pruebas del
-adaptador y 7/7 enfocadas del servidor, incluida la CAS v14; el humo liga G0,
-valida readiness/Web/Telnet, dos áreas residentes, `noop` y cierre limpio.
-Consulta el
-[registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md),
+6D adds internal retirement/rehydration of the same revision with the v8 snapshot
+and SQL v15, but remains partial. There is no revision replacement, state
+migrations, LRU, GC, network, compression, or remote signing. The historical 6C
+gate passes 774 Rust tests —329 from the server— and the re-audit 0 P1/0 P2.
+Disposable PostgreSQL 18 passes 20/20 adapter tests and 7/7 focused server tests,
+including the v14 CAS; the smoke binds G0, validates readiness/Web/Telnet, two
+resident areas, `noop`, and a clean shutdown. See the
+[PostgreSQL v14/PWA acceptance log](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md),
 [ADR 0005](../decisions/0005-hot-area-lifecycle.md),
-[ADR 0020](../decisions/0020-additive-local-area-loading.md) y
-[ADR 0021](../decisions/0021-quiescent-area-generation-cutover.md), y consulta
-[ADR 0022](../decisions/0022-reversible-area-unit-retirement.md) para 6D.
+[ADR 0020](../decisions/0020-additive-local-area-loading.md), and
+[ADR 0021](../decisions/0021-quiescent-area-generation-cutover.md), and see
+[ADR 0022](../decisions/0022-reversible-area-unit-retirement.md) for 6D.
 
-La puerta retenida 6A pasa 144/144 pruebas `world-pack`, incluidas 10/10 CLI,
-y 707/707 Rust del workspace, además de clippy, formato/diff, MSRV Rust 1.88,
-E2E, humo, cargo-deny y licencias/avisos. No debe atribuirse a 6C.
+The retained 6A gate passes 144/144 `world-pack` tests, including 10/10 CLI, and
+707/707 Rust workspace tests, plus clippy, format/diff, MSRV Rust 1.88, E2E,
+smoke, cargo-deny, and licenses/notices. It must not be attributed to 6C.
 
-## Principios de autoría
+## Authoring principles
 
-- El texto y estado estructurado contienen todos los hechos jugables; los
-  medios son presentación opcional.
-- Los IDs namespaced estables son identidad de contenido. Renómbralos solo como
-  una decisión explícita de migración.
-- El contenido de objeto vive en `itemPrototypes`; cada unidad authored vive en
-  `initialItemInstances` con una ubicación `room`, `npc_spawn`, `container` o
-  `staged`. Las pilas fungibles se derivan: no publiques ni persistas ID o
-  cantidad de pila, ni restaures los campos v3 `items`, `itemRules` o
+- Text and structured state contain all playable facts; media is optional
+  presentation.
+- Stable namespaced IDs are content identity. Rename them only as an explicit
+  migration decision.
+- Item content lives in `itemPrototypes`; each authored unit lives in
+  `initialItemInstances` with a `room`, `npc_spawn`, `container`, or `staged`
+  location. Fungible stacks are derived: do not publish or persist a stack ID or
+  quantity, and do not restore the v3 fields `items`, `itemRules`, or
   `lootItemIds`.
-- WorldPack v9 y AreaPack v8 aceptan `transferable`, `character_bound` y
-  `non_transferable`. El vínculo es estado runtime creado en la primera
-  adquisición y persistido en snapshot v8, no un campo de autoría. WorldPack
-  v4/AreaPack v3 y entradas más antiguas solo normalizan a `transferable`.
-- La política de transferencia cubre todo el subárbol. Una bolsa transferible
-  con un descendiente ligado/no transferible no puede darse o soltarse.
-  `canGive` es ayuda de UI; el servidor revalida ownership, vínculo,
-  proximidad, política social y ambos inventarios de forma atómica.
-- Usa ubicación `npc_spawn` para botín fijo de una sola vez y
-  `lootTables`/`lootSources` para drops repetibles. Garantizados preceden a los
-  pools ponderados; `nothing` es explícito y cada spawn tiene una fuente. El
-  peor caso fijo+repetible no supera 64 raíces.
-- Tablas/fuentes nacen en WorldPack v6/AreaPack v5. Formatos anteriores
-  normalizan a vacío y rechazan campos inyectados. El digest canónico de tabla
-  se vuelve procedencia durable; IDs, pesos, cantidades y referencias son
-  estrictos.
-- Sellos y afijos nacen en WorldPack v7/AreaPack v6 y siguen vigentes. Un sello
-  es único, consumible, `character_bound`, sin equipo/contenedor/efecto y
-  referencia una tabla que garantiza 1..=16 unidades y como máximo 1.024 filas
-  de odds. No es instancia inicial ni fuente NPC directa; procede de una tabla
-  normal y no produce otro sello. `open` consume un sello ganado y `reward odds`
-  muestra resultados authored sin revelar RNG, identidad o digests internos.
-  Un pool elige sin sesgo un afijo como máximo para un item único no sellado.
-  Apertura, RNG, contadores, creación, vínculo y capacidad confirman o revierten
-  juntos. No son cajas pagadas, llaves o tiradas comprables; pity, need/greed,
-  master-loot y contribución quedan fuera.
-- WorldPack v9/AreaPack v8 conservan las habilidades de comunicación de v8/v7.
-  La telepatía conocida tiene coste positivo, cooldown, un aliado online y hasta
-  64 salas bloqueadas. No causa daño/curación/estados ni pertenece a sets NPC.
-  Hay hasta 32; formatos anteriores rechazan el campo.
-- WorldPack v9/AreaPack v8 añaden hasta 32 emotes cerrados. Comandos ASCII
-  minúsculos únicos, targeting y plantillas determinan la forma exacta; solo se
-  admiten `{actor}`/`{target}` y el peor caso renderizado cabe en 512 bytes.
-  Formatos anteriores e importación normalizan a catálogo vacío.
-- `WorldRuntimeSnapshot` v8 es la autoridad durable de ubicaciones, vínculo,
-  reservas, procedencia, derechos, afijos y contador de apertura. SQLite y
-  PostgreSQL v15 lo guardan como `TEXT` opaco; v1–v5 retienen 1 MiB y v6–v8,
-  2 MiB. La conversión v6 añade afijos vacíos y contador uno. No hay tabla
-  espejo de loot/escrow ni doble escritura.
-- Títulos base/variante admiten 1..=128 bytes UTF-8 seguros; descripciones,
-  1..=8.192. Se cuentan bytes, no caracteres.
-- `entityMedia` de item apunta al prototipo; `roomPerception.hiddenItems`, a la
-  instancia durable. No intercambies esas identidades.
-- La visibilidad se resuelve en servidor. Nunca envíes a clientes un catálogo
-  de salas, variantes, entidades o assets secretos.
-- Personajes usan grants/requisitos acotados, no scripts arbitrarios de
-  progresión.
-- Lua tiene capacidades declaradas y cuotas duras; no evita el dominio.
-- Conversión de assets e IA opcional permanecen fuera del juego.
-- Una persona identificada revisa material importado, generado o subido antes
-  de publicarlo.
+- WorldPack v9 and AreaPack v8 accept `transferable`, `character_bound`, and
+  `non_transferable`. The binding is runtime state created on first acquisition
+  and persisted in the v8 snapshot, not an authoring field. WorldPack v4/AreaPack
+  v3 and older entries only normalize to `transferable`.
+- The transfer policy covers the whole subtree. A transferable bag with a
+  bound/non-transferable descendant cannot be given or dropped. `canGive` is a UI
+  aid; the server revalidates ownership, binding, proximity, social policy, and
+  both inventories atomically.
+- Use the `npc_spawn` location for one-time fixed loot and
+  `lootTables`/`lootSources` for repeatable drops. Guaranteed entries precede the
+  weighted pools; `nothing` is explicit and each spawn has a source. The worst
+  case fixed+repeatable does not exceed 64 roots.
+- Tables/sources originate in WorldPack v6/AreaPack v5. Earlier formats normalize
+  to empty and reject injected fields. The canonical table digest becomes durable
+  provenance; IDs, weights, quantities, and references are strict.
+- Seals and affixes originate in WorldPack v7/AreaPack v6 and remain current. A
+  seal is unique, consumable, `character_bound`, with no equipment/container/effect
+  and references a table that guarantees 1..=16 units and at most 1,024 odds rows.
+  It is not an initial instance or a direct NPC source; it comes from a normal
+  table and does not produce another seal. `open` consumes an earned seal and
+  `reward odds` shows authored results without revealing RNG, identity, or internal
+  digests. A pool picks at most one affix without bias for an unsealed unique item.
+  Opening, RNG, counters, creation, binding, and capacity commit or roll back
+  together. These are not paid boxes, keys, or purchasable rolls; pity, need/greed,
+  master-loot, and contribution are out of scope.
+- WorldPack v9/AreaPack v8 preserve the v8/v7 communication abilities. Known
+  telepathy has a positive cost, cooldown, one online ally, and up to 64 blocked
+  rooms. It causes no damage/healing/conditions and does not belong to NPC sets.
+  There are up to 32; earlier formats reject the field.
+- WorldPack v9/AreaPack v8 add up to 32 closed emotes. Unique lowercase ASCII
+  commands, targeting, and templates determine the exact form; only
+  `{actor}`/`{target}` are allowed and the worst-case rendering fits in 512 bytes.
+  Earlier formats and import normalize to an empty catalog.
+- `WorldRuntimeSnapshot` v8 is the durable authority for locations, binding,
+  reservations, provenance, rights, affixes, and opening counter. SQLite and
+  PostgreSQL v15 store it as opaque `TEXT`; v1–v5 retain 1 MiB and v6–v8, 2 MiB.
+  The v6 conversion adds empty affixes and a counter of one. There is no
+  loot/escrow mirror table or double write.
+- Base/variant titles allow 1..=128 safe UTF-8 bytes; descriptions, 1..=8,192.
+  Bytes are counted, not characters.
+- An item's `entityMedia` points to the prototype; `roomPerception.hiddenItems`,
+  to the durable instance. Do not swap those identities.
+- Visibility is resolved on the server. Never send clients a catalog of secret
+  rooms, variants, entities, or assets.
+- Characters use bounded grants/requirements, not arbitrary progression scripts.
+- Lua has declared capabilities and hard quotas; it does not bypass the domain.
+- Asset conversion and optional AI remain out of the game.
+- An identified person reviews imported, generated, or uploaded material before
+  publishing it.
 
-## Referencias detalladas
+## Detailed references
 
-- [Diseño de progresión v3](../design/character-progression-v3.md)
-- [Diseño del compositor opcional](../design/scene-compositor-v1.md)
-- [Decisión de personajes WorldPack v3](../decisions/0007-worldpack-v3-character-model.md)
-- [Fundación prototipo/instancia](../decisions/0009-item-prototypes-instances-and-capacity.md)
-- [Pilas derivadas y contenedores](../decisions/0010-derived-stacks-and-bounded-containers.md)
-- [Give y políticas ejecutables](../decisions/0011-atomic-give-and-item-transfer-policies.md)
-- [Reservas de trade](../decisions/0012-confirmed-trade-reservations.md)
-- [Botín, derechos y procedencia](../decisions/0013-repeatable-loot-rights-and-provenance.md)
-- [Sellos y afijos](../decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md)
-- [Telepatía authored](../decisions/0015-authored-online-telepathy.md)
-- [Emotes authored](../decisions/0016-authored-room-emotes.md)
-- [Compositor de escenas](../decisions/0008-optional-scene-compositor.md)
-- [Ciclo de áreas](../decisions/0005-hot-area-lifecycle.md)
-- [Carga aditiva 6B](../decisions/0020-additive-local-area-loading.md)
-- [Corte quiescente 6C](../decisions/0021-quiescent-area-generation-cutover.md)
-- [Retirada reversible 6D](../decisions/0022-reversible-area-unit-retirement.md)
-- [Compilador de assets](../../crates/asset-pipeline/README.md)
-- [Runtime Lua](../../crates/scripting/README.md)
-- [IA editorial opcional](../../crates/editorial-ai/README.md)
-- [Importador histórico Envy/Merc](../../tools/envy-import/README.md)
+- [Progression design v3](../design/character-progression-v3.md)
+- [Optional compositor design](../design/scene-compositor-v1.md)
+- [WorldPack v3 character decision](../decisions/0007-worldpack-v3-character-model.md)
+- [Prototype/instance foundation](../decisions/0009-item-prototypes-instances-and-capacity.md)
+- [Derived stacks and containers](../decisions/0010-derived-stacks-and-bounded-containers.md)
+- [Give and executable policies](../decisions/0011-atomic-give-and-item-transfer-policies.md)
+- [Trade reservations](../decisions/0012-confirmed-trade-reservations.md)
+- [Loot, rights, and provenance](../decisions/0013-repeatable-loot-rights-and-provenance.md)
+- [Seals and affixes](../decisions/0014-earned-sealed-rewards-and-deterministic-affixes.md)
+- [Authored telepathy](../decisions/0015-authored-online-telepathy.md)
+- [Authored emotes](../decisions/0016-authored-room-emotes.md)
+- [Scene compositor](../decisions/0008-optional-scene-compositor.md)
+- [Area lifecycle](../decisions/0005-hot-area-lifecycle.md)
+- [Additive loading 6B](../decisions/0020-additive-local-area-loading.md)
+- [Quiescent cutover 6C](../decisions/0021-quiescent-area-generation-cutover.md)
+- [Reversible retirement 6D](../decisions/0022-reversible-area-unit-retirement.md)
+- [Asset compiler](../../crates/asset-pipeline/README.md)
+- [Lua runtime](../../crates/scripting/README.md)
+- [Optional editorial AI](../../crates/editorial-ai/README.md)
+- [Historical Envy/Merc importer](../../tools/envy-import/README.md)
 
-La [guía WorldPack v9/AreaPack v8](../world-authoring.md) es la referencia
-compacta de esquema y flujo. Lantern Square contiene tres salas, diez
-prototipos, nueve instancias iniciales, dos tablas, una fuente, un afijo, un
-pool, una telepatía directa y un emote. El artefacto canónico de 53.567 bytes
-tiene SHA-256
+The [WorldPack v9/AreaPack v8 guide](../world-authoring.md) is the compact schema
+and flow reference. Lantern Square contains three rooms, ten prototypes, nine
+initial instances, two tables, one source, one affix, one pool, one direct
+telepathy, and one emote. The 53,567-byte canonical artifact has SHA-256
 `9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
-Mantiene `tiamud:road-token` y `tiamud:wolf-clasp` como transferibles y
-demuestra 3C con `tiamud:rain-writ` no transferible en `demo:north-gate` y el
-botín fijo ligado `tiamud:stormglass-talon` de `tiamud:gate-stalker-1`. Ese
-spawn usa round-robin para un token garantizado, un sello ganado y una tirada:
-60% clasp y 40% nada. El clasp normal y el talon del sello tiran además un
-prefijo `storm-bitten` al 60%, demostrando que los afijos no son exclusivos de
-sellos. El Wanderer recibe `tiamud:mind-whisper`; `demo:archive` demuestra su
-bloqueo authored. `tiamud:smile` demuestra targeting opcional y plantillas por
-perspectiva.
+It keeps `tiamud:road-token` and `tiamud:wolf-clasp` as transferable and
+demonstrates 3C with the non-transferable `tiamud:rain-writ` in `demo:north-gate`
+and the bound fixed loot `tiamud:stormglass-talon` from `tiamud:gate-stalker-1`.
+That spawn uses round-robin for a guaranteed token, an earned seal, and one roll:
+60% clasp and 40% nothing. The normal clasp and the seal's talon also roll a
+`storm-bitten` prefix at 60%, demonstrating that affixes are not exclusive to
+seals. The Wanderer receives `tiamud:mind-whisper`; `demo:archive` demonstrates
+its authored block. `tiamud:smile` demonstrates optional targeting and
+per-perspective templates.
