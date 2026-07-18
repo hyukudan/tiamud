@@ -11,8 +11,8 @@
 
 > Nota histórica: este documento conserva la propuesta previa a la entrega alfa
 > y no es el contrato vigente. Tiamud es el nombre definitivo. La
-> [especificación v0.3](spec-v0.3.md), la
-> [matriz de completitud](project/COMPLETION_MATRIX.md), la memoria y los ADR
+> [especificación v0.3](../spec-v0.3.md), la
+> [matriz de completitud](../project/COMPLETION_MATRIX.md), la memoria y los ADR
 > describen el baseline actual, incluido snapshot v8/esquema SQL v15 y el estado
 > parcial de la retirada reversible 6D.
 
@@ -87,7 +87,7 @@ Política propuesta:
 
 Licencia recomendada para el motor: MPL-2.0 si se desea que las modificaciones al núcleo sigan siendo compartibles sin impedir mundos privados. Apache-2.0 es una alternativa si se prioriza la máxima adopción.
 
-> Decisión final posterior: el [ADR 0004](decisions/0004-open-source-licensing.md)
+> Decisión final posterior: el [ADR 0004](../decisions/0004-open-source-licensing.md)
 > adoptó `MIT OR Apache-2.0` para el software y `CC-BY-4.0` para el contenido
 > original. Esta recomendación se conserva como contexto histórico de la
 > propuesta.
@@ -674,7 +674,7 @@ El compilador detectará:
 > AreaPack v2 en ese artefacto final; valida dependencias declaradas,
 > referencias y alcanzabilidad globales, colisiones de ID, recursos y límites.
 > La estructura y los comandos que siguen se conservan como propuesta
-> histórica. La [guía actual de autoría](world-authoring.md) documenta el
+> histórica. La [guía actual de autoría](../world-authoring.md) documenta el
 > contrato real, el ejemplo modular, las herramientas, los límites y la
 > publicación inmutable.
 
@@ -737,8 +737,8 @@ El importador produce un informe de:
 > trasfondo opcional, clase base/avanzada, XP global, reservas de puntos,
 > talentos con rango y promoción atómica. `archetype`/arquetipo solo se acepta
 > en límites explícitos de normalización. Véanse la
-> [especificación v0.3](spec-v0.3.md) y el
-> [diseño de progresión v3](design/character-progression-v3.md).
+> [especificación v0.3](../spec-v0.3.md) y el
+> [diseño de progresión v3](../design/character-progression-v3.md).
 
 El `gameplay` del WorldPack v2 admite de forma opcional un catálogo acotado de
 arquetipos, habilidades y repertorios de NPC. Que sean opcionales conserva los
@@ -773,9 +773,9 @@ capacidad de estados antes de confirmar. XP, nivel, ficha, recursos,
 habilidades, cooldowns, resistencias y estados activos forman parte del estado
 durable. Navegador y Telnet comparten esta ruta de dominio; el navegador ofrece
 ficha y controles accesibles, y el texto acepta `ability`, `skill` y `cast`.
-La [guía de autoría](world-authoring.md) contiene el esquema y los límites
+La [guía de autoría](../world-authoring.md) contiene el esquema y los límites
 exactos; el contrato de navegador se conserva en
-[`tiamud.v1`](protocol/tiamud-v1.md).
+[`tiamud.v1`](../protocol/tiamud-v1.md).
 
 No existe todavía un sistema general de entrenamiento de skills. Su progresión
 configurable procede de los hitos authored; además, la victoria en combate
@@ -838,7 +838,7 @@ on_quest_event
 > incrustada en el ejecutable; el registro de WorldPacks no copia multimedia.
 > Las rutas fragmentadas y libvips descritos a continuación pertenecen a la
 > propuesta histórica. Consulte la [guía actual de autoría y
-> multimedia](world-authoring.md).
+> multimedia](../world-authoring.md).
 
 ### 18.1 Almacenamiento v1
 
@@ -1353,7 +1353,7 @@ El objetivo no es construir infraestructura para un MMO hipotético, sino hacer 
 Estas decisiones sustituyen cualquier alternativa contradictoria que permanezca en borradores anteriores:
 
 > La decisión 5 conserva el punto de partida histórico. El
-> [ADR 0006](decisions/0006-character-progression-and-postgresql-first.md) la
+> [ADR 0006](../decisions/0006-character-progression-and-postgresql-first.md) la
 > actualiza después de implementar y probar el adaptador PostgreSQL: PostgreSQL
 > pasa a ser la recomendación para servidores públicos nuevos, aunque SQLite
 > continúa como comportamiento sin configuración y fallback local/heredado.
