@@ -248,7 +248,11 @@ impl TelnetOutputQueue {
     fn push(&self, frame: OutputFrame) -> io::Result<()> {
         let frame_bytes = frame.byte_len();
         let frame_priority = frame.priority();
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let before = state.frames.len();
         if state.closed {
             return Err(io::Error::new(
@@ -323,7 +327,11 @@ impl TelnetOutputQueue {
         loop {
             let notified = self.shared.notify.notified();
             {
-                let mut state = self.shared.state.lock().unwrap();
+                let mut state = self
+                    .shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(frame) = state.frames.pop_front() {
                     state.byte_len = state.byte_len.saturating_sub(frame.byte_len());
                     if let Some(metrics) = &self.shared.metrics {
@@ -340,7 +348,11 @@ impl TelnetOutputQueue {
     }
 
     fn close(&self) {
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.closed = true;
         drop(state);
         self.shared.notify.notify_waiters();

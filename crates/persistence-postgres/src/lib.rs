@@ -21,6 +21,8 @@ pub enum ConnectError {
     NoTlsRoots,
     #[error("could not add an operating-system TLS root certificate: {0}")]
     TlsRoot(#[source] rustls::Error),
+    #[error("the selected Rustls provider does not support TLS 1.2 and TLS 1.3: {0}")]
+    TlsProtocolVersions(#[source] rustls::Error),
     #[error("could not connect to PostgreSQL: {0}")]
     Postgres(#[from] postgres::Error),
 }
@@ -39,7 +41,7 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
     let tls = MakeRustlsConnect::new(
         ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-            .expect("the selected Rustls provider must support TLS 1.2 and TLS 1.3")
+            .map_err(ConnectError::TlsProtocolVersions)?
             .with_root_certificates(roots)
             .with_no_client_auth(),
     );

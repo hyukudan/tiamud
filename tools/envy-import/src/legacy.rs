@@ -647,7 +647,12 @@ fn parse_resets(bytes: &[u8]) -> Result<Vec<LegacyReset>, ImportError> {
             message: "reset contains non-ASCII bytes".to_owned(),
         })?;
         let mut fields = text.split_ascii_whitespace();
-        let command_text = fields.next().expect("non-empty reset line");
+        let Some(command_text) = fields.next() else {
+            return Err(ImportError::Syntax {
+                line,
+                message: "reset line is empty".to_owned(),
+            });
+        };
         if command_text.len() != 1 || !command.is_ascii_alphabetic() {
             return Err(ImportError::Syntax {
                 line,

@@ -17,6 +17,19 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use thiserror::Error;
 
+/// `MAX_STAT_VALUE` (the stat cap) expressed once as `i32`. The cap sits far
+/// below `i32::MAX`, so the conversion is lossless; the const assertion below
+/// enforces that invariant at compile time.
+const MAX_STAT_VALUE_I32: i32 = MAX_STAT_VALUE as i32;
+const _: () = assert!(MAX_STAT_VALUE <= i32::MAX as u32);
+
+/// Zero-based page index for a one-based `page` selector. Callers that must
+/// reject `page == 0` still do so explicitly before calling this; the
+/// `saturating_sub` only keeps the index computation itself underflow-free.
+fn page_index(page: u16) -> usize {
+    usize::from(page.saturating_sub(1))
+}
+
 new_key_type! {
     /// Internal, generational entity identifier. Never exposed as a persistent ID.
     struct EntityId;
@@ -4978,8 +4991,16 @@ impl DeterministicRng {
     }
 
     fn range_inclusive(&mut self, minimum: i32, maximum: i32) -> i32 {
-        debug_assert!(minimum <= maximum);
-        minimum + (self.next_u64() % (maximum - minimum + 1) as u64) as i32
+        // Compute the span in wider arithmetic so a misuse (minimum > maximum)
+        // fails closed to `minimum` instead of relying on a release-stripped
+        // debug assertion or underflowing `i32`. For valid inputs the span
+        // equals `maximum - minimum + 1`, so the distribution is unchanged.
+        let span = i64::from(maximum)
+            .saturating_sub(i64::from(minimum))
+            .saturating_add(1)
+            .max(1) as u64;
+        let offset = self.next_u64() % span;
+        i64::from(minimum).saturating_add(offset as i64) as i32
     }
 
     fn uniform_below(&mut self, upper_exclusive: u64) -> Result<u64, WorldError> {
@@ -8564,7 +8585,7 @@ impl World {
                 .get(npc_id)
                 .cloned()
                 .ok_or(WorldError::InvalidRuntimeSnapshot)?;
-            let max_stat_value = i32::try_from(MAX_STAT_VALUE).expect("MAX_STAT_VALUE fits in i32");
+            let max_stat_value = MAX_STAT_VALUE_I32;
             let valid = (1..=MAX_PROGRESSION_LEVEL).contains(&saved.level)
                 && (1..=max_stat_value).contains(&saved.max_health)
                 && (1..=max_stat_value).contains(&saved.strength)
@@ -9108,17 +9129,17 @@ impl World {
             && snapshot.level > 0
             && snapshot.level <= MAX_PROGRESSION_LEVEL
             && snapshot.vitals.max_health > 0
-            && snapshot.vitals.max_health <= i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)
+            && snapshot.vitals.max_health <= MAX_STAT_VALUE_I32
             && (0..=snapshot.vitals.max_health).contains(&snapshot.vitals.health)
             && snapshot.attributes.strength >= 0
-            && snapshot.attributes.strength <= i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)
+            && snapshot.attributes.strength <= MAX_STAT_VALUE_I32
             && snapshot.attributes.defence >= 0
-            && snapshot.attributes.defence <= i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)
+            && snapshot.attributes.defence <= MAX_STAT_VALUE_I32
             && snapshot.attributes.additional.len() + 2 <= MAX_STATS
             && snapshot.attributes.additional.iter().all(|(id, value)| {
                 valid_stat_id(id)
                     && !matches!(id.as_str(), "strength" | "defence" | "max_health")
-                    && (0..=i32::try_from(MAX_STAT_VALUE).unwrap_or(i32::MAX)).contains(value)
+                    && (0..=MAX_STAT_VALUE_I32).contains(value)
             })
             && snapshot.resources.len() <= MAX_RESOURCE_POOLS
             && snapshot.resources.iter().all(|(id, pool)| {
@@ -9283,7 +9304,7 @@ impl World {
         &mut self,
         definition: ItemGameplayDefinition,
     ) -> Result<(), WorldError> {
-        let max_stat_value = i32::try_from(MAX_STAT_VALUE).expect("MAX_STAT_VALUE fits in i32");
+        let max_stat_value = MAX_STAT_VALUE_I32;
         let valid = self.item_prototypes.contains_key(&definition.item_id)
             && (0..=max_stat_value).contains(&definition.attack_bonus)
             && (0..=max_stat_value).contains(&definition.heal_amount)
@@ -9372,7 +9393,7 @@ impl World {
             .collect::<std::collections::HashSet<_>>()
             .len()
             == definition.loot_item_ids.len();
-        let max_stat_value = i32::try_from(MAX_STAT_VALUE).expect("MAX_STAT_VALUE fits in i32");
+        let max_stat_value = MAX_STAT_VALUE_I32;
         let valid = !definition.stable_id.trim().is_empty()
             && !definition.name.trim().is_empty()
             && !self.npcs.contains_key(&definition.stable_id)
@@ -12170,7 +12191,7 @@ impl World {
             return Err(WorldError::InvalidGameplayDefinition);
         }
         let total_pages = rows.len().max(1).div_ceil(REWARD_ODDS_PAGE_SIZE);
-        let page_index = usize::from(page - 1);
+        let page_index = page_index(page);
         if page_index >= total_pages {
             return Err(WorldError::RewardUnavailable);
         }
@@ -12930,7 +12951,7 @@ impl World {
             direct_ids.into_iter(),
         )?;
         let total_pages = groups.len().max(1).div_ceil(CONTAINER_PAGE_SIZE);
-        let page_index = usize::from(page - 1);
+        let page_index = page_index(page);
         if page_index >= total_pages {
             return Err(WorldError::TradeUnavailable);
         }
@@ -16006,7 +16027,7 @@ impl World {
             direct_ids.iter(),
         )?;
         let total_pages = groups.len().max(1).div_ceil(CONTAINER_PAGE_SIZE);
-        let page_index = usize::from(page.saturating_sub(1));
+        let page_index = page_index(page);
         if page_index >= total_pages {
             return Err(WorldError::GameplayUnavailable);
         }
@@ -19348,17 +19369,11 @@ fn validate_restored_item_affixes(
                 || prototype
                     .attack_bonus
                     .checked_add(applied.attack_bonus_delta)
-                    .is_none_or(|value| {
-                        !(0..=i32::try_from(MAX_STAT_VALUE).expect("stat cap fits i32"))
-                            .contains(&value)
-                    })
+                    .is_none_or(|value| !(0..=MAX_STAT_VALUE_I32).contains(&value))
                 || prototype
                     .heal_amount
                     .checked_add(applied.heal_amount_delta)
-                    .is_none_or(|value| {
-                        !(0..=i32::try_from(MAX_STAT_VALUE).expect("stat cap fits i32"))
-                            .contains(&value)
-                    })
+                    .is_none_or(|value| !(0..=MAX_STAT_VALUE_I32).contains(&value))
             {
                 return Err(WorldError::InvalidRuntimeSnapshot);
             }
@@ -20285,17 +20300,11 @@ fn affix_pool_applies(
                             && prototype
                                 .attack_bonus
                                 .checked_add(affix.attack_bonus_delta)
-                                .is_some_and(|value| {
-                                    (0..=i32::try_from(MAX_STAT_VALUE).expect("stat cap fits i32"))
-                                        .contains(&value)
-                                })
+                                .is_some_and(|value| (0..=MAX_STAT_VALUE_I32).contains(&value))
                             && prototype
                                 .heal_amount
                                 .checked_add(affix.heal_amount_delta)
-                                .is_some_and(|value| {
-                                    (0..=i32::try_from(MAX_STAT_VALUE).expect("stat cap fits i32"))
-                                        .contains(&value)
-                                })
+                                .is_some_and(|value| (0..=MAX_STAT_VALUE_I32).contains(&value))
                     }),
             })
         })
@@ -22091,7 +22100,7 @@ mod tests {
     #[test]
     fn runtime_gameplay_definitions_enforce_numeric_caps() {
         let (mut world, _) = phase_two_world(1, 2, 10);
-        let max_stat_value = i32::try_from(MAX_STAT_VALUE).expect("MAX_STAT_VALUE fits in i32");
+        let max_stat_value = MAX_STAT_VALUE_I32;
         let base_item = ItemGameplayDefinition {
             item_id: "game:sword".into(),
             equipment_slot: Some(EquipmentSlot::Weapon),

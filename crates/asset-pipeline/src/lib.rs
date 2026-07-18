@@ -1237,7 +1237,14 @@ fn write_immutable(path: &Path, bytes: &[u8]) -> Result<(), PipelineError> {
     })();
 
     if temporary.exists() {
-        let _ = fs::remove_file(&temporary);
+        // cleanup best-effort: the primary result is authoritative; a failed
+        // removal only leaves a stale quarantine part behind.
+        if let Err(error) = fs::remove_file(&temporary) {
+            eprintln!(
+                "asset-pipeline: best-effort cleanup of {} failed: {error}",
+                temporary.display()
+            );
+        }
     }
     result
 }
@@ -1274,7 +1281,14 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Pipelin
         fs::rename(&temporary, path).map_err(|error| PipelineError::io(path, error))
     })();
     if temporary.exists() {
-        let _ = fs::remove_file(&temporary);
+        // cleanup best-effort: the primary result is authoritative; a failed
+        // removal only leaves a stale quarantine part behind.
+        if let Err(error) = fs::remove_file(&temporary) {
+            eprintln!(
+                "asset-pipeline: best-effort cleanup of {} failed: {error}",
+                temporary.display()
+            );
+        }
     }
     result
 }
