@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512"
+     height="512"
+     viewBox="0 0 512 512"
+     role="img"
+     aria-labelledby="tiamud-icon-title tiamud-icon-description">
+  <title id="tiamud-icon-title">Tiamud</title>
+  <desc id="tiamud-icon-description">A hanging blue-glass lantern glowing inside an aged-gold diamond, kept within the maskable safe zone.</desc>
+
+  <defs>
+    <radialGradient id="halo" cx="0.5" cy="0.52" r="0.5">
+      <stop offset="0" stop-color="#8cddf5" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#8cddf5" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background fills the whole square; content sits within the central safe zone. -->
+  <rect width="512" height="512" fill="#11130f"/>
+
+  <!-- Content group scaled to ~80% around the center so a circular mask keeps it intact. -->
+  <g transform="translate(256 256) scale(0.8) translate(-256 -256)">
+    <circle cx="256" cy="256" r="202" fill="#18313a" opacity="0.7"/>
+    <path d="M256 50L462 256L256 462L50 256Z" fill="none" stroke="#20251b" stroke-width="18" stroke-linejoin="round"/>
+    <path d="M256 54L458 256L256 458L54 256Z" fill="none" stroke="#b8a16b" stroke-width="6" stroke-linejoin="round"/>
+    <circle cx="256" cy="272" r="120" fill="url(#halo)"/>
+    <g stroke="#20251b" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke fill">
+      <circle cx="256" cy="132" r="15" fill="none" stroke-width="10"/>
+      <path d="M256 147V168" fill="none" stroke="#c7b174" stroke-width="10"/>
+      <path d="M214 190L256 168L298 190" fill="none" stroke="#c7b174" stroke-width="10"/>
+      <path d="M210 196H302L288 226H224Z" fill="#c7b174" stroke-width="9"/>
+      <path d="M256 226V214" fill="none" stroke="#20251b" stroke-width="6"/>
+      <path d="M224 226H288L300 356H212Z" fill="#72d0ee" stroke-width="9"/>
+      <path d="M248 228L244 354M264 228L268 354" fill="none" stroke="#c7b174" stroke-width="7" opacity="0.92"/>
+      <path d="M256 250V330" fill="none" stroke="#ecfbff" stroke-width="7" opacity="0.85"/>
+      <path d="M256 262V318" fill="none" stroke="#fff8dc" stroke-width="3" opacity="0.9"/>
+      <path d="M206 356H306L298 384H214Z" fill="#c7b174" stroke-width="9"/>
+      <path d="M244 384H268L262 402H250Z" fill="#c7b174" stroke-width="8"/>
+    </g>
+  </g>
+</svg>

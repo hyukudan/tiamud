@@ -6,52 +6,46 @@
      role="img"
      aria-labelledby="tiamud-icon-title tiamud-icon-description">
   <title id="tiamud-icon-title">Tiamud</title>
-  <desc id="tiamud-icon-description">The blue-glass lantern from the Tiamud wordmark.</desc>
+  <desc id="tiamud-icon-description">A hanging blue-glass lantern glowing inside an aged-gold diamond.</desc>
 
-  <!-- The background reaches every edge so the same source remains safe when masked. -->
+  <defs>
+    <radialGradient id="halo" cx="0.5" cy="0.52" r="0.5">
+      <stop offset="0" stop-color="#8cddf5" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#8cddf5" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- The background reaches every edge so the same source stays safe when masked. -->
   <rect width="512" height="512" fill="#11130f"/>
   <circle cx="256" cy="256" r="202" fill="#18313a" opacity="0.7"/>
-  <path d="M256 50L462 256L256 462L50 256Z"
-        fill="none"
-        stroke="#20251b"
-        stroke-width="18"
-        stroke-linejoin="round"/>
-  <path d="M256 54L458 256L256 458L54 256Z"
-        fill="none"
-        stroke="#b8a16b"
-        stroke-width="6"
-        stroke-linejoin="round"/>
 
-  <!-- Exact I and lantern geometry adapted from the reviewed Tiamud wordmark. -->
-  <g transform="translate(172.4 88) scale(2.2)"
-     stroke="#20251b"
-     stroke-linejoin="round"
-     paint-order="stroke fill">
-    <path d="M0 0H76V20H60V120H76V140H0V120H16V20H0Z"
-          fill="#f4ead7"
-          stroke-width="4"/>
-    <path d="M25 43L31 32H45L51 43"
-          fill="none"
-          stroke="#c7b174"
-          stroke-width="6"
-          stroke-linecap="round"/>
-    <path d="M21 45H55L61 89H15Z"
-          fill="#72d0ee"
-          stroke-width="4"/>
-    <path d="M21 45H55M15 89H61"
-          fill="none"
-          stroke="#c7b174"
-          stroke-width="6"/>
-    <path d="M30 48L27 85M46 48L50 85"
-          fill="none"
-          stroke="#e4d3a8"
-          stroke-width="3"
-          opacity="0.78"/>
-    <path d="M38 54V82"
-          fill="none"
-          stroke="#ecfbff"
-          stroke-width="3"
-          stroke-linecap="round"
-          opacity="0.72"/>
+  <!-- Aged-gold diamond frame, kept from the wordmark for brand continuity. -->
+  <path d="M256 50L462 256L256 462L50 256Z" fill="none" stroke="#20251b" stroke-width="18" stroke-linejoin="round"/>
+  <path d="M256 54L458 256L256 458L54 256Z" fill="none" stroke="#b8a16b" stroke-width="6" stroke-linejoin="round"/>
+
+  <!-- Soft light so the lantern clearly reads as lit. -->
+  <circle cx="256" cy="272" r="120" fill="url(#halo)"/>
+
+  <g stroke="#20251b" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke fill">
+    <!-- Hanger ring and bracket. -->
+    <circle cx="256" cy="132" r="15" fill="none" stroke-width="10"/>
+    <path d="M256 147V168" fill="none" stroke="#c7b174" stroke-width="10"/>
+    <path d="M214 190L256 168L298 190" fill="none" stroke="#c7b174" stroke-width="10"/>
+
+    <!-- Roof cap. -->
+    <path d="M210 196H302L288 226H224Z" fill="#c7b174" stroke-width="9"/>
+    <path d="M256 226V214" fill="none" stroke="#20251b" stroke-width="6"/>
+
+    <!-- Faceted blue-glass body. -->
+    <path d="M224 226H288L300 356H212Z" fill="#72d0ee" stroke-width="9"/>
+    <!-- Muntins dividing the facets. -->
+    <path d="M248 228L244 354M264 228L268 354" fill="none" stroke="#c7b174" stroke-width="7" opacity="0.92"/>
+    <!-- Vertical flame / inner highlight. -->
+    <path d="M256 250V330" fill="none" stroke="#ecfbff" stroke-width="7" opacity="0.85"/>
+    <path d="M256 262V318" fill="none" stroke="#fff8dc" stroke-width="3" opacity="0.9"/>
+
+    <!-- Base and finial. -->
+    <path d="M206 356H306L298 384H214Z" fill="#c7b174" stroke-width="9"/>
+    <path d="M244 384H268L262 402H250Z" fill="#c7b174" stroke-width="8"/>
   </g>
 </svg>
