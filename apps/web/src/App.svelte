@@ -22,6 +22,7 @@
     TradeContentsData,
   } from './lib/protocol';
   import { localizedImageAlt } from './lib/protocol';
+  import { isLootRollProjection } from './lib/dashboard/loot';
   import {
     imageAfterFailures,
     imageUrl,
@@ -114,6 +115,7 @@
   let boardList = $state<BoardListData>();
   let boardEntry = $state<BoardEntryData>();
   let lastActionResult = $state<ActionResultData>();
+  let lootRoll = $state<string>();
   let manifestImage = $state<SceneSnapshot['image']>();
   let activeAssetKey: string | undefined;
   let failedImageUrls = $state<string[]>([]);
@@ -307,6 +309,9 @@
     if (!result.requestId) {
       if (result.message) {
         notice = { level: result.ok ? 'info' : 'error', message: result.message };
+        if (result.ok && isLootRollProjection(result.message)) {
+          lootRoll = result.message;
+        }
       }
       return;
     }
@@ -314,6 +319,9 @@
     const pending = pendingStructuredActions.get(result.requestId);
     pendingStructuredActions.delete(result.requestId);
     lastActionResult = result;
+    if (result.ok && result.message && isLootRollProjection(result.message)) {
+      lootRoll = result.message;
+    }
     if (result.ok && pending) {
       applyConfirmedStructuredAction(pending);
     }
@@ -1117,6 +1125,7 @@
         {boardList}
         {boardEntry}
         actionResult={lastActionResult}
+        {lootRoll}
         {connectionState}
         abilityTargets={scene?.npcs ?? []}
         oncommand={submitCommand}
