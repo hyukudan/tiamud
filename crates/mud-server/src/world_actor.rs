@@ -5233,6 +5233,111 @@ mod tests {
         ));
     }
 
+    /// Freeze a two-member party encounter on the guardian in `test:arena`,
+    /// driven entirely through the shared text-command surface that both Web
+    /// (`web.rs` -> `parse_action`) and Telnet (`telnet.rs` -> `parse_action`)
+    /// dispatch. Returns the world plus the leader/partner ids and sessions.
+    fn group_loot_arena() -> (World, SessionId, CharacterId, SessionId, CharacterId) {
+        let store = MemoryStore::default();
+        let mut world = durable_gameplay_world();
+        let leader = SessionId(71);
+        let partner = SessionId(72);
+        connect_tick_character(
+            &mut world,
+            &store,
+            leader,
+            CharacterId(71),
+            "test:arena",
+            "Loot Leader",
+        );
+        connect_tick_character(
+            &mut world,
+            &store,
+            partner,
+            CharacterId(72),
+            "test:arena",
+            "Loot Partner",
+        );
+        run_text(&mut world, leader, "party create");
+        run_text(&mut world, leader, "party invite Loot Partner");
+        run_text(&mut world, partner, "party accept Loot Leader");
+        run_text(&mut world, leader, "attack guardian");
+        (world, leader, CharacterId(71), partner, CharacterId(72))
+    }
+
+    /// Apply a raw text command through the exact `parse_action` path both
+    /// transports use, asserting it parses and applies without error.
+    fn run_text(world: &mut World, session: SessionId, command: &str) {
+        let action = tiamud_core::parse_action(command)
+            .unwrap_or_else(|error| panic!("parse `{command}`: {error}"));
+        world
+            .apply(session, action)
+            .unwrap_or_else(|error| panic!("apply `{command}`: {error:?}"));
+    }
+
+    fn drive_arena_loot(world: &mut World) {
+        let root = ItemInstanceId("test:loot".into());
+        for _ in 0..16 {
+            world.advance_tick().unwrap();
+            if world.runtime_snapshot().ground_loot.contains_key(&root) {
+                return;
+            }
+        }
+        panic!("guardian loot was never resolved");
+    }
+
+    #[tokio::test]
+    async fn need_greed_group_loot_resolves_through_the_shared_command_surface() {
+        let (mut world, leader, _leader_id, partner, partner_id) = group_loot_arena();
+        // The leader opens need/greed; the partner needs, the leader only greeds.
+        run_text(&mut world, leader, "loot mode need_greed");
+        run_text(&mut world, partner, "need fang");
+        run_text(&mut world, leader, "greed fang");
+        // The cohort-private projection is byte-identical whichever transport
+        // requested it, and never leaks the internal instance id.
+        let roll = tiamud_core::parse_action("loot roll").unwrap();
+        let projection = world
+            .apply(leader, roll)
+            .unwrap()
+            .output
+            .expect("roll projection");
+        assert!(projection.contains("need/greed"));
+        assert!(projection.contains("silver fang"));
+        assert!(!projection.contains("test:loot"));
+        drive_arena_loot(&mut world);
+        let root = ItemInstanceId("test:loot".into());
+        assert_eq!(
+            world.runtime_snapshot().ground_loot[&root].beneficiary,
+            Some(partner_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn master_loot_group_loot_resolves_through_the_shared_command_surface() {
+        let (mut world, leader, _leader_id, _partner, partner_id) = group_loot_arena();
+        run_text(&mut world, leader, "loot mode master_loot");
+        run_text(&mut world, leader, "loot master fang to Loot Partner");
+        drive_arena_loot(&mut world);
+        let root = ItemInstanceId("test:loot".into());
+        assert_eq!(
+            world.runtime_snapshot().ground_loot[&root].beneficiary,
+            Some(partner_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn group_loot_rejects_out_of_cohort_and_repeat_declarations() {
+        let (mut world, leader, _leader_id, partner, _partner_id) = group_loot_arena();
+        run_text(&mut world, leader, "loot mode need_greed");
+        // A repeat declaration by the same member on the same root is refused.
+        run_text(&mut world, partner, "need fang");
+        let repeat = tiamud_core::parse_action("greed fang").unwrap();
+        assert!(world.apply(partner, repeat).is_err());
+        // A non-leader cannot switch the distribution mode.
+        let hijack = tiamud_core::parse_action("loot mode master_loot").unwrap();
+        assert!(world.apply(partner, hijack).is_err());
+    }
+
     #[tokio::test]
     async fn failed_startup_trade_cleanup_never_opens_readiness() {
         let store = Arc::new(MemoryStore::default());

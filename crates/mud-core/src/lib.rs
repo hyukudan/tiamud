@@ -179,8 +179,28 @@ pub const MAX_PREPARED_AREAS_PER_BATCH: usize = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LootAction {
+    /// Show the post-defeat reserved ground loot addressed to the actor.
     Status,
+    /// Pass on a post-defeat ground reservation, advancing it to the next
+    /// cohort member (phase 4A round-robin behaviour, unchanged).
     Pass(String),
+    /// Show the in-combat group-loot decision state for the frozen encounter
+    /// the actor belongs to: the active distribution mode, the declarable roots
+    /// the NPC is carrying and the current declarations/assignments.
+    Roll,
+    /// Leader/initiator sets the group-loot distribution mode on the encounter
+    /// they are engaged in. Switching modes clears the now-irrelevant advanced
+    /// state so the frozen encounter always validates.
+    Mode(loot_distribution::LootDistributionMode),
+    /// A cohort member declares `need`/`greed`/`pass` on one carried root while
+    /// the encounter is frozen and in `need_greed` mode.
+    Declare {
+        decision: loot_distribution::LootDecision,
+        query: String,
+    },
+    /// The leader assigns one carried root to a cohort member while the
+    /// encounter is frozen and in `master_loot` mode.
+    Master { query: String, member: String },
 }
 
 pub const MAX_TRADE_ITEM_QUANTITY: u16 = 128;
@@ -733,11 +753,63 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     if matches!(normalised.as_str(), "loot" | "loot status") {
         return Ok(PlayerAction::Loot(LootAction::Status));
     }
+    if matches!(normalised.as_str(), "loot roll" | "loot decisions") {
+        return Ok(PlayerAction::Loot(LootAction::Roll));
+    }
     if let Some(target) = command_tail_phrase(input, "loot pass") {
         return Ok(PlayerAction::Loot(LootAction::Pass(target)));
     }
     if normalised == "loot pass" {
         return Err(ParseActionError::MissingTarget { command: "loot" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "loot mode") {
+        let mode = match rest
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_")
+            .as_str()
+        {
+            "round_robin" | "roundrobin" | "rr" => {
+                loot_distribution::LootDistributionMode::RoundRobin
+            }
+            "need_greed" | "needgreed" | "ng" => loot_distribution::LootDistributionMode::NeedGreed,
+            "master_loot" | "masterloot" | "master" | "ml" => {
+                loot_distribution::LootDistributionMode::MasterLoot
+            }
+            _ => return Err(ParseActionError::Unknown(input.to_owned())),
+        };
+        return Ok(PlayerAction::Loot(LootAction::Mode(mode)));
+    }
+    if normalised == "loot mode" {
+        return Err(ParseActionError::MissingTarget { command: "loot" });
+    }
+    if let Some(rest) = command_tail_phrase(input, "loot master") {
+        // Syntax: `loot master <item> to <member>`. The final ` to ` splits the
+        // item query from the recipient so multi-word item queries survive.
+        let lowered = rest.to_ascii_lowercase();
+        if let Some(split) = lowered.rfind(" to ") {
+            let query = rest[..split].trim().to_owned();
+            let member = rest[split + 4..].trim().to_owned();
+            if !query.is_empty() && !member.is_empty() {
+                return Ok(PlayerAction::Loot(LootAction::Master { query, member }));
+            }
+        }
+        return Err(ParseActionError::MissingTarget { command: "loot" });
+    }
+    if normalised == "loot master" {
+        return Err(ParseActionError::MissingTarget { command: "loot" });
+    }
+    for (verb, decision) in [
+        ("need", loot_distribution::LootDecision::Need),
+        ("greed", loot_distribution::LootDecision::Greed),
+        ("pass", loot_distribution::LootDecision::Pass),
+    ] {
+        if let Some(query) = command_tail_phrase(input, verb) {
+            return Ok(PlayerAction::Loot(LootAction::Declare { decision, query }));
+        }
+        if normalised == verb {
+            return Err(ParseActionError::MissingTarget { command: "loot" });
+        }
     }
     match normalised.as_str() {
         "trade accept" => return Ok(PlayerAction::Trade(TradeAction::Accept)),
@@ -3152,6 +3224,25 @@ impl From<ItemProvenanceV6> for ItemProvenance {
 /// byte-identical to its v8 encoding.
 fn is_round_robin_distribution(mode: &loot_distribution::LootDistributionMode) -> bool {
     matches!(mode, loot_distribution::LootDistributionMode::RoundRobin)
+}
+
+/// Human-facing label for a group-loot distribution mode, shared verbatim by
+/// Web and Telnet projections.
+fn loot_distribution_label(mode: loot_distribution::LootDistributionMode) -> &'static str {
+    match mode {
+        loot_distribution::LootDistributionMode::RoundRobin => "round-robin",
+        loot_distribution::LootDistributionMode::NeedGreed => "need/greed",
+        loot_distribution::LootDistributionMode::MasterLoot => "master-loot",
+    }
+}
+
+/// Human-facing label for a single `need`/`greed`/`pass` declaration.
+fn loot_decision_label(decision: loot_distribution::LootDecision) -> &'static str {
+    match decision {
+        loot_distribution::LootDecision::Need => "need",
+        loot_distribution::LootDecision::Greed => "greed",
+        loot_distribution::LootDecision::Pass => "pass",
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -10594,22 +10685,38 @@ impl World {
                 loot_distribution::LootDistributionMode::RoundRobin => None,
                 loot_distribution::LootDistributionMode::NeedGreed => {
                     match encounter.loot_declarations.get(root_item_id) {
-                        Some(declarations) => match loot_distribution::resolve_need_greed(
-                            &cohort,
-                            declarations,
-                            &mut self.rng,
-                        )? {
-                            loot_distribution::LootResolution::Winner(id) => Some(id),
-                            loot_distribution::LootResolution::FallbackRoundRobin => None,
-                        },
+                        Some(declarations) => {
+                            // The final cohort is recomputed at defeat and may
+                            // omit a declarer who left the room or fell. Drop
+                            // those stale declarations so a genuine claimant is
+                            // never rejected; if none survive, fall back.
+                            let live = declarations
+                                .iter()
+                                .filter(|(member, _)| cohort.contains(member))
+                                .map(|(member, decision)| (*member, *decision))
+                                .collect::<BTreeMap<_, _>>();
+                            match loot_distribution::resolve_need_greed(
+                                &cohort,
+                                &live,
+                                &mut self.rng,
+                            )? {
+                                loot_distribution::LootResolution::Winner(id) => Some(id),
+                                loot_distribution::LootResolution::FallbackRoundRobin => None,
+                            }
+                        }
                         None => None,
                     }
                 }
                 loot_distribution::LootDistributionMode::MasterLoot => {
-                    match loot_distribution::resolve_master_loot(
-                        &cohort,
-                        encounter.master_assignments.get(root_item_id).copied(),
-                    )? {
+                    // Only honour an assignment whose recipient survived into
+                    // the final cohort; otherwise fall back rather than erroring
+                    // the whole defeat resolution.
+                    let assigned = encounter
+                        .master_assignments
+                        .get(root_item_id)
+                        .copied()
+                        .filter(|member| cohort.contains(member));
+                    match loot_distribution::resolve_master_loot(&cohort, assigned)? {
                         loot_distribution::LootResolution::Winner(id) => Some(id),
                         loot_distribution::LootResolution::FallbackRoundRobin => None,
                     }
@@ -12027,7 +12134,265 @@ impl World {
                     domain_events: vec![event],
                 })
             }
+            LootAction::Roll => {
+                let npc_id = self.active_decision_encounter(actor_id, &room_id, false)?;
+                let output = self.render_loot_decisions(session, &npc_id)?;
+                self.loot_decision_outcome(session, output)
+            }
+            LootAction::Mode(mode) => {
+                let npc_id = self.active_decision_encounter(actor_id, &room_id, true)?;
+                let encounter = self
+                    .loot_encounters
+                    .get_mut(&npc_id)
+                    .ok_or(WorldError::LootUnavailable)?;
+                encounter.distribution = mode;
+                // Switching away from an advanced mode drops its now-irrelevant
+                // per-root state so the frozen encounter always validates and a
+                // later defeat never resolves against stale declarations.
+                if mode != loot_distribution::LootDistributionMode::NeedGreed {
+                    encounter.loot_declarations.clear();
+                }
+                if mode != loot_distribution::LootDistributionMode::MasterLoot {
+                    encounter.master_assignments.clear();
+                }
+                self.revision = self.revision.wrapping_add(1).max(1);
+                let output = format!(
+                    "Group loot mode set to {}.\r\n",
+                    loot_distribution_label(mode)
+                );
+                self.loot_decision_outcome(session, output)
+            }
+            LootAction::Declare { decision, query } => {
+                let npc_id = self.active_decision_encounter(actor_id, &room_id, false)?;
+                if self.loot_encounters.get(&npc_id).map(|e| e.distribution)
+                    != Some(loot_distribution::LootDistributionMode::NeedGreed)
+                {
+                    return Err(WorldError::LootUnavailable);
+                }
+                let roots = self.declarable_loot_roots(&npc_id);
+                let salt = self.observer(session)?.salt;
+                let item_id = resolve_item_query(
+                    &self.item_instances,
+                    &self.item_prototypes,
+                    roots.iter(),
+                    &query,
+                    salt,
+                )
+                .map_err(|_| WorldError::LootUnavailable)?;
+                let item_name = self.item_effective_name(&item_id)?;
+                let encounter = self
+                    .loot_encounters
+                    .get_mut(&npc_id)
+                    .ok_or(WorldError::LootUnavailable)?;
+                let per_root = encounter.loot_declarations.entry(item_id).or_default();
+                // Exactly one declaration per (root, member); a repeat is refused
+                // rather than silently overwriting a prior choice.
+                if per_root.contains_key(&actor_id) {
+                    return Err(WorldError::LootUnavailable);
+                }
+                per_root.insert(actor_id, decision);
+                self.revision = self.revision.wrapping_add(1).max(1);
+                let output = format!(
+                    "You declare {} on {item_name}.\r\n",
+                    loot_decision_label(decision)
+                );
+                self.loot_decision_outcome(session, output)
+            }
+            LootAction::Master { query, member } => {
+                let npc_id = self.active_decision_encounter(actor_id, &room_id, true)?;
+                if self.loot_encounters.get(&npc_id).map(|e| e.distribution)
+                    != Some(loot_distribution::LootDistributionMode::MasterLoot)
+                {
+                    return Err(WorldError::LootUnavailable);
+                }
+                let recipient = self.resolve_connected_character(&member)?;
+                if !self
+                    .loot_encounters
+                    .get(&npc_id)
+                    .is_some_and(|encounter| encounter.cohort.contains(&recipient))
+                {
+                    return Err(WorldError::LootUnavailable);
+                }
+                let roots = self.declarable_loot_roots(&npc_id);
+                let salt = self.observer(session)?.salt;
+                let item_id = resolve_item_query(
+                    &self.item_instances,
+                    &self.item_prototypes,
+                    roots.iter(),
+                    &query,
+                    salt,
+                )
+                .map_err(|_| WorldError::LootUnavailable)?;
+                let item_name = self.item_effective_name(&item_id)?;
+                let recipient_name = self
+                    .connected_character_name(recipient)
+                    .unwrap_or_else(|| "the member".to_owned());
+                let encounter = self
+                    .loot_encounters
+                    .get_mut(&npc_id)
+                    .ok_or(WorldError::LootUnavailable)?;
+                encounter.master_assignments.insert(item_id, recipient);
+                self.revision = self.revision.wrapping_add(1).max(1);
+                let output = format!("You assign {item_name} to {recipient_name}.\r\n");
+                self.loot_decision_outcome(session, output)
+            }
         }
+    }
+
+    /// The carried loot roots of a frozen encounter's NPC that are still held by
+    /// that NPC and therefore addressable for a group-loot declaration or
+    /// assignment. These exact instance ids become the ground-loot roots at
+    /// defeat, so a declaration keyed here resolves the same physical drop.
+    fn declarable_loot_roots(&self, npc_id: &str) -> Vec<ItemInstanceId> {
+        self.npcs
+            .get(npc_id)
+            .map(|npc| {
+                npc.loot_item_ids
+                    .iter()
+                    .filter(|item_id| {
+                        self.item_location(item_id)
+                            == Some(&SharedItemLocation::HeldByNpc(npc_id.to_owned()))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Resolve the single live frozen encounter the actor may act on from their
+    /// current room. `require_leader` restricts the match to encounters the
+    /// actor initiated or leads (party leader); otherwise any cohort member
+    /// qualifies. The encounter must still be live (its NPC engaged by the
+    /// initiator) and the match must be unambiguous, so an actor juggling two
+    /// concurrent encounters fails closed rather than guessing.
+    fn active_decision_encounter(
+        &self,
+        actor_id: CharacterId,
+        room_id: &str,
+        require_leader: bool,
+    ) -> Result<String, WorldError> {
+        let mut found: Option<String> = None;
+        for (npc_id, encounter) in &self.loot_encounters {
+            if encounter.room_id != room_id {
+                continue;
+            }
+            if self
+                .npcs
+                .get(npc_id)
+                .is_none_or(|npc| npc.engaged_character != Some(encounter.initiator))
+            {
+                continue;
+            }
+            let eligible = if require_leader {
+                encounter.initiator == actor_id
+                    || encounter
+                        .party_id
+                        .and_then(|party_id| self.adventure.parties.get(&party_id))
+                        .is_some_and(|party| party.leader == actor_id)
+            } else {
+                encounter.cohort.contains(&actor_id)
+            };
+            if !eligible {
+                continue;
+            }
+            if found.is_some() {
+                return Err(WorldError::LootUnavailable);
+            }
+            found = Some(npc_id.clone());
+        }
+        found.ok_or(WorldError::LootUnavailable)
+    }
+
+    /// Render the cohort-private view of an in-combat group-loot encounter: its
+    /// active mode, the declarable roots (with per-observer opaque refs) and the
+    /// current declarations or master assignments. Text-only and bounded by the
+    /// encounter's carried-loot cap, so Web and Telnet share it verbatim.
+    fn render_loot_decisions(
+        &self,
+        session: SessionId,
+        npc_id: &str,
+    ) -> Result<String, WorldError> {
+        let salt = self.observer(session)?.salt;
+        let encounter = self
+            .loot_encounters
+            .get(npc_id)
+            .ok_or(WorldError::LootUnavailable)?;
+        let npc_name = self
+            .npcs
+            .get(npc_id)
+            .map(|npc| npc.name.clone())
+            .unwrap_or_default();
+        let roots = self.declarable_loot_roots(npc_id);
+        let mut output = format!(
+            "Group loot for {npc_name} (mode: {}):\r\n",
+            loot_distribution_label(encounter.distribution)
+        );
+        if roots.is_empty() {
+            output.push_str("- (no carried loot to divide)\r\n");
+        }
+        for item_id in &roots {
+            let prototype = self.item_prototype_for(item_id)?;
+            let selector = opaque_id(salt, "item", item_id.as_str());
+            match encounter.distribution {
+                loot_distribution::LootDistributionMode::NeedGreed => {
+                    let declarations = encounter.loot_declarations.get(item_id);
+                    let count = |wanted: loot_distribution::LootDecision| {
+                        declarations
+                            .map(|members| {
+                                members.values().filter(|value| **value == wanted).count()
+                            })
+                            .unwrap_or(0)
+                    };
+                    let declared = declarations.map(BTreeMap::len).unwrap_or(0);
+                    let pending = encounter.cohort.len().saturating_sub(declared);
+                    output.push_str(&format!(
+                        "- {} (ref {}): {} need, {} greed, {} pass, {} pending\r\n",
+                        prototype.name,
+                        selector,
+                        count(loot_distribution::LootDecision::Need),
+                        count(loot_distribution::LootDecision::Greed),
+                        count(loot_distribution::LootDecision::Pass),
+                        pending,
+                    ));
+                }
+                loot_distribution::LootDistributionMode::MasterLoot => {
+                    match encounter
+                        .master_assignments
+                        .get(item_id)
+                        .and_then(|member| self.connected_character_name(*member))
+                    {
+                        Some(name) => output.push_str(&format!(
+                            "- {} (ref {}): assigned to {name}\r\n",
+                            prototype.name, selector
+                        )),
+                        None => output.push_str(&format!(
+                            "- {} (ref {}): unassigned\r\n",
+                            prototype.name, selector
+                        )),
+                    }
+                }
+                loot_distribution::LootDistributionMode::RoundRobin => {
+                    output.push_str(&format!("- {} (ref {})\r\n", prototype.name, selector));
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    fn loot_decision_outcome(
+        &self,
+        session: SessionId,
+        output: String,
+    ) -> Result<ActionOutcome, WorldError> {
+        Ok(ActionOutcome {
+            scene: self.scene_for(session)?,
+            container_contents: None,
+            trade_contents: None,
+            reward_odds: None,
+            output: Some(output),
+            changed_character: None,
+            domain_events: Vec::new(),
+        })
     }
 
     fn open_reward(
@@ -29444,6 +29809,355 @@ mod tests {
             Some(CharacterId(910))
         );
         assert_eq!(world.party_loot_cursors.get(&5), Some(&1));
+    }
+
+    /// Freeze a two-member party encounter in the arena: the initiator (900,
+    /// "Adventurer", party leader) and a partner (901, "Partner"). The guardian
+    /// carries `game:fang`, which becomes the single ground-loot root at defeat.
+    fn party_arena_world(seed: u64) -> (World, SessionId, SessionId) {
+        let (mut world, session) = phase_two_world(seed, 1, 1);
+        world
+            .apply(session, PlayerAction::Move(Direction::North))
+            .unwrap();
+        let partner = SessionId(901);
+        world
+            .connect(
+                partner,
+                CharacterSnapshot {
+                    id: CharacterId(901),
+                    account_id: AccountId(91),
+                    name: "Partner".into(),
+                    room_id: "game:arena".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        world.adventure.next_party_id = 6;
+        world.adventure.parties.insert(
+            5,
+            PartySnapshot {
+                id: 5,
+                leader: CharacterId(900),
+                members: vec![CharacterId(900), CharacterId(901)],
+                invitations: BTreeMap::new(),
+            },
+        );
+        world
+            .apply(session, PlayerAction::Attack("guardian".into()))
+            .unwrap();
+        // The cohort must include both party members before any decision.
+        assert_eq!(
+            world.loot_encounters["game:guardian"].cohort,
+            vec![CharacterId(900), CharacterId(901)]
+        );
+        (world, session, partner)
+    }
+
+    fn drive_to_loot_resolution(world: &mut World) {
+        let fang = ItemInstanceId("game:fang".into());
+        for _ in 0..16 {
+            world.advance_tick().unwrap();
+            if world.ground_loot.contains_key(&fang) {
+                return;
+            }
+        }
+        panic!("guardian loot was never resolved");
+    }
+
+    #[test]
+    fn parses_group_loot_distribution_commands() {
+        use loot_distribution::{LootDecision, LootDistributionMode};
+        assert_eq!(
+            parse_action("loot mode need_greed"),
+            Ok(PlayerAction::Loot(LootAction::Mode(
+                LootDistributionMode::NeedGreed
+            )))
+        );
+        assert_eq!(
+            parse_action("loot mode master"),
+            Ok(PlayerAction::Loot(LootAction::Mode(
+                LootDistributionMode::MasterLoot
+            )))
+        );
+        assert_eq!(
+            parse_action("loot mode rr"),
+            Ok(PlayerAction::Loot(LootAction::Mode(
+                LootDistributionMode::RoundRobin
+            )))
+        );
+        assert_eq!(
+            parse_action("loot roll"),
+            Ok(PlayerAction::Loot(LootAction::Roll))
+        );
+        assert_eq!(
+            parse_action("need silver fang"),
+            Ok(PlayerAction::Loot(LootAction::Declare {
+                decision: LootDecision::Need,
+                query: "silver fang".into()
+            }))
+        );
+        assert_eq!(
+            parse_action("greed fang"),
+            Ok(PlayerAction::Loot(LootAction::Declare {
+                decision: LootDecision::Greed,
+                query: "fang".into()
+            }))
+        );
+        assert_eq!(
+            parse_action("pass fang"),
+            Ok(PlayerAction::Loot(LootAction::Declare {
+                decision: LootDecision::Pass,
+                query: "fang".into()
+            }))
+        );
+        assert_eq!(
+            parse_action("loot master fang to Partner"),
+            Ok(PlayerAction::Loot(LootAction::Master {
+                query: "fang".into(),
+                member: "Partner".into()
+            }))
+        );
+        // The pre-existing reservation `loot pass` still routes to `Pass`, never
+        // to a need/greed declaration.
+        assert_eq!(
+            parse_action("loot pass fang"),
+            Ok(PlayerAction::Loot(LootAction::Pass("fang".into())))
+        );
+        assert!(matches!(
+            parse_action("loot mode bogus"),
+            Err(ParseActionError::Unknown(_))
+        ));
+        assert!(matches!(
+            parse_action("loot mode"),
+            Err(ParseActionError::MissingTarget { command: "loot" })
+        ));
+        assert!(matches!(
+            parse_action("need"),
+            Err(ParseActionError::MissingTarget { command: "loot" })
+        ));
+    }
+
+    #[test]
+    fn need_greed_flow_resolves_the_needer_and_projects_state() {
+        let (mut world, s900, s901) = party_arena_world(7);
+        world
+            .apply(
+                s900,
+                PlayerAction::Loot(LootAction::Mode(
+                    loot_distribution::LootDistributionMode::NeedGreed,
+                )),
+            )
+            .unwrap();
+        // The cohort-private projection shows the mode and the carried root, with
+        // opaque refs only (never the internal instance id).
+        let roll = world
+            .apply(s901, PlayerAction::Loot(LootAction::Roll))
+            .unwrap();
+        let projection = roll.output.unwrap();
+        assert!(projection.contains("need/greed"));
+        assert!(projection.contains("silver fang"));
+        assert!(!projection.contains("game:fang"));
+        // 901 needs, 900 only greeds: the needer must win regardless of seed.
+        world
+            .apply(
+                s901,
+                PlayerAction::Loot(LootAction::Declare {
+                    decision: loot_distribution::LootDecision::Need,
+                    query: "fang".into(),
+                }),
+            )
+            .unwrap();
+        world
+            .apply(
+                s900,
+                PlayerAction::Loot(LootAction::Declare {
+                    decision: loot_distribution::LootDecision::Greed,
+                    query: "fang".into(),
+                }),
+            )
+            .unwrap();
+        drive_to_loot_resolution(&mut world);
+        let fang = ItemInstanceId("game:fang".into());
+        assert_eq!(world.ground_loot[&fang].beneficiary, Some(CharacterId(901)));
+    }
+
+    #[test]
+    fn need_greed_declarations_survive_a_snapshot_round_trip() {
+        let (mut world, s900, s901) = party_arena_world(11);
+        world
+            .apply(
+                s900,
+                PlayerAction::Loot(LootAction::Mode(
+                    loot_distribution::LootDistributionMode::NeedGreed,
+                )),
+            )
+            .unwrap();
+        world
+            .apply(
+                s901,
+                PlayerAction::Loot(LootAction::Declare {
+                    decision: loot_distribution::LootDecision::Need,
+                    query: "fang".into(),
+                }),
+            )
+            .unwrap();
+        // A restart mid-window preserves the durable declaration in snapshot v9,
+        // and resolution stays exactly-once: 901 still wins after the round trip.
+        let snapshot = world.runtime_snapshot();
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let decoded =
+            decode_world_runtime_snapshot(WORLD_RUNTIME_SNAPSHOT_VERSION, &encoded).unwrap();
+        let fang = ItemInstanceId("game:fang".into());
+        assert_eq!(
+            decoded.loot_encounters["game:guardian"].loot_declarations[&fang][&CharacterId(901)],
+            loot_distribution::LootDecision::Need
+        );
+        drive_to_loot_resolution(&mut world);
+        assert_eq!(world.ground_loot[&fang].beneficiary, Some(CharacterId(901)));
+    }
+
+    #[test]
+    fn master_loot_flow_assigns_to_the_chosen_member() {
+        let (mut world, s900, _s901) = party_arena_world(3);
+        world
+            .apply(
+                s900,
+                PlayerAction::Loot(LootAction::Mode(
+                    loot_distribution::LootDistributionMode::MasterLoot,
+                )),
+            )
+            .unwrap();
+        world
+            .apply(
+                s900,
+                PlayerAction::Loot(LootAction::Master {
+                    query: "fang".into(),
+                    member: "Partner".into(),
+                }),
+            )
+            .unwrap();
+        drive_to_loot_resolution(&mut world);
+        let fang = ItemInstanceId("game:fang".into());
+        assert_eq!(world.ground_loot[&fang].beneficiary, Some(CharacterId(901)));
+    }
+
+    #[test]
+    fn group_loot_rejects_non_cohort_double_declaration_and_closed_window() {
+        let (mut world, s900, s901) = party_arena_world(9);
+        // Declaring before the leader opts into need/greed is refused.
+        assert!(
+            world
+                .apply(
+                    s901,
+                    PlayerAction::Loot(LootAction::Declare {
+                        decision: loot_distribution::LootDecision::Need,
+                        query: "fang".into(),
+                    })
+                )
+                .is_err()
+        );
+        world
+            .apply(
+                s900,
+                PlayerAction::Loot(LootAction::Mode(
+                    loot_distribution::LootDistributionMode::NeedGreed,
+                )),
+            )
+            .unwrap();
+        // An outsider present in the room but outside the frozen cohort cannot
+        // declare.
+        let outsider = SessionId(902);
+        world
+            .connect(
+                outsider,
+                CharacterSnapshot {
+                    id: CharacterId(902),
+                    account_id: AccountId(92),
+                    name: "Outsider".into(),
+                    room_id: "game:arena".into(),
+                    item_locations: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        assert!(
+            world
+                .apply(
+                    outsider,
+                    PlayerAction::Loot(LootAction::Declare {
+                        decision: loot_distribution::LootDecision::Need,
+                        query: "fang".into(),
+                    })
+                )
+                .is_err()
+        );
+        // Exactly one declaration per (root, member): a second is refused.
+        world
+            .apply(
+                s901,
+                PlayerAction::Loot(LootAction::Declare {
+                    decision: loot_distribution::LootDecision::Need,
+                    query: "fang".into(),
+                }),
+            )
+            .unwrap();
+        assert!(
+            world
+                .apply(
+                    s901,
+                    PlayerAction::Loot(LootAction::Declare {
+                        decision: loot_distribution::LootDecision::Greed,
+                        query: "fang".into(),
+                    })
+                )
+                .is_err()
+        );
+        // Master assignment to a non-cohort member is refused.
+        world
+            .apply(
+                s900,
+                PlayerAction::Loot(LootAction::Mode(
+                    loot_distribution::LootDistributionMode::MasterLoot,
+                )),
+            )
+            .unwrap();
+        assert!(
+            world
+                .apply(
+                    s900,
+                    PlayerAction::Loot(LootAction::Master {
+                        query: "fang".into(),
+                        member: "Outsider".into(),
+                    })
+                )
+                .is_err()
+        );
+        // Once the encounter resolves at defeat, the decision window is closed.
+        drive_to_loot_resolution(&mut world);
+        assert!(
+            world
+                .apply(
+                    s900,
+                    PlayerAction::Loot(LootAction::Mode(
+                        loot_distribution::LootDistributionMode::NeedGreed,
+                    ))
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn round_robin_default_group_loot_is_unchanged() {
+        // With no mode selected and no declarations, the fixed root follows the
+        // unchanged phase 4A path: it is reserved for the initiator.
+        let (mut world, _s900, _s901) = party_arena_world(4);
+        drive_to_loot_resolution(&mut world);
+        let fang = ItemInstanceId("game:fang".into());
+        assert_eq!(
+            world.loot_encounters.get("game:guardian"),
+            None,
+            "the encounter is consumed at defeat"
+        );
+        assert_eq!(world.ground_loot[&fang].beneficiary, Some(CharacterId(900)));
     }
 
     #[test]
