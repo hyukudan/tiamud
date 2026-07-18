@@ -2,6 +2,7 @@
 
 mod ability;
 mod emote;
+pub mod loot_distribution;
 mod progression;
 
 pub use ability::*;
