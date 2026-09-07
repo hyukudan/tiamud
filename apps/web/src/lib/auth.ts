@@ -251,15 +251,15 @@ export function sessionHasExpired(session: Pick<AuthenticatedSession, 'expiresAt
 // SameSite cookie, which requires a backend/protocol change and is intentionally
 // deferred to a future ADR. This comment is a deliberate marker of that accepted
 // trade-off, not a bug to silently fix in this pass.
-export function readStoredAccess(storage: StorageLike): StoredAccess | undefined {
+export function readStoredAccess(storage: StorageLike | undefined): StoredAccess | undefined {
   let candidate: unknown;
   try {
-    const raw = storage.getItem(ACCESS_STORAGE_KEY);
+    const raw = storage?.getItem(ACCESS_STORAGE_KEY);
     if (!raw) return undefined;
     candidate = JSON.parse(raw);
     const session = parseSession(candidate);
     if (sessionHasExpired(session)) {
-      storage.removeItem(ACCESS_STORAGE_KEY);
+      clearStoredAccess(storage);
       return undefined;
     }
     const characterId = isRecord(candidate) ? candidate.characterId : undefined;
@@ -268,15 +268,23 @@ export function readStoredAccess(storage: StorageLike): StoredAccess | undefined
       characterId: typeof characterId === 'number' ? characterId : undefined,
     };
   } catch {
-    storage.removeItem(ACCESS_STORAGE_KEY);
+    clearStoredAccess(storage);
     return undefined;
   }
 }
 
-export function writeStoredAccess(storage: StorageLike, access: StoredAccess): void {
-  storage.setItem(ACCESS_STORAGE_KEY, JSON.stringify(access));
+export function writeStoredAccess(storage: StorageLike | undefined, access: StoredAccess): void {
+  try {
+    storage?.setItem(ACCESS_STORAGE_KEY, JSON.stringify(access));
+  } catch {
+    // The live session still works when browser persistence is unavailable.
+  }
 }
 
-export function clearStoredAccess(storage: StorageLike): void {
-  storage.removeItem(ACCESS_STORAGE_KEY);
+export function clearStoredAccess(storage: StorageLike | undefined): void {
+  try {
+    storage?.removeItem(ACCESS_STORAGE_KEY);
+  } catch {
+    // Local UI cleanup and server-side revocation must still complete.
+  }
 }

@@ -1162,7 +1162,7 @@
 
     <BoardsPanel {boardCatalog} {boardList} {boardEntry} {actionResult} {connectionState} {onaction} />
 
-    <OfflineMailPanel {mailList} {mailMessage} {onaction} />
+    <OfflineMailPanel {mailList} {mailMessage} {actionResult} {connectionState} {onaction} />
 
     <details class="dashboard-panel">
       <summary>Coin and market <span>{value.economy.spendableCoins} spendable</span></summary>

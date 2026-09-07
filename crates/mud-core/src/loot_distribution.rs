@@ -9,10 +9,10 @@
 //! persistence-free: it owns only the deterministic, exactly-once *decision* of
 //! which cohort member wins a single loot root given a frozen cohort, the per
 //! member declarations (or the leader's assignment) and an unbiased RNG source.
-//! Wiring this into `LootEncounter`, the `WorldRuntimeSnapshot`, the checkpointed
-//! mutation, the decision window ticks and the opaque projection is future work
-//! and lives elsewhere; nothing here touches SQL, the snapshot version, the
-//! actor or any client protocol.
+//! The world wires this resolver into `LootEncounter`, snapshot v9 and the
+//! carried-root decisions resolved at NPC defeat. The actor persists those
+//! mutations before acknowledgement. Post-defeat decision windows remain
+//! deferred; this pure module does not own SQL or client protocols.
 //!
 //! The resolution mirrors the ADR exactly:
 //!

@@ -2859,6 +2859,7 @@ async fn apply(
         );
     }
     let action_kind = action.clone();
+    let revision_before_action = world.revision();
     let outcome = match world.apply(session, action) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -2924,7 +2925,14 @@ async fn apply(
             return Err(error);
         }
     }
-    if (outcome.changed_character.is_some() || !committed_events.is_empty() || script_changed)
+    // Runtime-only decisions (for example group-loot declarations) can change
+    // durable world state without a character row or a narrative event. Never
+    // acknowledge such a mutation before its snapshot has committed.
+    let runtime_changed = world.revision() != revision_before_action;
+    if (runtime_changed
+        || outcome.changed_character.is_some()
+        || !committed_events.is_empty()
+        || script_changed)
         && let Err(error) = store
             .commit_action(
                 durable_connected_characters(world)?,
@@ -2939,7 +2947,7 @@ async fn apply(
     let events = project_view_events(world, session, &committed_events)?;
     let mut scene = world.current_scene(session)?;
     runtime_content.resolve_scene(world, session, role, &mut scene);
-    if !committed_events.is_empty() || script_changed {
+    if runtime_changed || !committed_events.is_empty() || script_changed {
         broadcast_world_deliveries(
             world,
             runtime_content,
@@ -5432,12 +5440,35 @@ mod tests {
     /// dispatch. Returns the world plus the leader/partner ids and sessions.
     fn group_loot_arena() -> (World, SessionId, CharacterId, SessionId, CharacterId) {
         let store = MemoryStore::default();
+        group_loot_arena_with_store(&store)
+    }
+
+    fn group_loot_arena_with_store(
+        store: &MemoryStore,
+    ) -> (World, SessionId, CharacterId, SessionId, CharacterId) {
         let mut world = durable_gameplay_world();
+        world
+            .configure_loot(
+                vec![tiamud_core::LootTableDefinition {
+                    id: "test:group-table".into(),
+                    digest_sha256: "a".repeat(64),
+                    guaranteed: Vec::new(),
+                    pools: Vec::new(),
+                }],
+                vec![tiamud_core::LootSourceDefinition {
+                    kind: tiamud_core::LootSourceKind::NpcSpawn,
+                    id: "test:group-source".into(),
+                    npc_spawn_id: "test:guardian".into(),
+                    loot_table_id: "test:group-table".into(),
+                    rights: tiamud_core::LootRightsPolicy::PartyRoundRobin,
+                }],
+            )
+            .unwrap();
         let leader = SessionId(71);
         let partner = SessionId(72);
         connect_tick_character(
             &mut world,
-            &store,
+            store,
             leader,
             CharacterId(71),
             "test:arena",
@@ -5445,7 +5476,7 @@ mod tests {
         );
         connect_tick_character(
             &mut world,
-            &store,
+            store,
             partner,
             CharacterId(72),
             "test:arena",
@@ -5477,6 +5508,99 @@ mod tests {
             }
         }
         panic!("guardian loot was never resolved");
+    }
+
+    #[tokio::test]
+    async fn group_loot_decisions_commit_before_ack_and_roll_back_on_failure() {
+        let store = MemoryStore::default();
+        let (mut world, leader, _, partner, _) = group_loot_arena_with_store(&store);
+        let content = RuntimeContent::default();
+        let mut social = SocialRuntime::new();
+        let mut roles = HashMap::new();
+        let mut staff = HashMap::new();
+        let mut delivery = DeliveryRouter::new(None);
+        let mut partner_inbox = delivery.register(partner);
+        for (session, command) in [
+            (leader, "loot mode need_greed"),
+            (partner, "need fang"),
+            (leader, "loot mode master_loot"),
+            (leader, "loot master fang to Loot Partner"),
+        ] {
+            let before = world.runtime_snapshot();
+            let revision_before = world.revision();
+            let commits_before = store.successful_commits.load(Ordering::SeqCst);
+            store.fail_saves.store(true, Ordering::SeqCst);
+            let failed = apply(
+                ApplyResources {
+                    world: &mut world,
+                    runtime_content: &content,
+                    social: &mut social,
+                    store: &store,
+                    session_roles: &mut roles,
+                    session_staff_accesses: &mut staff,
+                    delivery: &mut delivery,
+                },
+                session,
+                AccountRole::Player,
+                tiamud_core::parse_action(command).unwrap(),
+            )
+            .await;
+            assert!(
+                matches!(failed, Err(GameError::Persistence(_))),
+                "{command}"
+            );
+            assert_eq!(world.runtime_snapshot(), before, "{command}");
+            assert_eq!(world.revision(), revision_before);
+            assert!(partner_inbox.try_recv().is_err());
+            store.fail_saves.store(false, Ordering::SeqCst);
+            apply(
+                ApplyResources {
+                    world: &mut world,
+                    runtime_content: &content,
+                    social: &mut social,
+                    store: &store,
+                    session_roles: &mut roles,
+                    session_staff_accesses: &mut staff,
+                    delivery: &mut delivery,
+                },
+                session,
+                AccountRole::Player,
+                tiamud_core::parse_action(command).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                store.successful_commits.load(Ordering::SeqCst),
+                commits_before + 1
+            );
+            assert_eq!(
+                store.state.lock().unwrap().runtime.as_ref(),
+                Some(&world.runtime_snapshot())
+            );
+            while partner_inbox.try_recv().is_ok() {}
+        }
+        let commits = store.successful_commits.load(Ordering::SeqCst);
+        apply(
+            ApplyResources {
+                world: &mut world,
+                runtime_content: &content,
+                social: &mut social,
+                store: &store,
+                session_roles: &mut roles,
+                session_staff_accesses: &mut staff,
+                delivery: &mut delivery,
+            },
+            leader,
+            AccountRole::Player,
+            tiamud_core::parse_action("loot roll").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.successful_commits.load(Ordering::SeqCst),
+            commits,
+            "inspection stays read-only"
+        );
     }
 
     #[tokio::test]

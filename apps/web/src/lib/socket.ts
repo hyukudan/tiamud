@@ -281,7 +281,7 @@ export class TiamudConnection {
       if (message.type !== 'server.welcome' || sequence !== 1) {
         this.#requestSync(socket, 0);
       }
-      if (this.#syncPending && (message.type === 'scene.snapshot' || message.type === 'player.snapshot')) {
+      if (this.#syncPending && isWorldStateMessage(message)) {
         return;
       }
       this.#callbacks.onMessage(message);
@@ -298,7 +298,7 @@ export class TiamudConnection {
       this.#requestSync(socket, previous);
     }
 
-    if (this.#syncPending && (message.type === 'scene.snapshot' || message.type === 'player.snapshot')) {
+    if (this.#syncPending && isWorldStateMessage(message)) {
       return;
     }
     this.#callbacks.onMessage(message);
@@ -459,4 +459,13 @@ function sameCapabilities(
   return left?.images === right.images &&
     left.reducedMotion === right.reducedMotion &&
     left.audio === right.audio;
+}
+
+// Every partial update depends on a complete scene/player baseline. Keep
+// action acknowledgements and notices flowing while recovering that baseline.
+function isWorldStateMessage(message: ServerMessage): boolean {
+  return message.type === 'scene.snapshot' || message.type === 'player.snapshot' ||
+    message.type === 'scene.patch' || message.type === 'entity.upsert' ||
+    message.type === 'entity.remove' || message.type === 'vitals.update' ||
+    message.type === 'inventory.patch' || message.type === 'map.snapshot';
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import worker from '../../public/sw.js?raw';
 import manifestSource from '../../public/manifest.webmanifest?raw';
 import iconSource from '../../public/icons/tiamud-icon.svg?raw';
@@ -66,5 +66,45 @@ describe('offline shell', () => {
     );
     expect(indexSource).not.toContain('canonical');
     expect(indexSource).not.toContain('og:url');
+  });
+});
+
+describe('offline cache failures', () => {
+  function fetchThroughWorker(fetcher: () => Promise<unknown>, cacheStorage: unknown): Promise<unknown> {
+    const listeners = new Map<string, (event: unknown) => void>();
+    const scope = {
+      location: { origin: 'https://tiamud.test' },
+      addEventListener: (name: string, callback: (event: unknown) => void) => listeners.set(name, callback),
+    };
+    // Execute the checked-in worker against isolated browser API doubles.
+    new Function('self', 'caches', 'fetch', 'URL', worker)(scope, cacheStorage, fetcher, URL);
+    let result!: Promise<unknown>;
+    listeners.get('fetch')!({
+      request: { url: 'https://tiamud.test/', method: 'GET', mode: 'navigate', destination: 'document' },
+      respondWith: (response: Promise<unknown>) => { result = response; },
+    });
+    return result;
+  }
+
+  it('returns the live response when opening the cache fails', async () => {
+    const live = { ok: true, clone: () => ({}) };
+    const fetcher = vi.fn().mockResolvedValue(live);
+    await expect(fetchThroughWorker(fetcher, { open: async () => { throw new Error('storage blocked'); } })).resolves.toBe(live);
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('does not replace a successful update with stale cached HTML on quota failure', async () => {
+    const live = { ok: true, clone: () => ({}) };
+    const match = vi.fn().mockResolvedValue({ old: true });
+    const cache = { put: async () => { throw new Error('quota'); }, match };
+    await expect(fetchThroughWorker(async () => live, { open: async () => cache })).resolves.toBe(live);
+    expect(match).not.toHaveBeenCalled();
+  });
+
+  it('still uses the shell on a genuine network failure', async () => {
+    const cached = { offline: true };
+    await expect(fetchThroughWorker(async () => { throw new Error('offline'); }, {
+      open: async () => ({ match: async () => cached }),
+    })).resolves.toBe(cached);
   });
 });

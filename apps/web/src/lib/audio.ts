@@ -54,9 +54,13 @@ export class AudioController {
     this.playing.set(channel, media);
     try {
       await media.play();
+      if (this.playing.get(channel) !== media) {
+        media.pause();
+        return false;
+      }
       return true;
     } catch {
-      this.playing.delete(channel);
+      if (this.playing.get(channel) === media) this.playing.delete(channel);
       media.pause();
       return false;
     }

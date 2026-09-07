@@ -387,6 +387,39 @@ describe('TiamudConnection', () => {
     connection.close();
   });
 
+  it('holds partial world updates during recovery while still delivering action results', () => {
+    const received: ServerMessage[] = [];
+    const protocolError = vi.fn();
+    const recoveries: SyncRecoveryData[] = [];
+    const connection = new TiamudConnection('wss://tiamud.test/ws', { token: 'secret', characterId: 42 }, {
+      onMessage: (message) => received.push(message),
+      onSync: (recovery) => recoveries.push(recovery),
+      onStateChange: () => undefined,
+      onProtocolError: protocolError,
+    });
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+    const send = (type: string, seq: number, data: unknown) => socket.receive(JSON.stringify({ v: 1, type, seq, data }));
+    const state = validPlayerState();
+    send('server.welcome', 1, {});
+    send('vitals.update', 3, { revision: 2, character: state.character });
+    send('inventory.patch', 4, { revision: 2, inventory: [], equipment: [], inventoryCapacity: state.inventoryCapacity });
+    send('map.snapshot', 5, { revision: 2, map: state.map });
+    send('scene.patch', 6, { viewId: 'o1111111111111111', revision: 2, title: 'Incomplete' });
+    send('entity.remove', 7, { viewId: 'o1111111111111111', revision: 2, kind: 'item', id: 'o2222222222222222' });
+    send('action.result', 8, { requestId: 'pending', ok: true });
+    expect(lastSent(socket)).toMatchObject({ type: 'sync.request', data: { afterSeq: 1 } });
+    expect(received.map((message) => message.type)).toEqual(['server.welcome', 'action.result']);
+    send('sync.scene', 9, { syncId: 'sync-9', afterSeq: 1, scene: { title: 'Recovered', prose: [], exits: [], items: [] } });
+    send('sync.player', 10, { syncId: 'sync-9', afterSeq: 1, player: state, complete: true });
+    expect(recoveries).toHaveLength(1);
+    send('vitals.update', 11, { revision: 3, character: state.character });
+    expect(received.at(-1)?.type).toBe('vitals.update');
+    expect(protocolError).not.toHaveBeenCalled();
+    connection.close();
+  });
+
   it('reconnects instead of suppressing snapshots forever when sync is unanswered', () => {
     vi.useFakeTimers();
     const connection = new TiamudConnection(

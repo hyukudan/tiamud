@@ -1371,3 +1371,43 @@ test('scrollback stays put for readers away from the bottom and can jump to late
     Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop),
   )).toBeLessThanOrEqual(32);
 });
+
+test('offline mail preserves drafts until matching acknowledgement and through reconnect', async ({ page }) => {
+  await installMockWorld(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+  const panel = page.locator('details').filter({ has: page.locator('summary', { hasText: 'Offline mail' }) });
+  await panel.locator('summary').click();
+  await panel.getByLabel('Exact character name').fill('Bram');
+  await panel.getByLabel('Subject', { exact: true }).fill('Keep this subject');
+  await panel.getByLabel('Message', { exact: true }).fill('Keep this draft');
+  const send = panel.getByRole('button', { name: 'Send mail', exact: true });
+  const reply = async (ok: boolean) => page.evaluate((accepted) => {
+    const state = window as Window & {
+      mockActions?: Array<{ data?: { requestId?: string } }>;
+      emitMockActionResult?: (id: string, ok: boolean) => void;
+    };
+    state.emitMockActionResult?.(state.mockActions?.at(-1)?.data?.requestId ?? '', accepted);
+  }, ok);
+  await send.click();
+  await expect(send).toBeDisabled();
+  await expect(panel.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  await reply(false);
+  await expect(send).toBeEnabled();
+  await expect(panel.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  await send.click();
+  await page.evaluate(() => {
+    (window as Window & { disconnectMockSocket?: () => void }).disconnectMockSocket?.();
+  });
+  await expect(send).toBeEnabled();
+  await expect(panel.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft');
+  await send.click();
+  await panel.getByLabel('Message', { exact: true }).fill('New draft written while awaiting confirmation');
+  await reply(true);
+  await expect(panel.getByLabel('Subject', { exact: true })).toHaveValue('');
+  await expect(panel.getByLabel('Message', { exact: true })).toHaveValue('New draft written while awaiting confirmation');
+  await panel.getByLabel('Subject', { exact: true }).fill('Next subject');
+  await send.click();
+  await reply(true);
+  await expect(panel.getByLabel('Message', { exact: true })).toHaveValue('');
+});

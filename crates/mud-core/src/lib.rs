@@ -10052,6 +10052,18 @@ impl World {
         let mut cursor = round_robin_party
             .and_then(|party_id| self.party_loot_cursors.get(&party_id).copied())
             .unwrap_or(0);
+        // Authored credited-character rights are never overridden by a saved
+        // advanced decision. Revalidate leadership/cohort at resolution too.
+        let distribution = if round_robin_party.is_some_and(|party_id| {
+            self.adventure
+                .parties
+                .get(&party_id)
+                .is_some_and(|party| party.leader == encounter.initiator)
+        }) {
+            encounter.distribution
+        } else {
+            loot_distribution::LootDistributionMode::RoundRobin
+        };
         for root_item_id in roots {
             if self.ground_loot.len() >= MAX_GROUND_LOOT_RESERVATIONS {
                 return Err(WorldError::InvalidDomainTransition);
@@ -10064,7 +10076,7 @@ impl World {
             // exact round-robin path below, so a root can never be stuck. Empty
             // declarations never draw the RNG, so an encounter that never opted
             // into an advanced mode is byte-identical to its 4A behaviour.
-            let advanced_winner = match encounter.distribution {
+            let advanced_winner = match distribution {
                 loot_distribution::LootDistributionMode::RoundRobin => None,
                 loot_distribution::LootDistributionMode::NeedGreed => {
                     match encounter.loot_declarations.get(root_item_id) {
@@ -11524,6 +11536,17 @@ impl World {
             }
             LootAction::Mode(mode) => {
                 let npc_id = self.active_decision_encounter(actor_id, &room_id, true)?;
+                if mode != loot_distribution::LootDistributionMode::RoundRobin
+                    && (!self
+                        .loot_sources
+                        .get(&npc_id)
+                        .is_some_and(|source| source.rights == LootRightsPolicy::PartyRoundRobin)
+                        || !self.loot_encounters.get(&npc_id).is_some_and(|encounter| {
+                            encounter.party_id.is_some() && encounter.cohort.len() > 1
+                        }))
+                {
+                    return Err(WorldError::LootUnavailable);
+                }
                 let encounter = self
                     .loot_encounters
                     .get_mut(&npc_id)
@@ -11644,8 +11667,8 @@ impl World {
 
     /// Resolve the single live frozen encounter the actor may act on from their
     /// current room. `require_leader` restricts the match to encounters the
-    /// actor initiated or leads (party leader); otherwise any cohort member
-    /// qualifies. The encounter must still be live (its NPC engaged by the
+    /// actor initiated while still leading its party; otherwise any cohort
+    /// member qualifies. The encounter must still be live (its NPC engaged by the
     /// initiator) and the match must be unambiguous, so an actor juggling two
     /// concurrent encounters fails closed rather than guessing.
     fn active_decision_encounter(
@@ -11667,11 +11690,13 @@ impl World {
                 continue;
             }
             let eligible = if require_leader {
-                encounter.initiator == actor_id
-                    || encounter
-                        .party_id
-                        .and_then(|party_id| self.adventure.parties.get(&party_id))
-                        .is_some_and(|party| party.leader == actor_id)
+                encounter.cohort.contains(&actor_id)
+                    && encounter.initiator == actor_id
+                    && encounter.party_id.is_none_or(|party_id| {
+                        self.adventure.parties.get(&party_id).is_some_and(|party| {
+                            party.leader == actor_id && party.members.contains(&actor_id)
+                        })
+                    })
             } else {
                 encounter.cohort.contains(&actor_id)
             };
@@ -29265,6 +29290,23 @@ mod tests {
     fn party_arena_world(seed: u64) -> (World, SessionId, SessionId) {
         let (mut world, session) = phase_two_world(seed, 1, 1);
         world
+            .configure_loot(
+                vec![LootTableDefinition {
+                    id: "game:group-table".into(),
+                    digest_sha256: "a".repeat(64),
+                    guaranteed: Vec::new(),
+                    pools: Vec::new(),
+                }],
+                vec![LootSourceDefinition {
+                    kind: LootSourceKind::NpcSpawn,
+                    id: "game:group-source".into(),
+                    npc_spawn_id: "game:guardian".into(),
+                    loot_table_id: "game:group-table".into(),
+                    rights: LootRightsPolicy::PartyRoundRobin,
+                }],
+            )
+            .unwrap();
+        world
             .apply(session, PlayerAction::Move(Direction::North))
             .unwrap();
         let partner = SessionId(901);
@@ -29591,6 +29633,53 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn group_loot_cannot_override_credited_rights_or_leadership() {
+        use loot_distribution::LootDistributionMode;
+        let (mut world, leader, _) = party_arena_world(4);
+        world.loot_sources.get_mut("game:guardian").unwrap().rights =
+            LootRightsPolicy::CreditedCharacter;
+        let before = world.runtime_snapshot();
+        for mode in [
+            LootDistributionMode::NeedGreed,
+            LootDistributionMode::MasterLoot,
+        ] {
+            assert!(
+                world
+                    .apply(leader, PlayerAction::Loot(LootAction::Mode(mode)))
+                    .is_err()
+            );
+            assert_eq!(world.runtime_snapshot(), before);
+        }
+        // Even an already durable legacy advanced decision cannot override
+        // authored credited-character rights when the NPC is defeated.
+        let encounter = world.loot_encounters.get_mut("game:guardian").unwrap();
+        encounter.distribution = LootDistributionMode::MasterLoot;
+        encounter
+            .master_assignments
+            .insert(ItemInstanceId("game:fang".into()), CharacterId(901));
+        drive_to_loot_resolution(&mut world);
+        assert_eq!(
+            world.ground_loot[&ItemInstanceId("game:fang".into())].beneficiary,
+            Some(CharacterId(900))
+        );
+
+        let (mut world, leader, partner) = party_arena_world(5);
+        world.adventure.parties.get_mut(&5).unwrap().leader = CharacterId(901);
+        // Neither an initiating non-leader nor a later leader can take over the
+        // frozen initiating leader's authority.
+        for session in [leader, partner] {
+            assert!(
+                world
+                    .apply(
+                        session,
+                        PlayerAction::Loot(LootAction::Mode(LootDistributionMode::MasterLoot))
+                    )
+                    .is_err()
+            );
+        }
     }
 
     #[test]

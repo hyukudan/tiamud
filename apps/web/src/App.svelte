@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { browserStorage } from './lib/storage';
   import { onMount, tick } from 'svelte';
   import type {
     ActionResultData,
@@ -137,12 +138,12 @@
   const browserSaveData = typeof navigator !== 'undefined' &&
     (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData === true;
   const initialPreferences = loadPreferences(
-    typeof window === 'undefined' ? undefined : window.localStorage,
+    browserStorage(),
     browserSaveData,
   );
   let preferences = $state(initialPreferences);
   let rememberedCommands = $state(
-    loadCommandHistory(typeof window === 'undefined' ? undefined : window.localStorage),
+    loadCommandHistory(browserStorage()),
   );
   let historyCursor = $state(0);
   const audioController = typeof Audio === 'undefined'
@@ -239,7 +240,7 @@
       : 'normal';
     document.documentElement.dataset.reader = current.screenReader ? 'true' : 'false';
     document.documentElement.style.fontSize = `${current.fontScale}%`;
-    savePreferences(window.localStorage, current);
+    savePreferences(browserStorage(), current);
   });
 
   function updatePreferences(next: ClientPreferences): void {
@@ -338,6 +339,13 @@
   }
 
   function applyConfirmedStructuredAction(pending: PendingStructuredAction): void {
+    if (pending.action === 'mail.delete' && pending.fields?.mailId) {
+      if (mailMessage?.id === pending.fields.mailId) mailMessage = undefined;
+      // Reload authoritative totals/pagination rather than retaining a deleted
+      // entry or guessing whether the last page still exists.
+      mailList = undefined;
+      return;
+    }
     if (pending.action === 'board.post') {
       boardList = undefined;
       return;
@@ -710,7 +718,7 @@
     rememberedCommands = rememberCommand(
       rememberedCommands,
       submitted,
-      typeof window === 'undefined' ? undefined : window.localStorage,
+      browserStorage(),
     );
     historyCursor = rememberedCommands.length;
     command = '';
@@ -811,7 +819,7 @@
     historyAnchored = true;
     unseenHistory = 0;
     accessError = message;
-    if (clearCredentials) clearStoredAccess(window.localStorage);
+    if (clearCredentials) clearStoredAccess(browserStorage());
   }
 
   async function signOut(): Promise<void> {
@@ -838,7 +846,7 @@
     historyAnchored = true;
     unseenHistory = 0;
     accessError = undefined;
-    clearStoredAccess(window.localStorage);
+    clearStoredAccess(browserStorage());
     if (token) {
       try {
         await revokeAccess(token);

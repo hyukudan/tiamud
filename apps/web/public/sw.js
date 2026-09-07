@@ -41,19 +41,30 @@ self.addEventListener('fetch', (event) => {
   if (!cacheable) return;
 
   event.respondWith((async () => {
-    const cache = await caches.open(CACHE_VERSION);
+    let response;
     try {
-      const response = await fetch(request);
-      if (response.ok) {
-        await cache.put(request, response.clone());
-        await trim(cache);
-      }
-      return response;
+      response = await fetch(request);
     } catch (error) {
-      const cached = await cache.match(request);
-      if (cached) return cached;
+      try {
+        const cache = await caches.open(CACHE_VERSION);
+        const cached = await cache.match(request);
+        if (cached) return cached;
+      } catch {
+        // Storage may be disabled; preserve the original network failure.
+      }
       throw error;
     }
+    if (response.ok) {
+      try {
+        const cache = await caches.open(CACHE_VERSION);
+        await cache.put(request, response.clone());
+        await trim(cache);
+      } catch {
+        // Quota, privacy settings or cache eviction must not hide a live
+        // response or substitute an older client after a successful update.
+      }
+    }
+    return response;
   })());
 });
 

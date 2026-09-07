@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { browserStorage } from '../lib/storage';
   import { onMount } from 'svelte';
   import {
     authenticate,
@@ -93,7 +94,7 @@
 
   async function restore(): Promise<void> {
     restoring = true;
-    const stored = readStoredAccess(window.localStorage);
+    const stored = readStoredAccess(browserStorage());
     if (!stored) {
       restoring = false;
       return;
@@ -104,7 +105,7 @@
       await refreshRoster(stored);
     } catch (cause) {
       session = undefined;
-      clearStoredAccess(window.localStorage);
+      clearStoredAccess(browserStorage());
       error = cause instanceof Error ? cause.message : 'Your saved session could not be restored.';
     } finally {
       restoring = false;
@@ -119,7 +120,7 @@
       session = authenticated;
       password = '';
       lastCharacterId = undefined;
-      writeStoredAccess(window.localStorage, authenticated);
+      writeStoredAccess(browserStorage(), authenticated);
       await refreshRoster(authenticated);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : 'Tiamud could not complete the request.';
@@ -153,7 +154,7 @@
   function selectCharacter(character: Character): void {
     if (!session) return;
     lastCharacterId = character.id;
-    writeStoredAccess(window.localStorage, { ...session, characterId: character.id });
+    writeStoredAccess(browserStorage(), { ...session, characterId: character.id });
     onselect({ ...session, characterId: character.id, characterName: character.name });
   }
 
@@ -161,7 +162,7 @@
     const token = session?.token;
     busy = true;
     error = undefined;
-    clearStoredAccess(window.localStorage);
+    clearStoredAccess(browserStorage());
     session = undefined;
     characters = [];
     characterOptions = undefined;

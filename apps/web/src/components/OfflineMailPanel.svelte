@@ -1,10 +1,12 @@
 <script lang="ts">
-  import type { ActionPerformFields, MailListData, MailMessageData } from '../lib/protocol';
+  import type { ActionPerformFields, ActionResultData, ConnectionState, MailListData, MailMessageData } from '../lib/protocol';
   import { mailDate, mailVisibleText } from '../lib/dashboard/mail';
 
   interface Props {
     mailList?: MailListData;
     mailMessage?: MailMessageData;
+    actionResult?: ActionResultData;
+    connectionState?: ConnectionState;
     onaction: (
       action: string,
       fields: ActionPerformFields | undefined,
@@ -12,33 +14,57 @@
     ) => string | undefined;
   }
 
-  let { mailList, mailMessage, onaction }: Props = $props();
+  let { mailList, mailMessage, actionResult, connectionState = 'connecting', onaction }: Props = $props();
   let mailTarget = $state('');
   let mailSubject = $state('');
   let mailBody = $state('');
   let mailReportReason = $state('');
+  let pendingSend = $state<{ id: string; subject: string; body: string }>();
+  let pendingReport = $state<{ id: string; reason: string }>();
+
+  $effect(() => {
+    if (!actionResult?.requestId) return;
+    if (actionResult.requestId === pendingSend?.id) {
+      if (actionResult.ok) {
+        if (mailSubject === pendingSend.subject) mailSubject = '';
+        if (mailBody === pendingSend.body) mailBody = '';
+      }
+      pendingSend = undefined;
+    }
+    if (actionResult.requestId === pendingReport?.id) {
+      if (actionResult.ok && mailReportReason === pendingReport.reason) mailReportReason = '';
+      pendingReport = undefined;
+    }
+  });
+
+  $effect(() => {
+    if (connectionState === 'connected') return;
+    pendingSend = undefined;
+    pendingReport = undefined;
+  });
+
 
   function sendMail(): void {
-    if (!mailVisibleText(mailTarget, 64) || mailTarget.includes('|') ||
+    if (pendingSend || connectionState !== 'connected' || !mailVisibleText(mailTarget, 64) || mailTarget.includes('|') ||
       !mailVisibleText(mailSubject, 128) || mailSubject.includes('|') ||
       !mailVisibleText(mailBody, 2_048)) return;
-    onaction(
+    const id = onaction(
       'mail.send',
       { target: mailTarget, subject: mailSubject, body: mailBody },
       `mail to ${mailTarget}`,
     );
-    mailSubject = '';
-    mailBody = '';
+    if (id) pendingSend = { id, subject: mailSubject, body: mailBody };
   }
 
   function reportOpenMail(): void {
-    if (!mailMessage || !mailVisibleText(mailReportReason, 2_048)) return;
-    onaction(
+    if (pendingReport || connectionState !== 'connected' || !mailMessage ||
+      !mailVisibleText(mailReportReason, 2_048)) return;
+    const id = onaction(
       'mail.report',
       { mailId: mailMessage.id, reason: mailReportReason },
       `report mail ${mailMessage.id}`,
     );
-    mailReportReason = '';
+    if (id) pendingReport = { id, reason: mailReportReason };
   }
 </script>
 
@@ -105,7 +131,7 @@
         <form class="inline-form" onsubmit={(event) => { event.preventDefault(); reportOpenMail(); }}>
           <label for="mail-report-reason">Report this message</label>
           <textarea id="mail-report-reason" maxlength="2048" rows="3" bind:value={mailReportReason}></textarea>
-          <button type="submit" disabled={!mailVisibleText(mailReportReason, 2_048)}>Send report</button>
+          <button type="submit" disabled={connectionState !== 'connected' || Boolean(pendingReport) || !mailVisibleText(mailReportReason, 2_048)}>Send report</button>
         </form>
       </article>
     {/if}
@@ -121,7 +147,7 @@
       <small>Mail expires after 30 days. Delivery acknowledgements do not reveal ignore or mailbox state.</small>
       <button
         type="submit"
-        disabled={!mailVisibleText(mailTarget, 64) || mailTarget.includes('|') ||
+        disabled={connectionState !== 'connected' || Boolean(pendingSend) || !mailVisibleText(mailTarget, 64) || mailTarget.includes('|') ||
           !mailVisibleText(mailSubject, 128) || mailSubject.includes('|') ||
           !mailVisibleText(mailBody, 2_048)}
       >Send mail</button>

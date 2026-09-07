@@ -49,3 +49,36 @@ describe('opt-in audio', () => {
     expect(failed.pause).toHaveBeenCalled();
   });
 });
+
+describe('overlapping audio requests', () => {
+  it('keeps a replacement controllable after an older play promise rejects', async () => {
+    let rejectFirst!: (error: Error) => void;
+    const first = media();
+    first.play = () => new Promise((_, reject) => { rejectFirst = reject; });
+    const second = media();
+    const queue = [first, second];
+    const controller = new AudioController(() => queue.shift()!, { ...DEFAULT_PREFERENCES, audio: true });
+    controller.unlockFromGesture();
+    const pending = controller.play('music', `/assets/${HASH}/audio-first.ogg`);
+    expect(await controller.play('music', `/assets/${HASH}/audio-second.ogg`)).toBe(true);
+    rejectFirst(new Error('interrupted'));
+    expect(await pending).toBe(false);
+    controller.updatePreferences({ ...DEFAULT_PREFERENCES, audio: true, musicVolume: 25 });
+    expect(second.volume).toBe(0.25);
+    controller.stop();
+    expect(second.pause).toHaveBeenCalledOnce();
+  });
+
+  it('does not report playback success after stop while play is pending', async () => {
+    let finish!: () => void;
+    const first = media();
+    first.play = () => new Promise((resolve) => { finish = resolve; });
+    const controller = new AudioController(() => first, { ...DEFAULT_PREFERENCES, audio: true });
+    controller.unlockFromGesture();
+    const pending = controller.play('music', `/assets/${HASH}/audio-first.ogg`);
+    controller.stop();
+    finish();
+    expect(await pending).toBe(false);
+    expect(first.pause).toHaveBeenCalled();
+  });
+});
