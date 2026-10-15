@@ -17,6 +17,30 @@ use tiamud_core::{
     WorldRuntimeSnapshotV2, WorldRuntimeSnapshotV3,
 };
 
+/// Stores a complete runtime document as the v17 sectioned rows, exactly as
+/// the v16 -> v17 migration would.
+fn store_runtime_document(
+    connection: &Connection,
+    snapshot_version: impl Into<i64>,
+    json: &str,
+    last_event_sequence: Option<i64>,
+) {
+    runtime_sections::write_runtime_document_sqlite(
+        connection,
+        snapshot_version.into(),
+        json,
+        last_event_sequence,
+    )
+    .unwrap();
+}
+
+/// The verified assembled runtime document currently stored.
+fn stored_runtime_document(connection: &Connection) -> Option<serde_json::Value> {
+    runtime_sections::read_runtime_document_sqlite(connection, usize::MAX)
+        .unwrap()
+        .map(|(_, json)| serde_json::from_str(&json).unwrap())
+}
+
 async fn account(store: &SqliteCharacterStore, name: &str) -> AccountSnapshot {
     store.load_or_create_account(name).await.unwrap()
 }
@@ -445,18 +469,12 @@ fn startup_world_recovery_returns_a_valid_snapshot() {
     let mut connection = Connection::open_in_memory().unwrap();
     initialise(&mut connection).unwrap();
     let snapshot = World::demo().runtime_snapshot();
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json,
-                  last_event_sequence, updated_at)
-             VALUES (1, ?1, ?2, 0, unixepoch())",
-            params![
-                snapshot.snapshot_version,
-                serde_json::to_string(&snapshot).unwrap()
-            ],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        snapshot.snapshot_version,
+        &serde_json::to_string(&snapshot).unwrap(),
+        Some(0),
+    );
 
     let recovery = load_startup_world_recovery(&mut connection).unwrap();
     assert_eq!(
@@ -477,15 +495,12 @@ fn startup_world_recovery_preserves_legacy_durable_snapshot_version() {
     let object = legacy.as_object_mut().unwrap();
     object.insert("snapshotVersion".into(), serde_json::json!(7));
     object.remove("areaResidency");
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json,
-                  last_event_sequence, updated_at)
-             VALUES (1, 7, ?1, 0, unixepoch())",
-            [serde_json::to_string(&legacy).unwrap()],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        7,
+        &serde_json::to_string(&legacy).unwrap(),
+        Some(0),
+    );
 
     let StartupWorldRecovery::Snapshot {
         durable_version,
@@ -508,18 +523,12 @@ fn startup_world_recovery_gives_snapshot_precedence_over_the_ledger() {
     let mut connection = Connection::open_in_memory().unwrap();
     initialise(&mut connection).unwrap();
     let snapshot = World::demo().runtime_snapshot();
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json,
-                  last_event_sequence, updated_at)
-             VALUES (1, ?1, ?2, 0, unixepoch())",
-            params![
-                snapshot.snapshot_version,
-                serde_json::to_string(&snapshot).unwrap()
-            ],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        snapshot.snapshot_version,
+        &serde_json::to_string(&snapshot).unwrap(),
+        Some(0),
+    );
     // A retained diagnostic suffix is not consulted when a valid runtime
     // snapshot exists. Make it deliberately undecodable to prove there is
     // no hidden ledger fallback or eager parse.
@@ -543,15 +552,12 @@ fn startup_world_recovery_gives_snapshot_precedence_over_the_ledger() {
 fn startup_world_recovery_fails_closed_on_an_invalid_snapshot() {
     let mut connection = Connection::open_in_memory().unwrap();
     initialise(&mut connection).unwrap();
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json,
-                  last_event_sequence, updated_at)
-             VALUES (1, ?1, '{}', 0, unixepoch())",
-            [tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
+        "{}",
+        Some(0),
+    );
     connection
         .execute(
             "INSERT INTO domain_events (event_json) VALUES (?1)",
@@ -729,6 +735,7 @@ fn domain_event_compaction_stays_bounded_across_many_commits() {
             &mut connection,
             &[],
             &runtime,
+            RuntimeSectionSet::EMPTY,
             &[test_domain_event()],
             TEST_RETENTION,
             None,
@@ -765,19 +772,12 @@ fn failed_compaction_rolls_back_event_snapshot_watermark_and_deletion() {
     seed_domain_events(&connection, DOMAIN_EVENT_RETENTION);
     let original_runtime = World::demo().runtime_snapshot();
     let original_json = serde_json::to_string(&original_runtime).unwrap();
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json,
-                  last_event_sequence, updated_at)
-             VALUES (1, ?1, ?2, ?3, unixepoch())",
-            params![
-                original_runtime.snapshot_version,
-                original_json,
-                DOMAIN_EVENT_RETENTION
-            ],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        original_runtime.snapshot_version,
+        &original_json,
+        Some(DOMAIN_EVENT_RETENTION),
+    );
     connection
         .execute_batch(
             "CREATE TRIGGER reject_domain_event_compaction
@@ -796,8 +796,7 @@ fn failed_compaction_rolls_back_event_snapshot_watermark_and_deletion() {
             "SELECT
                  (SELECT COUNT(*) FROM domain_events),
                  (SELECT MAX(sequence) FROM domain_events),
-                 last_event_sequence,
-                 snapshot_json
+                 last_event_sequence
              FROM world_runtime WHERE singleton = 1",
             [],
             |row| {
@@ -805,7 +804,6 @@ fn failed_compaction_rolls_back_event_snapshot_watermark_and_deletion() {
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
                 ))
             },
         )
@@ -816,8 +814,11 @@ fn failed_compaction_rolls_back_event_snapshot_watermark_and_deletion() {
             DOMAIN_EVENT_RETENTION,
             DOMAIN_EVENT_RETENTION,
             DOMAIN_EVENT_RETENTION,
-            original_json
         )
+    );
+    assert_eq!(
+        stored_runtime_document(&connection),
+        Some(serde_json::from_str(&original_json).unwrap())
     );
 }
 
@@ -1396,14 +1397,12 @@ fn sqlite_runtime_loader_upgrades_v1_items_without_losing_identity_or_location()
         adventure: tiamud_core::AdventureRuntimeSnapshot::default(),
         progression_flags: Default::default(),
     };
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, updated_at)
-             VALUES (1, 1, ?1, unixepoch())",
-            [serde_json::to_string(&legacy).unwrap()],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        1,
+        &serde_json::to_string(&legacy).unwrap(),
+        None,
+    );
 
     let upgraded = load_runtime_snapshot(&connection).unwrap().unwrap();
     assert_eq!(
@@ -1447,14 +1446,12 @@ fn sqlite_runtime_loader_upgrades_v2_before_validating_current_version() {
         adventure: tiamud_core::AdventureRuntimeSnapshot::default(),
         progression_flags: Default::default(),
     };
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, updated_at)
-             VALUES (1, 2, ?1, unixepoch())",
-            [serde_json::to_string(&legacy).unwrap()],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        2,
+        &serde_json::to_string(&legacy).unwrap(),
+        None,
+    );
 
     let upgraded = load_runtime_snapshot(&connection).unwrap().unwrap();
     assert_eq!(
@@ -1552,14 +1549,12 @@ fn sqlite_runtime_loader_upgrades_v3_binding_as_unbound_and_rejects_smuggling() 
 
     let mut connection = Connection::open_in_memory().unwrap();
     migrate(&mut connection).unwrap();
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, updated_at)
-             VALUES (1, 3, ?1, unixepoch())",
-            [serde_json::to_string(&legacy).unwrap()],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        3,
+        &serde_json::to_string(&legacy).unwrap(),
+        None,
+    );
 
     let upgraded = load_runtime_snapshot(&connection).unwrap().unwrap();
     let item = &upgraded.item_instances[&ItemInstanceId("runtime:contained".into())];
@@ -1572,12 +1567,7 @@ fn sqlite_runtime_loader_upgrades_v3_binding_as_unbound_and_rejects_smuggling() 
     let mut smuggled = serde_json::to_value(&legacy).unwrap();
     smuggled["itemInstances"]["runtime:contained"]["binding"] =
         serde_json::json!({"kind":"character", "characterId":7});
-    connection
-        .execute(
-            "UPDATE world_runtime SET snapshot_json = ?1 WHERE singleton = 1",
-            [smuggled.to_string()],
-        )
-        .unwrap();
+    store_runtime_document(&connection, 3, &smuggled.to_string(), None);
     assert!(matches!(
         load_runtime_snapshot(&connection),
         Err(StoreError::InvalidRuntimeSnapshot)
@@ -1610,14 +1600,7 @@ fn sqlite_runtime_loader_upgrades_strict_v4_and_rejects_trade_smuggling() {
     {
         item.as_object_mut().unwrap().remove("itemAffixes");
     }
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, updated_at)
-             VALUES (1, 4, ?1, unixepoch())",
-            [legacy.to_string()],
-        )
-        .unwrap();
+    store_runtime_document(&connection, 4, &legacy.to_string(), None);
 
     let upgraded = load_runtime_snapshot(&connection).unwrap().unwrap();
     assert_eq!(
@@ -1628,12 +1611,7 @@ fn sqlite_runtime_loader_upgrades_strict_v4_and_rejects_trade_smuggling() {
     assert!(upgraded.trades.is_empty());
 
     legacy["trades"] = serde_json::json!({});
-    connection
-        .execute(
-            "UPDATE world_runtime SET snapshot_json = ?1 WHERE singleton = 1",
-            [legacy.to_string()],
-        )
-        .unwrap();
+    store_runtime_document(&connection, 4, &legacy.to_string(), None);
     assert!(matches!(
         load_runtime_snapshot(&connection),
         Err(StoreError::InvalidRuntimeSnapshot)
@@ -1694,14 +1672,7 @@ fn sqlite_runtime_loader_rejects_an_unsupported_snapshot_version() {
         "itemInstances": {},
         "npcs": {}
     });
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, updated_at)
-             VALUES (1, 99, ?1, unixepoch())",
-            [legacy.to_string()],
-        )
-        .unwrap();
+    store_runtime_document(&connection, 99, &legacy.to_string(), None);
 
     assert!(matches!(
         load_runtime_snapshot(&connection),
@@ -1714,14 +1685,12 @@ fn sqlite_runtime_loader_rejects_column_payload_version_mismatch() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrate(&mut connection).unwrap();
     let runtime = World::demo().runtime_snapshot();
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, updated_at)
-             VALUES (1, 1, ?1, unixepoch())",
-            [serde_json::to_string(&runtime).unwrap()],
-        )
-        .unwrap();
+    store_runtime_document(
+        &connection,
+        1,
+        &serde_json::to_string(&runtime).unwrap(),
+        None,
+    );
 
     assert!(matches!(
         load_runtime_snapshot(&connection),
@@ -1740,14 +1709,7 @@ fn sqlite_runtime_loader_rejects_multibyte_snapshot_above_byte_limit() {
     assert!(oversized.chars().count() <= MAX_RUNTIME_JSON_BYTES);
     assert!(oversized.len() > tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES);
     assert!(oversized.len() <= MAX_RUNTIME_JSON_BYTES);
-    connection
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, updated_at)
-             VALUES (1, 2, ?1, unixepoch())",
-            [&oversized],
-        )
-        .unwrap();
+    store_runtime_document(&connection, 2, &oversized, None);
 
     assert!(matches!(
         load_runtime_snapshot(&connection),

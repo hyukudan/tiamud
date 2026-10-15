@@ -18,12 +18,12 @@ use thiserror::Error;
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, AreaDynamicCheckpoint, AreaRuntimeResidence, BoardKey,
     CharacterGameplaySnapshot, CharacterId, CharacterSnapshot, DomainEvent,
-    DurableCharacterSnapshot, MAX_ITEM_INSTANCES, SocialChannelName, StaffCapability,
-    StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot, valid_board_public_id,
-    valid_board_subject, valid_mail_public_id, valid_mail_subject, valid_mail_target,
-    valid_mail_visible_text,
+    DurableCharacterSnapshot, MAX_ITEM_INSTANCES, RuntimeSectionSet, SocialChannelName,
+    StaffCapability, StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot,
+    valid_board_public_id, valid_board_subject, valid_mail_public_id, valid_mail_subject,
+    valid_mail_target, valid_mail_visible_text,
 };
-use tiamud_persistence_sqlite::{SchemaError, migrate};
+use tiamud_persistence_sqlite::{SchemaError, migrate, runtime_sections};
 #[cfg(test)]
 use tokio::sync::Notify;
 use tokio::{
@@ -47,6 +47,8 @@ pub use sqlite::SqliteCharacterStore;
 /// Public types of the persisted story save slots (schema v16, ADR 0030).
 mod story_slots;
 pub use story_slots::*;
+#[cfg(test)]
+mod sectioned_runtime_tests;
 #[cfg(test)]
 mod story_slot_tests;
 #[cfg(test)]
@@ -869,6 +871,20 @@ pub trait CharacterStore: Send + Sync {
         events: Vec<DomainEvent>,
     ) -> Result<(), StoreError>;
 
+    /// Like [`CharacterStore::commit_action`], but the runtime snapshot only
+    /// needs to rewrite `sections`: the caller guarantees that every other
+    /// section equals what this backend last confirmed (ADR 0035). Stores
+    /// that do not section the runtime keep the full rewrite.
+    async fn commit_action_sections(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        _sections: RuntimeSectionSet,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError> {
+        self.commit_action(characters, runtime, events).await
+    }
+
     async fn commit_staff_action(
         &self,
         characters: Vec<DurableCharacterSnapshot>,
@@ -1409,6 +1425,20 @@ impl CharacterStore for MeasuredCharacterStore {
             .await
     }
 
+    async fn commit_action_sections(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        sections: RuntimeSectionSet,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError> {
+        self.transaction(
+            self.inner
+                .commit_action_sections(characters, runtime, sections, events),
+        )
+        .await
+    }
+
     async fn commit_staff_action(
         &self,
         characters: Vec<DurableCharacterSnapshot>,
@@ -1566,6 +1596,7 @@ pub(super) enum Request {
     CommitAction {
         characters: Vec<DurableCharacterSnapshot>,
         runtime: WorldRuntimeSnapshot,
+        sections: RuntimeSectionSet,
         events: Vec<DomainEvent>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
@@ -1839,6 +1870,7 @@ pub(super) trait PersistenceCommandHandler {
         &mut self,
         characters: Vec<DurableCharacterSnapshot>,
         runtime: WorldRuntimeSnapshot,
+        sections: RuntimeSectionSet,
         events: Vec<DomainEvent>,
     ) -> Result<(), StoreError>;
     fn commit_staff_action(
@@ -2151,10 +2183,11 @@ pub(super) fn dispatch_persistence_request<H: PersistenceCommandHandler>(
         Request::CommitAction {
             characters,
             runtime,
+            sections,
             events,
             reply,
         } => {
-            let _ = reply.send(handler.commit_action(characters, runtime, events));
+            let _ = reply.send(handler.commit_action(characters, runtime, sections, events));
         }
         Request::CommitStaffAction {
             characters,

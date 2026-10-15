@@ -120,14 +120,17 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     let runtime = tiamud_core::World::demo().runtime_snapshot();
     let runtime_json = serde_json::to_string(&runtime).unwrap();
-    sqlite
-        .execute(
-            "INSERT INTO world_runtime
-                 (singleton, snapshot_version, snapshot_json, last_event_sequence)
-             VALUES (1, ?1, ?2, 7)",
-            params![runtime.snapshot_version, runtime_json],
-        )
-        .unwrap();
+    tiamud_persistence_sqlite::runtime_sections::write_runtime_document_sqlite(
+        &sqlite,
+        i64::from(runtime.snapshot_version),
+        &runtime_json,
+        Some(7),
+    )
+    .unwrap();
+    let source_runtime =
+        tiamud_persistence_sqlite::runtime_sections::load_stored_runtime_sqlite(&sqlite)
+            .unwrap()
+            .unwrap();
     let checkpoint = tiamud_core::AreaDynamicCheckpoint {
         checkpoint_version: tiamud_core::AREA_DYNAMIC_CHECKPOINT_VERSION,
         generation_sha256: "a".repeat(64),
@@ -190,7 +193,8 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     let report =
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres).unwrap();
-    assert_eq!(report.total_rows, 25);
+    // 25 rows plus the ten runtime section rows of schema v17.
+    assert_eq!(report.total_rows, 35);
     assert_eq!(
         postgres
             .query_one("SELECT COUNT(*)::BIGINT FROM characters", &[])
@@ -239,7 +243,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 16, to: 16 }
+        tiamud_persistence_postgres::MigrationReport { from: 17, to: 17 }
     );
     let story_row = postgres
         .query_one(
@@ -420,27 +424,36 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .get::<_, Option<i64>>(0),
         Some(7)
     );
+    let mut target_runtime =
+        tiamud_persistence_postgres::runtime_sections::load_stored_runtime(&mut postgres, false)
+            .unwrap()
+            .unwrap();
+    target_runtime.sections.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(
+        target_runtime, source_runtime,
+        "offline transfer must preserve the verified runtime rows byte-for-byte"
+    );
+    assert_eq!(assembled_runtime(&mut postgres), json_value(&runtime_json));
+
+    // v16 -> v17 splits the single legacy document into verified sections.
+    downgrade_runtime_to_v16(&mut postgres, &runtime_json, Some(7));
+    postgres
+        .batch_execute("UPDATE tiamud_schema SET version = 16 WHERE singleton = 1")
+        .unwrap();
+    assert_eq!(
+        tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
+        tiamud_persistence_postgres::MigrationReport { from: 16, to: 17 }
+    );
+    assert_eq!(assembled_runtime(&mut postgres), json_value(&runtime_json));
     assert_eq!(
         postgres
-            .query_one(
-                "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
-                &[],
-            )
+            .query_one("SELECT COUNT(*)::BIGINT FROM world_runtime_sections", &[])
             .unwrap()
             .get::<_, i64>(0),
-        i64::from(runtime.snapshot_version)
+        10
     );
-    assert_eq!(
-        postgres
-            .query_one(
-                "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
-                &[],
-            )
-            .unwrap()
-            .get::<_, String>(1),
-        runtime_json,
-        "offline transfer must preserve the validated runtime snapshot byte-for-byte"
-    );
+
+    downgrade_runtime_to_v16(&mut postgres, &runtime_json, Some(7));
     postgres
         .batch_execute(
             "DROP TABLE story_saves;
@@ -451,18 +464,12 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 13, to: 16 }
+        tiamud_persistence_postgres::MigrationReport { from: 13, to: 17 }
     );
     assert_eq!(
-        postgres
-            .query_one(
-                "SELECT snapshot_json FROM world_runtime WHERE singleton = 1",
-                &[],
-            )
-            .unwrap()
-            .get::<_, String>(0),
-        runtime_json,
-        "v13 to v16 must not rewrite the runtime snapshot"
+        assembled_runtime(&mut postgres),
+        json_value(&runtime_json),
+        "v13 to v17 must not change the runtime snapshot"
     );
     assert_eq!(
         postgres
@@ -472,6 +479,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         0,
         "v13 starts without a selected durable generation"
     );
+    downgrade_runtime_to_v16(&mut postgres, &runtime_json, Some(7));
     postgres
         .batch_execute(
             "DROP TABLE story_saves;
@@ -494,30 +502,22 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 10, to: 16 }
+        tiamud_persistence_postgres::MigrationReport { from: 10, to: 17 }
     );
-    let constraint: String = postgres
-        .query_one(
-            "SELECT pg_get_constraintdef(oid)
-             FROM pg_constraint
-             WHERE conrelid = 'world_runtime'::regclass
-               AND conname = 'world_runtime_snapshot_json_check'",
-            &[],
-        )
-        .unwrap()
-        .get(0);
-    assert!(constraint.contains("2097152"));
+    assert_eq!(
+        assembled_runtime(&mut postgres),
+        json_value(&runtime_json),
+        "v10 to v17 must preserve the runtime payload"
+    );
     assert_eq!(
         postgres
             .query_one(
-                "SELECT snapshot_version, snapshot_json, last_event_sequence
-                 FROM world_runtime WHERE singleton = 1",
+                "SELECT last_event_sequence FROM world_runtime WHERE singleton = 1",
                 &[],
             )
             .unwrap()
-            .get::<_, String>(1),
-        runtime_json,
-        "v10 to v11 must preserve the runtime payload and its metadata"
+            .get::<_, Option<i64>>(0),
+        Some(7)
     );
     assert!(matches!(
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres),
@@ -526,6 +526,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             rows: 2
         })
     ));
+    downgrade_runtime_to_v16(&mut postgres, &runtime_json, Some(7));
     postgres
         .batch_execute(
             "DROP TABLE story_saves;
@@ -563,7 +564,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 16 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 17 }
     );
     assert!(
         postgres
@@ -606,25 +607,25 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 17 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 18 WHERE singleton = 1",
             &[],
         )
         .unwrap();
     assert!(matches!(
         tiamud_persistence_postgres::migrate(&mut postgres),
-        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 17 })
+        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 18 })
     ));
     assert_eq!(
         postgres
             .query_one("SELECT version FROM tiamud_schema WHERE singleton = 1", &[])
             .unwrap()
             .get::<_, i32>(0),
-        17,
+        18,
         "future metadata must remain untouched after rejection"
     );
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 16 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 17 WHERE singleton = 1",
             &[],
         )
         .unwrap();
@@ -685,4 +686,50 @@ fn rolls_back_schema_and_rows_when_a_source_value_breaks_a_postgres_limit() {
     postgres
         .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
         .unwrap();
+}
+
+/// Restore the exact v16 single-document `world_runtime` table holding `json`.
+fn downgrade_runtime_to_v16(postgres: &mut Client, json: &str, last_event_sequence: Option<i64>) {
+    postgres
+        .batch_execute(
+            "DROP TABLE IF EXISTS world_runtime_sections;
+             DROP TABLE world_runtime;
+             CREATE TABLE world_runtime (
+                 singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
+                 snapshot_version BIGINT NOT NULL,
+                 snapshot_json TEXT NOT NULL
+                     CONSTRAINT world_runtime_snapshot_json_check
+                     CHECK (octet_length(snapshot_json) <= 2097152),
+                 last_event_sequence BIGINT
+                     CHECK (last_event_sequence IS NULL OR last_event_sequence >= 0),
+                 updated_at BIGINT NOT NULL
+                     DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
+             );",
+        )
+        .unwrap();
+    let version = i64::from(tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION);
+    postgres
+        .execute(
+            "INSERT INTO world_runtime
+                 (singleton, snapshot_version, snapshot_json, last_event_sequence)
+             VALUES (1, $1, $2, $3)",
+            &[&version, &json, &last_event_sequence],
+        )
+        .unwrap();
+}
+
+/// The verified assembled runtime document of the current schema.
+fn assembled_runtime(postgres: &mut Client) -> serde_json::Value {
+    let stored =
+        tiamud_persistence_postgres::runtime_sections::load_stored_runtime(postgres, false)
+            .unwrap()
+            .unwrap();
+    json_value(
+        &tiamud_persistence_sqlite::runtime_sections::assemble_stored_runtime(&stored, usize::MAX)
+            .unwrap(),
+    )
+}
+
+fn json_value(json: &str) -> serde_json::Value {
+    serde_json::from_str(json).unwrap()
 }

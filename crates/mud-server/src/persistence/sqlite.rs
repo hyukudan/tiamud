@@ -223,9 +223,16 @@ impl PersistenceCommandHandler for SqliteCommandHandler {
         &mut self,
         characters: Vec<DurableCharacterSnapshot>,
         runtime: WorldRuntimeSnapshot,
+        sections: RuntimeSectionSet,
         events: Vec<DomainEvent>,
     ) -> Result<(), StoreError> {
-        commit_action(&mut self.connection, &characters, &runtime, &events)
+        commit_action_sections(
+            &mut self.connection,
+            &characters,
+            &runtime,
+            sections,
+            &events,
+        )
     }
 
     fn commit_staff_action(
@@ -1616,11 +1623,23 @@ impl CharacterStore for SqliteCharacterStore {
         runtime: WorldRuntimeSnapshot,
         events: Vec<DomainEvent>,
     ) -> Result<(), StoreError> {
+        self.commit_action_sections(characters, runtime, RuntimeSectionSet::ALL, events)
+            .await
+    }
+
+    async fn commit_action_sections(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        sections: RuntimeSectionSet,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
         self.request_commit(
             Request::CommitAction {
                 characters,
                 runtime,
+                sections,
                 events,
                 reply,
             },
@@ -1675,6 +1694,7 @@ pub(super) fn initialise(connection: &mut Connection) -> Result<(), StoreError> 
             Err(StoreError::UnsupportedSchemaVersion { found, supported })
         }
         Err(SchemaError::ForeignKeyViolations) => Err(StoreError::SchemaForeignKeyViolations),
+        Err(SchemaError::RuntimeSections(error)) => Err(runtime_section_error(error)),
     }
 }
 
@@ -3982,20 +4002,102 @@ pub(super) fn load_runtime_snapshot(
 pub(super) fn load_durable_runtime_snapshot(
     connection: &Connection,
 ) -> Result<Option<(u32, WorldRuntimeSnapshot)>, StoreError> {
-    connection
-        .query_row(
-            "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?
-        .map(|(snapshot_version, json)| {
-            let durable_version =
-                u32::try_from(snapshot_version).map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
-            decode_runtime_snapshot(snapshot_version, &json)
-                .map(|snapshot| (durable_version, snapshot))
-        })
+    runtime_sections::load_stored_runtime_sqlite(connection)
+        .map_err(runtime_section_error)?
+        .map(|stored| decode_stored_runtime(&stored))
         .transpose()
+}
+
+/// Write one runtime commit (ADR 0035): the head and manifest always, plus
+/// the sections `plan_runtime_write` selects, the `world_adventure` mirror
+/// when its section changed, the event watermark and the retained-ledger
+/// compaction. Callers run it inside their commit transaction after any
+/// event inserts.
+pub(super) fn persist_runtime(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime: &WorldRuntimeSnapshot,
+    encoded: EncodedRuntime,
+    event_retention: i64,
+) -> Result<(), StoreError> {
+    let previous = transaction
+        .prepare_cached(
+            "SELECT snapshot_version, manifest_json FROM world_runtime WHERE singleton = 1",
+        )?
+        .query_row([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+    let plan = plan_runtime_write(previous, runtime, encoded)?;
+    if plan.replace_all {
+        transaction.execute("DELETE FROM world_runtime_sections", [])?;
+    }
+    {
+        let mut upsert = transaction.prepare_cached(
+            "INSERT INTO world_runtime_sections
+                 (section, revision, section_json, section_sha256, updated_at)
+             VALUES (?1, ?2, ?3, ?4, unixepoch())
+             ON CONFLICT(section) DO UPDATE SET
+                 revision = excluded.revision,
+                 section_json = excluded.section_json,
+                 section_sha256 = excluded.section_sha256,
+                 updated_at = excluded.updated_at",
+        )?;
+        for section in &plan.sections {
+            upsert.execute(params![
+                section.section.field_name(),
+                plan.revision,
+                section.json,
+                section.sha256
+            ])?;
+        }
+    }
+    if let Some(world_adventure_json) = plan.world_adventure_json() {
+        transaction
+            .prepare_cached(
+                "INSERT INTO world_adventure (singleton, state_json, updated_at)
+                 VALUES (1, ?1, unixepoch())
+                 ON CONFLICT(singleton) DO UPDATE SET
+                     state_json = excluded.state_json,
+                     updated_at = excluded.updated_at",
+            )?
+            .execute([world_adventure_json])?;
+    }
+    let last_event_sequence = transaction
+        .prepare_cached(
+            "SELECT max(
+             COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
+             COALESCE((SELECT last_event_sequence FROM world_runtime
+                       WHERE singleton = 1), 0)
+         )",
+        )?
+        .query_row([], |row| row.get::<_, i64>(0))?;
+    transaction
+        .prepare_cached(
+            "INSERT INTO world_runtime
+                 (singleton, snapshot_version, head_json, manifest_json,
+                  last_event_sequence, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, unixepoch())
+             ON CONFLICT(singleton) DO UPDATE SET
+                 snapshot_version = excluded.snapshot_version,
+                 head_json = excluded.head_json,
+                 manifest_json = excluded.manifest_json,
+                 last_event_sequence = excluded.last_event_sequence,
+                 updated_at = excluded.updated_at",
+        )?
+        .execute(params![
+            plan.snapshot_version,
+            plan.head_json,
+            plan.manifest_json,
+            last_event_sequence
+        ])?;
+    transaction
+        .prepare_cached(
+            "DELETE FROM domain_events
+             WHERE sequence <= ?1 - ?2
+               AND sequence <= ?1",
+        )?
+        .execute(params![last_event_sequence, event_retention])?;
+    Ok(())
 }
 
 pub(super) fn has_durable_character_authority(connection: &Connection) -> Result<bool, StoreError> {
@@ -4091,42 +4193,8 @@ pub(super) fn persist_area_runtime(
     transaction: &rusqlite::Transaction<'_>,
     runtime: &WorldRuntimeSnapshot,
 ) -> Result<(), StoreError> {
-    let (runtime_json, adventure_json) = encode_runtime_documents(runtime)?;
-    transaction.execute(
-        "INSERT INTO world_adventure (singleton, state_json, updated_at)
-         VALUES (1, ?1, unixepoch())
-         ON CONFLICT(singleton) DO UPDATE SET
-             state_json = excluded.state_json,
-             updated_at = excluded.updated_at",
-        [adventure_json],
-    )?;
-    let last_event_sequence = transaction.query_row(
-        "SELECT max(
-             COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
-             COALESCE((SELECT last_event_sequence FROM world_runtime
-                       WHERE singleton = 1), 0)
-         )",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    transaction.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json,
-              last_event_sequence, updated_at)
-         VALUES (1, ?1, ?2, ?3, unixepoch())
-         ON CONFLICT(singleton) DO UPDATE SET
-             snapshot_version = excluded.snapshot_version,
-             snapshot_json = excluded.snapshot_json,
-             last_event_sequence = excluded.last_event_sequence,
-             updated_at = excluded.updated_at",
-        params![runtime.snapshot_version, runtime_json, last_event_sequence],
-    )?;
-    transaction.execute(
-        "DELETE FROM domain_events
-         WHERE sequence <= ?1 - ?2 AND sequence <= ?1",
-        params![last_event_sequence, DOMAIN_EVENT_RETENTION],
-    )?;
-    Ok(())
+    let encoded = encode_runtime(runtime, RuntimeSectionSet::ALL)?;
+    persist_runtime(transaction, runtime, encoded, DOMAIN_EVENT_RETENTION)
 }
 
 pub(super) fn verify_exact_area_generation(
@@ -4253,7 +4321,7 @@ pub(super) fn commit_area_generation_activation(
     next: &DurableAreaGeneration,
 ) -> Result<(), StoreError> {
     validate_area_generation_transition(expected, next)?;
-    let (runtime_json, world_adventure_json) = encode_runtime_documents(runtime)?;
+    let encoded = encode_runtime(runtime, RuntimeSectionSet::ALL)?;
     let expected_sequence = i64::try_from(expected.activation_sequence)
         .map_err(|_| StoreError::InvalidAreaGeneration)?;
     let next_sequence =
@@ -4283,41 +4351,7 @@ pub(super) fn commit_area_generation_activation(
     if changed != 1 {
         return Err(StoreError::AreaGenerationConflict);
     }
-    transaction.execute(
-        "INSERT INTO world_adventure (singleton, state_json, updated_at)
-         VALUES (1, ?1, unixepoch())
-         ON CONFLICT(singleton) DO UPDATE SET
-             state_json = excluded.state_json,
-             updated_at = excluded.updated_at",
-        [world_adventure_json],
-    )?;
-    let last_event_sequence = transaction.query_row(
-        "SELECT max(
-             COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
-             COALESCE((SELECT last_event_sequence FROM world_runtime
-                       WHERE singleton = 1), 0)
-         )",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    transaction.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json,
-              last_event_sequence, updated_at)
-         VALUES (1, ?1, ?2, ?3, unixepoch())
-         ON CONFLICT(singleton) DO UPDATE SET
-             snapshot_version = excluded.snapshot_version,
-             snapshot_json = excluded.snapshot_json,
-             last_event_sequence = excluded.last_event_sequence,
-             updated_at = excluded.updated_at",
-        params![runtime.snapshot_version, runtime_json, last_event_sequence],
-    )?;
-    transaction.execute(
-        "DELETE FROM domain_events
-         WHERE sequence <= ?1 - ?2
-           AND sequence <= ?1",
-        params![last_event_sequence, DOMAIN_EVENT_RETENTION],
-    )?;
+    persist_runtime(&transaction, runtime, encoded, DOMAIN_EVENT_RETENTION)?;
     transaction.commit()?;
     Ok(())
 }
@@ -4369,16 +4403,37 @@ pub(super) fn load_domain_events(connection: &Connection) -> Result<Vec<DomainEv
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn commit_action(
     connection: &mut Connection,
     characters: &[DurableCharacterSnapshot],
     runtime: &WorldRuntimeSnapshot,
     events: &[DomainEvent],
 ) -> Result<(), StoreError> {
+    commit_action_sections(
+        connection,
+        characters,
+        runtime,
+        RuntimeSectionSet::ALL,
+        events,
+    )
+}
+
+/// An action commit that rewrites only `sections` of the runtime (plus any
+/// section the stored manifest cannot vouch for). The caller guarantees every
+/// other section equals what the backend last confirmed (ADR 0035).
+pub(super) fn commit_action_sections(
+    connection: &mut Connection,
+    characters: &[DurableCharacterSnapshot],
+    runtime: &WorldRuntimeSnapshot,
+    sections: RuntimeSectionSet,
+    events: &[DomainEvent],
+) -> Result<(), StoreError> {
     commit_action_with_retention(
         connection,
         characters,
         runtime,
+        sections,
         events,
         DOMAIN_EVENT_RETENTION,
         None,
@@ -4397,6 +4452,7 @@ pub(super) fn commit_staff_action(
         connection,
         characters,
         runtime,
+        RuntimeSectionSet::ALL,
         events,
         DOMAIN_EVENT_RETENTION,
         Some((audit, now)),
@@ -4457,6 +4513,7 @@ pub(super) fn commit_action_with_retention(
     connection: &mut Connection,
     characters: &[DurableCharacterSnapshot],
     runtime: &WorldRuntimeSnapshot,
+    sections: RuntimeSectionSet,
     events: &[DomainEvent],
     event_retention: i64,
     staff_audit: Option<(StaffAuditRecord, i64)>,
@@ -4465,11 +4522,10 @@ pub(super) fn commit_action_with_retention(
     let EncodedActionCommit {
         gameplay_json,
         adventure_json,
-        runtime_json,
-        world_adventure_json,
+        runtime: encoded_runtime,
         event_json,
         staff_audit,
-    } = encode_action_commit(characters, runtime, events, staff_audit)?;
+    } = encode_action_commit(characters, runtime, sections, events, staff_audit)?;
 
     let transaction = connection.transaction()?;
     if let Some((audit, _)) = &staff_audit {
@@ -4505,15 +4561,6 @@ pub(super) fn commit_action_with_retention(
             )?
             .execute(params![snapshot.character.id.0, adventure_json])?;
     }
-    transaction
-        .prepare_cached(
-            "INSERT INTO world_adventure (singleton, state_json, updated_at)
-         VALUES (1, ?1, unixepoch())
-         ON CONFLICT(singleton) DO UPDATE SET
-             state_json = excluded.state_json,
-             updated_at = excluded.updated_at",
-        )?
-        .execute([world_adventure_json])?;
     {
         let mut insert_event =
             transaction.prepare_cached("INSERT INTO domain_events (event_json) VALUES (?1)")?;
@@ -4521,39 +4568,7 @@ pub(super) fn commit_action_with_retention(
             insert_event.execute([event_json])?;
         }
     }
-    let last_event_sequence = transaction
-        .prepare_cached(
-            "SELECT max(
-             COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
-             COALESCE((SELECT last_event_sequence FROM world_runtime
-                       WHERE singleton = 1), 0)
-         )",
-        )?
-        .query_row([], |row| row.get::<_, i64>(0))?;
-    transaction
-        .prepare_cached(
-            "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json,
-              last_event_sequence, updated_at)
-         VALUES (1, ?1, ?2, ?3, unixepoch())
-         ON CONFLICT(singleton) DO UPDATE SET
-             snapshot_version = excluded.snapshot_version,
-             snapshot_json = excluded.snapshot_json,
-             last_event_sequence = excluded.last_event_sequence,
-             updated_at = excluded.updated_at",
-        )?
-        .execute(params![
-            runtime.snapshot_version,
-            runtime_json,
-            last_event_sequence
-        ])?;
-    transaction
-        .prepare_cached(
-            "DELETE FROM domain_events
-             WHERE sequence <= ?1 - ?2
-               AND sequence <= ?1",
-        )?
-        .execute(params![last_event_sequence, event_retention])?;
+    persist_runtime(&transaction, runtime, encoded_runtime, event_retention)?;
     if let Some((audit, now)) = &staff_audit {
         insert_staff_audit(&transaction, audit, *now)?;
     }

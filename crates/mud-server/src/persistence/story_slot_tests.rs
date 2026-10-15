@@ -506,7 +506,7 @@ async fn sqlite_store_migrates_a_v15_database_to_story_slots() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        16
+        tiamud_persistence_sqlite::SCHEMA_VERSION
     );
 }
 

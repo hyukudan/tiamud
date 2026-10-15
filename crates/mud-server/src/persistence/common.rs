@@ -15,12 +15,13 @@ use std::{
 
 use tiamud_core::{
     AccountId, AccountRole, CharacterGameplaySnapshot, CharacterSnapshot, DomainEvent,
-    DurableCharacterSnapshot, SocialChannelName, StaffCapability, StaffProfileKey,
-    WorldRuntimeSnapshot, valid_board_visible_text, valid_mail_visible_text,
+    DurableCharacterSnapshot, RuntimeSection, RuntimeSectionSet, SocialChannelName,
+    StaffCapability, StaffProfileKey, WorldRuntimeSnapshot, valid_board_visible_text,
+    valid_mail_visible_text,
 };
 use tokio::time::Duration;
 
-use tiamud_persistence_sqlite::story_saves;
+use tiamud_persistence_sqlite::{runtime_sections, story_saves};
 
 use super::{
     BOARD_ACCOUNT_CAPACITY, BOARD_CAPACITY_PER_BOARD, MAILBOX_CAPACITY, MAX_SOCIAL_REASON_BYTES,
@@ -224,18 +225,217 @@ pub(crate) fn encode_character_row(
     Ok((name, item_locations_json))
 }
 
-/// `world_runtime.snapshot_json` and `world_adventure.state_json` for one
-/// runtime snapshot, in that order.
-pub(crate) fn encode_runtime_documents(
-    runtime: &WorldRuntimeSnapshot,
-) -> Result<(String, String), StoreError> {
-    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
-    let world_adventure_json = bounded_json(
-        &runtime.adventure,
-        "world adventure",
+// ---------------------------------------------------------------------------
+// Sectioned world runtime (schema v17, ADR 0035)
+// ---------------------------------------------------------------------------
+
+/// `world_runtime.head_json`: every snapshot member that is not a section.
+/// `runtime_head_covers_every_non_section_member` pins it to the DTO.
+pub(crate) fn encode_runtime_head(runtime: &WorldRuntimeSnapshot) -> Result<String, StoreError> {
+    bounded_json(
+        &serde_json::json!({
+            "snapshotVersion": runtime.snapshot_version,
+            "revision": runtime.revision,
+            "logicalTick": runtime.logical_tick,
+            "rngState": runtime.rng_state,
+            "nextItemInstanceSequence": runtime.next_item_instance_sequence,
+            "nextTradeId": runtime.next_trade_id,
+            "nextLootDropId": runtime.next_loot_drop_id,
+            "nextRewardOpenId": runtime.next_reward_open_id,
+        }),
+        "world runtime head",
         MAX_RUNTIME_JSON_BYTES,
-    )?;
-    Ok((runtime_json, world_adventure_json))
+    )
+}
+
+/// One encoded runtime section with its digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EncodedRuntimeSection {
+    pub(crate) section: RuntimeSection,
+    pub(crate) json: String,
+    pub(crate) sha256: String,
+}
+
+/// `world_runtime_sections.section_json` of one section. The adventure
+/// section is also the `world_adventure.state_json` document.
+pub(crate) fn encode_runtime_section(
+    runtime: &WorldRuntimeSnapshot,
+    section: RuntimeSection,
+) -> Result<EncodedRuntimeSection, StoreError> {
+    const KIND: &str = "world runtime section";
+    let json = match section {
+        RuntimeSection::ItemInstances => {
+            bounded_json(&runtime.item_instances, KIND, MAX_RUNTIME_JSON_BYTES)
+        }
+        RuntimeSection::ItemProvenance => {
+            bounded_json(&runtime.item_provenance, KIND, MAX_RUNTIME_JSON_BYTES)
+        }
+        RuntimeSection::Npcs => bounded_json(&runtime.npcs, KIND, MAX_RUNTIME_JSON_BYTES),
+        RuntimeSection::Adventure => bounded_json(
+            &runtime.adventure,
+            "world adventure",
+            MAX_RUNTIME_JSON_BYTES,
+        ),
+        RuntimeSection::ProgressionFlags => {
+            bounded_json(&runtime.progression_flags, KIND, MAX_RUNTIME_JSON_BYTES)
+        }
+        RuntimeSection::Trades => bounded_json(&runtime.trades, KIND, MAX_RUNTIME_JSON_BYTES),
+        RuntimeSection::LootEncounters => {
+            bounded_json(&runtime.loot_encounters, KIND, MAX_RUNTIME_JSON_BYTES)
+        }
+        RuntimeSection::GroundLoot => {
+            bounded_json(&runtime.ground_loot, KIND, MAX_RUNTIME_JSON_BYTES)
+        }
+        RuntimeSection::PartyLootCursors => {
+            bounded_json(&runtime.party_loot_cursors, KIND, MAX_RUNTIME_JSON_BYTES)
+        }
+        RuntimeSection::AreaResidency => {
+            bounded_json(&runtime.area_residency, KIND, MAX_RUNTIME_JSON_BYTES)
+        }
+    }?;
+    let sha256 = runtime_sections::sha256_hex(json.as_bytes());
+    Ok(EncodedRuntimeSection {
+        section,
+        json,
+        sha256,
+    })
+}
+
+/// The head and the requested sections of one runtime commit, encoded
+/// before any transaction opens.
+#[derive(Clone, Debug)]
+pub(crate) struct EncodedRuntime {
+    pub(crate) snapshot_version: i64,
+    pub(crate) head_json: String,
+    pub(crate) sections: Vec<EncodedRuntimeSection>,
+}
+
+pub(crate) fn encode_runtime(
+    runtime: &WorldRuntimeSnapshot,
+    sections: RuntimeSectionSet,
+) -> Result<EncodedRuntime, StoreError> {
+    Ok(EncodedRuntime {
+        snapshot_version: i64::from(runtime.snapshot_version),
+        head_json: encode_runtime_head(runtime)?,
+        sections: sections
+            .iter()
+            .map(|section| encode_runtime_section(runtime, section))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+/// Exactly what one runtime write stores, decided inside the transaction
+/// from the previously stored manifest.
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeWritePlan {
+    pub(crate) snapshot_version: i64,
+    pub(crate) head_json: String,
+    pub(crate) manifest_json: String,
+    pub(crate) revision: i64,
+    /// Section rows to upsert, in canonical order.
+    pub(crate) sections: Vec<EncodedRuntimeSection>,
+    /// True when no usable previous manifest exists: every section row is
+    /// replaced and stray rows are deleted.
+    pub(crate) replace_all: bool,
+}
+
+impl RuntimeWritePlan {
+    /// The `world_adventure.state_json` mirror, when the adventure section is
+    /// rewritten.
+    pub(crate) fn world_adventure_json(&self) -> Option<&str> {
+        self.sections
+            .iter()
+            .find(|encoded| encoded.section == RuntimeSection::Adventure)
+            .map(|encoded| encoded.json.as_str())
+    }
+
+    /// Bytes of the runtime documents this plan writes (head, manifest and
+    /// sections), for diagnostics and the hot-path measurement.
+    #[cfg(test)]
+    pub(crate) fn written_bytes(&self) -> usize {
+        self.head_json.len()
+            + self.manifest_json.len()
+            + self
+                .sections
+                .iter()
+                .map(|encoded| encoded.json.len())
+                .sum::<usize>()
+    }
+}
+
+/// Decide a runtime write. `previous` is the stored `(snapshot_version,
+/// manifest_json)`. A clean section is only kept when a manifest of the same
+/// snapshot version lists it; anything else (no row, another version, an
+/// unreadable manifest, a section the manifest lacks) is encoded and written.
+/// The assembled snapshot keeps the same byte ceiling as a single document.
+pub(crate) fn plan_runtime_write(
+    previous: Option<(i64, String)>,
+    runtime: &WorldRuntimeSnapshot,
+    encoded: EncodedRuntime,
+) -> Result<RuntimeWritePlan, StoreError> {
+    let EncodedRuntime {
+        snapshot_version,
+        head_json,
+        mut sections,
+    } = encoded;
+    let previous = previous
+        .filter(|(version, _)| *version == snapshot_version)
+        .and_then(|(_, manifest)| runtime_sections::RuntimeManifest::parse(&manifest).ok());
+    let revision = previous
+        .as_ref()
+        .map_or(Some(1), |manifest| manifest.revision.checked_add(1))
+        .filter(|revision| i64::try_from(*revision).is_ok())
+        .ok_or(StoreError::InvalidRuntimeSnapshot)?;
+    let replace_all = previous.is_none();
+    let encoded_set = sections
+        .iter()
+        .map(|encoded| encoded.section)
+        .collect::<RuntimeSectionSet>();
+    for section in RuntimeSection::ALL {
+        let stored = previous
+            .as_ref()
+            .is_some_and(|manifest| manifest.sections.contains_key(section.field_name()));
+        if !encoded_set.contains(section) && !stored {
+            sections.push(encode_runtime_section(runtime, section)?);
+        }
+    }
+    sections.sort_by_key(|encoded| encoded.section);
+    let mut manifest = previous.unwrap_or_default();
+    manifest.revision = revision;
+    if replace_all {
+        manifest.sections.clear();
+    }
+    for encoded in &sections {
+        manifest.sections.insert(
+            encoded.section.field_name().to_owned(),
+            runtime_sections::RuntimeManifestEntry {
+                revision,
+                bytes: encoded.json.len() as u64,
+                sha256: encoded.sha256.clone(),
+            },
+        );
+    }
+    let assembled = runtime_sections::assembled_document_len(
+        &head_json,
+        manifest
+            .sections
+            .iter()
+            .map(|(name, entry)| (name.as_str(), entry.bytes)),
+    );
+    if assembled.is_none_or(|bytes| bytes > MAX_RUNTIME_JSON_BYTES as u64) {
+        return Err(StoreError::SnapshotTooLarge {
+            kind: "world runtime",
+            maximum: MAX_RUNTIME_JSON_BYTES,
+        });
+    }
+    Ok(RuntimeWritePlan {
+        snapshot_version,
+        head_json,
+        manifest_json: manifest.to_json(),
+        revision: i64::try_from(revision).map_err(|_| StoreError::InvalidRuntimeSnapshot)?,
+        sections,
+        replace_all,
+    })
 }
 
 /// Every document an action commit writes, encoded and bounded before the
@@ -244,8 +444,7 @@ pub(crate) fn encode_runtime_documents(
 pub(crate) struct EncodedActionCommit {
     pub(crate) gameplay_json: Vec<String>,
     pub(crate) adventure_json: Vec<String>,
-    pub(crate) runtime_json: String,
-    pub(crate) world_adventure_json: String,
+    pub(crate) runtime: EncodedRuntime,
     pub(crate) event_json: Vec<String>,
     pub(crate) staff_audit: Option<(PreparedStaffAudit, i64)>,
 }
@@ -253,6 +452,7 @@ pub(crate) struct EncodedActionCommit {
 pub(crate) fn encode_action_commit(
     characters: &[DurableCharacterSnapshot],
     runtime: &WorldRuntimeSnapshot,
+    sections: RuntimeSectionSet,
     events: &[DomainEvent],
     staff_audit: Option<(StaffAuditRecord, i64)>,
 ) -> Result<EncodedActionCommit, StoreError> {
@@ -264,7 +464,7 @@ pub(crate) fn encode_action_commit(
         .iter()
         .map(|snapshot| encode_character_adventure(&snapshot.gameplay))
         .collect::<Result<Vec<_>, _>>()?;
-    let (runtime_json, world_adventure_json) = encode_runtime_documents(runtime)?;
+    let runtime = encode_runtime(runtime, sections)?;
     let event_json = events
         .iter()
         .map(|event| bounded_json(event, "domain event", MAX_EVENT_JSON_BYTES))
@@ -275,8 +475,7 @@ pub(crate) fn encode_action_commit(
     Ok(EncodedActionCommit {
         gameplay_json,
         adventure_json,
-        runtime_json,
-        world_adventure_json,
+        runtime,
         event_json,
         staff_audit,
     })
@@ -1177,14 +1376,17 @@ mod tests {
     #[test]
     fn action_commit_encoding_validates_staff_audit_before_any_write() {
         let runtime = tiamud_core::World::demo().runtime_snapshot();
-        let encoded = encode_action_commit(&[], &runtime, &[], None).unwrap();
+        let encoded =
+            encode_action_commit(&[], &runtime, RuntimeSectionSet::ALL, &[], None).unwrap();
         assert!(encoded.gameplay_json.is_empty());
         assert!(encoded.adventure_json.is_empty());
         assert!(encoded.event_json.is_empty());
         assert!(encoded.staff_audit.is_none());
         assert_eq!(
-            (encoded.runtime_json, encoded.world_adventure_json),
-            encode_runtime_documents(&runtime).unwrap()
+            encoded.runtime.sections,
+            encode_runtime(&runtime, RuntimeSectionSet::ALL)
+                .unwrap()
+                .sections
         );
 
         let self_targeted = StaffAuditRecord {
@@ -1196,8 +1398,218 @@ mod tests {
             details: serde_json::json!({}),
         };
         assert!(matches!(
-            encode_action_commit(&[], &runtime, &[], Some((self_targeted, 7))),
+            encode_action_commit(
+                &[],
+                &runtime,
+                RuntimeSectionSet::ALL,
+                &[],
+                Some((self_targeted, 7))
+            ),
             Err(StoreError::StaffHierarchy)
+        ));
+    }
+
+    #[test]
+    fn runtime_sections_match_the_storage_contract_names() {
+        assert_eq!(
+            RuntimeSection::ALL.map(RuntimeSection::field_name),
+            runtime_sections::RUNTIME_SECTION_NAMES
+        );
+        assert_eq!(RuntimeSectionSet::ALL.len(), RuntimeSection::ALL.len());
+        assert!(RuntimeSectionSet::ALL.is_all() && RuntimeSectionSet::EMPTY.is_empty());
+    }
+
+    #[test]
+    fn runtime_head_covers_every_non_section_member() {
+        // Any member added to the DTO must land in the head or in a section;
+        // otherwise a sectioned write would silently drop it.
+        let mut runtime = tiamud_core::World::demo().runtime_snapshot();
+        runtime.revision = 11;
+        runtime.logical_tick = 12;
+        runtime.rng_state = 13;
+        let full = serde_json::to_string(&runtime).unwrap();
+        let split = runtime_sections::split_runtime_document(&full);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&split.head_json).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&encode_runtime_head(&runtime).unwrap())
+                .unwrap()
+        );
+        for (name, json) in split.sections {
+            let section = RuntimeSection::ALL
+                .into_iter()
+                .find(|section| section.field_name() == name)
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(
+                    &encode_runtime_section(&runtime, section).unwrap().json
+                )
+                .unwrap(),
+                serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    fn assemble_plan(
+        plan: &RuntimeWritePlan,
+        stored: &mut std::collections::BTreeMap<String, runtime_sections::RuntimeSectionRow>,
+    ) -> WorldRuntimeSnapshot {
+        if plan.replace_all {
+            stored.clear();
+        }
+        for encoded in &plan.sections {
+            stored.insert(
+                encoded.section.field_name().to_owned(),
+                runtime_sections::RuntimeSectionRow {
+                    name: encoded.section.field_name().to_owned(),
+                    revision: plan.revision,
+                    json: encoded.json.clone(),
+                    sha256: encoded.sha256.clone(),
+                },
+            );
+        }
+        let stored = runtime_sections::StoredRuntime {
+            snapshot_version: plan.snapshot_version,
+            head_json: plan.head_json.clone(),
+            manifest_json: plan.manifest_json.clone(),
+            last_event_sequence: None,
+            sections: stored.values().cloned().collect(),
+        };
+        super::super::decode_stored_runtime(&stored).unwrap().1
+    }
+
+    #[test]
+    fn runtime_write_plans_rewrite_only_dirty_sections_and_assemble_exactly() {
+        let mut runtime = tiamud_core::World::demo().runtime_snapshot();
+        let mut stored = std::collections::BTreeMap::new();
+
+        // No manifest: everything is written even if nothing was requested.
+        let first = plan_runtime_write(
+            None,
+            &runtime,
+            encode_runtime(&runtime, RuntimeSectionSet::EMPTY).unwrap(),
+        )
+        .unwrap();
+        assert!(first.replace_all);
+        assert_eq!(first.sections.len(), RuntimeSection::ALL.len());
+        assert_eq!(first.revision, 1);
+        assert_eq!(assemble_plan(&first, &mut stored), runtime);
+
+        // Only the scalar head changed: no section row is written.
+        runtime.logical_tick += 5;
+        runtime.revision += 1;
+        let head_only = plan_runtime_write(
+            Some((first.snapshot_version, first.manifest_json.clone())),
+            &runtime,
+            encode_runtime(&runtime, RuntimeSectionSet::EMPTY).unwrap(),
+        )
+        .unwrap();
+        assert!(!head_only.replace_all && head_only.sections.is_empty());
+        assert_eq!(head_only.revision, 2);
+        assert!(head_only.world_adventure_json().is_none());
+        assert_eq!(
+            head_only.written_bytes(),
+            head_only.head_json.len() + head_only.manifest_json.len()
+        );
+        assert_eq!(assemble_plan(&head_only, &mut stored), runtime);
+
+        // One dirty section: exactly that row, at the new revision.
+        runtime.progression_flags.insert("flag:sectioned".into());
+        let dirty = [RuntimeSection::ProgressionFlags]
+            .into_iter()
+            .collect::<RuntimeSectionSet>();
+        let one = plan_runtime_write(
+            Some((head_only.snapshot_version, head_only.manifest_json.clone())),
+            &runtime,
+            encode_runtime(&runtime, dirty).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            one.sections
+                .iter()
+                .map(|encoded| encoded.section)
+                .collect::<Vec<_>>(),
+            [RuntimeSection::ProgressionFlags]
+        );
+        assert_eq!(assemble_plan(&one, &mut stored), runtime);
+        let manifest = runtime_sections::RuntimeManifest::parse(&one.manifest_json).unwrap();
+        assert_eq!(manifest.sections["progressionFlags"].revision, 3);
+        assert_eq!(manifest.sections["npcs"].revision, 1);
+
+        // The adventure section also refreshes the mirror row.
+        let adventure = [RuntimeSection::Adventure]
+            .into_iter()
+            .collect::<RuntimeSectionSet>();
+        let mirrored = plan_runtime_write(
+            Some((one.snapshot_version, one.manifest_json.clone())),
+            &runtime,
+            encode_runtime(&runtime, adventure).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            mirrored.world_adventure_json(),
+            Some(serde_json::to_string(&runtime.adventure).unwrap().as_str())
+        );
+
+        // A manifest of another version, or an unreadable one, is never
+        // trusted: the plan rewrites everything.
+        for previous in [
+            (
+                i64::from(runtime.snapshot_version) - 1,
+                one.manifest_json.clone(),
+            ),
+            (i64::from(runtime.snapshot_version), "{}".to_owned()),
+        ] {
+            let plan = plan_runtime_write(
+                Some(previous),
+                &runtime,
+                encode_runtime(&runtime, RuntimeSectionSet::EMPTY).unwrap(),
+            )
+            .unwrap();
+            assert!(plan.replace_all);
+            assert_eq!(plan.sections.len(), RuntimeSection::ALL.len());
+        }
+
+        // A manifest that lacks a section forces that section.
+        let mut partial = runtime_sections::RuntimeManifest::parse(&one.manifest_json).unwrap();
+        partial.sections.remove("trades");
+        let plan = plan_runtime_write(
+            Some((one.snapshot_version, partial.to_json())),
+            &runtime,
+            encode_runtime(&runtime, RuntimeSectionSet::EMPTY).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.sections
+                .iter()
+                .map(|encoded| encoded.section)
+                .collect::<Vec<_>>(),
+            [RuntimeSection::Trades]
+        );
+    }
+
+    #[test]
+    fn runtime_write_plans_keep_the_assembled_two_mib_ceiling() {
+        let mut runtime = tiamud_core::World::demo().runtime_snapshot();
+        // Two sections that each fit but together exceed the snapshot bound.
+        let half = MAX_RUNTIME_JSON_BYTES / 2;
+        runtime
+            .progression_flags
+            .insert("a".repeat(half.saturating_sub(16)));
+        runtime
+            .adventure
+            .shop_stock
+            .insert("b".repeat(half.saturating_sub(16)), 1);
+        assert!(matches!(
+            plan_runtime_write(
+                None,
+                &runtime,
+                encode_runtime(&runtime, RuntimeSectionSet::ALL).unwrap(),
+            ),
+            Err(StoreError::SnapshotTooLarge {
+                kind: "world runtime",
+                maximum: MAX_RUNTIME_JSON_BYTES,
+            })
         ));
     }
 
