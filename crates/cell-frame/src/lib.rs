@@ -1,9 +1,7 @@
 //! Bounded, transport-neutral cell art with explicit-consent renderers.
 
 use std::fmt::Write as _;
-use std::io::Cursor;
 
-use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -256,29 +254,54 @@ impl CellFrame {
         Ok(output)
     }
 
-    fn background_raster(&self) -> RgbImage {
+    fn background_raster(&self) -> BackgroundRaster {
         let width = u32::from(self.width) * CELL_PIXEL_WIDTH;
         let height = u32::from(self.height) * CELL_PIXEL_HEIGHT;
-        let mut image = RgbImage::new(width, height);
+        // Bounded by MAX_WIDTH x MAX_HEIGHT cells of 4x6 pixels after validation.
+        let mut pixels = vec![0_u8; width as usize * height as usize * 3];
         for (index, cell) in self.cells.iter().enumerate() {
             let color = self.palette[usize::from(cell.background)];
             let cell_x = (index % usize::from(self.width)) as u32 * CELL_PIXEL_WIDTH;
             let cell_y = (index / usize::from(self.width)) as u32 * CELL_PIXEL_HEIGHT;
             for y in cell_y..cell_y + CELL_PIXEL_HEIGHT {
                 for x in cell_x..cell_x + CELL_PIXEL_WIDTH {
-                    image.put_pixel(x, y, Rgb([color.red, color.green, color.blue]));
+                    let offset = (y as usize * width as usize + x as usize) * 3;
+                    pixels[offset..offset + 3].copy_from_slice(&[
+                        color.red,
+                        color.green,
+                        color.blue,
+                    ]);
                 }
             }
         }
-        image
+        BackgroundRaster {
+            width,
+            height,
+            pixels,
+        }
     }
 
+    /// Encodes the decorative background as an 8-bit RGB PNG with the same
+    /// fast-compression, adaptive-filter settings the general-purpose `image`
+    /// crate used, without linking its decoders into network servers.
     fn background_png(&self) -> Result<Vec<u8>, CellFrameError> {
-        let mut bytes = Cursor::new(Vec::new());
-        DynamicImage::ImageRgb8(self.background_raster())
-            .write_to(&mut bytes, ImageFormat::Png)
+        let raster = self.background_raster();
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, raster.width, raster.height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        encoder.set_filter(png::Filter::Adaptive);
+        let mut writer = encoder
+            .write_header()
             .map_err(|error| CellFrameError::Png(error.to_string()))?;
-        Ok(bytes.into_inner())
+        writer
+            .write_image_data(&raster.pixels)
+            .map_err(|error| CellFrameError::Png(error.to_string()))?;
+        writer
+            .finish()
+            .map_err(|error| CellFrameError::Png(error.to_string()))?;
+        Ok(bytes)
     }
 
     fn sixel_background(&self) -> Vec<u8> {
@@ -294,15 +317,15 @@ impl CellFrame {
                 percent(color.blue)
             );
         }
-        for band_y in (0..image.height()).step_by(6) {
+        for band_y in (0..image.height).step_by(6) {
             for (palette_index, color) in self.palette.iter().enumerate() {
                 let _ = write!(StringWriter(&mut output), "#{palette_index}");
-                for x in 0..image.width() {
+                for x in 0..image.width {
                     let mut bits = 0_u8;
                     for bit in 0..6 {
                         let y = band_y + bit;
-                        if y < image.height()
-                            && image.get_pixel(x, y).0 == [color.red, color.green, color.blue]
+                        if y < image.height
+                            && image.pixel(x, y) == [color.red, color.green, color.blue]
                         {
                             bits |= 1 << bit;
                         }
@@ -315,6 +338,24 @@ impl CellFrame {
         }
         output.extend_from_slice(b"\x1b\\");
         output
+    }
+}
+
+/// Row-major 8-bit RGB pixels for the decorative cell background.
+struct BackgroundRaster {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+impl BackgroundRaster {
+    fn pixel(&self, x: u32, y: u32) -> [u8; 3] {
+        let offset = (y as usize * self.width as usize + x as usize) * 3;
+        [
+            self.pixels[offset],
+            self.pixels[offset + 1],
+            self.pixels[offset + 2],
+        ]
     }
 }
 
@@ -515,5 +556,21 @@ mod tests {
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn native_raster_is_a_png_of_cell_backgrounds() {
+        let mut frame = frame();
+        frame.cells[1].background = 1;
+        let kitty = frame
+            .render_native(NativeProtocol::Kitty, true, 1_000_000)
+            .unwrap();
+        // Base64 of the eight-byte PNG signature plus the IHDR length prefix.
+        assert!(kitty.starts_with(b"\x1b_Ga=T,f=100,m=0;iVBORw0KGgo"));
+        let raster = frame.background_raster();
+        assert_eq!((raster.width, raster.height), (8, 6));
+        assert_eq!(raster.pixel(3, 5), [0, 0, 0]);
+        assert_eq!(raster.pixel(4, 0), [255, 160, 32]);
+        assert_eq!(raster.pixel(7, 5), [255, 160, 32]);
     }
 }

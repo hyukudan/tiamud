@@ -12,7 +12,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use postgres::{Client, GenericClient, IsolationLevel};
+use postgres::{Client, GenericClient, IsolationLevel, ToStatement};
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, BoardKey, CharacterGameplaySnapshot, CharacterId,
     CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, MAX_BOARD_BODY_BYTES,
@@ -66,6 +66,8 @@ const STAFF_LIST_LIMIT: i64 = 10;
 const MAIL_PAGE_SIZE: i64 = 10;
 const MAIL_MAX_PAGES: i64 = 7;
 const MAILBOX_CAPACITY: i64 = 64;
+const MAILBOX_CAPACITY_U32: u32 = 64;
+const _: () = assert!(MAILBOX_CAPACITY_U32 as i64 == MAILBOX_CAPACITY);
 const MAILBOX_BYTE_CAPACITY: i64 = 128 * 1024;
 const MAIL_GLOBAL_CAPACITY: i64 = 100_000;
 const MAIL_HOURLY_CAPACITY: i64 = 20;
@@ -1899,17 +1901,29 @@ fn character_from_row(row: &postgres::Row) -> Result<CharacterSnapshot, StoreErr
     })
 }
 
+const SAVE_CHARACTER_SQL: &str = "UPDATE characters
+     SET name = $1, room_id = $2, item_locations_json = $3,
+         updated_at = floor(extract(epoch FROM now()))::BIGINT
+     WHERE id = $4 AND account_id = $5";
+
 fn save<C: GenericClient>(
     connection: &mut C,
+    snapshot: &CharacterSnapshot,
+) -> Result<(), StoreError> {
+    save_with(connection, SAVE_CHARACTER_SQL, snapshot)
+}
+
+/// Saves one character through `statement`, which is either
+/// [`SAVE_CHARACTER_SQL`] or a statement prepared from it once per transaction.
+fn save_with<C: GenericClient, T: ?Sized + ToStatement>(
+    connection: &mut C,
+    statement: &T,
     snapshot: &CharacterSnapshot,
 ) -> Result<(), StoreError> {
     let name = normalise_name(&snapshot.name, "character")?;
     let item_locations_json = serde_json::to_string(&snapshot.item_locations)?;
     let updated = connection.execute(
-        "UPDATE characters
-         SET name = $1, room_id = $2, item_locations_json = $3,
-             updated_at = floor(extract(epoch FROM now()))::BIGINT
-         WHERE id = $4 AND account_id = $5",
+        statement,
         &[
             &name,
             &snapshot.room_id,
@@ -2522,35 +2536,47 @@ fn commit_action_with_retention(
     if let Some((audit, _)) = &staff_audit {
         validate_staff_authority(&mut transaction, audit, None, audit.target_account_id)?;
     }
-    for ((snapshot, gameplay_json), adventure_json) in
-        characters.iter().zip(gameplay_json).zip(adventure_json)
-    {
-        save(&mut transaction, &snapshot.character)?;
-        let updated = transaction.execute(
+    // Statements repeated per character or per event are prepared once per
+    // transaction instead of once per execution. Order and atomicity are
+    // unchanged: every row is still written by the same transaction.
+    if !characters.is_empty() {
+        let save_character = transaction.prepare(SAVE_CHARACTER_SQL)?;
+        let update_gameplay = transaction.prepare(
             "UPDATE characters
              SET gameplay_json = $1,
                  updated_at = floor(extract(epoch FROM now()))::BIGINT
              WHERE id = $2 AND account_id = $3",
-            &[
-                &gameplay_json,
-                &snapshot.character.id.0,
-                &snapshot.character.account_id.0,
-            ],
         )?;
-        if updated == 0 {
-            return Err(StoreError::CharacterNotFound {
-                account_id: snapshot.character.account_id,
-                character_id: snapshot.character.id,
-            });
-        }
-        transaction.execute(
+        let upsert_adventure = transaction.prepare(
             "INSERT INTO character_adventure (character_id, state_json, updated_at)
              VALUES ($1, $2, floor(extract(epoch FROM now()))::BIGINT)
              ON CONFLICT(character_id) DO UPDATE SET
                  state_json = excluded.state_json,
                  updated_at = excluded.updated_at",
-            &[&snapshot.character.id.0, &adventure_json],
         )?;
+        for ((snapshot, gameplay_json), adventure_json) in
+            characters.iter().zip(gameplay_json).zip(adventure_json)
+        {
+            save_with(&mut transaction, &save_character, &snapshot.character)?;
+            let updated = transaction.execute(
+                &update_gameplay,
+                &[
+                    &gameplay_json,
+                    &snapshot.character.id.0,
+                    &snapshot.character.account_id.0,
+                ],
+            )?;
+            if updated == 0 {
+                return Err(StoreError::CharacterNotFound {
+                    account_id: snapshot.character.account_id,
+                    character_id: snapshot.character.id,
+                });
+            }
+            transaction.execute(
+                &upsert_adventure,
+                &[&snapshot.character.id.0, &adventure_json],
+            )?;
+        }
     }
     transaction.execute(
         "INSERT INTO world_adventure (singleton, state_json, updated_at)
@@ -2560,11 +2586,12 @@ fn commit_action_with_retention(
              updated_at = excluded.updated_at",
         &[&world_adventure_json],
     )?;
-    for json in event_json {
-        transaction.execute(
-            "INSERT INTO domain_events (event_json) VALUES ($1)",
-            &[&json],
-        )?;
+    if !event_json.is_empty() {
+        let insert_event =
+            transaction.prepare("INSERT INTO domain_events (event_json) VALUES ($1)")?;
+        for json in event_json {
+            transaction.execute(&insert_event, &[&json])?;
+        }
     }
     let last_event_sequence: i64 = transaction
         .query_one(
@@ -2942,8 +2969,8 @@ fn send_mail(
     if hour_count >= MAIL_HOURLY_CAPACITY || day_count >= MAIL_DAILY_CAPACITY {
         return Err(StoreError::MailRateLimited);
     }
-    let next_hour_count = i32::try_from(hour_count + 1).expect("mail hourly cap fits i32");
-    let next_day_count = i32::try_from(day_count + 1).expect("mail daily cap fits i32");
+    let next_hour_count = next_quota_count(hour_count).ok_or(StoreError::MailRateLimited)?;
+    let next_day_count = next_quota_count(day_count).ok_or(StoreError::MailRateLimited)?;
     transaction.execute(
         "INSERT INTO social_mail_usage
              (account_id, hour_started_at, hour_count,
@@ -3083,7 +3110,7 @@ fn mailbox_page(
     page: u32,
     now: i64,
 ) -> Result<MailPage, StoreError> {
-    if !(1..=u32::try_from(MAIL_MAX_PAGES).expect("mail page cap fits u32")).contains(&page) {
+    if !(1..=MAIL_MAX_PAGES).contains(&i64::from(page)) {
         return Err(StoreError::InvalidMailInput);
     }
     ensure_social_character_exists(connection, recipient)?;
@@ -3096,11 +3123,11 @@ fn mailbox_page(
     )?;
     let total: i64 = totals.get(0);
     let unread: i64 = totals.get(1);
-    let total_pages = ((total + MAIL_PAGE_SIZE - 1) / MAIL_PAGE_SIZE).max(1);
+    let total_pages = (total.saturating_add(MAIL_PAGE_SIZE - 1) / MAIL_PAGE_SIZE).max(1);
     if total_pages > MAIL_MAX_PAGES {
         return Err(StoreError::InvalidMailInput);
     }
-    let offset = (i64::from(page) - 1) * MAIL_PAGE_SIZE;
+    let offset = (i64::from(page) - 1).saturating_mul(MAIL_PAGE_SIZE);
     let messages = connection
         .query(
             "SELECT public_id, sender_name, subject, created_at, expires_at,
@@ -3126,7 +3153,7 @@ fn mailbox_page(
         total_pages: u32::try_from(total_pages).map_err(|_| StoreError::InvalidMailInput)?,
         total_messages: u32::try_from(total).map_err(|_| StoreError::InvalidMailInput)?,
         unread_count: u32::try_from(unread).map_err(|_| StoreError::InvalidMailInput)?,
-        capacity: u32::try_from(MAILBOX_CAPACITY).expect("mailbox cap fits u32"),
+        capacity: MAILBOX_CAPACITY_U32,
         messages,
     })
 }
@@ -3331,8 +3358,8 @@ fn purge_expired_mail_rows<C: GenericClient>(
          RETURNING messages.id",
         &[&now, &limit],
     )?;
-    let message_count = i64::try_from(message_rows.len()).expect("purge batch fits i64");
-    let remaining = limit - message_count;
+    let message_count = row_count(message_rows.len());
+    let remaining = limit.saturating_sub(message_count);
     if remaining == 0 {
         return Ok(message_count);
     }
@@ -3346,7 +3373,19 @@ fn purge_expired_mail_rows<C: GenericClient>(
          RETURNING evidence.report_id",
         &[&now, &remaining],
     )?;
-    Ok(message_count + i64::try_from(evidence_rows.len()).expect("purge batch fits i64"))
+    Ok(message_count.saturating_add(row_count(evidence_rows.len())))
+}
+
+/// Increments a bounded quota counter for storage as `INTEGER`; `None` fails closed.
+fn next_quota_count(count: i64) -> Option<i32> {
+    count
+        .checked_add(1)
+        .and_then(|next| i32::try_from(next).ok())
+}
+
+/// Converts a bounded batch length to the SQL row-count type without panicking.
+fn row_count(length: usize) -> i64 {
+    i64::try_from(length).unwrap_or(i64::MAX)
 }
 
 fn normalise_board_text(value: &str, maximum: usize) -> Result<String, StoreError> {
@@ -3425,8 +3464,8 @@ fn consume_board_usage<C: GenericClient>(
     if hour_count >= BOARD_HOURLY_CAPACITY || day_count >= BOARD_DAILY_CAPACITY {
         return Err(StoreError::BoardRateLimited);
     }
-    let next_hour_count = i32::try_from(hour_count + 1).expect("board hourly cap fits i32");
-    let next_day_count = i32::try_from(day_count + 1).expect("board daily cap fits i32");
+    let next_hour_count = next_quota_count(hour_count).ok_or(StoreError::BoardRateLimited)?;
+    let next_day_count = next_quota_count(day_count).ok_or(StoreError::BoardRateLimited)?;
     connection.execute(
         "INSERT INTO social_board_usage
              (account_id, hour_started_at, hour_count,
@@ -3820,8 +3859,8 @@ fn purge_expired_boards(connection: &mut Client, now: i64) -> Result<u64, StoreE
          USING expired WHERE posts.id = expired.id RETURNING posts.id",
         &[&now, &BOARD_PURGE_LIMIT],
     )?;
-    let post_count = i64::try_from(post_rows.len()).expect("board purge batch fits i64");
-    let remaining = BOARD_PURGE_LIMIT - post_count;
+    let post_count = row_count(post_rows.len());
+    let remaining = BOARD_PURGE_LIMIT.saturating_sub(post_count);
     let evidence_count = if remaining > 0 {
         let rows = transaction.query(
             "WITH expired AS (
@@ -3833,7 +3872,7 @@ fn purge_expired_boards(connection: &mut Client, now: i64) -> Result<u64, StoreE
              RETURNING evidence.report_id",
             &[&now, &remaining],
         )?;
-        i64::try_from(rows.len()).expect("board evidence purge batch fits i64")
+        row_count(rows.len())
     } else {
         0
     };
@@ -4103,7 +4142,24 @@ fn staff_reports(
         .map(|row| {
             let evidence_sender: Option<String> = row.get(8);
             let board_key: Option<String> = row.get(14);
-            StaffReport {
+            let board_evidence = match board_key {
+                Some(board_key) => Some(BoardReportEvidence {
+                    board: BoardKey::parse(&board_key).ok_or_else(|| {
+                        StoreError::InvalidStaffState(format!(
+                            "board report evidence key {board_key:?}"
+                        ))
+                    })?,
+                    post_public_id: row.get(15),
+                    author_name: row.get(16),
+                    subject: row.get(17),
+                    body: row.get(18),
+                    posted_at: row.get(19),
+                    created_at: row.get(20),
+                    expires_at: row.get(21),
+                }),
+                None => None,
+            };
+            Ok(StaffReport {
                 id: row.get(0),
                 reporter_character_id: CharacterId(row.get(1)),
                 reporter_name: row.get(2),
@@ -4120,19 +4176,10 @@ fn staff_reports(
                     created_at: row.get(12),
                     expires_at: row.get(13),
                 }),
-                board_evidence: board_key.map(|board_key| BoardReportEvidence {
-                    board: BoardKey::parse(&board_key).expect("schema limits board keys"),
-                    post_public_id: row.get(15),
-                    author_name: row.get(16),
-                    subject: row.get(17),
-                    body: row.get(18),
-                    posted_at: row.get(19),
-                    created_at: row.get(20),
-                    expires_at: row.get(21),
-                }),
-            }
+                board_evidence,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, StoreError>>()?;
     transaction.commit()?;
     Ok(reports)
 }

@@ -744,14 +744,13 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
     }
     if let Some(rest) = normalised.strip_prefix("talent learn ").map(str::trim) {
         let mut parts = rest.split_whitespace();
-        let graph_id = parts.next();
-        let node_id = parts.next();
-        if graph_id.is_none() || node_id.is_none() || parts.next().is_some() {
+        let (Some(graph_id), Some(node_id), None) = (parts.next(), parts.next(), parts.next())
+        else {
             return Err(ParseActionError::MissingTarget { command: "talent" });
-        }
+        };
         return Ok(PlayerAction::AcquireTalent {
-            graph_id: graph_id.expect("checked").to_owned(),
-            node_id: node_id.expect("checked").to_owned(),
+            graph_id: graph_id.to_owned(),
+            node_id: node_id.to_owned(),
         });
     }
     if normalised == "balance" {
@@ -1017,13 +1016,10 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
                 .ok()
                 .filter(|page| (1..=MAX_BOARD_PAGE).contains(page))
         });
-        if fields.next().is_some() || board.is_none() || page.is_none() {
+        let (None, Some(board), Some(page)) = (fields.next(), board, page) else {
             return Err(ParseActionError::Unknown(input.to_owned()));
-        }
-        return Ok(PlayerAction::Board(BoardAction::List {
-            board: board.expect("checked above"),
-            page: page.expect("checked above"),
-        }));
+        };
+        return Ok(PlayerAction::Board(BoardAction::List { board, page }));
     }
     for (command, read) in [("board read", true), ("board delete", false)] {
         if normalised == command {
@@ -10906,15 +10902,12 @@ impl World {
                     self.validate_persisted_item_event(
                         *actor_id, actor_name, item_id, item_name, room_id,
                     )?;
-                    if restored.get(item_id).map(|item| &item.location)
-                        != Some(&SharedItemLocation::Carried(*actor_id))
-                    {
-                        return Err(WorldError::InvalidDomainTransition);
+                    match restored.get_mut(item_id) {
+                        Some(item) if item.location == SharedItemLocation::Carried(*actor_id) => {
+                            item.location = SharedItemLocation::Room(room_id.clone());
+                        }
+                        _ => return Err(WorldError::InvalidDomainTransition),
                     }
-                    restored
-                        .get_mut(item_id)
-                        .expect("validated item exists")
-                        .location = SharedItemLocation::Room(room_id.clone());
                     self.reconcile_rollback_bindings(&mut restored, std::slice::from_ref(item_id))?;
                     affected_characters.insert(*actor_id);
                     item_event_count += 1;
@@ -10929,15 +10922,14 @@ impl World {
                     self.validate_persisted_item_event(
                         *actor_id, actor_name, item_id, item_name, room_id,
                     )?;
-                    if restored.get(item_id).map(|item| &item.location)
-                        != Some(&SharedItemLocation::Room(room_id.clone()))
-                    {
-                        return Err(WorldError::InvalidDomainTransition);
+                    match restored.get_mut(item_id) {
+                        Some(item)
+                            if item.location == SharedItemLocation::Room(room_id.clone()) =>
+                        {
+                            item.location = SharedItemLocation::Carried(*actor_id);
+                        }
+                        _ => return Err(WorldError::InvalidDomainTransition),
                     }
-                    restored
-                        .get_mut(item_id)
-                        .expect("validated item exists")
-                        .location = SharedItemLocation::Carried(*actor_id);
                     self.reconcile_rollback_bindings(&mut restored, std::slice::from_ref(item_id))?;
                     affected_characters.insert(*actor_id);
                     item_event_count += 1;
@@ -16909,18 +16901,24 @@ impl World {
         if query.is_empty() {
             return Err(WorldError::GiveTargetUnavailable);
         }
-        let mut matches = self
+        // Names are compared first and cheaply. A query without the exact
+        // opaque-selector shape can never equal a selector, so hashing every
+        // connected character's selector happens only for selector-shaped
+        // queries. Ambiguity (name and selector, or two names) still fails.
+        let selector_query = is_opaque_id_shaped(query);
+        let matches = self
             .connected_characters()?
             .into_iter()
             .filter(|candidate| {
                 candidate.name.eq_ignore_ascii_case(query)
-                    || opaque_id(salt, "character", &candidate.character_id.0.to_string()) == query
+                    || (selector_query
+                        && opaque_id(salt, "character", &candidate.character_id.0.to_string())
+                            == query)
             })
             .collect::<Vec<_>>();
-        if matches.len() != 1 {
+        let Ok([recipient]) = <[ConnectedCharacter; 1]>::try_from(matches) else {
             return Err(WorldError::GiveTargetUnavailable);
-        }
-        let recipient = matches.pop().expect("exactly one recipient");
+        };
         if recipient.character_id == giver.id || recipient.room_id != giver_room {
             return Err(WorldError::GiveTargetUnavailable);
         }
@@ -18219,16 +18217,10 @@ impl World {
                         &recipient_id.0.to_string(),
                     )),
                     text,
-                    (viewer.id == *giver_id || viewer.id == *recipient_id).then(|| {
-                        opaque_id(
-                            observer.salt,
-                            "item",
-                            item_ids
-                                .first()
-                                .expect("validated ItemsGiven is non-empty")
-                                .as_str(),
-                        )
-                    }),
+                    (viewer.id == *giver_id || viewer.id == *recipient_id)
+                        .then(|| item_ids.first())
+                        .flatten()
+                        .map(|item_id| opaque_id(observer.salt, "item", item_id.as_str())),
                 )
             }
             DomainEvent::TradeRequested { trade } => (
@@ -21268,12 +21260,21 @@ fn opaque_id(observer_salt: [u8; 32], kind: &str, domain_id: &str) -> String {
     hasher.update((domain_id.len() as u64).to_be_bytes());
     hasher.update(domain_id.as_bytes());
     let digest = hasher.finalize();
-    let token = u64::from_be_bytes(
-        digest[..8]
-            .try_into()
-            .expect("a SHA-256 digest always contains eight bytes"),
-    );
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    let token = u64::from_be_bytes(prefix);
     format!("o{token:016x}")
+}
+
+/// Whether `value` has the exact `o` + 16 lowercase hex shape produced by
+/// [`opaque_id`]. Any other string can never equal an opaque selector.
+fn is_opaque_id_shaped(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 17
+        && bytes[0] == b'o'
+        && bytes[1..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn room(entities: &SlotMap<EntityId, Entity>, id: EntityId) -> &Room {
@@ -27350,6 +27351,14 @@ mod tests {
             .find(|entry| entry.name == "Aria")
             .unwrap();
         let aria_selector = aria.id.clone();
+        // Selector hashing is skipped only for queries that cannot be one.
+        assert!(is_opaque_id_shaped(&aria_selector));
+        assert!(!is_opaque_id_shaped(&aria_selector.to_ascii_uppercase()));
+        assert!(!is_opaque_id_shaped("Aria"));
+        assert!(matches!(
+            world.resolve_give_recipient(giver_session, &aria_selector.to_ascii_uppercase()),
+            Err(WorldError::GiveTargetUnavailable)
+        ));
         assert!(aria.nearby);
         assert!(
             !social

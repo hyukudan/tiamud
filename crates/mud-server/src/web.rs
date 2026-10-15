@@ -766,16 +766,15 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     state
         .metrics
         .set_database_queue_depth(state.store.queue_depth());
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(
+    (
+        StatusCode::OK,
+        [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
-        )
-        .body(Body::from(
-            state.metrics.prometheus(state.world.queue_depth()),
-        ))
-        .expect("valid metrics response")
+        )],
+        Body::from(state.metrics.prometheus(state.world.queue_depth())),
+    )
+        .into_response()
 }
 
 pub async fn status() -> Json<Value> {
@@ -1851,9 +1850,9 @@ fn truncate_trade_offer_labels(player: &mut Value, maximum_bytes: usize) {
                 end = next;
             }
             let shortened = label[..end].to_owned();
-            line.as_object_mut()
-                .expect("trade lines serialize as objects")
-                .insert("label".into(), Value::String(shortened));
+            if let Some(object) = line.as_object_mut() {
+                object.insert("label".into(), Value::String(shortened));
+            }
         }
     }
 }
@@ -2204,10 +2203,9 @@ fn queue_container_contents(
         .iter()
         .map(|item| {
             let mut summary = json!(item);
-            summary
-                .as_object_mut()
-                .expect("player item views serialize as objects")
-                .remove("description");
+            if let Some(object) = summary.as_object_mut() {
+                object.remove("description");
+            }
             summary
         })
         .collect::<Vec<_>>();
@@ -2241,10 +2239,9 @@ fn queue_trade_contents(
         .iter()
         .map(|item| {
             let mut summary = json!(item);
-            summary
-                .as_object_mut()
-                .expect("player item views serialize as objects")
-                .remove("description");
+            if let Some(object) = summary.as_object_mut() {
+                object.remove("description");
+            }
             summary
         })
         .collect::<Vec<_>>();
@@ -2405,9 +2402,9 @@ fn queue_board_page(outbound: &OutboundHandle, sequence: &mut u64, page: &BoardP
 
 fn queue_board_entry(outbound: &OutboundHandle, sequence: &mut u64, entry: &BoardEntry) -> bool {
     let mut data = board_summary_json(&entry.summary);
-    data.as_object_mut()
-        .expect("board summaries serialize as objects")
-        .insert("body".into(), json!(entry.body));
+    if let Some(object) = data.as_object_mut() {
+        object.insert("body".into(), json!(entry.body));
+    }
     queue_sequenced(
         outbound,
         sequence,
@@ -2537,18 +2534,21 @@ pub async fn static_asset(uri: Uri) -> Response {
             } else {
                 "no-cache"
             };
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .header(header::CACHE_CONTROL, cache)
-                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-                .header(header::REFERRER_POLICY, "no-referrer")
-                .header(
-                    header::CONTENT_SECURITY_POLICY,
-                    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-                )
-                .body(Body::from(asset.data.into_owned()))
-                .expect("valid static response")
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, mime.as_ref()),
+                    (header::CACHE_CONTROL, cache),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                    (header::REFERRER_POLICY, "no-referrer"),
+                    (
+                        header::CONTENT_SECURITY_POLICY,
+                        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                    ),
+                ],
+                Body::from(asset.data.into_owned()),
+            )
+                .into_response()
         }
         None => (StatusCode::NOT_FOUND, "Not found").into_response(),
     }
@@ -3332,6 +3332,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         Ok(reason)
     };
+    let trade_fields_error = || format!("Action {action:?} has unexpected or missing fields.");
     let trade_fields_exact = |target: bool,
                               recipient: bool,
                               quantity: bool,
@@ -3362,9 +3363,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             && matches!(data.lore_title, NullableField::Missing)
             && data.capability.is_none()
             && data.enabled.is_none();
-        exact
-            .then_some(())
-            .ok_or_else(|| format!("Action {action:?} has unexpected or missing fields."))
+        exact.then_some(()).ok_or_else(trade_fields_error)
     };
     match action {
         "look" => exact_no_fields().map(|()| PlayerAction::Look),
@@ -3521,9 +3520,10 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "item.unequip" => gameplay_target().map(PlayerAction::Unequip),
         "trade.request" => {
             trade_fields_exact(false, true, false, false, false, false, false)?;
-            Ok(PlayerAction::Trade(TradeAction::Request(
-                data.recipient.clone().expect("validated recipient"),
-            )))
+            let Some(recipient) = data.recipient.clone() else {
+                return Err(trade_fields_error());
+            };
+            Ok(PlayerAction::Trade(TradeAction::Request(recipient)))
         }
         "trade.accept" => {
             trade_fields_exact(false, false, false, false, false, false, true)?;
@@ -3535,39 +3535,47 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "trade.item.set" => {
             trade_fields_exact(true, false, true, false, false, false, true)?;
-            let quantity = data.quantity.expect("validated quantity");
+            let (Some(query), Some(quantity)) = (data.target.clone(), data.quantity) else {
+                return Err(trade_fields_error());
+            };
             if quantity > 128 {
                 return Err("Trade item quantity must be between 1 and 128.".to_owned());
             }
             Ok(PlayerAction::Trade(TradeAction::OfferItem(ItemSelection {
-                query: data.target.clone().expect("validated target"),
+                query,
                 quantity,
             })))
         }
         "trade.item.remove" => {
             trade_fields_exact(true, false, false, false, false, false, true)?;
-            Ok(PlayerAction::Trade(TradeAction::RemoveItem(
-                data.target.clone().expect("validated target"),
-            )))
+            let Some(target) = data.target.clone() else {
+                return Err(trade_fields_error());
+            };
+            Ok(PlayerAction::Trade(TradeAction::RemoveItem(target)))
         }
         "trade.coins.set" => {
             trade_fields_exact(false, false, false, false, true, false, true)?;
-            Ok(PlayerAction::Trade(TradeAction::OfferCoins(
-                data.coins.expect("validated coins"),
-            )))
+            let Some(coins) = data.coins else {
+                return Err(trade_fields_error());
+            };
+            Ok(PlayerAction::Trade(TradeAction::OfferCoins(coins)))
         }
         "trade.contents" => {
             trade_fields_exact(true, false, false, true, false, false, true)?;
+            let (Some(container), Some(page)) = (data.target.clone(), data.page) else {
+                return Err(trade_fields_error());
+            };
             Ok(PlayerAction::Trade(TradeAction::Contents {
-                container: data.target.clone().expect("validated target"),
-                page: data.page.expect("validated page"),
+                container,
+                page,
             }))
         }
         "trade.confirm" => {
             trade_fields_exact(false, false, false, false, false, true, true)?;
-            Ok(PlayerAction::Trade(TradeAction::Confirm {
-                state_revision: data.state_revision.expect("validated revision"),
-            }))
+            let Some(state_revision) = data.state_revision else {
+                return Err(trade_fields_error());
+            };
+            Ok(PlayerAction::Trade(TradeAction::Confirm { state_revision }))
         }
         "trade.status" => {
             trade_fields_exact(false, false, false, false, false, false, true)?;
@@ -4499,14 +4507,17 @@ fn request_address(headers: &HeaderMap, remote: SocketAddr) -> std::net::IpAddr 
 }
 
 fn rate_limit_error() -> Response {
-    Response::builder()
-        .status(StatusCode::TOO_MANY_REQUESTS)
-        .header(header::RETRY_AFTER, "60")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [
+            (header::RETRY_AFTER, "60"),
+            (header::CONTENT_TYPE, "application/json"),
+        ],
+        Body::from(
             json!({"error": "Too many authentication attempts. Try again later."}).to_string(),
-        ))
-        .expect("valid rate limit response")
+        ),
+    )
+        .into_response()
 }
 
 fn api_error(error: GameError) -> Response {
