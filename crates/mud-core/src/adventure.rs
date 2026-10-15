@@ -571,8 +571,16 @@ impl World {
         event: AdventureEvent,
     ) -> Result<ActionOutcome, WorldError> {
         let event = DomainEvent::Adventure { event };
-        self.party_loot_cursors
-            .retain(|party_id, _| self.adventure.parties.contains_key(party_id));
+        // Only take a mutable (copy-on-write, dirtying) borrow when a stale
+        // cursor actually exists.
+        if self
+            .party_loot_cursors
+            .keys()
+            .any(|party_id| !self.adventure.parties.contains_key(party_id))
+        {
+            self.party_loot_cursors
+                .retain(|party_id, _| self.adventure.parties.contains_key(party_id));
+        }
         self.revision = self.revision.wrapping_add(1).max(1);
         self.bump_view_revisions(&event)?;
         Ok(ActionOutcome {

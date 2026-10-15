@@ -245,6 +245,13 @@ impl PersistenceCommandHandler for SqliteCommandHandler {
         )
     }
 
+    fn commit_characters(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        commit_characters_only(&mut self.connection, &characters)
+    }
+
     fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
         social_profile(&self.connection, character_id, unix_timestamp())
     }
@@ -1641,6 +1648,15 @@ impl CharacterStore for SqliteCharacterStore {
             receive,
         )
         .await
+    }
+
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::CommitCharacters { characters, reply }, receive)
+            .await
     }
 }
 
@@ -4385,6 +4401,56 @@ pub(super) fn commit_staff_action(
         DOMAIN_EVENT_RETENTION,
         Some((audit, now)),
     )
+}
+
+/// Characters-only commit (ADR 0027): the same character rows that
+/// `commit_action_with_retention` writes, in one transaction, without
+/// touching the runtime snapshot, world adventure row or event ledger.
+pub(super) fn commit_characters_only(
+    connection: &mut Connection,
+    characters: &[DurableCharacterSnapshot],
+) -> Result<(), StoreError> {
+    let rows = characters
+        .iter()
+        .map(|snapshot| {
+            Ok::<_, StoreError>((
+                snapshot,
+                encode_character_gameplay(&snapshot.gameplay)?,
+                encode_character_adventure(&snapshot.gameplay)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let transaction = connection.transaction()?;
+    for (snapshot, gameplay_json, adventure_json) in rows {
+        save(&transaction, &snapshot.character)?;
+        let updated = transaction
+            .prepare_cached(
+                "UPDATE characters SET gameplay_json = ?1, updated_at = unixepoch()
+             WHERE id = ?2 AND account_id = ?3",
+            )?
+            .execute(params![
+                gameplay_json,
+                snapshot.character.id.0,
+                snapshot.character.account_id.0
+            ])?;
+        if updated == 0 {
+            return Err(StoreError::CharacterNotFound {
+                account_id: snapshot.character.account_id,
+                character_id: snapshot.character.id,
+            });
+        }
+        transaction
+            .prepare_cached(
+                "INSERT INTO character_adventure (character_id, state_json, updated_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(character_id) DO UPDATE SET
+                 state_json = excluded.state_json,
+                 updated_at = excluded.updated_at",
+            )?
+            .execute(params![snapshot.character.id.0, adventure_json])?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 pub(super) fn commit_action_with_retention(

@@ -460,7 +460,7 @@ impl World {
                     {
                         return Err(WorldError::InvalidAreaLifecycle);
                     }
-                    let room_id = self.entities.insert(Entity::Room(Box::new(Room {
+                    let room_id = self.entities.insert(Entity::Room(Shared::new(Room {
                         stable_id: definition.stable_id.clone(),
                         title: definition.title.clone(),
                         prose: definition.prose.clone(),

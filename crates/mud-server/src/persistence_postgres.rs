@@ -382,6 +382,13 @@ impl PersistenceCommandHandler for PostgresCommandHandler {
         )
     }
 
+    fn commit_characters(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        commit_characters_only(&mut self.connection, &characters)
+    }
+
     fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
         social_profile(&mut self.connection, character_id, unix_timestamp())
     }
@@ -1566,6 +1573,15 @@ impl CharacterStore for PostgresCharacterStore {
         )
         .await
     }
+
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::CommitCharacters { characters, reply }, receive)
+            .await
+    }
 }
 
 fn finish_register_account(
@@ -2691,6 +2707,65 @@ fn commit_staff_action(
         DOMAIN_EVENT_RETENTION,
         Some((audit, now)),
     )
+}
+
+/// Characters-only commit (ADR 0027): the same character rows that
+/// `commit_action_with_retention` writes, in one transaction, without
+/// touching the runtime snapshot, world adventure row or event ledger.
+fn commit_characters_only(
+    connection: &mut Client,
+    characters: &[DurableCharacterSnapshot],
+) -> Result<(), StoreError> {
+    let rows = characters
+        .iter()
+        .map(|snapshot| {
+            Ok::<_, StoreError>((
+                snapshot,
+                encode_character_gameplay(&snapshot.gameplay)?,
+                encode_character_adventure(&snapshot.gameplay)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut transaction = connection.transaction()?;
+    if !rows.is_empty() {
+        let save_character = transaction.prepare(SAVE_CHARACTER_SQL)?;
+        let update_gameplay = transaction.prepare(
+            "UPDATE characters
+             SET gameplay_json = $1,
+                 updated_at = floor(extract(epoch FROM now()))::BIGINT
+             WHERE id = $2 AND account_id = $3",
+        )?;
+        let upsert_adventure = transaction.prepare(
+            "INSERT INTO character_adventure (character_id, state_json, updated_at)
+             VALUES ($1, $2, floor(extract(epoch FROM now()))::BIGINT)
+             ON CONFLICT(character_id) DO UPDATE SET
+                 state_json = excluded.state_json,
+                 updated_at = excluded.updated_at",
+        )?;
+        for (snapshot, gameplay_json, adventure_json) in rows {
+            save_with(&mut transaction, &save_character, &snapshot.character)?;
+            let updated = transaction.execute(
+                &update_gameplay,
+                &[
+                    &gameplay_json,
+                    &snapshot.character.id.0,
+                    &snapshot.character.account_id.0,
+                ],
+            )?;
+            if updated == 0 {
+                return Err(StoreError::CharacterNotFound {
+                    account_id: snapshot.character.account_id,
+                    character_id: snapshot.character.id,
+                });
+            }
+            transaction.execute(
+                &upsert_adventure,
+                &[&snapshot.character.id.0, &adventure_json],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn commit_action_with_retention(

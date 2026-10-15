@@ -5,7 +5,7 @@ use super::*;
 
 /// A single-owner world graph. Callers are expected to place it behind an actor.
 pub struct World {
-    pub(crate) entities: SlotMap<EntityId, Entity>,
+    pub(crate) entities: Shared<SlotMap<EntityId, Entity>>,
     pub(crate) stable_rooms: HashMap<String, EntityId>,
     pub(crate) area_generation: Option<AreaGenerationId>,
     pub(crate) active_areas: BTreeMap<String, ActiveAreaRevision>,
@@ -16,30 +16,30 @@ pub struct World {
     /// snapshot with newly published initial instances without allowing a
     /// snapshot to retarget an existing authored ID to another prototype.
     pub(crate) initial_item_prototypes: BTreeMap<ItemInstanceId, String>,
-    pub(crate) item_instances: BTreeMap<ItemInstanceId, ItemInstance>,
+    pub(crate) item_instances: ItemInstances,
     pub(crate) next_item_instance_sequence: u64,
-    pub(crate) item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
+    pub(crate) item_provenance: Shared<BTreeMap<ItemInstanceId, ItemProvenance>>,
     pub(crate) affixes: BTreeMap<String, AffixDefinition>,
     pub(crate) affix_pools: BTreeMap<String, AffixPool>,
     pub(crate) loot_tables: BTreeMap<String, LootTable>,
     pub(crate) loot_sources: BTreeMap<String, LootSource>,
     pub(crate) next_loot_drop_id: LootDropId,
     pub(crate) next_reward_open_id: RewardOpenId,
-    pub(crate) loot_encounters: BTreeMap<String, LootEncounter>,
-    pub(crate) ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
-    pub(crate) party_loot_cursors: BTreeMap<u64, u64>,
+    pub(crate) loot_encounters: Shared<BTreeMap<String, LootEncounter>>,
+    pub(crate) ground_loot: Shared<BTreeMap<ItemInstanceId, GroundLootReservation>>,
+    pub(crate) party_loot_cursors: Shared<BTreeMap<u64, u64>>,
     pub(crate) room_light: HashMap<String, LightLevel>,
     pub(crate) hidden_items: HashMap<String, u16>,
     pub(crate) hidden_npcs: HashMap<String, u16>,
     pub(crate) secret_exits: HashMap<(String, Direction), u16>,
     pub(crate) pending_npc_ability_sets: BTreeMap<String, NpcAbilitySetDefinition>,
-    pub(crate) npcs: BTreeMap<String, Npc>,
+    pub(crate) npcs: Shared<BTreeMap<String, Npc>>,
     pub(crate) abilities: BTreeMap<String, AbilityDefinition>,
     pub(crate) social_emotes: BTreeMap<String, SocialEmoteDefinition>,
     pub(crate) progression: ProgressionCatalog,
     pub(crate) progression_catalog: CharacterCreationCatalogView,
-    pub(crate) world_progression_flags: BTreeSet<String>,
-    pub(crate) character_gameplay: HashMap<CharacterId, CharacterGameplaySnapshot>,
+    pub(crate) world_progression_flags: Shared<BTreeSet<String>>,
+    pub(crate) character_gameplay: Shared<HashMap<CharacterId, CharacterGameplaySnapshot>>,
     pub(crate) sessions: HashMap<SessionId, EntityId>,
     pub(crate) observer_views: HashMap<SessionId, ObserverView>,
     pub(crate) last_view_bump: Option<(u64, Vec<(SessionId, u64)>)>,
@@ -48,13 +48,16 @@ pub struct World {
     pub(crate) revision: u64,
     pub(crate) logical_tick: u64,
     pub(crate) rng: DeterministicRng,
-    pub(crate) adventure: AdventureRuntimeSnapshot,
+    pub(crate) adventure: Shared<AdventureRuntimeSnapshot>,
     pub(crate) next_trade_id: TradeId,
-    pub(crate) trades: BTreeMap<TradeId, TradeSnapshot>,
+    pub(crate) trades: Shared<BTreeMap<TradeId, TradeSnapshot>>,
     /// Ephemeral abuse control. This deliberately does not enter the portable
     /// runtime snapshot and may reset on process restart.
     pub(crate) last_trade_request_ticks: HashMap<CharacterId, u64>,
     pub(crate) tick_resolution_pending: bool,
+    /// What the backend last confirmed. Not part of any checkpoint: rolling
+    /// world state back never changes what the store holds.
+    pub(crate) durable: DurableBaseline,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,26 +80,26 @@ pub(crate) struct RetiredAreaRevision {
 /// failed database transaction is invisible to connected clients.
 #[derive(Clone)]
 pub struct WorldCheckpoint {
-    pub(crate) entities: SlotMap<EntityId, Entity>,
-    pub(crate) item_instances: BTreeMap<ItemInstanceId, ItemInstance>,
+    pub(crate) entities: Shared<SlotMap<EntityId, Entity>>,
+    pub(crate) item_instances: ItemInstances,
     pub(crate) next_item_instance_sequence: u64,
-    pub(crate) item_provenance: BTreeMap<ItemInstanceId, ItemProvenance>,
+    pub(crate) item_provenance: Shared<BTreeMap<ItemInstanceId, ItemProvenance>>,
     pub(crate) next_reward_open_id: RewardOpenId,
     pub(crate) next_loot_drop_id: LootDropId,
-    pub(crate) loot_encounters: BTreeMap<String, LootEncounter>,
-    pub(crate) ground_loot: BTreeMap<ItemInstanceId, GroundLootReservation>,
-    pub(crate) party_loot_cursors: BTreeMap<u64, u64>,
-    pub(crate) npcs: BTreeMap<String, Npc>,
-    pub(crate) character_gameplay: HashMap<CharacterId, CharacterGameplaySnapshot>,
+    pub(crate) loot_encounters: Shared<BTreeMap<String, LootEncounter>>,
+    pub(crate) ground_loot: Shared<BTreeMap<ItemInstanceId, GroundLootReservation>>,
+    pub(crate) party_loot_cursors: Shared<BTreeMap<u64, u64>>,
+    pub(crate) npcs: Shared<BTreeMap<String, Npc>>,
+    pub(crate) character_gameplay: Shared<HashMap<CharacterId, CharacterGameplaySnapshot>>,
     pub(crate) observer_views: HashMap<SessionId, ObserverView>,
     pub(crate) last_view_bump: Option<(u64, Vec<(SessionId, u64)>)>,
     pub(crate) revision: u64,
     pub(crate) logical_tick: u64,
     pub(crate) rng: DeterministicRng,
-    pub(crate) adventure: AdventureRuntimeSnapshot,
-    pub(crate) world_progression_flags: BTreeSet<String>,
+    pub(crate) adventure: Shared<AdventureRuntimeSnapshot>,
+    pub(crate) world_progression_flags: Shared<BTreeSet<String>>,
     pub(crate) next_trade_id: TradeId,
-    pub(crate) trades: BTreeMap<TradeId, TradeSnapshot>,
+    pub(crate) trades: Shared<BTreeMap<TradeId, TradeSnapshot>>,
     pub(crate) last_trade_request_ticks: HashMap<CharacterId, u64>,
     pub(crate) tick_resolution_pending: bool,
 }
@@ -235,7 +238,7 @@ impl World {
             }
 
             let stable_id = definition.stable_id;
-            let room_id = entities.insert(Entity::Room(Box::new(Room {
+            let room_id = entities.insert(Entity::Room(Shared::new(Room {
                 stable_id: stable_id.clone(),
                 title: definition.title,
                 prose: definition.prose,
@@ -364,7 +367,7 @@ impl World {
             .keys()
             .cloned()
             .map(|id| (id, ItemProvenance::AuthoredInitial))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
         let next_item_instance_sequence = item_instances
             .keys()
             .filter_map(runtime_item_sequence)
@@ -374,7 +377,7 @@ impl World {
             .ok_or_else(|| WorldBuildError::InvalidItemPrototype("runtime:*".into()))?;
 
         Ok(Self {
-            entities,
+            entities: entities.into(),
             stable_rooms,
             area_generation: None,
             active_areas: BTreeMap::new(),
@@ -382,30 +385,30 @@ impl World {
             room_areas: HashMap::new(),
             item_prototypes,
             initial_item_prototypes,
-            item_instances,
+            item_instances: item_instances.into(),
             next_item_instance_sequence,
-            item_provenance,
+            item_provenance: item_provenance.into(),
             affixes: BTreeMap::new(),
             affix_pools: BTreeMap::new(),
             loot_tables: BTreeMap::new(),
             loot_sources: BTreeMap::new(),
             next_loot_drop_id: LootDropId(1),
             next_reward_open_id: RewardOpenId(1),
-            loot_encounters: BTreeMap::new(),
-            ground_loot: BTreeMap::new(),
-            party_loot_cursors: BTreeMap::new(),
+            loot_encounters: BTreeMap::new().into(),
+            ground_loot: BTreeMap::new().into(),
+            party_loot_cursors: BTreeMap::new().into(),
             room_light: HashMap::new(),
             hidden_items: HashMap::new(),
             hidden_npcs: HashMap::new(),
             secret_exits: HashMap::new(),
             pending_npc_ability_sets: BTreeMap::new(),
-            npcs: BTreeMap::new(),
+            npcs: BTreeMap::new().into(),
             abilities: BTreeMap::new(),
             social_emotes: BTreeMap::new(),
             progression,
             progression_catalog,
-            world_progression_flags: BTreeSet::new(),
-            character_gameplay: HashMap::new(),
+            world_progression_flags: BTreeSet::new().into(),
+            character_gameplay: HashMap::new().into(),
             sessions: HashMap::new(),
             observer_views: HashMap::new(),
             last_view_bump: None,
@@ -414,11 +417,12 @@ impl World {
             revision: 1,
             logical_tick: 0,
             rng: DeterministicRng::new(0x5449_414d_5544),
-            adventure: AdventureRuntimeSnapshot::default(),
+            adventure: AdventureRuntimeSnapshot::default().into(),
             next_trade_id: TradeId(1),
-            trades: BTreeMap::new(),
+            trades: BTreeMap::new().into(),
             last_trade_request_ticks: HashMap::new(),
             tick_resolution_pending: false,
+            durable: DurableBaseline::default(),
         })
     }
 
@@ -1306,6 +1310,9 @@ impl World {
     }
 
     pub fn restore_lifecycle_checkpoint(&mut self, checkpoint: WorldLifecycleCheckpoint) {
+        // Lifecycle rollbacks follow failed or ambiguous area commits whose
+        // durable outcome the caller reconciles separately.
+        self.invalidate_durable_baseline();
         self.restore_checkpoint(checkpoint.world);
         self.stable_rooms = checkpoint.stable_rooms;
         self.area_generation = checkpoint.area_generation;
@@ -1686,14 +1693,21 @@ impl World {
                 };
                 let mut events = vec![event];
                 let mut released_npcs = Vec::new();
-                for npc in self.npcs.values_mut() {
-                    if npc.engaged_character == Some(actor_id) {
-                        npc.engaged_character = None;
-                        released_npcs.push((
-                            npc.stable_id.clone(),
-                            npc.name.clone(),
-                            npc.spawn_room_id.clone(),
-                        ));
+                // Copy-on-write: borrow NPCs mutably only when one is engaged.
+                if self
+                    .npcs
+                    .values()
+                    .any(|npc| npc.engaged_character == Some(actor_id))
+                {
+                    for npc in self.npcs.values_mut() {
+                        if npc.engaged_character == Some(actor_id) {
+                            npc.engaged_character = None;
+                            released_npcs.push((
+                                npc.stable_id.clone(),
+                                npc.name.clone(),
+                                npc.spawn_room_id.clone(),
+                            ));
+                        }
                     }
                 }
                 for (npc_id, npc_name, room_id) in released_npcs {

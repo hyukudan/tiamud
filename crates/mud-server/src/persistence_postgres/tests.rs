@@ -882,6 +882,86 @@ async fn postgres_board_advisory_lock_serializes_concurrent_quota() {
 }
 
 #[tokio::test]
+async fn postgres_characters_only_commit_is_atomic_and_leaves_runtime_alone() {
+    let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let schema = format!("tiamud_rows_test_{}_{}", process::id(), nonce);
+    admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
+    let store = PostgresCharacterStore::open(&scoped_url(&base_url, &schema))
+        .await
+        .unwrap();
+    let owner = store
+        .register_account("Rows Owner", "correct horse battery staple")
+        .await
+        .unwrap();
+    let mut character = store
+        .load_or_create_character(owner.account.id, "Rows", "room:a")
+        .await
+        .unwrap();
+    let mut runtime = tiamud_core::World::demo().runtime_snapshot();
+    runtime.logical_tick = 7;
+    store
+        .commit_action(
+            vec![tiamud_core::DurableCharacterSnapshot {
+                character: character.clone(),
+                gameplay: CharacterGameplaySnapshot::default(),
+            }],
+            runtime.clone(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    character.room_id = "room:b".into();
+    let changed = tiamud_core::DurableCharacterSnapshot {
+        character: character.clone(),
+        gameplay: CharacterGameplaySnapshot {
+            coins: 4_321,
+            ..CharacterGameplaySnapshot::default()
+        },
+    };
+    let mut missing = changed.clone();
+    missing.character.id = tiamud_core::CharacterId(999_999);
+    assert!(
+        store
+            .commit_characters(vec![changed.clone(), missing])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .load_character_gameplay(character.id)
+            .await
+            .unwrap()
+            .coins,
+        CharacterGameplaySnapshot::default().coins
+    );
+    store.commit_characters(vec![changed]).await.unwrap();
+    assert_eq!(
+        store
+            .load_character(owner.account.id, character.id)
+            .await
+            .unwrap(),
+        character
+    );
+    assert_eq!(
+        store
+            .load_character_gameplay(character.id)
+            .await
+            .unwrap()
+            .coins,
+        4_321
+    );
+    assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
+    store.shutdown().await.unwrap();
+    admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
+}
+
+#[tokio::test]
 async fn postgres_store_round_trips_auth_characters_runtime_and_social_policy() {
     let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
         return;

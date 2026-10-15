@@ -621,12 +621,13 @@ fn loot_views_and_pass_keep_reserved_ground_items_enforced_server_side() {
         .unwrap();
     let item_id = ItemInstanceId("demo:blue-lantern".into());
     world.next_loot_drop_id = LootDropId(2);
+    let room_id = world.start_room_id().to_owned();
     world.ground_loot.insert(
         item_id.clone(),
         GroundLootReservation {
             drop_id: LootDropId(1),
             root_item_id: item_id,
-            room_id: world.start_room_id().to_owned(),
+            room_id,
             cohort: vec![CharacterId(101), CharacterId(102)],
             beneficiary: Some(CharacterId(101)),
             passed: BTreeSet::new(),

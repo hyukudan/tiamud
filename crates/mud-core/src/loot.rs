@@ -1801,7 +1801,7 @@ impl World {
     pub fn cancel_all_loot_encounters_for_restart(
         &mut self,
     ) -> Result<Vec<DomainEvent>, WorldError> {
-        let encounters = std::mem::take(&mut self.loot_encounters);
+        let encounters = std::mem::take(&mut *self.loot_encounters);
         let mut events = Vec::with_capacity(encounters.len());
         for (npc_id, _) in encounters {
             let npc = self
@@ -1909,8 +1909,16 @@ impl World {
                 });
             }
         }
-        self.party_loot_cursors
-            .retain(|party_id, _| self.adventure.parties.contains_key(party_id));
+        // Only take a mutable (copy-on-write, dirtying) borrow when a stale
+        // cursor actually exists.
+        if self
+            .party_loot_cursors
+            .keys()
+            .any(|party_id| !self.adventure.parties.contains_key(party_id))
+        {
+            self.party_loot_cursors
+                .retain(|party_id, _| self.adventure.parties.contains_key(party_id));
+        }
         Ok(events)
     }
 }

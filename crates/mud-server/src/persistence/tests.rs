@@ -1207,6 +1207,78 @@ async fn selected_initial_gameplay_is_persisted_once_without_overwriting_existin
 }
 
 #[tokio::test]
+async fn characters_only_commit_is_atomic_and_leaves_runtime_and_events_alone() {
+    let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+    let owner = account(&store, "Rows Owner").await;
+    let mut character = store
+        .load_or_create_character(owner.id, "Rows", "room:a")
+        .await
+        .unwrap();
+    let mut runtime = World::demo().runtime_snapshot();
+    runtime.logical_tick = 7;
+    let event = DomainEvent::CharacterMoved {
+        actor_id: character.id,
+        actor_name: character.name.clone(),
+        from_room_id: "room:a".into(),
+        to_room_id: "room:a".into(),
+        direction: Direction::North,
+    };
+    store
+        .commit_action(
+            vec![DurableCharacterSnapshot {
+                character: character.clone(),
+                gameplay: CharacterGameplaySnapshot::default(),
+            }],
+            runtime.clone(),
+            vec![event.clone()],
+        )
+        .await
+        .unwrap();
+
+    character.room_id = "room:b".into();
+    let changed = DurableCharacterSnapshot {
+        character: character.clone(),
+        gameplay: CharacterGameplaySnapshot {
+            coins: 4_321,
+            ..CharacterGameplaySnapshot::default()
+        },
+    };
+    let mut missing = changed.clone();
+    missing.character.id = CharacterId(9_999);
+    // One unknown row rolls back the whole characters-only transaction.
+    assert!(
+        store
+            .commit_characters(vec![changed.clone(), missing])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .load_character_gameplay(character.id)
+            .await
+            .unwrap()
+            .coins,
+        CharacterGameplaySnapshot::default().coins
+    );
+
+    store.commit_characters(vec![changed]).await.unwrap();
+    assert_eq!(
+        store.load_character(owner.id, character.id).await.unwrap(),
+        character
+    );
+    assert_eq!(
+        store
+            .load_character_gameplay(character.id)
+            .await
+            .unwrap()
+            .coins,
+        4_321
+    );
+    assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
+    assert_eq!(store.load_domain_events().await.unwrap(), vec![event]);
+}
+
+#[tokio::test]
 async fn character_and_shared_world_events_commit_atomically() {
     let store = SqliteCharacterStore::open(":memory:").await.unwrap();
     let owner = account(&store, "Event Owner").await;

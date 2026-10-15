@@ -880,6 +880,14 @@ pub trait CharacterStore: Send + Sync {
         events: Vec<DomainEvent>,
         audit: StaffAuditRecord,
     ) -> Result<(), StoreError>;
+
+    /// Atomically persist only character aggregates in one transaction. The
+    /// caller guarantees the durable runtime snapshot is unchanged and that
+    /// no domain events need recording (ADR 0027).
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError>;
 }
 
 /// Adds bounded operational timing to every database transaction while
@@ -1418,6 +1426,14 @@ impl CharacterStore for MeasuredCharacterStore {
         )
         .await
     }
+
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.commit_characters(characters))
+            .await
+    }
 }
 
 pub(super) enum Request {
@@ -1570,6 +1586,10 @@ pub(super) enum Request {
         runtime: WorldRuntimeSnapshot,
         events: Vec<DomainEvent>,
         audit: StaffAuditRecord,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    CommitCharacters {
+        characters: Vec<DurableCharacterSnapshot>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     SocialProfile {
@@ -1839,6 +1859,10 @@ pub(super) trait PersistenceCommandHandler {
         runtime: WorldRuntimeSnapshot,
         events: Vec<DomainEvent>,
         audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+    fn commit_characters(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
     ) -> Result<(), StoreError>;
     fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError>;
     fn social_target(&mut self, name: String) -> Result<SocialProfile, StoreError>;
@@ -2152,6 +2176,9 @@ pub(super) fn dispatch_persistence_request<H: PersistenceCommandHandler>(
             reply,
         } => {
             let _ = reply.send(handler.commit_staff_action(characters, runtime, events, audit));
+        }
+        Request::CommitCharacters { characters, reply } => {
+            let _ = reply.send(handler.commit_characters(characters));
         }
         Request::SocialProfile {
             character_id,
