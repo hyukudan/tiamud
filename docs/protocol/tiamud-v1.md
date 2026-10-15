@@ -275,7 +275,9 @@ sequenceDiagram
 ```
 
 The command is at most 1024 bytes and contains no control characters. It reaches
-the same `PlayerAction` parser as Telnet.
+the same `PlayerAction` parser as Telnet, except story commands and any line
+typed while the session is inside a story, which go to the story instance
+(see [Story sessions](#story-sessions)).
 
 Textual item delivery uses exactly:
 
@@ -675,6 +677,7 @@ traffic.
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
+| `story.entered`, `story.view`, `story.left`, `story.error` | Single-player story session state; see [Story sessions](#story-sessions). Critical priority. |
 
 State messages are coalescible, while narrative output has lower priority than
 critical results. When a connection cannot drain critical output within the
@@ -1247,6 +1250,73 @@ Channels are `music`, `ambience` or `effects`; formats are Opus/Ogg/MP3 under a
 content-addressed same-origin asset path. The browser independently requires a
 user gesture and enabled preference before playback. `media.stop` identifies a
 channel. Media never carries exclusive gameplay information.
+
+## Story sessions
+
+Story sessions ([ADR 0029](../decisions/0029-story-session-instances-and-story-protocol.md),
+proposed) are an additive, single-player, in-memory surface. They exist only
+when the server is started with `TIAMUD_STORY_DIR`; otherwise every story
+command answers that stories are unavailable.
+
+Entering and listing reuse `command.submit`: `historias`/`stories` returns the
+catalog in `action.result.message`; `historia <id>`/`story <id>` answers with a
+correlated `action.result`, then `story.entered` and the current
+`story.view`. While a session is in a story, other `command.submit` lines and
+every `action.perform` are answered with `ok: false` and never reach the world;
+typed numbers choose the numbered action, `deshacer`/`undo` undoes,
+`ver`/`look` re-sends the view and `salir`/`leave`/`salir historia` leave. The
+character stays connected and visible in its room.
+
+Server messages:
+
+- `story.entered`: `{storyId, title}`. `storyId` is the public catalog id.
+- `story.view`: `{viewRev, part, parts, turn, canUndo, items}`. A view whose
+  sequenced frame would exceed 15 KiB is split into `parts` frames that share
+  `viewRev`; the client applies the view only when parts `0..parts` arrived
+  in order and concatenates `items`. `items` are tagged by `type`:
+  `scene {title, text, score, ending: null | {kind: victory|defeat|neutral}}`
+  (exactly one per view), `cue {action: play|stop, channel, url?, loop}`,
+  `portrait {name}`, `block {kind: event|line, speaker?, text}`,
+  `stat {label, value}`, `item {name}`, `choice {id, label}`,
+  `verb {id, label, needsTarget}`, `target {verb, id, label}` (where `verb` is
+  the id of a verb of the same view) and `dialogueOption {id, label}`. Every
+  `id` is `c` followed by 16 lowercase hex digits, random per view, never
+  derived from authored ids, ordinals or prose, and stops resolving when the
+  next view is published. A `play` cue carries a content-addressed
+  `/assets/<sha256>/audio-*.{opus,ogg,mp3}` URL resolved from the reviewed
+  story media map; cues are omitted for clients without audio.
+- `story.left`: `{reason: left|evicted}`. `evicted` also covers an instance
+  closed by another session of the same account.
+- `story.error`: `{code, message}` with `code` one of `disabled`,
+  `unknown_story`, `already_in_story`, `capacity`, `not_in_story`,
+  `stale_view`, `unknown_choice`, `ended`, `nothing_to_undo`, `busy`,
+  `internal`. `stale_view` is followed by the current view.
+
+Client messages (all strict, unknown fields rejected):
+
+- `story.choose {id, viewRev}`: a `choice` or `dialogueOption` id.
+- `story.dialogue {id, viewRev}`: a `dialogueOption` id only.
+- `story.menu {verb, target?, viewRev}`: `target` is required exactly when the
+  verb has `needsTarget` and must be a `target` of that verb.
+- `story.undo {}` and `story.leave {}`: exactly an empty object.
+
+A stale `viewRev`, an id that was never published, an id of the wrong kind or
+a target of another verb is rejected without changing state. After
+`sync.request` and after every reconnection of the account, the server
+re-sends `story.entered` and the current view (with only the current music as
+cue). An idle instance (30 minutes by default) is evicted and lost; there are
+no save slots before S3.
+
+Telnet renders the same view as text: title, prose, events, speaker lines,
+present characters, stats and inventory, then every action numbered
+`1) …` in the browser's order (choices, dialogue options, verbs or
+`VERB → target` pairs). GMCP clients that negotiated `Tiamud.Story 1` receive
+`Tiamud.Story.View` (`viewRev`, `title`, `turn`, `score`, `ending`,
+`canUndo`, `dialogue`, numbered `choices` with labels, `present`, `stats`,
+`inventory`; no prose and no ids) and `Tiamud.Story.Left {reason}`. An
+oversized summary degrades to bounded labels with `truncated`/`overflow`, then
+to `{viewRev, choiceCount, truncated, overflow}`, always under 8 KiB. Story
+cues use `Client.Media.Play`/`Stop` only with the media opt-in.
 
 ## Telnet GMCP scene overflow
 
