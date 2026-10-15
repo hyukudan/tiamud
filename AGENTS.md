@@ -416,6 +416,13 @@ matriz, memoria y documentación pública a la vez.
   y composición son solo presentación.
 - `tiamud.v1` experimental usa secuencias monótonas, deduplicación acotada,
   heartbeats y recuperación autoritativa; no hay replay general de eventos.
+- `crates/protocol` (`tiamud-protocol`) tipa el sobre, los nombres de mensaje,
+  las cargas cliente salvo `action.perform` y las cargas servidor propias del
+  transporte; `web.rs` construye con ellas todo mensaje WebSocket con bytes
+  idénticos a la construcción `json!` previa (pruebas golden). El TypeScript
+  generado con ts-rs (solo dev) se versiona en `apps/web/src/lib/generated/`.
+  `action.perform` y las formas internas de escena/jugador siguen escritas a
+  mano en ambos lados.
 - Una recuperación devuelve `sync.scene` y `sync.player` correlacionados, cada
   uno bajo 16 KiB; el navegador valida y aplica el par atómicamente. La ventana
   semántica Web para escenas es 14 KiB y conserva en orden botín propio,
@@ -576,6 +583,7 @@ No existe LRU ni política automática de memoria.
 | --- | --- |
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
+| `crates/protocol/` | Tipos serde de `tiamud.v1` y generación del TypeScript del cliente (ADR 0026 propuesto) |
 | `crates/persistence-sqlite/` | SQLite esquema v15 y almacenamiento local |
 | `crates/persistence-postgres/` | PostgreSQL esquema v15, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
@@ -615,7 +623,10 @@ No existe LRU ni política automática de memoria.
 - WorldPack suele exigir esquema, validador, normalización, composición,
   loader, datos revisados y CLI tests.
 - Protocolo web suele exigir serialización Rust, parser TypeScript estricto,
-  socket/recovery, Playwright y revisión Telnet/GMCP.
+  socket/recovery, Playwright y revisión Telnet/GMCP. Los tipos de cable viven
+  en `crates/protocol`: cambia el tipo, añade su prueba golden y regenera
+  `apps/web/src/lib/generated/protocol.ts`; no relajes la validación en tiempo
+  de ejecución de `protocol.ts` por existir tipos generados.
 - Medios pasan por manifiestos revisados y percepción.
 - Usa aritmética checked/saturating y límites explícitos; falla cerrado ante
   autoridad, esquema o seguridad ambiguos.
@@ -641,6 +652,12 @@ cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
+
+`cargo test --workspace --locked` incluye la comprobación de que
+`apps/web/src/lib/generated/protocol.ts` coincide con `crates/protocol`. Para
+regenerarlo tras cambiar un tipo de cable, ejecuta
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol` y
+revisa el diff.
 
 PostgreSQL requiere una base desechable y autoridad explícita:
 
