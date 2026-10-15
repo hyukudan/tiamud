@@ -44,6 +44,11 @@ pub(crate) use recovery::*;
 /// The SQLite store: its owner thread, command handler and SQL.
 mod sqlite;
 pub use sqlite::SqliteCharacterStore;
+/// Public types of the persisted story save slots (schema v16, ADR 0030).
+mod story_slots;
+pub use story_slots::*;
+#[cfg(test)]
+mod story_slot_tests;
 #[cfg(test)]
 mod tests;
 
@@ -465,6 +470,18 @@ pub enum StoreError {
     UnsupportedSchemaVersion { found: i64, supported: i64 },
     #[error("database schema migration left foreign-key violations")]
     SchemaForeignKeyViolations,
+    #[error("invalid story save input")]
+    InvalidStorySave,
+    #[error("story save state exceeds the {maximum} byte limit")]
+    StorySaveTooLarge { maximum: usize },
+    #[error("the account's story save capacity is exhausted")]
+    StorySaveCapacity,
+    #[error("the stored story save failed its integrity check")]
+    StorySaveCorrupt,
+    #[error("the story save belongs to an incompatible story pack revision")]
+    StorySavePackMismatch,
+    #[error("this character store does not implement story save slots")]
+    StorySaveUnsupported,
 }
 
 /// Mutable identity and character state behind the transport-independent actor.
@@ -620,6 +637,58 @@ pub trait CharacterStore: Send + Sync {
         _checkpoint: DurableAreaCheckpoint,
     ) -> Result<(), StoreError> {
         Err(StoreError::AreaCheckpointUnsupported)
+    }
+
+    /// Atomically insert or overwrite one story save slot (ADR 0030).
+    ///
+    /// Validates identity, slot, pack digest, format version, byte bounds and
+    /// that the document's `format_version`/`pack_id` match the metadata,
+    /// computes the SHA-256 of the exact bytes and enforces the per-account
+    /// caps in the same transaction. Overwriting keeps `created_at`.
+    #[allow(dead_code)] // Wired by the S2 story instance manager.
+    async fn save_story_slot(
+        &self,
+        _write: StorySaveWrite,
+    ) -> Result<StorySaveSummary, StoreError> {
+        Err(StoreError::StorySaveUnsupported)
+    }
+
+    /// Load one slot. `Ok(None)` means the slot is empty. A row whose bytes,
+    /// digest or metadata disagree yields `StorySaveCorrupt`; a row for a pack
+    /// revision `pack` does not accept yields `StorySavePackMismatch`. The
+    /// caller must still re-validate the state against the pack.
+    #[allow(dead_code)] // Wired by the S2 story instance manager.
+    async fn load_story_slot(
+        &self,
+        _account_id: AccountId,
+        _story_id: &str,
+        _slot: StorySlot,
+        _pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError> {
+        Err(StoreError::StorySaveUnsupported)
+    }
+
+    /// List the account's slots for one story in slot order (at most ten),
+    /// reading metadata only.
+    #[allow(dead_code)] // Wired by the S2 story instance manager.
+    async fn list_story_slots(
+        &self,
+        _account_id: AccountId,
+        _story_id: &str,
+    ) -> Result<Vec<StorySaveSummary>, StoreError> {
+        Err(StoreError::StorySaveUnsupported)
+    }
+
+    /// Delete one slot; returns whether a row existed. Account deletion
+    /// removes every slot through the `ON DELETE CASCADE` foreign key.
+    #[allow(dead_code)] // Wired by the S2 story instance manager.
+    async fn delete_story_slot(
+        &self,
+        _account_id: AccountId,
+        _story_id: &str,
+        _slot: StorySlot,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::StorySaveUnsupported)
     }
 
     /// Load the retained event suffix in durable sequence order. Before the
@@ -1103,6 +1172,40 @@ impl CharacterStore for MeasuredCharacterStore {
         self.inner.load_domain_events().await
     }
 
+    async fn save_story_slot(&self, write: StorySaveWrite) -> Result<StorySaveSummary, StoreError> {
+        self.transaction(self.inner.save_story_slot(write)).await
+    }
+
+    async fn load_story_slot(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError> {
+        self.inner
+            .load_story_slot(account_id, story_id, slot, pack)
+            .await
+    }
+
+    async fn list_story_slots(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+    ) -> Result<Vec<StorySaveSummary>, StoreError> {
+        self.inner.list_story_slots(account_id, story_id).await
+    }
+
+    async fn delete_story_slot(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+        slot: StorySlot,
+    ) -> Result<bool, StoreError> {
+        self.transaction(self.inner.delete_story_slot(account_id, story_id, slot))
+            .await
+    }
+
     async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
         self.inner.social_profile(character_id).await
     }
@@ -1426,6 +1529,36 @@ pub(super) enum Request {
     LoadDomainEvents {
         reply: oneshot::Sender<Result<Vec<DomainEvent>, StoreError>>,
     },
+    // Constructed once the S2 story instance manager calls the store.
+    #[allow(dead_code)]
+    SaveStorySlot {
+        write: StorySaveWrite,
+        reply: oneshot::Sender<Result<StorySaveSummary, StoreError>>,
+    },
+    // Constructed once the S2 story instance manager calls the store.
+    #[allow(dead_code)]
+    LoadStorySlot {
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+        reply: oneshot::Sender<Result<Option<StorySaveRecord>, StoreError>>,
+    },
+    // Constructed once the S2 story instance manager calls the store.
+    #[allow(dead_code)]
+    ListStorySlots {
+        account_id: AccountId,
+        story_id: String,
+        reply: oneshot::Sender<Result<Vec<StorySaveSummary>, StoreError>>,
+    },
+    // Constructed once the S2 story instance manager calls the store.
+    #[allow(dead_code)]
+    DeleteStorySlot {
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+        reply: oneshot::Sender<Result<bool, StoreError>>,
+    },
     CommitAction {
         characters: Vec<DurableCharacterSnapshot>,
         runtime: WorldRuntimeSnapshot,
@@ -1675,6 +1808,25 @@ pub(super) trait PersistenceCommandHandler {
         checkpoint: DurableAreaCheckpoint,
     ) -> Result<(), StoreError>;
     fn load_domain_events(&mut self) -> Result<Vec<DomainEvent>, StoreError>;
+    fn save_story_slot(&mut self, write: StorySaveWrite) -> Result<StorySaveSummary, StoreError>;
+    fn load_story_slot(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError>;
+    fn list_story_slots(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+    ) -> Result<Vec<StorySaveSummary>, StoreError>;
+    fn delete_story_slot(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+    ) -> Result<bool, StoreError>;
     fn commit_action(
         &mut self,
         characters: Vec<DurableCharacterSnapshot>,
@@ -1956,6 +2108,33 @@ pub(super) fn dispatch_persistence_request<H: PersistenceCommandHandler>(
         }
         Request::LoadDomainEvents { reply } => {
             let _ = reply.send(handler.load_domain_events());
+        }
+        Request::SaveStorySlot { write, reply } => {
+            let _ = reply.send(handler.save_story_slot(write));
+        }
+        Request::LoadStorySlot {
+            account_id,
+            story_id,
+            slot,
+            pack,
+            reply,
+        } => {
+            let _ = reply.send(handler.load_story_slot(account_id, story_id, slot, pack));
+        }
+        Request::ListStorySlots {
+            account_id,
+            story_id,
+            reply,
+        } => {
+            let _ = reply.send(handler.list_story_slots(account_id, story_id));
+        }
+        Request::DeleteStorySlot {
+            account_id,
+            story_id,
+            slot,
+            reply,
+        } => {
+            let _ = reply.send(handler.delete_story_slot(account_id, story_id, slot));
         }
         Request::CommitAction {
             characters,

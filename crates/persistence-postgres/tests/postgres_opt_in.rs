@@ -166,6 +166,19 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             ],
         )
         .unwrap();
+    let story_state = r#"{"format_version":2,"pack_id":"cripta-del-nigromante","node":"inicio"}"#;
+    let story_state_sha256 = hex::encode(Sha256::digest(story_state.as_bytes()));
+    sqlite
+        .execute(
+            "INSERT INTO story_saves
+                 (account_id, story_id, slot, pack_id, pack_sha256,
+                  state_format_version, state_json, state_sha256,
+                  created_at, updated_at)
+             VALUES (2, 'cripta-del-nigromante', 0, 'cripta-del-nigromante',
+                     ?1, 2, ?2, ?3, 990, 995)",
+            params!["c".repeat(64), story_state, story_state_sha256],
+        )
+        .unwrap();
     let gameplay_json = r#"{"lineageId":"tiamud:mortal","backgroundId":"tiamud:city-guard","baseClassId":"tiamud:vanguard","activeClassId":"tiamud:bastion","classHistory":["tiamud:vanguard","tiamud:bastion"],"progressionPoints":{"talent":0},"talentNodeRanks":{"tiamud:martial-talents":{"tiamud:guarded-stance":1}},"tags":["tiamud:founder"],"receivedSignals":["tiamud:heard-call"]}"#;
     sqlite
         .execute(
@@ -177,7 +190,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     let report =
         tiamud_persistence_postgres::copy_sqlite_to_postgres(&sqlite_path, &mut postgres).unwrap();
-    assert_eq!(report.total_rows, 24);
+    assert_eq!(report.total_rows, 25);
     assert_eq!(
         postgres
             .query_one("SELECT COUNT(*)::BIGINT FROM characters", &[])
@@ -226,7 +239,72 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 15, to: 15 }
+        tiamud_persistence_postgres::MigrationReport { from: 16, to: 16 }
+    );
+    let story_row = postgres
+        .query_one(
+            "SELECT account_id, story_id, slot, pack_id, pack_sha256,
+                    state_format_version, state_json, state_sha256,
+                    created_at, updated_at
+             FROM story_saves",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(story_row.get::<_, i64>(0), 2);
+    assert_eq!(story_row.get::<_, String>(1), "cripta-del-nigromante");
+    assert_eq!(story_row.get::<_, i16>(2), 0);
+    assert_eq!(story_row.get::<_, String>(3), "cripta-del-nigromante");
+    assert_eq!(story_row.get::<_, String>(4), "c".repeat(64));
+    assert_eq!(story_row.get::<_, i32>(5), 2);
+    assert_eq!(
+        story_row.get::<_, String>(6),
+        story_state,
+        "offline transfer must preserve story save bytes exactly"
+    );
+    assert_eq!(story_row.get::<_, String>(7), story_state_sha256);
+    assert_eq!(story_row.get::<_, i64>(8), 990);
+    assert_eq!(story_row.get::<_, i64>(9), 995);
+    assert!(
+        postgres
+            .execute("UPDATE story_saves SET slot = 10", &[])
+            .is_err(),
+        "the PostgreSQL slot bound must match SQLite"
+    );
+    assert!(
+        postgres
+            .execute(
+                "UPDATE story_saves SET state_json = repeat('x', 65537)",
+                &[],
+            )
+            .is_err(),
+        "the PostgreSQL state byte bound must match SQLite"
+    );
+    // A genuine v15 database has no story_saves table; v15 -> v16 adds it
+    // empty without touching any other authority.
+    postgres
+        .batch_execute(
+            "DROP TABLE story_saves;
+             UPDATE tiamud_schema SET version = 15 WHERE singleton = 1",
+        )
+        .unwrap();
+    assert_eq!(
+        tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
+        tiamud_persistence_postgres::MigrationReport { from: 15, to: 16 }
+    );
+    assert_eq!(
+        postgres
+            .query_one("SELECT COUNT(*)::BIGINT FROM story_saves", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        postgres
+            .query_one("SELECT COUNT(*)::BIGINT FROM world_area_checkpoints", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1,
+        "v15 to v16 must not touch area checkpoints"
     );
     assert_eq!(
         postgres
@@ -365,14 +443,15 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     postgres
         .batch_execute(
-            "DROP TABLE world_area_checkpoints;
+            "DROP TABLE story_saves;
+             DROP TABLE world_area_checkpoints;
              DROP TABLE world_area_generation;
              UPDATE tiamud_schema SET version = 13 WHERE singleton = 1",
         )
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 13, to: 15 }
+        tiamud_persistence_postgres::MigrationReport { from: 13, to: 16 }
     );
     assert_eq!(
         postgres
@@ -383,7 +462,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             .unwrap()
             .get::<_, String>(0),
         runtime_json,
-        "v13 to v15 must not rewrite the runtime snapshot"
+        "v13 to v16 must not rewrite the runtime snapshot"
     );
     assert_eq!(
         postgres
@@ -395,7 +474,8 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     );
     postgres
         .batch_execute(
-            "DROP TABLE world_area_checkpoints;
+            "DROP TABLE story_saves;
+             DROP TABLE world_area_checkpoints;
              DROP TABLE social_board_report_evidence;
              DROP TABLE world_area_generation;
              DROP TABLE social_board_posts;
@@ -414,7 +494,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 10, to: 15 }
+        tiamud_persistence_postgres::MigrationReport { from: 10, to: 16 }
     );
     let constraint: String = postgres
         .query_one(
@@ -448,7 +528,8 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
     ));
     postgres
         .batch_execute(
-            "DROP TABLE world_area_checkpoints;
+            "DROP TABLE story_saves;
+             DROP TABLE world_area_checkpoints;
              DROP TABLE character_adventure;
              DROP TABLE world_adventure;
              DROP TABLE world_area_generation;
@@ -482,7 +563,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         .unwrap();
     assert_eq!(
         tiamud_persistence_postgres::migrate(&mut postgres).unwrap(),
-        tiamud_persistence_postgres::MigrationReport { from: 6, to: 15 }
+        tiamud_persistence_postgres::MigrationReport { from: 6, to: 16 }
     );
     assert!(
         postgres
@@ -525,25 +606,25 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
 
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 16 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 17 WHERE singleton = 1",
             &[],
         )
         .unwrap();
     assert!(matches!(
         tiamud_persistence_postgres::migrate(&mut postgres),
-        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 16 })
+        Err(tiamud_persistence_postgres::SchemaError::UnsupportedVersion { found: 17 })
     ));
     assert_eq!(
         postgres
             .query_one("SELECT version FROM tiamud_schema WHERE singleton = 1", &[])
             .unwrap()
             .get::<_, i32>(0),
-        16,
+        17,
         "future metadata must remain untouched after rejection"
     );
     postgres
         .execute(
-            "UPDATE tiamud_schema SET version = 15 WHERE singleton = 1",
+            "UPDATE tiamud_schema SET version = 16 WHERE singleton = 1",
             &[],
         )
         .unwrap();

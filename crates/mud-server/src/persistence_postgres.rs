@@ -35,6 +35,7 @@ use crate::{
         MailSendResult, ModerationAction, PersistenceCommandHandler, PreparedLogin, Request,
         SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry, StaffAuditRecord,
         StaffReport, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
+        StoryPackCompatibility, StorySaveRecord, StorySaveSummary, StorySaveWrite, StorySlot,
         decode_runtime_snapshot, decode_startup_domain_events, decode_startup_gameplay,
         dispatch_persistence_request, ensure_all_character_ids_exist,
         ensure_all_startup_characters_loaded, normalise_character_identity_ids,
@@ -322,6 +323,37 @@ impl PersistenceCommandHandler for PostgresCommandHandler {
 
     fn load_domain_events(&mut self) -> Result<Vec<DomainEvent>, StoreError> {
         load_domain_events(&mut self.connection)
+    }
+
+    fn save_story_slot(&mut self, write: StorySaveWrite) -> Result<StorySaveSummary, StoreError> {
+        save_story_slot(&mut self.connection, write, unix_timestamp())
+    }
+
+    fn load_story_slot(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError> {
+        load_story_slot(&mut self.connection, account_id, &story_id, slot, &pack)
+    }
+
+    fn list_story_slots(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+    ) -> Result<Vec<StorySaveSummary>, StoreError> {
+        list_story_slots(&mut self.connection, account_id, &story_id)
+    }
+
+    fn delete_story_slot(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+    ) -> Result<bool, StoreError> {
+        delete_story_slot(&mut self.connection, account_id, &story_id, slot)
     }
 
     fn commit_action(
@@ -986,6 +1018,69 @@ impl CharacterStore for PostgresCharacterStore {
         let (reply, receive) = oneshot::channel();
         self.request(Request::LoadDomainEvents { reply }, receive)
             .await
+    }
+
+    async fn save_story_slot(&self, write: StorySaveWrite) -> Result<StorySaveSummary, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::SaveStorySlot { write, reply }, receive)
+            .await
+    }
+
+    async fn load_story_slot(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoadStorySlot {
+                account_id,
+                story_id: story_id.to_owned(),
+                slot,
+                pack,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn list_story_slots(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+    ) -> Result<Vec<StorySaveSummary>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ListStorySlots {
+                account_id,
+                story_id: story_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn delete_story_slot(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+        slot: StorySlot,
+    ) -> Result<bool, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::DeleteStorySlot {
+                account_id,
+                story_id: story_id.to_owned(),
+                slot,
+                reply,
+            },
+            receive,
+        )
+        .await
     }
 
     async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
@@ -2205,6 +2300,195 @@ fn commit_area_rehydration(
     persist_area_runtime(&mut transaction, runtime)?;
     transaction.commit()?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Story save slots (schema v16, ADR 0030)
+// ---------------------------------------------------------------------------
+
+/// Atomic upsert of one slot. `SELECT .. FOR UPDATE` on the account row
+/// serializes concurrent writers of the same account (also across processes)
+/// between the cap check and the write; the whole operation is one
+/// transaction.
+fn save_story_slot(
+    connection: &mut Client,
+    write: StorySaveWrite,
+    now: i64,
+) -> Result<StorySaveSummary, StoreError> {
+    let prepared = prepare_story_save(write)?;
+    // The shared contract bounds slot to 0..=9 and the version to 1..=255.
+    let slot = i16::try_from(prepared.slot).map_err(|_| StoreError::InvalidStorySave)?;
+    let state_format_version =
+        i32::try_from(prepared.state_format_version).map_err(|_| StoreError::InvalidStorySave)?;
+    let mut transaction = connection.transaction()?;
+    if transaction
+        .query_opt(
+            "SELECT id FROM accounts WHERE id = $1 FOR UPDATE",
+            &[&prepared.account_id.0],
+        )?
+        .is_none()
+    {
+        return Err(StoreError::AccountNotFound(prepared.account_id));
+    }
+    let totals = transaction.query_one(
+        "SELECT COUNT(DISTINCT story_id)::BIGINT,
+                COALESCE(SUM(octet_length(state_json)), 0)::BIGINT
+         FROM story_saves WHERE account_id = $1",
+        &[&prepared.account_id.0],
+    )?;
+    let stories_with_saves: i64 = totals.get(0);
+    let account_bytes: i64 = totals.get(1);
+    let story_has_saves: bool = transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM story_saves WHERE account_id = $1 AND story_id = $2)",
+            &[&prepared.account_id.0, &prepared.story_id],
+        )?
+        .get(0);
+    let replaced_bytes: i64 = transaction
+        .query_opt(
+            "SELECT octet_length(state_json)::BIGINT FROM story_saves
+             WHERE account_id = $1 AND story_id = $2 AND slot = $3",
+            &[&prepared.account_id.0, &prepared.story_id, &slot],
+        )?
+        .map_or(0, |row| row.get(0));
+    check_story_save_account_capacity(
+        stories_with_saves,
+        story_has_saves,
+        account_bytes,
+        replaced_bytes,
+        prepared.state_bytes,
+    )?;
+    let now = now.max(0);
+    transaction.execute(
+        "INSERT INTO story_saves
+             (account_id, story_id, slot, pack_id, pack_sha256,
+              state_format_version, state_json, state_sha256,
+              created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+         ON CONFLICT (account_id, story_id, slot) DO UPDATE SET
+             pack_id = EXCLUDED.pack_id,
+             pack_sha256 = EXCLUDED.pack_sha256,
+             state_format_version = EXCLUDED.state_format_version,
+             state_json = EXCLUDED.state_json,
+             state_sha256 = EXCLUDED.state_sha256,
+             updated_at = GREATEST(story_saves.created_at, EXCLUDED.updated_at)",
+        &[
+            &prepared.account_id.0,
+            &prepared.story_id,
+            &slot,
+            &prepared.pack_id,
+            &prepared.pack_sha256,
+            &state_format_version,
+            &prepared.state_json,
+            &prepared.state_sha256,
+            &now,
+        ],
+    )?;
+    let row = read_story_save_row(
+        &mut transaction,
+        prepared.account_id,
+        &prepared.story_id,
+        slot,
+    )?
+    .ok_or(StoreError::StorySaveCorrupt)?;
+    let record = decode_story_save_row(row)?;
+    transaction.commit()?;
+    Ok(record.summary)
+}
+
+fn read_story_save_row<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    story_id: &str,
+    slot: i16,
+) -> Result<Option<StorySaveRow>, StoreError> {
+    Ok(connection
+        .query_opt(
+            "SELECT story_id, slot, pack_id, pack_sha256, state_format_version,
+                    state_json, state_sha256, created_at, updated_at
+             FROM story_saves
+             WHERE account_id = $1 AND story_id = $2 AND slot = $3",
+            &[&account_id.0, &story_id, &slot],
+        )?
+        .map(|row| StorySaveRow {
+            story_id: row.get(0),
+            slot: i64::from(row.get::<_, i16>(1)),
+            pack_id: row.get(2),
+            pack_sha256: row.get(3),
+            state_format_version: i64::from(row.get::<_, i32>(4)),
+            state_json: row.get(5),
+            state_sha256: row.get(6),
+            created_at: row.get(7),
+            updated_at: row.get(8),
+        }))
+}
+
+fn load_story_slot<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    story_id: &str,
+    slot: StorySlot,
+    pack: &StoryPackCompatibility,
+) -> Result<Option<StorySaveRecord>, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    validate_story_pack_compatibility(pack)?;
+    let Some(row) = read_story_save_row(connection, account_id, story_id, i16::from(slot.get()))?
+    else {
+        return Ok(None);
+    };
+    let record = decode_story_save_row(row)?;
+    check_story_pack_compatibility(&record.summary, pack)?;
+    Ok(Some(record))
+}
+
+fn list_story_slots<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    story_id: &str,
+) -> Result<Vec<StorySaveSummary>, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    let limit = row_count(tiamud_persistence_sqlite::story_saves::STORY_SLOTS_PER_STORY + 1);
+    let rows = connection.query(
+        "SELECT story_id, slot, pack_id, pack_sha256, state_format_version,
+                octet_length(state_json)::BIGINT, state_sha256, created_at, updated_at
+         FROM story_saves
+         WHERE account_id = $1 AND story_id = $2
+         ORDER BY slot
+         LIMIT $3",
+        &[&account_id.0, &story_id, &limit],
+    )?;
+    if rows.len() > tiamud_persistence_sqlite::story_saves::STORY_SLOTS_PER_STORY {
+        return Err(StoreError::StorySaveCorrupt);
+    }
+    rows.into_iter()
+        .map(|row| {
+            decode_story_save_summary(
+                row.get(0),
+                i64::from(row.get::<_, i16>(1)),
+                row.get(2),
+                row.get(3),
+                i64::from(row.get::<_, i32>(4)),
+                row.get(5),
+                row.get(6),
+                row.get(7),
+                row.get(8),
+            )
+        })
+        .collect()
+}
+
+fn delete_story_slot<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    story_id: &str,
+    slot: StorySlot,
+) -> Result<bool, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    let deleted = connection.execute(
+        "DELETE FROM story_saves WHERE account_id = $1 AND story_id = $2 AND slot = $3",
+        &[&account_id.0, &story_id, &i16::from(slot.get())],
+    )?;
+    Ok(deleted == 1)
 }
 
 fn bind_area_generation_if_absent(

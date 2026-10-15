@@ -20,9 +20,12 @@ use tiamud_core::{
 };
 use tokio::time::Duration;
 
+use tiamud_persistence_sqlite::story_saves;
+
 use super::{
     BOARD_ACCOUNT_CAPACITY, BOARD_CAPACITY_PER_BOARD, MAILBOX_CAPACITY, MAX_SOCIAL_REASON_BYTES,
-    ModerationAction, StaffAccess, StaffAuditRecord, StoreError,
+    ModerationAction, StaffAccess, StaffAuditRecord, StoreError, StoryPackCompatibility,
+    StorySaveRecord, StorySaveSummary, StorySaveWrite, StorySlot,
 };
 use crate::auth::PasswordWorkError;
 
@@ -417,6 +420,221 @@ pub(crate) fn check_board_report_capacity(
 }
 
 // ---------------------------------------------------------------------------
+// Story save slots (schema v16, ADR 0030)
+// ---------------------------------------------------------------------------
+
+/// A validated slot write ready for either backend's upsert.
+pub(crate) struct PreparedStorySave {
+    pub(crate) account_id: AccountId,
+    pub(crate) story_id: String,
+    pub(crate) slot: i64,
+    pub(crate) pack_id: String,
+    pub(crate) pack_sha256: String,
+    pub(crate) state_format_version: i64,
+    pub(crate) state_json: String,
+    pub(crate) state_sha256: String,
+    pub(crate) state_bytes: i64,
+}
+
+/// Validates a write against the shared row contract and computes the digest
+/// of its exact bytes. Oversized documents get their own typed error.
+pub(crate) fn prepare_story_save(write: StorySaveWrite) -> Result<PreparedStorySave, StoreError> {
+    if write.account_id.0 <= 0 {
+        return Err(StoreError::InvalidStorySave);
+    }
+    let slot = i64::from(write.slot.get());
+    story_saves::validate_story_save_identity(
+        &write.story_id,
+        slot,
+        &write.pack_id,
+        &write.pack_sha256,
+    )
+    .map_err(|_| StoreError::InvalidStorySave)?;
+    if write.state_json.len() > story_saves::MAX_STORY_SAVE_STATE_BYTES {
+        return Err(StoreError::StorySaveTooLarge {
+            maximum: story_saves::MAX_STORY_SAVE_STATE_BYTES,
+        });
+    }
+    let state_sha256 = story_saves::story_state_sha256(&write.state_json);
+    let state_format_version = i64::from(write.state_format_version);
+    story_saves::validate_story_save_document(
+        &write.pack_id,
+        state_format_version,
+        &write.state_json,
+        &state_sha256,
+    )
+    .map_err(|_| StoreError::InvalidStorySave)?;
+    let state_bytes = row_count(write.state_json.len());
+    Ok(PreparedStorySave {
+        account_id: write.account_id,
+        story_id: write.story_id,
+        slot,
+        pack_id: write.pack_id,
+        pack_sha256: write.pack_sha256,
+        state_format_version,
+        state_json: write.state_json,
+        state_sha256,
+        state_bytes,
+    })
+}
+
+/// Validates the `(account, story)` part of a lookup.
+pub(crate) fn validate_story_lookup(
+    account_id: AccountId,
+    story_id: &str,
+) -> Result<(), StoreError> {
+    if account_id.0 <= 0 || !story_saves::valid_story_identifier(story_id) {
+        return Err(StoreError::InvalidStorySave);
+    }
+    Ok(())
+}
+
+/// Validates the caller's pack revision and its bounded compatibility set.
+pub(crate) fn validate_story_pack_compatibility(
+    pack: &StoryPackCompatibility,
+) -> Result<(), StoreError> {
+    if !story_saves::valid_story_identifier(&pack.pack_id)
+        || !story_saves::valid_sha256_hex(&pack.pack_sha256)
+        || pack.compatible_pack_sha256.len() > story_saves::MAX_COMPATIBLE_STORY_PACK_REVISIONS
+        || !pack
+            .compatible_pack_sha256
+            .iter()
+            .all(|digest| story_saves::valid_sha256_hex(digest))
+    {
+        return Err(StoreError::InvalidStorySave);
+    }
+    Ok(())
+}
+
+/// Maps the per-account cap decision to the store error.
+pub(crate) fn check_story_save_account_capacity(
+    stories_with_saves: i64,
+    story_has_saves: bool,
+    account_bytes: i64,
+    replaced_bytes: i64,
+    added_bytes: i64,
+) -> Result<(), StoreError> {
+    story_saves::check_story_save_capacity(
+        stories_with_saves,
+        story_has_saves,
+        account_bytes,
+        replaced_bytes,
+        added_bytes,
+    )
+    .map_err(|_| StoreError::StorySaveCapacity)
+}
+
+/// One stored row as either backend reads it, widened to `i64`.
+pub(crate) struct StorySaveRow {
+    pub(crate) story_id: String,
+    pub(crate) slot: i64,
+    pub(crate) pack_id: String,
+    pub(crate) pack_sha256: String,
+    pub(crate) state_format_version: i64,
+    pub(crate) state_json: String,
+    pub(crate) state_sha256: String,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+}
+
+/// Re-checks a stored row completely. Any disagreement between bytes,
+/// digest, metadata or bounds is corruption, never a panic.
+pub(crate) fn decode_story_save_row(row: StorySaveRow) -> Result<StorySaveRecord, StoreError> {
+    story_saves::validate_story_save_row(
+        &row.story_id,
+        row.slot,
+        &row.pack_id,
+        &row.pack_sha256,
+        row.state_format_version,
+        &row.state_json,
+        &row.state_sha256,
+        row.created_at,
+        row.updated_at,
+    )
+    .map_err(|_| StoreError::StorySaveCorrupt)?;
+    let summary = decode_story_save_summary(
+        row.story_id,
+        row.slot,
+        row.pack_id,
+        row.pack_sha256,
+        row.state_format_version,
+        row_count(row.state_json.len()),
+        row.state_sha256,
+        row.created_at,
+        row.updated_at,
+    )?;
+    Ok(StorySaveRecord {
+        summary,
+        state_json: row.state_json,
+    })
+}
+
+/// Decodes listing metadata (no document) and fails closed on bad columns.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_story_save_summary(
+    story_id: String,
+    slot: i64,
+    pack_id: String,
+    pack_sha256: String,
+    state_format_version: i64,
+    state_bytes: i64,
+    state_sha256: String,
+    created_at: i64,
+    updated_at: i64,
+) -> Result<StorySaveSummary, StoreError> {
+    let slot = story_saves::validate_story_save_identity(&story_id, slot, &pack_id, &pack_sha256)
+        .ok()
+        .and_then(StorySlot::new)
+        .ok_or(StoreError::StorySaveCorrupt)?;
+    let state_format_version = u32::try_from(state_format_version)
+        .ok()
+        .filter(|version| {
+            (story_saves::MIN_STORY_STATE_FORMAT_VERSION
+                ..=story_saves::MAX_STORY_STATE_FORMAT_VERSION)
+                .contains(version)
+        })
+        .ok_or(StoreError::StorySaveCorrupt)?;
+    let state_bytes = u32::try_from(state_bytes)
+        .ok()
+        .filter(|bytes| {
+            (story_saves::MIN_STORY_SAVE_STATE_BYTES..=story_saves::MAX_STORY_SAVE_STATE_BYTES)
+                .contains(&(*bytes as usize))
+        })
+        .ok_or(StoreError::StorySaveCorrupt)?;
+    if !story_saves::valid_sha256_hex(&state_sha256) || created_at < 0 || updated_at < created_at {
+        return Err(StoreError::StorySaveCorrupt);
+    }
+    Ok(StorySaveSummary {
+        story_id,
+        slot,
+        pack_id,
+        pack_sha256,
+        state_format_version,
+        state_bytes,
+        state_sha256,
+        created_at,
+        updated_at,
+    })
+}
+
+/// Fails closed unless the slot was written with the caller's pack id and
+/// either the exact current digest or a digest the caller declares
+/// compatible. There is no implicit migration between pack revisions.
+pub(crate) fn check_story_pack_compatibility(
+    summary: &StorySaveSummary,
+    pack: &StoryPackCompatibility,
+) -> Result<(), StoreError> {
+    if summary.pack_id == pack.pack_id
+        && (summary.pack_sha256 == pack.pack_sha256
+            || pack.compatible_pack_sha256.contains(&summary.pack_sha256))
+    {
+        Ok(())
+    } else {
+        Err(StoreError::StorySavePackMismatch)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Retention
 // ---------------------------------------------------------------------------
 
@@ -744,6 +962,130 @@ mod tests {
         assert!(matches!(
             normalise_board_text("hi!", 2),
             Err(StoreError::InvalidBoardInput)
+        ));
+    }
+
+    fn story_summary(pack_id: &str, pack_sha: char) -> StorySaveSummary {
+        decode_story_save_summary(
+            "cripta".into(),
+            1,
+            pack_id.into(),
+            pack_sha.to_string().repeat(64),
+            2,
+            64,
+            "e".repeat(64),
+            10,
+            10,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn story_save_policy_prepares_writes_and_fails_closed_on_rows() {
+        let json = r#"{"format_version":2,"pack_id":"cripta"}"#.to_owned();
+        let prepared = prepare_story_save(StorySaveWrite {
+            account_id: AccountId(1),
+            story_id: "cripta".into(),
+            slot: StorySlot::AUTOSAVE,
+            pack_id: "cripta".into(),
+            pack_sha256: "a".repeat(64),
+            state_format_version: 2,
+            state_json: json.clone(),
+        })
+        .unwrap();
+        assert_eq!(prepared.slot, 0);
+        assert_eq!(prepared.state_bytes, row_count(json.len()));
+        assert_eq!(
+            prepared.state_sha256,
+            story_saves::story_state_sha256(&json)
+        );
+        assert!(matches!(
+            prepare_story_save(StorySaveWrite {
+                account_id: AccountId(0),
+                story_id: "cripta".into(),
+                slot: StorySlot::AUTOSAVE,
+                pack_id: "cripta".into(),
+                pack_sha256: "a".repeat(64),
+                state_format_version: 2,
+                state_json: json.clone(),
+            }),
+            Err(StoreError::InvalidStorySave)
+        ));
+
+        let row = |state_json: String, state_sha256: String| StorySaveRow {
+            story_id: "cripta".into(),
+            slot: 4,
+            pack_id: "cripta".into(),
+            pack_sha256: "a".repeat(64),
+            state_format_version: 2,
+            state_json,
+            state_sha256,
+            created_at: 5,
+            updated_at: 6,
+        };
+        let digest = story_saves::story_state_sha256(&json);
+        let record = decode_story_save_row(row(json.clone(), digest.clone())).unwrap();
+        assert_eq!(record.summary.slot.get(), 4);
+        assert_eq!(record.summary.state_bytes as usize, json.len());
+        assert!(matches!(
+            decode_story_save_row(row(json.replace('2', "3"), digest.clone())),
+            Err(StoreError::StorySaveCorrupt)
+        ));
+        let mut bad_slot = row(json.clone(), digest);
+        bad_slot.slot = 12;
+        assert!(matches!(
+            decode_story_save_row(bad_slot),
+            Err(StoreError::StorySaveCorrupt)
+        ));
+        assert!(matches!(
+            decode_story_save_summary(
+                "cripta".into(),
+                1,
+                "cripta".into(),
+                "a".repeat(64),
+                2,
+                1,
+                "e".repeat(64),
+                10,
+                10,
+            ),
+            Err(StoreError::StorySaveCorrupt)
+        ));
+    }
+
+    #[test]
+    fn story_pack_compatibility_requires_same_pack_and_declared_digest() {
+        let current = StoryPackCompatibility {
+            pack_id: "cripta".into(),
+            pack_sha256: "a".repeat(64),
+            compatible_pack_sha256: ["b".repeat(64)].into_iter().collect(),
+        };
+        validate_story_pack_compatibility(&current).unwrap();
+        assert!(check_story_pack_compatibility(&story_summary("cripta", 'a'), &current).is_ok());
+        assert!(check_story_pack_compatibility(&story_summary("cripta", 'b'), &current).is_ok());
+        assert!(matches!(
+            check_story_pack_compatibility(&story_summary("cripta", 'c'), &current),
+            Err(StoreError::StorySavePackMismatch)
+        ));
+        assert!(matches!(
+            check_story_pack_compatibility(&story_summary("otra", 'a'), &current),
+            Err(StoreError::StorySavePackMismatch)
+        ));
+        let mut malformed = current.clone();
+        malformed.compatible_pack_sha256.insert("B".repeat(64));
+        assert!(matches!(
+            validate_story_pack_compatibility(&malformed),
+            Err(StoreError::InvalidStorySave)
+        ));
+        assert!(matches!(
+            check_story_save_account_capacity(
+                story_saves::MAX_STORIES_WITH_SAVES_PER_ACCOUNT as i64,
+                false,
+                0,
+                0,
+                1
+            ),
+            Err(StoreError::StorySaveCapacity)
         ));
     }
 

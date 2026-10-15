@@ -188,6 +188,37 @@ impl PersistenceCommandHandler for SqliteCommandHandler {
         load_domain_events(&self.connection)
     }
 
+    fn save_story_slot(&mut self, write: StorySaveWrite) -> Result<StorySaveSummary, StoreError> {
+        save_story_slot(&mut self.connection, write, unix_timestamp())
+    }
+
+    fn load_story_slot(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError> {
+        load_story_slot(&self.connection, account_id, &story_id, slot, &pack)
+    }
+
+    fn list_story_slots(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+    ) -> Result<Vec<StorySaveSummary>, StoreError> {
+        list_story_slots(&self.connection, account_id, &story_id)
+    }
+
+    fn delete_story_slot(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+    ) -> Result<bool, StoreError> {
+        delete_story_slot(&self.connection, account_id, &story_id, slot)
+    }
+
     fn commit_action(
         &mut self,
         characters: Vec<DurableCharacterSnapshot>,
@@ -1063,6 +1094,69 @@ impl CharacterStore for SqliteCharacterStore {
         let (reply, receive) = oneshot::channel();
         self.request(Request::LoadDomainEvents { reply }, receive)
             .await
+    }
+
+    async fn save_story_slot(&self, write: StorySaveWrite) -> Result<StorySaveSummary, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::SaveStorySlot { write, reply }, receive)
+            .await
+    }
+
+    async fn load_story_slot(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoadStorySlot {
+                account_id,
+                story_id: story_id.to_owned(),
+                slot,
+                pack,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn list_story_slots(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+    ) -> Result<Vec<StorySaveSummary>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ListStorySlots {
+                account_id,
+                story_id: story_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn delete_story_slot(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+        slot: StorySlot,
+    ) -> Result<bool, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::DeleteStorySlot {
+                account_id,
+                story_id: story_id.to_owned(),
+                slot,
+                reply,
+            },
+            receive,
+        )
+        .await
     }
 
     async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
@@ -4399,4 +4493,219 @@ pub(super) fn commit_action_with_retention(
     }
     transaction.commit()?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Story save slots (schema v16, ADR 0030)
+// ---------------------------------------------------------------------------
+
+/// Atomic upsert of one slot. The account's caps are read and the row is
+/// written inside one `IMMEDIATE` transaction, so a concurrent writer (for
+/// example an offline admin tool) cannot interleave between check and write.
+pub(super) fn save_story_slot(
+    connection: &mut Connection,
+    write: StorySaveWrite,
+    now: i64,
+) -> Result<StorySaveSummary, StoreError> {
+    let prepared = prepare_story_save(write)?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    ensure_account_exists(&transaction, prepared.account_id)?;
+    let (stories_with_saves, account_bytes): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(DISTINCT story_id),
+                COALESCE(SUM(length(CAST(state_json AS BLOB))), 0)
+         FROM story_saves WHERE account_id = ?1",
+        [prepared.account_id.0],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let story_has_saves: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM story_saves WHERE account_id = ?1 AND story_id = ?2)",
+        params![prepared.account_id.0, prepared.story_id],
+        |row| row.get(0),
+    )?;
+    let replaced_bytes: i64 = transaction
+        .query_row(
+            "SELECT length(CAST(state_json AS BLOB)) FROM story_saves
+             WHERE account_id = ?1 AND story_id = ?2 AND slot = ?3",
+            params![prepared.account_id.0, prepared.story_id, prepared.slot],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    check_story_save_account_capacity(
+        stories_with_saves,
+        story_has_saves,
+        account_bytes,
+        replaced_bytes,
+        prepared.state_bytes,
+    )?;
+    transaction.execute(
+        "INSERT INTO story_saves
+             (account_id, story_id, slot, pack_id, pack_sha256,
+              state_format_version, state_json, state_sha256,
+              created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+         ON CONFLICT(account_id, story_id, slot) DO UPDATE SET
+             pack_id = excluded.pack_id,
+             pack_sha256 = excluded.pack_sha256,
+             state_format_version = excluded.state_format_version,
+             state_json = excluded.state_json,
+             state_sha256 = excluded.state_sha256,
+             updated_at = max(story_saves.created_at, excluded.updated_at)",
+        params![
+            prepared.account_id.0,
+            prepared.story_id,
+            prepared.slot,
+            prepared.pack_id,
+            prepared.pack_sha256,
+            prepared.state_format_version,
+            prepared.state_json,
+            prepared.state_sha256,
+            now.max(0),
+        ],
+    )?;
+    let row = read_story_save_row(
+        &transaction,
+        prepared.account_id,
+        &prepared.story_id,
+        prepared.slot,
+    )?
+    .ok_or(StoreError::StorySaveCorrupt)?;
+    let record = decode_story_save_row(row)?;
+    transaction.commit()?;
+    Ok(record.summary)
+}
+
+fn read_story_save_row(
+    connection: &Connection,
+    account_id: AccountId,
+    story_id: &str,
+    slot: i64,
+) -> Result<Option<StorySaveRow>, StoreError> {
+    connection
+        .query_row(
+            "SELECT story_id, slot, pack_id, pack_sha256, state_format_version,
+                    state_json, state_sha256, created_at, updated_at
+             FROM story_saves
+             WHERE account_id = ?1 AND story_id = ?2 AND slot = ?3",
+            params![account_id.0, story_id, slot],
+            |row| {
+                Ok(StorySaveRow {
+                    story_id: row.get(0)?,
+                    slot: row.get(1)?,
+                    pack_id: row.get(2)?,
+                    pack_sha256: row.get(3)?,
+                    state_format_version: row.get(4)?,
+                    state_json: row.get(5)?,
+                    state_sha256: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(story_row_read_error)
+}
+
+/// A stored value whose SQLite type no longer matches the column (possible
+/// only through out-of-band tampering, given flexible typing) is corruption.
+fn story_row_read_error(error: rusqlite::Error) -> StoreError {
+    match error {
+        rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::IntegralValueOutOfRange(..)
+        | rusqlite::Error::Utf8Error(..) => StoreError::StorySaveCorrupt,
+        other => StoreError::Sqlite(other),
+    }
+}
+
+pub(super) fn load_story_slot(
+    connection: &Connection,
+    account_id: AccountId,
+    story_id: &str,
+    slot: StorySlot,
+    pack: &StoryPackCompatibility,
+) -> Result<Option<StorySaveRecord>, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    validate_story_pack_compatibility(pack)?;
+    let Some(row) = read_story_save_row(connection, account_id, story_id, i64::from(slot.get()))?
+    else {
+        return Ok(None);
+    };
+    let record = decode_story_save_row(row)?;
+    check_story_pack_compatibility(&record.summary, pack)?;
+    Ok(Some(record))
+}
+
+pub(super) fn list_story_slots(
+    connection: &Connection,
+    account_id: AccountId,
+    story_id: &str,
+) -> Result<Vec<StorySaveSummary>, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    let mut statement = connection.prepare(
+        "SELECT story_id, slot, pack_id, pack_sha256, state_format_version,
+                length(CAST(state_json AS BLOB)), state_sha256, created_at, updated_at
+         FROM story_saves
+         WHERE account_id = ?1 AND story_id = ?2
+         ORDER BY slot
+         LIMIT ?3",
+    )?;
+    let rows = statement
+        .query_map(
+            params![
+                account_id.0,
+                story_id,
+                row_count(tiamud_persistence_sqlite::story_saves::STORY_SLOTS_PER_STORY + 1)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(story_row_read_error)?;
+    if rows.len() > tiamud_persistence_sqlite::story_saves::STORY_SLOTS_PER_STORY {
+        return Err(StoreError::StorySaveCorrupt);
+    }
+    rows.into_iter()
+        .map(
+            |(story, slot, pack_id, pack_sha256, version, bytes, sha256, created, updated)| {
+                decode_story_save_summary(
+                    story,
+                    slot,
+                    pack_id,
+                    pack_sha256,
+                    version,
+                    bytes,
+                    sha256,
+                    created,
+                    updated,
+                )
+            },
+        )
+        .collect()
+}
+
+pub(super) fn delete_story_slot(
+    connection: &Connection,
+    account_id: AccountId,
+    story_id: &str,
+    slot: StorySlot,
+) -> Result<bool, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    let deleted = connection.execute(
+        "DELETE FROM story_saves WHERE account_id = ?1 AND story_id = ?2 AND slot = ?3",
+        params![account_id.0, story_id, i64::from(slot.get())],
+    )?;
+    Ok(deleted == 1)
 }

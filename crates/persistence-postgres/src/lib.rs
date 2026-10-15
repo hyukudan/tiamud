@@ -49,10 +49,10 @@ pub fn connect(database_url: &str) -> Result<Client, ConnectError> {
 }
 
 /// Current PostgreSQL persistence contract, kept equal to SQLite.
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 const MIGRATION_LOCK_ID: i64 = 0x5449_414d_5544_0007;
-pub(crate) const APPLICATION_TABLES: [&str; 25] = [
+pub(crate) const APPLICATION_TABLES: [&str; 26] = [
     "accounts",
     "characters",
     "auth_sessions",
@@ -78,6 +78,7 @@ pub(crate) const APPLICATION_TABLES: [&str; 25] = [
     "staff_audit",
     "character_adventure",
     "world_adventure",
+    "story_saves",
 ];
 
 /// Complete PostgreSQL representation of the current SQLite schema.
@@ -467,7 +468,24 @@ CREATE TABLE world_adventure (
     updated_at BIGINT NOT NULL DEFAULT (floor(extract(epoch FROM now()))::BIGINT)
 );
 
-INSERT INTO tiamud_schema (singleton, version) VALUES (1, 15);
+CREATE TABLE story_saves (
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    story_id TEXT NOT NULL CHECK (story_id ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
+    slot SMALLINT NOT NULL CHECK (slot BETWEEN 0 AND 9),
+    pack_id TEXT NOT NULL CHECK (pack_id ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
+    pack_sha256 TEXT NOT NULL CHECK (pack_sha256 ~ '^[0-9a-f]{64}$'),
+    state_format_version INTEGER NOT NULL
+        CHECK (state_format_version BETWEEN 1 AND 255),
+    state_json TEXT NOT NULL
+        CHECK (octet_length(state_json) BETWEEN 2 AND 65536),
+    state_sha256 TEXT NOT NULL CHECK (state_sha256 ~ '^[0-9a-f]{64}$'),
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    PRIMARY KEY (account_id, story_id, slot),
+    CHECK (updated_at >= created_at)
+);
+
+INSERT INTO tiamud_schema (singleton, version) VALUES (1, 16);
 "#;
 
 const UPGRADE_V6_TO_V7_SQL: &str = r#"
@@ -808,6 +826,28 @@ SET version = 15, updated_at = floor(extract(epoch FROM now()))::BIGINT
 WHERE singleton = 1 AND version = 14;
 "#;
 
+const UPGRADE_V15_TO_V16_SQL: &str = r#"
+CREATE TABLE story_saves (
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    story_id TEXT NOT NULL CHECK (story_id ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
+    slot SMALLINT NOT NULL CHECK (slot BETWEEN 0 AND 9),
+    pack_id TEXT NOT NULL CHECK (pack_id ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
+    pack_sha256 TEXT NOT NULL CHECK (pack_sha256 ~ '^[0-9a-f]{64}$'),
+    state_format_version INTEGER NOT NULL
+        CHECK (state_format_version BETWEEN 1 AND 255),
+    state_json TEXT NOT NULL
+        CHECK (octet_length(state_json) BETWEEN 2 AND 65536),
+    state_sha256 TEXT NOT NULL CHECK (state_sha256 ~ '^[0-9a-f]{64}$'),
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    PRIMARY KEY (account_id, story_id, slot),
+    CHECK (updated_at >= created_at)
+);
+UPDATE tiamud_schema
+SET version = 16, updated_at = floor(extract(epoch FROM now()))::BIGINT
+WHERE singleton = 1 AND version = 15;
+"#;
+
 const ENSURE_BOOTSTRAP_ADMIN_SQL: &str = r#"
 WITH candidate AS (
     SELECT id FROM accounts
@@ -846,17 +886,17 @@ pub enum SchemaError {
     #[error("the PostgreSQL tiamud_schema metadata is missing or malformed")]
     InvalidMetadata,
     #[error(
-        "PostgreSQL schema version {found} is unsupported; this backend supports a new v15 schema or migration from v6/v7/v8/v9/v10/v11/v12/v13/v14"
+        "PostgreSQL schema version {found} is unsupported; this backend supports a new v16 schema or migration from v6/v7/v8/v9/v10/v11/v12/v13/v14/v15"
     )]
     UnsupportedVersion { found: i32 },
-    #[error("PostgreSQL schema metadata says v15 but required table {table} is missing")]
+    #[error("PostgreSQL schema metadata says v16 but required table {table} is missing")]
     MissingTable { table: &'static str },
 }
 
 /// Install or verify the current schema in one PostgreSQL transaction.
 ///
 /// PostgreSQL persistence starts at v6, so an empty destination is installed
-/// at the current version, v6-v14 are upgraded to v15, and v15 is verified.
+/// at the current version, v6-v15 are upgraded to v16, and v16 is verified.
 pub fn migrate(client: &mut Client) -> Result<MigrationReport, SchemaError> {
     let mut transaction = client.transaction()?;
     let report = migrate_in_transaction(&mut transaction)?;
@@ -927,7 +967,7 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
             client.batch_execute(UPGRADE_V11_TO_V12_SQL)?;
         }
         11 => client.batch_execute(UPGRADE_V11_TO_V12_SQL)?,
-        12..=14 => {}
+        12..=15 => {}
         SCHEMA_VERSION => {}
         _ => return Err(SchemaError::UnsupportedVersion { found }),
     }
@@ -939,6 +979,9 @@ pub(crate) fn migrate_in_transaction<C: GenericClient>(
     }
     if (6..=14).contains(&found) {
         client.batch_execute(UPGRADE_V14_TO_V15_SQL)?;
+    }
+    if (6..=15).contains(&found) {
+        client.batch_execute(UPGRADE_V15_TO_V16_SQL)?;
     }
     for &table in &APPLICATION_TABLES {
         let exists: bool = client
@@ -999,13 +1042,14 @@ mod tests {
             "staff_audit",
             "character_adventure",
             "world_adventure",
+            "story_saves",
         ] {
             assert!(
                 SCHEMA_SQL.contains(&format!("CREATE TABLE {table}")),
                 "missing {table}"
             );
         }
-        assert!(SCHEMA_SQL.contains("VALUES (1, 15)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 16)"));
         assert!(SCHEMA_SQL.contains("last_event_sequence BIGINT"));
     }
 
@@ -1164,6 +1208,49 @@ mod tests {
         assert!(UPGRADE_V14_TO_V15_SQL.contains("SET version = 15"));
         assert!(!UPGRADE_V14_TO_V15_SQL.contains("world_runtime"));
         assert!(!UPGRADE_V14_TO_V15_SQL.contains("DELETE FROM"));
+    }
+
+    #[test]
+    fn v16_upgrade_adds_only_bounded_story_save_slots() {
+        assert!(UPGRADE_V15_TO_V16_SQL.contains("CREATE TABLE story_saves"));
+        for column in [
+            "account_id",
+            "story_id",
+            "slot",
+            "pack_id",
+            "pack_sha256",
+            "state_format_version",
+            "state_json",
+            "state_sha256",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(UPGRADE_V15_TO_V16_SQL.contains(column));
+            assert!(SCHEMA_SQL.contains(column));
+        }
+        let story_table = |sql: &str| {
+            let start = sql.find("CREATE TABLE story_saves").unwrap();
+            let end = start + sql[start..].find(");").unwrap();
+            sql[start..end].to_owned()
+        };
+        assert_eq!(
+            story_table(UPGRADE_V15_TO_V16_SQL),
+            story_table(SCHEMA_SQL),
+            "fresh install and v15->v16 upgrade must create the identical table"
+        );
+        assert!(UPGRADE_V15_TO_V16_SQL.contains("REFERENCES accounts(id) ON DELETE CASCADE"));
+        assert!(UPGRADE_V15_TO_V16_SQL.contains("slot BETWEEN 0 AND 9"));
+        assert!(UPGRADE_V15_TO_V16_SQL.contains("BETWEEN 2 AND 65536"));
+        assert!(UPGRADE_V15_TO_V16_SQL.contains("BETWEEN 1 AND 255"));
+        assert!(UPGRADE_V15_TO_V16_SQL.contains("PRIMARY KEY (account_id, story_id, slot)"));
+        assert!(UPGRADE_V15_TO_V16_SQL.contains("SET version = 16"));
+        assert!(!UPGRADE_V15_TO_V16_SQL.contains("world_runtime"));
+        assert!(!UPGRADE_V15_TO_V16_SQL.contains("DELETE FROM"));
+        assert_eq!(
+            tiamud_persistence_sqlite::story_saves::MAX_STORY_SAVE_STATE_BYTES,
+            65_536
+        );
+        assert_eq!(tiamud_persistence_sqlite::story_saves::MAX_STORY_SLOT, 9);
     }
 
     #[test]
