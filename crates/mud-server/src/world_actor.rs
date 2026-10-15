@@ -8052,7 +8052,12 @@ mod tests {
                     .unwrap()
                     .runtime
                     .as_ref()
-                    .is_some_and(|runtime| runtime.logical_tick >= 1);
+                    // Combat resolves on a scheduler tick: wait until the
+                    // defeat itself is durable, not merely any tick.
+                    .is_some_and(|runtime| {
+                        runtime.logical_tick >= 1
+                            && runtime.npcs["test:guardian"].respawn_at_tick.is_some()
+                    });
                 if ready {
                     break;
                 }
