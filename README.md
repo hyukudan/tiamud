@@ -77,8 +77,9 @@ baseline needs no Kubernetes, Redis, object storage or AI.
 - **Safe media:** optional scene image and audio, immutable content-addressed
   assets, alternative text and preferences for media, motion, contrast and
   screen readers.
-- **Modular authoring:** AreaPack v8 splits a world into areas; the offline
-  composition of WorldProject v2 produces a canonical WorldPack v9. Phases 6A–6C
+- **Modular authoring:** AreaPack v9 splits a world into areas; the offline
+  composition of WorldProject v2 produces a canonical WorldPack v10, which also
+  declares quests, commodities and shops as data. Phases 6A–6C
   add verifiable catalogs/bundles, catalog boot with additive on-demand loading,
   and quiescent replacement of a whole generation. Phase 6D, **partial**, adds
   reversible retirement of same-generation SCC units with a durable checkpoint;
@@ -206,7 +207,7 @@ configuration does not publish metrics.
 
 ## Characters, classes and progression
 
-WorldPack v9 keeps the v3 character model: it composes a character from a
+WorldPack v10 keeps the v3 character model: it composes a character from a
 lineage, optional background and a base class. Accumulated XP governs the global
 level, class grants and separate point reserves. There is one active class and
 an ordered history, not free multiclassing.
@@ -287,8 +288,8 @@ explicit.
 
 ![Technical illustration of the three Lantern Square rooms and their media, perception, variant, script and test modules.](docs/images/tiamud-worldpack.webp)
 
-The runtime consumes **one canonical WorldPack v9**. To work with less coupling,
-authors split a **WorldProject v2** into **AreaPack v8** with declared
+The runtime consumes **one canonical WorldPack v10**. To work with less coupling,
+authors split a **WorldProject v2** into **AreaPack v9** with declared
 dependencies and ownership, then compose them offline:
 
 ```sh
@@ -472,7 +473,7 @@ entry points:
 
 - **Protocol:** [`tiamud.v1`](docs/protocol/tiamud-v1.md) (experimental).
 - **Operation:** [single host](docs/operations/single-host.md).
-- **Authoring:** [WorldPack v9](docs/authoring/README.md) ·
+- **Authoring:** [WorldPack v10](docs/authoring/README.md) ·
   [areas and catalogs](docs/world-authoring.md).
 - **Status:** [completion matrix](docs/project/COMPLETION_MATRIX.md) ·
   [project memory](docs/project/PROJECT_MEMORY.md).

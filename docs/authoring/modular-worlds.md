@@ -1,8 +1,8 @@
 # Projects, areas, and composition
 
 The current modular source is a **WorldProject v2** manifest with strict
-**AreaPack v8** files. `tiamud-world compose` validates the full graph and
-produces a canonical **WorldPack v9** document.
+**AreaPack v9** files. `tiamud-world compose` validates the full graph and
+produces a canonical **WorldPack v10** document.
 
 Use [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json)
 and [`worlds/areas/square.area.json`](../../worlds/areas/square.area.json) as
@@ -86,12 +86,13 @@ no per-area deployment, download, LRU, or independent services.
 
 Lantern Square composes three areas into three rooms, ten prototypes, nine
 initial instances, two tables, one source, one affix, one pool, one direct
-telepathy, and one emote. The 53,567-byte canonical artifact has SHA-256
-`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
+telepathy, one emote, two commodities, one quest, and one shop. The 55,264-byte
+canonical artifact has SHA-256
+`666dda61438a6a1e2b17d6ef0ba825b4d72c7e1b9d122e93284d71dab8ab4092`.
 
 ## Direct WorldPack authoring
 
-A monolithic WorldPack v9 is still valid, but AreaPack is preferable with
+A monolithic WorldPack v10 is still valid, but AreaPack is preferable with
 several builders or regions. `tiamud-world build` validates and canonicalizes a
 direct document:
 
