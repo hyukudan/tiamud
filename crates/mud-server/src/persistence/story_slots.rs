@@ -18,7 +18,6 @@ use tiamud_persistence_sqlite::story_saves::{MAX_STORY_SLOT, STORY_AUTOSAVE_SLOT
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StorySlot(u8);
 
-#[allow(dead_code)] // Wired by the S2 story instance manager.
 impl StorySlot {
     pub const AUTOSAVE: Self = Self(STORY_AUTOSAVE_SLOT);
 

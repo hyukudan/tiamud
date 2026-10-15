@@ -67,6 +67,9 @@ fn message_type_names_match_serde_names() {
         ServerMessageType::StoryView,
         ServerMessageType::StoryLeft,
         ServerMessageType::StoryError,
+        ServerMessageType::StorySlots,
+        ServerMessageType::StorySaved,
+        ServerMessageType::StoryRestored,
     ] {
         assert_eq!(
             serde_json::to_value(message_type).unwrap(),
@@ -639,7 +642,70 @@ fn story_payloads_have_their_documented_shape() {
         "story.dialogue",
         "story.undo",
         "story.leave",
+        "story.save",
+        "story.restore",
+        "story.slots",
+        "story.deleteSlot",
+        "story.continue",
     ] {
         assert!(serde_json::from_value::<ClientMessageType>(json!(name)).is_ok());
+    }
+}
+
+#[test]
+fn story_slot_payloads_have_their_documented_shape() {
+    assert_wire(
+        StorySlots {
+            slots: vec![
+                StorySlotSummary {
+                    slot: 0,
+                    updated_at: 1_700_000_000,
+                    compatible: true,
+                },
+                StorySlotSummary {
+                    slot: 3,
+                    updated_at: 1_700_000_100,
+                    compatible: false,
+                },
+            ],
+            offer_continue: true,
+        },
+        json!({
+            "slots": [
+                {"slot": 0, "updatedAt": 1_700_000_000, "compatible": true},
+                {"slot": 3, "updatedAt": 1_700_000_100, "compatible": false}
+            ],
+            "offerContinue": true
+        }),
+    );
+    assert_wire(
+        StorySaved {
+            slot: 2,
+            updated_at: 5,
+        },
+        json!({"slot": 2, "updatedAt": 5}),
+    );
+    assert_wire(StoryRestored { slot: 0 }, json!({"slot": 0}));
+    for (code, wire) in [
+        (StoryErrorCode::SlotsUnavailable, "slots_unavailable"),
+        (StoryErrorCode::InvalidSlot, "invalid_slot"),
+        (StoryErrorCode::SlotEmpty, "slot_empty"),
+        (StoryErrorCode::SlotCorrupt, "slot_corrupt"),
+        (StoryErrorCode::SlotIncompatible, "slot_incompatible"),
+        (StoryErrorCode::SlotCapacity, "slot_capacity"),
+        (StoryErrorCode::RateLimited, "rate_limited"),
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), json!(wire));
+    }
+    let slot: StorySlotData = serde_json::from_value(json!({"slot": 4})).unwrap();
+    assert_eq!(slot.slot, 4);
+    for rejected in [
+        json!({"slot": 4, "x": 1}),
+        json!({}),
+        json!({"slot": -1}),
+        json!({"slot": 256}),
+        json!({"slot": "1"}),
+    ] {
+        assert!(serde_json::from_value::<StorySlotData>(rejected).is_err());
     }
 }

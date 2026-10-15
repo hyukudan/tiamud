@@ -5,23 +5,40 @@
 //! is a single-writer Tokio task with a bounded mailbox that owns its
 //! [`StoryState`], its in-memory [`UndoRing`] and the opaque ids of its current
 //! view. Instances are keyed by account (one per account in this phase),
-//! bounded globally, evicted after an idle timeout and never persisted: an
-//! evicted or restarted instance is lost until save slots exist (S3).
+//! bounded globally and evicted after an idle timeout.
+//!
+//! With a character store attached, the persisted save slots of ADR 0030 are
+//! wired here: manual slots `1..=9`, and an autosave in slot `0` written on
+//! leave, on idle eviction and on graceful shutdown. Store calls run on the
+//! session task (or on the exiting instance task), never inside the running
+//! instance or the world actor; the instance only hands out and accepts
+//! validated `StoryState` values. Loaded bytes are re-validated with
+//! `StoryState::from_json_slice` against the exact pack revision (its
+//! SHA-256). The in-memory undo history is never persisted.
 //!
 //! The ruleset is `tiamud-story-core`; this module only serializes inputs,
 //! projects views and enforces bounds. It never reads `tiamud-core` world
 //! state and the world actor never sees story input.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+use crate::{
+    operations::KeyedRateLimiter,
+    persistence::{
+        CharacterStore, StoreError, StoryPackCompatibility, StorySaveSummary, StorySaveWrite,
+        StorySlot,
+    },
+};
+use sha2::{Digest, Sha256};
 
 use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
@@ -70,6 +87,15 @@ pub const MAX_STORY_FRAME_BYTES: usize = 16 * 1024;
 const STORY_VIEW_FRAME_BUDGET: usize = 15 * 1024;
 /// Maximum bytes of one projected text block.
 pub const MAX_STORY_BLOCK_BYTES: usize = 2 * 1024;
+/// Slot writes (`save`, `delete`) per account and minute, also the burst.
+pub const SLOT_WRITES_PER_MINUTE: u32 = 6;
+/// Slot reads (`slots`, `restore`, `continue`) per account and minute.
+pub const SLOT_READS_PER_MINUTE: u32 = 30;
+const SLOT_READ_BURST: u32 = 10;
+/// Accounts tracked by each slot rate limiter (least recently seen evicted).
+const MAX_TRACKED_SLOT_ACCOUNTS: usize = 4_096;
+/// Upper bound of one store call made for a story slot.
+const STORE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -160,6 +186,9 @@ pub struct CatalogStory {
     pub id: String,
     pub title: String,
     pack: StoryPack,
+    /// Lowercase hexadecimal SHA-256 of the exact pack bytes; the revision a
+    /// save slot is bound to (ADR 0030).
+    pack_sha256: String,
 }
 
 /// Validated StoryPacks plus the reviewed media map for their cues.
@@ -236,7 +265,8 @@ impl StoryCatalog {
                         reason: error.to_string(),
                     }
                 })?;
-                packs.push((name, pack));
+                let digest = sha256_hex(&bytes);
+                packs.push((name, pack, digest));
             }
         }
         if packs.is_empty() {
@@ -253,20 +283,25 @@ impl StoryCatalog {
     ) -> Result<Self, StoryCatalogError> {
         let named = packs
             .into_iter()
-            .map(|pack| (format!("{}.story.json", pack.id), pack))
+            .map(|pack| {
+                // In-memory packs have no file bytes; their canonical JSON
+                // stands in for the revision digest.
+                let digest = sha256_hex(&serde_json::to_vec(&pack).unwrap_or_default());
+                (format!("{}.story.json", pack.id), pack, digest)
+            })
             .collect();
         Self::from_named_packs(named, media)
     }
 
     fn from_named_packs(
-        packs: Vec<(String, StoryPack)>,
+        packs: Vec<(String, StoryPack, String)>,
         media: BTreeMap<String, String>,
     ) -> Result<Self, StoryCatalogError> {
         if packs.len() > MAX_CATALOG_STORIES {
             return Err(StoryCatalogError::TooManyStories);
         }
         let mut stories = BTreeMap::new();
-        for (file, pack) in packs {
+        for (file, pack, pack_sha256) in packs {
             if let Err(errors) = pack.validate() {
                 return Err(StoryCatalogError::Invalid {
                     file,
@@ -290,6 +325,7 @@ impl StoryCatalog {
                         id: id.clone(),
                         title,
                         pack,
+                        pack_sha256,
                     }),
                 )
                 .is_some()
@@ -315,6 +351,10 @@ impl StoryCatalog {
             .map(|story| (story.id.clone(), story.title.clone()))
             .collect()
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn read_bounded(path: &Path, limit: u64, name: &str) -> Result<Vec<u8>, StoryCatalogError> {
@@ -401,6 +441,20 @@ pub enum StoryFailure {
     /// The instance no longer exists (idle eviction or closed elsewhere).
     Gone,
     Internal,
+    /// No character store implements save slots.
+    SlotsUnavailable,
+    /// The slot number is outside the range of the operation.
+    InvalidSlot,
+    SlotEmpty,
+    /// Stored bytes failed their digest, metadata or ruleset validation.
+    SlotCorrupt,
+    /// The slot was saved with another revision of the story pack.
+    SlotIncompatible,
+    /// Per-account slot capacity (stories or bytes) or the state size limit.
+    SlotCapacity,
+    RateLimited,
+    /// The store failed or timed out; nothing changed.
+    SlotStore,
 }
 
 impl StoryFailure {
@@ -416,7 +470,14 @@ impl StoryFailure {
             Self::Ended => StoryErrorCode::Ended,
             Self::NothingToUndo => StoryErrorCode::NothingToUndo,
             Self::Busy => StoryErrorCode::Busy,
-            Self::Internal => StoryErrorCode::Internal,
+            Self::Internal | Self::SlotStore => StoryErrorCode::Internal,
+            Self::SlotsUnavailable => StoryErrorCode::SlotsUnavailable,
+            Self::InvalidSlot => StoryErrorCode::InvalidSlot,
+            Self::SlotEmpty => StoryErrorCode::SlotEmpty,
+            Self::SlotCorrupt => StoryErrorCode::SlotCorrupt,
+            Self::SlotIncompatible => StoryErrorCode::SlotIncompatible,
+            Self::SlotCapacity => StoryErrorCode::SlotCapacity,
+            Self::RateLimited => StoryErrorCode::RateLimited,
         }
     }
 
@@ -435,9 +496,44 @@ impl StoryFailure {
             Self::NothingToUndo => "No queda nada que deshacer.",
             Self::Busy => "La historia está ocupada. Inténtalo de nuevo.",
             Self::Gone => {
-                "La historia se cerró por inactividad o desde otra sesión; su progreso no se guardó."
+                "La historia se cerró por inactividad o desde otra sesión. Si hay autoguardado, al volver a entrar podrás continuar."
             }
             Self::Internal => "La historia no pudo continuar.",
+            Self::SlotsUnavailable => {
+                "Las partidas guardadas no están disponibles en este servidor."
+            }
+            Self::InvalidSlot => {
+                "Usa una ranura del 1 al 9 para guardar; la 0 es el autoguardado (solo cargar o borrar)."
+            }
+            Self::SlotEmpty => "Esa ranura está vacía.",
+            Self::SlotCorrupt => {
+                "Esa partida guardada está dañada y no se puede cargar. Puedes sobrescribirla guardando de nuevo."
+            }
+            Self::SlotIncompatible => {
+                "Esa partida se guardó con otra versión de la historia y ya no se puede cargar."
+            }
+            Self::SlotCapacity => {
+                "No queda espacio para guardar esta partida. Borra alguna partida guardada e inténtalo de nuevo."
+            }
+            Self::RateLimited => {
+                "Demasiadas operaciones con partidas guardadas. Espera un momento."
+            }
+            Self::SlotStore => {
+                "No se pudo acceder a las partidas guardadas. Inténtalo de nuevo más tarde."
+            }
+        }
+    }
+
+    /// Maps a store error to a public failure without leaking its details.
+    fn from_store(error: &StoreError) -> Self {
+        match error {
+            StoreError::StorySaveUnsupported => Self::SlotsUnavailable,
+            StoreError::StorySaveCapacity | StoreError::StorySaveTooLarge { .. } => {
+                Self::SlotCapacity
+            }
+            StoreError::StorySaveCorrupt => Self::SlotCorrupt,
+            StoreError::StorySavePackMismatch => Self::SlotIncompatible,
+            _ => Self::SlotStore,
         }
     }
 
@@ -456,14 +552,41 @@ pub struct StoryMetrics {
     started: AtomicU64,
     closed_left: AtomicU64,
     closed_evicted: AtomicU64,
+    closed_shutdown: AtomicU64,
     rejected_capacity: AtomicU64,
     rejected_account: AtomicU64,
     rejected_unknown: AtomicU64,
     inputs_accepted: AtomicU64,
     inputs_rejected: AtomicU64,
+    saves_manual_ok: AtomicU64,
+    saves_manual_failed: AtomicU64,
+    saves_auto_ok: AtomicU64,
+    saves_auto_failed: AtomicU64,
+    restores_ok: AtomicU64,
+    restores_rejected: AtomicU64,
+    slot_rate_limited: AtomicU64,
 }
 
 impl StoryMetrics {
+    fn save(&self, autosave: bool, ok: bool) {
+        match (autosave, ok) {
+            (false, true) => &self.saves_manual_ok,
+            (false, false) => &self.saves_manual_failed,
+            (true, true) => &self.saves_auto_ok,
+            (true, false) => &self.saves_auto_failed,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn restore(&self, ok: bool) {
+        if ok {
+            &self.restores_ok
+        } else {
+            &self.restores_rejected
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
     fn input(&self, accepted: bool) {
         let counter = if accepted {
             &self.inputs_accepted
@@ -485,6 +608,7 @@ impl StoryMetrics {
                 "# TYPE tiamud_story_instances_closed_total counter\n",
                 "tiamud_story_instances_closed_total{{reason=\"left\"}} {}\n",
                 "tiamud_story_instances_closed_total{{reason=\"evicted\"}} {}\n",
+                "tiamud_story_instances_closed_total{{reason=\"shutdown\"}} {}\n",
                 "# TYPE tiamud_story_enter_rejected_total counter\n",
                 "tiamud_story_enter_rejected_total{{reason=\"capacity\"}} {}\n",
                 "tiamud_story_enter_rejected_total{{reason=\"account\"}} {}\n",
@@ -492,17 +616,35 @@ impl StoryMetrics {
                 "# TYPE tiamud_story_inputs_total counter\n",
                 "tiamud_story_inputs_total{{result=\"accepted\"}} {}\n",
                 "tiamud_story_inputs_total{{result=\"rejected\"}} {}\n",
+                "# TYPE tiamud_story_saves_total counter\n",
+                "tiamud_story_saves_total{{kind=\"manual\",result=\"ok\"}} {}\n",
+                "tiamud_story_saves_total{{kind=\"manual\",result=\"failed\"}} {}\n",
+                "tiamud_story_saves_total{{kind=\"autosave\",result=\"ok\"}} {}\n",
+                "tiamud_story_saves_total{{kind=\"autosave\",result=\"failed\"}} {}\n",
+                "# TYPE tiamud_story_restores_total counter\n",
+                "tiamud_story_restores_total{{result=\"ok\"}} {}\n",
+                "tiamud_story_restores_total{{result=\"rejected\"}} {}\n",
+                "# TYPE tiamud_story_slot_rate_limited_total counter\n",
+                "tiamud_story_slot_rate_limited_total {}\n",
             ),
             catalog_stories,
             self.live.load(Ordering::Relaxed),
             self.started.load(Ordering::Relaxed),
             self.closed_left.load(Ordering::Relaxed),
             self.closed_evicted.load(Ordering::Relaxed),
+            self.closed_shutdown.load(Ordering::Relaxed),
             self.rejected_capacity.load(Ordering::Relaxed),
             self.rejected_account.load(Ordering::Relaxed),
             self.rejected_unknown.load(Ordering::Relaxed),
             self.inputs_accepted.load(Ordering::Relaxed),
             self.inputs_rejected.load(Ordering::Relaxed),
+            self.saves_manual_ok.load(Ordering::Relaxed),
+            self.saves_manual_failed.load(Ordering::Relaxed),
+            self.saves_auto_ok.load(Ordering::Relaxed),
+            self.saves_auto_failed.load(Ordering::Relaxed),
+            self.restores_ok.load(Ordering::Relaxed),
+            self.restores_rejected.load(Ordering::Relaxed),
+            self.slot_rate_limited.load(Ordering::Relaxed),
         )
     }
 }
@@ -769,6 +911,16 @@ pub enum StoryInputCommand {
     Leave,
     Look,
     List,
+    /// `guardar N`/`save N`; `None` when the slot is missing or malformed.
+    Save(Option<u8>),
+    /// `cargar N`/`load N`/`restore N`.
+    Restore(Option<u8>),
+    /// `partidas`/`saves`.
+    Slots,
+    /// `borrar N`/`delete N`.
+    Delete(Option<u8>),
+    /// `continuar`/`continue`: restores the autosave.
+    Continue,
     Other,
 }
 
@@ -805,7 +957,27 @@ pub fn parse_story_input(input: &str) -> StoryInputCommand {
             .filter(|number| *number >= 1)
             .map_or(StoryInputCommand::Other, StoryInputCommand::Number);
     }
-    match trimmed.to_lowercase().as_str() {
+    let lower = trimmed.to_lowercase();
+    let words = lower.split_whitespace().collect::<Vec<_>>();
+    let slot = |word: Option<&&str>| {
+        word.filter(|word| word.len() <= 2)
+            .and_then(|word| word.parse::<u8>().ok())
+    };
+    match words.as_slice() {
+        ["guardar" | "save", rest @ ..] if rest.len() <= 1 => {
+            return StoryInputCommand::Save(slot(rest.first()));
+        }
+        ["cargar" | "load" | "restore", rest @ ..] if rest.len() <= 1 => {
+            return StoryInputCommand::Restore(slot(rest.first()));
+        }
+        ["borrar" | "delete", rest @ ..] if rest.len() <= 1 => {
+            return StoryInputCommand::Delete(slot(rest.first()));
+        }
+        ["partidas" | "saves"] => return StoryInputCommand::Slots,
+        ["continuar" | "continue"] => return StoryInputCommand::Continue,
+        _ => {}
+    }
+    match lower.as_str() {
         "deshacer" | "undo" | "story undo" => StoryInputCommand::Undo,
         "salir" | "leave" | "salir historia" | "story leave" => StoryInputCommand::Leave,
         "ver" | "look" | "l" => StoryInputCommand::Look,
@@ -814,7 +986,62 @@ pub fn parse_story_input(input: &str) -> StoryInputCommand {
     }
 }
 
-pub const STORY_INPUT_HELP: &str = "Estás absorto en una historia: escribe un número para elegir, «ver» (look), «deshacer» (undo) o «salir» (leave).";
+pub const STORY_INPUT_HELP: &str = "Estás absorto en una historia: escribe un número para elegir, «ver» (look), «deshacer» (undo), «guardar N» (save), «cargar N» (load), «partidas» (saves), «borrar N» (delete) o «salir» (leave).";
+
+/// Renders the slot listing of the current story for text clients.
+pub fn render_slots(slots: &[protocol::StorySlotSummary]) -> String {
+    if slots.is_empty() {
+        return "No tienes partidas guardadas de esta historia. Escribe «guardar N» (save N) con N del 1 al 9.".to_owned();
+    }
+    let mut text = String::from("Partidas guardadas:");
+    for slot in slots {
+        let name = if slot.slot == 0 {
+            "0 (autoguardado)".to_owned()
+        } else {
+            slot.slot.to_string()
+        };
+        let _ = write!(text, "\n  {name} — {}", format_utc(slot.updated_at));
+        if !slot.compatible {
+            text.push_str(" (otra versión de la historia; no se puede cargar)");
+        }
+    }
+    text.push_str("\nEscribe «cargar N» (load N) para cargar o «borrar N» (delete N) para borrar.");
+    text
+}
+
+/// The entry offer for text clients, when a compatible autosave exists.
+pub fn render_continue_offer(slots: &protocol::StorySlots) -> Option<String> {
+    let autosave = slots
+        .slots
+        .iter()
+        .find(|slot| slot.slot == 0 && slot.compatible)
+        .filter(|_| slots.offer_continue)?;
+    Some(format!(
+        "Tienes una partida autoguardada ({}). Escribe «continuar» (continue) para retomarla o juega para empezar de nuevo.",
+        format_utc(autosave.updated_at)
+    ))
+}
+
+/// `YYYY-MM-DD HH:MM UTC` for Unix seconds (proleptic Gregorian calendar).
+pub fn format_utc(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let rest = seconds.rem_euclid(86_400);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        rest / 3_600,
+        rest % 3_600 / 60
+    )
+}
 
 /// Renders the catalog listing for `historias`.
 pub fn render_listing(listing: &[(String, String)]) -> String {
@@ -865,7 +1092,39 @@ enum Command {
         reply: oneshot::Sender<Result<StoryProjection, StoryFailure>>,
     },
     Undo(oneshot::Sender<Result<StoryProjection, StoryFailure>>),
-    Leave(oneshot::Sender<()>),
+    /// The current state as the exact bytes a save slot stores.
+    Snapshot(oneshot::Sender<Result<SavedState, StoryFailure>>),
+    /// Replaces the state with one already validated against the pack.
+    Restore {
+        state: Box<StoryState>,
+        reply: oneshot::Sender<Result<StoryProjection, StoryFailure>>,
+    },
+    /// Closes the instance and hands back its state when it has progress
+    /// (turn > 0), for the autosave.
+    Leave {
+        reason: CloseReason,
+        reply: oneshot::Sender<Option<SavedState>>,
+    },
+}
+
+/// A serialized `StoryState` ready for a slot write.
+#[derive(Clone, Debug)]
+struct SavedState {
+    json: String,
+    format_version: u32,
+    pack_id: String,
+}
+
+impl SavedState {
+    fn of(state: &StoryState) -> Result<Self, StoryFailure> {
+        let bytes = state.to_json().map_err(|_| StoryFailure::Internal)?;
+        let json = String::from_utf8(bytes).map_err(|_| StoryFailure::Internal)?;
+        Ok(Self {
+            json,
+            format_version: state.format_version,
+            pack_id: state.pack_id.clone(),
+        })
+    }
 }
 
 struct LiveEntry {
@@ -880,6 +1139,12 @@ struct ManagerInner {
     live: Mutex<HashMap<AccountId, LiveEntry>>,
     next_instance: AtomicU64,
     metrics: StoryMetrics,
+    /// Character store holding the save slots; unset when none is attached.
+    store: OnceLock<Arc<dyn CharacterStore>>,
+    slot_writes: KeyedRateLimiter<AccountId>,
+    slot_reads: KeyedRateLimiter<AccountId>,
+    /// Set by graceful shutdown: no new instance starts afterwards.
+    closing: AtomicBool,
 }
 
 impl ManagerInner {
@@ -894,16 +1159,123 @@ impl ManagerInner {
             match reason {
                 CloseReason::Left => &self.metrics.closed_left,
                 CloseReason::Evicted => &self.metrics.closed_evicted,
+                CloseReason::Shutdown => &self.metrics.closed_shutdown,
             }
             .fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    fn store(&self) -> Result<Arc<dyn CharacterStore>, StoryFailure> {
+        self.store
+            .get()
+            .cloned()
+            .ok_or(StoryFailure::SlotsUnavailable)
+    }
+
+    fn admit(&self, account: AccountId, write: bool) -> Result<(), StoryFailure> {
+        let limiter = if write {
+            &self.slot_writes
+        } else {
+            &self.slot_reads
+        };
+        if limiter.check(account, Instant::now()) {
+            Ok(())
+        } else {
+            self.metrics
+                .slot_rate_limited
+                .fetch_add(1, Ordering::Relaxed);
+            Err(StoryFailure::RateLimited)
+        }
+    }
+
+    /// Runs one bounded store call and maps its error to a public failure.
+    async fn call<T>(
+        &self,
+        operation: impl Future<Output = Result<T, StoreError>>,
+    ) -> Result<T, StoryFailure> {
+        match tokio::time::timeout(STORE_TIMEOUT, operation).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                let failure = StoryFailure::from_store(&error);
+                if failure == StoryFailure::SlotStore {
+                    warn!(%error, "story slot store call failed");
+                }
+                Err(failure)
+            }
+            Err(_) => {
+                warn!("story slot store call timed out");
+                Err(StoryFailure::SlotStore)
+            }
+        }
+    }
+
+    async fn write_slot(
+        &self,
+        account: AccountId,
+        story: &CatalogStory,
+        slot: StorySlot,
+        saved: SavedState,
+    ) -> Result<StorySaveSummary, StoryFailure> {
+        let store = self.store()?;
+        let result = self
+            .call(store.save_story_slot(StorySaveWrite {
+                account_id: account,
+                story_id: story.id.clone(),
+                slot,
+                pack_id: saved.pack_id,
+                pack_sha256: story.pack_sha256.clone(),
+                state_format_version: saved.format_version,
+                state_json: saved.json,
+            }))
+            .await;
+        self.metrics.save(slot.is_autosave(), result.is_ok());
+        result
+    }
+
+    /// Writes the autosave slot. Failures are logged and counted, never
+    /// surfaced as a gameplay error: leaving always succeeds.
+    async fn autosave(&self, account: AccountId, story: &CatalogStory, saved: SavedState) -> bool {
+        if self.store.get().is_none() {
+            return false;
+        }
+        match self
+            .write_slot(account, story, StorySlot::AUTOSAVE, saved)
+            .await
+        {
+            Ok(_) => true,
+            Err(failure) => {
+                warn!(?failure, "story autosave failed");
+                false
+            }
+        }
+    }
+
+    async fn list_slots(
+        &self,
+        account: AccountId,
+        story: &CatalogStory,
+    ) -> Result<Vec<protocol::StorySlotSummary>, StoryFailure> {
+        let store = self.store()?;
+        let slots = self
+            .call(store.list_story_slots(account, &story.id))
+            .await?;
+        Ok(slots
+            .into_iter()
+            .map(|summary| protocol::StorySlotSummary {
+                slot: summary.slot.get(),
+                updated_at: summary.updated_at,
+                compatible: summary.pack_id == story.pack.id
+                    && summary.pack_sha256 == story.pack_sha256,
+            })
+            .collect())
+    }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CloseReason {
     Left,
     Evicted,
+    Shutdown,
 }
 
 /// Owner of the story catalog and every live instance.
@@ -915,10 +1287,20 @@ pub struct StoryManager {
 /// A session's handle to its account's live instance.
 #[derive(Clone)]
 pub struct StoryLink {
-    story_id: String,
-    title: String,
+    account: AccountId,
+    story: Arc<CatalogStory>,
+    /// True when the link joined an instance that already existed (resume or
+    /// re-entry); only a fresh instance offers to continue the autosave.
+    resumed: bool,
     sender: mpsc::Sender<Command>,
     inner: Arc<ManagerInner>,
+}
+
+/// Result of leaving a story.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LeaveOutcome {
+    /// The state was written to the autosave slot.
+    pub autosaved: bool,
 }
 
 impl StoryManager {
@@ -930,8 +1312,27 @@ impl StoryManager {
                 live: Mutex::new(HashMap::new()),
                 next_instance: AtomicU64::new(1),
                 metrics: StoryMetrics::default(),
+                store: OnceLock::new(),
+                slot_writes: KeyedRateLimiter::per_minute_tracking(
+                    SLOT_WRITES_PER_MINUTE,
+                    SLOT_WRITES_PER_MINUTE,
+                    MAX_TRACKED_SLOT_ACCOUNTS,
+                ),
+                slot_reads: KeyedRateLimiter::per_minute_tracking(
+                    SLOT_READS_PER_MINUTE,
+                    SLOT_READ_BURST,
+                    MAX_TRACKED_SLOT_ACCOUNTS,
+                ),
+                closing: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Connects the save slots of ADR 0030. Without a store every slot
+    /// operation answers `SlotsUnavailable` and leaving does not autosave.
+    /// A second call is ignored.
+    pub fn attach_store(&self, store: Arc<dyn CharacterStore>) {
+        let _ = self.inner.store.set(store);
     }
 
     pub fn listing(&self) -> Vec<(String, String)> {
@@ -958,13 +1359,15 @@ impl StoryManager {
             .live
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        live.get(&account).map(|entry| self.link(entry))
+        live.get(&account)
+            .map(|entry| self.link(account, entry, true))
     }
 
-    fn link(&self, entry: &LiveEntry) -> StoryLink {
+    fn link(&self, account: AccountId, entry: &LiveEntry, resumed: bool) -> StoryLink {
         StoryLink {
-            story_id: entry.story.id.clone(),
-            title: entry.story.title.clone(),
+            account,
+            story: entry.story.clone(),
+            resumed,
             sender: entry.sender.clone(),
             inner: self.inner.clone(),
         }
@@ -1000,7 +1403,7 @@ impl StoryManager {
             .unwrap_or_else(|error| error.into_inner());
         if let Some(entry) = live.get(&account) {
             if entry.story.id == story.id && !entry.sender.is_closed() {
-                return Ok(self.link(entry));
+                return Ok(self.link(account, entry, true));
             }
             self.inner
                 .metrics
@@ -1009,6 +1412,9 @@ impl StoryManager {
             return Err(StoryFailure::AlreadyInStory);
         }
         debug_assert_eq!(MAX_INSTANCES_PER_ACCOUNT, 1);
+        if self.inner.closing.load(Ordering::Acquire) {
+            return Err(StoryFailure::Busy);
+        }
         if live.len() >= self.inner.limits.max_instances {
             self.inner
                 .metrics
@@ -1025,7 +1431,7 @@ impl StoryManager {
             sender,
             story,
         };
-        let link = self.link(&entry);
+        let link = self.link(account, &entry, false);
         live.insert(account, entry);
         self.inner.metrics.live.store(live.len(), Ordering::Relaxed);
         self.inner.metrics.started.fetch_add(1, Ordering::Relaxed);
@@ -1039,15 +1445,57 @@ impl StoryManager {
         ));
         Ok(link)
     }
+
+    /// Graceful shutdown: refuses new instances, closes every live instance
+    /// and writes its autosave. Returns how many autosaves were written. The
+    /// caller bounds the whole call; each store call is bounded too.
+    pub async fn shutdown(&self) -> usize {
+        self.inner.closing.store(true, Ordering::Release);
+        let entries = {
+            let live = self
+                .inner
+                .live
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            live.iter()
+                .map(|(account, entry)| (*account, entry.sender.clone(), entry.story.clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut tasks = tokio::task::JoinSet::new();
+        for (account, sender, story) in entries {
+            let inner = self.inner.clone();
+            tasks.spawn(async move {
+                let (reply, response) = oneshot::channel();
+                let command = Command::Leave {
+                    reason: CloseReason::Shutdown,
+                    reply,
+                };
+                let sent = tokio::time::timeout(REPLY_TIMEOUT, sender.send(command)).await;
+                if !matches!(sent, Ok(Ok(()))) {
+                    return false;
+                }
+                match tokio::time::timeout(REPLY_TIMEOUT, response).await {
+                    Ok(Ok(Some(saved))) => inner.autosave(account, &story, saved).await,
+                    _ => false,
+                }
+            });
+        }
+        let mut written = 0;
+        while let Some(result) = tasks.join_next().await {
+            written += usize::from(result.unwrap_or(false));
+        }
+        info!(autosaves = written, "story instances closed for shutdown");
+        written
+    }
 }
 
 impl StoryLink {
     pub fn story_id(&self) -> &str {
-        &self.story_id
+        &self.story.id
     }
 
     pub fn title(&self) -> &str {
-        &self.title
+        &self.story.title
     }
 
     async fn request<T>(
@@ -1103,8 +1551,126 @@ impl StoryLink {
         result
     }
 
-    pub async fn leave(&self) -> Result<(), StoryFailure> {
-        self.request(Command::Leave).await
+    /// Leaves the story. When the instance had progress and a store is
+    /// attached, its state is written to the autosave slot first.
+    pub async fn leave(&self) -> Result<LeaveOutcome, StoryFailure> {
+        let saved = self
+            .request(|reply| Command::Leave {
+                reason: CloseReason::Left,
+                reply,
+            })
+            .await?;
+        let autosaved = match saved {
+            Some(saved) => self.inner.autosave(self.account, &self.story, saved).await,
+            None => false,
+        };
+        Ok(LeaveOutcome { autosaved })
+    }
+
+    /// `story.save`: writes the current state to manual slot `1..=9`.
+    pub async fn save(&self, slot: u8) -> Result<protocol::StorySaved, StoryFailure> {
+        let slot = StorySlot::new(slot)
+            .filter(|slot| !slot.is_autosave())
+            .ok_or(StoryFailure::InvalidSlot)?;
+        self.inner.store()?;
+        self.inner.admit(self.account, true)?;
+        let saved = self
+            .request(Command::Snapshot)
+            .await
+            .and_then(|result| result)?;
+        let summary = self
+            .inner
+            .write_slot(self.account, &self.story, slot, saved)
+            .await?;
+        Ok(protocol::StorySaved {
+            slot: summary.slot.get(),
+            updated_at: summary.updated_at,
+        })
+    }
+
+    /// `story.restore` (and `story.continue` for slot 0): loads the slot of
+    /// the exact current pack revision, re-validates it against the pack and
+    /// replaces the instance state. The undo history starts empty.
+    pub async fn restore(&self, slot: u8) -> Result<StoryProjection, StoryFailure> {
+        let result = self.restore_inner(slot).await;
+        self.inner.metrics.restore(result.is_ok());
+        result
+    }
+
+    async fn restore_inner(&self, slot: u8) -> Result<StoryProjection, StoryFailure> {
+        let slot = StorySlot::new(slot).ok_or(StoryFailure::InvalidSlot)?;
+        let store = self.inner.store()?;
+        self.inner.admit(self.account, false)?;
+        let compatibility = StoryPackCompatibility {
+            pack_id: self.story.pack.id.clone(),
+            pack_sha256: self.story.pack_sha256.clone(),
+            // StoryPack declares no compatible revisions yet (ADR 0030).
+            compatible_pack_sha256: BTreeSet::new(),
+        };
+        let record = self
+            .inner
+            .call(store.load_story_slot(self.account, &self.story.id, slot, compatibility))
+            .await?
+            .ok_or(StoryFailure::SlotEmpty)?;
+        let state = StoryState::from_json_slice(record.state_json.as_bytes(), &self.story.pack)
+            .map_err(|error| {
+                // The reason may name authored ids; it stays in the server log.
+                warn!(%error, "stored story state failed validation against its pack");
+                StoryFailure::SlotCorrupt
+            })?;
+        self.request(|reply| Command::Restore {
+            state: Box::new(state),
+            reply,
+        })
+        .await
+        .and_then(|result| result)
+    }
+
+    /// `story.slots`: metadata of the occupied slots of this story.
+    pub async fn slots(&self) -> Result<Vec<protocol::StorySlotSummary>, StoryFailure> {
+        self.inner.store()?;
+        self.inner.admit(self.account, false)?;
+        self.inner.list_slots(self.account, &self.story).await
+    }
+
+    /// `story.deleteSlot`: removes slot `0..=9` (an empty slot is an error)
+    /// and returns the remaining slots. The listing is part of the admitted
+    /// write and is not rate limited separately.
+    pub async fn delete_slot(
+        &self,
+        slot: u8,
+    ) -> Result<Vec<protocol::StorySlotSummary>, StoryFailure> {
+        let slot = StorySlot::new(slot).ok_or(StoryFailure::InvalidSlot)?;
+        let store = self.inner.store()?;
+        self.inner.admit(self.account, true)?;
+        if !self
+            .inner
+            .call(store.delete_story_slot(self.account, &self.story.id, slot))
+            .await?
+        {
+            return Err(StoryFailure::SlotEmpty);
+        }
+        self.inner.list_slots(self.account, &self.story).await
+    }
+
+    /// The listing sent once after entering a fresh instance, with the
+    /// continue offer when a compatible autosave exists. `None` when the
+    /// instance was resumed, no store is attached or listing failed. It is
+    /// not rate limited: entering is already bounded by the command limiter.
+    pub async fn entry_slots(&self) -> Option<protocol::StorySlots> {
+        if self.resumed || self.inner.store.get().is_none() {
+            return None;
+        }
+        let slots = self
+            .inner
+            .list_slots(self.account, &self.story)
+            .await
+            .ok()?;
+        let offer_continue = slots.iter().any(|slot| slot.slot == 0 && slot.compatible);
+        Some(protocol::StorySlots {
+            slots,
+            offer_continue,
+        })
     }
 
     fn record<T>(&self, result: &Result<T, StoryFailure>) {
@@ -1126,6 +1692,12 @@ async fn run_instance(
             Ok(None) | Err(_) => {
                 inner.remove(account, instance_id, CloseReason::Evicted);
                 info!(instance = instance_id, "idle story instance evicted");
+                // The instance is already unregistered; the autosave runs on
+                // this exiting task and never delays a live instance.
+                if let Some(saved) = instance.progress() {
+                    let story = instance.story.clone();
+                    inner.autosave(account, &story, saved).await;
+                }
                 return;
             }
         };
@@ -1143,11 +1715,17 @@ async fn run_instance(
             Command::Undo(reply) => {
                 let _ = reply.send(instance.undo(&inner.catalog.media));
             }
-            Command::Leave(reply) => {
+            Command::Snapshot(reply) => {
+                let _ = reply.send(SavedState::of(&instance.state));
+            }
+            Command::Restore { state, reply } => {
+                let _ = reply.send(instance.restore(*state, &inner.catalog.media));
+            }
+            Command::Leave { reason, reply } => {
                 // Unregister before acknowledging so the session can start
                 // another story immediately.
-                inner.remove(account, instance_id, CloseReason::Left);
-                let _ = reply.send(());
+                inner.remove(account, instance_id, reason);
+                let _ = reply.send(instance.progress());
                 return;
             }
         }
@@ -1343,6 +1921,45 @@ impl Instance {
             self.music = music;
             self.undo.pop();
             return Err(StoryFailure::Internal);
+        }
+        Ok(self.current.clone())
+    }
+
+    /// The state to autosave when the playthrough has progressed.
+    fn progress(&self) -> Option<SavedState> {
+        if self.state.turn == 0 {
+            return None;
+        }
+        SavedState::of(&self.state)
+            .inspect_err(|_| warn!("story state could not be serialized for the autosave"))
+            .ok()
+    }
+
+    /// Replaces the state with a restored one (already validated against the
+    /// pack). The undo history is not persisted, so it restarts empty; the
+    /// restored scene's cues play as on entry and earlier music stops.
+    fn restore(
+        &mut self,
+        state: StoryState,
+        media: &BTreeMap<String, String>,
+    ) -> Result<StoryProjection, StoryFailure> {
+        let scene_cues = core_view(&self.story.pack, &state)
+            .map_err(|_| StoryFailure::SlotCorrupt)?
+            .cues;
+        let undo = UndoRing::new(UNDO_CAPACITY).map_err(|_| StoryFailure::Internal)?;
+        let mut events = Vec::with_capacity(scene_cues.len() + 1);
+        if self.music.is_some() {
+            events.push(StoryEvent::Cue(Cue::StopMusic));
+        }
+        events.extend(scene_cues.into_iter().map(StoryEvent::Cue));
+        let previous_state = std::mem::replace(&mut self.state, state);
+        let previous_undo = std::mem::replace(&mut self.undo, undo);
+        let music = self.music.clone();
+        if self.project(&events, media).is_err() {
+            self.state = previous_state;
+            self.undo = previous_undo;
+            self.music = music;
+            return Err(StoryFailure::SlotCorrupt);
         }
         Ok(self.current.clone())
     }
@@ -1666,3 +2283,6 @@ fn render_event(pack: &StoryPack, event: &StoryEvent) -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod slot_tests;

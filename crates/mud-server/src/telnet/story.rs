@@ -10,12 +10,15 @@ use super::{
 };
 use crate::story_sessions::{
     STORY_INPUT_HELP, StoryCommand, StoryFailure, StoryInputCommand, StoryLink, StoryManager,
-    StoryProjection, parse_story_command, parse_story_input, render_listing, render_text,
+    StoryProjection, parse_story_command, parse_story_input, render_continue_offer, render_listing,
+    render_slots, render_text,
 };
 use serde_json::json;
 use std::io;
 use tiamud_core::AccountId;
-use tiamud_protocol::{MediaChannel, StoryCueAction, StoryEndingKind, StoryItem};
+use tiamud_protocol::{
+    MediaChannel, StoryCueAction, StoryEndingKind, StoryItem, StorySlotSummary, StorySlots,
+};
 
 /// Result of offering one line to the story adapter.
 #[derive(Debug, Eq, PartialEq)]
@@ -99,10 +102,54 @@ impl TelnetStory {
             StoryInputCommand::Undo => link.undo().await,
             StoryInputCommand::Look => link.view().await,
             StoryInputCommand::Leave => {
-                let _ = link.leave().await;
+                let outcome = link.leave().await;
                 self.leave_locally(output, input, "left")?;
-                write_line(output, input, "Sales de la historia y vuelves al mundo.")?;
+                let message = if outcome.is_ok_and(|outcome| outcome.autosaved) {
+                    "Sales de la historia y vuelves al mundo. Tu progreso quedó en el autoguardado."
+                } else {
+                    "Sales de la historia y vuelves al mundo."
+                };
+                write_line(output, input, message)?;
                 return Ok(StoryLineOutcome::Left);
+            }
+            StoryInputCommand::Save(slot) => {
+                match link.save(slot.unwrap_or(u8::MAX)).await {
+                    Ok(saved) => write_line(
+                        output,
+                        input,
+                        &format!("Partida guardada en la ranura {}.", saved.slot),
+                    )?,
+                    Err(failure) => return self.show(output, input, Err(failure)).await,
+                }
+                return Ok(StoryLineOutcome::Handled);
+            }
+            StoryInputCommand::Restore(slot) => {
+                return self
+                    .restore(output, input, &link, slot.unwrap_or(u8::MAX))
+                    .await;
+            }
+            StoryInputCommand::Continue => return self.restore(output, input, &link, 0).await,
+            StoryInputCommand::Slots => {
+                match link.slots().await {
+                    Ok(slots) => self.slots(output, input, slots, false)?,
+                    Err(failure) => return self.show(output, input, Err(failure)).await,
+                }
+                return Ok(StoryLineOutcome::Handled);
+            }
+            StoryInputCommand::Delete(slot) => {
+                let slot = slot.unwrap_or(u8::MAX);
+                match link.delete_slot(slot).await {
+                    Ok(slots) => {
+                        write_line(
+                            output,
+                            input,
+                            &format!("Partida de la ranura {slot} borrada."),
+                        )?;
+                        self.slots(output, input, slots, false)?;
+                    }
+                    Err(failure) => return self.show(output, input, Err(failure)).await,
+                }
+                return Ok(StoryLineOutcome::Handled);
             }
             StoryInputCommand::List => {
                 let listing = self
@@ -142,7 +189,16 @@ impl TelnetStory {
                     write_line(output, input, &format!("Entras en «{}».", link.title()))?;
                     self.link = Some(link.clone());
                     let result = link.view().await;
-                    return self.show(output, input, result).await;
+                    let outcome = self.show(output, input, result).await?;
+                    if outcome == StoryLineOutcome::Handled
+                        && let Some(slots) = link.entry_slots().await
+                    {
+                        if let Some(offer) = render_continue_offer(&slots) {
+                            write_line(output, input, &offer)?;
+                        }
+                        self.slots_gmcp(output, input, &slots)?;
+                    }
+                    return Ok(outcome);
                 }
                 Err(failure) => write_line(output, input, failure.message())?,
             },
@@ -185,6 +241,57 @@ impl TelnetStory {
                 Ok(StoryLineOutcome::Handled)
             }
         }
+    }
+
+    async fn restore(
+        &mut self,
+        output: &TelnetOutputQueue,
+        input: &mut TelnetInput,
+        link: &StoryLink,
+        slot: u8,
+    ) -> io::Result<StoryLineOutcome> {
+        let result = link.restore(slot).await;
+        if result.is_ok() {
+            let message = if slot == 0 {
+                "Continúas la partida autoguardada.".to_owned()
+            } else {
+                format!("Cargas la partida de la ranura {slot}.")
+            };
+            write_line(output, input, &message)?;
+        }
+        self.show(output, input, result).await
+    }
+
+    /// Writes the slot listing and, with GMCP, `Tiamud.Story.Slots`.
+    fn slots(
+        &mut self,
+        output: &TelnetOutputQueue,
+        input: &mut TelnetInput,
+        slots: Vec<StorySlotSummary>,
+        offer_continue: bool,
+    ) -> io::Result<()> {
+        write_line(output, input, &render_slots(&slots))?;
+        self.slots_gmcp(
+            output,
+            input,
+            &StorySlots {
+                slots,
+                offer_continue,
+            },
+        )
+    }
+
+    fn slots_gmcp(
+        &mut self,
+        output: &TelnetOutputQueue,
+        input: &mut TelnetInput,
+        slots: &StorySlots,
+    ) -> io::Result<()> {
+        let gmcp = input.negotiation.story_slots_gmcp(slots);
+        if !gmcp.is_empty() {
+            output.bytes(OutputPriority::Interactive, gmcp)?;
+        }
+        Ok(())
     }
 
     fn leave_locally(
@@ -354,6 +461,32 @@ impl TelnetSession {
                 }
             }
         }
+        output
+    }
+
+    /// `Tiamud.Story.Slots`: slot metadata only (at most ten small entries,
+    /// far below the GMCP budget). Never the saved state or a pack digest.
+    pub(super) fn story_slots_gmcp(&mut self, slots: &StorySlots) -> Vec<u8> {
+        if !self.q.local_enabled(super::OPT_GMCP) || !self.gmcp.supports("tiamud.story") {
+            return Vec::new();
+        }
+        let mut output = Vec::new();
+        let entries = slots
+            .slots
+            .iter()
+            .map(|slot| {
+                json!({
+                    "slot": slot.slot,
+                    "updatedAt": slot.updated_at,
+                    "compatible": slot.compatible,
+                })
+            })
+            .collect::<Vec<_>>();
+        append_gmcp(
+            &mut output,
+            "Tiamud.Story.Slots",
+            &json!({"slots": entries, "offerContinue": slots.offer_continue}),
+        );
         output
     }
 

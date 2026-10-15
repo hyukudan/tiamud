@@ -690,7 +690,7 @@ const LLUVIA_SCRIPT: [&str; 15] = [
 ];
 
 /// The `tiamud.v1` client message a browser sends for `action`.
-fn wire_input(action: &StoryAction, view_rev: u32) -> serde_json::Value {
+pub(super) fn wire_input(action: &StoryAction, view_rev: u32) -> serde_json::Value {
     match action.request() {
         StoryRequest::Choose { id } => {
             json!({"type": "story.choose", "data": {"id": id, "viewRev": view_rev}})
