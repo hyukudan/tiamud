@@ -31,6 +31,7 @@ implementación por fase vive en
 | [0023](0023-need-greed-and-master-loot-distribution.md) | Need/greed and master-loot distribution | Aceptado (implementación parcial) | Botín 4C |
 | [0024](0024-phase-6d-acceptance-closure-plan.md) | Phase 6D acceptance closure plan | Aceptado (implementación parcial: Gate 2) | Áreas 6D |
 | [0025](0025-narrative-ruleset-story-core.md) | Narrative ruleset (story-core), StoryPack and instanced story sessions | Propuesto (prototipo S0 de biblioteca) | Narrativa S0–S8 |
+| [0028](0028-story-menus-portraits-and-dialogue-trees.md) | Story verb menus, portraits and dialogue trees (StoryPack v2) | Propuesto (modelo de núcleo de biblioteca) | Narrativa S4 |
 
 El estado de fase (`Complete`/`Partial`) es autoridad de
 [`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
