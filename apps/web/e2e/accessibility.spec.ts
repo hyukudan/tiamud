@@ -702,7 +702,11 @@ test('screen-reader mode suppresses images and motion without accessibility viol
   });
   const imageRequests: string[] = [];
   page.on('request', (request) => {
-    if (request.resourceType() === 'image') imageRequests.push(request.url());
+    // Firefox fetches the PWA favicon/touch icon for browser chrome as image
+    // requests; those are identity icons, not optional page artwork.
+    if (request.resourceType() === 'image' && !new URL(request.url()).pathname.startsWith('/icons/')) {
+      imageRequests.push(request.url());
+    }
   });
 
   await page.goto('/');
@@ -760,6 +764,87 @@ test('authenticated mobile play exposes complete accessible panels and a fixed c
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
     .analyze();
   expect(results.violations).toEqual([]);
+});
+
+async function undersizedTouchTargets(page: import('@playwright/test').Page): Promise<string[]> {
+  return page.evaluate((minimum) => {
+    const selector = 'button, summary, a[href], select, textarea, input:not([type="hidden"]), [role="button"]';
+    const failures: string[] = [];
+    for (const element of document.querySelectorAll<HTMLElement>(selector)) {
+      const style = getComputedStyle(element);
+      if (style.visibility === 'hidden' || style.display === 'none') continue;
+      if (element.closest('[aria-hidden="true"], .sr-only')) continue;
+      if (element.closest('details:not([open])') && element.tagName !== 'SUMMARY') continue;
+      const input = element instanceof HTMLInputElement ? element : undefined;
+      // A checkbox or radio is operated through its wrapping label.
+      const target = input && ['checkbox', 'radio'].includes(input.type)
+        ? (input.closest('label') ?? element)
+        : element;
+      const box = target.getBoundingClientRect();
+      if (box.width === 0 && box.height === 0) continue;
+      if (box.width < minimum - 0.5 || box.height < minimum - 0.5) {
+        const name = (element.getAttribute('aria-label') ?? element.textContent ?? element.id ?? '')
+          .trim().replace(/\s+/g, ' ').slice(0, 40);
+        failures.push(`${element.tagName.toLowerCase()} "${name}" ${Math.round(box.width)}x${Math.round(box.height)}`);
+      }
+    }
+    return failures;
+  }, 44);
+}
+
+test('mobile touch targets are at least 44 CSS pixels on the gate and in play', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await installMockWorld(page);
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: /Continue as Aria/i })).toBeVisible();
+  const gate = await undersizedTouchTargets(page);
+
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+  await expect(page.getByRole('heading', { name: 'Lantern Square' })).toBeVisible();
+  await expect(page.locator('summary').filter({ hasText: 'Inventory' })).toBeVisible();
+  const play = await undersizedTouchTargets(page);
+
+  await page.getByText('Preferences', { exact: true }).click();
+  const preferences = await undersizedTouchTargets(page);
+  expect({ gate, play, preferences }).toEqual({ gate: [], play: [], preferences: [] });
+});
+
+test('the command bar rises above an overlaying on-screen keyboard', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await installMockWorld(page);
+  await page.addInitScript(() => {
+    // Simulate a keyboard that overlays the page: only the visual viewport shrinks.
+    const listeners = new Set<() => void>();
+    const viewport = {
+      height: window.innerHeight,
+      offsetTop: 0,
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+    };
+    Object.defineProperty(window, 'visualViewport', { configurable: true, get: () => viewport });
+    (window as Window & { openMockKeyboard?: (height: number) => void }).openMockKeyboard = (height) => {
+      viewport.height = window.innerHeight - height;
+      for (const listener of listeners) listener();
+    };
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+  const command = page.getByLabel('What do you do?');
+  await expect(command).toBeFocused();
+
+  await page.evaluate(() =>
+    (window as Window & { openMockKeyboard?: (height: number) => void }).openMockKeyboard?.(300));
+  await expect.poll(async () => {
+    const box = await command.boundingBox();
+    return (box?.y ?? 0) + (box?.height ?? 0);
+  }).toBeLessThanOrEqual(740 - 300);
+
+  await page.evaluate(() =>
+    (window as Window & { openMockKeyboard?: (height: number) => void }).openMockKeyboard?.(0));
+  await expect.poll(async () => {
+    const box = await command.boundingBox();
+    return (box?.y ?? 0) + (box?.height ?? 0);
+  }).toBeGreaterThan(740 - 120);
 });
 
 test('community boards are pull-only, keyboard-operable, text-safe and accessible', async ({ page }) => {
