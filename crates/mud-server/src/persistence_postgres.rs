@@ -5,11 +5,7 @@
 //! runs in a separately bounded blocking service, and no PostgreSQL call runs
 //! on an async executor thread.
 
-use std::{
-    collections::BTreeSet,
-    thread,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::thread;
 
 use async_trait::async_trait;
 use postgres::{Client, GenericClient, IsolationLevel, ToStatement};
@@ -19,23 +15,23 @@ use tiamud_core::{
     MAX_BOARD_REPORT_REASON_BYTES, MAX_BOARD_SUBJECT_BYTES, MAX_MAIL_BODY_BYTES,
     MAX_MAIL_REPORT_REASON_BYTES, MAX_MAIL_SUBJECT_BYTES, SocialChannelName, StaffCapability,
     StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot, valid_board_public_id,
-    valid_board_subject, valid_board_visible_text, valid_mail_public_id, valid_mail_visible_text,
+    valid_board_subject, valid_mail_public_id, valid_mail_visible_text,
 };
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{Duration, timeout},
+    time::timeout,
 };
 
 use crate::{
     auth::{
-        AuthenticatedSession, DEFAULT_SESSION_TTL, PasswordService, PasswordWorkError,
-        SessionToken, digest_token, validate_password,
+        AuthenticatedSession, DEFAULT_SESSION_TTL, PasswordService, SessionToken, digest_token,
+        validate_password,
     },
     persistence::{
-        BOARD_ACCOUNT_CAPACITY, BOARD_CAPACITY_PER_BOARD, BOARD_MAX_PAGES, BOARD_PAGE_SIZE,
-        BoardEntry, BoardPage, BoardPostSummary, BoardReportEvidence, CharacterStore,
-        DOMAIN_EVENT_RETENTION, DurableAreaCheckpoint, DurableAreaGeneration,
-        DurableCharacterGameplay, MailMessage, MailMessageSummary, MailPage, MailReportEvidence,
+        self, BOARD_CAPACITY_PER_BOARD, BOARD_MAX_PAGES, BOARD_PAGE_SIZE, BoardEntry, BoardPage,
+        BoardPostSummary, BoardReportEvidence, CharacterStore, DOMAIN_EVENT_RETENTION,
+        DurableAreaCheckpoint, DurableAreaGeneration, DurableCharacterGameplay, MAILBOX_CAPACITY,
+        MAX_REPORT_REASON_BYTES, MailMessage, MailMessageSummary, MailPage, MailReportEvidence,
         MailSendResult, ModerationAction, PersistenceCommandHandler, PreparedLogin, Request,
         SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry, StaffAuditRecord,
         StaffReport, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
@@ -48,52 +44,19 @@ use crate::{
         validate_area_retirement_previous_runtime,
     },
 };
+// Backend-agnostic bounds, JSON shaping, quota/capacity, retention and staff
+// authority policy shared with the SQLite store.
+use crate::persistence::common::*;
 
 #[cfg(test)]
 use crate::persistence::{AuditEntry, area_checkpoint_unit_id};
 
-const MAX_IDENTITY_NAME_BYTES: usize = 64;
-const MAX_ACTIVE_SESSIONS: i64 = 16;
-const MAX_CHARACTER_JSON_BYTES: usize = 65_536;
-const MAX_EVENT_JSON_BYTES: usize = 65_536;
-const MAX_RUNTIME_JSON_BYTES: usize = tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES;
-const MAX_SOCIAL_REASON_BYTES: usize = 1_024;
-const MAX_REPORT_REASON_BYTES: usize = 2_048;
-const MAX_AUDIT_DETAILS_BYTES: usize = 4_096;
-const MAX_STAFF_ACTION_BYTES: usize = 64;
-const MAX_STAFF_LORE_TITLE_BYTES: usize = 128;
-const STAFF_LIST_LIMIT: i64 = 10;
-const MAIL_PAGE_SIZE: i64 = 10;
-const MAIL_MAX_PAGES: i64 = 7;
-const MAILBOX_CAPACITY: i64 = 64;
-const MAILBOX_CAPACITY_U32: u32 = 64;
-const _: () = assert!(MAILBOX_CAPACITY_U32 as i64 == MAILBOX_CAPACITY);
-const MAILBOX_BYTE_CAPACITY: i64 = 128 * 1024;
-const MAIL_GLOBAL_CAPACITY: i64 = 100_000;
-const MAIL_HOURLY_CAPACITY: i64 = 20;
-const MAIL_DAILY_CAPACITY: i64 = 50;
-const MAIL_HOUR_SECONDS: i64 = 60 * 60;
-const MAIL_DAY_SECONDS: i64 = 24 * MAIL_HOUR_SECONDS;
-const MAIL_RETENTION_SECONDS: i64 = 30 * MAIL_DAY_SECONDS;
-const MAIL_REPORT_EVIDENCE_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
-const MAIL_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
-const MAIL_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
-const MAIL_PURGE_LIMIT: i64 = 256;
+// PostgreSQL binds `BIGINT` page arithmetic; the values are the shared `u32`
+// public bounds widened losslessly.
+const MAIL_PAGE_SIZE: i64 = persistence::MAIL_PAGE_SIZE as i64;
+const MAIL_MAX_PAGES: i64 = persistence::MAIL_MAX_PAGES as i64;
 const MAIL_TRANSACTION_LOCK_ID: i64 = 0x5449_414d_4d41_494c;
-const BOARD_BYTE_CAPACITY_PER_BOARD: i64 = 4 * 1_024 * 1_024;
-const BOARD_GLOBAL_CAPACITY: i64 = 2_000;
-const BOARD_GLOBAL_BYTE_CAPACITY: i64 = 8 * 1_024 * 1_024;
-const BOARD_HOURLY_CAPACITY: i64 = 5;
-const BOARD_DAILY_CAPACITY: i64 = 20;
-const BOARD_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
-const BOARD_REPORT_EVIDENCE_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
-const BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
-const BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
-const BOARD_PURGE_LIMIT: i64 = 256;
 const BOARD_TRANSACTION_LOCK_ID: i64 = 0x5449_414d_424f_4152;
-const MAX_MODERATION_DURATION_SECONDS: i64 = 365 * 24 * 60 * 60;
-const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
-const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const POSTGRES_CHARACTER_BATCH_SIZE: usize =
     tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES / MAX_CHARACTER_JSON_BYTES;
 const POSTGRES_CHARACTER_EXISTENCE_BATCH_SIZE: usize = 4_096;
@@ -1510,30 +1473,6 @@ impl CharacterStore for PostgresCharacterStore {
     }
 }
 
-fn normalise_name(name: &str, kind: &'static str) -> Result<String, StoreError> {
-    let name = name.trim();
-    if !valid_mail_visible_text(name, MAX_IDENTITY_NAME_BYTES) || name.contains('|') {
-        return Err(StoreError::InvalidName { kind });
-    }
-    Ok(name.to_owned())
-}
-
-fn map_password_work_error(error: PasswordWorkError) -> StoreError {
-    match error {
-        PasswordWorkError::Overloaded | PasswordWorkError::Timeout => StoreError::RequestTimeout,
-        PasswordWorkError::Execution => StoreError::PasswordHashing,
-    }
-}
-
-fn unix_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .try_into()
-        .unwrap_or(i64::MAX)
-}
-
 fn finish_register_account(
     connection: &mut Client,
     name: &str,
@@ -1846,11 +1785,7 @@ fn load_or_create_character_with_gameplay<C: GenericClient>(
 ) -> Result<CharacterSnapshot, StoreError> {
     ensure_account_exists(connection, account_id)?;
     let name = normalise_name(name, "character")?;
-    let gameplay_json = bounded_json(
-        initial_gameplay,
-        "character gameplay",
-        MAX_CHARACTER_JSON_BYTES,
-    )?;
+    let gameplay_json = encode_character_gameplay(initial_gameplay)?;
     connection.execute(
         "INSERT INTO characters (account_id, name, room_id, gameplay_json)
          VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
@@ -1920,8 +1855,7 @@ fn save_with<C: GenericClient, T: ?Sized + ToStatement>(
     statement: &T,
     snapshot: &CharacterSnapshot,
 ) -> Result<(), StoreError> {
-    let name = normalise_name(&snapshot.name, "character")?;
-    let item_locations_json = serde_json::to_string(&snapshot.item_locations)?;
+    let (name, item_locations_json) = encode_character_row(snapshot)?;
     let updated = connection.execute(
         statement,
         &[
@@ -2150,12 +2084,7 @@ fn persist_area_runtime<C: GenericClient>(
     transaction: &mut C,
     runtime: &WorldRuntimeSnapshot,
 ) -> Result<(), StoreError> {
-    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
-    let adventure_json = bounded_json(
-        &runtime.adventure,
-        "world adventure",
-        MAX_RUNTIME_JSON_BYTES,
-    )?;
+    let (runtime_json, adventure_json) = encode_runtime_documents(runtime)?;
     transaction.execute(
         "INSERT INTO world_adventure (singleton, state_json, updated_at)
          VALUES (1, $1, floor(extract(epoch FROM now()))::BIGINT)
@@ -2309,12 +2238,7 @@ fn commit_area_generation_activation(
     next: &DurableAreaGeneration,
 ) -> Result<(), StoreError> {
     validate_area_generation_transition(expected, next)?;
-    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
-    let world_adventure_json = bounded_json(
-        &runtime.adventure,
-        "world adventure",
-        MAX_RUNTIME_JSON_BYTES,
-    )?;
+    let (runtime_json, world_adventure_json) = encode_runtime_documents(runtime)?;
     let expected_sequence = i64::try_from(expected.activation_sequence)
         .map_err(|_| StoreError::InvalidAreaGeneration)?;
     let next_sequence =
@@ -2494,43 +2418,14 @@ fn commit_action_with_retention(
     staff_audit: Option<(StaffAuditRecord, i64)>,
 ) -> Result<(), StoreError> {
     debug_assert!(event_retention > 0);
-    let gameplay_json = characters
-        .iter()
-        .map(|snapshot| {
-            bounded_json(
-                &snapshot.gameplay,
-                "character gameplay",
-                MAX_CHARACTER_JSON_BYTES,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let adventure_json = characters
-        .iter()
-        .map(|snapshot| {
-            bounded_json(
-                &serde_json::json!({
-                    "coins": snapshot.gameplay.coins,
-                    "commodities": snapshot.gameplay.commodities,
-                    "quests": snapshot.gameplay.quests,
-                }),
-                "character adventure",
-                MAX_CHARACTER_JSON_BYTES,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
-    let world_adventure_json = bounded_json(
-        &runtime.adventure,
-        "world adventure",
-        MAX_RUNTIME_JSON_BYTES,
-    )?;
-    let event_json = events
-        .iter()
-        .map(|event| bounded_json(event, "domain event", MAX_EVENT_JSON_BYTES))
-        .collect::<Result<Vec<_>, _>>()?;
-    let staff_audit = staff_audit
-        .map(|(audit, now)| prepare_staff_audit(audit).map(|audit| (audit, now)))
-        .transpose()?;
+    let EncodedActionCommit {
+        gameplay_json,
+        adventure_json,
+        runtime_json,
+        world_adventure_json,
+        event_json,
+        staff_audit,
+    } = encode_action_commit(characters, runtime, events, staff_audit)?;
 
     let mut transaction = connection.transaction()?;
     if let Some((audit, _)) = &staff_audit {
@@ -2629,32 +2524,6 @@ fn commit_action_with_retention(
     }
     transaction.commit()?;
     Ok(())
-}
-
-fn role_from_database(value: &str) -> Result<AccountRole, StoreError> {
-    match value {
-        "player" => Ok(AccountRole::Player),
-        "moderator" => Ok(AccountRole::Moderator),
-        "admin" => Ok(AccountRole::Admin),
-        _ => Err(StoreError::InvalidSocialInput),
-    }
-}
-
-fn role_as_database(role: AccountRole) -> &'static str {
-    match role {
-        AccountRole::Player => "player",
-        AccountRole::Moderator => "moderator",
-        AccountRole::Admin => "admin",
-    }
-}
-
-fn social_channel_from_database(value: &str) -> Result<SocialChannelName, StoreError> {
-    match value {
-        "general" => Ok(SocialChannelName::General),
-        "newbie" => Ok(SocialChannelName::Newbie),
-        "staff" => Ok(SocialChannelName::Staff),
-        _ => Err(StoreError::InvalidSocialInput),
-    }
 }
 
 fn ensure_social_character_exists<C: GenericClient>(
@@ -2879,14 +2748,6 @@ fn set_social_channel_subscription(
     Ok(())
 }
 
-fn normalise_mail_text(value: &str, maximum: usize) -> Result<String, StoreError> {
-    if !valid_mail_visible_text(value, maximum) {
-        Err(StoreError::InvalidMailInput)
-    } else {
-        Ok(value.to_owned())
-    }
-}
-
 fn send_mail(
     connection: &mut Client,
     sender: CharacterId,
@@ -2941,36 +2802,20 @@ fn send_mail(
          FROM social_mail_usage WHERE account_id = $1 FOR UPDATE",
         &[&sender_account],
     )?;
-    let (hour_started_at, hour_count, day_started_at, day_count) =
-        usage.map_or((now, 0_i64, now, 0_i64), |row| {
-            let stored_hour: i64 = row.get(0);
-            let stored_hour_count: i32 = row.get(1);
-            let stored_day: i64 = row.get(2);
-            let stored_day_count: i32 = row.get(3);
-            let hour_expired =
-                now < stored_hour || now.saturating_sub(stored_hour) >= MAIL_HOUR_SECONDS;
-            let day_expired =
-                now < stored_day || now.saturating_sub(stored_day) >= MAIL_DAY_SECONDS;
-            (
-                if hour_expired { now } else { stored_hour },
-                if hour_expired {
-                    0
-                } else {
-                    i64::from(stored_hour_count)
-                },
-                if day_expired { now } else { stored_day },
-                if day_expired {
-                    0
-                } else {
-                    i64::from(stored_day_count)
-                },
-            )
-        });
-    if hour_count >= MAIL_HOURLY_CAPACITY || day_count >= MAIL_DAILY_CAPACITY {
+    let window = usage.map_or(QuotaWindow::empty(now), |row| {
+        QuotaWindow {
+            hour_started_at: row.get(0),
+            hour_count: i64::from(row.get::<_, i32>(1)),
+            day_started_at: row.get(2),
+            day_count: i64::from(row.get::<_, i32>(3)),
+        }
+        .rolled(now)
+    });
+    if window.exhausted(MAIL_HOURLY_CAPACITY, MAIL_DAILY_CAPACITY) {
         return Err(StoreError::MailRateLimited);
     }
-    let next_hour_count = next_quota_count(hour_count).ok_or(StoreError::MailRateLimited)?;
-    let next_day_count = next_quota_count(day_count).ok_or(StoreError::MailRateLimited)?;
+    let next_hour_count = next_quota_count(window.hour_count).ok_or(StoreError::MailRateLimited)?;
+    let next_day_count = next_quota_count(window.day_count).ok_or(StoreError::MailRateLimited)?;
     transaction.execute(
         "INSERT INTO social_mail_usage
              (account_id, hour_started_at, hour_count,
@@ -2984,9 +2829,9 @@ fn send_mail(
              updated_at = excluded.updated_at",
         &[
             &sender_account,
-            &hour_started_at,
+            &window.hour_started_at,
             &next_hour_count,
-            &day_started_at,
+            &window.day_started_at,
             &next_day_count,
             &now,
         ],
@@ -3076,9 +2921,7 @@ fn send_mail(
         .get(0);
     let suppressed = recipient_banned
         || policy_suppressed
-        || mailbox_count >= MAILBOX_CAPACITY
-        || mailbox_bytes.saturating_add(added_bytes) > MAILBOX_BYTE_CAPACITY
-        || global_count >= MAIL_GLOBAL_CAPACITY;
+        || mail_delivery_exceeds_capacity(mailbox_count, mailbox_bytes, added_bytes, global_count);
     if suppressed {
         transaction.commit()?;
         return Ok(MailSendResult::Suppressed);
@@ -3153,7 +2996,7 @@ fn mailbox_page(
         total_pages: u32::try_from(total_pages).map_err(|_| StoreError::InvalidMailInput)?,
         total_messages: u32::try_from(total).map_err(|_| StoreError::InvalidMailInput)?,
         unread_count: u32::try_from(unread).map_err(|_| StoreError::InvalidMailInput)?,
-        capacity: MAILBOX_CAPACITY_U32,
+        capacity: MAILBOX_CAPACITY,
         messages,
     })
 }
@@ -3270,9 +3113,7 @@ fn report_mail(
             &[&recipient_account],
         )?
         .get(0);
-    if open_reports >= MAIL_OPEN_REPORT_CAPACITY_PER_ACCOUNT {
-        return Err(StoreError::MailReportLimit);
-    }
+    check_mail_report_quota(open_reports)?;
     let evidence_count: i64 = transaction
         .query_one(
             "SELECT COUNT(*)::BIGINT FROM social_mail_report_evidence
@@ -3280,9 +3121,7 @@ fn report_mail(
             &[&now],
         )?
         .get(0);
-    if evidence_count >= MAIL_REPORT_EVIDENCE_GLOBAL_CAPACITY {
-        return Err(StoreError::MailEvidenceLimit);
-    }
+    check_mail_evidence_capacity(evidence_count)?;
 
     let report_id: i64 = transaction
         .query_one(
@@ -3359,7 +3198,7 @@ fn purge_expired_mail_rows<C: GenericClient>(
         &[&now, &limit],
     )?;
     let message_count = row_count(message_rows.len());
-    let remaining = limit.saturating_sub(message_count);
+    let remaining = purge_remaining(limit, message_rows.len());
     if remaining == 0 {
         return Ok(message_count);
     }
@@ -3376,56 +3215,6 @@ fn purge_expired_mail_rows<C: GenericClient>(
     Ok(message_count.saturating_add(row_count(evidence_rows.len())))
 }
 
-/// Increments a bounded quota counter for storage as `INTEGER`; `None` fails closed.
-fn next_quota_count(count: i64) -> Option<i32> {
-    count
-        .checked_add(1)
-        .and_then(|next| i32::try_from(next).ok())
-}
-
-/// Converts a bounded batch length to the SQL row-count type without panicking.
-fn row_count(length: usize) -> i64 {
-    i64::try_from(length).unwrap_or(i64::MAX)
-}
-
-fn normalise_board_text(value: &str, maximum: usize) -> Result<String, StoreError> {
-    if valid_board_visible_text(value, maximum) {
-        Ok(value.to_owned())
-    } else {
-        Err(StoreError::InvalidBoardInput)
-    }
-}
-
-fn check_board_capacity(
-    account_count: i64,
-    board_count: i64,
-    board_bytes: i64,
-    global_count: i64,
-    global_bytes: i64,
-    added_bytes: i64,
-) -> Result<(), StoreError> {
-    if account_count >= i64::from(BOARD_ACCOUNT_CAPACITY)
-        || board_count >= i64::from(BOARD_CAPACITY_PER_BOARD)
-        || board_bytes.saturating_add(added_bytes) > BOARD_BYTE_CAPACITY_PER_BOARD
-        || global_count >= BOARD_GLOBAL_CAPACITY
-        || global_bytes.saturating_add(added_bytes) > BOARD_GLOBAL_BYTE_CAPACITY
-    {
-        Err(StoreError::BoardCapacity)
-    } else {
-        Ok(())
-    }
-}
-
-fn check_board_report_capacity(open_reports: i64, evidence_count: i64) -> Result<(), StoreError> {
-    if open_reports >= BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT {
-        Err(StoreError::BoardReportLimit)
-    } else if evidence_count >= BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY {
-        Err(StoreError::BoardEvidenceLimit)
-    } else {
-        Ok(())
-    }
-}
-
 fn consume_board_usage<C: GenericClient>(
     connection: &mut C,
     account_id: AccountId,
@@ -3436,36 +3225,21 @@ fn consume_board_usage<C: GenericClient>(
          FROM social_board_usage WHERE account_id = $1 FOR UPDATE",
         &[&account_id.0],
     )?;
-    let (hour_started_at, hour_count, day_started_at, day_count) =
-        usage.map_or((now, 0_i64, now, 0_i64), |row| {
-            let stored_hour: i64 = row.get(0);
-            let stored_hour_count: i32 = row.get(1);
-            let stored_day: i64 = row.get(2);
-            let stored_day_count: i32 = row.get(3);
-            let hour_expired =
-                now < stored_hour || now.saturating_sub(stored_hour) >= MAIL_HOUR_SECONDS;
-            let day_expired =
-                now < stored_day || now.saturating_sub(stored_day) >= MAIL_DAY_SECONDS;
-            (
-                if hour_expired { now } else { stored_hour },
-                if hour_expired {
-                    0
-                } else {
-                    i64::from(stored_hour_count)
-                },
-                if day_expired { now } else { stored_day },
-                if day_expired {
-                    0
-                } else {
-                    i64::from(stored_day_count)
-                },
-            )
-        });
-    if hour_count >= BOARD_HOURLY_CAPACITY || day_count >= BOARD_DAILY_CAPACITY {
+    let window = usage.map_or(QuotaWindow::empty(now), |row| {
+        QuotaWindow {
+            hour_started_at: row.get(0),
+            hour_count: i64::from(row.get::<_, i32>(1)),
+            day_started_at: row.get(2),
+            day_count: i64::from(row.get::<_, i32>(3)),
+        }
+        .rolled(now)
+    });
+    if window.exhausted(BOARD_HOURLY_CAPACITY, BOARD_DAILY_CAPACITY) {
         return Err(StoreError::BoardRateLimited);
     }
-    let next_hour_count = next_quota_count(hour_count).ok_or(StoreError::BoardRateLimited)?;
-    let next_day_count = next_quota_count(day_count).ok_or(StoreError::BoardRateLimited)?;
+    let next_hour_count =
+        next_quota_count(window.hour_count).ok_or(StoreError::BoardRateLimited)?;
+    let next_day_count = next_quota_count(window.day_count).ok_or(StoreError::BoardRateLimited)?;
     connection.execute(
         "INSERT INTO social_board_usage
              (account_id, hour_started_at, hour_count,
@@ -3479,9 +3253,9 @@ fn consume_board_usage<C: GenericClient>(
              updated_at = excluded.updated_at",
         &[
             &account_id.0,
-            &hour_started_at,
+            &window.hour_started_at,
             &next_hour_count,
-            &day_started_at,
+            &window.day_started_at,
             &next_day_count,
             &now,
         ],
@@ -3860,7 +3634,7 @@ fn purge_expired_boards(connection: &mut Client, now: i64) -> Result<u64, StoreE
         &[&now, &BOARD_PURGE_LIMIT],
     )?;
     let post_count = row_count(post_rows.len());
-    let remaining = BOARD_PURGE_LIMIT.saturating_sub(post_count);
+    let remaining = purge_remaining(BOARD_PURGE_LIMIT, post_rows.len());
     let evidence_count = if remaining > 0 {
         let rows = transaction.query(
             "WITH expired AS (
@@ -3917,16 +3691,6 @@ fn report_character(
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct PreparedStaffAudit {
-    actor_account_id: AccountId,
-    target_account_id: Option<AccountId>,
-    capability: StaffCapability,
-    action: String,
-    reason: String,
-    details_json: String,
-}
-
 fn staff_access<C: GenericClient>(
     connection: &mut C,
     character_id: CharacterId,
@@ -3957,74 +3721,19 @@ fn staff_access_by_account<C: GenericClient>(
     let role: String = row.get(0);
     let profile: Option<String> = row.get(1);
     let lore_title: Option<String> = row.get(2);
-    let profile = profile
-        .as_deref()
-        .map(|value| {
-            StaffProfileKey::parse(value)
-                .ok_or_else(|| StoreError::InvalidStaffState(format!("profile {value:?}")))
-        })
-        .transpose()?;
-    let capabilities = connection
-        .query(
-            "SELECT capability FROM staff_capability_assignments
-             WHERE account_id = $1 ORDER BY capability",
-            &[&account_id.0],
-        )?
-        .into_iter()
-        .map(|row| {
-            let value: String = row.get(0);
-            StaffCapability::parse(&value)
-                .ok_or_else(|| StoreError::InvalidStaffState(format!("capability {value:?}")))
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if profile.is_none() && !capabilities.is_empty() {
-        return Err(StoreError::InvalidStaffState(format!(
-            "account {} has capabilities without a profile",
-            account_id.0
-        )));
-    }
-    Ok(StaffAccess {
+    let profile = parse_staff_profile(profile.as_deref())?;
+    let capabilities = connection.query(
+        "SELECT capability FROM staff_capability_assignments
+         WHERE account_id = $1 ORDER BY capability",
+        &[&account_id.0],
+    )?;
+    staff_access_from_rows(
         account_id,
-        role: role_from_database(&role)?,
+        &role,
         profile,
         lore_title,
-        capabilities,
-    })
-}
-
-fn prepare_staff_audit(record: StaffAuditRecord) -> Result<PreparedStaffAudit, StoreError> {
-    let action = normalise_staff_text(&record.action, MAX_STAFF_ACTION_BYTES)?;
-    let reason = normalise_staff_text(&record.reason, MAX_SOCIAL_REASON_BYTES)?;
-    let details_json = serde_json::to_string(&record.details)?;
-    if details_json.len() > MAX_AUDIT_DETAILS_BYTES {
-        return Err(StoreError::InvalidStaffInput);
-    }
-    if record.target_account_id == Some(record.actor_account_id) {
-        return Err(StoreError::StaffHierarchy);
-    }
-    Ok(PreparedStaffAudit {
-        actor_account_id: record.actor_account_id,
-        target_account_id: record.target_account_id,
-        capability: record.capability,
-        action,
-        reason,
-        details_json,
-    })
-}
-
-fn normalise_staff_text(value: &str, maximum: usize) -> Result<String, StoreError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
-        Err(StoreError::InvalidStaffInput)
-    } else {
-        Ok(value.to_owned())
-    }
-}
-
-fn normalise_lore_title(value: Option<&str>) -> Result<Option<String>, StoreError> {
-    value
-        .map(|value| normalise_staff_text(value, MAX_STAFF_LORE_TITLE_BYTES))
-        .transpose()
+        capabilities.into_iter().map(|row| row.get::<_, String>(0)),
+    )
 }
 
 fn validate_staff_authority<C: GenericClient>(
@@ -4033,31 +3742,9 @@ fn validate_staff_authority<C: GenericClient>(
     expected_capability: Option<StaffCapability>,
     target_account: Option<AccountId>,
 ) -> Result<StaffAccess, StoreError> {
-    if expected_capability.is_some_and(|expected| expected != audit.capability)
-        || audit.target_account_id != target_account
-    {
-        return Err(StoreError::StaffForbidden);
-    }
-    let actor = staff_access_by_account(connection, audit.actor_account_id)?;
-    if !actor.capabilities.contains(&audit.capability) {
-        return Err(StoreError::StaffForbidden);
-    }
-    let Some(actor_profile) = actor.profile else {
-        return Err(StoreError::StaffForbidden);
-    };
-    if let Some(target_account) = target_account {
-        if target_account == actor.account_id {
-            return Err(StoreError::StaffHierarchy);
-        }
-        let target = staff_access_by_account(connection, target_account)?;
-        if target
-            .profile
-            .is_some_and(|profile| profile.authority_rank() >= actor_profile.authority_rank())
-        {
-            return Err(StoreError::StaffHierarchy);
-        }
-    }
-    Ok(actor)
+    validate_staff_authority_with(audit, expected_capability, target_account, |account| {
+        staff_access_by_account(connection, account)
+    })
 }
 
 fn insert_staff_audit<C: GenericClient>(
@@ -4208,13 +3895,7 @@ fn resolve_staff_report(
         )?
         .map(|row| AccountId(row.get(0)))
         .ok_or(StoreError::StaffReportUnavailable(report_id))?;
-    if audit
-        .target_account_id
-        .is_some_and(|account_id| account_id != target_account)
-    {
-        return Err(StoreError::StaffForbidden);
-    }
-    audit.target_account_id = Some(target_account);
+    bind_report_audit_target(&mut audit, target_account)?;
     validate_staff_authority(
         &mut transaction,
         &audit,
@@ -4272,18 +3953,7 @@ fn set_staff_profile(
         Some(StaffCapability::StaffAssign),
         Some(target_account),
     )?;
-    let actor_profile = actor.profile.ok_or(StoreError::StaffForbidden)?;
-    if profile.is_some_and(|profile| profile.authority_rank() >= actor_profile.authority_rank()) {
-        return Err(StoreError::StaffHierarchy);
-    }
-    if profile.is_some_and(|profile| {
-        profile
-            .default_capabilities()
-            .iter()
-            .any(|capability| !actor.capabilities.contains(capability))
-    }) {
-        return Err(StoreError::StaffForbidden);
-    }
+    authorize_profile_assignment(&actor, profile)?;
     transaction.execute(
         "DELETE FROM staff_capability_assignments WHERE account_id = $1",
         &[&target_account.0],
@@ -4348,9 +4018,7 @@ fn set_staff_capability(
         Some(target_account),
     )?;
     let target = staff_access_by_account(&mut transaction, target_account)?;
-    if enabled && (target.profile.is_none() || !actor.capabilities.contains(&capability)) {
-        return Err(StoreError::StaffForbidden);
-    }
+    authorize_capability_change(&actor, &target, capability, enabled)?;
     if enabled {
         transaction.execute(
             "INSERT INTO staff_capability_assignments
@@ -4443,55 +4111,12 @@ fn moderate_character(
     if actor == target {
         return Err(StoreError::SocialSelfTarget);
     }
-    let (required_capability, action_name, reason, details) = match &action {
-        ModerationAction::Mute { expires_at, reason } => {
-            validate_expiry(*expires_at, now)?;
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::ModerationMute,
-                "mute",
-                reason.clone(),
-                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
-            )
-        }
-        ModerationAction::Unmute { reason } => {
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::ModerationMute,
-                "unmute",
-                reason.clone(),
-                serde_json::json!({"reason": reason}),
-            )
-        }
-        ModerationAction::Ban { expires_at, reason } => {
-            validate_expiry(*expires_at, now)?;
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::ModerationBan,
-                "ban",
-                reason.clone(),
-                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
-            )
-        }
-        ModerationAction::Unban { reason } => {
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::ModerationBan,
-                "unban",
-                reason.clone(),
-                serde_json::json!({"reason": reason}),
-            )
-        }
-        ModerationAction::SetRole { role, reason } => {
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::StaffAssign,
-                "set_role",
-                reason.clone(),
-                serde_json::json!({"role": role_as_database(*role), "reason": reason}),
-            )
-        }
-    };
+    let PreparedModeration {
+        required_capability,
+        action_name,
+        reason,
+        details,
+    } = prepare_moderation(&action, now)?;
     let mut transaction = connection.transaction()?;
     let actor_profile = social_profile(&mut transaction, actor, now)?;
     let target_profile = social_profile(&mut transaction, target, now)?;
@@ -4604,16 +4229,6 @@ fn moderate_character(
     Ok(())
 }
 
-fn validate_expiry(expires_at: Option<i64>, now: i64) -> Result<(), StoreError> {
-    if expires_at.is_some_and(|expires_at| {
-        expires_at <= now || expires_at.saturating_sub(now) > MAX_MODERATION_DURATION_SECONDS
-    }) {
-        Err(StoreError::InvalidSocialInput)
-    } else {
-        Ok(())
-    }
-}
-
 fn revoke_active<C: GenericClient>(
     connection: &mut C,
     table: &str,
@@ -4634,15 +4249,6 @@ fn revoke_active<C: GenericClient>(
     Ok(())
 }
 
-fn normalise_social_text(value: &str, maximum: usize) -> Result<String, StoreError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
-        Err(StoreError::InvalidSocialInput)
-    } else {
-        Ok(value.to_owned())
-    }
-}
-
 fn append_audit<C: GenericClient>(
     connection: &mut C,
     actor: AccountId,
@@ -4651,10 +4257,7 @@ fn append_audit<C: GenericClient>(
     details: serde_json::Value,
     now: i64,
 ) -> Result<(), StoreError> {
-    let details_json = serde_json::to_string(&details)?;
-    if action.is_empty() || action.len() > 64 || details_json.len() > MAX_AUDIT_DETAILS_BYTES {
-        return Err(StoreError::InvalidSocialInput);
-    }
+    let details_json = encode_moderation_audit_details(action, &details)?;
     connection.execute(
         "INSERT INTO moderation_audit
              (actor_account_id, target_account_id, action, details_json, created_at)
@@ -4691,23 +4294,16 @@ fn audit_log(connection: &mut Client) -> Result<Vec<AuditEntry>, StoreError> {
         .collect())
 }
 
-fn bounded_json<T: serde::Serialize>(
-    value: &T,
-    kind: &'static str,
-    maximum: usize,
-) -> Result<String, StoreError> {
-    let json = serde_json::to_string(value)?;
-    if json.len() > maximum {
-        return Err(StoreError::SnapshotTooLarge { kind, maximum });
-    }
-    Ok(json)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::BOARD_ACCOUNT_CAPACITY;
     use sha2::{Digest, Sha256};
-    use std::{collections::BTreeMap, env, process, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        env, process,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
     use tiamud_core::{
         AdventureRuntimeSnapshot, AreaDynamicCheckpoint, AreaDynamicCheckpointIdentity,
         AreaRuntimeResidence, Direction, ItemBinding, ItemInstanceId, ItemLocationSnapshot,
