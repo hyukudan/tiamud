@@ -41,4 +41,3 @@ tracing-subscriber.workspace = true
 fd-lock.workspace = true
 rcgen = "0.13.2"
 tempfile.workspace = true
-tiamud-story-core = { path = "../story-core" }
