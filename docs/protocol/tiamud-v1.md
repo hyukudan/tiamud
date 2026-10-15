@@ -677,7 +677,9 @@ traffic.
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
-| `story.entered`, `story.view`, `story.left`, `story.error`, `story.slots`, `story.saved`, `story.restored` | Single-player story session state and save slots; see [Story sessions](#story-sessions). Critical priority. |
+| `story.entered`, `story.view`, `story.left`, `story.error`, `story.slots`, `story.saved`, `story.restored` | Story session state and save slots; see [Story sessions](#story-sessions). Critical priority. |
+| `story.lobby`, `story.tally` | Seats, rules and public vote counts of a shared story; see [Shared story instances](#shared-story-instances). Critical priority. |
+| `story.invitation` | A host invited this character to a shared story. Narrative priority. |
 
 State messages are coalescible, while narrative output has lower priority than
 critical results. When a connection cannot drain critical output within the
@@ -1290,14 +1292,17 @@ Server messages:
   next view is published. A `play` cue carries a content-addressed
   `/assets/<sha256>/audio-*.{opus,ogg,mp3}` URL resolved from the reviewed
   story media map; cues are omitted for clients without audio.
-- `story.left`: `{reason: left|evicted}`. `evicted` also covers an instance
-  closed by another session of the same account.
+- `story.left`: `{reason: left|evicted|kicked|ended}`. `evicted` also covers
+  an instance closed by another session of the same account (or a lapsed
+  shared seat); `kicked` and `ended` belong to shared instances.
 - `story.error`: `{code, message}` with `code` one of `disabled`,
   `unknown_story`, `already_in_story`, `capacity`, `not_in_story`,
   `stale_view`, `unknown_choice`, `ended`, `nothing_to_undo`, `busy`,
   `internal`, `slots_unavailable`, `invalid_slot`, `slot_empty`,
-  `slot_corrupt`, `slot_incompatible`, `slot_capacity`, `rate_limited`.
-  `stale_view` is followed by the current view. `message` is Spanish
+  `slot_corrupt`, `slot_incompatible`, `slot_capacity`, `rate_limited`, and
+  for shared instances `host_only`, `spectator`, `not_your_turn`,
+  `unknown_code`, `seats_full`, `not_shared`, `unknown_member`,
+  `invalid_setting`. `stale_view` is followed by the current view. `message` is Spanish
   player-facing text and never names authored ids, digests or store details.
 - `story.slots`: `{slots: [{slot, updatedAt, compatible}], offerContinue}`.
   At most ten entries in ascending, unique `slot` order (`0..=9`; `0` is the
@@ -1356,6 +1361,87 @@ after `partidas`/`borrar`) and `Tiamud.Story.Left {reason}`. An
 oversized summary degrades to bounded labels with `truncated`/`overflow`, then
 to `{viewRev, choiceCount, truncated, overflow}`, always under 8 KiB. Story
 cues use `Client.Media.Play`/`Stop` only with the media opt-in.
+
+## Shared story instances
+
+Shared instances ([ADR 0033](../decisions/0033-shared-story-instances-and-voting.md),
+proposed, phase S7) let several characters play one story instance. The
+instance stays a single writer; a pure table decides which action applies.
+
+Text commands (`command.submit` and Telnet): `historia compartir <id>`/`story
+host <id>` enters and shares a story; inside a solo story `compartir`/`share`
+shares it. `historia unirse <code>`/`story join <code>` takes a seat and
+`historia mirar <code>`/`story watch <code>` joins as a read-only spectator.
+Inside a shared story: a typed number (or `votar N`/`vote N`) chooses or
+votes, `votar 0`/`vote 0` withdraws the vote, `asientos`/`seats` shows the
+lobby; the host may `invitar <name>`/`invite <name>`, `expulsar <name>`/`kick
+<name>` and `modo anfitrion|votacion|turnos [seconds]`/`mode
+host|vote|turns [seconds]`. `salir`/`leave` gives up the seat.
+
+Server messages:
+
+- `story.lobby`: `{mode: host|vote|turns, voteSeconds, you:
+  host|player|spectator, code?, seats: [{name, role: host|player, connected,
+  turn}], spectators, maxSeats, maxSpectators}`. Sent after entering, on
+  every membership, presence, role, turn or rule change and on recovery.
+  `seats` are in seat order and the first seat is the host; `code` (eight
+  characters of `23456789ABCDEFGHJKLMNPQRSTUVWXYZ`) is present only for the
+  host. Spectators are counted, never named. `connected: false` marks a seat
+  held for a disconnected player; `turn` marks the turn holder in turns mode.
+- `story.tally`: `{viewRev, mode, choices: [{choiceId, votes}], voted,
+  eligible, remainingSeconds?, yourVote?}`. Public counts only, never voter
+  identities: `choices` lists the actions with at least one vote, addressed
+  by their leaf id (the `choice`/`dialogueOption` id, the `target` id or the
+  untargeted `verb` id) and summing to `voted`; `eligible` counts the
+  connected seats in vote mode (otherwise 1). `remainingSeconds` (at most 120)
+  is present while a vote window or a turn runs; clients count down locally.
+  `yourVote` is the recipient's own vote. Sent after every view and every vote
+  change, and in answer to every accepted shared input.
+- `story.invitation`: `{host, storyId, title, code}`; delivered to every
+  connected session of the invited character, never acknowledged to the host.
+
+Client messages (strict, unknown fields rejected):
+
+- `story.share {}`: shares the current solo instance (owner only).
+- `story.join {code, spectate}`: `code` is 1..=8 ASCII alphanumerics (case
+  folded by the server); an unknown, malformed or refused code answers
+  `unknown_code`; full seats or spectator places answer `seats_full`. At most
+  10 attempts per account and minute (`rate_limited`).
+- `story.invite {name}` and `story.kick {name}`: `name` is 1..=64 bytes
+  without control characters; host only. Invitations: 10 per host and
+  minute; the answer never reveals whether the name exists or is connected.
+  Kicking the host itself or an unknown name answers `unknown_member`; a
+  kicked account cannot rejoin that instance.
+- `story.mode {mode, voteSeconds?}`: host only; `voteSeconds` in `30..=120`
+  (else `invalid_setting`). Changing the mode discards open votes; turns
+  start with the host.
+- `story.vote {choiceId?, viewRev}`: a vote for the action whose leaf id is
+  `choiceId` in view `viewRev`; without `choiceId` the vote is withdrawn. A
+  forged id answers `unknown_choice`, another revision `stale_view`.
+
+Decision modes: in `vote`, seated players vote (`story.choose`, `story.menu`
+and `story.dialogue` from a seat count as votes too); the window starts with
+the first vote and closes early when every connected seat voted; otherwise the
+majority of the cast votes wins when it expires. Ties go to the host's vote
+when it is among them, else to the lowest action number. In `host`, only the
+host's input applies; other seats get `host_only` for inputs and may leave
+advisory votes. In `turns`, the turn holder's input applies and the turn
+passes in seat order; an idle (window elapsed) or disconnected holder loses
+the turn without an action applied. Spectators get `spectator` for every
+input. Only the host undoes (others see `canUndo: false`) and uses save slots,
+which belong to the host's account; the autosave is written to the host at
+close. A disconnected seat is held for the grace period
+(`TIAMUD_STORY_SEAT_GRACE_SECONDS`), then lapses; the host role migrates to
+the longest-seated player; the instance ends (`story.left {reason: ended}`
+for everyone left) when no seat remains. Recovery and reconnection re-send
+`story.lobby`, the view and `story.tally`.
+
+Telnet prints the lobby as text and a tally line such as `Votos (1/2): 1) 1 ·
+cierra en 60 s · tu voto: 1`; invitations as a line with the join commands.
+GMCP clients with `Tiamud.Story 1` also receive `Tiamud.Story.Lobby` (the
+`story.lobby` object), `Tiamud.Story.Tally {viewRev, mode, votes: [{number,
+votes}], voted, eligible, remainingSeconds, yourVote}` (by action number, no
+opaque ids) and `Tiamud.Story.Invitation`.
 
 ## Telnet GMCP scene overflow
 

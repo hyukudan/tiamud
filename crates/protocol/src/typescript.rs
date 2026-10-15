@@ -99,6 +99,18 @@ fn declarations(config: &Config) -> Vec<String> {
         StorySlots::decl(config),
         StorySaved::decl(config),
         StoryRestored::decl(config),
+        // Shared story instances (ADR 0033).
+        StoryDecisionMode::decl(config),
+        StorySeatRole::decl(config),
+        StoryJoinData::decl(config),
+        StoryNameData::decl(config),
+        StoryModeData::decl(config),
+        StoryVoteData::decl(config),
+        StorySeat::decl(config),
+        StoryLobby::decl(config),
+        StoryTallyEntry::decl(config),
+        StoryTally::decl(config),
+        StoryInvitation::decl(config),
     ]
 }
 

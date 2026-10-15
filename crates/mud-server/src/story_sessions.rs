@@ -16,6 +16,14 @@
 //! `StoryState::from_json_slice` against the exact pack revision (its
 //! SHA-256). The in-memory undo history is never persisted.
 //!
+//! An instance may be shared (ADR 0033, phase S7): the host shares it and
+//! other characters join by invitation or with an opaque join code, seated
+//! (at most eight) or as read-only spectators (at most 32). The instance
+//! task stays the single writer; its [`shared::Table`] decides which action is
+//! applied (host decides, majority vote with a bounded window, or round-robin
+//! turns) and every participant's session follows a `watch` of the latest
+//! shared frame, so slow sessions coalesce instead of queueing.
+//!
 //! The ruleset is `tiamud-story-core`; this module only serializes inputs,
 //! projects views and enforces bounds. It never reads `tiamud-core` world
 //! state and the world actor never sees story input.
@@ -25,11 +33,14 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
+
+pub mod shared;
+use shared::{SharedLimits, Table};
 
 use crate::{
     operations::KeyedRateLimiter,
@@ -46,13 +57,14 @@ use thiserror::Error;
 use tiamud_core::AccountId;
 use tiamud_protocol::{
     self as protocol, MediaChannel, STORY_CHOICE_ID_BYTES, ServerMessageType, StoryBlockKind,
-    StoryCueAction, StoryEnding, StoryEndingKind, StoryErrorCode, StoryItem,
+    StoryCueAction, StoryDecisionMode, StoryEnding, StoryEndingKind, StoryErrorCode, StoryItem,
+    StorySeatRole,
 };
 use tiamud_story_core::{
     Cue, EndingKind, MAX_PACK_BYTES, PageItem, StoryEvent, StoryInput, StoryPack, StoryState,
     UndoRing, Value, step, view as core_view, view_pages,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 /// Locale used to resolve story text in S2. Per-session locales are later work.
@@ -96,6 +108,18 @@ const SLOT_READ_BURST: u32 = 10;
 const MAX_TRACKED_SLOT_ACCOUNTS: usize = 4_096;
 /// Upper bound of one store call made for a story slot.
 const STORE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Clock period of a shared instance (presence, vote windows, turns).
+const SHARED_TICK: Duration = Duration::from_millis(500);
+/// Join attempts per account and minute (codes are 40-bit secrets).
+pub const JOINS_PER_MINUTE: u32 = 10;
+const JOIN_BURST: u32 = 5;
+/// Invitations sent per host account and minute.
+pub const INVITES_PER_MINUTE: u32 = 10;
+const INVITE_BURST: u32 = 5;
+/// Pending invitations queued per connected character.
+const INVITATION_INBOX: usize = 4;
+/// Registered invitation inboxes (one per connected story-capable session).
+const MAX_INBOXES: usize = 16_384;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -105,6 +129,8 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct StoryLimits {
     pub max_instances: usize,
     pub idle_timeout: Duration,
+    /// Seats, spectators, vote window and seat grace of shared instances.
+    pub shared: SharedLimits,
 }
 
 impl Default for StoryLimits {
@@ -112,6 +138,7 @@ impl Default for StoryLimits {
         Self {
             max_instances: DEFAULT_MAX_INSTANCES,
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_SECONDS),
+            shared: SharedLimits::default(),
         }
     }
 }
@@ -135,6 +162,105 @@ pub enum StoryConfigError {
     InvalidIdleSeconds,
     #[error("story limits were configured but TIAMUD_STORY_DIR is not set")]
     LimitsWithoutDirectory,
+    #[error(
+        "TIAMUD_STORY_MAX_SEATS must be an integer in {}..={}",
+        shared::MIN_SEATS,
+        protocol::MAX_STORY_SEATS
+    )]
+    InvalidMaxSeats,
+    #[error(
+        "TIAMUD_STORY_MAX_SPECTATORS must be an integer in 0..={}",
+        protocol::MAX_STORY_SPECTATORS
+    )]
+    InvalidMaxSpectators,
+    #[error(
+        "TIAMUD_STORY_VOTE_SECONDS must be an integer in {}..={}",
+        protocol::MIN_STORY_VOTE_SECONDS,
+        protocol::MAX_STORY_VOTE_SECONDS
+    )]
+    InvalidVoteSeconds,
+    #[error(
+        "TIAMUD_STORY_SEAT_GRACE_SECONDS must be an integer in {}..={}",
+        shared::MIN_GRACE_SECONDS,
+        shared::MAX_GRACE_SECONDS
+    )]
+    InvalidGraceSeconds,
+}
+
+/// Raw shared-instance settings (`TIAMUD_STORY_MAX_SEATS`,
+/// `TIAMUD_STORY_MAX_SPECTATORS`, `TIAMUD_STORY_VOTE_SECONDS`,
+/// `TIAMUD_STORY_SEAT_GRACE_SECONDS`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SharedStoryEnv {
+    pub max_seats: Option<String>,
+    pub max_spectators: Option<String>,
+    pub vote_seconds: Option<String>,
+    pub grace_seconds: Option<String>,
+}
+
+impl SharedStoryEnv {
+    fn any(&self) -> bool {
+        self.max_seats.is_some()
+            || self.max_spectators.is_some()
+            || self.vote_seconds.is_some()
+            || self.grace_seconds.is_some()
+    }
+}
+
+/// Applies the shared-instance settings to `config`. Out-of-range values
+/// fail closed; settings without a story directory are refused.
+pub fn apply_shared_story_env(
+    config: &mut StoryConfig,
+    env: &SharedStoryEnv,
+) -> Result<(), StoryConfigError> {
+    fn ranged<T: std::str::FromStr + PartialOrd>(
+        value: Option<&str>,
+        range: std::ops::RangeInclusive<T>,
+        error: StoryConfigError,
+    ) -> Result<Option<T>, StoryConfigError> {
+        value
+            .map(|value| {
+                value
+                    .parse::<T>()
+                    .ok()
+                    .filter(|value| range.contains(value))
+                    .ok_or(error)
+            })
+            .transpose()
+    }
+    if config.directory.is_none() && env.any() {
+        return Err(StoryConfigError::LimitsWithoutDirectory);
+    }
+    let limits = &mut config.limits.shared;
+    if let Some(seats) = ranged(
+        env.max_seats.as_deref(),
+        shared::MIN_SEATS..=usize::from(protocol::MAX_STORY_SEATS),
+        StoryConfigError::InvalidMaxSeats,
+    )? {
+        limits.max_seats = seats;
+    }
+    if let Some(spectators) = ranged(
+        env.max_spectators.as_deref(),
+        0..=usize::from(protocol::MAX_STORY_SPECTATORS),
+        StoryConfigError::InvalidMaxSpectators,
+    )? {
+        limits.max_spectators = spectators;
+    }
+    if let Some(seconds) = ranged(
+        env.vote_seconds.as_deref(),
+        protocol::MIN_STORY_VOTE_SECONDS..=protocol::MAX_STORY_VOTE_SECONDS,
+        StoryConfigError::InvalidVoteSeconds,
+    )? {
+        limits.vote_seconds = seconds;
+    }
+    if let Some(seconds) = ranged(
+        env.grace_seconds.as_deref(),
+        shared::MIN_GRACE_SECONDS..=shared::MAX_GRACE_SECONDS,
+        StoryConfigError::InvalidGraceSeconds,
+    )? {
+        limits.grace = Duration::from_secs(seconds);
+    }
+    Ok(())
 }
 
 /// Parses the story configuration from the raw environment values. Stories
@@ -455,6 +581,21 @@ pub enum StoryFailure {
     RateLimited,
     /// The store failed or timed out; nothing changed.
     SlotStore,
+    /// Shared instance: only the host may do this.
+    HostOnly,
+    /// Shared instance: spectators are read-only.
+    Spectator,
+    /// Shared instance, turns mode: another seat decides now.
+    NotYourTurn,
+    /// No shared instance accepts that join code.
+    UnknownCode,
+    SeatsFull,
+    /// The operation needs a shared instance.
+    NotShared,
+    /// No participant has that name (or it names the host).
+    UnknownMember,
+    /// A shared-instance setting is out of range.
+    InvalidSetting,
 }
 
 impl StoryFailure {
@@ -478,6 +619,14 @@ impl StoryFailure {
             Self::SlotIncompatible => StoryErrorCode::SlotIncompatible,
             Self::SlotCapacity => StoryErrorCode::SlotCapacity,
             Self::RateLimited => StoryErrorCode::RateLimited,
+            Self::HostOnly => StoryErrorCode::HostOnly,
+            Self::Spectator => StoryErrorCode::Spectator,
+            Self::NotYourTurn => StoryErrorCode::NotYourTurn,
+            Self::UnknownCode => StoryErrorCode::UnknownCode,
+            Self::SeatsFull => StoryErrorCode::SeatsFull,
+            Self::NotShared => StoryErrorCode::NotShared,
+            Self::UnknownMember => StoryErrorCode::UnknownMember,
+            Self::InvalidSetting => StoryErrorCode::InvalidSetting,
         }
     }
 
@@ -520,6 +669,18 @@ impl StoryFailure {
             }
             Self::SlotStore => {
                 "No se pudo acceder a las partidas guardadas. Inténtalo de nuevo más tarde."
+            }
+            Self::HostOnly => "Solo el anfitrión de la historia compartida puede hacer eso.",
+            Self::Spectator => "Los espectadores solo pueden mirar.",
+            Self::NotYourTurn => "No es tu turno; espera a que decida quien tiene el turno.",
+            Self::UnknownCode => "Ese código no corresponde a ninguna historia compartida.",
+            Self::SeatsFull => "No quedan plazas libres en esa historia compartida.",
+            Self::NotShared => {
+                "Esta historia no está compartida. Escribe «compartir» (share) para abrirla a otros."
+            }
+            Self::UnknownMember => "No hay ningún participante con ese nombre.",
+            Self::InvalidSetting => {
+                "Valor no válido: el plazo de votación va de 30 a 120 segundos."
             }
         }
     }
@@ -565,6 +726,15 @@ pub struct StoryMetrics {
     restores_ok: AtomicU64,
     restores_rejected: AtomicU64,
     slot_rate_limited: AtomicU64,
+    shared_instances: AtomicUsize,
+    shared_started: AtomicU64,
+    shared_joins_ok: AtomicU64,
+    shared_joins_rejected: AtomicU64,
+    shared_votes: AtomicU64,
+    shared_decisions: AtomicU64,
+    shared_invitations: AtomicU64,
+    shared_kicks: AtomicU64,
+    shared_seat_lapses: AtomicU64,
 }
 
 impl StoryMetrics {
@@ -626,6 +796,23 @@ impl StoryMetrics {
                 "tiamud_story_restores_total{{result=\"rejected\"}} {}\n",
                 "# TYPE tiamud_story_slot_rate_limited_total counter\n",
                 "tiamud_story_slot_rate_limited_total {}\n",
+                "# TYPE tiamud_story_shared_instances gauge\n",
+                "tiamud_story_shared_instances {}\n",
+                "# TYPE tiamud_story_shared_started_total counter\n",
+                "tiamud_story_shared_started_total {}\n",
+                "# TYPE tiamud_story_shared_joins_total counter\n",
+                "tiamud_story_shared_joins_total{{result=\"ok\"}} {}\n",
+                "tiamud_story_shared_joins_total{{result=\"rejected\"}} {}\n",
+                "# TYPE tiamud_story_shared_votes_total counter\n",
+                "tiamud_story_shared_votes_total {}\n",
+                "# TYPE tiamud_story_shared_decisions_total counter\n",
+                "tiamud_story_shared_decisions_total {}\n",
+                "# TYPE tiamud_story_shared_invitations_total counter\n",
+                "tiamud_story_shared_invitations_total {}\n",
+                "# TYPE tiamud_story_shared_kicks_total counter\n",
+                "tiamud_story_shared_kicks_total {}\n",
+                "# TYPE tiamud_story_shared_seat_lapses_total counter\n",
+                "tiamud_story_shared_seat_lapses_total {}\n",
             ),
             catalog_stories,
             self.live.load(Ordering::Relaxed),
@@ -645,6 +832,15 @@ impl StoryMetrics {
             self.restores_ok.load(Ordering::Relaxed),
             self.restores_rejected.load(Ordering::Relaxed),
             self.slot_rate_limited.load(Ordering::Relaxed),
+            self.shared_instances.load(Ordering::Relaxed),
+            self.shared_started.load(Ordering::Relaxed),
+            self.shared_joins_ok.load(Ordering::Relaxed),
+            self.shared_joins_rejected.load(Ordering::Relaxed),
+            self.shared_votes.load(Ordering::Relaxed),
+            self.shared_decisions.load(Ordering::Relaxed),
+            self.shared_invitations.load(Ordering::Relaxed),
+            self.shared_kicks.load(Ordering::Relaxed),
+            self.shared_seat_lapses.load(Ordering::Relaxed),
         )
     }
 }
@@ -690,6 +886,20 @@ pub enum StoryAction {
 }
 
 impl StoryAction {
+    /// The opaque id that names this action alone in a view: the choice or
+    /// dialogue option id, the verb target id, or the untargeted verb id.
+    /// `story.vote` and `story.tally` address actions by it.
+    pub fn leaf_id(&self) -> &str {
+        match self {
+            Self::Choose { id, .. } | Self::Dialogue { id, .. } => id,
+            Self::Menu {
+                target: Some(target),
+                ..
+            } => target,
+            Self::Menu { verb, .. } => verb,
+        }
+    }
+
     pub fn label(&self) -> &str {
         match self {
             Self::Choose { label, .. }
@@ -900,6 +1110,14 @@ pub enum StoryCommand {
     List,
     Enter(String),
     Leave,
+    /// `historia compartir <id>`/`story host <id>`: enter and share.
+    Host(String),
+    /// `historia unirse <código>`/`story join <code>` (seated) or
+    /// `historia mirar <código>`/`story watch <code>` (spectator).
+    Join {
+        code: String,
+        spectate: bool,
+    },
 }
 
 /// Input recognised while a session is inside a story.
@@ -921,6 +1139,18 @@ pub enum StoryInputCommand {
     Delete(Option<u8>),
     /// `continuar`/`continue`: restores the autosave.
     Continue,
+    /// `votar N`/`vote N`; `0` withdraws the vote, `None` is malformed.
+    Vote(Option<usize>),
+    /// `asientos`/`seats`: the lobby of a shared instance.
+    Seats,
+    /// `compartir`/`share`: shares the current instance.
+    Share,
+    /// `invitar <nombre>`/`invite <name>`.
+    Invite(String),
+    /// `expulsar <nombre>`/`kick <name>`.
+    Kick(String),
+    /// `modo <anfitrion|votacion|turnos> [segundos]`; `None` is malformed.
+    Mode(Option<(StoryDecisionMode, Option<u16>)>),
     Other,
 }
 
@@ -941,6 +1171,17 @@ pub fn parse_story_command(input: &str) -> Option<StoryCommand> {
             Some(StoryCommand::List)
         }
         ["salir", "historia"] | ["story", "leave"] => Some(StoryCommand::Leave),
+        ["historia", "compartir", id] | ["story", "host", id] => {
+            Some(StoryCommand::Host((*id).to_owned()))
+        }
+        ["historia", "unirse", code] | ["story", "join", code] => Some(StoryCommand::Join {
+            code: (*code).to_owned(),
+            spectate: false,
+        }),
+        ["historia", "mirar", code] | ["story", "watch", code] => Some(StoryCommand::Join {
+            code: (*code).to_owned(),
+            spectate: true,
+        }),
         ["historia", id] | ["story", id] => Some(StoryCommand::Enter((*id).to_owned())),
         _ => None,
     }
@@ -975,6 +1216,45 @@ pub fn parse_story_input(input: &str) -> StoryInputCommand {
         }
         ["partidas" | "saves"] => return StoryInputCommand::Slots,
         ["continuar" | "continue"] => return StoryInputCommand::Continue,
+        ["votar" | "vote", rest @ ..] if rest.len() <= 1 => {
+            return StoryInputCommand::Vote(
+                rest.first()
+                    .filter(|word| word.len() <= 3)
+                    .and_then(|word| word.parse::<usize>().ok()),
+            );
+        }
+        ["asientos" | "seats" | "sala" | "lobby"] => return StoryInputCommand::Seats,
+        ["compartir" | "share"] => return StoryInputCommand::Share,
+        ["invitar" | "invite", _] | ["expulsar" | "kick", _] => {
+            // Keep the typed case of the name.
+            let name = trimmed
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned();
+            return if words[0] == "invitar" || words[0] == "invite" {
+                StoryInputCommand::Invite(name)
+            } else {
+                StoryInputCommand::Kick(name)
+            };
+        }
+        ["modo" | "mode", rest @ ..] if (1..=2).contains(&rest.len()) => {
+            let mode = match rest[0] {
+                "anfitrion" | "anfitrión" | "host" => Some(StoryDecisionMode::Host),
+                "votacion" | "votación" | "vote" | "votar" => Some(StoryDecisionMode::Vote),
+                "turnos" | "turns" => Some(StoryDecisionMode::Turns),
+                _ => None,
+            };
+            let seconds = match rest.get(1) {
+                None => Some(None),
+                Some(word) => word
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|_| word.len() <= 3)
+                    .map(Some),
+            };
+            return StoryInputCommand::Mode(mode.zip(seconds));
+        }
         _ => {}
     }
     match lower.as_str() {
@@ -986,7 +1266,103 @@ pub fn parse_story_input(input: &str) -> StoryInputCommand {
     }
 }
 
-pub const STORY_INPUT_HELP: &str = "Estás absorto en una historia: escribe un número para elegir, «ver» (look), «deshacer» (undo), «guardar N» (save), «cargar N» (load), «partidas» (saves), «borrar N» (delete) o «salir» (leave).";
+pub const STORY_INPUT_HELP: &str = "Estás absorto en una historia: escribe un número para elegir, «ver» (look), «deshacer» (undo), «guardar N» (save), «cargar N» (load), «partidas» (saves), «borrar N» (delete), «compartir» (share) o «salir» (leave).";
+
+/// Help of a shared instance.
+pub const SHARED_STORY_HELP: &str = "Historia compartida: un número o «votar N» (vote N) elige o vota, «votar 0» retira tu voto, «asientos» (seats) muestra la sala; el anfitrión puede «invitar <nombre>» (invite), «expulsar <nombre>» (kick), «modo anfitrion|votacion|turnos [segundos]» (mode host|vote|turns), «deshacer» (undo) y guardar o cargar partidas. «salir» (leave) deja tu asiento.";
+
+pub const fn mode_label(mode: StoryDecisionMode) -> &'static str {
+    match mode {
+        StoryDecisionMode::Host => "decide el anfitrión",
+        StoryDecisionMode::Vote => "votación por mayoría",
+        StoryDecisionMode::Turns => "turnos rotatorios",
+    }
+}
+
+/// Text rendering of `story.lobby` for Telnet and `command.submit`.
+pub fn render_lobby(lobby: &protocol::StoryLobby) -> String {
+    let mut text = format!(
+        "Historia compartida · {} · plazo {} s",
+        mode_label(lobby.mode),
+        lobby.vote_seconds
+    );
+    if let Some(code) = &lobby.code {
+        let _ = write!(
+            text,
+            "\nCódigo para unirse: {code} (historia unirse {code} / story join {code})"
+        );
+    }
+    let _ = write!(
+        text,
+        "\nAsientos ({}/{}):",
+        lobby.seats.len(),
+        lobby.max_seats
+    );
+    for (index, seat) in lobby.seats.iter().enumerate() {
+        let _ = write!(text, "\n  {}. {}", index + 1, seat.name);
+        if seat.role == StorySeatRole::Host {
+            text.push_str(" (anfitrión)");
+        }
+        if !seat.connected {
+            text.push_str(" (desconectado; asiento reservado)");
+        }
+        if seat.turn {
+            text.push_str(" ← turno");
+        }
+    }
+    let _ = write!(
+        text,
+        "\nEspectadores: {}/{}. Tú: {}.",
+        lobby.spectators,
+        lobby.max_spectators,
+        match lobby.you {
+            StorySeatRole::Host => "anfitrión",
+            StorySeatRole::Player => "jugador",
+            StorySeatRole::Spectator => "espectador",
+        }
+    );
+    text
+}
+
+/// One-line text rendering of `story.tally` against the numbered actions of
+/// `view`. `None` when there is nothing to report.
+pub fn render_tally(tally: &protocol::StoryTally, view: &StoryProjection) -> Option<String> {
+    if tally.view_rev != view.view_rev || view.ending.is_some() {
+        return None;
+    }
+    let actions = view.actions();
+    let number = |id: &str| {
+        actions
+            .iter()
+            .position(|action| action.leaf_id() == id)
+            .map(|index| index + 1)
+    };
+    let mut text = match tally.mode {
+        StoryDecisionMode::Vote => format!("Votos ({}/{}):", tally.voted, tally.eligible),
+        StoryDecisionMode::Host => {
+            if tally.choices.is_empty() {
+                return None;
+            }
+            "Votos orientativos (decide el anfitrión):".to_owned()
+        }
+        StoryDecisionMode::Turns => return None,
+    };
+    if tally.choices.is_empty() {
+        text.push_str(" ninguno todavía");
+    }
+    for entry in &tally.choices {
+        if let Some(number) = number(&entry.choice_id) {
+            let _ = write!(text, " {number}) {}", entry.votes);
+        }
+    }
+    if let Some(seconds) = tally.remaining_seconds {
+        let _ = write!(text, " · cierra en {seconds} s");
+    }
+    if let Some(number) = tally.your_vote.as_deref().and_then(number) {
+        let _ = write!(text, " · tu voto: {number}");
+    }
+    Some(text)
+}
 
 /// Renders the slot listing of the current story for text clients.
 pub fn render_slots(slots: &[protocol::StorySlotSummary]) -> String {
@@ -1087,23 +1463,69 @@ impl StoryAction {
 enum Command {
     View(oneshot::Sender<StoryProjection>),
     Input {
+        from: AccountId,
         request: StoryRequest,
         view_rev: u32,
         reply: oneshot::Sender<Result<StoryProjection, StoryFailure>>,
     },
-    Undo(oneshot::Sender<Result<StoryProjection, StoryFailure>>),
+    /// `story.vote`: a vote for (or, with `None`, a withdrawal from) the
+    /// action whose leaf id is given. Shared instances only.
+    Vote {
+        from: AccountId,
+        leaf: Option<String>,
+        view_rev: u32,
+        reply: oneshot::Sender<Result<StoryProjection, StoryFailure>>,
+    },
+    Undo {
+        from: AccountId,
+        reply: oneshot::Sender<Result<StoryProjection, StoryFailure>>,
+    },
     /// The current state as the exact bytes a save slot stores.
-    Snapshot(oneshot::Sender<Result<SavedState, StoryFailure>>),
+    Snapshot {
+        from: AccountId,
+        reply: oneshot::Sender<Result<SavedState, StoryFailure>>,
+    },
     /// Replaces the state with one already validated against the pack.
     Restore {
+        from: AccountId,
         state: Box<StoryState>,
         reply: oneshot::Sender<Result<StoryProjection, StoryFailure>>,
     },
-    /// Closes the instance and hands back its state when it has progress
-    /// (turn > 0), for the autosave.
+    /// Leaves the instance. A solo instance (or a shared one whose last seat
+    /// leaves, or any instance closed by shutdown) closes and hands back its
+    /// state when it has progress (turn > 0), for the autosave.
     Leave {
+        from: AccountId,
         reason: CloseReason,
         reply: oneshot::Sender<Option<SavedState>>,
+    },
+    /// Turns a solo instance into a shared one hosted by its owner.
+    Share {
+        from: AccountId,
+        name: String,
+        reply: oneshot::Sender<Result<(), StoryFailure>>,
+    },
+    Join {
+        from: AccountId,
+        name: String,
+        spectate: bool,
+        reply: oneshot::Sender<Result<(), StoryFailure>>,
+    },
+    Kick {
+        from: AccountId,
+        name: String,
+        reply: oneshot::Sender<Result<(), StoryFailure>>,
+    },
+    Mode {
+        from: AccountId,
+        mode: StoryDecisionMode,
+        vote_seconds: Option<u16>,
+        reply: oneshot::Sender<Result<(), StoryFailure>>,
+    },
+    /// Host check before an invitation: the host's name and the join code.
+    InviteInfo {
+        from: AccountId,
+        reply: oneshot::Sender<Result<(String, String), StoryFailure>>,
     },
 }
 
@@ -1127,41 +1549,204 @@ impl SavedState {
     }
 }
 
+/// The latest public state of a shared instance, followed by every
+/// participant's session through a `watch` channel (newest value wins, so a
+/// slow session coalesces instead of queueing). Per-recipient fields (own
+/// role, own vote, the host-only join code) are derived by the session.
+#[derive(Clone, Debug)]
+pub struct SharedFrame {
+    pub view: StoryProjection,
+    pub table: Table,
+    /// Set on the last frame of a closed instance.
+    pub closed: Option<protocol::StoryLeftReason>,
+}
+
+impl SharedFrame {
+    pub fn role(&self, me: AccountId) -> Option<StorySeatRole> {
+        self.table.role(me)
+    }
+
+    /// `story.lobby` for `me`.
+    pub fn lobby(&self, me: AccountId) -> protocol::StoryLobby {
+        self.table.lobby(me)
+    }
+
+    /// `story.tally` for `me`, with the remaining window measured now.
+    pub fn tally(&self, me: AccountId) -> protocol::StoryTally {
+        self.tally_at(me, tokio::time::Instant::now())
+    }
+
+    pub fn tally_at(&self, me: AccountId, now: tokio::time::Instant) -> protocol::StoryTally {
+        let leaves = self
+            .view
+            .actions()
+            .iter()
+            .map(|action| action.leaf_id().to_owned())
+            .collect::<Vec<_>>();
+        self.table.tally(me, self.view.view_rev, &leaves, now)
+    }
+
+    /// Why `me` is no longer part of this instance, if it is not.
+    pub fn removal(&self, me: AccountId) -> Option<protocol::StoryLeftReason> {
+        if let Some(reason) = self.closed {
+            return Some(reason);
+        }
+        match self.table.role(me) {
+            Some(_) => None,
+            None if self.table.is_banned(me) => Some(protocol::StoryLeftReason::Kicked),
+            None => Some(protocol::StoryLeftReason::Evicted),
+        }
+    }
+
+    /// Only the host may undo; other participants see `canUndo: false`.
+    pub fn view_for(&self, me: AccountId, mut view: StoryProjection) -> StoryProjection {
+        view.can_undo &= self.table.is_host(me);
+        view
+    }
+}
+
+/// An account's membership in a live instance.
 struct LiveEntry {
     instance: u64,
+    /// Strong references live in the account's session links; a dead weak
+    /// reference means no session of the account is connected.
+    presence: Weak<()>,
+}
+
+struct Route {
     sender: mpsc::Sender<Command>,
     story: Arc<CatalogStory>,
+    /// The account that started the instance.
+    owner: AccountId,
+    /// Present once the instance is shared.
+    frames: Option<watch::Receiver<Arc<SharedFrame>>>,
+    code: Option<String>,
 }
+
+/// Routing of accounts and join codes to live instances. The instance tasks
+/// own the authoritative state; this only maps who may talk to which task.
+#[derive(Default)]
+struct Registry {
+    accounts: HashMap<AccountId, LiveEntry>,
+    routes: HashMap<u64, Route>,
+    codes: HashMap<String, u64>,
+}
+
+type InboxSender = mpsc::Sender<protocol::StoryInvitation>;
 
 struct ManagerInner {
     catalog: StoryCatalog,
     limits: StoryLimits,
-    live: Mutex<HashMap<AccountId, LiveEntry>>,
+    live: Mutex<Registry>,
     next_instance: AtomicU64,
     metrics: StoryMetrics,
     /// Character store holding the save slots; unset when none is attached.
     store: OnceLock<Arc<dyn CharacterStore>>,
     slot_writes: KeyedRateLimiter<AccountId>,
     slot_reads: KeyedRateLimiter<AccountId>,
+    joins: KeyedRateLimiter<AccountId>,
+    invites: KeyedRateLimiter<AccountId>,
+    /// Lowercase character name → invitation inboxes of its sessions.
+    inboxes: Mutex<HashMap<String, Vec<(u64, InboxSender)>>>,
+    next_inbox: AtomicU64,
     /// Set by graceful shutdown: no new instance starts afterwards.
     closing: AtomicBool,
 }
 
 impl ManagerInner {
-    fn remove(&self, account: AccountId, instance: u64, reason: CloseReason) {
-        let mut live = self.live.lock().unwrap_or_else(|error| error.into_inner());
-        if live
+    fn registry(&self) -> std::sync::MutexGuard<'_, Registry> {
+        self.live.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Unregisters an instance, its join code and every member account.
+    fn close_instance(&self, instance: u64, reason: CloseReason) {
+        let mut registry = self.registry();
+        let Some(route) = registry.routes.remove(&instance) else {
+            return;
+        };
+        if let Some(code) = &route.code {
+            registry.codes.remove(code);
+        }
+        registry
+            .accounts
+            .retain(|_, entry| entry.instance != instance);
+        self.metrics
+            .live
+            .store(registry.routes.len(), Ordering::Relaxed);
+        if route.frames.is_some() {
+            self.metrics
+                .shared_instances
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+        match reason {
+            CloseReason::Left => &self.metrics.closed_left,
+            CloseReason::Evicted => &self.metrics.closed_evicted,
+            CloseReason::Shutdown => &self.metrics.closed_shutdown,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Removes one participant's routing entry (leave, kick, lapse).
+    fn remove_member(&self, account: AccountId, instance: u64) {
+        let mut registry = self.registry();
+        if registry
+            .accounts
             .get(&account)
             .is_some_and(|entry| entry.instance == instance)
         {
-            live.remove(&account);
-            self.metrics.live.store(live.len(), Ordering::Relaxed);
-            match reason {
-                CloseReason::Left => &self.metrics.closed_left,
-                CloseReason::Evicted => &self.metrics.closed_evicted,
-                CloseReason::Shutdown => &self.metrics.closed_shutdown,
-            }
+            registry.accounts.remove(&account);
+        }
+    }
+
+    /// Accounts of `members` with at least one connected session.
+    fn present(&self, instance: u64, members: &[AccountId]) -> BTreeSet<AccountId> {
+        let registry = self.registry();
+        members
+            .iter()
+            .copied()
+            .filter(|account| {
+                registry.accounts.get(account).is_some_and(|entry| {
+                    entry.instance == instance && entry.presence.strong_count() > 0
+                })
+            })
+            .collect()
+    }
+
+    /// Publishes a freshly shared instance; `false` on a code collision.
+    fn register_shared(
+        &self,
+        instance: u64,
+        code: &str,
+        frames: watch::Receiver<Arc<SharedFrame>>,
+    ) -> bool {
+        let mut registry = self.registry();
+        if registry.codes.contains_key(code) || !registry.routes.contains_key(&instance) {
+            return false;
+        }
+        registry.codes.insert(code.to_owned(), instance);
+        if let Some(route) = registry.routes.get_mut(&instance) {
+            route.frames = Some(frames);
+            route.code = Some(code.to_owned());
+        }
+        self.metrics
+            .shared_instances
             .fetch_add(1, Ordering::Relaxed);
+        self.metrics.shared_started.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Delivers an invitation to every connected session of `name`. Unknown
+    /// or offline names and full inboxes are dropped silently: the host
+    /// never learns whether a character is connected.
+    fn deliver(&self, name: &str, invitation: &protocol::StoryInvitation) {
+        let inboxes = self
+            .inboxes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(senders) = inboxes.get(&name.trim().to_lowercase()) {
+            for (_, sender) in senders {
+                let _ = sender.try_send(invitation.clone());
+            }
         }
     }
 
@@ -1284,16 +1869,20 @@ pub struct StoryManager {
     inner: Arc<ManagerInner>,
 }
 
-/// A session's handle to its account's live instance.
+/// A session's handle to its account's live instance. While any link of an
+/// account is alive the account counts as connected to a shared instance.
 #[derive(Clone)]
 pub struct StoryLink {
     account: AccountId,
     story: Arc<CatalogStory>,
-    /// True when the link joined an instance that already existed (resume or
-    /// re-entry); only a fresh instance offers to continue the autosave.
+    /// True when the link joined an instance that already existed (resume,
+    /// re-entry or joining a shared instance); only a fresh instance offers
+    /// to continue the autosave.
     resumed: bool,
     sender: mpsc::Sender<Command>,
     inner: Arc<ManagerInner>,
+    frames: Option<watch::Receiver<Arc<SharedFrame>>>,
+    _presence: Arc<()>,
 }
 
 /// Result of leaving a story.
@@ -1303,13 +1892,43 @@ pub struct LeaveOutcome {
     pub autosaved: bool,
 }
 
+/// A session's invitation inbox; unregistered when dropped.
+pub struct InvitationInbox {
+    receiver: mpsc::Receiver<protocol::StoryInvitation>,
+    key: String,
+    token: u64,
+    inner: Arc<ManagerInner>,
+}
+
+impl InvitationInbox {
+    pub async fn recv(&mut self) -> Option<protocol::StoryInvitation> {
+        self.receiver.recv().await
+    }
+}
+
+impl Drop for InvitationInbox {
+    fn drop(&mut self) {
+        let mut inboxes = self
+            .inner
+            .inboxes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(senders) = inboxes.get_mut(&self.key) {
+            senders.retain(|(token, _)| *token != self.token);
+            if senders.is_empty() {
+                inboxes.remove(&self.key);
+            }
+        }
+    }
+}
+
 impl StoryManager {
     pub fn new(catalog: StoryCatalog, limits: StoryLimits) -> Self {
         Self {
             inner: Arc::new(ManagerInner {
                 catalog,
                 limits,
-                live: Mutex::new(HashMap::new()),
+                live: Mutex::new(Registry::default()),
                 next_instance: AtomicU64::new(1),
                 metrics: StoryMetrics::default(),
                 store: OnceLock::new(),
@@ -1323,6 +1942,18 @@ impl StoryManager {
                     SLOT_READ_BURST,
                     MAX_TRACKED_SLOT_ACCOUNTS,
                 ),
+                joins: KeyedRateLimiter::per_minute_tracking(
+                    JOINS_PER_MINUTE,
+                    JOIN_BURST,
+                    MAX_TRACKED_SLOT_ACCOUNTS,
+                ),
+                invites: KeyedRateLimiter::per_minute_tracking(
+                    INVITES_PER_MINUTE,
+                    INVITE_BURST,
+                    MAX_TRACKED_SLOT_ACCOUNTS,
+                ),
+                inboxes: Mutex::new(HashMap::new()),
+                next_inbox: AtomicU64::new(1),
                 closing: AtomicBool::new(false),
             }),
         }
@@ -1341,35 +1972,74 @@ impl StoryManager {
 
     #[cfg(test)]
     pub fn live_instances(&self) -> usize {
-        self.inner
-            .live
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .len()
+        self.inner.registry().routes.len()
     }
 
     pub fn prometheus(&self) -> String {
         self.inner.metrics.prometheus(self.inner.catalog.len())
     }
 
-    /// Re-attaches a session to its account's live instance, if any.
-    pub fn attach(&self, account: AccountId) -> Option<StoryLink> {
-        let live = self
+    /// Registers the invitation inbox of a connected character's session.
+    /// `None` when the name is empty or too many inboxes are registered.
+    pub fn register_inbox(&self, name: &str) -> Option<InvitationInbox> {
+        let key = name.trim().to_lowercase();
+        if key.is_empty() || key.len() > shared::MAX_MEMBER_NAME_BYTES {
+            return None;
+        }
+        let mut inboxes = self
             .inner
-            .live
+            .inboxes
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        live.get(&account)
-            .map(|entry| self.link(account, entry, true))
+        let registered = inboxes.values().map(Vec::len).sum::<usize>();
+        if registered >= MAX_INBOXES {
+            return None;
+        }
+        let (sender, receiver) = mpsc::channel(INVITATION_INBOX);
+        let token = self.inner.next_inbox.fetch_add(1, Ordering::Relaxed);
+        inboxes
+            .entry(key.clone())
+            .or_default()
+            .push((token, sender));
+        Some(InvitationInbox {
+            receiver,
+            key,
+            token,
+            inner: self.inner.clone(),
+        })
     }
 
-    fn link(&self, account: AccountId, entry: &LiveEntry, resumed: bool) -> StoryLink {
+    /// Re-attaches a session to its account's live instance, if any.
+    pub fn attach(&self, account: AccountId) -> Option<StoryLink> {
+        let mut registry = self.inner.registry();
+        let Registry {
+            accounts, routes, ..
+        } = &mut *registry;
+        let entry = accounts.get_mut(&account)?;
+        let route = routes.get(&entry.instance)?;
+        Some(self.link(account, entry, route, true))
+    }
+
+    fn link(
+        &self,
+        account: AccountId,
+        entry: &mut LiveEntry,
+        route: &Route,
+        resumed: bool,
+    ) -> StoryLink {
+        let presence = entry.presence.upgrade().unwrap_or_else(|| {
+            let presence = Arc::new(());
+            entry.presence = Arc::downgrade(&presence);
+            presence
+        });
         StoryLink {
             account,
-            story: entry.story.clone(),
+            story: route.story.clone(),
             resumed,
-            sender: entry.sender.clone(),
+            sender: route.sender.clone(),
             inner: self.inner.clone(),
+            frames: route.frames.clone(),
+            _presence: presence,
         }
     }
 
@@ -1396,14 +2066,16 @@ impl StoryManager {
                 .fetch_add(1, Ordering::Relaxed);
             return Err(StoryFailure::UnknownStory);
         };
-        let mut live = self
-            .inner
-            .live
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(entry) = live.get(&account) {
-            if entry.story.id == story.id && !entry.sender.is_closed() {
-                return Ok(self.link(account, entry, true));
+        let mut registry = self.inner.registry();
+        let Registry {
+            accounts, routes, ..
+        } = &mut *registry;
+        if let Some(entry) = accounts.get_mut(&account) {
+            if let Some(route) = routes.get(&entry.instance)
+                && route.story.id == story.id
+                && !route.sender.is_closed()
+            {
+                return Ok(self.link(account, entry, route, true));
             }
             self.inner
                 .metrics
@@ -1415,7 +2087,7 @@ impl StoryManager {
         if self.inner.closing.load(Ordering::Acquire) {
             return Err(StoryFailure::Busy);
         }
-        if live.len() >= self.inner.limits.max_instances {
+        if routes.len() >= self.inner.limits.max_instances {
             self.inner
                 .metrics
                 .rejected_capacity
@@ -1426,16 +2098,26 @@ impl StoryManager {
             .map_err(|_| StoryFailure::Internal)?;
         let instance_id = self.inner.next_instance.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel(INSTANCE_MAILBOX);
-        let entry = LiveEntry {
-            instance: instance_id,
+        let route = Route {
             sender,
             story,
+            owner: account,
+            frames: None,
+            code: None,
         };
-        let link = self.link(account, &entry, false);
-        live.insert(account, entry);
-        self.inner.metrics.live.store(live.len(), Ordering::Relaxed);
+        let mut entry = LiveEntry {
+            instance: instance_id,
+            presence: Weak::new(),
+        };
+        let link = self.link(account, &mut entry, &route, false);
+        accounts.insert(account, entry);
+        routes.insert(instance_id, route);
+        self.inner
+            .metrics
+            .live
+            .store(routes.len(), Ordering::Relaxed);
         self.inner.metrics.started.fetch_add(1, Ordering::Relaxed);
-        drop(live);
+        drop(registry);
         tokio::spawn(run_instance(
             self.inner.clone(),
             account,
@@ -1446,19 +2128,113 @@ impl StoryManager {
         Ok(link)
     }
 
+    /// `historia compartir <id>`/`story host <id>`: enters (or resumes) the
+    /// story and shares it, hosted by `account`.
+    pub async fn host(
+        &self,
+        account: AccountId,
+        name: &str,
+        story_id: &str,
+    ) -> Result<StoryLink, StoryFailure> {
+        self.enter(account, story_id)?.share(name).await
+    }
+
+    /// `historia unirse <código>`/`story join <code>` (or, spectating,
+    /// `historia mirar`/`story watch`). Attempts are rate limited per account;
+    /// an unknown code and a refused (kicked) account get the same answer.
+    pub async fn join(
+        &self,
+        account: AccountId,
+        name: &str,
+        code: &str,
+        spectate: bool,
+    ) -> Result<StoryLink, StoryFailure> {
+        let result = self.join_inner(account, name, code, spectate).await;
+        match &result {
+            Ok(_) => &self.inner.metrics.shared_joins_ok,
+            Err(_) => &self.inner.metrics.shared_joins_rejected,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
+    async fn join_inner(
+        &self,
+        account: AccountId,
+        name: &str,
+        code: &str,
+        spectate: bool,
+    ) -> Result<StoryLink, StoryFailure> {
+        if !self.inner.joins.check(account, Instant::now()) {
+            return Err(StoryFailure::RateLimited);
+        }
+        let code = shared::normalize_join_code(code).ok_or(StoryFailure::UnknownCode)?;
+        let (link, instance) = {
+            let mut registry = self.inner.registry();
+            let Registry {
+                accounts,
+                routes,
+                codes,
+            } = &mut *registry;
+            let instance = *codes.get(&code).ok_or(StoryFailure::UnknownCode)?;
+            let route = routes.get(&instance).ok_or(StoryFailure::UnknownCode)?;
+            if let Some(entry) = accounts.get_mut(&account) {
+                if entry.instance == instance {
+                    return Ok(self.link(account, entry, route, true));
+                }
+                return Err(StoryFailure::AlreadyInStory);
+            }
+            if self.inner.closing.load(Ordering::Acquire) {
+                return Err(StoryFailure::Busy);
+            }
+            let mut entry = LiveEntry {
+                instance,
+                presence: Weak::new(),
+            };
+            let link = self.link(account, &mut entry, route, true);
+            accounts.insert(account, entry);
+            (link, instance)
+        };
+        let name = name.to_owned();
+        let joined = link
+            .request(|reply| Command::Join {
+                from: account,
+                name,
+                spectate,
+                reply,
+            })
+            .await
+            .and_then(|result| result);
+        match joined {
+            Ok(()) => Ok(link),
+            Err(failure) => {
+                self.inner.remove_member(account, instance);
+                Err(match failure {
+                    StoryFailure::Gone | StoryFailure::NotShared => StoryFailure::UnknownCode,
+                    failure => failure,
+                })
+            }
+        }
+    }
+
     /// Graceful shutdown: refuses new instances, closes every live instance
-    /// and writes its autosave. Returns how many autosaves were written. The
-    /// caller bounds the whole call; each store call is bounded too.
+    /// and writes its autosave (to the host of a shared instance). Returns
+    /// how many autosaves were written. The caller bounds the whole call;
+    /// each store call is bounded too.
     pub async fn shutdown(&self) -> usize {
         self.inner.closing.store(true, Ordering::Release);
         let entries = {
-            let live = self
-                .inner
-                .live
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            live.iter()
-                .map(|(account, entry)| (*account, entry.sender.clone(), entry.story.clone()))
+            let registry = self.inner.registry();
+            registry
+                .routes
+                .values()
+                .map(|route| {
+                    let account = route
+                        .frames
+                        .as_ref()
+                        .map_or(route.owner, |frames| frames.borrow().table.host());
+                    (account, route.sender.clone(), route.story.clone())
+                })
                 .collect::<Vec<_>>()
         };
         let mut tasks = tokio::task::JoinSet::new();
@@ -1467,6 +2243,7 @@ impl StoryManager {
             tasks.spawn(async move {
                 let (reply, response) = oneshot::channel();
                 let command = Command::Leave {
+                    from: account,
                     reason: CloseReason::Shutdown,
                     reply,
                 };
@@ -1498,6 +2275,31 @@ impl StoryLink {
         &self.story.title
     }
 
+    /// The shared frames this link follows; `None` for a solo instance.
+    pub fn frames(&self) -> Option<watch::Receiver<Arc<SharedFrame>>> {
+        self.frames.clone()
+    }
+
+    pub const fn is_shared(&self) -> bool {
+        self.frames.is_some()
+    }
+
+    /// Role in a shared instance (`None` for a solo instance).
+    pub fn role(&self) -> Option<StorySeatRole> {
+        self.frames
+            .as_ref()
+            .and_then(|frames| frames.borrow().role(self.account))
+    }
+
+    /// Save slots of a shared instance belong to its host.
+    fn require_slot_owner(&self) -> Result<(), StoryFailure> {
+        if self.is_shared() && self.role() != Some(StorySeatRole::Host) {
+            Err(StoryFailure::HostOnly)
+        } else {
+            Ok(())
+        }
+    }
+
     async fn request<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<T>) -> Command,
@@ -1521,15 +2323,40 @@ impl StoryLink {
         self.request(Command::View).await
     }
 
-    /// Applies one input addressed by opaque ids of view `view_rev`.
+    /// Applies one input addressed by opaque ids of view `view_rev`. In a
+    /// shared instance the input is routed by the decision mode: applied,
+    /// counted as a vote, or refused.
     pub async fn input(
         &self,
         request: StoryRequest,
         view_rev: u32,
     ) -> Result<StoryProjection, StoryFailure> {
+        let from = self.account;
         let result = self
             .request(|reply| Command::Input {
+                from,
                 request,
+                view_rev,
+                reply,
+            })
+            .await
+            .and_then(|result| result);
+        self.record(&result);
+        result
+    }
+
+    /// `story.vote`: votes for the action named by its leaf id, or (`None`)
+    /// withdraws the vote.
+    pub async fn vote(
+        &self,
+        leaf: Option<String>,
+        view_rev: u32,
+    ) -> Result<StoryProjection, StoryFailure> {
+        let from = self.account;
+        let result = self
+            .request(|reply| Command::Vote {
+                from,
+                leaf,
                 view_rev,
                 reply,
             })
@@ -1546,16 +2373,22 @@ impl StoryLink {
     }
 
     pub async fn undo(&self) -> Result<StoryProjection, StoryFailure> {
-        let result = self.request(Command::Undo).await.and_then(|result| result);
+        let from = self.account;
+        let result = self
+            .request(|reply| Command::Undo { from, reply })
+            .await
+            .and_then(|result| result);
         self.record(&result);
         result
     }
 
-    /// Leaves the story. When the instance had progress and a store is
-    /// attached, its state is written to the autosave slot first.
+    /// Leaves the story. When the instance closes with progress and a store
+    /// is attached, its state is written to the autosave slot first.
     pub async fn leave(&self) -> Result<LeaveOutcome, StoryFailure> {
+        let from = self.account;
         let saved = self
             .request(|reply| Command::Leave {
+                from,
                 reason: CloseReason::Left,
                 reply,
             })
@@ -1567,15 +2400,94 @@ impl StoryLink {
         Ok(LeaveOutcome { autosaved })
     }
 
+    /// Shares this solo instance; returns the link that follows its frames.
+    /// Sharing an already shared instance is a no-op.
+    pub async fn share(&self, name: &str) -> Result<StoryLink, StoryFailure> {
+        let from = self.account;
+        let name = name.to_owned();
+        self.request(|reply| Command::Share { from, name, reply })
+            .await
+            .and_then(|result| result)?;
+        StoryManager {
+            inner: self.inner.clone(),
+        }
+        .attach(self.account)
+        .ok_or(StoryFailure::Gone)
+    }
+
+    /// Host only: removes a participant by name.
+    pub async fn kick(&self, name: &str) -> Result<(), StoryFailure> {
+        let from = self.account;
+        let name = name.to_owned();
+        self.request(|reply| Command::Kick { from, name, reply })
+            .await
+            .and_then(|result| result)
+    }
+
+    /// Host only: changes the decision mode and, optionally, the window.
+    pub async fn set_mode(
+        &self,
+        mode: StoryDecisionMode,
+        vote_seconds: Option<u16>,
+    ) -> Result<(), StoryFailure> {
+        let from = self.account;
+        self.request(|reply| Command::Mode {
+            from,
+            mode,
+            vote_seconds,
+            reply,
+        })
+        .await
+        .and_then(|result| result)
+    }
+
+    /// Host only: sends the join code to a connected character. The answer
+    /// never reveals whether the character exists or is connected.
+    pub async fn invite(&self, name: &str) -> Result<(), StoryFailure> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > shared::MAX_MEMBER_NAME_BYTES {
+            return Err(StoryFailure::UnknownMember);
+        }
+        if !self.is_shared() {
+            return Err(StoryFailure::NotShared);
+        }
+        if !self.inner.invites.check(self.account, Instant::now()) {
+            return Err(StoryFailure::RateLimited);
+        }
+        let from = self.account;
+        let (host, code) = self
+            .request(|reply| Command::InviteInfo { from, reply })
+            .await
+            .and_then(|result| result)?;
+        if !host.eq_ignore_ascii_case(name) {
+            self.inner.deliver(
+                name,
+                &protocol::StoryInvitation {
+                    host,
+                    story_id: self.story.id.clone(),
+                    title: self.story.title.clone(),
+                    code,
+                },
+            );
+            self.inner
+                .metrics
+                .shared_invitations
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     /// `story.save`: writes the current state to manual slot `1..=9`.
     pub async fn save(&self, slot: u8) -> Result<protocol::StorySaved, StoryFailure> {
         let slot = StorySlot::new(slot)
             .filter(|slot| !slot.is_autosave())
             .ok_or(StoryFailure::InvalidSlot)?;
+        self.require_slot_owner()?;
         self.inner.store()?;
         self.inner.admit(self.account, true)?;
+        let from = self.account;
         let saved = self
-            .request(Command::Snapshot)
+            .request(|reply| Command::Snapshot { from, reply })
             .await
             .and_then(|result| result)?;
         let summary = self
@@ -1599,6 +2511,7 @@ impl StoryLink {
 
     async fn restore_inner(&self, slot: u8) -> Result<StoryProjection, StoryFailure> {
         let slot = StorySlot::new(slot).ok_or(StoryFailure::InvalidSlot)?;
+        self.require_slot_owner()?;
         let store = self.inner.store()?;
         self.inner.admit(self.account, false)?;
         let compatibility = StoryPackCompatibility {
@@ -1618,7 +2531,9 @@ impl StoryLink {
                 warn!(%error, "stored story state failed validation against its pack");
                 StoryFailure::SlotCorrupt
             })?;
+        let from = self.account;
         self.request(|reply| Command::Restore {
+            from,
             state: Box::new(state),
             reply,
         })
@@ -1628,6 +2543,7 @@ impl StoryLink {
 
     /// `story.slots`: metadata of the occupied slots of this story.
     pub async fn slots(&self) -> Result<Vec<protocol::StorySlotSummary>, StoryFailure> {
+        self.require_slot_owner()?;
         self.inner.store()?;
         self.inner.admit(self.account, false)?;
         self.inner.list_slots(self.account, &self.story).await
@@ -1641,6 +2557,7 @@ impl StoryLink {
         slot: u8,
     ) -> Result<Vec<protocol::StorySlotSummary>, StoryFailure> {
         let slot = StorySlot::new(slot).ok_or(StoryFailure::InvalidSlot)?;
+        self.require_slot_owner()?;
         let store = self.inner.store()?;
         self.inner.admit(self.account, true)?;
         if !self
@@ -1678,58 +2595,453 @@ impl StoryLink {
     }
 }
 
+/// Shared-mode state owned by an instance task.
+struct SharedCore {
+    table: Table,
+    frames: watch::Sender<Arc<SharedFrame>>,
+}
+
+impl SharedCore {
+    fn publish(&self, instance: &Instance) {
+        self.frames.send_replace(Arc::new(SharedFrame {
+            view: instance.current.clone(),
+            table: self.table.clone(),
+            closed: None,
+        }));
+    }
+
+    fn close(&self, instance: &Instance, reason: protocol::StoryLeftReason) {
+        self.frames.send_replace(Arc::new(SharedFrame {
+            view: instance.current.clone(),
+            table: self.table.clone(),
+            closed: Some(reason),
+        }));
+    }
+
+    /// Applies action `ordinal` of the current view (a closed vote, the
+    /// host's or the turn holder's decision) and publishes the result.
+    fn decide(
+        &mut self,
+        inner: &ManagerInner,
+        instance: &mut Instance,
+        ordinal: usize,
+    ) -> Result<StoryProjection, StoryFailure> {
+        let request = instance
+            .current
+            .actions()
+            .get(ordinal)
+            .map(StoryAction::request)
+            .ok_or(StoryFailure::UnknownChoice)?;
+        let view_rev = instance.view_rev;
+        let result = instance.input(&request, view_rev, &inner.catalog.media);
+        if result.is_ok() {
+            self.table
+                .on_new_view(instance.view_rev, true, tokio::time::Instant::now());
+            inner
+                .metrics
+                .shared_decisions
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.publish(instance);
+        result
+    }
+
+    fn input(
+        &mut self,
+        inner: &ManagerInner,
+        instance: &mut Instance,
+        from: AccountId,
+        request: &StoryRequest,
+        view_rev: u32,
+    ) -> Result<StoryProjection, StoryFailure> {
+        match self.table.route(from)? {
+            shared::Route::Apply => {
+                let ordinal = instance.ordinal_of(request, view_rev)?;
+                self.decide(inner, instance, ordinal)
+            }
+            shared::Route::Vote => {
+                let ordinal = instance.ordinal_of(request, view_rev)?;
+                self.vote(inner, instance, from, Some(ordinal))
+            }
+        }
+    }
+
+    fn vote_leaf(
+        &mut self,
+        inner: &ManagerInner,
+        instance: &mut Instance,
+        from: AccountId,
+        leaf: Option<&str>,
+        view_rev: u32,
+    ) -> Result<StoryProjection, StoryFailure> {
+        self.table.require_seat(from)?;
+        if leaf.is_some_and(|leaf| !valid_choice_id(leaf)) {
+            return Err(StoryFailure::UnknownChoice);
+        }
+        if view_rev != instance.view_rev {
+            return Err(StoryFailure::StaleView);
+        }
+        if instance.state.ended.is_some() {
+            return Err(StoryFailure::Ended);
+        }
+        let ordinal = leaf
+            .map(|leaf| {
+                instance
+                    .current
+                    .actions()
+                    .iter()
+                    .position(|action| action.leaf_id() == leaf)
+                    .ok_or(StoryFailure::UnknownChoice)
+            })
+            .transpose()?;
+        self.vote(inner, instance, from, ordinal)
+    }
+
+    fn vote(
+        &mut self,
+        inner: &ManagerInner,
+        instance: &mut Instance,
+        from: AccountId,
+        ordinal: Option<usize>,
+    ) -> Result<StoryProjection, StoryFailure> {
+        let decided = self
+            .table
+            .vote(from, ordinal, tokio::time::Instant::now())?;
+        inner.metrics.shared_votes.fetch_add(1, Ordering::Relaxed);
+        match decided {
+            Some(winner) => self.decide(inner, instance, winner),
+            None => {
+                self.publish(instance);
+                Ok(instance.current.clone())
+            }
+        }
+    }
+
+    /// One clock tick: presence, seat lapses, vote windows and turns.
+    /// Returns `false` when the last seat lapsed and the instance closes.
+    fn tick(&mut self, inner: &ManagerInner, instance: &mut Instance, id: u64) -> bool {
+        let now = tokio::time::Instant::now();
+        let members = self
+            .table
+            .members()
+            .map(|member| member.account)
+            .collect::<Vec<_>>();
+        let present = inner.present(id, &members);
+        let tick = self.table.tick(now, |account| present.contains(&account));
+        for account in &tick.removed {
+            inner.remove_member(*account, id);
+            inner
+                .metrics
+                .shared_seat_lapses
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        if tick.closed {
+            return false;
+        }
+        match tick.winner {
+            Some(winner) => {
+                let _ = self.decide(inner, instance, winner);
+            }
+            None if tick.changed => self.publish(instance),
+            None => {}
+        }
+        true
+    }
+}
+
+/// Closes an instance: unregisters it, ends its shared frames and writes the
+/// autosave (to the host of a shared instance) on this exiting task.
+async fn close_instance_task(
+    inner: &ManagerInner,
+    id: u64,
+    owner: AccountId,
+    instance: &Instance,
+    shared: Option<&SharedCore>,
+    reason: CloseReason,
+    public: protocol::StoryLeftReason,
+) {
+    inner.close_instance(id, reason);
+    let account = shared.map_or(owner, |core| core.table.host());
+    if let Some(core) = shared {
+        core.close(instance, public);
+    }
+    if let Some(saved) = instance.progress() {
+        let story = instance.story.clone();
+        inner.autosave(account, &story, saved).await;
+    }
+}
+
 async fn run_instance(
     inner: Arc<ManagerInner>,
-    account: AccountId,
+    owner: AccountId,
     instance_id: u64,
     mut instance: Instance,
     mut receiver: mpsc::Receiver<Command>,
 ) {
     let idle = inner.limits.idle_timeout;
+    let mut shared: Option<SharedCore> = None;
+    let mut clock = tokio::time::interval(SHARED_TICK);
+    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_activity = tokio::time::Instant::now();
     loop {
-        let command = match tokio::time::timeout(idle, receiver.recv()).await {
-            Ok(Some(command)) => command,
-            Ok(None) | Err(_) => {
-                inner.remove(account, instance_id, CloseReason::Evicted);
-                info!(instance = instance_id, "idle story instance evicted");
-                // The instance is already unregistered; the autosave runs on
-                // this exiting task and never delays a live instance.
-                if let Some(saved) = instance.progress() {
-                    let story = instance.story.clone();
-                    inner.autosave(account, &story, saved).await;
+        let command = if let Some(core) = shared.as_mut() {
+            tokio::select! {
+                command = receiver.recv() => command,
+                _ = clock.tick() => {
+                    let idle_for = last_activity.elapsed();
+                    if idle_for >= idle {
+                        info!(instance = instance_id, "idle shared story instance evicted");
+                        close_instance_task(
+                            &inner, instance_id, owner, &instance, Some(core),
+                            CloseReason::Evicted, protocol::StoryLeftReason::Evicted,
+                        ).await;
+                        return;
+                    }
+                    if !core.tick(&inner, &mut instance, instance_id) {
+                        info!(instance = instance_id, "shared story instance ended");
+                        close_instance_task(
+                            &inner, instance_id, owner, &instance, Some(core),
+                            CloseReason::Left, protocol::StoryLeftReason::Ended,
+                        ).await;
+                        return;
+                    }
+                    continue;
                 }
-                return;
             }
+        } else {
+            tokio::time::timeout(idle, receiver.recv())
+                .await
+                .unwrap_or_default()
         };
+        let Some(command) = command else {
+            info!(instance = instance_id, "idle story instance evicted");
+            // The instance is unregistered first; the autosave runs on this
+            // exiting task and never delays a live instance.
+            close_instance_task(
+                &inner,
+                instance_id,
+                owner,
+                &instance,
+                shared.as_ref(),
+                CloseReason::Evicted,
+                protocol::StoryLeftReason::Evicted,
+            )
+            .await;
+            return;
+        };
+        last_activity = tokio::time::Instant::now();
+        let media = &inner.catalog.media;
         match command {
             Command::View(reply) => {
                 let _ = reply.send(instance.resume_projection());
             }
             Command::Input {
+                from,
                 request,
                 view_rev,
                 reply,
             } => {
-                let _ = reply.send(instance.input(&request, view_rev, &inner.catalog.media));
+                let result = match shared.as_mut() {
+                    None => instance.input(&request, view_rev, media),
+                    Some(core) => core.input(&inner, &mut instance, from, &request, view_rev),
+                };
+                let _ = reply.send(result);
             }
-            Command::Undo(reply) => {
-                let _ = reply.send(instance.undo(&inner.catalog.media));
+            Command::Vote {
+                from,
+                leaf,
+                view_rev,
+                reply,
+            } => {
+                let result = match shared.as_mut() {
+                    None => Err(StoryFailure::NotShared),
+                    Some(core) => {
+                        core.vote_leaf(&inner, &mut instance, from, leaf.as_deref(), view_rev)
+                    }
+                };
+                let _ = reply.send(result);
             }
-            Command::Snapshot(reply) => {
-                let _ = reply.send(SavedState::of(&instance.state));
+            Command::Undo { from, reply } => {
+                let result = match shared.as_mut() {
+                    None => instance.undo(media),
+                    Some(core) => core.table.require_host(from).and_then(|()| {
+                        let result = instance.undo(media);
+                        if result.is_ok() {
+                            core.table.on_new_view(
+                                instance.view_rev,
+                                false,
+                                tokio::time::Instant::now(),
+                            );
+                            core.publish(&instance);
+                        }
+                        result
+                    }),
+                };
+                let _ = reply.send(result);
             }
-            Command::Restore { state, reply } => {
-                let _ = reply.send(instance.restore(*state, &inner.catalog.media));
+            Command::Snapshot { from, reply } => {
+                let result = match shared.as_ref() {
+                    Some(core) => core.table.require_host(from),
+                    None => Ok(()),
+                }
+                .and_then(|()| SavedState::of(&instance.state));
+                let _ = reply.send(result);
             }
-            Command::Leave { reason, reply } => {
+            Command::Restore { from, state, reply } => {
+                let result = match shared.as_mut() {
+                    None => instance.restore(*state, media),
+                    Some(core) => core.table.require_host(from).and_then(|()| {
+                        let result = instance.restore(*state, media);
+                        if result.is_ok() {
+                            core.table.on_new_view(
+                                instance.view_rev,
+                                false,
+                                tokio::time::Instant::now(),
+                            );
+                            core.publish(&instance);
+                        }
+                        result
+                    }),
+                };
+                let _ = reply.send(result);
+            }
+            Command::Leave {
+                from,
+                reason,
+                reply,
+            } => {
+                if let (Some(core), CloseReason::Left) = (shared.as_mut(), reason) {
+                    let removal = core.table.leave(from, tokio::time::Instant::now());
+                    inner.remove_member(from, instance_id);
+                    if !removal.closed {
+                        // Fewer seats may complete the vote of the view.
+                        let _ = core.tick(&inner, &mut instance, instance_id);
+                        core.publish(&instance);
+                        let _ = reply.send(None);
+                        continue;
+                    }
+                    inner.close_instance(instance_id, reason);
+                    core.close(&instance, protocol::StoryLeftReason::Ended);
+                    let _ = reply.send(instance.progress());
+                    return;
+                }
                 // Unregister before acknowledging so the session can start
                 // another story immediately.
-                inner.remove(account, instance_id, reason);
+                inner.close_instance(instance_id, reason);
+                if let Some(core) = &shared {
+                    core.close(&instance, protocol::StoryLeftReason::Evicted);
+                }
                 let _ = reply.send(instance.progress());
                 return;
             }
+            Command::Share { from, name, reply } => {
+                let result = if let Some(core) = &shared {
+                    core.table
+                        .role(from)
+                        .map(|_| ())
+                        .ok_or(StoryFailure::NotInStory)
+                } else if from != owner {
+                    Err(StoryFailure::NotInStory)
+                } else {
+                    let core = share_instance(&inner, instance_id, from, &name, &instance);
+                    let result = core.as_ref().map(|_| ()).ok_or(StoryFailure::Internal);
+                    shared = core;
+                    result
+                };
+                let _ = reply.send(result);
+            }
+            Command::Join {
+                from,
+                name,
+                spectate,
+                reply,
+            } => {
+                let result = match shared.as_mut() {
+                    None => Err(StoryFailure::NotShared),
+                    Some(core) => core.table.join(from, &name, spectate).map(|()| {
+                        core.publish(&instance);
+                    }),
+                };
+                let _ = reply.send(result);
+            }
+            Command::Kick { from, name, reply } => {
+                let result = match shared.as_mut() {
+                    None => Err(StoryFailure::NotShared),
+                    Some(core) => core
+                        .table
+                        .kick(from, &name, tokio::time::Instant::now())
+                        .map(|(target, _)| {
+                            inner.remove_member(target, instance_id);
+                            inner.metrics.shared_kicks.fetch_add(1, Ordering::Relaxed);
+                            let _ = core.tick(&inner, &mut instance, instance_id);
+                            core.publish(&instance);
+                        }),
+                };
+                let _ = reply.send(result);
+            }
+            Command::Mode {
+                from,
+                mode,
+                vote_seconds,
+                reply,
+            } => {
+                let result = match shared.as_mut() {
+                    None => Err(StoryFailure::NotShared),
+                    Some(core) => core
+                        .table
+                        .set_mode(from, mode, vote_seconds, tokio::time::Instant::now())
+                        .map(|()| core.publish(&instance)),
+                };
+                let _ = reply.send(result);
+            }
+            Command::InviteInfo { from, reply } => {
+                let result = match shared.as_ref() {
+                    None => Err(StoryFailure::NotShared),
+                    Some(core) => core.table.require_host(from).map(|()| {
+                        let host = core
+                            .table
+                            .seats()
+                            .first()
+                            .map(|seat| seat.name.clone())
+                            .unwrap_or_default();
+                        (host, core.table.code().to_owned())
+                    }),
+                };
+                let _ = reply.send(result);
+            }
         }
     }
+}
+
+/// Makes a solo instance shared: draws a unique join code, builds the table
+/// and publishes the first frame. `None` if no unique code could be drawn.
+fn share_instance(
+    inner: &ManagerInner,
+    id: u64,
+    host: AccountId,
+    name: &str,
+    instance: &Instance,
+) -> Option<SharedCore> {
+    for _ in 0..8 {
+        let code = shared::join_code(OsRng.next_u64());
+        let table = Table::new(
+            host,
+            name,
+            inner.limits.shared.clone(),
+            code.clone(),
+            instance.view_rev,
+        );
+        let (frames, receiver) = watch::channel(Arc::new(SharedFrame {
+            view: instance.current.clone(),
+            table: table.clone(),
+            closed: None,
+        }));
+        if inner.register_shared(id, &code, receiver) {
+            return Some(SharedCore { table, frames });
+        }
+    }
+    warn!("could not draw a unique story join code");
+    None
 }
 
 /// What an opaque id of the current view stands for.
@@ -1923,6 +3235,47 @@ impl Instance {
             return Err(StoryFailure::Internal);
         }
         Ok(self.current.clone())
+    }
+
+    /// Ordinal (in [`StoryProjection::actions`] order) of the action that
+    /// `request` addresses in view `view_rev`; validated like an input.
+    fn ordinal_of(&self, request: &StoryRequest, view_rev: u32) -> Result<usize, StoryFailure> {
+        let shaped = match request {
+            StoryRequest::Choose { id } | StoryRequest::Dialogue { id } => valid_choice_id(id),
+            StoryRequest::Menu { verb, target } => {
+                valid_choice_id(verb) && target.as_deref().is_none_or(valid_choice_id)
+            }
+        };
+        if !shaped {
+            return Err(StoryFailure::UnknownChoice);
+        }
+        if view_rev != self.view_rev {
+            return Err(StoryFailure::StaleView);
+        }
+        if self.state.ended.is_some() {
+            return Err(StoryFailure::Ended);
+        }
+        let actions = self.current.actions();
+        let addressed = |action: &StoryAction| match (request, action) {
+            (StoryRequest::Choose { id }, StoryAction::Choose { id: own, .. })
+            | (
+                StoryRequest::Choose { id } | StoryRequest::Dialogue { id },
+                StoryAction::Dialogue { id: own, .. },
+            ) => id == own,
+            (
+                StoryRequest::Menu { verb, target },
+                StoryAction::Menu {
+                    verb: own_verb,
+                    target: own_target,
+                    ..
+                },
+            ) => verb == own_verb && target == own_target,
+            _ => false,
+        };
+        actions
+            .iter()
+            .position(addressed)
+            .ok_or(StoryFailure::UnknownChoice)
     }
 
     /// The state to autosave when the playthrough has progressed.
@@ -2286,3 +3639,6 @@ mod tests;
 
 #[cfg(test)]
 mod slot_tests;
+
+#[cfg(test)]
+mod shared_tests;

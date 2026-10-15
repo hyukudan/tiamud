@@ -42,3 +42,5 @@ fd-lock.workspace = true
 png.workspace = true
 rcgen = "0.13.2"
 tempfile.workspace = true
+# Paused clock for shared story vote windows and seat grace (ADR 0033).
+tokio = { workspace = true, features = ["test-util"] }

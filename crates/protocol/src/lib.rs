@@ -115,6 +115,12 @@ pub enum ServerMessageType {
     StorySaved,
     #[serde(rename = "story.restored")]
     StoryRestored,
+    #[serde(rename = "story.lobby")]
+    StoryLobby,
+    #[serde(rename = "story.tally")]
+    StoryTally,
+    #[serde(rename = "story.invitation")]
+    StoryInvitation,
 }
 
 impl ServerMessageType {
@@ -154,6 +160,9 @@ impl ServerMessageType {
             Self::StorySlots => "story.slots",
             Self::StorySaved => "story.saved",
             Self::StoryRestored => "story.restored",
+            Self::StoryLobby => "story.lobby",
+            Self::StoryTally => "story.tally",
+            Self::StoryInvitation => "story.invitation",
         }
     }
 }
@@ -192,6 +201,18 @@ pub enum ClientMessageType {
     StoryDeleteSlot,
     #[serde(rename = "story.continue")]
     StoryContinue,
+    #[serde(rename = "story.share")]
+    StoryShare,
+    #[serde(rename = "story.join")]
+    StoryJoin,
+    #[serde(rename = "story.invite")]
+    StoryInvite,
+    #[serde(rename = "story.kick")]
+    StoryKick,
+    #[serde(rename = "story.mode")]
+    StoryMode,
+    #[serde(rename = "story.vote")]
+    StoryVote,
 }
 
 /// A sequenced server→client envelope.
@@ -998,6 +1019,10 @@ pub enum StoryLeftReason {
     /// The instance no longer exists: idle eviction or closed by another
     /// session of the account (S2 has no save slots).
     Evicted,
+    /// The host of a shared instance removed this participant (ADR 0033).
+    Kicked,
+    /// The shared instance closed because no seated player remained.
+    Ended,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1035,6 +1060,22 @@ pub enum StoryErrorCode {
     SlotCapacity,
     /// Too many slot operations in a short time.
     RateLimited,
+    /// Only the host of a shared instance may do this (ADR 0033).
+    HostOnly,
+    /// Spectators are read-only.
+    Spectator,
+    /// Round-robin mode: another seated player decides this turn.
+    NotYourTurn,
+    /// No shared instance accepts that join code.
+    UnknownCode,
+    /// Every seat (or every spectator place) is taken.
+    SeatsFull,
+    /// The operation needs a shared instance.
+    NotShared,
+    /// No participant of the shared instance has that name (or it is the host).
+    UnknownMember,
+    /// A shared-instance setting is outside its documented range.
+    InvalidSetting,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1101,6 +1142,158 @@ pub struct StorySaved {
 #[cfg_attr(test, derive(TS))]
 pub struct StoryRestored {
     pub slot: u8,
+}
+
+// ---------------------------------------------------------------------------
+// Shared story instances (ADR 0033, phase S7 of ADR 0025)
+// ---------------------------------------------------------------------------
+
+/// Bytes of a join code: eight characters of `23456789ABCDEFGHJKLMNPQRSTUVWXYZ`.
+pub const STORY_JOIN_CODE_BYTES: usize = 8;
+/// Absolute caps of one shared instance.
+pub const MAX_STORY_SEATS: u8 = 8;
+pub const MAX_STORY_SPECTATORS: u8 = 32;
+/// Bounds of the vote (and turn) window, in seconds.
+pub const MIN_STORY_VOTE_SECONDS: u16 = 30;
+pub const MAX_STORY_VOTE_SECONDS: u16 = 120;
+
+/// How a shared instance decides which action is applied.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "lowercase")]
+pub enum StoryDecisionMode {
+    /// The host's input applies; other seats may cast advisory votes.
+    Host,
+    /// Seated players vote; the majority wins when everyone present voted
+    /// or when the window closes. Ties go to the host's vote, else to the
+    /// lowest action number.
+    Vote,
+    /// Seated players act in seat order, one input per turn.
+    Turns,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "lowercase")]
+pub enum StorySeatRole {
+    Host,
+    Player,
+    Spectator,
+}
+
+/// `story.join`: joins a shared instance by its code, seated or as a
+/// read-only spectator.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoryJoinData {
+    pub code: String,
+    pub spectate: bool,
+}
+
+/// `story.invite` (host): sends the join code to a connected character.
+/// `story.kick` (host): removes a participant by character name.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields)]
+pub struct StoryNameData {
+    pub name: String,
+}
+
+/// `story.mode` (host): decision mode and, optionally, the vote window.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoryModeData {
+    pub mode: StoryDecisionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub vote_seconds: Option<u16>,
+}
+
+/// `story.vote`: votes for the action whose opaque leaf id is `choiceId`
+/// (a choice, a dialogue option, an untargeted verb or a verb target) of
+/// view `viewRev`. Omitting `choiceId` withdraws the vote (abstains).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoryVoteData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub choice_id: Option<String>,
+    pub view_rev: u32,
+}
+
+/// One seat of a shared instance, in seat order.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+pub struct StorySeat {
+    pub name: String,
+    pub role: StorySeatRole,
+    /// False while the seat is held for a disconnected player.
+    pub connected: bool,
+    /// True for the seat whose turn it is (round-robin mode only).
+    pub turn: bool,
+}
+
+/// `story.lobby`: membership and rules of a shared instance, sent on every
+/// change and on recovery. `code` is present for the host only. Spectators
+/// are counted, never named.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StoryLobby {
+    pub mode: StoryDecisionMode,
+    pub vote_seconds: u16,
+    pub you: StorySeatRole,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub code: Option<String>,
+    pub seats: Vec<StorySeat>,
+    pub spectators: u8,
+    pub max_seats: u8,
+    pub max_spectators: u8,
+}
+
+/// Votes for one action of the current view.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StoryTallyEntry {
+    pub choice_id: String,
+    pub votes: u8,
+}
+
+/// `story.tally`: public vote counts of view `viewRev`, without voter
+/// identities. `remainingSeconds` is present while a deadline runs (the vote
+/// window, or the current turn in round-robin mode). `yourVote` is the
+/// recipient's own vote.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StoryTally {
+    pub view_rev: u32,
+    pub mode: StoryDecisionMode,
+    pub choices: Vec<StoryTallyEntry>,
+    pub voted: u8,
+    pub eligible: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub remaining_seconds: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub your_vote: Option<String>,
+}
+
+/// `story.invitation`: a host invited this character to a shared instance.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StoryInvitation {
+    pub host: String,
+    pub story_id: String,
+    pub title: String,
+    pub code: String,
 }
 
 #[cfg(test)]

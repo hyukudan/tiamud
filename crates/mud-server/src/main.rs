@@ -91,10 +91,21 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let legacy_area_generation_ack = optional_env("TIAMUD_ACK_LEGACY_AREA_GENERATION")?;
     // Story sessions are disabled unless a StoryPack directory is configured.
     // A configured catalog is validated completely before any backend opens.
-    let story_config = story_sessions::story_config(
+    let mut story_config = story_sessions::story_config(
         optional_env("TIAMUD_STORY_DIR")?,
         optional_env("TIAMUD_STORY_MAX_INSTANCES")?,
         optional_env("TIAMUD_STORY_IDLE_SECONDS")?,
+    )?;
+    // Shared story instances (ADR 0033): seats, spectators, vote window and
+    // the grace period of a disconnected seat.
+    story_sessions::apply_shared_story_env(
+        &mut story_config,
+        &story_sessions::SharedStoryEnv {
+            max_seats: optional_env("TIAMUD_STORY_MAX_SEATS")?,
+            max_spectators: optional_env("TIAMUD_STORY_MAX_SPECTATORS")?,
+            vote_seconds: optional_env("TIAMUD_STORY_VOTE_SECONDS")?,
+            grace_seconds: optional_env("TIAMUD_STORY_SEAT_GRACE_SECONDS")?,
+        },
     )?;
     let stories = match &story_config.directory {
         Some(directory) => {
@@ -103,6 +114,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 stories = catalog.len(),
                 max_instances = story_config.limits.max_instances,
                 idle_seconds = story_config.limits.idle_timeout.as_secs(),
+                max_seats = story_config.limits.shared.max_seats,
+                max_spectators = story_config.limits.shared.max_spectators,
+                vote_seconds = story_config.limits.shared.vote_seconds,
+                seat_grace_seconds = story_config.limits.shared.grace.as_secs(),
                 "story catalog loaded"
             );
             Some(story_sessions::StoryManager::new(

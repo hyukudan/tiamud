@@ -15,8 +15,12 @@ import type {
   RewardOddsData,
   SceneSnapshot,
   ServerNoticeData,
+  StoryDecisionMode,
   StoryError,
+  StoryInvitation,
+  StoryLobby,
   StorySlotSummary,
+  StoryTally,
   StoryView,
   SyncRecoveryData,
   TradeContentsData,
@@ -87,7 +91,8 @@ export type SessionConnection = Pick<
 > & Partial<Pick<
   TiamudConnection,
   'storyChoose' | 'storyDialogue' | 'storyMenu' | 'storyUndo' | 'storyLeave' |
-  'storySave' | 'storyRestore' | 'storyDeleteSlot' | 'storySlots' | 'storyContinue'
+  'storySave' | 'storyRestore' | 'storyDeleteSlot' | 'storySlots' | 'storyContinue' |
+  'storyVote' | 'storyShare' | 'storyJoin' | 'storyInvite' | 'storyKick' | 'storyMode'
 >>;
 
 export interface AudioSink {
@@ -151,6 +156,14 @@ export class GameSession {
   storyOfferContinue = $state(false);
   /** Short confirmation of the last slot operation. */
   storyNotice = $state<string>();
+  /** Seats and rules while the story is shared (ADR 0033). */
+  storyLobby = $state<StoryLobby>();
+  /** Public vote counts of the current view of a shared story. */
+  storyTally = $state<StoryTally>();
+  /** `Date.now()` milliseconds when the running vote or turn window closes. */
+  storyDeadline = $state<number>();
+  /** The latest invitation to a shared story, until joined or dismissed. */
+  storyInvitation = $state<StoryInvitation>();
 
   /** Scene entities that can carry an optional sprite. */
   readonly visualEntities = $derived.by((): VisualSceneEntity[] =>
@@ -203,6 +216,34 @@ export class GameSession {
         this.storySlots = undefined;
         this.storyOfferContinue = false;
         this.storyNotice = undefined;
+        this.storyLobby = undefined;
+        this.storyTally = undefined;
+        this.storyDeadline = undefined;
+        this.storyInvitation = undefined;
+        return;
+      case 'story.lobby':
+        this.storyPending = false;
+        this.storyLobby = message.data;
+        return;
+      case 'story.tally':
+        this.storyPending = false;
+        this.storyTally = message.data;
+        this.storyDeadline = message.data.remainingSeconds === undefined
+          ? undefined
+          : Date.now() + message.data.remainingSeconds * 1000;
+        return;
+      case 'story.invitation':
+        this.storyInvitation = message.data;
+        this.#replaceHistory([
+          ...this.history,
+          {
+            id: `story-invitation-${message.seq ?? createRequestId()}`,
+            command: 'Story',
+            state: 'complete',
+            response: `${message.data.host} invites you to the shared story «${message.data.title}». ` +
+              `Join code: ${message.data.code} (historia unirse ${message.data.code}).`,
+          },
+        ]);
         return;
       case 'story.slots':
         this.storyPending = false;
@@ -241,9 +282,7 @@ export class GameSession {
             id: `story-left-${message.seq ?? createRequestId()}`,
             command: 'Story',
             state: 'complete',
-            response: message.data.reason === 'left'
-              ? 'You leave the story and return to the world.'
-              : 'The story closed after inactivity. Enter it again to continue from its autosave, if one was kept.',
+            response: storyLeftMessage(message.data.reason),
           },
         ]);
         return;
@@ -409,17 +448,91 @@ export class GameSession {
     this.#recordSubmission(label, id, sent);
   };
 
+  /**
+   * True when this participant's choices are votes: a shared story in vote
+   * mode, or a guest's advisory vote while the host decides.
+   */
+  get storyVotes(): boolean {
+    const lobby = this.storyLobby;
+    return lobby !== undefined && lobby.you !== 'spectator' &&
+      (lobby.mode === 'vote' || (lobby.mode === 'host' && lobby.you !== 'host'));
+  }
+
   /** Takes a gamebook choice or answers the dialogue with an opaque id. */
   chooseStory = (id: string): void => {
     const view = this.story;
     const item = view?.items.find((candidate) => 'id' in candidate && candidate.id === id);
-    if (!view || this.storyPending || !item) return;
+    if (!view || this.storyPending || !item || this.storyLobby?.you === 'spectator') return;
+    if (this.storyVotes && (item.type === 'choice' || item.type === 'dialogueOption')) {
+      this.#markStorySent(this.#connection?.storyVote?.(id, view.viewRev));
+      return;
+    }
     const sent = item.type === 'choice'
       ? this.#connection?.storyChoose?.(id, view.viewRev)
       : item.type === 'dialogueOption'
         ? this.#connection?.storyDialogue?.(id, view.viewRev)
         : false;
     this.#markStorySent(sent);
+  };
+
+  /** Withdraws this participant's vote (abstains). */
+  withdrawStoryVote = (): void => {
+    const view = this.story;
+    if (!view || this.storyPending || !this.storyTally?.yourVote) return;
+    this.#markStorySent(this.#connection?.storyVote?.(undefined, view.viewRev));
+  };
+
+  /** Opens the current (solo) story to other characters. */
+  shareStory = (): void => {
+    if (!this.story || this.storyPending || this.storyLobby) return;
+    this.#markStorySent(this.#connection?.storyShare?.());
+  };
+
+  /** Joins a shared story by code, seated or as a spectator. */
+  joinStory = (code: string, spectate = false): void => {
+    if (this.story) return;
+    try {
+      this.#connection?.storyJoin?.(code, spectate);
+    } catch {
+      this.notice = { level: 'warning', message: 'A join code has eight letters and digits.' };
+    }
+  };
+
+  dismissStoryInvitation = (): void => {
+    this.storyInvitation = undefined;
+  };
+
+  /** Host: sends the join code to a connected character. */
+  inviteToStory = (name: string): boolean => {
+    if (this.storyLobby?.you !== 'host') return false;
+    try {
+      const sent = this.#connection?.storyInvite?.(name) ?? false;
+      if (sent) this.storyNotice = `Invitation sent to ${name.trim()} if they are connected.`;
+      return sent;
+    } catch {
+      this.storyNotice = 'Type a character name to invite.';
+      return false;
+    }
+  };
+
+  /** Host: removes a participant by name. */
+  kickFromStory = (name: string): void => {
+    if (this.storyLobby?.you !== 'host') return;
+    try {
+      this.#connection?.storyKick?.(name);
+    } catch {
+      // The name comes from the lobby and is always valid.
+    }
+  };
+
+  /** Host: decision mode and, optionally, the vote window in seconds. */
+  setStoryMode = (mode: StoryDecisionMode, voteSeconds?: number): void => {
+    if (this.storyLobby?.you !== 'host') return;
+    try {
+      this.#connection?.storyMode?.(mode, voteSeconds);
+    } catch {
+      this.storyNotice = 'The vote window must be 30–120 seconds.';
+    }
   };
 
   /** Applies a menu verb, with one of its targets when the verb needs one. */
@@ -430,6 +543,11 @@ export class GameSession {
     if (verbItem?.type !== 'verb' || verbItem.needsTarget !== (target !== undefined)) return;
     if (target !== undefined &&
       !view.items.some((item) => item.type === 'target' && item.id === target && item.verb === verb)) {
+      return;
+    }
+    if (this.storyLobby?.you === 'spectator') return;
+    if (this.storyVotes) {
+      this.#markStorySent(this.#connection?.storyVote?.(target ?? verb, view.viewRev));
       return;
     }
     this.#markStorySent(this.#connection?.storyMenu?.(verb, target, view.viewRev));
@@ -646,6 +764,9 @@ export class GameSession {
     this.storySlots = undefined;
     this.storyOfferContinue = false;
     this.storyNotice = undefined;
+    this.storyLobby = undefined;
+    this.storyTally = undefined;
+    this.storyDeadline = undefined;
   }
 
   #views(): WorldViews {
@@ -730,5 +851,18 @@ export class GameSession {
       const { [entityId]: _expired, ...remaining } = this.activeVisualCues;
       this.activeVisualCues = remaining;
     }, cue.durationMs));
+  }
+}
+
+function storyLeftMessage(reason: 'left' | 'evicted' | 'kicked' | 'ended'): string {
+  switch (reason) {
+    case 'left':
+      return 'You leave the story and return to the world.';
+    case 'kicked':
+      return 'The host removed you from the shared story. You return to the world.';
+    case 'ended':
+      return 'The shared story ended: no seated player remained. You return to the world.';
+    case 'evicted':
+      return 'The story closed after inactivity. Enter it again to continue from its autosave, if one was kept.';
   }
 }

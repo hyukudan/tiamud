@@ -473,6 +473,7 @@ async fn one_instance_per_account_and_a_global_bound() {
         StoryLimits {
             max_instances: 2,
             idle_timeout: Duration::from_secs(60),
+            ..StoryLimits::default()
         },
     );
     let first = stories.enter(AccountId(1), CRIPTA).unwrap();
@@ -516,6 +517,7 @@ async fn idle_instances_are_evicted_and_reported_as_gone() {
         StoryLimits {
             max_instances: 4,
             idle_timeout: Duration::from_millis(50),
+            ..StoryLimits::default()
         },
     );
     let link = stories.enter(AccountId(1), CRIPTA).unwrap();

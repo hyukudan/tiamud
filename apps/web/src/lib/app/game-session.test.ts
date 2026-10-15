@@ -47,6 +47,12 @@ function harness() {
     storyDeleteSlot: vi.fn(() => true),
     storySlots: vi.fn(() => true),
     storyContinue: vi.fn(() => true),
+    storyVote: vi.fn(() => true),
+    storyShare: vi.fn(() => true),
+    storyJoin: vi.fn(() => true),
+    storyInvite: vi.fn(() => true),
+    storyKick: vi.fn(() => true),
+    storyMode: vi.fn(() => true),
   } satisfies SessionConnection;
   const storage = new Map<string, string>();
   const historyView: HistoryView = {
@@ -333,5 +339,94 @@ describe('GameSession', () => {
     callbacks().onMessage(message('story.left', { reason: 'evicted' }, 20));
     expect(session.storySlots).toBeUndefined();
     expect(session.history.at(-1)?.response).toContain('autosave');
+  });
+
+  it('routes shared-story choices by decision mode and role', () => {
+    const { session, connection, callbacks } = harness();
+    const CHOICE = 'c1111111111111111';
+    const VERB = 'c2222222222222222';
+    const TARGET = 'c3333333333333333';
+    const lobby = (you: string, mode: string) => ({
+      mode, voteSeconds: 60, you,
+      seats: [
+        { name: 'Aria', role: 'host', connected: true, turn: false },
+        { name: 'Bruno', role: 'player', connected: true, turn: false },
+      ],
+      spectators: 0, maxSeats: 8, maxSpectators: 32,
+    });
+    callbacks().onMessage(message('story.entered', { storyId: 'cripta', title: 'Cripta' }, 1));
+    callbacks().onMessage(message('story.view', {
+      viewRev: 2, part: 0, parts: 1, turn: 0, canUndo: false,
+      items: [
+        { type: 'scene', title: 'Cripta', text: 'Oscuro.', score: 0, ending: null },
+        { type: 'choice', id: CHOICE, label: 'Avanzar' },
+        { type: 'verb', id: VERB, label: 'MIRAR', needsTarget: true },
+        { type: 'target', verb: VERB, id: TARGET, label: 'Puerta' },
+      ],
+    }, 2));
+    // Solo: an ordinary choice; sharing is offered.
+    expect(session.storyVotes).toBe(false);
+    session.shareStory();
+    expect(connection.storyShare).toHaveBeenCalledTimes(1);
+    callbacks().onMessage(message('story.lobby', lobby('player', 'vote'), 3));
+    expect(session.storyPending).toBe(false);
+    expect(session.storyVotes).toBe(true);
+    session.chooseStory(CHOICE);
+    expect(connection.storyVote).toHaveBeenLastCalledWith(CHOICE, 2);
+    expect(connection.storyChoose).not.toHaveBeenCalled();
+    expect(session.storyPending).toBe(true);
+    // The tally acknowledges the vote and starts the countdown.
+    callbacks().onMessage(message('story.tally', {
+      viewRev: 2, mode: 'vote', choices: [{ choiceId: CHOICE, votes: 1 }], voted: 1, eligible: 2,
+      remainingSeconds: 30, yourVote: CHOICE,
+    }, 4));
+    expect(session.storyPending).toBe(false);
+    expect(session.storyTally?.yourVote).toBe(CHOICE);
+    expect(session.storyDeadline).toBeGreaterThan(Date.now() + 29_000);
+    session.storyMenu(VERB, TARGET);
+    expect(connection.storyVote).toHaveBeenLastCalledWith(TARGET, 2);
+    callbacks().onMessage(message('story.error', { code: 'stale_view', message: 'x' }, 5));
+    session.withdrawStoryVote();
+    expect(connection.storyVote).toHaveBeenLastCalledWith(undefined, 2);
+    callbacks().onMessage(message('story.error', { code: 'stale_view', message: 'x' }, 6));
+    // Host mode: the host acts, guests vote advisorily; spectators do nothing.
+    callbacks().onMessage(message('story.lobby', lobby('host', 'host'), 7));
+    session.chooseStory(CHOICE);
+    expect(connection.storyChoose).toHaveBeenCalledWith(CHOICE, 2);
+    callbacks().onMessage(message('story.error', { code: 'stale_view', message: 'x' }, 8));
+    expect(session.inviteToStory('  Bruno ')).toBe(true);
+    expect(connection.storyInvite).toHaveBeenCalledWith('  Bruno ');
+    expect(session.storyNotice).toContain('Bruno');
+    session.kickFromStory('Bruno');
+    expect(connection.storyKick).toHaveBeenCalledWith('Bruno');
+    session.setStoryMode('turns', 45);
+    expect(connection.storyMode).toHaveBeenCalledWith('turns', 45);
+    callbacks().onMessage(message('story.lobby', lobby('spectator', 'vote'), 9));
+    const votes = connection.storyVote.mock.calls.length;
+    session.chooseStory(CHOICE);
+    session.storyMenu(VERB, TARGET);
+    expect(connection.storyVote.mock.calls.length).toBe(votes);
+    expect(session.inviteToStory('Bruno')).toBe(false);
+    // Leaving reasons of shared stories.
+    callbacks().onMessage(message('story.left', { reason: 'kicked' }, 10));
+    expect(session.story).toBeUndefined();
+    expect(session.storyLobby).toBeUndefined();
+    expect(session.history.at(-1)?.response).toContain('host removed you');
+  });
+
+  it('records invitations and joins by code', () => {
+    const { session, connection, callbacks } = harness();
+    callbacks().onMessage(message('story.invitation', {
+      host: 'Aria', storyId: 'cripta', title: 'Cripta', code: 'ABCD2345',
+    }, 1));
+    expect(session.storyInvitation?.code).toBe('ABCD2345');
+    expect(session.history.at(-1)?.response).toContain('historia unirse ABCD2345');
+    session.joinStory('ABCD2345', true);
+    expect(connection.storyJoin).toHaveBeenCalledWith('ABCD2345', true);
+    session.dismissStoryInvitation();
+    expect(session.storyInvitation).toBeUndefined();
+    callbacks().onMessage(message('story.entered', { storyId: 'cripta', title: 'Cripta' }, 2));
+    callbacks().onMessage(message('story.left', { reason: 'ended' }, 3));
+    expect(session.history.at(-1)?.response).toContain('no seated player remained');
   });
 });

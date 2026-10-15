@@ -1174,7 +1174,8 @@ async fn serve_entered(
     write_scene(output, input, &entered.scene, &entered.player)?;
     // While in a story the character stays parked in its room; world scene
     // output is suspended and re-rendered when the story ends.
-    let mut story = story::TelnetStory::new(stories, entered.account_id);
+    let mut story = story::TelnetStory::new(stories, entered.account_id)
+        .with_name(&entered.player.character.name);
     story.resume(output, input).await?;
     write_prompt(output, input)?;
     let mut last_revision = entered.scene.revision;
@@ -1270,6 +1271,22 @@ async fn serve_entered(
                         write_prompt(output, input)?;
                     }
                     None => return Ok(()),
+                }
+            }
+            event = story.next_event() => {
+                match story.handle_event(output, input, event)? {
+                    story::StoryLineOutcome::World => {}
+                    story::StoryLineOutcome::Handled => write_prompt(output, input)?,
+                    story::StoryLineOutcome::Left => {
+                        let (scene, _presentation, player) = world
+                            .current_state(entered.session_id)
+                            .await
+                            .map_err(io::Error::other)?;
+                        last_revision = scene.revision;
+                        ignore_world_through_revision = Some(scene.revision);
+                        write_scene(output, input, &scene, &player)?;
+                        write_prompt(output, input)?;
+                    }
                 }
             }
             event = input.read_line_queued(reader, output) => {

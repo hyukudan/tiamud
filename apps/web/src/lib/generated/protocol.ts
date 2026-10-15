@@ -7,9 +7,9 @@ export type ProtocolVersion = 1;
 
 export const WEBSOCKET_SUBPROTOCOL = 'tiamud.v1';
 
-export type ServerMessageType = "server.welcome" | "server.notice" | "server.heartbeat" | "action.result" | "scene.snapshot" | "player.snapshot" | "scene.patch" | "entity.upsert" | "entity.remove" | "vitals.update" | "inventory.patch" | "container.contents" | "trade.contents" | "reward.odds" | "mail.list" | "mail.message" | "board.catalog" | "board.list" | "board.entry" | "map.snapshot" | "message.append" | "chat.message" | "sync.scene" | "sync.player" | "media.play" | "media.stop" | "story.entered" | "story.view" | "story.left" | "story.error" | "story.slots" | "story.saved" | "story.restored";
+export type ServerMessageType = "server.welcome" | "server.notice" | "server.heartbeat" | "action.result" | "scene.snapshot" | "player.snapshot" | "scene.patch" | "entity.upsert" | "entity.remove" | "vitals.update" | "inventory.patch" | "container.contents" | "trade.contents" | "reward.odds" | "mail.list" | "mail.message" | "board.catalog" | "board.list" | "board.entry" | "map.snapshot" | "message.append" | "chat.message" | "sync.scene" | "sync.player" | "media.play" | "media.stop" | "story.entered" | "story.view" | "story.left" | "story.error" | "story.slots" | "story.saved" | "story.restored" | "story.lobby" | "story.tally" | "story.invitation";
 
-export type ClientMessageType = "client.hello" | "command.submit" | "action.perform" | "sync.request" | "client.heartbeat" | "story.choose" | "story.menu" | "story.dialogue" | "story.undo" | "story.leave" | "story.save" | "story.restore" | "story.slots" | "story.deleteSlot" | "story.continue";
+export type ClientMessageType = "client.hello" | "command.submit" | "action.perform" | "sync.request" | "client.heartbeat" | "story.choose" | "story.menu" | "story.dialogue" | "story.undo" | "story.leave" | "story.save" | "story.restore" | "story.slots" | "story.deleteSlot" | "story.continue" | "story.share" | "story.join" | "story.invite" | "story.kick" | "story.mode" | "story.vote";
 
 export type ServerEnvelope<T> = { v: ProtocolVersion, type: ServerMessageType, seq: number, data: T, };
 
@@ -117,11 +117,11 @@ export type StoryItem = { "type": "scene", title: string, text: string, score: n
 
 export type StoryView = { viewRev: number, part: number, parts: number, turn: number, canUndo: boolean, items: Array<StoryItem>, };
 
-export type StoryLeftReason = "left" | "evicted";
+export type StoryLeftReason = "left" | "evicted" | "kicked" | "ended";
 
 export type StoryLeft = { reason: StoryLeftReason, };
 
-export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited";
+export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited" | "host_only" | "spectator" | "not_your_turn" | "unknown_code" | "seats_full" | "not_shared" | "unknown_member" | "invalid_setting";
 
 export type StoryError = { code: StoryErrorCode, message: string, };
 
@@ -143,3 +143,33 @@ export type StorySlots = { slots: Array<StorySlotSummary>, offerContinue: boolea
 export type StorySaved = { slot: number, updatedAt: number, };
 
 export type StoryRestored = { slot: number, };
+
+export type StoryDecisionMode = "host" | "vote" | "turns";
+
+export type StorySeatRole = "host" | "player" | "spectator";
+
+export type StoryJoinData = { code: string, spectate: boolean, };
+
+export type StoryNameData = { name: string, };
+
+export type StoryModeData = { mode: StoryDecisionMode, voteSeconds?: number, };
+
+export type StoryVoteData = { choiceId?: string, viewRev: number, };
+
+export type StorySeat = { name: string, role: StorySeatRole, 
+/**
+ * False while the seat is held for a disconnected player.
+ */
+connected: boolean, 
+/**
+ * True for the seat whose turn it is (round-robin mode only).
+ */
+turn: boolean, };
+
+export type StoryLobby = { mode: StoryDecisionMode, voteSeconds: number, you: StorySeatRole, code?: string, seats: Array<StorySeat>, spectators: number, maxSeats: number, maxSpectators: number, };
+
+export type StoryTallyEntry = { choiceId: string, votes: number, };
+
+export type StoryTally = { viewRev: number, mode: StoryDecisionMode, choices: Array<StoryTallyEntry>, voted: number, eligible: number, remainingSeconds?: number, yourVote?: string, };
+
+export type StoryInvitation = { host: string, storyId: string, title: string, code: string, };

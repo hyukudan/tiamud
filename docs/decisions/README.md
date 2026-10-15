@@ -38,6 +38,7 @@ implementación por fase vive en
 | [0029](0029-story-session-instances-and-story-protocol.md) | Story session instances and `story.*` protocol | Propuesto (implementación parcial S2: un jugador, en memoria) | Narrativa S2 |
 | [0031](0031-parser-interactive-fiction-storypack-v3.md) | Parser interactive fiction (StoryPack v3) | Propuesto (núcleo de biblioteca, sin cablear al servidor) | Narrativa S5 |
 | [0032](0032-worldpack-v10-quests-and-shops.md) | WorldPack v10 quests, commodities and shops | Propuesto (implementado en el MUD; aceptación pendiente) | Contenido MUD (S8 lado MUD) |
+| [0033](0033-shared-story-instances-and-voting.md) | Shared story instances, seats and voting | Propuesto (implementación parcial S7) | Narrativa S7 |
 
 El estado de fase (`Complete`/`Partial`) es autoridad de
 [`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).

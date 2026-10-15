@@ -55,6 +55,7 @@ fn stories_with(pack: StoryPack, store: &Arc<dyn CharacterStore>, idle: Duration
         StoryLimits {
             max_instances: 8,
             idle_timeout: idle,
+            ..StoryLimits::default()
         },
     );
     stories.attach_store(store.clone());

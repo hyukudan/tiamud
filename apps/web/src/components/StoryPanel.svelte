@@ -1,8 +1,14 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { StoryError } from '../lib/protocol';
-  import type { StorySlotSummary } from '../lib/generated/protocol';
+  import type {
+    StoryDecisionMode,
+    StoryLobby as StoryLobbyState,
+    StorySlotSummary,
+    StoryTally,
+  } from '../lib/generated/protocol';
   import { presentStory, type AssembledStoryView } from '../lib/story-protocol';
+  import StoryLobby from './StoryLobby.svelte';
 
   interface Props {
     view: AssembledStoryView;
@@ -28,6 +34,17 @@
     onslots?: () => void;
     oncontinue?: () => void;
     ondismisscontinue?: () => void;
+    /** Seats and rules while the story is shared (ADR 0033). */
+    lobby?: StoryLobbyState;
+    tally?: StoryTally;
+    deadline?: number;
+    /** True when choosing casts a vote instead of acting. */
+    votes?: boolean;
+    onshare?: () => void;
+    oninvite?: (name: string) => boolean;
+    onkick?: (name: string) => void;
+    onmode?: (mode: StoryDecisionMode, voteSeconds?: number) => void;
+    onwithdraw?: () => void;
   }
 
   let {
@@ -50,14 +67,37 @@
     onslots,
     oncontinue,
     ondismisscontinue,
+    lobby,
+    tally,
+    deadline,
+    votes = false,
+    onshare,
+    oninvite,
+    onkick,
+    onmode,
+    onwithdraw,
   }: Props = $props();
+
+  const spectating = $derived(lobby?.you === 'spectator');
+  /** Votes of the current view by opaque leaf id. */
+  const voteCounts = $derived(new Map(
+    tally && tally.viewRev === view.viewRev
+      ? tally.choices.map((entry) => [entry.choiceId, entry.votes] as const)
+      : [],
+  ));
+  const yourVote = $derived(tally?.viewRev === view.viewRev ? tally.yourVote : undefined);
+  const voteLabel = (id: string): string => {
+    const count = voteCounts.get(id) ?? 0;
+    return count === 0 ? '' : count === 1 ? '1 vote' : `${count} votes`;
+  };
 
   /** Slot rows: the autosave (0) then the nine manual slots. */
   const SLOT_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
   let savesOpen = $state(false);
   let savesToggle = $state<HTMLButtonElement>();
   let savesHeading = $state<HTMLHeadingElement>();
-  const slotsAvailable = $derived(Boolean(onsave && onrestore));
+  // Save slots of a shared story belong to its host.
+  const slotsAvailable = $derived(Boolean(onsave && onrestore) && (!lobby || lobby.you === 'host'));
   const autosave = $derived(slots?.find((slot) => slot.slot === 0));
 
   /** Deterministic, locale-independent timestamp. */
@@ -88,7 +128,7 @@
   }
 
   const story = $derived(presentStory(view));
-  const disabled = $derived(!connected || pending);
+  const disabled = $derived(!connected || pending || spectating);
   /** Numbered actions in the same order Telnet numbers them. */
   const actions = $derived([
     ...story.choices.map((choice) => ({ label: choice.label, run: () => onchoose(choice.id) })),
@@ -167,6 +207,20 @@
 
   {#if error}<p class="story-error" role="alert">{error.message}</p>{/if}
 
+  {#if lobby}
+    <StoryLobby
+      {lobby}
+      {tally}
+      {deadline}
+      {connected}
+      {oninvite}
+      {onkick}
+      {onmode}
+      {onwithdraw}
+    />
+    {#if spectating}<p class="story-hint">You are watching as a spectator.</p>{/if}
+  {/if}
+
   {#if story.present.length > 0}
     <p class="story-present" {lang}>Present: {story.present.join(', ')}</p>
   {/if}
@@ -175,8 +229,14 @@
     <ol class="story-choices" aria-label={story.dialogue.length > 0 ? 'Dialogue options' : 'Choices'} {lang}>
       {#each [...story.choices, ...story.dialogue] as option, index (option.id)}
         <li>
-          <button type="button" {disabled} onclick={() => onchoose(option.id)}>
+          <button
+            type="button"
+            {disabled}
+            aria-pressed={votes ? yourVote === option.id : undefined}
+            onclick={() => onchoose(option.id)}
+          >
             <span aria-hidden="true">{index + 1}.</span> {option.label}
+            {#if voteLabel(option.id)}<span class="story-votes" lang="en">· {voteLabel(option.id)}</span>{/if}
           </button>
         </li>
       {/each}
@@ -193,12 +253,16 @@
               {#each verb.targets as target (target.id)}
                 <button type="button" {disabled} onclick={() => onmenu(verb.id, target.id)}>
                   {target.label}
+                  {#if voteLabel(target.id)}<span class="story-votes" lang="en">· {voteLabel(target.id)}</span>{/if}
                 </button>
               {/each}
             </fieldset>
           {/if}
         {:else}
-          <button type="button" {disabled} onclick={() => onmenu(verb.id)}>{verb.label}</button>
+          <button type="button" {disabled} onclick={() => onmenu(verb.id)}>
+            {verb.label}
+            {#if voteLabel(verb.id)}<span class="story-votes" lang="en">· {voteLabel(verb.id)}</span>{/if}
+          </button>
         {/if}
       {/each}
     </div>
@@ -217,6 +281,9 @@
 
   <div class="story-controls">
     <button type="button" disabled={disabled || !view.canUndo} onclick={onundo}>Undo</button>
+    {#if onshare && !lobby}
+      <button type="button" disabled={!connected || pending} onclick={onshare}>Share story</button>
+    {/if}
     {#if slotsAvailable}
       <button
         type="button"
@@ -281,8 +348,10 @@
       <button type="button" onclick={closeSaves}>Close saved games</button>
     </section>
   {/if}
-  {#if actions.length > 0}
-    <p class="story-hint">Press 1–{Math.min(9, actions.length)} to choose.</p>
+  {#if actions.length > 0 && !spectating}
+    <p class="story-hint">
+      Press 1–{Math.min(9, actions.length)} to {votes ? 'vote' : 'choose'}.
+    </p>
   {/if}
 </section>
 
@@ -397,6 +466,16 @@
 
   .story-slot-state {
     flex: 1 1 12rem;
+  }
+
+  .story-votes {
+    margin-inline-start: 0.4rem;
+    font-size: 0.875rem;
+    font-style: italic;
+  }
+
+  .story-choices button[aria-pressed='true'] {
+    outline: 2px solid #d9c27a;
   }
 
   .story-notice,

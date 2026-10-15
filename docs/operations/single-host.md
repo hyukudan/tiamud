@@ -128,6 +128,32 @@ means accounts at their slot capacity or a store problem (see the server
 log, which never logs state contents). While a player is in a story the
 character stays connected and visible in its room.
 
+Shared story instances ([ADR 0033](../decisions/0033-shared-story-instances-and-voting.md),
+proposed, phase S7) need no extra service; all four settings fail closed out
+of range and are refused without `TIAMUD_STORY_DIR`:
+
+- `TIAMUD_STORY_MAX_SEATS` (`2..=8`, default `8`) seats per shared instance.
+- `TIAMUD_STORY_MAX_SPECTATORS` (`0..=32`, default `32`) read-only
+  spectators per shared instance; `0` disables spectating.
+- `TIAMUD_STORY_VOTE_SECONDS` (`30..=120`, default `60`) default vote and
+  turn window; the host may change it per instance within the same range.
+- `TIAMUD_STORY_SEAT_GRACE_SECONDS` (`30..=600`, default `120`) how long a
+  disconnected player's seat is held before it lapses.
+
+A shared instance counts once against `TIAMUD_STORY_MAX_INSTANCES`. Join
+attempts are limited to 10 per account and minute and invitations to 10 per
+host and minute; invitations do not yet consult the world's ignore/block
+lists (they carry only the host name, story title and join code). Save slots
+and the autosave of a shared instance belong to the host account. Shared
+metrics: `tiamud_story_shared_instances`,
+`tiamud_story_shared_started_total`,
+`tiamud_story_shared_joins_total{result=ok|rejected}`,
+`tiamud_story_shared_votes_total`, `tiamud_story_shared_decisions_total`,
+`tiamud_story_shared_invitations_total`, `tiamud_story_shared_kicks_total`
+and `tiamud_story_shared_seat_lapses_total`. A closed shared instance counts
+in `tiamud_story_instances_closed_total{reason="left"}` when its last seat
+leaves or lapses.
+
 ## Rate limits and metrics
 
 The environment example configures bounded browser authentication and command
