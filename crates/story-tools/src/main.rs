@@ -81,11 +81,11 @@ enum Command {
         /// Replace an existing output file.
         #[arg(long, requires = "output")]
         force: bool,
-        /// Rewrite a format v1 pack as format v2 (a lossless version bump).
+        /// Rewrite a format v1 or v2 pack as format v3 (a lossless version bump).
         #[arg(long, conflicts_with = "check")]
         upgrade: bool,
     },
-    /// Print the published JSON Schema of the current StoryPack format (v2).
+    /// Print the published JSON Schema of the current StoryPack format (v3).
     Schema,
 }
 
@@ -173,6 +173,15 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 .filter_map(|node| node.menu.as_ref())
                 .map(|menu| menu.entries.len())
                 .sum();
+            let world = pack.world.as_ref().map_or_else(String::new, |world| {
+                format!(
+                    ", {} room(s), {} object(s), {} rule(s), lexicon(s) {}",
+                    pack.nodes.iter().filter(|node| node.room.is_some()).count(),
+                    world.objects.len(),
+                    world.rules.len(),
+                    world.languages().join("+"),
+                )
+            });
             let menus = if pack.verbs.is_empty() && pack.dialogues.is_empty() {
                 String::new()
             } else {
@@ -185,7 +194,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 )
             };
             println!(
-                "valid StoryPack {:?} (format v{}): {} node(s), {} choice(s), {} variable(s), {} item(s){menus}; {} warning(s), {} lint(s)",
+                "valid StoryPack {:?} (format v{}): {} node(s), {} choice(s), {} variable(s), {} item(s){menus}{world}; {} warning(s), {} lint(s)",
                 pack.id,
                 pack.format_version,
                 pack.nodes.len(),

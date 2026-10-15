@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::rng::SplitMix64;
 use crate::state::key;
+use crate::world::{Location, ObjectFlag};
 use crate::{
     Choice, Condition, Cue, Dialogue, DialogueNext, DialogueNode, DialogueOption, DialoguePosition,
     Effect, Ending, LastResponse, LocalizedText, MAX_CONDITION_DEPTH, MAX_DICE_COUNT,
@@ -28,6 +29,15 @@ pub enum StoryInput {
     },
     /// Answers the active dialogue with an option token.
     DialogueChoice { token: String },
+    /// Free text for the parser of a format v3 pack with a world. The
+    /// language picks a lexicon (`es`, `en`); absent or unknown, the pack's
+    /// first lexicon is used. Meta commands (undo, save, restore, quit,
+    /// restart) are only reported by [`crate::step_command`].
+    Command {
+        text: String,
+        #[serde(default)]
+        language: Option<String>,
+    },
 }
 
 /// Ordered, internal record of what one step did. A transport layer projects
@@ -107,7 +117,7 @@ pub fn resolve_choice<'a>(
         return Err(StoryError::MalformedToken);
     };
     let node = current_node(pack, state)?;
-    available_choices(state, node)?
+    available_choices(pack, state, node)?
         .into_iter()
         .nth(ordinal)
         .ok_or(StoryError::UnknownChoice)
@@ -201,6 +211,10 @@ pub fn step(
             let option = resolve_dialogue_option(pack, state, &token)?;
             dialogue_choice(pack, state, option)
         }
+        StoryInput::Command { text, language } => {
+            let stepped = crate::command::step_command(pack, state, &text, language.as_deref())?;
+            Ok((stepped.state, stepped.events))
+        }
     }
 }
 
@@ -231,7 +245,7 @@ fn menu_action(
         return Ok(exec.finish());
     };
     // Responses are chosen against the state *before* this use is counted.
-    let response = select_response(&exec.state, node, entry)?;
+    let response = select_response(pack, &exec.state, node, entry)?;
     let counter = key(&[&node.id, &entry.id]);
     let uses = exec.state.menu_uses.get(&counter).copied().unwrap_or(0);
     exec.state
@@ -330,6 +344,7 @@ fn default_response(node: &Node, verb: &str) -> LastResponse {
 }
 
 fn select_response<'a>(
+    pack: &StoryPack,
     state: &StoryState,
     node: &Node,
     entry: &'a MenuEntry,
@@ -344,7 +359,7 @@ fn select_response<'a>(
         }
         let open = match &response.when {
             None => true,
-            Some(condition) => evaluate(state, condition, 0)?,
+            Some(condition) => evaluate(pack, state, condition, 0)?,
         };
         if open {
             return Ok(Some(response));
@@ -429,12 +444,13 @@ pub(crate) fn current_node<'a>(
 }
 
 pub(crate) fn available_choices<'a>(
+    pack: &StoryPack,
     state: &StoryState,
     node: &'a Node,
 ) -> Result<Vec<&'a Choice>, StoryError> {
     let mut out = Vec::new();
     for choice in &node.choices {
-        if holds(state, choice.when.as_ref())? {
+        if holds(pack, state, choice.when.as_ref())? {
             out.push(choice);
         }
     }
@@ -452,7 +468,7 @@ pub(crate) fn menu_verbs<'a>(
     };
     let mut out = Vec::new();
     for offered in &menu.verbs {
-        if holds(state, offered.when.as_ref())? {
+        if holds(pack, state, offered.when.as_ref())? {
             let verb = pack
                 .verb(&offered.verb)
                 .ok_or_else(|| StoryError::InvalidPack("menu names an unknown verb".to_owned()))?;
@@ -474,14 +490,14 @@ pub(crate) fn verb_targets<'a>(
         TargetKind::None => {}
         TargetKind::Hotspot => {
             for hotspot in &node.hotspots {
-                if holds(state, hotspot.when.as_ref())? {
+                if holds(pack, state, hotspot.when.as_ref())? {
                     out.push((hotspot.id.as_str(), &hotspot.label));
                 }
             }
         }
         TargetKind::Character => {
             for presence in &node.present {
-                if holds(state, presence.when.as_ref())? {
+                if holds(pack, state, presence.when.as_ref())? {
                     let character = pack.character(&presence.character).ok_or_else(|| {
                         StoryError::InvalidPack("presence names an unknown character".to_owned())
                     })?;
@@ -523,7 +539,7 @@ pub(crate) fn active_dialogue<'a>(
         {
             continue;
         }
-        if holds(state, option.when.as_ref())? {
+        if holds(pack, state, option.when.as_ref())? {
             options.push(option);
         }
     }
@@ -547,21 +563,30 @@ pub(crate) fn dialogue_node<'a>(
     Ok(Some((dialogue, node)))
 }
 
-pub(crate) fn holds(state: &StoryState, condition: Option<&Condition>) -> Result<bool, StoryError> {
+pub(crate) fn holds(
+    pack: &StoryPack,
+    state: &StoryState,
+    condition: Option<&Condition>,
+) -> Result<bool, StoryError> {
     match condition {
         None => Ok(true),
-        Some(condition) => evaluate(state, condition, 0),
+        Some(condition) => evaluate(pack, state, condition, 0),
     }
 }
 
-fn evaluate(state: &StoryState, condition: &Condition, depth: usize) -> Result<bool, StoryError> {
+pub(crate) fn evaluate(
+    pack: &StoryPack,
+    state: &StoryState,
+    condition: &Condition,
+    depth: usize,
+) -> Result<bool, StoryError> {
     if depth >= MAX_CONDITION_DEPTH {
         return Err(StoryError::InvalidPack("condition is too deep".to_owned()));
     }
     Ok(match condition {
         Condition::All(children) => {
             for child in children {
-                if !evaluate(state, child, depth + 1)? {
+                if !evaluate(pack, state, child, depth + 1)? {
                     return Ok(false);
                 }
             }
@@ -569,13 +594,13 @@ fn evaluate(state: &StoryState, condition: &Condition, depth: usize) -> Result<b
         }
         Condition::Any(children) => {
             for child in children {
-                if evaluate(state, child, depth + 1)? {
+                if evaluate(pack, state, child, depth + 1)? {
                     return Ok(true);
                 }
             }
             false
         }
-        Condition::Not(child) => !evaluate(state, child, depth + 1)?,
+        Condition::Not(child) => !evaluate(pack, state, child, depth + 1)?,
         Condition::VarCmp { var, op, value } => match state.vars.get(var) {
             Some(Value::Int(current)) => op.apply(*current, *value),
             _ => {
@@ -607,17 +632,39 @@ fn evaluate(state: &StoryState, condition: &Condition, depth: usize) -> Result<b
                 .unwrap_or(0);
             op.apply(i64::from(uses), *value)
         }
+        Condition::Carried(obj) => {
+            object_state(state, obj)?;
+            crate::runtime::held(state, obj)
+        }
+        Condition::ObjectAt { obj, at } => object_state(state, obj)?.at == *at,
+        Condition::ObjectIs { obj, flag } => object_state(state, obj)?.flag(*flag),
+        Condition::Visible(obj) => {
+            object_state(state, obj)?;
+            crate::runtime::visible(pack, state, obj)
+        }
+        Condition::PlayerIn(node) => state.node == *node,
+        Condition::TurnCmp { op, value } => op.apply(i64::from(state.turn), *value),
     })
 }
 
-struct Exec<'a> {
-    pack: &'a StoryPack,
+fn object_state<'a>(
+    state: &'a StoryState,
+    obj: &str,
+) -> Result<&'a crate::world::ObjectState, StoryError> {
+    state
+        .objects
+        .get(obj)
+        .ok_or_else(|| StoryError::InvalidPack("condition names an unknown object".to_owned()))
+}
+
+pub(crate) struct Exec<'a> {
+    pub(crate) pack: &'a StoryPack,
     rng: SplitMix64,
-    state: StoryState,
-    events: Vec<StoryEvent>,
-    budget: usize,
+    pub(crate) state: StoryState,
+    pub(crate) events: Vec<StoryEvent>,
+    pub(crate) budget: usize,
     destination: Option<String>,
-    ended: bool,
+    pub(crate) ended: bool,
 }
 
 impl<'a> Exec<'a> {
@@ -643,8 +690,25 @@ impl<'a> Exec<'a> {
         })
     }
 
+    /// Continues from `state` without advancing the turn, for parser
+    /// commands that count their own turns. Clears the last menu response
+    /// and drops a dialogue position that no longer blocks.
+    pub(crate) fn resume(pack: &'a StoryPack, mut state: StoryState) -> Self {
+        state.last = None;
+        state.dialogue = None;
+        Self {
+            pack,
+            rng: SplitMix64::from_state(state.rng),
+            state,
+            events: Vec::new(),
+            budget: MAX_EFFECTS_PER_CHOICE,
+            destination: None,
+            ended: false,
+        }
+    }
+
     /// Enters the effect destination, or `fallback`. Returns true on a move.
-    fn finish_move(&mut self, fallback: Option<&str>) -> Result<bool, StoryError> {
+    pub(crate) fn finish_move(&mut self, fallback: Option<&str>) -> Result<bool, StoryError> {
         if self.ended {
             return Ok(false);
         }
@@ -661,7 +725,7 @@ impl<'a> Exec<'a> {
         }
     }
 
-    fn finish(self) -> (StoryState, Vec<StoryEvent>) {
+    pub(crate) fn finish(self) -> (StoryState, Vec<StoryEvent>) {
         let Exec {
             mut state,
             rng,
@@ -672,7 +736,7 @@ impl<'a> Exec<'a> {
         (state, events)
     }
 
-    fn run(&mut self, effects: &[Effect], depth: usize) -> Result<(), StoryError> {
+    pub(crate) fn run(&mut self, effects: &[Effect], depth: usize) -> Result<(), StoryError> {
         if depth > MAX_EFFECT_DEPTH {
             return Err(StoryError::EffectBudget);
         }
@@ -771,7 +835,7 @@ impl<'a> Exec<'a> {
                 then,
                 otherwise,
             } => {
-                let branch = if evaluate(&self.state, when, 0)? {
+                let branch = if evaluate(self.pack, &self.state, when, 0)? {
                     then
                 } else {
                     otherwise
@@ -793,13 +857,94 @@ impl<'a> Exec<'a> {
                 });
             }
             Effect::End(ending) => self.end(ending.clone()),
+            Effect::MoveObject { obj, to } => self.move_object(obj, to)?,
+            Effect::SetObject { obj, flag, value } => self.set_object(obj, *flag, *value)?,
+        }
+        Ok(())
+    }
+
+    /// Moves an object; a move into itself or its own contents is ignored
+    /// and an object leaving the player's hands is no longer worn.
+    pub(crate) fn move_object(&mut self, obj: &str, to: &Location) -> Result<(), StoryError> {
+        let invalid = |message: &str| StoryError::InvalidPack(message.to_owned());
+        if !self.state.objects.contains_key(obj) {
+            return Err(invalid("effect names an unknown object"));
+        }
+        match to {
+            Location::Room(node) => {
+                if self.pack.room(node).is_none() {
+                    return Err(invalid("effect names an unknown room"));
+                }
+            }
+            Location::In(container) => {
+                if !self
+                    .pack
+                    .object(container)
+                    .is_some_and(|decl| decl.container)
+                {
+                    return Err(invalid("effect names an unknown container"));
+                }
+                if container == obj || crate::runtime::inside(&self.state, container, obj) {
+                    return Ok(());
+                }
+            }
+            Location::Carried | Location::Nowhere => {}
+        }
+        if let Some(object) = self.state.objects.get_mut(obj) {
+            object.at = to.clone();
+            if *to != Location::Carried {
+                object.worn = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_object(&mut self, obj: &str, flag: ObjectFlag, value: bool) -> Result<(), StoryError> {
+        let decl = self
+            .pack
+            .object(obj)
+            .ok_or_else(|| StoryError::InvalidPack("effect names an unknown object".to_owned()))?;
+        let allowed = match flag {
+            ObjectFlag::Open | ObjectFlag::Locked => decl.openable,
+            ObjectFlag::Lit => decl.lightable || decl.lit,
+            ObjectFlag::Worn => decl.wearable,
+        };
+        if !allowed {
+            return Err(StoryError::InvalidPack(
+                "effect sets a flag the object does not have".to_owned(),
+            ));
+        }
+        let Some(object) = self.state.objects.get_mut(obj) else {
+            return Err(StoryError::InvalidPack(
+                "effect names an unknown object".to_owned(),
+            ));
+        };
+        match flag {
+            ObjectFlag::Open => {
+                object.open = value;
+                if value {
+                    object.locked = false;
+                }
+            }
+            ObjectFlag::Locked => {
+                object.locked = value;
+                if value {
+                    object.open = false;
+                }
+            }
+            ObjectFlag::Lit => object.lit = value,
+            ObjectFlag::Worn => {
+                if !value || object.at == Location::Carried {
+                    object.worn = value;
+                }
+            }
         }
         Ok(())
     }
 
     /// Moves to a scene: leaves any dialogue, records the visit, emits the
     /// scene's cues and ends the story on an ending node.
-    fn enter(&mut self, node_id: &str) -> Result<(), StoryError> {
+    pub(crate) fn enter(&mut self, node_id: &str) -> Result<(), StoryError> {
         let node = self
             .pack
             .node(node_id)

@@ -26,12 +26,20 @@
 //! start, options that can never be offered, and portraits that name an
 //! expression the character does not declare. Menu responses and dialogue
 //! exits also feed the reachability, ending and soft-lock analysis.
+//!
+//! Format v3 (parser worlds) adds world lints: objects that share a room and
+//! whose words the parser can never tell apart, keys that never enter play,
+//! locked objects nothing can unlock, objects that never enter play, and
+//! rule actions some lexicon of the world cannot produce. Room exits and
+//! rule destinations feed the same reachability analysis (the core
+//! validator already warns about rooms no exit reaches).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tiamud_story_core::{
-    CmpOp, Condition, DialogueNext, Effect, MAX_MENU_USES, MAX_REPORTED_ISSUES, Menu, MenuEntry,
-    Node, StoryPack, TargetKind, TextBlock, Value, VariableKind,
+    CmpOp, Condition, DialogueNext, Effect, Location, MAX_MENU_USES, MAX_REPORTED_ISSUES,
+    MAX_TURNS, Menu, MenuEntry, Node, ObjectDecl, ObjectFlag, StoryPack, TargetKind, TextBlock,
+    Value, VariableKind, World,
 };
 
 /// One authoring lint located by pack path and authored ids.
@@ -113,6 +121,10 @@ struct Mutations<'a> {
     sets: BTreeMap<&'a str, Vec<Value>>,
     given: BTreeSet<&'a str>,
     taken: BTreeSet<&'a str>,
+    /// World objects some effect moves.
+    moved: BTreeSet<&'a str>,
+    /// World objects some effect opens or unlocks.
+    unlocked: BTreeSet<&'a str>,
 }
 
 fn collect_mutations<'a>(effects: &'a [Effect], out: &mut Mutations<'a>) {
@@ -138,6 +150,21 @@ fn collect_mutations<'a>(effects: &'a [Effect], out: &mut Mutations<'a>) {
             } => {
                 collect_mutations(then, out);
                 collect_mutations(otherwise, out);
+            }
+            Effect::MoveObject { obj, .. } => {
+                out.moved.insert(obj);
+            }
+            Effect::SetObject {
+                obj,
+                flag: ObjectFlag::Open,
+                value: true,
+            }
+            | Effect::SetObject {
+                obj,
+                flag: ObjectFlag::Locked,
+                value: false,
+            } => {
+                out.unlocked.insert(obj);
             }
             _ => {}
         }
@@ -257,6 +284,19 @@ impl<'a> Facts<'a> {
             Condition::Uses { op, value, .. } => {
                 compare_range(0, i64::from(MAX_MENU_USES), *op, *value)
             }
+            Condition::PlayerIn(node) => {
+                if self.loose_reachable.contains(node.as_str()) {
+                    Truth::Maybe
+                } else {
+                    Truth::Never
+                }
+            }
+            Condition::TurnCmp { op, value } => compare_range(0, i64::from(MAX_TURNS), *op, *value),
+            // Object state changes with every command; never decided.
+            Condition::Carried(_)
+            | Condition::ObjectAt { .. }
+            | Condition::ObjectIs { .. }
+            | Condition::Visible(_) => Truth::Maybe,
         }
     }
 
@@ -412,6 +452,19 @@ impl Graph {
                             targets.extend(exits.iter().copied());
                             can_end |= *ends_dialogue;
                         }
+                    }
+                }
+            }
+            if let (Some(room), Some(world)) = (&node.room, &pack.world) {
+                for exit in &room.exits {
+                    if !closed(exit.when.as_ref()) {
+                        targets.push(exit.to.as_str());
+                    }
+                }
+                // A rule can fire in any room.
+                for rule in &world.rules {
+                    if !closed(rule.when.as_ref()) {
+                        walk_targets(facts, prune, &rule.effects, &mut targets, &mut can_end);
                     }
                 }
             }
@@ -599,7 +652,152 @@ fn all_effect_lists(pack: &StoryPack) -> Vec<&[Effect]> {
                 .map(|option| option.effects.as_slice()),
         );
     }
+    if let Some(world) = &pack.world {
+        lists.extend(world.rules.iter().map(|rule| rule.effects.as_slice()));
+    }
     lists
+}
+
+/// Rooms an object stands in at the start: its outermost holder's room plus
+/// `found_in`, or `None` when it starts carried (in scope everywhere).
+fn initial_rooms<'a>(world: &'a World, decl: &'a ObjectDecl) -> Option<BTreeSet<&'a str>> {
+    let mut current = decl;
+    for _ in 0..=world.objects.len() {
+        match &current.location {
+            Location::In(container) => {
+                current = world.objects.iter().find(|other| other.id == *container)?;
+            }
+            Location::Room(room) => {
+                let mut rooms: BTreeSet<&str> =
+                    current.found_in.iter().map(String::as_str).collect();
+                rooms.insert(room.as_str());
+                return Some(rooms);
+            }
+            Location::Carried => return None,
+            Location::Nowhere => return Some(BTreeSet::new()),
+        }
+    }
+    Some(BTreeSet::new())
+}
+
+/// Folded words of one object in one language.
+fn object_words<'a>(decl: &'a ObjectDecl, language: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+    let fold = |list: Option<&'a Vec<String>>| {
+        list.into_iter()
+            .flatten()
+            .map(|word| tiamud_story_parser::fold(word))
+            .collect::<BTreeSet<_>>()
+    };
+    (
+        fold(decl.nouns.get(language)),
+        fold(decl.adjectives.get(language)),
+    )
+}
+
+fn lint_world(pack: &StoryPack, report: &mut LintReport) {
+    let Some(world) = &pack.world else {
+        return;
+    };
+    let mut mutations = Mutations::default();
+    for effects in all_effect_lists(pack) {
+        collect_mutations(effects, &mut mutations);
+    }
+    // Objects the parser can never single out: every word of one is also a
+    // word of another that starts in the same room (or is carried).
+    let rooms: Vec<Option<BTreeSet<&str>>> = world
+        .objects
+        .iter()
+        .map(|decl| initial_rooms(world, decl))
+        .collect();
+    for language in world.languages() {
+        for (a, first) in world.objects.iter().enumerate() {
+            for (b, second) in world.objects.iter().enumerate() {
+                if a == b {
+                    continue;
+                }
+                let together = match (&rooms[a], &rooms[b]) {
+                    (None, _) | (_, None) => true,
+                    (Some(left), Some(right)) => !left.is_disjoint(right),
+                };
+                if !together {
+                    continue;
+                }
+                let (nouns_a, adjectives_a) = object_words(first, language);
+                let (nouns_b, adjectives_b) = object_words(second, language);
+                let shares_noun = !nouns_a.is_disjoint(&nouns_b);
+                let covered = nouns_a
+                    .iter()
+                    .chain(&adjectives_a)
+                    .all(|word| nouns_b.contains(word) || adjectives_b.contains(word));
+                if shares_noun && covered {
+                    report.push(
+                        format!("world.objects[{a}] ({})", first.id),
+                        format!(
+                            "every {language} word of this object also names {:?} in the same room; the parser always has to ask which one",
+                            second.id
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    for (index, decl) in world.objects.iter().enumerate() {
+        let path = format!("world.objects[{index}] ({})", decl.id);
+        let never_in_play =
+            decl.location == Location::Nowhere && !mutations.moved.contains(decl.id.as_str());
+        if never_in_play {
+            report.push(path.clone(), "object starts nowhere and no effect moves it");
+        }
+        if decl.locked && !mutations.unlocked.contains(decl.id.as_str()) {
+            match &decl.key {
+                None => report.push(
+                    path,
+                    "object is locked, has no key and no effect unlocks it",
+                ),
+                Some(key) => {
+                    let key_lost = world.objects.iter().any(|other| {
+                        other.id == *key
+                            && other.location == Location::Nowhere
+                            && !mutations.moved.contains(other.id.as_str())
+                    });
+                    if key_lost {
+                        report.push(
+                            path,
+                            format!("its key {key:?} never enters play and no effect unlocks it"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // With several lexicons, each rule action should exist in all of them.
+    if world.lexicons.len() > 1 {
+        for lexicon in &world.lexicons {
+            let json = tiamud_story_parser::Parser::builtin_lexicon_json(&lexicon.id);
+            let Some(base) = json.and_then(|json| {
+                tiamud_story_parser::Lexicon::from_json_slice(json.as_bytes()).ok()
+            }) else {
+                continue;
+            };
+            let mut actions: BTreeSet<&str> = BTreeSet::new();
+            actions.insert(base.go_action.as_str());
+            for verb in base.verbs.iter().chain(&lexicon.verbs) {
+                actions.insert(verb.action.as_str());
+                actions.extend(verb.patterns.iter().filter_map(|p| p.action.as_deref()));
+            }
+            for (index, rule) in world.rules.iter().enumerate() {
+                if !actions.contains(rule.action.as_str()) {
+                    report.push(
+                        format!("world.rules[{index}] ({})", rule.id),
+                        format!(
+                            "the {:?} lexicon never produces action {:?}",
+                            lexicon.id, rule.action
+                        ),
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn lint_menu(
@@ -852,6 +1050,7 @@ pub fn lint(pack: &StoryPack) -> LintReport {
     }
     lint_dialogues(&facts, &mut report);
     lint_portraits(pack, &mut report);
+    lint_world(pack, &mut report);
 
     let loose = Graph::build(&facts, false);
     let strict = Graph::build(&facts, true);

@@ -11,3 +11,4 @@ description = "Pure, deterministic narrative ruleset (StoryPack) for Tiamud stor
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tiamud-story-parser = { path = "../story-parser" }

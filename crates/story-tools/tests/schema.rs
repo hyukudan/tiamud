@@ -6,7 +6,9 @@
 
 use serde_json::{Value, json};
 use tiamud_story_core::StoryPack;
-use tiamud_story_tools::{STORY_PACK_SCHEMA, STORY_PACK_SCHEMA_V1, format::canonical_json};
+use tiamud_story_tools::{
+    STORY_PACK_SCHEMA, STORY_PACK_SCHEMA_V1, STORY_PACK_SCHEMA_V2, format::canonical_json,
+};
 
 const ID_PATTERN: &str = "^[a-z0-9][a-z0-9._-]{0,63}$";
 const LOCALE_PATTERN: &str = "^[A-Za-z][A-Za-z0-9-]{1,34}$";
@@ -259,7 +261,7 @@ fn shapes_the_loader_rejects_are_rejected_by_the_schema() {
     type Mutation = Box<dyn Fn(&mut Value)>;
     let mutations: Vec<Mutation> = vec![
         Box::new(|pack| pack["sorpresa"] = json!(1)),
-        Box::new(|pack| pack["format_version"] = json!(3)),
+        Box::new(|pack| pack["format_version"] = json!(4)),
         Box::new(|pack| {
             pack.as_object_mut().unwrap().remove("start");
         }),
@@ -379,5 +381,125 @@ fn schema_bounds_match_core_constants() {
     assert_eq!(
         props("dialogueNode", "options")["maxItems"],
         MAX_DIALOGUE_OPTIONS
+    );
+}
+
+fn faro() -> Value {
+    serde_json::from_slice(include_bytes!(
+        "../../story-core/fixtures/parser/faro-de-punta-gris.story.json"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn v3_fixtures_satisfy_the_schema_and_older_schemas_reject_them() {
+    let root = schema();
+    for document in [
+        faro(),
+        serde_json::from_slice(include_bytes!("fixtures/world-lints.story.json")).unwrap(),
+    ] {
+        assert!(valid(&root, &root, &document));
+        let pack = StoryPack::from_json_slice(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let canonical: Value = serde_json::from_slice(&canonical_json(&pack).unwrap()).unwrap();
+        assert!(valid(&root, &root, &canonical));
+        let v2: Value = serde_json::from_str(STORY_PACK_SCHEMA_V2).unwrap();
+        assert!(!valid(&v2, &v2, &document));
+    }
+    // v1 and v2 documents still satisfy the v3 schema.
+    assert!(valid(&root, &root, &fixture()));
+    assert!(valid(&root, &root, &noir()));
+}
+
+#[test]
+fn v3_shapes_the_loader_rejects_are_rejected_by_the_schema() {
+    let root = schema();
+    type Mutation = Box<dyn Fn(&mut Value)>;
+    let mutations: Vec<Mutation> = vec![
+        Box::new(|pack| pack["world"]["sorpresa"] = json!(1)),
+        Box::new(|pack| pack["world"]["lexicons"][0]["id"] = json!(7)),
+        Box::new(|pack| pack["world"]["objects"][0]["location"] = json!("everywhere")),
+        Box::new(|pack| pack["world"]["objects"][0]["location"] = json!({ "under": "mesa" })),
+        Box::new(|pack| pack["world"]["objects"][0]["portable"] = json!("si")),
+        Box::new(|pack| pack["world"]["objects"][0]["gender"] = json!("neutral")),
+        Box::new(|pack| pack["world"]["objects"][0]["peso"] = json!(2)),
+        Box::new(|pack| {
+            pack["world"]["objects"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("nouns");
+        }),
+        Box::new(|pack| pack["world"]["rules"][0]["phase"] = json!("during")),
+        Box::new(|pack| pack["world"]["messages"]["no_exit"] = json!("texto")),
+        Box::new(|pack| pack["world"]["messages"]["inventado"] = json!({ "es": "x" })),
+        Box::new(|pack| pack["nodes"][0]["room"]["exits"][0]["puerta"] = json!("x")),
+        Box::new(|pack| pack["nodes"][0]["room"]["dark"] = json!(1)),
+        Box::new(|pack| {
+            pack["world"]["rules"][0]["when"] =
+                json!({ "object_is": { "obj": "barca", "flag": "rota" } })
+        }),
+        Box::new(|pack| {
+            pack["world"]["rules"][0]["effects"] =
+                json!([{ "move_object": { "obj": "barca", "to": "lejos" } }])
+        }),
+        Box::new(|pack| {
+            pack["world"]["lexicons"][0]["verbs"][0]["patterns"][0]["objeto"] = json!(true)
+        }),
+    ];
+    for (index, mutate) in mutations.iter().enumerate() {
+        let mut pack = faro();
+        mutate(&mut pack);
+        assert!(
+            !loader_accepts(&pack),
+            "v3 mutation {index} should be rejected by the loader"
+        );
+        assert!(
+            !valid(&root, &root, &pack),
+            "v3 mutation {index} should be rejected by the schema"
+        );
+    }
+    // Every v3 condition and effect form is accepted by both.
+    let mut pack = faro();
+    pack["world"]["rules"][0]["when"] = json!({ "all": [
+        { "carried": "medalla" },
+        { "object_at": { "obj": "medalla", "at": { "in": "barca" } } },
+        { "object_at": { "obj": "medalla", "at": { "room": "playa" } } },
+        { "object_at": { "obj": "medalla", "at": "nowhere" } },
+        { "object_is": { "obj": "puerta", "flag": "locked" } },
+        { "visible": "barca" },
+        { "player_in": "playa" },
+        { "turn_cmp": { "op": "ge", "value": 3 } }
+    ] });
+    pack["world"]["rules"][0]["effects"] = json!([
+        { "move_object": { "obj": "medalla", "to": "carried" } },
+        { "set_object": { "obj": "puerta", "flag": "open", "value": true } }
+    ]);
+    assert!(loader_accepts(&pack));
+    assert!(valid(&root, &root, &pack));
+}
+
+#[test]
+fn v3_schema_bounds_match_core_constants() {
+    use tiamud_story_core::{
+        MAX_EXITS, MAX_EXTENSION_VERBS, MAX_FOUND_IN, MAX_LEXICONS, MAX_OBJECTS, MAX_RULES,
+    };
+    let root = schema();
+    let defs = &root["$defs"];
+    let props = |def: &str, field: &str| defs[def]["properties"][field].clone();
+    assert_eq!(props("world", "lexicons")["maxItems"], MAX_LEXICONS);
+    assert_eq!(props("world", "objects")["maxItems"], MAX_OBJECTS);
+    assert_eq!(props("world", "rules")["maxItems"], MAX_RULES);
+    assert_eq!(props("room", "exits")["maxItems"], MAX_EXITS);
+    assert_eq!(props("object", "found_in")["maxItems"], MAX_FOUND_IN);
+    assert_eq!(
+        props("lexiconRef", "verbs")["maxItems"],
+        MAX_EXTENSION_VERBS
+    );
+    assert_eq!(
+        defs["localizedWords"]["additionalProperties"]["maxItems"],
+        tiamud_story_parser::MAX_SCOPE_WORDS_PER_OBJECT
+    );
+    assert_eq!(
+        root["properties"]["format_version"]["enum"],
+        json!([1, 2, 3])
     );
 }

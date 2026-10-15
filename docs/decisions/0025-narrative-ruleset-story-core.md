@@ -14,6 +14,12 @@
   figura como S5). No depende de `story-core` ni está integrada: ningún
   StoryPack, actor, protocolo `story.command` ni cliente la usa, y su
   integración sigue requiriendo el ADR propio de parser e idioma.
+  Nota de estado posterior (2026-10-15): ese ADR es
+  [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md) (propuesto);
+  StoryPack v3 integra el parser en `story-core` como biblioteca (mundo de
+  objetos, reglas, biblioteca por defecto, `StoryInput::Command`) y la
+  herramienta offline lo juega, pero ninguna sesión de servidor, protocolo
+  `story.command`, Telnet ni navegador lo usa todavía.
   La capa de persistencia de S3 (slots y esquema SQL v16) se propone en
   [ADR 0030](0030-story-save-slots-and-schema-v16.md) y existe sin conectar a
   sesiones ni protocolo.
@@ -198,7 +204,7 @@ sus implicaciones de autorización, moderación y persistencia.
 | S2 | Actor de instancia en el servidor, límites globales/por cuenta, desalojo por inactividad, protocolo `story.*`, paridad Telnet/GMCP, Playwright | **Sí** (protocolo y actor) |
 | S3 | Slots de guardado persistidos, esquema SQL v16 SQLite/PostgreSQL, migración y paridad | **Sí** (persistencia: [ADR 0030](0030-story-save-slots-and-schema-v16.md), propuesto; capa de persistencia implementada, sin conectar a S2) |
 | S4 | Aventuras por menús de verbos: `story.menu`, diálogos, retratos y cues vía pipeline de medios | **Sí** (modelo de menús/diálogo: [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md), propuesto; su modelo de núcleo StoryPack v2 existe como biblioteca) |
-| S5 | Parser de ficción interactiva en castellano (`story.command`/`story.prompt`), gramática acotada y determinista | **Sí** (parser e idioma) |
+| S5 | Parser de ficción interactiva en castellano (`story.command`/`story.prompt`), gramática acotada y determinista | **Sí** (parser e idioma: [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md), propuesto; núcleo StoryPack v3 implementado como biblioteca, sin cablear) |
 | S6 | Integración opcional de scripts con el sandbox Lua y cuotas | **Sí** |
 | S7 | Multijugador: instancias compartidas, votos, espectadores, asíncrono | **Sí** |
 | S8 | Herramientas de autoría avanzadas, importadores y aceptación (carga, soak de instancias) | Solo si cambia arquitectura |

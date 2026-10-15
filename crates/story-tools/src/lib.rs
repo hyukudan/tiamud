@@ -1,5 +1,6 @@
 //! Offline authoring tools for StoryPacks (phase S1 tooling, ADR 0025; menu
-//! and dialogue support for format v2, ADR 0028).
+//! and dialogue support for format v2, ADR 0028; parser worlds for format v3,
+//! ADR 0031).
 //!
 //! This crate is the library behind the `tiamud-story` binary. It only reads
 //! local files and standard input; it never opens sockets, spawns processes or
@@ -27,12 +28,15 @@ use tiamud_story_core::{
 };
 
 /// Published JSON Schema (draft 2020-12) for the current StoryPack format
-/// (v2). A v1 document also satisfies it.
+/// (v3). v1 and v2 documents also satisfy it.
 ///
 /// The schema describes the canonical document shape. The validator in
 /// `tiamud-story-core` remains authoritative for references, byte limits,
-/// nesting budgets, v1/v2 feature gating and lints.
-pub const STORY_PACK_SCHEMA: &str = include_str!("../schema/story-pack.v2.schema.json");
+/// nesting budgets, v1/v2/v3 feature gating, lexicon compilation and lints.
+pub const STORY_PACK_SCHEMA: &str = include_str!("../schema/story-pack.v3.schema.json");
+
+/// Historical JSON Schema of StoryPack format v2, kept unchanged.
+pub const STORY_PACK_SCHEMA_V2: &str = include_str!("../schema/story-pack.v2.schema.json");
 
 /// Historical JSON Schema of StoryPack format v1, kept unchanged.
 pub const STORY_PACK_SCHEMA_V1: &str = include_str!("../schema/story-pack.v1.schema.json");

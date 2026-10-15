@@ -42,7 +42,13 @@
       "patterns": [{ "object": true, "prep": "with", "second": true }] },
     { "action": "close", "display": "close",
       "words": ["close", "shut"],
-      "patterns": [{ "object": true }] },
+      "patterns": [
+        { "object": true, "prep": "with", "second": true, "action": "lock" },
+        { "object": true }
+      ] },
+    { "action": "lock", "display": "lock",
+      "words": ["lock"],
+      "patterns": [{ "object": true, "prep": "with", "second": true }] },
     { "action": "put_in", "display": "put",
       "words": ["put", "insert", "place"],
       "patterns": [
@@ -82,6 +88,12 @@
       "patterns": [{ "object": true }] },
     { "action": "switch_off", "display": "extinguish", "words": ["extinguish", "deactivate"],
       "patterns": [{ "object": true }] },
+    { "action": "wear", "display": "wear", "words": ["wear", "don"],
+      "patterns": [{ "object": true }] },
+    { "action": "remove", "display": "take off", "words": ["remove", "doff"],
+      "patterns": [{ "object": true }] },
+    { "action": "exit", "display": "leave", "words": ["exit", "leave"],
+      "patterns": [{}, { "object": true }] },
     { "action": "undo", "display": "undo", "meta": true, "words": ["undo"], "patterns": [{}] },
     { "action": "save", "display": "save", "meta": true, "words": ["save"], "patterns": [{}] },
     { "action": "restore", "display": "restore", "meta": true,
@@ -123,7 +135,10 @@
     { "words": ["turn", "on"], "replace": "light" },
     { "words": ["switch", "on"], "replace": "light" },
     { "words": ["turn", "off"], "replace": "extinguish" },
-    { "words": ["switch", "off"], "replace": "extinguish" }
+    { "words": ["switch", "off"], "replace": "extinguish" },
+    { "words": ["put", "on"], "replace": "don" },
+    { "words": ["take", "off"], "replace": "doff" },
+    { "words": ["get", "out"], "replace": "exit" }
   ],
   "all_words": ["all", "everything"],
   "except_words": ["except", "but", "excluding"],

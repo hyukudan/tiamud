@@ -292,7 +292,7 @@ pub(crate) struct Compiled {
     pub articles: BTreeSet<String>,
     pub fillers: BTreeSet<String>,
     pub pronouns: BTreeSet<String>,
-    /// Longest suffix first.
+    /// Shortest suffix first (longest verb stem first).
     pub enclitics: Vec<(String, EncliticKind)>,
     pub contractions: BTreeMap<String, Vec<String>>,
     /// Longest phrase first.
@@ -558,7 +558,9 @@ impl Compiled {
             }
             enclitics.push((suffix, decl.kind));
         }
-        enclitics.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        // Shortest suffix first, so the longest verb stem wins: `póntela` is
+        // `ponte` + `la` (wear it), not `pon` + `tela`.
+        enclitics.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
 
         count(lexicon.contractions.len(), MAX_CONTRACTIONS, "contractions")?;
         let mut contractions = BTreeMap::new();
@@ -763,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn strips_enclitics_longest_first() {
+    fn strips_enclitics_preferring_the_longest_verb_stem() {
         let mut value = minimal();
         value["enclitics"] = serde_json::json!([
             { "suffix": "lo", "kind": "direct" },

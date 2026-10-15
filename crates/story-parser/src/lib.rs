@@ -16,9 +16,9 @@
 //! quantity is bounded by the constants below; no input panics, and no
 //! regular expressions are used.
 //!
-//! This crate is a library only. No server, protocol or StoryPack format uses
-//! it yet; see `docs/authoring/story-parser.md` for the planned integration
-//! with `tiamud-story-core`.
+//! `tiamud-story-core` uses it for StoryPack format v3 parser worlds (ADR
+//! 0031); this crate does not depend on it. No server or protocol uses the
+//! parser yet; see `docs/authoring/story-parser.md`.
 
 #![forbid(unsafe_code)]
 

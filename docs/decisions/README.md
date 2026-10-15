@@ -35,6 +35,7 @@ implementación por fase vive en
 | [0028](0028-story-menus-portraits-and-dialogue-trees.md) | Story verb menus, portraits and dialogue trees (StoryPack v2) | Propuesto (modelo de núcleo de biblioteca) | Narrativa S4 |
 | [0030](0030-story-save-slots-and-schema-v16.md) | Story save slots and schema v16 | Propuesto (capa de persistencia, sin conectar a sesiones) | Narrativa S3 |
 | [0029](0029-story-session-instances-and-story-protocol.md) | Story session instances and `story.*` protocol | Propuesto (implementación parcial S2: un jugador, en memoria) | Narrativa S2 |
+| [0031](0031-parser-interactive-fiction-storypack-v3.md) | Parser interactive fiction (StoryPack v3) | Propuesto (núcleo de biblioteca, sin cablear al servidor) | Narrativa S5 |
 
 El estado de fase (`Complete`/`Partial`) es autoridad de
 [`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).

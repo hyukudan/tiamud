@@ -378,11 +378,11 @@ fn prints_the_published_schema() {
     let output = run(&["schema"]);
     assert!(output.status.success());
     let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(schema["title"], "Tiamud StoryPack v2");
+    assert_eq!(schema["title"], "Tiamud StoryPack v3");
 }
 
 #[test]
-fn fmt_upgrade_rewrites_v1_packs_as_v2_losslessly() {
+fn fmt_upgrade_rewrites_v1_packs_as_v3_losslessly() {
     let temp = tempfile::tempdir().unwrap();
     let upgraded = temp.path().join("upgraded.story.json");
     let output = run(&[
@@ -395,12 +395,104 @@ fn fmt_upgrade_rewrites_v1_packs_as_v2_losslessly() {
     assert!(output.status.success(), "{}", stderr(&output));
     let before = StoryPack::from_json_slice(&fs::read(cripta()).unwrap()).unwrap();
     let mut after = StoryPack::from_json_slice(&fs::read(&upgraded).unwrap()).unwrap();
-    assert_eq!(after.format_version, 2);
+    assert_eq!(after.format_version, 3);
     after.format_version = 1;
     assert_eq!(before, after, "only the version changes");
     let output = run(&["validate", upgraded.to_str().unwrap(), "--deny-warnings"]);
     assert!(output.status.success(), "{}", stdout(&output));
-    assert!(stdout(&output).contains("(format v2)"));
+    assert!(stdout(&output).contains("(format v3)"));
     let output = run(&["fmt", &cripta(), "--upgrade", "--check"]);
     assert!(!output.status.success(), "--upgrade conflicts with --check");
+}
+
+fn faro() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../story-core/fixtures/parser/faro-de-punta-gris.story.json")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn parser_worlds_validate_test_and_play_with_free_text() {
+    let pack = faro();
+    let output = run(&["validate", &pack, "--deny-warnings"]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(
+        stdout(&output),
+        "valid StoryPack \"faro-de-punta-gris\" (format v3): 7 node(s), 0 choice(s), 3 variable(s), 0 item(s), 6 room(s), 14 object(s), 14 rule(s), lexicon(s) es; 0 warning(s), 0 lint(s)\n"
+    );
+
+    let script = fixture("faro-victoria.script.json");
+    let output = run(&["test", &pack, "--script", &script]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "story test passed: 40 step(s), 21 choice(s), 18 expectation(s); final node \"amanecer\" at turn 21\n"
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let wrong = temp.path().join("wrong.json");
+    fs::write(
+        &wrong,
+        r#"{"format_version":3,"steps":[{"text":"coge la llave"},{"expect":{"transcript":["Coges"]}},{"text":"examina la barca"},{"expect":{"carried":["medalla"]}}]}"#,
+    )
+    .unwrap();
+    let output = run(&["test", &pack, "--script", wrong.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("step 2: expectation failed: transcript does not contain \"Coges\"; it reads \"No ves eso por aquí.\""),
+        "{}",
+        stderr(&output)
+    );
+    let old = temp.path().join("old.json");
+    fs::write(&old, br#"{"format_version":2,"steps":[{"text":"mira"}]}"#).unwrap();
+    let output = run(&["test", &pack, "--script", old.to_str().unwrap()]);
+    assert!(
+        stderr(&output)
+            .contains("step 1: text steps and v3 expectations need script format_version 3")
+    );
+    let output = run(&["test", &cripta(), "--script", wrong.to_str().unwrap()]);
+    assert!(stderr(&output).contains("need a pack with a parser world"));
+
+    let input = "examina la barca\ncoge la medalla y póntela\nsur\nguardar\ndeshacer\nestado\nxyzzy\nsalir\nmira\n";
+    let output = run_with_stdin(&["play", &pack, "--seed", "2"], input.as_bytes());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let transcript = stdout(&output);
+    for expected in [
+        "Escribe órdenes como en cualquier aventura",
+        "» Dentro de la barca varada ves una medalla de plata.",
+        "» Coges la medalla de plata.\n» Te pones la medalla de plata.",
+        "» Por ahí solo hay roca y mar.",
+        "(Sin ranuras de guardado en el modo offline: usa deshacer.)",
+        "node: playa\nturn: 3 · score: 0 · seed: 2",
+        "» No conozco la palabra 'xyzzy'.",
+    ] {
+        assert!(
+            transcript.contains(expected),
+            "missing {expected:?} in\n{transcript}"
+        );
+    }
+    assert!(!transcript.contains("Inventario"), "{transcript}");
+}
+
+#[test]
+fn reports_parser_world_lints() {
+    let output = run(&["validate", &fixture("world-lints.story.json")]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report = stdout(&output);
+    for expected in [
+        "warning: nodes[2] (sotano): node is unreachable from the start node",
+        "warning: world.rules[1]: rule has neither text nor effects",
+        "lint: world.objects[1] (moneda-falsa): every es word of this object also names \"moneda\" in the same room",
+        "lint: world.objects[2] (llave): object starts nowhere and no effect moves it",
+        "lint: world.objects[3] (cofre): its key \"llave\" never enters play and no effect unlocks it",
+        "lint: world.objects[4] (reja): object is locked, has no key and no effect unlocks it",
+        "lint: world.rules[0] (rezar): the \"en\" lexicon never produces action \"pray\"",
+        "2 warning(s), 5 lint(s)",
+    ] {
+        assert!(
+            report.contains(expected),
+            "missing {expected:?} in\n{report}"
+        );
+    }
 }

@@ -6,11 +6,17 @@
 //! field is optional and omitted when empty, so a v1 document is a valid v2
 //! document; the validator rejects v2 features in a document that still
 //! declares `format_version: 1`.
+//!
+//! Format v3 adds the parser world (ADR 0031): a `world` section with
+//! lexicons, objects and rules, `room` data on nodes, and object conditions
+//! and effects. As before, every v3 field is optional and the validator
+//! rejects v3 features in a document that declares an older version.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::world::{Location, ObjectFlag, Room, World};
 use crate::{
     LocalizedText, MAX_PACK_BYTES, STORY_PACK_FORMAT_VERSION, STORY_PACK_MIN_FORMAT_VERSION,
     StoryError, bounded_message,
@@ -43,11 +49,14 @@ pub struct StoryPack {
     /// Dialogue trees (format v2), entered from a menu response.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogues: Vec<Dialogue>,
+    /// Parser world (format v3): lexicons, objects and rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world: Option<World>,
 }
 
 impl StoryPack {
     /// Parses a bounded JSON document. This only checks size, syntax, shape
-    /// and format version (v1 or v2); call [`StoryPack::validate`] before use.
+    /// and format version (v1 to v3); call [`StoryPack::validate`] before use.
     pub fn from_json_slice(bytes: &[u8]) -> Result<Self, StoryError> {
         if bytes.len() > MAX_PACK_BYTES {
             return Err(StoryError::TooLarge {
@@ -66,9 +75,10 @@ impl StoryPack {
         Ok(pack)
     }
 
-    /// Upgrades a v1 pack to the current format in place. Format v2 is a
-    /// strict superset of v1, so the upgrade only rewrites `format_version`;
-    /// no id, text or rule changes. Returns true when the version changed.
+    /// Upgrades a v1 or v2 pack to the current format in place. Each format is
+    /// a strict superset of the previous one, so the upgrade only rewrites
+    /// `format_version`; no id, text or rule changes. Returns true when the
+    /// version changed.
     pub fn upgrade(&mut self) -> bool {
         if self.format_version < STORY_PACK_FORMAT_VERSION {
             self.format_version = STORY_PACK_FORMAT_VERSION;
@@ -100,6 +110,16 @@ impl StoryPack {
 
     pub(crate) fn dialogue(&self, id: &str) -> Option<&Dialogue> {
         self.dialogues.iter().find(|dialogue| dialogue.id == id)
+    }
+
+    /// The world object `id`, if the pack has a world and declares it.
+    pub(crate) fn object(&self, id: &str) -> Option<&crate::world::ObjectDecl> {
+        self.world.as_ref().and_then(|world| world.object(id))
+    }
+
+    /// Room data of node `id`, if the node exists and is a room.
+    pub(crate) fn room(&self, id: &str) -> Option<&Room> {
+        self.node(id).and_then(|node| node.room.as_ref())
     }
 }
 
@@ -164,6 +184,9 @@ pub struct Node {
     /// Verb menu of this scene (format v2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu: Option<Menu>,
+    /// Room of the parser world (format v3): name, exits and darkness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<Room>,
 }
 
 impl Node {
@@ -249,6 +272,29 @@ pub enum Condition {
     Uses {
         node: String,
         entry: String,
+        op: CmpOp,
+        value: i64,
+    },
+    /// True when the object is held, directly or inside held containers
+    /// (format v3).
+    Carried(String),
+    /// True when the object is exactly at `at` (format v3).
+    ObjectAt {
+        obj: String,
+        at: Location,
+    },
+    /// True when the object's flag is set (format v3).
+    ObjectIs {
+        obj: String,
+        flag: ObjectFlag,
+    },
+    /// True when the object is in the parser's scope now: in the room (and
+    /// lit) or held, with every enclosing container open (format v3).
+    Visible(String),
+    /// True when the current node is `node` (format v3).
+    PlayerIn(String),
+    /// Compares the turn counter with a constant (format v3).
+    TurnCmp {
         op: CmpOp,
         value: i64,
     },
@@ -343,6 +389,19 @@ pub enum Effect {
     Score(i64),
     /// Ends the story immediately; remaining effects are skipped.
     End(Ending),
+    /// Moves a world object (format v3). A move that would put a container
+    /// inside itself is ignored; leaving the player's hands clears `worn`.
+    MoveObject {
+        obj: String,
+        to: Location,
+    },
+    /// Sets or clears an object flag (format v3). Setting `worn` on an
+    /// object that is not held is ignored.
+    SetObject {
+        obj: String,
+        flag: ObjectFlag,
+        value: bool,
+    },
 }
 
 /// Media cue naming a reviewed asset id, never a URL.

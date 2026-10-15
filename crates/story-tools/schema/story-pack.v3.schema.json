@@ -1,0 +1,1723 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tiamud:schema:story-pack:v3",
+  "title": "Tiamud StoryPack v3",
+  "description": "Structural schema of the canonical StoryPack v3 document. Format v3 adds the parser world: a `world` section (shipped lexicons with pack verbs, objects with locations and properties, before/instead/after rules, library message overrides, intro and maximum score), `room` data on nodes (name, exits by canonical direction, darkness) and object conditions and effects. v1 and v2 documents also satisfy it. `tiamud-story validate` is authoritative: it also checks references, byte limits, nesting and effect budgets, value ranges, v1/v2/v3 feature gating, lexicon compilation, parser words and authoring lints. Optional fields are omitted rather than written as null in canonical form.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "id",
+    "title",
+    "start",
+    "nodes"
+  ],
+  "properties": {
+    "format_version": {
+      "enum": [
+        1,
+        2,
+        3
+      ]
+    },
+    "id": {
+      "$ref": "#/$defs/id"
+    },
+    "title": {
+      "$ref": "#/$defs/localizedText"
+    },
+    "start": {
+      "$ref": "#/$defs/id"
+    },
+    "variables": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/variable"
+      }
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "initial_inventory": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "verbs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/verb"
+      }
+    },
+    "characters": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/character"
+      }
+    },
+    "dialogues": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/dialogue"
+      }
+    },
+    "world": {
+      "$ref": "#/$defs/world"
+    }
+  },
+  "$defs": {
+    "id": {
+      "description": "Durable authored identifier: 1..=64 bytes of lowercase ASCII letters, digits, '-', '_' or '.', starting with a letter or digit. Asset ids (backgrounds, portraits, cues) use the same form and are never URLs.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "localizedText": {
+      "description": "Locale tag to non-empty plain text. Labels allow at most 256 bytes and no newlines; node and block text allows 4096 bytes and newlines.",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9-]{1,34}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "varInt": {
+      "type": "integer",
+      "minimum": -1000000000,
+      "maximum": 1000000000
+    },
+    "variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "kind": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "int"
+              ],
+              "properties": {
+                "int": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "min",
+                    "max",
+                    "initial"
+                  ],
+                  "properties": {
+                    "min": {
+                      "$ref": "#/$defs/varInt"
+                    },
+                    "max": {
+                      "$ref": "#/$defs/varInt"
+                    },
+                    "initial": {
+                      "$ref": "#/$defs/varInt"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "bool"
+              ],
+              "properties": {
+                "bool": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "initial"
+                  ],
+                  "properties": {
+                    "initial": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/localizedText"
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "text"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "text": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "choices": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/choice"
+          }
+        },
+        "ending": {
+          "$ref": "#/$defs/ending"
+        },
+        "background": {
+          "$ref": "#/$defs/id"
+        },
+        "cues": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/cue"
+          }
+        },
+        "hotspots": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/hotspot"
+          }
+        },
+        "present": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/presence"
+          }
+        },
+        "menu": {
+          "$ref": "#/$defs/menu"
+        },
+        "room": {
+          "$ref": "#/$defs/room"
+        }
+      }
+    },
+    "choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "when": {
+          "$ref": "#/$defs/condition"
+        },
+        "effects": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/effect"
+          }
+        },
+        "target": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "ending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "victory",
+            "defeat",
+            "neutral"
+          ]
+        }
+      }
+    },
+    "textBlock": {
+      "description": "One paragraph, optionally spoken by a declared character with a portrait expression.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "speaker": {
+          "$ref": "#/$defs/id"
+        },
+        "expression": {
+          "$ref": "#/$defs/id"
+        },
+        "text": {
+          "$ref": "#/$defs/localizedText"
+        }
+      }
+    },
+    "textBlocks": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/textBlock"
+      }
+    },
+    "verb": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "targets",
+        "default"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "targets": {
+          "enum": [
+            "none",
+            "hotspot",
+            "character",
+            "item"
+          ]
+        },
+        "default": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/textBlock"
+          }
+        }
+      }
+    },
+    "character": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "portraits": {
+          "description": "Expression id to reviewed portrait asset id.",
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {
+            "$ref": "#/$defs/id"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "default_expression": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "hotspot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "when": {
+          "$ref": "#/$defs/condition"
+        }
+      }
+    },
+    "presence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "character"
+      ],
+      "properties": {
+        "character": {
+          "$ref": "#/$defs/id"
+        },
+        "expression": {
+          "$ref": "#/$defs/id"
+        },
+        "when": {
+          "$ref": "#/$defs/condition"
+        }
+      }
+    },
+    "menu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verbs"
+      ],
+      "properties": {
+        "verbs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "verb"
+            ],
+            "properties": {
+              "verb": {
+                "$ref": "#/$defs/id"
+              },
+              "when": {
+                "$ref": "#/$defs/condition"
+              }
+            }
+          }
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/menuEntry"
+          }
+        },
+        "defaults": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "verb",
+              "blocks"
+            ],
+            "properties": {
+              "verb": {
+                "$ref": "#/$defs/id"
+              },
+              "blocks": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                  "$ref": "#/$defs/textBlock"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "menuEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "verb",
+        "responses"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "verb": {
+          "$ref": "#/$defs/id"
+        },
+        "target": {
+          "$ref": "#/$defs/id"
+        },
+        "responses": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/response"
+          }
+        },
+        "exhausted": {
+          "$ref": "#/$defs/textBlocks"
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "blocks"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "when": {
+          "$ref": "#/$defs/condition"
+        },
+        "once": {
+          "type": "boolean"
+        },
+        "blocks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/textBlock"
+          }
+        },
+        "effects": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/effect"
+          }
+        },
+        "target": {
+          "$ref": "#/$defs/id"
+        },
+        "dialogue": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "dialogue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "start",
+        "nodes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "start": {
+          "$ref": "#/$defs/id"
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/dialogueNode"
+          }
+        }
+      }
+    },
+    "dialogueNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "lines",
+        "options"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/textBlock"
+          }
+        },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/dialogueOption"
+          }
+        }
+      }
+    },
+    "dialogueOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "when": {
+          "$ref": "#/$defs/condition"
+        },
+        "once": {
+          "type": "boolean"
+        },
+        "effects": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/effect"
+          }
+        },
+        "next": {
+          "oneOf": [
+            {
+              "enum": [
+                "return",
+                "exit"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "goto"
+              ],
+              "properties": {
+                "goto": {
+                  "$ref": "#/$defs/id"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "conditionList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/condition"
+      }
+    },
+    "cmpOp": {
+      "enum": [
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge"
+      ]
+    },
+    "condition": {
+      "description": "Closed condition AST. Nesting is limited to 8 levels and 64 nodes per tree. `uses` (v2) compares a menu entry use counter. Format v3 adds `carried`, `object_at`, `object_is`, `visible`, `player_in` and `turn_cmp`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "$ref": "#/$defs/conditionList"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "$ref": "#/$defs/conditionList"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "not"
+          ],
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/condition"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "var_cmp"
+          ],
+          "properties": {
+            "var_cmp": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "var",
+                "op",
+                "value"
+              ],
+              "properties": {
+                "var": {
+                  "$ref": "#/$defs/id"
+                },
+                "op": {
+                  "$ref": "#/$defs/cmpOp"
+                },
+                "value": {
+                  "$ref": "#/$defs/varInt"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "has_item"
+          ],
+          "properties": {
+            "has_item": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "visited"
+          ],
+          "properties": {
+            "visited": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "flag"
+          ],
+          "properties": {
+            "flag": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "uses"
+          ],
+          "properties": {
+            "uses": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "node",
+                "entry",
+                "op",
+                "value"
+              ],
+              "properties": {
+                "node": {
+                  "$ref": "#/$defs/id"
+                },
+                "entry": {
+                  "$ref": "#/$defs/id"
+                },
+                "op": {
+                  "$ref": "#/$defs/cmpOp"
+                },
+                "value": {
+                  "$ref": "#/$defs/varInt"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "carried"
+          ],
+          "properties": {
+            "carried": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "object_at"
+          ],
+          "properties": {
+            "object_at": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "obj",
+                "at"
+              ],
+              "properties": {
+                "obj": {
+                  "$ref": "#/$defs/id"
+                },
+                "at": {
+                  "$ref": "#/$defs/location"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "object_is"
+          ],
+          "properties": {
+            "object_is": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "obj",
+                "flag"
+              ],
+              "properties": {
+                "obj": {
+                  "$ref": "#/$defs/id"
+                },
+                "flag": {
+                  "enum": [
+                    "open",
+                    "locked",
+                    "lit",
+                    "worn"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "visible"
+          ],
+          "properties": {
+            "visible": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "player_in"
+          ],
+          "properties": {
+            "player_in": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "turn_cmp"
+          ],
+          "properties": {
+            "turn_cmp": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "op",
+                "value"
+              ],
+              "properties": {
+                "op": {
+                  "$ref": "#/$defs/cmpOp"
+                },
+                "value": {
+                  "type": "integer",
+                  "minimum": -1000000,
+                  "maximum": 1000000
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "dice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "sides"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "sides": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 100
+        },
+        "modifier": {
+          "type": "integer",
+          "minimum": -1000000,
+          "maximum": 1000000
+        }
+      }
+    },
+    "rollTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "at_least"
+      ],
+      "properties": {
+        "at_least": {
+          "$ref": "#/$defs/varInt"
+        },
+        "success": {
+          "$ref": "#/$defs/id"
+        },
+        "failure": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "cue": {
+      "description": "Presentation-only media cue naming a reviewed asset id, never a URL.",
+      "oneOf": [
+        {
+          "const": "stop_music"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "music"
+          ],
+          "properties": {
+            "music": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "asset"
+              ],
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/id"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sfx"
+          ],
+          "properties": {
+            "sfx": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "asset"
+              ],
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/id"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "effectList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/effect"
+      }
+    },
+    "effect": {
+      "description": "Closed effect DSL. A choice, response or dialogue option holds at most 64 effects counting nested `if` branches, nested at most 4 levels. Format v3 adds `move_object` and `set_object`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "set"
+          ],
+          "properties": {
+            "set": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "var",
+                "value"
+              ],
+              "properties": {
+                "var": {
+                  "$ref": "#/$defs/id"
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "$ref": "#/$defs/varInt"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "add"
+          ],
+          "properties": {
+            "add": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "var",
+                "delta"
+              ],
+              "properties": {
+                "var": {
+                  "$ref": "#/$defs/id"
+                },
+                "delta": {
+                  "$ref": "#/$defs/varInt"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "give"
+          ],
+          "properties": {
+            "give": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "take"
+          ],
+          "properties": {
+            "take": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "goto"
+          ],
+          "properties": {
+            "goto": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "roll"
+          ],
+          "properties": {
+            "roll": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "dice"
+              ],
+              "properties": {
+                "dice": {
+                  "$ref": "#/$defs/dice"
+                },
+                "modifier_var": {
+                  "$ref": "#/$defs/id"
+                },
+                "store": {
+                  "$ref": "#/$defs/id"
+                },
+                "test": {
+                  "$ref": "#/$defs/rollTest"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "if"
+          ],
+          "properties": {
+            "if": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "when"
+              ],
+              "properties": {
+                "when": {
+                  "$ref": "#/$defs/condition"
+                },
+                "then": {
+                  "$ref": "#/$defs/effectList"
+                },
+                "otherwise": {
+                  "$ref": "#/$defs/effectList"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cue"
+          ],
+          "properties": {
+            "cue": {
+              "$ref": "#/$defs/cue"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "score"
+          ],
+          "properties": {
+            "score": {
+              "type": "integer",
+              "minimum": -1000000,
+              "maximum": 1000000
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "end"
+          ],
+          "properties": {
+            "end": {
+              "$ref": "#/$defs/ending"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "move_object"
+          ],
+          "properties": {
+            "move_object": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "obj",
+                "to"
+              ],
+              "properties": {
+                "obj": {
+                  "$ref": "#/$defs/id"
+                },
+                "to": {
+                  "$ref": "#/$defs/location"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "set_object"
+          ],
+          "properties": {
+            "set_object": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "obj",
+                "flag",
+                "value"
+              ],
+              "properties": {
+                "obj": {
+                  "$ref": "#/$defs/id"
+                },
+                "flag": {
+                  "enum": [
+                    "open",
+                    "locked",
+                    "lit",
+                    "worn"
+                  ]
+                },
+                "value": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "room": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "exits": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/exit"
+          }
+        },
+        "dark": {
+          "type": "boolean"
+        }
+      }
+    },
+    "exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "direction",
+        "to"
+      ],
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/id"
+        },
+        "to": {
+          "$ref": "#/$defs/id"
+        },
+        "when": {
+          "$ref": "#/$defs/condition"
+        },
+        "door": {
+          "$ref": "#/$defs/id"
+        },
+        "blocked": {
+          "$ref": "#/$defs/localizedText"
+        }
+      }
+    },
+    "location": {
+      "description": "Where an object is: `carried`, `nowhere`, on a room floor or inside a container object.",
+      "oneOf": [
+        {
+          "const": "carried"
+        },
+        {
+          "const": "nowhere"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "room"
+          ],
+          "properties": {
+            "room": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "in"
+          ],
+          "properties": {
+            "in": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      ]
+    },
+    "localizedWords": {
+      "description": "Lexicon language to parser words (one alphanumeric word each, at most 32 bytes after folding).",
+      "type": "object",
+      "maxProperties": 4,
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9-]{1,34}$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "maxItems": 16,
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "nouns",
+        "description",
+        "location"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "nouns": {
+          "$ref": "#/$defs/localizedWords"
+        },
+        "adjectives": {
+          "$ref": "#/$defs/localizedWords"
+        },
+        "description": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "location": {
+          "$ref": "#/$defs/location"
+        },
+        "found_in": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "gender": {
+          "enum": [
+            "masculine",
+            "feminine"
+          ]
+        },
+        "proper": {
+          "type": "boolean"
+        },
+        "portable": {
+          "type": "boolean"
+        },
+        "scenery": {
+          "type": "boolean"
+        },
+        "animate": {
+          "type": "boolean"
+        },
+        "container": {
+          "type": "boolean"
+        },
+        "openable": {
+          "type": "boolean"
+        },
+        "open": {
+          "type": "boolean"
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "key": {
+          "$ref": "#/$defs/id"
+        },
+        "lightable": {
+          "type": "boolean"
+        },
+        "lit": {
+          "type": "boolean"
+        },
+        "wearable": {
+          "type": "boolean"
+        },
+        "worn": {
+          "type": "boolean"
+        },
+        "text": {
+          "$ref": "#/$defs/localizedText"
+        }
+      }
+    },
+    "lexiconPattern": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/id"
+        },
+        "lead": {
+          "$ref": "#/$defs/id"
+        },
+        "object": {
+          "type": "boolean"
+        },
+        "prep": {
+          "$ref": "#/$defs/id"
+        },
+        "second": {
+          "type": "boolean"
+        },
+        "multi": {
+          "type": "boolean"
+        }
+      }
+    },
+    "lexiconVerb": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "display",
+        "words"
+      ],
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/id"
+        },
+        "display": {
+          "type": "string",
+          "minLength": 1
+        },
+        "words": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "meta": {
+          "type": "boolean"
+        },
+        "directions": {
+          "type": "boolean"
+        },
+        "patterns": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/lexiconPattern"
+          }
+        }
+      }
+    },
+    "lexiconRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "es",
+            "en"
+          ]
+        },
+        "verbs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/lexiconVerb"
+          }
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "phase",
+        "action"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "phase": {
+          "enum": [
+            "before",
+            "instead",
+            "after"
+          ]
+        },
+        "action": {
+          "$ref": "#/$defs/id"
+        },
+        "obj": {
+          "$ref": "#/$defs/id"
+        },
+        "obj2": {
+          "$ref": "#/$defs/id"
+        },
+        "direction": {
+          "$ref": "#/$defs/id"
+        },
+        "when": {
+          "$ref": "#/$defs/condition"
+        },
+        "effects": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/effect"
+          }
+        },
+        "text": {
+          "$ref": "#/$defs/localizedText"
+        }
+      }
+    },
+    "world": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lexicons"
+      ],
+      "properties": {
+        "lexicons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/lexiconRef"
+          }
+        },
+        "objects": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/object"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        },
+        "messages": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "dark",
+              "dark_name",
+              "you_see",
+              "inside_you_see",
+              "empty",
+              "inventory",
+              "inventory_empty",
+              "wearing",
+              "taken",
+              "already_carried",
+              "not_portable",
+              "take_animate",
+              "nothing_to_take",
+              "dropped",
+              "not_carried",
+              "nothing_to_drop",
+              "take_off_first",
+              "opened",
+              "not_openable",
+              "already_open",
+              "locked",
+              "closed",
+              "not_closable",
+              "already_closed",
+              "unlocked",
+              "no_lock",
+              "not_locked",
+              "wrong_key",
+              "locked_with",
+              "already_locked",
+              "close_first",
+              "put_in",
+              "not_container",
+              "container_closed",
+              "put_in_self",
+              "put_on",
+              "no_exit",
+              "door_closed",
+              "wait",
+              "cant_enter",
+              "give_not_animate",
+              "give_declined",
+              "show_declined",
+              "talk_not_animate",
+              "talk_nothing",
+              "nothing_written",
+              "worn",
+              "not_wearable",
+              "already_worn",
+              "removed",
+              "not_worn",
+              "switched_on",
+              "not_lightable",
+              "already_on",
+              "switched_off",
+              "already_off",
+              "goes_dark",
+              "search_nothing",
+              "nothing_happens",
+              "score",
+              "score_of",
+              "help"
+            ]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/localizedText"
+          }
+        },
+        "intro": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "max_score": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000
+        }
+      }
+    }
+  }
+}
