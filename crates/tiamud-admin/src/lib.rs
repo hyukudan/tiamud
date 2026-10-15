@@ -11,7 +11,7 @@ use tempfile::Builder;
 use thiserror::Error;
 use tiamud_core::{StaffCapability, StaffProfileKey};
 use tiamud_persistence_sqlite::{
-    MigrationReport, SCHEMA_VERSION, SchemaError, migrate as migrate_schema,
+    MigrationReport, SCHEMA_VERSION, SchemaError, migrate as migrate_schema, runtime_sections,
 };
 use world_pack::{DocumentToolError, ValidationErrors, WorldPack, WorldPackDocument};
 
@@ -636,15 +636,23 @@ fn validate_runtime_snapshot(connection: &Connection, path: &Path) -> Result<(),
     if !has_table {
         return Ok(());
     }
-    let snapshot = connection
-        .query_row(
-            "SELECT snapshot_version, snapshot_json
-             FROM world_runtime WHERE singleton = 1",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()
-        .map_err(|source| database_error(path, source))?;
+    // Before schema v17 the runtime is one `snapshot_json` document; from v17
+    // it is assembled from verified sections (ADR 0035). Reading assembles
+    // under the largest ceiling; the exact version ceiling is applied below.
+    let snapshot = runtime_sections::read_runtime_document_sqlite(
+        connection,
+        tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES,
+    )
+    .map_err(|error| match error {
+        runtime_sections::RuntimeSectionError::Sqlite(source) => database_error(path, source),
+        runtime_sections::RuntimeSectionError::TooLarge { maximum } => {
+            AdminError::RuntimeSnapshotTooLarge {
+                path: path.to_owned(),
+                maximum,
+            }
+        }
+        _ => AdminError::InvalidRuntimeSnapshot(path.to_owned()),
+    })?;
     let Some((version, json)) = snapshot else {
         return Ok(());
     };
@@ -725,6 +733,12 @@ mod tests {
     use rusqlite::params;
     use std::{collections::BTreeSet, io::Write};
     use tempfile::TempDir;
+
+    /// Store a complete runtime document as v17 sections.
+    fn store_runtime_document(connection: &Connection, snapshot_version: i64, json: &str) {
+        runtime_sections::write_runtime_document_sqlite(connection, snapshot_version, json, None)
+            .unwrap();
+    }
 
     fn create_database(path: &Path) {
         let connection = Connection::open(path).unwrap();
@@ -819,14 +833,7 @@ mod tests {
         let mut connection = Connection::open(&database).unwrap();
         migrate_schema(&mut connection).unwrap();
         let runtime = tiamud_core::World::demo().runtime_snapshot();
-        connection
-            .execute(
-                "INSERT INTO world_runtime
-                     (singleton, snapshot_version, snapshot_json, updated_at)
-                 VALUES (1, 2, ?1, unixepoch())",
-                [serde_json::to_string(&runtime).unwrap()],
-            )
-            .unwrap();
+        store_runtime_document(&connection, 2, &serde_json::to_string(&runtime).unwrap());
         drop(connection);
         create_world_pack(&world);
 
@@ -893,14 +900,7 @@ mod tests {
             .unwrap();
             let mut restored = tiamud_core::World::demo();
             restored.restore_runtime_snapshot(decoded).unwrap();
-            connection
-                .execute(
-                    "INSERT INTO world_runtime
-                         (singleton, snapshot_version, snapshot_json, updated_at)
-                     VALUES (1, ?1, ?2, unixepoch())",
-                    params![snapshot_version, runtime_json],
-                )
-                .unwrap();
+            store_runtime_document(&connection, snapshot_version, &runtime_json);
             drop(connection);
             create_world_pack(&world);
 
@@ -1010,14 +1010,7 @@ mod tests {
             migrate_schema(&mut connection).unwrap();
             let json = serde_json::to_string(&runtime).unwrap();
             serde_json::from_str::<tiamud_core::WorldRuntimeSnapshot>(&json).unwrap();
-            connection
-                .execute(
-                    "INSERT INTO world_runtime
-                         (singleton, snapshot_version, snapshot_json, updated_at)
-                     VALUES (1, 5, ?1, unixepoch())",
-                    [json],
-                )
-                .unwrap();
+            store_runtime_document(&connection, 5, &json);
             drop(connection);
             create_world_pack(&world);
 
@@ -1039,14 +1032,7 @@ mod tests {
         let mut runtime =
             serde_json::to_value(tiamud_core::World::demo().runtime_snapshot()).unwrap();
         runtime["snapshotVersion"] = serde_json::json!(4);
-        connection
-            .execute(
-                "INSERT INTO world_runtime
-                     (singleton, snapshot_version, snapshot_json, updated_at)
-                 VALUES (1, 4, ?1, unixepoch())",
-                [runtime.to_string()],
-            )
-            .unwrap();
+        store_runtime_document(&connection, 4, &runtime.to_string());
         drop(connection);
         create_world_pack(&world);
 
@@ -1084,14 +1070,7 @@ mod tests {
             item.as_object_mut().unwrap().remove("binding");
         }
         runtime["itemInstances"][&item_id]["binding"] = serde_json::json!({"kind":"unbound"});
-        connection
-            .execute(
-                "INSERT INTO world_runtime
-                     (singleton, snapshot_version, snapshot_json, updated_at)
-                 VALUES (1, 3, ?1, unixepoch())",
-                [runtime.to_string()],
-            )
-            .unwrap();
+        store_runtime_document(&connection, 3, &runtime.to_string());
         drop(connection);
         create_world_pack(&world);
 

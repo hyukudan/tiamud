@@ -295,3 +295,63 @@ async fn crash_after_skipped_ticks_recovers_everything_but_a_bounded_clock_lag()
         assert_eq!(state.gameplay.get(&live.character.id), Some(&live.gameplay));
     }
 }
+
+/// Sectioned runtime commits (ADR 0035): every runtime commit rewrites the
+/// sections whose content changed since the previous commit and no other.
+/// The memory store additionally proves on every commit that the stored
+/// sections assemble to the full snapshot.
+#[tokio::test]
+async fn runtime_commits_rewrite_only_changed_sections() {
+    let store = MemoryStore::default();
+    let (mut world, sessions) = idle_world(&store);
+    let roles = roles(&sessions);
+    let mut delivery = DeliveryRouter::new(None);
+    let content = RuntimeContent::default();
+    let members = |snapshot: &WorldRuntimeSnapshot| {
+        serde_json::to_value(snapshot)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone()
+    };
+
+    assert!(persist_tick(&mut world, &content, &roles, &store, &mut delivery).await);
+    assert_eq!(
+        store.last_runtime_sections.lock().unwrap().len(),
+        tiamud_core::RuntimeSection::ALL.len()
+    );
+    let mut committed = members(&world.runtime_snapshot());
+    let mut runtime_commits = 0;
+    let mut partial_commits = 0;
+    for _ in 0..(2 * tiamud_core::DURABLE_CLOCK_HEARTBEAT_TICKS) {
+        let before = store.runtime_snapshots_written.load(Ordering::SeqCst);
+        assert!(persist_tick(&mut world, &content, &roles, &store, &mut delivery).await);
+        if store.runtime_snapshots_written.load(Ordering::SeqCst) == before {
+            continue;
+        }
+        runtime_commits += 1;
+        let current = members(&world.runtime_snapshot());
+        let written = store
+            .last_runtime_sections
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        for section in tiamud_core::RuntimeSection::ALL {
+            let name = section.field_name();
+            if committed.get(name) != current.get(name) {
+                assert!(written.contains(name), "changed {name} was not rewritten");
+            } else {
+                assert!(!written.contains(name), "unchanged {name} was rewritten");
+            }
+        }
+        if written.len() < tiamud_core::RuntimeSection::ALL.len() {
+            partial_commits += 1;
+        }
+        committed = current;
+    }
+    // The heartbeat alone forces at least one runtime commit in this window.
+    assert!(runtime_commits > 0);
+    assert_eq!(partial_commits, runtime_commits);
+}

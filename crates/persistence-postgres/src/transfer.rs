@@ -9,7 +9,7 @@ use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transact
 
 const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 
-const TABLES: [&str; 26] = APPLICATION_TABLES;
+const TABLES: [&str; 27] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -109,9 +109,14 @@ pub fn copy_sqlite_to_postgres(
         table: "domain_events",
         rows: copy_domain_events(&source, &mut target)?,
     });
+    let (runtime_rows, runtime_section_rows) = copy_world_runtime(&source, &mut target)?;
     tables.push(TableCount {
         table: "world_runtime",
-        rows: copy_world_runtime(&source, &mut target)?,
+        rows: runtime_rows,
+    });
+    tables.push(TableCount {
+        table: "world_runtime_sections",
+        rows: runtime_section_rows,
     });
     tables.push(TableCount {
         table: "world_area_generation",
@@ -226,7 +231,8 @@ fn lock_target_tables<C: GenericClient>(target: &mut C) -> Result<(), postgres::
                     moderation_mutes, account_bans, social_reports,
                     moderation_audit, staff_profiles,
                     staff_capability_assignments, staff_audit,
-                    character_adventure, world_adventure, story_saves
+                    character_adventure, world_adventure, story_saves,
+                    world_runtime_sections
          IN ACCESS EXCLUSIVE MODE",
     )
 }
@@ -426,46 +432,50 @@ fn copy_domain_events<C: GenericClient>(
     Ok(count)
 }
 
+/// Copies the sectioned runtime rows verbatim (head, manifest and sections
+/// with their digests) after verifying that they assemble into a valid
+/// snapshot. Returns `(head rows, section rows)`.
 fn copy_world_runtime<C: GenericClient>(
     source: &Connection,
     target: &mut C,
-) -> Result<u64, TransferError> {
-    let row = source
-        .query_row(
-            "SELECT singleton, snapshot_version, snapshot_json,
-                    last_event_sequence, updated_at
-             FROM world_runtime WHERE singleton = 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((singleton, snapshot_version, snapshot_json, last_event_sequence, updated_at)) = row
-    else {
-        return Ok(0);
+) -> Result<(u64, u64), TransferError> {
+    use tiamud_persistence_sqlite::runtime_sections::{
+        RuntimeSectionError, assemble_stored_runtime, load_stored_runtime_sqlite,
     };
-    validate_runtime_snapshot(snapshot_version, &snapshot_json)?;
-    target.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json,
-              last_event_sequence, updated_at)
-         VALUES ($1, $2, $3, $4, $5)",
-        &[
-            &singleton,
-            &snapshot_version,
-            &snapshot_json,
-            &last_event_sequence,
-            &updated_at,
-        ],
+    let stored = load_stored_runtime_sqlite(source).map_err(|error| match error {
+        RuntimeSectionError::Sqlite(error) => TransferError::Sqlite(error),
+        _ => TransferError::InvalidRuntimeSnapshot,
+    })?;
+    let Some(stored) = stored else {
+        return Ok((0, 0));
+    };
+    let updated_at = source.query_row(
+        "SELECT updated_at FROM world_runtime WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
     )?;
-    Ok(1)
+    let maximum = runtime_maximum(stored.snapshot_version)?;
+    let snapshot_json = assemble_stored_runtime(&stored, maximum).map_err(|error| match error {
+        RuntimeSectionError::TooLarge { maximum } => {
+            TransferError::RuntimeSnapshotTooLarge { maximum }
+        }
+        _ => TransferError::InvalidRuntimeSnapshot,
+    })?;
+    validate_runtime_snapshot(stored.snapshot_version, &snapshot_json)?;
+    let rows = crate::runtime_sections::insert_stored_runtime(target, &stored, updated_at)?;
+    Ok((1, rows - 1))
+}
+
+fn runtime_maximum(snapshot_version: i64) -> Result<usize, TransferError> {
+    let runtime_version =
+        u32::try_from(snapshot_version).map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
+    Ok(
+        if runtime_version <= LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION {
+            tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
+        } else {
+            tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+        },
+    )
 }
 
 fn copy_world_area_generation<C: GenericClient>(
@@ -617,11 +627,7 @@ fn validate_runtime_snapshot(
 ) -> Result<(), TransferError> {
     let runtime_version =
         u32::try_from(snapshot_version).map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
-    let maximum = if runtime_version <= LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION {
-        tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
-    } else {
-        tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
-    };
+    let maximum = runtime_maximum(snapshot_version)?;
     if snapshot_json.len() > maximum {
         return Err(TransferError::RuntimeSnapshotTooLarge { maximum });
     }
@@ -1582,7 +1588,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 16
+                required: 17
             }
         ));
         assert_eq!(
@@ -1676,7 +1682,7 @@ mod tests {
     fn transfer_manifest_is_parent_before_child_and_complete() {
         assert_eq!(TABLES[0], "accounts");
         assert_eq!(TABLES[1], "characters");
-        assert_eq!(TABLES.len(), 26);
+        assert_eq!(TABLES.len(), 27);
         let generation = TABLES
             .iter()
             .position(|table| *table == "world_area_generation")
@@ -1699,6 +1705,6 @@ mod tests {
             .position(|table| *table == "social_board_report_evidence")
             .unwrap();
         assert!(reports < posts && posts < evidence);
-        assert_eq!(TABLES.last(), Some(&"story_saves"));
+        assert_eq!(TABLES.last(), Some(&"world_runtime_sections"));
     }
 }

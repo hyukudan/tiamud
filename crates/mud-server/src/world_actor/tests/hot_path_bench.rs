@@ -4,9 +4,10 @@
 //! `cargo test -p tiamud-server --release --locked hot_path_measurement -- --ignored --nocapture`
 //!
 //! The store is the in-memory test adapter. It serializes exactly the JSON a
-//! SQL adapter would write (character gameplay/identity, runtime snapshot and
-//! events) so `bytes/commit` reflects the payload, while the reported times
-//! exclude real SQL I/O. Numbers are diagnostic, not CI evidence.
+//! SQL adapter would write (character gameplay/identity, the sectioned runtime
+//! head, manifest and rewritten sections of schema v17, and events) so
+//! `bytes/commit` reflects the payload, while the reported times exclude real
+//! SQL I/O. Numbers are diagnostic, not CI evidence.
 
 use super::*;
 use tiamud_core::{RuntimeItemInstanceSnapshot, RuntimeItemLocation};
@@ -17,6 +18,8 @@ struct BenchWorld {
     sessions: Vec<SessionId>,
     mover: SessionId,
     route: (Direction, Direction),
+    /// Name of the plain prototype placed in every room, for take/drop.
+    item_name: String,
 }
 
 fn bench_world(
@@ -53,7 +56,7 @@ fn bench_world(
         }
     }
     let (route_room, there, back) = route.expect("default world has a two-way exit");
-    let prototype = loaded
+    let prototype_definition = loaded
         .definition
         .item_prototypes
         .iter()
@@ -62,9 +65,28 @@ fn bench_world(
                 && prototype.sealed_loot_table_id.is_none()
                 && prototype.transfer_policy == ItemTransferPolicy::Transferable
         })
-        .expect("default world has a plain transferable prototype")
-        .prototype_id
-        .clone();
+        .expect("default world has a plain transferable prototype");
+    let prototype = prototype_definition.prototype_id.clone();
+    // A second plain prototype with a distinct name: exactly one instance of
+    // it lies in the mover's room, so take/drop resolve unambiguously.
+    let initial = world.runtime_snapshot();
+    let movable = loaded
+        .definition
+        .item_prototypes
+        .iter()
+        .find(|candidate| {
+            candidate.container.is_none()
+                && candidate.sealed_loot_table_id.is_none()
+                && candidate.transfer_policy == ItemTransferPolicy::Transferable
+                && candidate.name != prototype_definition.name
+                && !initial
+                    .item_instances
+                    .values()
+                    .any(|instance| instance.prototype_id == candidate.prototype_id)
+        })
+        .expect("default world has an unplaced plain transferable prototype");
+    let movable_prototype = movable.prototype_id.clone();
+    let item_name = movable.name.clone();
 
     let mut snapshot = world.runtime_snapshot();
     let mut sequence = snapshot.next_item_instance_sequence;
@@ -111,10 +133,32 @@ fn bench_world(
             );
         }
     }
+    let movable_id = ItemInstanceId(format!("runtime:{sequence}"));
+    sequence += 1;
+    snapshot.item_instances.insert(
+        movable_id.clone(),
+        RuntimeItemInstanceSnapshot {
+            prototype_id: movable_prototype,
+            location: RuntimeItemLocation::Room {
+                room_id: route_room.clone(),
+            },
+            binding: tiamud_core::ItemBinding::Unbound,
+            item_affixes: Vec::new(),
+        },
+    );
+    snapshot.item_provenance.insert(
+        movable_id,
+        tiamud_core::ItemProvenance::RuntimeCreated { created_tick: 0 },
+    );
     snapshot.next_item_instance_sequence = sequence;
     world.restore_runtime_snapshot(snapshot).unwrap();
 
     let store = MemoryStore::default();
+    // The per-commit assembly proof decodes the whole snapshot; it is a test
+    // oracle, not part of what a SQL store does on the hot path.
+    store
+        .skip_section_verification
+        .store(true, Ordering::SeqCst);
     let mut sessions = Vec::new();
     for character in 0..characters {
         let session = SessionId(1_000 + character as u64);
@@ -146,6 +190,7 @@ fn bench_world(
         mover: sessions[0],
         sessions,
         route: (there, back),
+        item_name,
     }
 }
 
@@ -165,6 +210,7 @@ async fn hot_path_measurement() {
             sessions,
             mover,
             route,
+            item_name,
         } = bench_world(characters, staged, per_room, carried);
         let roles = sessions
             .iter()
@@ -191,6 +237,7 @@ async fn hot_path_measurement() {
         let bytes_before = store.bytes_written.load(Ordering::SeqCst);
         let characters_before = store.characters_written.load(Ordering::SeqCst);
         let runtime_before = store.runtime_snapshots_written.load(Ordering::SeqCst);
+        let tick_sections_before = store.runtime_sections_written.load(Ordering::SeqCst);
         let mut tick_total = Duration::ZERO;
         let mut tick_max = Duration::ZERO;
         for _ in 0..TICKS {
@@ -205,6 +252,8 @@ async fn hot_path_measurement() {
         let tick_bytes = store.bytes_written.load(Ordering::SeqCst) - bytes_before;
         let tick_characters = store.characters_written.load(Ordering::SeqCst) - characters_before;
         let tick_runtime = store.runtime_snapshots_written.load(Ordering::SeqCst) - runtime_before;
+        let tick_sections =
+            store.runtime_sections_written.load(Ordering::SeqCst) - tick_sections_before;
 
         // --- Checkpoint / scene primitives -------------------------------
         let started = Instant::now();
@@ -230,6 +279,7 @@ async fn hot_path_measurement() {
         let commits_before = store.successful_commits.load(Ordering::SeqCst);
         let bytes_before = store.bytes_written.load(Ordering::SeqCst);
         let characters_before = store.characters_written.load(Ordering::SeqCst);
+        let sections_before = store.runtime_sections_written.load(Ordering::SeqCst);
         let mut command_total = Duration::ZERO;
         for index in 0..COMMANDS {
             let direction = if index % 2 == 0 { route.0 } else { route.1 };
@@ -257,14 +307,57 @@ async fn hot_path_measurement() {
         let command_bytes = store.bytes_written.load(Ordering::SeqCst) - bytes_before;
         let command_characters =
             store.characters_written.load(Ordering::SeqCst) - characters_before;
+        let command_sections =
+            store.runtime_sections_written.load(Ordering::SeqCst) - sections_before;
+
+        // --- Item commands: take/drop dirty the large item sections --------
+        let commits_before = store.successful_commits.load(Ordering::SeqCst);
+        let bytes_before = store.bytes_written.load(Ordering::SeqCst);
+        let sections_before = store.runtime_sections_written.load(Ordering::SeqCst);
+        let mut item_total = Duration::ZERO;
+        for index in 0..COMMANDS {
+            let selection = tiamud_core::ItemSelection::one(item_name.clone());
+            let action = if index % 2 == 0 {
+                PlayerAction::Take(selection)
+            } else {
+                PlayerAction::Drop(selection)
+            };
+            let started = Instant::now();
+            apply(
+                ApplyResources {
+                    world: &mut world,
+                    runtime_content: &content,
+                    social: &mut social,
+                    store: &store,
+                    session_roles: &mut command_roles,
+                    session_staff_accesses: &mut staff,
+                    delivery: &mut delivery,
+                },
+                mover,
+                AccountRole::Player,
+                action,
+            )
+            .await
+            .unwrap();
+            item_total += started.elapsed();
+            drain(&mut inboxes);
+        }
+        let item_commits = store.successful_commits.load(Ordering::SeqCst) - commits_before;
+        let item_bytes = store.bytes_written.load(Ordering::SeqCst) - bytes_before;
+        let item_sections = store.runtime_sections_written.load(Ordering::SeqCst) - sections_before;
 
         let items = world.runtime_snapshot().item_instances.len();
+        let full_snapshot = serde_json::to_vec(&world.runtime_snapshot()).unwrap().len();
         println!(
-            "HOTPATH characters={characters} items={items} | tick: mean={:.3}ms max={:.3}ms \
+            "HOTPATH characters={characters} items={items} full_snapshot_bytes={full_snapshot} \
+             | tick: mean={:.3}ms max={:.3}ms \
              commits={tick_commits}/{TICKS} runtime_snapshots={tick_runtime} \
+             sections_written={tick_sections} \
              characters_written={tick_characters} bytes/tick={} | checkpoint={:.4}ms \
              scene={:.4}ms player_state={:.4}ms | move command: mean={:.3}ms \
              commits={command_commits}/{COMMANDS} characters_written={command_characters} \
+             sections_written={command_sections} bytes/commit={} | take/drop command: \
+             mean={:.3}ms commits={item_commits}/{COMMANDS} sections_written={item_sections} \
              bytes/commit={}",
             per_op(tick_total, TICKS),
             tick_max.as_secs_f64() * 1_000.0,
@@ -274,6 +367,8 @@ async fn hot_path_measurement() {
             player_ms,
             per_op(command_total, COMMANDS),
             command_bytes / command_commits.max(1),
+            per_op(item_total, COMMANDS),
+            item_bytes / item_commits.max(1),
         );
     }
 }

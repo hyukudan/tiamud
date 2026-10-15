@@ -313,6 +313,24 @@ async fn admin_batch(base_url: &str, sql: String) {
     .unwrap();
 }
 
+/// Replace the stored runtime of `schema` with a complete rewrite of `json`
+/// as v17 sections, exactly as the v16 -> v17 migration would.
+async fn admin_write_runtime_document(base_url: &str, schema: &str, version: i64, json: String) {
+    let url = scoped_url(base_url, schema);
+    tokio::task::spawn_blocking(move || {
+        let mut client = tiamud_persistence_postgres::connect(&url).unwrap();
+        tiamud_persistence_postgres::runtime_sections::write_runtime_document(
+            &mut client,
+            version,
+            &json,
+            None,
+        )
+        .unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 async fn admin_count(base_url: &str, sql: String) -> i64 {
     let base_url = base_url.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -379,14 +397,11 @@ async fn postgres_startup_recovery_is_atomic_and_snapshot_authoritative() {
     let object = legacy.as_object_mut().unwrap();
     object.insert("snapshotVersion".into(), serde_json::json!(7));
     object.remove("areaResidency");
-    let legacy_json = serde_json::to_string(&legacy).unwrap().replace('\'', "''");
-    admin_batch(
+    admin_write_runtime_document(
         &base_url,
-        format!(
-            "UPDATE {schema}.world_runtime
-             SET snapshot_version = 7, snapshot_json = '{legacy_json}'
-             WHERE singleton = 1"
-        ),
+        &schema,
+        7,
+        serde_json::to_string(&legacy).unwrap(),
     )
     .await;
     let StartupWorldRecovery::Snapshot {
@@ -401,11 +416,31 @@ async fn postgres_startup_recovery_is_atomic_and_snapshot_authoritative() {
 
     // A present but invalid snapshot must never fall through to the valid
     // retained ledger observed by the same repeatable-read transaction.
+    admin_write_runtime_document(&base_url, &schema, 9, "{}".to_owned()).await;
+    assert!(matches!(
+        store.load_startup_world_recovery().await,
+        Err(StoreError::InvalidRuntimeSnapshot)
+    ));
+
+    // Sectioned storage fails closed too: a valid snapshot whose section row
+    // no longer matches the manifest digest, and orphan sections.
+    store
+        .commit_action(Vec::new(), World::demo().runtime_snapshot(), Vec::new())
+        .await
+        .unwrap();
     admin_batch(
         &base_url,
-        format!("UPDATE {schema}.world_runtime SET snapshot_json = '{{}}' WHERE singleton = 1"),
+        format!(
+            "UPDATE {schema}.world_runtime_sections
+             SET section_json = '[1]' WHERE section = 'npcs'"
+        ),
     )
     .await;
+    assert!(matches!(
+        store.load_startup_world_recovery().await,
+        Err(StoreError::InvalidRuntimeSnapshot)
+    ));
+    admin_batch(&base_url, format!("DELETE FROM {schema}.world_runtime")).await;
     assert!(matches!(
         store.load_startup_world_recovery().await,
         Err(StoreError::InvalidRuntimeSnapshot)
@@ -414,7 +449,8 @@ async fn postgres_startup_recovery_is_atomic_and_snapshot_authoritative() {
     admin_batch(
         &base_url,
         format!(
-            "DELETE FROM {schema}.world_runtime;
+            "DELETE FROM {schema}.world_runtime_sections;
+             DELETE FROM {schema}.world_runtime;
              DELETE FROM {schema}.domain_events;
              INSERT INTO {schema}.domain_events (sequence, event_json)
              VALUES (1, '{event_json}'), (3, '{event_json}')"
@@ -441,6 +477,143 @@ async fn postgres_startup_recovery_is_atomic_and_snapshot_authoritative() {
         store.load_startup_world_recovery().await,
         Err(StoreError::InvalidStartupLedger)
     ));
+
+    drop(store);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
+}
+
+/// Parity with the SQLite sectioned-runtime tests (ADR 0035): only dirty
+/// sections are rewritten, a failed commit is atomic and the retry rewrites
+/// everything, and recovery assembles exactly the committed snapshot.
+#[tokio::test]
+async fn postgres_sectioned_runtime_rewrites_only_dirty_sections_and_recovers_exactly() {
+    let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let schema = format!("tiamud_sections_test_{}_{}", process::id(), nonce);
+    admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
+    let store = PostgresCharacterStore::open(&scoped_url(&base_url, &schema))
+        .await
+        .unwrap();
+    let mut world = World::demo();
+    let session = tiamud_core::SessionId(41);
+    world
+        .connect(
+            session,
+            CharacterSnapshot {
+                id: CharacterId(41),
+                account_id: AccountId(41),
+                name: "Sectioned".into(),
+                room_id: "demo:lantern-square".into(),
+                item_locations: Default::default(),
+            },
+        )
+        .unwrap();
+    let written_last_sql = format!(
+        "SELECT COUNT(*)::BIGINT FROM {schema}.world_runtime_sections
+         WHERE revision = (SELECT max(revision) FROM {schema}.world_runtime_sections)"
+    );
+
+    assert_eq!(world.runtime_dirty_sections(), RuntimeSectionSet::ALL);
+    store
+        .commit_action_sections(
+            Vec::new(),
+            world.runtime_snapshot(),
+            world.runtime_dirty_sections(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    world.mark_durable_commit(true, Vec::new(), false);
+    assert_eq!(admin_count(&base_url, written_last_sql.clone()).await, 10);
+
+    world
+        .apply(
+            session,
+            tiamud_core::PlayerAction::Take(tiamud_core::ItemSelection::one("blue-glass lantern")),
+        )
+        .unwrap();
+    let dirty = world.runtime_dirty_sections();
+    assert!(!dirty.is_empty() && !dirty.is_all());
+    store
+        .commit_action_sections(Vec::new(), world.runtime_snapshot(), dirty, Vec::new())
+        .await
+        .unwrap();
+    world.mark_durable_commit(true, Vec::new(), false);
+    assert_eq!(
+        admin_count(&base_url, written_last_sql.clone()).await,
+        dirty.len() as i64
+    );
+    assert_eq!(
+        store.load_startup_world_recovery().await.unwrap(),
+        StartupWorldRecovery::Snapshot {
+            durable_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
+            snapshot: world.runtime_snapshot(),
+        }
+    );
+
+    // A failed commit leaves no partial section rows behind.
+    let committed = world.runtime_snapshot();
+    world
+        .apply(
+            session,
+            tiamud_core::PlayerAction::Drop(tiamud_core::ItemSelection::one("blue-glass lantern")),
+        )
+        .unwrap();
+    admin_batch(
+        &base_url,
+        format!(
+            "CREATE FUNCTION {schema}.reject_runtime_head() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected'; END; $$;
+             CREATE TRIGGER reject_runtime_head
+             BEFORE UPDATE ON {schema}.world_runtime
+             FOR EACH ROW EXECUTE FUNCTION {schema}.reject_runtime_head();"
+        ),
+    )
+    .await;
+    assert!(
+        store
+            .commit_action_sections(
+                Vec::new(),
+                world.runtime_snapshot(),
+                world.runtime_dirty_sections(),
+                Vec::new(),
+            )
+            .await
+            .is_err()
+    );
+    world.invalidate_durable_baseline();
+    match store.load_startup_world_recovery().await.unwrap() {
+        StartupWorldRecovery::Snapshot { snapshot, .. } => assert_eq!(snapshot, committed),
+        other => panic!("expected a snapshot, got {other:?}"),
+    }
+    admin_batch(
+        &base_url,
+        format!("DROP TRIGGER reject_runtime_head ON {schema}.world_runtime"),
+    )
+    .await;
+    assert_eq!(world.runtime_dirty_sections(), RuntimeSectionSet::ALL);
+    store
+        .commit_action_sections(
+            Vec::new(),
+            world.runtime_snapshot(),
+            world.runtime_dirty_sections(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admin_count(&base_url, written_last_sql).await, 10);
+    match store.load_startup_world_recovery().await.unwrap() {
+        StartupWorldRecovery::Snapshot { snapshot, .. } => {
+            assert_eq!(snapshot, world.runtime_snapshot())
+        }
+        other => panic!("expected a snapshot, got {other:?}"),
+    }
 
     drop(store);
     tokio::time::sleep(Duration::from_millis(25)).await;

@@ -95,7 +95,7 @@ than 1,024 directory entries stops the server.
 - `TIAMUD_STORY_IDLE_SECONDS` (`60..=86400`, default `1800`) evicts an idle
   instance.
 - Save slots ([ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md),
-  proposed) live in the configured backend's `story_saves` table (schema v16)
+  proposed) live in the configured backend's `story_saves` table (added in schema v16)
   and go through the same measured store and persistence worker; there is no
   separate setting. Players save to slots `1..=9`; slot `0` is the autosave
   written on leave, on idle eviction and on graceful shutdown when the game
@@ -307,7 +307,7 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v16, both SQLite and PostgreSQL retain the
+In current schema v17, both SQLite and PostgreSQL retain the
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
@@ -405,6 +405,37 @@ v16 database as a future schema: rolling the binary back requires restoring
 the backup taken before the migration, which also discards any slot written
 after it.
 
+Schema v17 changes how the runtime snapshot is stored, not what it contains
+([ADR 0035](../decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
+proposed). `world_runtime` keeps `snapshot_version`, a small scalar
+`head_json`, a `manifest_json` (per section: byte length, revision and
+SHA-256) and `last_event_sequence`; the old `snapshot_json` column is gone.
+`world_runtime_sections` holds ten closed sections (`itemInstances`,
+`itemProvenance`, `npcs`, `adventure`, `progressionFlags`, `trades`,
+`lootEncounters`, `groundLoot`, `partyLootCursors`, `areaResidency`). Each
+command or tick commit rewrites the head, the manifest and only the sections
+that changed, in the same transaction as characters and events. The v16→v17
+migration (both backends, inside the migration transaction) splits the single
+legacy document into verified sections and keeps its version, watermark and
+`updated_at`.
+
+Operational consequences:
+
+- Startup reassembles and verifies the sections. A missing, extra, altered or
+  stale section row, a malformed manifest, or section rows without a head row
+  fail startup closed with an invalid runtime snapshot error; the retained
+  event ledger is never used as a fallback. The fix is to restore a verified
+  backup, never to edit or delete section rows by hand.
+- Backups must keep `world_runtime` and `world_runtime_sections` from the same
+  committed point. SQLite `tiamud-admin backup`, `verify-backup` and `restore`
+  copy the whole database, and `tiamud-admin check` verifies the assembled
+  snapshot of both pre-v17 and v17 files. A PostgreSQL `pg_dump` or physical
+  backup must include both tables (a single consistent dump does).
+- Tools or queries that read `world_runtime.snapshot_json` no longer work; read
+  the assembled document through the server or `tiamud-admin check` instead.
+- A v16 binary refuses a v17 database as a future schema: rolling the binary
+  back requires restoring the backup taken before the migration.
+
 For an existing 6B installation, the v14 row is born empty and there is no way
 to automatically reconstruct which v13 catalog was running. Recovery without a
 snapshot/ledger may still contain characters; that is why the server consults
@@ -464,7 +495,7 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires schema v16 and refuses to run while any operational
+The command requires schema v17 and refuses to run while any operational
 `administrator` or `implementor` profile exists. A legacy `admin` role alone
 does not count as executable authority. Recovery replaces the target's profile
 with `implementor`, clears its lore title and previous direct assignments,
@@ -476,7 +507,7 @@ commit in one transaction; any failure rolls all of them back.
 `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
 verify the installation's normal `pg_dump` or physical backup, then run
 `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
-equivalent schema-v16 transaction:
+equivalent schema-v17 transaction:
 
 ```sql
 BEGIN;
@@ -488,8 +519,8 @@ DECLARE
     target_id BIGINT;
     recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 16 THEN
-        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 16';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 17 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 17';
     END IF;
     IF EXISTS (
         SELECT 1 FROM staff_profiles
@@ -610,7 +641,7 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v16, including durable social
+The mover requires the current SQLite schema v17, including durable social
 channel subscriptions, staff profiles, capability assignments, report
 resolutions, staff audit, offline mail usage/messages and retained mail-report
 evidence, board posts, usage and retained evidence, and the durable area
@@ -628,7 +659,7 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 ```
 
 Exercise registration, login, movement, combat and social state before deleting
-or archiving the SQLite rollback copy. For schema v16 explicitly send, list,
+or archiving the SQLite rollback copy. For schema v17 explicitly send, list,
 read, delete and report mail, restart, and confirm that the moved PostgreSQL
 state retains the inbox, usage quota and report evidence. Also publish, list,
 read, delete and report one board post; confirm post quota/evidence survive the

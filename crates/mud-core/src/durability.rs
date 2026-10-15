@@ -29,6 +29,108 @@ use super::*;
 /// at most this many ticks; graceful shutdown flushes it.
 pub const DURABLE_CLOCK_HEARTBEAT_TICKS: u64 = 60;
 
+/// One independently stored part of the portable runtime snapshot (schema
+/// v17, ADR 0035). Each variant is exactly one top-level member of the
+/// serialized `WorldRuntimeSnapshot`; the remaining small scalar members form
+/// the head document that every runtime commit rewrites.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RuntimeSection {
+    ItemInstances,
+    ItemProvenance,
+    Npcs,
+    Adventure,
+    ProgressionFlags,
+    Trades,
+    LootEncounters,
+    GroundLoot,
+    PartyLootCursors,
+    AreaResidency,
+}
+
+impl RuntimeSection {
+    /// Every section in canonical storage order.
+    pub const ALL: [Self; 10] = [
+        Self::ItemInstances,
+        Self::ItemProvenance,
+        Self::Npcs,
+        Self::Adventure,
+        Self::ProgressionFlags,
+        Self::Trades,
+        Self::LootEncounters,
+        Self::GroundLoot,
+        Self::PartyLootCursors,
+        Self::AreaResidency,
+    ];
+
+    /// The camelCase member name of this section in the serialized snapshot,
+    /// which is also its durable storage key.
+    pub const fn field_name(self) -> &'static str {
+        match self {
+            Self::ItemInstances => "itemInstances",
+            Self::ItemProvenance => "itemProvenance",
+            Self::Npcs => "npcs",
+            Self::Adventure => "adventure",
+            Self::ProgressionFlags => "progressionFlags",
+            Self::Trades => "trades",
+            Self::LootEncounters => "lootEncounters",
+            Self::GroundLoot => "groundLoot",
+            Self::PartyLootCursors => "partyLootCursors",
+            Self::AreaResidency => "areaResidency",
+        }
+    }
+
+    const fn bit(self) -> u16 {
+        1 << self as u16
+    }
+}
+
+/// A set of [`RuntimeSection`]s. "Unknown" must always be represented by
+/// [`RuntimeSectionSet::ALL`]: a section missing from a dirty set is only
+/// skipped when the durable baseline proves it unchanged.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct RuntimeSectionSet(u16);
+
+impl RuntimeSectionSet {
+    pub const EMPTY: Self = Self(0);
+    pub const ALL: Self = Self((1 << RuntimeSection::ALL.len()) - 1);
+
+    pub const fn contains(self, section: RuntimeSection) -> bool {
+        self.0 & section.bit() != 0
+    }
+
+    pub fn insert(&mut self, section: RuntimeSection) {
+        self.0 |= section.bit();
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn is_all(self) -> bool {
+        self.0 == Self::ALL.0
+    }
+
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = RuntimeSection> {
+        RuntimeSection::ALL
+            .into_iter()
+            .filter(move |section| self.contains(*section))
+    }
+}
+
+impl FromIterator<RuntimeSection> for RuntimeSectionSet {
+    fn from_iter<I: IntoIterator<Item = RuntimeSection>>(iter: I) -> Self {
+        let mut set = Self::EMPTY;
+        for section in iter {
+            set.insert(section);
+        }
+        set
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct DurableBaseline {
     runtime: Option<RuntimeBaseline>,
@@ -158,6 +260,58 @@ impl World {
         ]
         .into_iter()
         .filter_map(|(name, clean)| (!clean).then_some(name))
+        .collect()
+    }
+
+    /// Runtime snapshot sections that may differ from what the backend last
+    /// confirmed. Without a confirmed baseline every section is dirty. Scalar
+    /// counters, the clock and the revision live in the head document, which
+    /// every runtime commit rewrites, so they are not sections.
+    pub fn runtime_dirty_sections(&self) -> RuntimeSectionSet {
+        let Some(baseline) = &self.durable.runtime else {
+            return RuntimeSectionSet::ALL;
+        };
+        [
+            (
+                RuntimeSection::ItemInstances,
+                baseline.item_instances.ptr_eq(&self.item_instances),
+            ),
+            (
+                RuntimeSection::ItemProvenance,
+                baseline.item_provenance.ptr_eq(&self.item_provenance),
+            ),
+            (RuntimeSection::Npcs, baseline.npcs.ptr_eq(&self.npcs)),
+            (
+                RuntimeSection::Adventure,
+                baseline.adventure.ptr_eq(&self.adventure),
+            ),
+            (
+                RuntimeSection::ProgressionFlags,
+                baseline
+                    .world_progression_flags
+                    .ptr_eq(&self.world_progression_flags),
+            ),
+            (RuntimeSection::Trades, baseline.trades.ptr_eq(&self.trades)),
+            (
+                RuntimeSection::LootEncounters,
+                baseline.loot_encounters.ptr_eq(&self.loot_encounters),
+            ),
+            (
+                RuntimeSection::GroundLoot,
+                baseline.ground_loot.ptr_eq(&self.ground_loot),
+            ),
+            (
+                RuntimeSection::PartyLootCursors,
+                baseline.party_loot_cursors.ptr_eq(&self.party_loot_cursors),
+            ),
+            (
+                RuntimeSection::AreaResidency,
+                baseline.active_areas == self.active_areas
+                    && baseline.retired_areas == self.retired_areas,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(section, clean)| (!clean).then_some(section))
         .collect()
     }
 

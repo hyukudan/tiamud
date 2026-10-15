@@ -11,6 +11,46 @@ use super::*;
 /// only the exact v1-v5 DTOs remain on the historical 1 MiB budget.
 pub(crate) const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 
+/// Maps a sectioned-runtime storage error to the store contract: database
+/// errors stay database errors, every disagreement fails closed as an invalid
+/// runtime snapshot and an oversized assembly reports its ceiling.
+pub(crate) fn runtime_section_error(
+    error: tiamud_persistence_sqlite::runtime_sections::RuntimeSectionError,
+) -> StoreError {
+    use tiamud_persistence_sqlite::runtime_sections::RuntimeSectionError;
+    match error {
+        RuntimeSectionError::Sqlite(error) => StoreError::Sqlite(error),
+        RuntimeSectionError::TooLarge { maximum } => StoreError::SnapshotTooLarge {
+            kind: "world runtime",
+            maximum,
+        },
+        RuntimeSectionError::InvalidManifest | RuntimeSectionError::Inconsistent(_) => {
+            StoreError::InvalidRuntimeSnapshot
+        }
+    }
+}
+
+/// Verify, assemble and decode one stored sectioned runtime (schema v17,
+/// ADR 0035). The manifest must agree exactly with the section rows, and the
+/// assembled document is admitted under the same version-dependent ceiling as
+/// the former single document before the version-directed decoder runs.
+pub(crate) fn decode_stored_runtime(
+    stored: &tiamud_persistence_sqlite::runtime_sections::StoredRuntime,
+) -> Result<(u32, WorldRuntimeSnapshot), StoreError> {
+    let durable_version =
+        u32::try_from(stored.snapshot_version).map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
+    let maximum = if durable_version <= LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION {
+        tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
+    } else {
+        MAX_RUNTIME_JSON_BYTES
+    };
+    let document =
+        tiamud_persistence_sqlite::runtime_sections::assemble_stored_runtime(stored, maximum)
+            .map_err(runtime_section_error)?;
+    decode_runtime_snapshot(stored.snapshot_version, &document)
+        .map(|snapshot| (durable_version, snapshot))
+}
+
 pub(crate) fn normalise_character_identity_ids(
     mut character_ids: Vec<CharacterId>,
 ) -> Result<Vec<CharacterId>, StoreError> {

@@ -3382,7 +3382,12 @@ async fn commit_durable(
     events: Vec<DomainEvent>,
 ) -> Result<(), StoreError> {
     match store
-        .commit_action(characters.clone(), world.runtime_snapshot(), events)
+        .commit_action_sections(
+            characters.clone(),
+            world.runtime_snapshot(),
+            world.runtime_dirty_sections(),
+            events,
+        )
         .await
     {
         Ok(()) => {
@@ -3410,9 +3415,10 @@ async fn commit_tick(
     let runtime = !persisted_events.is_empty() || world.runtime_needs_durable_commit();
     let result = if runtime {
         store
-            .commit_action(
+            .commit_action_sections(
                 characters.clone(),
                 world.runtime_snapshot(),
+                world.runtime_dirty_sections(),
                 persisted_events,
             )
             .await
@@ -3679,6 +3685,8 @@ mod tests {
         characters: HashMap<CharacterId, CharacterSnapshot>,
         gameplay: HashMap<CharacterId, CharacterGameplaySnapshot>,
         runtime: Option<WorldRuntimeSnapshot>,
+        /// The sectioned rows a SQL store would hold (ADR 0035).
+        runtime_rows: Option<MemoryRuntimeRows>,
         domain_events: Vec<tiamud_core::DomainEvent>,
         roles: HashMap<AccountId, tiamud_core::AccountRole>,
         muted: HashSet<AccountId>,
@@ -3820,6 +3828,29 @@ mod tests {
         expires_at: i64,
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct MemoryRuntimeRows {
+        snapshot_version: i64,
+        head_json: String,
+        manifest_json: String,
+        sections: BTreeMap<String, tiamud_persistence_sqlite::runtime_sections::RuntimeSectionRow>,
+    }
+
+    impl MemoryRuntimeRows {
+        fn assemble(&self) -> WorldRuntimeSnapshot {
+            let stored = tiamud_persistence_sqlite::runtime_sections::StoredRuntime {
+                snapshot_version: self.snapshot_version,
+                head_json: self.head_json.clone(),
+                manifest_json: self.manifest_json.clone(),
+                last_event_sequence: None,
+                sections: self.sections.values().cloned().collect(),
+            };
+            crate::persistence::decode_stored_runtime(&stored)
+                .unwrap()
+                .1
+        }
+    }
+
     #[derive(Default)]
     struct MemoryStore {
         state: Mutex<MemoryState>,
@@ -3827,19 +3858,78 @@ mod tests {
         fail_social_reads: AtomicBool,
         successful_commits: AtomicUsize,
         /// Serialized JSON bytes a SQL adapter would write for committed
-        /// character aggregates, runtime snapshots and events.
+        /// character aggregates, runtime head/manifest/sections and events.
         bytes_written: AtomicUsize,
         characters_written: AtomicUsize,
         runtime_snapshots_written: AtomicUsize,
+        /// Runtime section rows written (ADR 0035).
+        runtime_sections_written: AtomicUsize,
+        /// The section names written by the latest runtime commit.
+        last_runtime_sections: Mutex<Vec<&'static str>>,
+        /// Skip the per-commit assembly check (used only by the measurement).
+        skip_section_verification: AtomicBool,
         purge_mail_calls: AtomicUsize,
         purge_board_calls: AtomicUsize,
     }
 
     impl MemoryStore {
+        /// Applies one runtime write exactly as the SQL stores plan it and,
+        /// unless disabled, proves that the stored sections assemble back to
+        /// the full snapshot the actor passed: a missed dirty section fails
+        /// every test that commits through this store.
+        fn apply_runtime(
+            &self,
+            state: &mut MemoryState,
+            runtime: &WorldRuntimeSnapshot,
+            sections: tiamud_core::RuntimeSectionSet,
+        ) -> Result<usize, StoreError> {
+            let encoded = crate::persistence::common::encode_runtime(runtime, sections)?;
+            let previous = state
+                .runtime_rows
+                .as_ref()
+                .map(|rows| (rows.snapshot_version, rows.manifest_json.clone()));
+            let plan = crate::persistence::common::plan_runtime_write(previous, runtime, encoded)?;
+            let bytes = plan.written_bytes();
+            let rows = state.runtime_rows.get_or_insert_with(Default::default);
+            if plan.replace_all {
+                rows.sections.clear();
+            }
+            *self.last_runtime_sections.lock().unwrap() = plan
+                .sections
+                .iter()
+                .map(|encoded| encoded.section.field_name())
+                .collect();
+            self.runtime_sections_written
+                .fetch_add(plan.sections.len(), Ordering::SeqCst);
+            for encoded in plan.sections {
+                let name = encoded.section.field_name().to_owned();
+                rows.sections.insert(
+                    name.clone(),
+                    tiamud_persistence_sqlite::runtime_sections::RuntimeSectionRow {
+                        name,
+                        revision: plan.revision,
+                        json: encoded.json,
+                        sha256: encoded.sha256,
+                    },
+                );
+            }
+            rows.snapshot_version = plan.snapshot_version;
+            rows.head_json = plan.head_json;
+            rows.manifest_json = plan.manifest_json;
+            if !self.skip_section_verification.load(Ordering::SeqCst) {
+                assert_eq!(
+                    &rows.assemble(),
+                    runtime,
+                    "the sectioned runtime no longer assembles to the committed snapshot"
+                );
+            }
+            Ok(bytes)
+        }
+
         fn record_written(
             &self,
             characters: &[tiamud_core::DurableCharacterSnapshot],
-            runtime: Option<&WorldRuntimeSnapshot>,
+            runtime_bytes: Option<usize>,
             events: &[tiamud_core::DomainEvent],
         ) {
             let mut bytes = 0_usize;
@@ -3847,8 +3937,8 @@ mod tests {
                 bytes += serde_json::to_vec(&snapshot.gameplay).unwrap().len();
                 bytes += serde_json::to_vec(&snapshot.character).unwrap().len();
             }
-            if let Some(runtime) = runtime {
-                bytes += serde_json::to_vec(runtime).unwrap().len();
+            if let Some(runtime_bytes) = runtime_bytes {
+                bytes += runtime_bytes;
                 self.runtime_snapshots_written
                     .fetch_add(1, Ordering::SeqCst);
             }
@@ -5226,6 +5316,22 @@ mod tests {
             runtime: WorldRuntimeSnapshot,
             events: Vec<tiamud_core::DomainEvent>,
         ) -> Result<(), StoreError> {
+            self.commit_action_sections(
+                characters,
+                runtime,
+                tiamud_core::RuntimeSectionSet::ALL,
+                events,
+            )
+            .await
+        }
+
+        async fn commit_action_sections(
+            &self,
+            characters: Vec<tiamud_core::DurableCharacterSnapshot>,
+            runtime: WorldRuntimeSnapshot,
+            sections: tiamud_core::RuntimeSectionSet,
+            events: Vec<tiamud_core::DomainEvent>,
+        ) -> Result<(), StoreError> {
             if self.fail_saves.load(Ordering::SeqCst) {
                 return Err(StoreError::WorkerStopped);
             }
@@ -5241,7 +5347,8 @@ mod tests {
                     });
                 }
             }
-            self.record_written(&characters, Some(&runtime), &events);
+            let runtime_bytes = self.apply_runtime(&mut state, &runtime, sections)?;
+            self.record_written(&characters, Some(runtime_bytes), &events);
             for snapshot in characters {
                 state
                     .gameplay
@@ -5280,6 +5387,7 @@ mod tests {
             }
             memory_authorize_staff(&state, &audit)?;
             memory_append_staff_audit(&mut state, audit)?;
+            self.apply_runtime(&mut state, &runtime, tiamud_core::RuntimeSectionSet::ALL)?;
             for snapshot in characters {
                 state
                     .gameplay
@@ -7944,7 +8052,12 @@ mod tests {
                     .unwrap()
                     .runtime
                     .as_ref()
-                    .is_some_and(|runtime| runtime.logical_tick >= 1);
+                    // Combat resolves on a scheduler tick: wait until the
+                    // defeat itself is durable, not merely any tick.
+                    .is_some_and(|runtime| {
+                        runtime.logical_tick >= 1
+                            && runtime.npcs["test:guardian"].respawn_at_tick.is_some()
+                    });
                 if ready {
                     break;
                 }
