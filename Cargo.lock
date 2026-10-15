@@ -2867,6 +2867,7 @@ dependencies = [
  "tiamud-protocol",
  "tiamud-scripting",
  "tiamud-story-core",
+ "tiamud-story-script",
  "tiamud-telnet-codec",
  "tokio",
  "tokio-rustls",
