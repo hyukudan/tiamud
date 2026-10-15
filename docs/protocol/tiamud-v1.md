@@ -136,6 +136,27 @@ Every sequenced server message uses:
 `server.heartbeat` is deliberately unsequenced so best-effort liveness traffic
 cannot displace an accepted command result.
 
+### Typed source and generated TypeScript
+
+The Rust crate `crates/protocol` (`tiamud-protocol`, proposed
+[ADR 0026](../decisions/0026-typed-protocol-source-and-typescript-codegen.md))
+is the single typed source of the envelope, the server/client message type
+names, every client payload except `action.perform`, and the server payloads
+whose shape belongs to the transport. Payloads that embed a `tiamud-core`
+projection (scene, player, item, map, narrative event) are generic over it. The
+server builds every WebSocket message from these types; the encoded JSON is
+byte-identical to the former hand-built objects, which golden tests in both
+crates pin.
+
+`apps/web/src/lib/generated/protocol.ts` is generated from those types with
+ts-rs (a test-only dependency) and committed. `cargo test --workspace --locked`
+fails when it is stale; regenerate with
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol`.
+Generated declarations describe the wire, not trust: the official client still
+validates every inbound frame at runtime in `protocol.ts`, and its validators
+return the generated types. Still hand-mirrored: the `action.perform` field set
+and the inner scene/player/item/map/event/reward-odds/presentation shapes.
+
 ### Additive v1 rollout policy
 
 `tiamud.v1` has not yet reached its first compatibility milestone nor been used

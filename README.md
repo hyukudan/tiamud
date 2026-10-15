@@ -387,6 +387,12 @@ node --test scripts/bot.test.mjs scripts/verify-soak-report.test.mjs scripts/tel
 node scripts/smoke.mjs
 ```
 
+`cargo test --workspace --locked` also fails if
+`apps/web/src/lib/generated/protocol.ts` is stale against the typed protocol in
+`crates/protocol`; regenerate it with
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol` and
+review the diff.
+
 The baseline is verified locally per phase with formatting, strict clippy,
 workspace tests, the web client and license checks. Exact per-phase figures,
 retained evidence and unrun limits live in
@@ -431,6 +437,7 @@ apps/web/                    official Svelte 5 client
 clients/                     TinTin++ and Mudlet integrations
 crates/mud-core/             transport-independent domain and perception
 crates/mud-server/           actor, transports, persistence and embedded web
+crates/protocol/             typed tiamud.v1 wire types; generates web TypeScript
 crates/telnet-codec/         shared, fuzzed Telnet parser
 crates/cell-frame/           bounded, consented cell graphics
 crates/persistence-*/        SQLite/PostgreSQL schemas and migration

@@ -55,7 +55,9 @@ local no es evidencia de CI, release ni producción.
 - WorldPack requiere esquema, validador, normalización, composición, loader,
   datos revisados y CLI tests.
 - Protocolo requiere Rust, TypeScript estricto, socket/recovery, Playwright y
-  paridad Telnet/GMCP.
+  paridad Telnet/GMCP. Los tipos de cable viven en `crates/protocol`; regenera
+  `apps/web/src/lib/generated/protocol.ts` con
+  `TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol`.
 - Medios pasan por pipeline y manifiesto revisado; perderlos no cambia juego.
 - La identidad durable prototype/instance, las pilas derivadas y los
   contenedores acotados, `give`, trade confirmado y botín repetible con
