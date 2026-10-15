@@ -2700,11 +2700,15 @@ impl TelnetSession {
             return Vec::new();
         }
         let mut output = Vec::new();
-        let mut full =
-            serde_json::to_value(odds).expect("reward odds views contain only serializable values");
-        full.as_object_mut()
-            .expect("reward odds views serialize as objects")
-            .insert("revision".into(), json!(revision));
+        let Ok(mut full) = serde_json::to_value(odds) else {
+            warn!("failed to project Char.Reward.Odds");
+            return output;
+        };
+        let Some(object) = full.as_object_mut() else {
+            warn!("failed to project Char.Reward.Odds");
+            return output;
+        };
+        object.insert("revision".into(), json!(revision));
         if append_gmcp(&mut output, "Char.Reward.Odds", &full) {
             return output;
         }
@@ -3086,9 +3090,9 @@ fn append_bounded_text_gmcp(
         let middle = lower + (upper - lower) / 2;
         let end = boundaries[middle];
         let mut fallback = data.clone();
-        let fields = fallback
-            .as_object_mut()
-            .expect("the original GMCP projection was an object");
+        let Some(fields) = fallback.as_object_mut() else {
+            return false;
+        };
         fields.insert(field.to_owned(), json!(&text[..end]));
         fields.insert("truncated".into(), json!(true));
         fields.insert(

@@ -2752,7 +2752,7 @@ dependencies = [
 name = "tiamud-cell-frame"
 version = "0.1.0"
 dependencies = [
- "image",
+ "png",
  "serde",
  "thiserror",
 ]
@@ -2939,7 +2939,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

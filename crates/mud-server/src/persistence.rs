@@ -4576,9 +4576,9 @@ fn consume_mail_usage(
          WHERE account_id = ?6",
         params![
             hour_start,
-            hour_count + 1,
+            hour_count.saturating_add(1),
             day_start,
-            day_count + 1,
+            day_count.saturating_add(1),
             now,
             account_id.0
         ],
@@ -5071,9 +5071,9 @@ fn consume_board_usage(
          WHERE account_id = ?6",
         params![
             hour_start,
-            hour_count + 1,
+            hour_count.saturating_add(1),
             day_start,
-            day_count + 1,
+            day_count.saturating_add(1),
             now,
             account_id.0
         ],
@@ -6251,18 +6251,19 @@ fn character_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CharacterSnap
 fn save(connection: &Connection, snapshot: &CharacterSnapshot) -> Result<(), StoreError> {
     let name = normalise_name(&snapshot.name, "character")?;
     let item_locations_json = serde_json::to_string(&snapshot.item_locations)?;
-    let updated = connection.execute(
-        "UPDATE characters
-         SET name = ?1, room_id = ?2, item_locations_json = ?3, updated_at = unixepoch()
-         WHERE id = ?4 AND account_id = ?5",
-        params![
+    let updated = connection
+        .prepare_cached(
+            "UPDATE characters
+             SET name = ?1, room_id = ?2, item_locations_json = ?3, updated_at = unixepoch()
+             WHERE id = ?4 AND account_id = ?5",
+        )?
+        .execute(params![
             name,
             snapshot.room_id,
             item_locations_json,
             snapshot.id.0,
             snapshot.account_id.0
-        ],
-    )?;
+        ])?;
     if updated == 0 {
         return Err(StoreError::CharacterNotFound {
             account_id: snapshot.account_id,
@@ -7169,7 +7170,9 @@ pub(super) fn decode_startup_domain_events(
             });
         }
         events.push(serde_json::from_str(&json)?);
-        expected_sequence += 1;
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or(StoreError::InvalidStartupLedger)?;
     }
     Ok(events)
 }
@@ -7306,55 +7309,60 @@ fn commit_action_with_retention(
         characters.iter().zip(gameplay_json).zip(adventure_json)
     {
         save(&transaction, &snapshot.character)?;
-        let updated = transaction.execute(
-            "UPDATE characters SET gameplay_json = ?1, updated_at = unixepoch()
+        let updated = transaction
+            .prepare_cached(
+                "UPDATE characters SET gameplay_json = ?1, updated_at = unixepoch()
              WHERE id = ?2 AND account_id = ?3",
-            params![
+            )?
+            .execute(params![
                 gameplay_json,
                 snapshot.character.id.0,
                 snapshot.character.account_id.0
-            ],
-        )?;
+            ])?;
         if updated == 0 {
             return Err(StoreError::CharacterNotFound {
                 account_id: snapshot.character.account_id,
                 character_id: snapshot.character.id,
             });
         }
-        transaction.execute(
-            "INSERT INTO character_adventure (character_id, state_json, updated_at)
+        transaction
+            .prepare_cached(
+                "INSERT INTO character_adventure (character_id, state_json, updated_at)
              VALUES (?1, ?2, unixepoch())
              ON CONFLICT(character_id) DO UPDATE SET
                  state_json = excluded.state_json,
                  updated_at = excluded.updated_at",
-            params![snapshot.character.id.0, adventure_json],
-        )?;
+            )?
+            .execute(params![snapshot.character.id.0, adventure_json])?;
     }
-    transaction.execute(
-        "INSERT INTO world_adventure (singleton, state_json, updated_at)
+    transaction
+        .prepare_cached(
+            "INSERT INTO world_adventure (singleton, state_json, updated_at)
          VALUES (1, ?1, unixepoch())
          ON CONFLICT(singleton) DO UPDATE SET
              state_json = excluded.state_json,
              updated_at = excluded.updated_at",
-        [world_adventure_json],
-    )?;
-    for event_json in event_json {
-        transaction.execute(
-            "INSERT INTO domain_events (event_json) VALUES (?1)",
-            [event_json],
-        )?;
+        )?
+        .execute([world_adventure_json])?;
+    {
+        let mut insert_event =
+            transaction.prepare_cached("INSERT INTO domain_events (event_json) VALUES (?1)")?;
+        for event_json in event_json {
+            insert_event.execute([event_json])?;
+        }
     }
-    let last_event_sequence = transaction.query_row(
-        "SELECT max(
+    let last_event_sequence = transaction
+        .prepare_cached(
+            "SELECT max(
              COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
              COALESCE((SELECT last_event_sequence FROM world_runtime
                        WHERE singleton = 1), 0)
          )",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    transaction.execute(
-        "INSERT INTO world_runtime
+        )?
+        .query_row([], |row| row.get::<_, i64>(0))?;
+    transaction
+        .prepare_cached(
+            "INSERT INTO world_runtime
              (singleton, snapshot_version, snapshot_json,
               last_event_sequence, updated_at)
          VALUES (1, ?1, ?2, ?3, unixepoch())
@@ -7363,14 +7371,19 @@ fn commit_action_with_retention(
              snapshot_json = excluded.snapshot_json,
              last_event_sequence = excluded.last_event_sequence,
              updated_at = excluded.updated_at",
-        params![runtime.snapshot_version, runtime_json, last_event_sequence],
-    )?;
-    transaction.execute(
-        "DELETE FROM domain_events
-         WHERE sequence <= ?1 - ?2
-           AND sequence <= ?1",
-        params![last_event_sequence, event_retention],
-    )?;
+        )?
+        .execute(params![
+            runtime.snapshot_version,
+            runtime_json,
+            last_event_sequence
+        ])?;
+    transaction
+        .prepare_cached(
+            "DELETE FROM domain_events
+             WHERE sequence <= ?1 - ?2
+               AND sequence <= ?1",
+        )?
+        .execute(params![last_event_sequence, event_retention])?;
     if let Some((audit, now)) = &staff_audit {
         insert_staff_audit(&transaction, audit, *now)?;
     }
