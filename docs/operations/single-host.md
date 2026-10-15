@@ -179,7 +179,7 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v15, both SQLite and PostgreSQL retain the
+In current schema v16, both SQLite and PostgreSQL retain the
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
@@ -262,6 +262,21 @@ manifest fails closed without its exact checkpoint and that the mover copies or
 rejects each row atomically. Do not enable LRU or automatic retirements just by
 migrating.
 
+Schema v16 adds only `story_saves`, the persisted story save slots of
+[ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md) (proposed).
+Each row is keyed by account, story and slot `0..=9` and retains the pack id
+and SHA-256, the state format version, an opaque state document of at most
+64 KiB and the SHA-256 of its exact bytes; deleting an account cascades to its
+slots. Per account at most 16 stories and 1 MiB of state are accepted. The
+v15→v16 migration creates the empty table in both backends and changes no other
+table or snapshot. The server does not yet expose story sessions, so the table
+stays empty until that work lands. SQLite `tiamud-admin backup`,
+`verify-backup` and `restore` copy the table with the rest of the database;
+PostgreSQL `pg_dump` or physical backups must include it. A v15 binary refuses a
+v16 database as a future schema: rolling the binary back requires restoring
+the backup taken before the migration, which also discards any slot written
+after it.
+
 For an existing 6B installation, the v14 row is born empty and there is no way
 to automatically reconstruct which v13 catalog was running. Recovery without a
 snapshot/ledger may still contain characters; that is why the server consults
@@ -321,7 +336,7 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires schema v15 and refuses to run while any operational
+The command requires schema v16 and refuses to run while any operational
 `administrator` or `implementor` profile exists. A legacy `admin` role alone
 does not count as executable authority. Recovery replaces the target's profile
 with `implementor`, clears its lore title and previous direct assignments,
@@ -333,7 +348,7 @@ commit in one transaction; any failure rolls all of them back.
 `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
 verify the installation's normal `pg_dump` or physical backup, then run
 `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
-equivalent schema-v15 transaction:
+equivalent schema-v16 transaction:
 
 ```sql
 BEGIN;
@@ -345,8 +360,8 @@ DECLARE
     target_id BIGINT;
     recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 15 THEN
-        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 15';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 16 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 16';
     END IF;
     IF EXISTS (
         SELECT 1 FROM staff_profiles
@@ -467,11 +482,14 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v15, including durable social
+The mover requires the current SQLite schema v16, including durable social
 channel subscriptions, staff profiles, capability assignments, report
 resolutions, staff audit, offline mail usage/messages and retained mail-report
 evidence, board posts, usage and retained evidence, and the durable area
-generation row and every validated area checkpoint when present. It refuses a
+generation row, every validated area checkpoint and every story save slot
+when present. Each story save row is checked against the shared row contract
+(bounds, metadata agreement and the SHA-256 of its exact bytes) before the
+PostgreSQL transaction opens; one corrupt slot aborts the whole move. It refuses a
 non-empty target and commits schema
 plus rows in one PostgreSQL transaction. Configure exactly one line in the
 service environment and remove/comment the other:
@@ -482,7 +500,7 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 ```
 
 Exercise registration, login, movement, combat and social state before deleting
-or archiving the SQLite rollback copy. For schema v15 explicitly send, list,
+or archiving the SQLite rollback copy. For schema v16 explicitly send, list,
 read, delete and report mail, restart, and confirm that the moved PostgreSQL
 state retains the inbox, usage quota and report evidence. Also publish, list,
 read, delete and report one board post; confirm post quota/evidence survive the
@@ -511,7 +529,7 @@ installation.
 
 This operation only exists when the service uses
 `TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. The first run binds the verified
-catalog in SQL v15 before readiness. On later restarts the durable row prevails:
+catalog in SQL (v14+) before readiness. On later restarts the durable row prevails:
 the server derives the exact path from the registry, `worldId` and digest even
 if `area-active` points to a different publication. A catalog-bound base cannot
 start in monolithic WorldPack mode. If migrating from v13, first complete the G0

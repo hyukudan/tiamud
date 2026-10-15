@@ -14,6 +14,9 @@
   figura como S5). No depende de `story-core` ni está integrada: ningún
   StoryPack, actor, protocolo `story.command` ni cliente la usa, y su
   integración sigue requiriendo el ADR propio de parser e idioma.
+  La capa de persistencia de S3 (slots y esquema SQL v16) se propone en
+  [ADR 0030](0030-story-save-slots-and-schema-v16.md) y existe sin conectar a
+  sesiones ni protocolo.
   Nada de este ADR modifica decisiones aceptadas hasta que se acepte.
 - Fecha: 2026-10-15
 - Alcance: nuevo runtime narrativo hermano de `tiamud-core`
@@ -193,7 +196,7 @@ sus implicaciones de autorización, moderación y persistencia.
 | S0 | Crate puro `story-core`: StoryPack, validador/lints, DSL, RNG sembrado, `step`/`view`, `UndoRing`, fixture en castellano y pruebas deterministas | No (este ADR) |
 | S1 | CLI de autoría (`validate`/`play` en terminal) y esquema JSON publicado del StoryPack | No, salvo cambio de formato |
 | S2 | Actor de instancia en el servidor, límites globales/por cuenta, desalojo por inactividad, protocolo `story.*`, paridad Telnet/GMCP, Playwright | **Sí** (protocolo y actor) |
-| S3 | Slots de guardado persistidos, esquema SQL v16 SQLite/PostgreSQL, migración y paridad | **Sí** (persistencia) |
+| S3 | Slots de guardado persistidos, esquema SQL v16 SQLite/PostgreSQL, migración y paridad | **Sí** (persistencia: [ADR 0030](0030-story-save-slots-and-schema-v16.md), propuesto; capa de persistencia implementada, sin conectar a S2) |
 | S4 | Aventuras por menús de verbos: `story.menu`, diálogos, retratos y cues vía pipeline de medios | **Sí** (modelo de menús/diálogo: [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md), propuesto; su modelo de núcleo StoryPack v2 existe como biblioteca) |
 | S5 | Parser de ficción interactiva en castellano (`story.command`/`story.prompt`), gramática acotada y determinista | **Sí** (parser e idioma) |
 | S6 | Integración opcional de scripts con el sandbox Lua y cuotas | **Sí** |

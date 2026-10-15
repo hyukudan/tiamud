@@ -35,7 +35,7 @@ assets can be served from the process or a proxy on the same host. PostgreSQL is
 recommended for new public installations; SQLite is the local, service-free
 alternative. One is selected and dual-writing never happens.
 
-Both adapters implement schema v15. It preserves the social and staff relations
+Both adapters implement schema v16. It preserves the social and staff relations
 of v9/v10 and transactionally widens the physical bound of the current opaque
 snapshot to 2 MiB. Legacy snapshots v1–v5 remain limited to 1 MiB when decoded;
 v6, v7 and v8 admit 2 MiB. The SQLite→PostgreSQL move copies these relations,
@@ -49,6 +49,11 @@ focused server tests, including the generation CAS; its smoke binds G0 and
 validates `noop`, readiness, Web, Telnet and two resident areas. That evidence is
 schema v14 and is not relabeled as v15. See the
 [PostgreSQL v14/PWA log](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
+Schema v16 only adds the `story_saves` table for persisted story save slots
+([ADR 0030](decisions/0030-story-save-slots-and-schema-v16.md), proposed; the
+persistence layer exists but no story session or protocol uses it yet). The
+mover validates and copies those rows too. Its PostgreSQL tests are written
+but have not run against a real server, so no PostgreSQL evidence is v16.
 
 Operations are in [single-host.md](operations/single-host.md). Microservices and
 orchestration are not a goal without measured load that justifies them.
@@ -139,7 +144,7 @@ generations as labels.
 Phase 6B only grows residency until shutdown. 6C allows replacing **the whole
 generation**, not an individual area. In catalog mode, the first run binds,
 before readiness, the `worldId`, active digest and activation sequence in the SQL
-v15 singleton `world_area_generation`. A later startup derives the exact path
+v14+ singleton `world_area_generation`. A later startup derives the exact path
 from the registry and that durable digest, even if the editorial `area-active`
 pointer has changed. The current baseline uses `WorldRuntimeSnapshot` v8 and no
 other authority for items, NPCs, loot or characters appears.
@@ -353,7 +358,7 @@ identities into active characters; for cohorts or beneficiaries that appear only
 in loot, an `existence-only` query is performed. Then the still-open loot
 encounters and their combat state are cancelled in a commit prior to readiness;
 already-resolved `groundLoot` rights survive intact. SQLite and PostgreSQL commit
-the snapshot as the single global authority in their schema v15 transaction; there
+the snapshot as the single global authority in their schema v16 transaction; there
 is no mirror loot or escrow table and no dual write.
 
 The main limits are 1,024 prototypes and 8,192 initial instances per WorldPack,
@@ -745,7 +750,7 @@ create a sequence and are not inferred from prose. Reference:
 | Transparent sprite profile | WebP alpha + PNG implemented |
 | Safe entity sidecar | Implemented; no sample sprites |
 | Combat hints | NPC attack/hit/defeat; no player/heal/tombstone |
-| Social phase 1 and current schema v15 | Groups/chat/reply/channels and Web/Telnet/GMCP parity implemented; real PostgreSQL v13/v14 remains historical evidence, not a v15 pass |
+| Social phase 1 and current schema v16 | Groups/chat/reply/channels and Web/Telnet/GMCP parity implemented; real PostgreSQL v13/v14/v15 remains historical evidence, not a v16 pass |
 | Communication phase 5A | Authored direct online telepathy with cost/cooldowns, per-room blocking, private suppression, commit before delivery and Web/Telnet/GMCP parity; telepathy does not persist or deliver offline/group |
 | Communication phase 5B | Authored local emotes with closed templates and non-recursive render, closed local targeting without none/optional/required, per-receiver ignore/block, commit before delivery and Web/Telnet/GMCP parity; no free text, persistence or global/group emotes |
 | Communication phase 5C | Explicit offline mail with per-account quotas, bounded mailbox/expiry/pagination, opaque references, acceptance that does not leak policy/capacity, report with 90-day evidence and Web/Telnet/`Tiamud.Mail 1` parity; no general history, outbox, attachments or group mail |

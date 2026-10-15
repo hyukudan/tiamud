@@ -3,7 +3,9 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 15;
+pub mod story_saves;
+
+pub const SCHEMA_VERSION: i64 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MigrationReport {
@@ -438,7 +440,33 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, SchemaErr
              state_json TEXT NOT NULL CHECK(length(state_json) <= 1048576),
              updated_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
-         PRAGMA user_version = 15;",
+         CREATE TABLE IF NOT EXISTS story_saves (
+             account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+             story_id TEXT NOT NULL
+                 CHECK(length(story_id) BETWEEN 1 AND 64
+                       AND story_id GLOB '[a-z0-9]*'
+                       AND story_id NOT GLOB '*[^a-z0-9._-]*'),
+             slot INTEGER NOT NULL CHECK(slot BETWEEN 0 AND 9),
+             pack_id TEXT NOT NULL
+                 CHECK(length(pack_id) BETWEEN 1 AND 64
+                       AND pack_id GLOB '[a-z0-9]*'
+                       AND pack_id NOT GLOB '*[^a-z0-9._-]*'),
+             pack_sha256 TEXT NOT NULL
+                 CHECK(length(pack_sha256) = 64
+                       AND pack_sha256 NOT GLOB '*[^0-9a-f]*'),
+             state_format_version INTEGER NOT NULL
+                 CHECK(state_format_version BETWEEN 1 AND 255),
+             state_json TEXT NOT NULL
+                 CHECK(length(CAST(state_json AS BLOB)) BETWEEN 2 AND 65536),
+             state_sha256 TEXT NOT NULL
+                 CHECK(length(state_sha256) = 64
+                       AND state_sha256 NOT GLOB '*[^0-9a-f]*'),
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             PRIMARY KEY(account_id, story_id, slot),
+             CHECK(updated_at >= created_at)
+         );
+         PRAGMA user_version = 16;",
     )?;
     if !column_exists(&transaction, "social_reports", "report_kind")? {
         transaction.execute_batch(
@@ -782,12 +810,12 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let report = migrate(&mut connection).unwrap();
 
-        assert_eq!(report, MigrationReport { from: 0, to: 15 });
+        assert_eq!(report, MigrationReport { from: 0, to: 16 });
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            15
+            16
         );
         assert!(
             connection
@@ -796,6 +824,7 @@ mod tests {
         );
         for table in [
             "world_area_checkpoints",
+            "story_saves",
             "social_mail_messages",
             "social_mail_usage",
             "social_mail_report_evidence",
@@ -901,7 +930,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 13, to: 15 }
+            MigrationReport { from: 13, to: 16 }
         );
         assert_eq!(
             connection
@@ -921,6 +950,162 @@ mod tests {
                 .unwrap(),
             "{}"
         );
+    }
+
+    fn insert_story_save(
+        connection: &Connection,
+        account_id: i64,
+        story_id: &str,
+        slot: i64,
+        state_json: &str,
+    ) -> rusqlite::Result<usize> {
+        connection.execute(
+            "INSERT INTO story_saves
+                 (account_id, story_id, slot, pack_id, pack_sha256,
+                  state_format_version, state_json, state_sha256,
+                  created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'cripta', ?4, 2, ?5, ?6, 100, 100)",
+            rusqlite::params![
+                account_id,
+                story_id,
+                slot,
+                "a".repeat(64),
+                state_json,
+                story_saves::story_state_sha256(state_json)
+            ],
+        )
+    }
+
+    #[test]
+    fn upgrades_v15_with_an_empty_story_save_table_and_keeps_existing_rows() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let generation = "a".repeat(64);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts (id, name) VALUES (1, 'Reader');
+                 INSERT INTO characters (id, account_id, name, room_id)
+                 VALUES (10, 1, 'Aster', 'demo:square');
+                 INSERT INTO world_runtime
+                     (singleton, snapshot_version, snapshot_json, last_event_sequence)
+                 VALUES (1, 8, '{}', 0);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO world_area_generation
+                     (singleton, world_id, active_catalog_sha256, activation_sequence)
+                 VALUES (1, 'demo:world', ?1, 2)",
+                [&generation],
+            )
+            .unwrap();
+        // A genuine v15 database has no story_saves table.
+        connection
+            .execute_batch("DROP TABLE story_saves; PRAGMA user_version = 15;")
+            .unwrap();
+
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 15, to: 16 }
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM story_saves", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT name FROM characters WHERE id = 10", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "Aster"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT active_catalog_sha256 FROM world_area_generation",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            generation
+        );
+        assert_eq!(
+            migrate(&mut connection).unwrap(),
+            MigrationReport { from: 16, to: 16 }
+        );
+    }
+
+    #[test]
+    fn story_save_schema_is_bounded_keyed_and_cascades_with_the_account() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 INSERT INTO accounts (id, name) VALUES (1, 'Reader'), (2, 'Other');",
+            )
+            .unwrap();
+        let state = r#"{"format_version":2,"pack_id":"cripta"}"#;
+        insert_story_save(&connection, 1, "cripta", 0, state).unwrap();
+        insert_story_save(&connection, 1, "cripta", 9, state).unwrap();
+        insert_story_save(&connection, 2, "cripta", 0, state).unwrap();
+        assert!(
+            insert_story_save(&connection, 1, "cripta", 0, state).is_err(),
+            "(account, story, slot) is the primary key"
+        );
+        for slot in [-1, 10] {
+            assert!(insert_story_save(&connection, 1, "cripta", slot, state).is_err());
+        }
+        for story in ["", "Cripta", "-cripta", "cripta del", &"a".repeat(65)] {
+            assert!(
+                insert_story_save(&connection, 1, story, 1, state).is_err(),
+                "{story:?}"
+            );
+        }
+        assert!(insert_story_save(&connection, 1, "cripta", 1, "{").is_err());
+        let oversized = format!("{{\"x\":\"{}\"}}", "a".repeat(65_536));
+        assert!(insert_story_save(&connection, 1, "cripta", 1, &oversized).is_err());
+        assert!(insert_story_save(&connection, 404, "cripta", 1, state).is_err());
+        assert!(
+            connection
+                .execute(
+                    "UPDATE story_saves SET pack_sha256 = ?1 WHERE account_id = 1",
+                    ["A".repeat(64)],
+                )
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE story_saves SET updated_at = 99 WHERE account_id = 1",
+                    [],
+                )
+                .is_err()
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE story_saves SET state_format_version = 0 WHERE account_id = 1",
+                    [],
+                )
+                .is_err()
+        );
+
+        connection
+            .execute("DELETE FROM accounts WHERE id = 1", [])
+            .unwrap();
+        let remaining: Vec<i64> = connection
+            .prepare("SELECT account_id FROM story_saves ORDER BY account_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec![2], "account deletion cascades to its saves");
     }
 
     #[test]
@@ -946,7 +1131,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 14, to: 15 }
+            MigrationReport { from: 14, to: 16 }
         );
         assert_eq!(
             connection
@@ -1225,7 +1410,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 11, to: 15 }
+            MigrationReport { from: 11, to: 16 }
         );
         for table in [
             "social_mail_messages",
@@ -1301,7 +1486,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 12, to: 15 }
+            MigrationReport { from: 12, to: 16 }
         );
         assert_eq!(
             connection
@@ -1495,7 +1680,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 10, to: 15 }
+            MigrationReport { from: 10, to: 16 }
         );
         assert_eq!(
             connection
@@ -1560,7 +1745,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 3, to: 15 }
+            MigrationReport { from: 3, to: 16 }
         );
         assert_eq!(
             connection
@@ -1604,7 +1789,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 4, to: 15 }
+            MigrationReport { from: 4, to: 16 }
         );
         let gameplay: String = connection
             .query_row(
@@ -1669,7 +1854,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 5, to: 15 }
+            MigrationReport { from: 5, to: 16 }
         );
         assert_eq!(
             connection
@@ -1726,7 +1911,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 6, to: 15 }
+            MigrationReport { from: 6, to: 16 }
         );
         assert!(connection.prepare("SELECT role FROM accounts").is_ok());
         assert!(
@@ -1778,7 +1963,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 7, to: 15 }
+            MigrationReport { from: 7, to: 16 }
         );
         assert_eq!(
             connection
@@ -1867,7 +2052,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 8, to: 15 }
+            MigrationReport { from: 8, to: 16 }
         );
         assert_eq!(
             connection
@@ -1909,7 +2094,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 15, to: 15 }
+            MigrationReport { from: 16, to: 16 }
         );
         assert_eq!(
             connection
@@ -1977,7 +2162,7 @@ mod tests {
 
         assert_eq!(
             migrate(&mut connection).unwrap(),
-            MigrationReport { from: 9, to: 15 }
+            MigrationReport { from: 9, to: 16 }
         );
         assert_eq!(
             connection

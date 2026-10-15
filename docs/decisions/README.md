@@ -33,6 +33,7 @@ implementación por fase vive en
 | [0025](0025-narrative-ruleset-story-core.md) | Narrative ruleset (story-core), StoryPack and instanced story sessions | Propuesto (prototipo S0 de biblioteca) | Narrativa S0–S8 |
 | [0026](0026-typed-protocol-source-and-typescript-codegen.md) | Typed `tiamud.v1` source and generated TypeScript | Propuesto (implementación incremental) | Protocolo navegador |
 | [0028](0028-story-menus-portraits-and-dialogue-trees.md) | Story verb menus, portraits and dialogue trees (StoryPack v2) | Propuesto (modelo de núcleo de biblioteca) | Narrativa S4 |
+| [0030](0030-story-save-slots-and-schema-v16.md) | Story save slots and schema v16 | Propuesto (capa de persistencia, sin conectar a sesiones) | Narrativa S3 |
 
 El estado de fase (`Complete`/`Partial`) es autoridad de
 [`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).

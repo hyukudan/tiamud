@@ -8,7 +8,7 @@ release dependency graphs and includes the license and notice texts shipped by
 their packages. It does not replace the terms of those licenses.
 
 - Release target: `x86_64-unknown-linux-gnu`
-- Cargo lockfile SHA-256: `88cba22f352f8326137cdd5a60249f2c8a84624ec3ff1ec1695f050419a7d5a2`
+- Cargo lockfile SHA-256: `e64e812a5be587b48f88d497de6d03fd964d16c852e26ac4c5a5f88bcf9f621b`
 - pnpm lockfile SHA-256: `9275125a07de8f672f32191dc79a57304d2746cfe2164afe06c200cb09df65ba`
 - Rust release dependencies: 308
 - Web build/runtime dependencies: 76

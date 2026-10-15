@@ -76,15 +76,15 @@ matriz, memoria y documentación pública a la vez.
 - Mundo y conversación usan buzones acotados de 256 entradas por sesión,
   encaminados por `SessionId`. Conserva el fan-out O(S), recuperación por lag y
   limpieza segura ante cancelación.
-- PostgreSQL esquema v15 es el perfil recomendado para un host público nuevo.
-  SQLite esquema v15 es la ruta local/predeterminada sin servicios. Se abre un
+- PostgreSQL esquema v16 es el perfil recomendado para un host público nuevo.
+  SQLite esquema v16 es la ruta local/predeterminada sin servicios. Se abre un
   único sistema autoritativo; no hay doble escritura.
 - La última aceptación PostgreSQL integral retenida corresponde a v14 y usa
   PostgreSQL 18 desechable: 20/20 pruebas
   `--all-targets` del adaptador y 7/7 pruebas enfocadas del servidor, incluida la
   CAS de generación. El humo confirma esquema 14, liga G0, readiness, Web,
   Telnet, dos áreas residentes, `noop` por SIGHUP y cierre limpio. Esto no
-  demuestra por sí solo el esquema v15 ni sustituye TLS, backup/restore,
+  demuestra por sí solo los esquemas v15/v16 ni sustituye TLS, backup/restore,
   monitorización o recuperación del operador.
 - `tiamud-migrate-postgres` traslada sin conexión una instantánea SQLite actual
   a PostgreSQL vacío en una transacción, incluidas suscripciones, perfiles,
@@ -99,7 +99,7 @@ matriz, memoria y documentación pública a la vez.
   instancia y contador de aperturas de v7 y añade un manifiesto acotado
   `Resident|Retired` para las áreas de una generación de catálogo. SQLite y
   PostgreSQL la confirman con personajes/eventos en su transacción existente;
-  ambos adaptadores usan esquema v15 y no hay tabla espejo ni custodia SQL de
+  ambos adaptadores usan esquema v16 y no hay tabla espejo ni custodia SQL de
   trade o botín. DTO exactos v1-v8 se seleccionan por `snapshotVersion`;
   snapshots v1-v5 conservan su límite legado de 1 MiB y v6-v7 admiten hasta
   2 MiB; v8 mantiene ese máximo. El DTO v6 estricto rechaza campos v7 y
@@ -117,6 +117,15 @@ matriz, memoria y documentación pública a la vez.
   SHA-256. Retiro y rehidratación confirman por CAS checkpoint + snapshot v8 o
   consumen ambos atómicamente. El mover SQLite→PostgreSQL valida y copia esas
   filas; no son otra autoridad de trade, botín ni personajes.
+- El esquema v16 solo añade `story_saves`, la capa de persistencia de slots de
+  historia S3 ([ADR 0030](docs/decisions/0030-story-save-slots-and-schema-v16.md),
+  propuesto): clave `(cuenta, historia, slot 0..=9)`, FK de cuenta en cascada,
+  digest del pack, estado opaco ≤ 64 KiB con SHA-256 de bytes exactos y límites
+  por cuenta (16 historias, 1 MiB). Cargar verifica digest y metadatos y falla
+  cerrado ante otra revisión del pack no declarada compatible; el llamador
+  revalida con `story-core`. El mover valida y copia esas filas. No está
+  conectada a sesiones, protocolo ni clientes, y sus pruebas PostgreSQL no se
+  han ejecutado contra un servidor real.
 - Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
   sufijo diagnóstico cubierto de 10.000 secuencias.
 - Autenticación registrada compartida entre web y Telnet. Trabajo Argon2id,
@@ -338,7 +347,7 @@ matriz, memoria y documentación pública a la vez.
 - La conversación incluye `say` local, `tell`, `reply` en memoria mientras el
   destinatario siga conectado, chat de grupo y canales `general`, `newbie` y
   `staff`. Las suscripciones son durables desde v13 y se conservan en el esquema
-  v15 actual; `staff` requiere perfil
+  v16 actual; `staff` requiere perfil
   `moderator`, `administrator` o `implementor` al unirse, enviar y recibir;
   `helper` y `builder` no acceden. WorldPack v9/AreaPack v8 conservan una
   comunicación `telepathy/direct_online` en habilidades `spell|utility`
@@ -584,8 +593,8 @@ No existe LRU ni política automática de memoria.
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
 | `crates/protocol/` | Tipos serde de `tiamud.v1` y generación del TypeScript del cliente (ADR 0026 propuesto) |
-| `crates/persistence-sqlite/` | SQLite esquema v15 y almacenamiento local |
-| `crates/persistence-postgres/` | PostgreSQL esquema v15, adaptador y mover |
+| `crates/persistence-sqlite/` | SQLite esquema v16, almacenamiento local y contrato de fila de slots de historia |
+| `crates/persistence-postgres/` | PostgreSQL esquema v16, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
 | `crates/story-core/` | Ruleset narrativo puro StoryPack v1/v2: librojuego S0 y menús, retratos y diálogos S4 (ADR 0025 y 0028 propuestos; sin servidor ni persistencia) |

@@ -77,7 +77,7 @@ the [editorial AI guide](../../crates/editorial-ai/README.md).
 ## Runtime boundary
 
 The server loads the embedded WorldPack, `TIAMUD_WORLD_PACK`, or the
-`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG` pair. In catalog mode, SQL v15
+`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG` pair. In catalog mode, SQL (v14+)
 binds the durable generation and prevails on restart over `area-active`; SIGHUP
 is the only live reconciliation. `WorldRuntimeSnapshot` uses v8 and an activation
 confirms snapshot + pointer via CAS before the in-memory swap.

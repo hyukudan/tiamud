@@ -1449,3 +1449,304 @@ async fn postgres_store_round_trips_auth_characters_runtime_and_social_policy() 
     tokio::time::sleep(Duration::from_millis(25)).await;
     admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
 }
+
+fn story_state_json(pack_id: &str, filler: usize) -> String {
+    format!(
+        "{{\"format_version\":2,\"pack_id\":\"{pack_id}\",\"node\":\"{}\"}}",
+        "n".repeat(filler)
+    )
+}
+
+fn story_write(
+    account_id: AccountId,
+    story_id: &str,
+    slot: u8,
+    pack_sha: char,
+    state_json: String,
+) -> StorySaveWrite {
+    StorySaveWrite {
+        account_id,
+        story_id: story_id.to_owned(),
+        slot: StorySlot::new(slot).unwrap(),
+        pack_id: story_id.to_owned(),
+        pack_sha256: pack_sha.to_string().repeat(64),
+        state_format_version: 2,
+        state_json,
+    }
+}
+
+fn story_pack(story_id: &str, pack_sha: char) -> StoryPackCompatibility {
+    StoryPackCompatibility {
+        pack_id: story_id.to_owned(),
+        pack_sha256: pack_sha.to_string().repeat(64),
+        compatible_pack_sha256: std::collections::BTreeSet::new(),
+    }
+}
+
+/// PostgreSQL parity of the SQLite story save slot suite (schema v16,
+/// ADR 0030): round trip, overwrite, listing, deletion, caps, corruption,
+/// pack revision mismatch and account cascade.
+#[tokio::test]
+async fn postgres_story_slots_round_trip_cap_detect_corruption_and_cascade() {
+    use tiamud_persistence_sqlite::story_saves::{
+        MAX_STORIES_WITH_SAVES_PER_ACCOUNT, MAX_STORY_SAVE_BYTES_PER_ACCOUNT,
+        MAX_STORY_SAVE_STATE_BYTES, STORY_SLOTS_PER_STORY, story_state_sha256,
+    };
+
+    let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let schema = format!("tiamud_story_slot_test_{}_{}", process::id(), nonce);
+    admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
+    let store = PostgresCharacterStore::open(&scoped_url(&base_url, &schema))
+        .await
+        .unwrap();
+    let reader = store.load_or_create_account("Reader").await.unwrap();
+    let other = store.load_or_create_account("Other").await.unwrap();
+    let slot = |value: u8| StorySlot::new(value).unwrap();
+
+    // Round trip, overwrite and listing.
+    let first = story_state_json("cripta", 4);
+    let saved = store
+        .save_story_slot(story_write(reader.id, "cripta", 3, 'a', first.clone()))
+        .await
+        .unwrap();
+    assert_eq!(saved.state_sha256, story_state_sha256(&first));
+    assert_eq!(saved.state_bytes as usize, first.len());
+    let loaded = store
+        .load_story_slot(reader.id, "cripta", slot(3), story_pack("cripta", 'a'))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.state_json, first);
+    assert_eq!(loaded.summary, saved);
+    let second = story_state_json("cripta", 9);
+    let overwritten = store
+        .save_story_slot(story_write(reader.id, "cripta", 3, 'b', second.clone()))
+        .await
+        .unwrap();
+    assert_eq!(overwritten.created_at, saved.created_at);
+    assert!(overwritten.updated_at >= saved.updated_at);
+    store
+        .save_story_slot(story_write(
+            reader.id,
+            "cripta",
+            0,
+            'b',
+            story_state_json("cripta", 1),
+        ))
+        .await
+        .unwrap();
+    store
+        .save_story_slot(story_write(
+            other.id,
+            "cripta",
+            5,
+            'b',
+            story_state_json("cripta", 1),
+        ))
+        .await
+        .unwrap();
+    let listed = store.list_story_slots(reader.id, "cripta").await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|save| save.slot.get())
+            .collect::<Vec<_>>(),
+        vec![0, 3]
+    );
+    assert_eq!(listed[1], overwritten);
+    assert_eq!(
+        store
+            .load_story_slot(reader.id, "cripta", slot(3), story_pack("cripta", 'b'))
+            .await
+            .unwrap()
+            .unwrap()
+            .state_json,
+        second
+    );
+
+    // Pack revision compatibility fails closed unless declared.
+    assert!(matches!(
+        store
+            .load_story_slot(reader.id, "cripta", slot(3), story_pack("cripta", 'a'))
+            .await,
+        Err(StoreError::StorySavePackMismatch)
+    ));
+    let mut declared = story_pack("cripta", 'a');
+    declared.compatible_pack_sha256.insert("b".repeat(64));
+    assert!(
+        store
+            .load_story_slot(reader.id, "cripta", slot(3), declared)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Input validation and typed size error.
+    assert!(matches!(
+        store
+            .save_story_slot(story_write(
+                reader.id,
+                "cripta",
+                1,
+                'a',
+                story_state_json("otra", 1),
+            ))
+            .await,
+        Err(StoreError::InvalidStorySave)
+    ));
+    assert!(matches!(
+        store
+            .save_story_slot(story_write(
+                reader.id,
+                "cripta",
+                1,
+                'a',
+                story_state_json("cripta", MAX_STORY_SAVE_STATE_BYTES),
+            ))
+            .await,
+        Err(StoreError::StorySaveTooLarge { .. })
+    ));
+    assert!(matches!(
+        store
+            .save_story_slot(story_write(
+                AccountId(404_404),
+                "cripta",
+                1,
+                'a',
+                story_state_json("cripta", 1),
+            ))
+            .await,
+        Err(StoreError::AccountNotFound(_))
+    ));
+
+    // Delete.
+    assert!(
+        store
+            .delete_story_slot(reader.id, "cripta", slot(0))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .delete_story_slot(reader.id, "cripta", slot(0))
+            .await
+            .unwrap()
+    );
+
+    // Story cap.
+    let collector = store.load_or_create_account("Collector").await.unwrap();
+    for index in 0..MAX_STORIES_WITH_SAVES_PER_ACCOUNT {
+        let story = format!("historia-{index}");
+        store
+            .save_story_slot(story_write(
+                collector.id,
+                &story,
+                1,
+                'a',
+                story_state_json(&story, 1),
+            ))
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        store
+            .save_story_slot(story_write(
+                collector.id,
+                "historia-extra",
+                1,
+                'a',
+                story_state_json("historia-extra", 1),
+            ))
+            .await,
+        Err(StoreError::StorySaveCapacity)
+    ));
+
+    // Byte cap across stories; overwriting counts only the difference.
+    let hoarder = store.load_or_create_account("Hoarder").await.unwrap();
+    let large = |story: &str| story_state_json(story, MAX_STORY_SAVE_STATE_BYTES - 64);
+    let fits = MAX_STORY_SAVE_BYTES_PER_ACCOUNT / large("grande-0").len();
+    let place = |index: usize| {
+        (
+            format!("grande-{}", index / STORY_SLOTS_PER_STORY),
+            u8::try_from(index % STORY_SLOTS_PER_STORY).unwrap(),
+        )
+    };
+    for index in 0..fits {
+        let (story, number) = place(index);
+        store
+            .save_story_slot(story_write(hoarder.id, &story, number, 'a', large(&story)))
+            .await
+            .unwrap();
+    }
+    let (story, number) = place(fits);
+    assert!(matches!(
+        store
+            .save_story_slot(story_write(hoarder.id, &story, number, 'a', large(&story)))
+            .await,
+        Err(StoreError::StorySaveCapacity)
+    ));
+    store
+        .save_story_slot(story_write(
+            hoarder.id,
+            "grande-0",
+            0,
+            'b',
+            large("grande-0"),
+        ))
+        .await
+        .unwrap();
+
+    // Same-length tampering is detected by the digest, never a panic.
+    admin_batch(
+        &base_url,
+        format!(
+            "UPDATE {schema}.story_saves
+             SET state_json = replace(state_json, 'nnnn', 'mmmm')
+             WHERE account_id = {} AND story_id = 'cripta' AND slot = 3",
+            reader.id.0
+        ),
+    )
+    .await;
+    assert!(matches!(
+        store
+            .load_story_slot(reader.id, "cripta", slot(3), story_pack("cripta", 'b'))
+            .await,
+        Err(StoreError::StorySaveCorrupt)
+    ));
+
+    // Account deletion cascades to every slot of that account only.
+    admin_batch(
+        &base_url,
+        format!("DELETE FROM {schema}.accounts WHERE id = {}", reader.id.0),
+    )
+    .await;
+    assert_eq!(
+        admin_count(
+            &base_url,
+            format!(
+                "SELECT COUNT(*)::BIGINT FROM {schema}.story_saves WHERE account_id = {}",
+                reader.id.0
+            ),
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        store
+            .list_story_slots(other.id, "cripta")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    drop(store);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
+}

@@ -2811,7 +2811,10 @@ dependencies = [
 name = "tiamud-persistence-sqlite"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "rusqlite",
+ "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]
@@ -2862,6 +2865,7 @@ dependencies = [
  "tiamud-persistence-sqlite",
  "tiamud-protocol",
  "tiamud-scripting",
+ "tiamud-story-core",
  "tiamud-telnet-codec",
  "tokio",
  "tokio-rustls",
