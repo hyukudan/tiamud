@@ -150,43 +150,10 @@ pub fn validate_module(
     limits: ScriptLimits,
 ) -> Result<(), ScriptError> {
     validate_limits(source, limits)?;
-    let started = Instant::now();
-    let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH,
-        LuaOptions::default(),
-    )
-    .map_err(map_lua_error)?;
-    lua.set_memory_limit(limits.max_memory_bytes)
-        .map_err(map_lua_error)?;
-    let instructions = Arc::new(Mutex::new(0_u64));
-    let hook_instructions = Arc::clone(&instructions);
-    lua.set_hook(
-        HookTriggers::new().every_nth_instruction(HOOK_GRANULARITY),
-        move |_lua, _debug| {
-            let mut consumed = hook_instructions
-                .lock()
-                .map_err(|_| LuaError::RuntimeError("quota state poisoned".to_owned()))?;
-            *consumed = consumed.saturating_add(u64::from(HOOK_GRANULARITY));
-            if *consumed > limits.max_instructions || started.elapsed() > limits.max_wall_time {
-                return Err(LuaError::RuntimeError("TIAMUD_EXECUTION_QUOTA".to_owned()));
-            }
-            Ok(VmState::Continue)
-        },
-    )
-    .map_err(map_lua_error)?;
-    install_capability_api(&lua, 0, &BTreeSet::new(), limits)?;
-    lua.load(source)
-        .set_name("@worldpack")
-        .set_mode(ChunkMode::Text)
-        .exec()
-        .map_err(map_lua_error)?;
+    let sandbox = Sandbox::new(0, BTreeSet::new(), limits)?;
+    sandbox.load(source, "@worldpack")?;
     for hook in hooks {
-        if lua
-            .globals()
-            .get::<Option<mlua::Function>>(hook.function_name())
-            .map_err(map_lua_error)?
-            .is_none()
-        {
+        if sandbox.function(hook.function_name())?.is_none() {
             return Err(ScriptError::MissingHook(hook.function_name()));
         }
     }
@@ -202,45 +169,17 @@ pub fn execute_hook(
     limits: ScriptLimits,
 ) -> Result<ScriptOutcome, ScriptError> {
     validate_limits(source, limits)?;
-    let started = Instant::now();
-    let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH,
-        LuaOptions::default(),
-    )
-    .map_err(map_lua_error)?;
-    lua.set_memory_limit(limits.max_memory_bytes)
-        .map_err(map_lua_error)?;
+    let allowed = capabilities
+        .iter()
+        .map(|capability| capability.event_kind().to_owned())
+        .collect::<BTreeSet<_>>();
+    let sandbox = Sandbox::new(context.seed, allowed, limits)?;
+    sandbox.load(source, "@worldpack")?;
 
-    let instructions = Arc::new(Mutex::new(0_u64));
-    let hook_instructions = Arc::clone(&instructions);
-    lua.set_hook(
-        HookTriggers::new().every_nth_instruction(HOOK_GRANULARITY),
-        move |_lua, _debug| {
-            let mut consumed = hook_instructions
-                .lock()
-                .map_err(|_| LuaError::RuntimeError("quota state poisoned".to_owned()))?;
-            *consumed = consumed.saturating_add(u64::from(HOOK_GRANULARITY));
-            if *consumed > limits.max_instructions || started.elapsed() > limits.max_wall_time {
-                return Err(LuaError::RuntimeError("TIAMUD_EXECUTION_QUOTA".to_owned()));
-            }
-            Ok(VmState::Continue)
-        },
-    )
-    .map_err(map_lua_error)?;
-
-    install_capability_api(&lua, context.seed, capabilities, limits)?;
-    lua.load(source)
-        .set_name("@worldpack")
-        .set_mode(ChunkMode::Text)
-        .exec()
-        .map_err(map_lua_error)?;
-
-    let function = lua
-        .globals()
-        .get::<Option<mlua::Function>>(hook.function_name())
-        .map_err(map_lua_error)?
+    let function = sandbox
+        .function(hook.function_name())?
         .ok_or(ScriptError::MissingHook(hook.function_name()))?;
-    let context_table = lua.create_table().map_err(map_lua_error)?;
+    let context_table = sandbox.lua.create_table().map_err(map_lua_error)?;
     for (key, value) in &context.values {
         validate_field(key, limits.max_event_field_bytes)?;
         validate_field(value, limits.max_event_field_bytes)?;
@@ -249,23 +188,261 @@ pub fn execute_hook(
             .map_err(map_lua_error)?;
     }
     function.call::<()>(context_table).map_err(map_lua_error)?;
-
-    let events = lua
-        .app_data_ref::<SharedEvents>()
-        .ok_or_else(|| ScriptError::Lua("event buffer missing".to_owned()))?
-        .0
-        .lock()
-        .map_err(|_| ScriptError::Lua("event buffer poisoned".to_owned()))?
-        .clone();
-    let consumed = *instructions
-        .lock()
-        .map_err(|_| ScriptError::Lua("quota state poisoned".to_owned()))?;
+    let (events, instructions) = sandbox.drain()?;
     Ok(ScriptOutcome {
         events,
-        instructions: consumed,
-        memory_bytes: lua.used_memory(),
-        elapsed: started.elapsed(),
+        instructions,
+        memory_bytes: sandbox.lua.used_memory(),
+        elapsed: sandbox.started.elapsed(),
     })
+}
+
+/// Maximum nesting of a [`ScriptValue`] passed to [`call_function`].
+pub const MAX_SCRIPT_VALUE_DEPTH: usize = 4;
+/// Maximum values (counting every nested list element and map entry) in the
+/// arguments of one [`call_function`].
+pub const MAX_SCRIPT_VALUE_NODES: usize = 16_384;
+
+/// A bounded, read-only data tree copied into a fresh VM as a Lua value.
+/// Maps become tables with string keys (inserted in key order), lists become
+/// 1-based sequences. The VM receives a copy; nothing written to it ever
+/// reaches the host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScriptValue {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    List(Vec<ScriptValue>),
+    Map(BTreeMap<String, ScriptValue>),
+}
+
+/// Result of [`call_function`]: the inert events the function emitted and its
+/// first return value when that value is a scalar (`nil`, boolean, integer
+/// or string); any other return value is reported as [`ScriptValue::Nil`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionOutcome {
+    pub events: Vec<ScriptEvent>,
+    pub result: ScriptValue,
+    pub instructions: u64,
+    pub memory_bytes: usize,
+    pub elapsed: Duration,
+}
+
+/// Compile and initialize a module under the sandbox without calling any
+/// function, and require each named global function to exist. A generic
+/// sibling of [`validate_module`] for hosts that are not WorldPack rooms (for
+/// example StoryPack scripts). `chunk_name` labels Lua diagnostics.
+pub fn validate_functions(
+    source: &str,
+    chunk_name: &str,
+    functions: &[&str],
+    limits: ScriptLimits,
+) -> Result<(), ScriptError> {
+    validate_limits(source, limits)?;
+    let sandbox = Sandbox::new(0, BTreeSet::new(), limits)?;
+    sandbox.load(source, chunk_name)?;
+    for name in functions {
+        if sandbox.function(name)?.is_none() {
+            return Err(ScriptError::Lua(format!(
+                "function `{name}` is not defined"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Execute one named global function in a fresh, isolated VM with bounded,
+/// copied arguments. `allowed_event_kinds` is the closed set of event kinds
+/// `tiamud.emit` accepts; an empty set makes the call pure. The source,
+/// quota, hardening and seeded `tiamud.random` rules of [`execute_hook`]
+/// apply unchanged.
+pub fn call_function(
+    source: &str,
+    chunk_name: &str,
+    function: &str,
+    args: &[ScriptValue],
+    allowed_event_kinds: &BTreeSet<String>,
+    seed: u64,
+    limits: ScriptLimits,
+) -> Result<FunctionOutcome, ScriptError> {
+    validate_limits(source, limits)?;
+    let mut nodes = 0usize;
+    for arg in args {
+        check_value(arg, 0, &mut nodes, limits.max_event_field_bytes)?;
+    }
+    let sandbox = Sandbox::new(seed, allowed_event_kinds.clone(), limits)?;
+    sandbox.load(source, chunk_name)?;
+    let callee = sandbox
+        .function(function)?
+        .ok_or_else(|| ScriptError::Lua(format!("function `{function}` is not defined")))?;
+    let mut values = mlua::MultiValue::new();
+    for arg in args {
+        values.push_back(to_lua(&sandbox.lua, arg)?);
+    }
+    let returned = callee
+        .call::<mlua::MultiValue>(values)
+        .map_err(map_lua_error)?;
+    let result = match returned.into_iter().next() {
+        Some(mlua::Value::Boolean(flag)) => ScriptValue::Bool(flag),
+        Some(mlua::Value::Integer(value)) => ScriptValue::Int(value),
+        Some(mlua::Value::String(text)) => {
+            let text = text.to_str().map_err(map_lua_error)?.to_owned();
+            if text.len() > limits.max_event_field_bytes {
+                return Err(ScriptError::EventQuota);
+            }
+            ScriptValue::Str(text)
+        }
+        _ => ScriptValue::Nil,
+    };
+    let (events, instructions) = sandbox.drain()?;
+    Ok(FunctionOutcome {
+        events,
+        result,
+        instructions,
+        memory_bytes: sandbox.lua.used_memory(),
+        elapsed: sandbox.started.elapsed(),
+    })
+}
+
+fn check_value(
+    value: &ScriptValue,
+    depth: usize,
+    nodes: &mut usize,
+    max_string: usize,
+) -> Result<(), ScriptError> {
+    *nodes = nodes.saturating_add(1);
+    if depth > MAX_SCRIPT_VALUE_DEPTH || *nodes > MAX_SCRIPT_VALUE_NODES {
+        return Err(ScriptError::EventQuota);
+    }
+    match value {
+        ScriptValue::Nil | ScriptValue::Bool(_) | ScriptValue::Int(_) => Ok(()),
+        ScriptValue::Str(text) => {
+            if text.len() > max_string {
+                Err(ScriptError::EventQuota)
+            } else {
+                Ok(())
+            }
+        }
+        ScriptValue::List(items) => items
+            .iter()
+            .try_for_each(|item| check_value(item, depth + 1, nodes, max_string)),
+        ScriptValue::Map(entries) => entries.iter().try_for_each(|(key, item)| {
+            if key.len() > max_string {
+                return Err(ScriptError::EventQuota);
+            }
+            check_value(item, depth + 1, nodes, max_string)
+        }),
+    }
+}
+
+fn to_lua(lua: &Lua, value: &ScriptValue) -> Result<mlua::Value, ScriptError> {
+    Ok(match value {
+        ScriptValue::Nil => mlua::Value::Nil,
+        ScriptValue::Bool(flag) => mlua::Value::Boolean(*flag),
+        ScriptValue::Int(number) => mlua::Value::Integer(*number),
+        ScriptValue::Str(text) => {
+            mlua::Value::String(lua.create_string(text).map_err(map_lua_error)?)
+        }
+        ScriptValue::List(items) => {
+            let table = lua
+                .create_table_with_capacity(items.len(), 0)
+                .map_err(map_lua_error)?;
+            for item in items {
+                table.raw_push(to_lua(lua, item)?).map_err(map_lua_error)?;
+            }
+            mlua::Value::Table(table)
+        }
+        ScriptValue::Map(entries) => {
+            let table = lua
+                .create_table_with_capacity(0, entries.len())
+                .map_err(map_lua_error)?;
+            for (key, item) in entries {
+                table
+                    .raw_set(key.as_str(), to_lua(lua, item)?)
+                    .map_err(map_lua_error)?;
+            }
+            mlua::Value::Table(table)
+        }
+    })
+}
+
+/// One fresh, hardened VM with its quota hook and event buffer.
+struct Sandbox {
+    lua: Lua,
+    instructions: Arc<Mutex<u64>>,
+    started: Instant,
+}
+
+impl Sandbox {
+    fn new(
+        seed: u64,
+        allowed_event_kinds: BTreeSet<String>,
+        limits: ScriptLimits,
+    ) -> Result<Self, ScriptError> {
+        let started = Instant::now();
+        let lua = Lua::new_with(
+            StdLib::TABLE | StdLib::STRING | StdLib::MATH,
+            LuaOptions::default(),
+        )
+        .map_err(map_lua_error)?;
+        lua.set_memory_limit(limits.max_memory_bytes)
+            .map_err(map_lua_error)?;
+        let instructions = Arc::new(Mutex::new(0_u64));
+        let hook_instructions = Arc::clone(&instructions);
+        lua.set_hook(
+            HookTriggers::new().every_nth_instruction(HOOK_GRANULARITY),
+            move |_lua, _debug| {
+                let mut consumed = hook_instructions
+                    .lock()
+                    .map_err(|_| LuaError::RuntimeError("quota state poisoned".to_owned()))?;
+                *consumed = consumed.saturating_add(u64::from(HOOK_GRANULARITY));
+                if *consumed > limits.max_instructions || started.elapsed() > limits.max_wall_time {
+                    return Err(LuaError::RuntimeError("TIAMUD_EXECUTION_QUOTA".to_owned()));
+                }
+                Ok(VmState::Continue)
+            },
+        )
+        .map_err(map_lua_error)?;
+        install_capability_api(&lua, seed, allowed_event_kinds, limits)?;
+        Ok(Self {
+            lua,
+            instructions,
+            started,
+        })
+    }
+
+    fn load(&self, source: &str, chunk_name: &str) -> Result<(), ScriptError> {
+        self.lua
+            .load(source)
+            .set_name(chunk_name)
+            .set_mode(ChunkMode::Text)
+            .exec()
+            .map_err(map_lua_error)
+    }
+
+    fn function(&self, name: &str) -> Result<Option<mlua::Function>, ScriptError> {
+        self.lua
+            .globals()
+            .get::<Option<mlua::Function>>(name)
+            .map_err(map_lua_error)
+    }
+
+    fn drain(&self) -> Result<(Vec<ScriptEvent>, u64), ScriptError> {
+        let events = self
+            .lua
+            .app_data_ref::<SharedEvents>()
+            .ok_or_else(|| ScriptError::Lua("event buffer missing".to_owned()))?
+            .0
+            .lock()
+            .map_err(|_| ScriptError::Lua("event buffer poisoned".to_owned()))?
+            .clone();
+        let consumed = *self
+            .instructions
+            .lock()
+            .map_err(|_| ScriptError::Lua("quota state poisoned".to_owned()))?;
+        Ok((events, consumed))
+    }
 }
 
 #[derive(Clone)]
@@ -274,7 +451,7 @@ struct SharedEvents(Arc<Mutex<Vec<ScriptEvent>>>);
 fn install_capability_api(
     lua: &Lua,
     seed: u64,
-    capabilities: &BTreeSet<ScriptCapability>,
+    allowed: BTreeSet<String>,
     limits: ScriptLimits,
 ) -> Result<(), ScriptError> {
     for forbidden in [
@@ -292,10 +469,6 @@ fn install_capability_api(
     }
     harden_standard_libraries(lua)?;
     let api = lua.create_table().map_err(map_lua_error)?;
-    let allowed = capabilities
-        .iter()
-        .map(|capability| capability.event_kind().to_owned())
-        .collect::<BTreeSet<_>>();
     let events = Arc::new(Mutex::new(Vec::new()));
     lua.set_app_data(SharedEvents(Arc::clone(&events)));
     api.set(
@@ -604,5 +777,126 @@ mod tests {
             tiny_memory,
         );
         assert!(matches!(result, Err(ScriptError::MemoryQuota)));
+    }
+
+    fn kinds(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|kind| (*kind).to_owned()).collect()
+    }
+
+    #[test]
+    fn call_function_copies_arguments_and_returns_scalars() {
+        let story = ScriptValue::Map(BTreeMap::from([
+            ("vida".to_owned(), ScriptValue::Int(4)),
+            (
+                "lista".to_owned(),
+                ScriptValue::List(vec![ScriptValue::Str("a".to_owned()), ScriptValue::Nil]),
+            ),
+        ]));
+        let outcome = call_function(
+            r#"
+                function check(story, extra)
+                    story.vida = 99
+                    tiamud.emit("note", story.lista[1], tostring(extra))
+                    return story.vida == 99 and #story.lista == 1
+                end
+            "#,
+            "=prueba",
+            "check",
+            &[story.clone(), ScriptValue::Bool(true)],
+            &kinds(&["note"]),
+            1,
+            ScriptLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome.result, ScriptValue::Bool(true));
+        assert_eq!(outcome.events[0].target.as_deref(), Some("a"));
+        assert_eq!(outcome.events[0].value.as_deref(), Some("true"));
+        // The host's value is untouched: the VM only ever saw a copy.
+        assert_eq!(
+            story,
+            ScriptValue::Map(BTreeMap::from([
+                ("vida".to_owned(), ScriptValue::Int(4)),
+                (
+                    "lista".to_owned(),
+                    ScriptValue::List(vec![ScriptValue::Str("a".to_owned()), ScriptValue::Nil]),
+                ),
+            ]))
+        );
+    }
+
+    #[test]
+    fn call_function_keeps_event_kinds_closed_and_names_chunks() {
+        let denied = call_function(
+            "function run() tiamud.emit('give', 'x', nil) end",
+            "=guion",
+            "run",
+            &[],
+            &kinds(&["add"]),
+            1,
+            ScriptLimits::default(),
+        );
+        assert!(matches!(denied, Err(ScriptError::CapabilityDenied(kind)) if kind == "give"));
+        let failed = call_function(
+            "function run()\n  error('mal')\nend",
+            "=guion",
+            "run",
+            &[],
+            &BTreeSet::new(),
+            1,
+            ScriptLimits::default(),
+        );
+        assert!(matches!(failed, Err(ScriptError::Lua(message)) if message.contains("guion:2:")));
+        let missing = call_function(
+            "x = 1",
+            "=guion",
+            "run",
+            &[],
+            &BTreeSet::new(),
+            1,
+            ScriptLimits::default(),
+        );
+        assert!(matches!(missing, Err(ScriptError::Lua(message)) if message.contains("`run`")));
+        assert!(
+            validate_functions(
+                "function run() end",
+                "=g",
+                &["run"],
+                ScriptLimits::default()
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_functions(
+                "function run() end",
+                "=g",
+                &["check"],
+                ScriptLimits::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn call_function_bounds_its_arguments() {
+        let mut deep = ScriptValue::Nil;
+        for _ in 0..=MAX_SCRIPT_VALUE_DEPTH + 1 {
+            deep = ScriptValue::List(vec![deep]);
+        }
+        let wide = ScriptValue::List(vec![ScriptValue::Nil; MAX_SCRIPT_VALUE_NODES + 1]);
+        let long = ScriptValue::Str("x".repeat(2048));
+        for arg in [deep, wide, long] {
+            assert!(matches!(
+                call_function(
+                    "function run() end",
+                    "=g",
+                    "run",
+                    &[arg],
+                    &BTreeSet::new(),
+                    1,
+                    ScriptLimits::default(),
+                ),
+                Err(ScriptError::EventQuota)
+            ));
+        }
     }
 }

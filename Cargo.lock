@@ -2896,6 +2896,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiamud-story-script"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "tiamud-scripting",
+ "tiamud-story-core",
+]
+
+[[package]]
 name = "tiamud-story-tools"
 version = "0.1.0"
 dependencies = [

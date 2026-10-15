@@ -1,0 +1,16 @@
+[package]
+name = "tiamud-story-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Optional Lua script host for StoryPacks: quota-limited pure scripts that emit closed story-core intents"
+
+[dependencies]
+thiserror.workspace = true
+tiamud-scripting = { path = "../scripting" }
+tiamud-story-core = { path = "../story-core" }
+
+[dev-dependencies]
+serde_json.workspace = true

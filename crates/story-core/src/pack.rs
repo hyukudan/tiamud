@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::script::{ScriptDecl, ScriptRef};
 use crate::world::{Location, ObjectFlag, Room, World};
 use crate::{
     LocalizedText, MAX_PACK_BYTES, STORY_PACK_FORMAT_VERSION, STORY_PACK_MIN_FORMAT_VERSION,
@@ -52,6 +53,11 @@ pub struct StoryPack {
     /// Parser world (format v3): lexicons, objects and rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world: Option<World>,
+    /// Optional Lua scripts (format v3, phase S6, ADR 0034). A pack that
+    /// declares any only validates with [`StoryPack::validate_scripted`] and
+    /// only runs through a [`crate::ScriptHost`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<ScriptDecl>,
 }
 
 impl StoryPack {
@@ -115,6 +121,11 @@ impl StoryPack {
     /// The world object `id`, if the pack has a world and declares it.
     pub(crate) fn object(&self, id: &str) -> Option<&crate::world::ObjectDecl> {
         self.world.as_ref().and_then(|world| world.object(id))
+    }
+
+    /// The declared script `id`.
+    pub(crate) fn script(&self, id: &str) -> Option<&ScriptDecl> {
+        self.scripts.iter().find(|script| script.id == id)
     }
 
     /// Room data of node `id`, if the node exists and is a room.
@@ -298,6 +309,10 @@ pub enum Condition {
         op: CmpOp,
         value: i64,
     },
+    /// Evaluates a declared condition script through the runtime's
+    /// [`crate::ScriptHost`] (format v3, ADR 0034). Without a host it fails
+    /// closed.
+    Script(ScriptRef),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +417,11 @@ pub enum Effect {
         flag: ObjectFlag,
         value: bool,
     },
+    /// Runs a declared effect script through the runtime's
+    /// [`crate::ScriptHost`] (format v3, ADR 0034) and applies the closed
+    /// intents it emits, each checked against the script's grants. Without a
+    /// host it fails closed.
+    Script(ScriptRef),
 }
 
 /// Media cue naming a reviewed asset id, never a URL.

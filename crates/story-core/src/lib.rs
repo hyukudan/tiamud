@@ -29,6 +29,7 @@ mod messages;
 mod pack;
 mod rng;
 mod runtime;
+mod script;
 mod state;
 mod text;
 mod undo;
@@ -36,10 +37,10 @@ mod validate;
 mod view;
 mod world;
 
-pub use command::{CommandStep, MetaRequest, build_parser, step_command};
+pub use command::{CommandStep, MetaRequest, build_parser, step_command, step_command_scripted};
 pub use engine::{
     MenuSelection, StoryEvent, StoryInput, resolve_choice, resolve_dialogue_option, resolve_menu,
-    step,
+    resolve_menu_scripted, step, step_scripted,
 };
 pub use pack::{
     CharacterDecl, Choice, CmpOp, Condition, Cue, Dialogue, DialogueNext, DialogueNode,
@@ -47,13 +48,17 @@ pub use pack::{
     MenuEntry, MenuVerb, Node, Presence, Response, RollTest, StoryPack, TargetKind, TextBlock,
     Value, VariableDecl, VariableKind, VerbDecl,
 };
+pub use script::{
+    ScriptCall, ScriptDecl, ScriptFailure, ScriptHost, ScriptKind, ScriptRef, ScriptSnapshot,
+};
 pub use state::{DialoguePosition, LastResponse, PendingQuestion, Reply, StoryState};
 pub use text::LocalizedText;
 pub use undo::UndoRing;
 pub use validate::{ValidationErrors, ValidationIssue, ValidationReport};
 pub use view::{
     PageItem, StoryView, ViewBlock, ViewChoice, ViewDialogue, ViewMenu, ViewPage, ViewPortrait,
-    ViewPrompt, ViewStat, ViewTarget, ViewVerb, view, view_pages,
+    ViewPrompt, ViewStat, ViewTarget, ViewVerb, view, view_pages, view_pages_scripted,
+    view_scripted,
 };
 pub use world::{
     Exit, Gender, LexiconRef, LibraryMessage, LocalizedWords, Location, ObjectDecl, ObjectFlag,
@@ -183,6 +188,23 @@ pub const MAX_PARSER_REPLY_BYTES: usize = 1024;
 pub const MAX_PENDING_ANSWERS: usize = 4;
 /// Maximum objects one `todo`/`all` command acts on.
 pub const MAX_MULTI_OBJECTS: usize = 32;
+/// Maximum declared scripts (ADR 0034).
+pub const MAX_SCRIPTS: usize = 32;
+/// Maximum bytes of one script source; equal to the Lua sandbox's own
+/// 64 KiB source quota.
+pub const MAX_SCRIPT_SOURCE_BYTES: usize = 64 * 1024;
+/// Maximum bytes of all script sources of a pack together.
+pub const MAX_TOTAL_SCRIPT_BYTES: usize = 256 * 1024;
+/// Maximum entries of one script grant list (`writes`, `items`, `goto`,
+/// `objects`).
+pub const MAX_SCRIPT_GRANTS: usize = 64;
+/// Maximum constant arguments of one script reference.
+pub const MAX_SCRIPT_ARGS: usize = 8;
+/// Maximum script invocations (conditions and effects together) during one
+/// step or one view. Exceeding it fails the whole step closed.
+pub const MAX_SCRIPT_CALLS_PER_STEP: usize = 16;
+/// Maximum intents one effect script may emit.
+pub const MAX_SCRIPT_EFFECTS: usize = 32;
 
 /// Errors returned by loading, validating against state, or stepping a story.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -221,6 +243,16 @@ pub enum StoryError {
     ViewTooLarge { limit: usize },
     #[error("this story has no parser world")]
     NoParser,
+    /// A script reference was reached but the runtime has no script host.
+    #[error("this runtime has no script host; the pack's scripts cannot run")]
+    ScriptUnavailable,
+    /// More than [`MAX_SCRIPT_CALLS_PER_STEP`] script invocations.
+    #[error("more than {limit} script calls in one step")]
+    ScriptBudget { limit: usize },
+    /// A script failed or emitted an intent it was not granted. The message
+    /// is author-facing; transports must show players a generic error.
+    #[error("script {script:?} failed: {message}")]
+    Script { script: String, message: String },
 }
 
 /// Returns true for a bounded authored identifier: 1..=64 bytes, starting with

@@ -19,6 +19,13 @@ use crate::{
     MAX_EXITS, MAX_EXTENSION_VERBS, MAX_FOUND_IN, MAX_LEXICONS, MAX_MESSAGE_BYTES,
     MAX_OBJECT_NAME_BYTES, MAX_OBJECTS, MAX_RULES, MAX_SCORE_ABS, MAX_TURNS,
 };
+use crate::{
+    MAX_SCRIPT_ARGS, MAX_SCRIPT_GRANTS, MAX_SCRIPT_SOURCE_BYTES, MAX_SCRIPTS,
+    MAX_TOTAL_SCRIPT_BYTES, ScriptDecl, ScriptKind, ScriptRef,
+};
+
+const NO_SCRIPT_HOST: &str = "the pack declares scripts but this runtime has no script host; \
+     validate and run it with a scripted runtime (tiamud-story-script, ADR 0034)";
 
 const V3_MESSAGE: &str =
     "format v3 feature in a pack with an older format_version; run `tiamud-story fmt --upgrade`";
@@ -115,13 +122,34 @@ struct Validator<'a> {
     actions: BTreeSet<String>,
     /// Directions every lexicon knows.
     directions: BTreeSet<String>,
+    /// Declared scripts by id (ADR 0034).
+    scripts: BTreeMap<&'a str, ScriptKind>,
+    /// True when the caller runs scripts through a host.
+    allow_scripts: bool,
 }
 
 impl StoryPack {
     /// Validates structure, references, types and every bound, then runs the
     /// reachability and dead-end lints. Errors make the pack unusable;
     /// warnings do not.
+    ///
+    /// This is the validation of a runtime **without** a script host: a pack
+    /// that declares `scripts` is rejected, so it can never be loaded where
+    /// its scripts could not run. See [`StoryPack::validate_scripted`].
     pub fn validate(&self) -> Result<ValidationReport, ValidationErrors> {
+        self.validate_with(false)
+    }
+
+    /// Like [`StoryPack::validate`], for a runtime that evaluates scripts
+    /// through a [`crate::ScriptHost`] (ADR 0034). It checks script
+    /// declarations, grants and references, but cannot compile Lua: the
+    /// host's own validation (for example `tiamud-story-script`) must also
+    /// accept the pack.
+    pub fn validate_scripted(&self) -> Result<ValidationReport, ValidationErrors> {
+        self.validate_with(true)
+    }
+
+    fn validate_with(&self, allow_scripts: bool) -> Result<ValidationReport, ValidationErrors> {
         let mut validator = Validator {
             pack: self,
             errors: Issues::default(),
@@ -138,6 +166,8 @@ impl StoryPack {
             languages: Vec::new(),
             actions: BTreeSet::new(),
             directions: BTreeSet::new(),
+            scripts: BTreeMap::new(),
+            allow_scripts,
         };
         validator.run();
         if validator.errors.list.is_empty() {
@@ -232,6 +262,7 @@ impl<'a> Validator<'a> {
         }
         self.declarations();
         self.world_declarations();
+        self.script_declarations();
         if !self.nodes.contains_key(pack.start.as_str()) {
             self.error("start", "start node does not exist");
         }
@@ -810,6 +841,129 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Script declarations and grants (ADR 0034). Sources are only bounded
+    /// here; compiling them is the host's job.
+    fn script_declarations(&mut self) {
+        let pack = self.pack;
+        if pack.scripts.is_empty() {
+            return;
+        }
+        self.v3("scripts");
+        if !self.allow_scripts {
+            self.error("scripts", NO_SCRIPT_HOST);
+        }
+        if pack.scripts.len() > MAX_SCRIPTS {
+            self.error("scripts", format!("at most {MAX_SCRIPTS} scripts"));
+            return;
+        }
+        let total = pack.scripts.iter().fold(0usize, |sum, script| {
+            sum.saturating_add(script.source.len())
+        });
+        if total > MAX_TOTAL_SCRIPT_BYTES {
+            self.error(
+                "scripts",
+                format!("script sources exceed {MAX_TOTAL_SCRIPT_BYTES} bytes in total"),
+            );
+        }
+        for (index, script) in pack.scripts.iter().enumerate() {
+            self.script_declaration(&format!("scripts[{index}]"), script);
+        }
+    }
+
+    fn script_declaration(&mut self, path: &str, script: &'a ScriptDecl) {
+        if !valid_id(&script.id) {
+            self.error(format!("{path}.id"), "invalid identifier");
+        } else if self
+            .scripts
+            .insert(script.id.as_str(), script.kind)
+            .is_some()
+        {
+            self.error(format!("{path}.id"), "duplicate script id");
+        }
+        if script.source.trim().is_empty() {
+            self.error(format!("{path}.source"), "source is empty");
+        }
+        if script.source.len() > MAX_SCRIPT_SOURCE_BYTES {
+            self.error(
+                format!("{path}.source"),
+                format!("source exceeds {MAX_SCRIPT_SOURCE_BYTES} bytes"),
+            );
+        }
+        if script.source.contains('\0') {
+            self.error(format!("{path}.source"), "source contains a NUL byte");
+        }
+        if script.kind == ScriptKind::Condition && script.has_grants() {
+            self.error(
+                path,
+                "condition scripts are pure and take no grants (writes, items, goto, objects, score, ends)",
+            );
+        }
+        let lists: [(&str, &Vec<String>); 4] = [
+            ("writes", &script.writes),
+            ("items", &script.items),
+            ("goto", &script.goto),
+            ("objects", &script.objects),
+        ];
+        for (field, list) in lists {
+            if list.len() > MAX_SCRIPT_GRANTS {
+                self.error(
+                    format!("{path}.{field}"),
+                    format!("at most {MAX_SCRIPT_GRANTS} entries"),
+                );
+                continue;
+            }
+            let mut seen = BTreeSet::new();
+            for (index, id) in list.iter().enumerate() {
+                let entry = format!("{path}.{field}[{index}]");
+                if !seen.insert(id.as_str()) {
+                    self.error(entry, "duplicate grant");
+                    continue;
+                }
+                match field {
+                    "writes" => {
+                        if !self.vars.contains_key(id.as_str()) {
+                            self.error(entry, "unknown variable");
+                        }
+                    }
+                    "items" => self.item_ref(&entry, id),
+                    "goto" => self.node_ref(&entry, id),
+                    _ => self.object_ref(&entry, id),
+                }
+            }
+        }
+    }
+
+    fn script_ref(&mut self, path: &str, script: &ScriptRef, kind: ScriptKind) {
+        self.v3(path);
+        match self.scripts.get(script.id.as_str()) {
+            None => self.error(format!("{path}.id"), "unknown script"),
+            Some(found) if *found != kind => self.error(
+                format!("{path}.id"),
+                match kind {
+                    ScriptKind::Condition => "an effect script cannot be used as a condition",
+                    ScriptKind::Effect => "a condition script cannot be used as an effect",
+                },
+            ),
+            Some(_) => {}
+        }
+        if script.args.len() > MAX_SCRIPT_ARGS {
+            self.error(
+                format!("{path}.args"),
+                format!("at most {MAX_SCRIPT_ARGS} arguments"),
+            );
+        }
+        for (name, value) in &script.args {
+            if !valid_id(name) {
+                self.error(format!("{path}.args"), "invalid argument name");
+            }
+            if let Value::Int(number) = value
+                && number.unsigned_abs() > MAX_VAR_ABS.unsigned_abs()
+            {
+                self.error(format!("{path}.args.{name}"), "argument is out of range");
+            }
+        }
+    }
+
     fn v3(&mut self, path: &str) {
         if self.pack.format_version < 3 {
             self.error(path, V3_MESSAGE);
@@ -1220,6 +1374,9 @@ impl<'a> Validator<'a> {
                     );
                 }
             }
+            Condition::Script(script) => {
+                self.script_ref(&format!("{path}.script"), script, ScriptKind::Condition);
+            }
         }
     }
 
@@ -1339,6 +1496,9 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+            Effect::Script(script) => {
+                self.script_ref(&format!("{path}.script"), script, ScriptKind::Effect);
+            }
         }
     }
 
@@ -1354,8 +1514,8 @@ impl<'a> Validator<'a> {
             let mut targets = Vec::new();
             let mut can_end = false;
             for option in dialogue.nodes.iter().flat_map(|node| &node.options) {
-                collect_targets(&option.effects, &mut targets);
-                can_end |= any_end(&option.effects);
+                collect_targets(pack, &option.effects, &mut targets);
+                can_end |= any_end(pack, &option.effects);
             }
             dialogue_exits.insert(dialogue.id.as_str(), (targets, can_end));
         }
@@ -1364,8 +1524,8 @@ impl<'a> Validator<'a> {
         let mut rules_end = false;
         if let Some(world) = &pack.world {
             for rule in &world.rules {
-                collect_targets(&rule.effects, &mut rule_targets);
-                rules_end |= any_end(&rule.effects);
+                collect_targets(pack, &rule.effects, &mut rule_targets);
+                rules_end |= any_end(pack, &rule.effects);
             }
         }
         for (index, node) in pack.nodes.iter().enumerate() {
@@ -1377,14 +1537,14 @@ impl<'a> Validator<'a> {
             }
             for choice in &node.choices {
                 targets.extend(choice.target.as_deref());
-                collect_targets(&choice.effects, &mut targets);
-                ends[index] |= any_end(&choice.effects);
+                collect_targets(pack, &choice.effects, &mut targets);
+                ends[index] |= any_end(pack, &choice.effects);
             }
             if let Some(menu) = &node.menu {
                 for response in menu.entries.iter().flat_map(|entry| &entry.responses) {
                     targets.extend(response.target.as_deref());
-                    collect_targets(&response.effects, &mut targets);
-                    ends[index] |= any_end(&response.effects);
+                    collect_targets(pack, &response.effects, &mut targets);
+                    ends[index] |= any_end(pack, &response.effects);
                     if let Some((exits, can_end)) = response
                         .dialogue
                         .as_deref()
@@ -1464,10 +1624,16 @@ fn count_effects(effects: &[Effect], depth: usize) -> usize {
     })
 }
 
-fn collect_targets<'a>(effects: &'a [Effect], out: &mut Vec<&'a str>) {
+/// Destinations of effects, including the `goto` grants of effect scripts.
+fn collect_targets<'a>(pack: &'a StoryPack, effects: &'a [Effect], out: &mut Vec<&'a str>) {
     for effect in effects {
         match effect {
             Effect::Goto(node) => out.push(node),
+            Effect::Script(script) => {
+                if let Some(decl) = pack.script(&script.id) {
+                    out.extend(decl.goto.iter().map(String::as_str));
+                }
+            }
             Effect::Roll {
                 test: Some(test), ..
             } => {
@@ -1477,20 +1643,21 @@ fn collect_targets<'a>(effects: &'a [Effect], out: &mut Vec<&'a str>) {
             Effect::If {
                 then, otherwise, ..
             } => {
-                collect_targets(then, out);
-                collect_targets(otherwise, out);
+                collect_targets(pack, then, out);
+                collect_targets(pack, otherwise, out);
             }
             _ => {}
         }
     }
 }
 
-fn any_end(effects: &[Effect]) -> bool {
+fn any_end(pack: &StoryPack, effects: &[Effect]) -> bool {
     effects.iter().any(|effect| match effect {
         Effect::End(_) => true,
+        Effect::Script(script) => pack.script(&script.id).is_some_and(|decl| decl.ends),
         Effect::If {
             then, otherwise, ..
-        } => any_end(then) || any_end(otherwise),
+        } => any_end(pack, then) || any_end(pack, otherwise),
         _ => false,
     })
 }
