@@ -4,10 +4,11 @@
   `ScriptHost` en `crates/story-core`, el anfitrión Lua en
   `crates/story-script` (`tiamud-story-script`), una API aditiva
   `call_function`/`validate_functions` en `crates/scripting` y el soporte de
-  `tiamud-story` (validar, lints, `preview`, `test`, `play`). **No** está
-  cableado a las sesiones del servidor: `StoryPack::validate` rechaza los
-  packs con scripts, de modo que el catálogo S2 nunca carga uno. Ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  `tiamud-story` (validar, lints, `preview`, `test`, `play`). Desde la
+  [nota de estado del cableado](#nota-de-estado-2026-10-15-cableado-a-las-sesiones-del-servidor)
+  las sesiones del servidor ejecutan scripts solo con `TIAMUD_STORY_SCRIPTS=1`
+  (desactivado por defecto: entonces el catálogo rechaza esos packs al
+  arrancar). Ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
 - Fecha: 2026-10-15
 - Alcance: fase S6 de [ADR 0025](0025-narrative-ruleset-story-core.md)
   («integración opcional de scripts con el sandbox Lua y cuotas»)
@@ -170,3 +171,51 @@ lo que un script puede tocar está declarado y es auditable en el pack.
   la regla de dependencias de ADR 0025 para quien compile con la feature y
   mezclaría el runtime de scripts con el ruleset puro.
 - **StoryPack v4**: innecesario; el cambio es aditivo y opcional dentro de v3.
+
+## Nota de estado (2026-10-15): cableado a las sesiones del servidor
+
+Esta nota fija los dos requisitos previos que la sección «Cuotas y
+presupuesto por paso» exigía antes de cablear y describe lo entregado; no
+cambia la decisión ni acepta el ADR, que sigue **propuesto**.
+
+- **Interruptor de arranque.** `TIAMUD_STORY_SCRIPTS` (`0`/`1`, por defecto
+  desactivado). Desactivado, un `*.story.json` que declara scripts detiene el
+  arranque como cualquier pack inválido. Activado, cada pack con scripts se
+  valida con `tiamud_story_script::validate_pack` (declaraciones, grants,
+  referencias y compilación de cada fuente en el sandbox) antes de abrir
+  backend o listeners. Los packs sin scripts siguen pasando por
+  `StoryPack::validate()`.
+- **Fuera de cualquier actor compartido y del runtime async.** Cada instancia
+  ya es su propia tarea de escritor único; para una historia con scripts,
+  toda operación que puede evaluar un script (proyección inicial, elegir,
+  menú/diálogo, línea de parser, voto, deshacer, cargar partida y el tick de
+  una instancia compartida) mueve el estado de la instancia a un pool
+  bloqueante acotado (`spawn_blocking`) y lo recupera al terminar. El pool
+  limita globalmente los trabajos simultáneos (`TIAMUD_STORY_SCRIPT_WORKERS`,
+  `1..=64`, por defecto el paralelismo del host hasta 16) y los admitidos en
+  espera (`TIAMUD_STORY_SCRIPT_QUEUE`, `0..=1024`, por defecto 4 × workers);
+  saturado, la entrada se rechaza con `busy` antes de ejecutar nada y el
+  estado no cambia. Un tick compartido rechazado se reintenta en el
+  siguiente; salir y expulsar dejan su tick oportunista al reloj.
+- **Presupuesto agregado por entrada.** `TIAMUD_STORY_SCRIPT_BUDGET_MS`
+  (`10..=400`, por defecto 100 ms) de reloj para todas las llamadas de una
+  entrada (paso y proyección), además de las cuotas por llamada: cada
+  llamada recibe como tope de reloj el mínimo de 25 ms y lo que queda del
+  presupuesto, y una llamada que empieza sin presupuesto falla. Como hasta
+  ahora, agotar algo solo hace fallar el paso.
+- **Fallos.** Un error de script, cuota o presupuesto llega al jugador como
+  un error genérico (`story.error` con código `internal`, en castellano o
+  inglés según el idioma de la sesión), con el detalle de autor solo en el
+  log del servidor; el estado queda intacto. Tres fallos de script seguidos
+  en una instancia la cierran con autoguardado del último estado bueno.
+- **Compartidas.** Igual semántica; la mesa resuelve votos o turnos antes de
+  ejecutar los scripts de la acción ganadora.
+- **Métricas** sin etiquetas de historia ni script:
+  `tiamud_story_script_invocations_total`,
+  `tiamud_story_script_failures_total`,
+  `tiamud_story_script_budget_exceeded_total`,
+  `tiamud_story_script_busy_total` y
+  `tiamud_story_instances_closed_total{reason="script_failures"}`.
+- Sin cambios de protocolo, `StoryState`, `story-core` ni del actor del
+  mundo. Evidencia local solamente (pruebas Rust del servidor); no hay
+  escenario Playwright del fixture con scripts.
