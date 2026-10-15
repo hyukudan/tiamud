@@ -189,3 +189,15 @@ valida cada marco con claves exactas.
   lleno dejaría un asiento «conectado» para siempre; el `Weak` no se pierde.
 - **Votos con identidad pública:** innecesario para jugar y fuente de
   presión social; se publican recuentos.
+
+## Nota de estado (2026-10-15): historias con parser compartidas
+
+Añadida después de la decisión; no cambia el estado propuesto. En una
+historia con parser (StoryPack v3) el texto libre **no se vota**: en los modos
+`host` y `vote` solo el anfitrión teclea órdenes (los demás reciben
+`host_only` y siguen votando las acciones numeradas de las vistas que las
+tengan); en `turns` solo el titular del turno (`not_your_turn`), y el turno
+pasa solo tras una línea que ejecutó órdenes del mundo (errores de análisis y
+preguntas lo conservan); los espectadores nunca. `deshacer` y `reiniciar`
+tecleados son solo del anfitrión. Ver la nota de
+[ADR 0031](0031-parser-interactive-fiction-storypack-v3.md).

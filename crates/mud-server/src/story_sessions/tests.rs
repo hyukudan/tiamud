@@ -109,14 +109,63 @@ fn configuration_is_disabled_by_default_and_fails_closed() {
 
 #[test]
 fn catalog_loads_the_fixture_directory_and_rejects_bad_content() {
+    // The parser adventure lives in `parser/`, one level down.
     let catalog = StoryCatalog::load_dir(&fixture_dir()).unwrap();
     assert_eq!(
         catalog.listing(),
         vec![
             (CRIPTA.to_owned(), "La cripta del nigromante".to_owned()),
+            (
+                "faro-de-punta-gris".to_owned(),
+                "El faro de Punta Gris".to_owned()
+            ),
             (LLUVIA.to_owned(), "Lluvia de neón".to_owned()),
         ]
     );
+    assert!(catalog.get("faro-de-punta-gris").unwrap().is_parser());
+    assert_eq!(catalog.get("faro-de-punta-gris").unwrap().language(), "es");
+    assert!(!catalog.get(CRIPTA).unwrap().is_parser());
+
+    // Only one level is scanned, hidden directories are skipped and the
+    // media map is read from the top directory only.
+    let nested = tempfile::tempdir().unwrap();
+    let pack_json = serde_json::to_vec(&tiny_pack("arriba")).unwrap();
+    std::fs::write(nested.path().join("arriba.story.json"), &pack_json).unwrap();
+    std::fs::create_dir_all(nested.path().join("uno/dos")).unwrap();
+    std::fs::create_dir_all(nested.path().join(".oculto")).unwrap();
+    std::fs::write(
+        nested.path().join("uno/uno.story.json"),
+        serde_json::to_vec(&tiny_pack("uno")).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        nested.path().join("uno/dos/dos.story.json"),
+        serde_json::to_vec(&tiny_pack("dos")).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        nested.path().join(".oculto/oculto.story.json"),
+        serde_json::to_vec(&tiny_pack("oculto")).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        nested.path().join("uno").join(STORY_MEDIA_FILE),
+        b"not json",
+    )
+    .unwrap();
+    let ids = StoryCatalog::load_dir(nested.path())
+        .unwrap()
+        .listing()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["arriba", "uno"]);
+    // A broken pack one level down still fails the whole load.
+    std::fs::write(nested.path().join("uno/roto.story.json"), b"{}").unwrap();
+    assert!(matches!(
+        StoryCatalog::load_dir(nested.path()),
+        Err(StoryCatalogError::Invalid { file, .. }) if file.ends_with("roto.story.json")
+    ));
 
     let empty = tempfile::tempdir().unwrap();
     assert!(matches!(

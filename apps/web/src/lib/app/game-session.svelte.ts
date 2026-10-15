@@ -25,7 +25,11 @@ import type {
   SyncRecoveryData,
   TradeContentsData,
 } from '../protocol';
-import { StoryViewAssembler, type AssembledStoryView } from '../story-protocol';
+import {
+  MAX_STORY_COMMAND_BYTES,
+  StoryViewAssembler,
+  type AssembledStoryView,
+} from '../story-protocol';
 import { isLootRollProjection } from '../dashboard/loot';
 import {
   clearStoredAccess,
@@ -92,7 +96,8 @@ export type SessionConnection = Pick<
   TiamudConnection,
   'storyChoose' | 'storyDialogue' | 'storyMenu' | 'storyUndo' | 'storyLeave' |
   'storySave' | 'storyRestore' | 'storyDeleteSlot' | 'storySlots' | 'storyContinue' |
-  'storyVote' | 'storyShare' | 'storyJoin' | 'storyInvite' | 'storyKick' | 'storyMode'
+  'storyVote' | 'storyShare' | 'storyJoin' | 'storyInvite' | 'storyKick' | 'storyMode' |
+  'storyCommand'
 >>;
 
 export interface AudioSink {
@@ -446,6 +451,29 @@ export class GameSession {
     const id = createRequestId();
     const sent = this.#connection?.acquireTalent(graphId, nodeId, id) ?? false;
     this.#recordSubmission(label, id, sent);
+  };
+
+  /**
+   * Sends one line of free text to a parser story (StoryPack v3). Returns
+   * whether it was sent; empty, over-long or untimely lines are not.
+   */
+  commandStory = (text: string): boolean => {
+    const view = this.story;
+    const line = text.trim();
+    if (!view || this.storyPending || line.length === 0 ||
+      new TextEncoder().encode(line).length > MAX_STORY_COMMAND_BYTES ||
+      this.storyLobby?.you === 'spectator' ||
+      !view.items.some((item) => item.type === 'scene' && item.prompt !== undefined)) {
+      return false;
+    }
+    let sent: boolean | undefined;
+    try {
+      sent = this.#connection?.storyCommand?.(line, view.viewRev);
+    } catch {
+      sent = false;
+    }
+    this.#markStorySent(sent);
+    return sent === true;
   };
 
   /**

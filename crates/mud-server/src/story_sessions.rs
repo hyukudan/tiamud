@@ -62,7 +62,7 @@ use tiamud_protocol::{
 };
 use tiamud_story_core::{
     Cue, EndingKind, MAX_PACK_BYTES, PageItem, StoryEvent, StoryInput, StoryPack, StoryState,
-    UndoRing, Value, step, view as core_view, view_pages,
+    UndoRing, Value, step, step_command, view as core_view, view_pages,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
@@ -120,6 +120,14 @@ const INVITE_BURST: u32 = 5;
 const INVITATION_INBOX: usize = 4;
 /// Registered invitation inboxes (one per connected story-capable session).
 const MAX_INBOXES: usize = 16_384;
+/// Maximum bytes of one parser command line (StoryPack v3).
+pub const MAX_COMMAND_BYTES: usize = protocol::MAX_STORY_COMMAND_BYTES;
+/// Parser command lines per account and minute, and their burst. Typing is
+/// slower than this; the bound keeps a script from monopolizing an instance.
+pub const COMMANDS_PER_MINUTE: u32 = 120;
+const COMMAND_BURST: u32 = 20;
+/// Depth of the catalog scan: the directory and its direct subdirectories.
+const CATALOG_SUBDIRECTORY_DEPTH: usize = 1;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -315,6 +323,40 @@ pub struct CatalogStory {
     /// Lowercase hexadecimal SHA-256 of the exact pack bytes; the revision a
     /// save slot is bound to (ADR 0030).
     pack_sha256: String,
+    /// Language of the instance: the parser lexicon (`es` when the pack has
+    /// one, else its first lexicon) and the locale its views resolve.
+    language: String,
+}
+
+impl CatalogStory {
+    /// True for a StoryPack v3 with a parser world: it accepts free text.
+    pub fn is_parser(&self) -> bool {
+        self.pack.world.is_some()
+    }
+
+    /// The instance language (`es` unless the pack only declares others).
+    pub fn language(&self) -> &str {
+        &self.language
+    }
+}
+
+/// The language an instance of `pack` plays in: Spanish when the parser
+/// world has a Spanish lexicon (or there is no parser), else its first one.
+fn pack_language(pack: &StoryPack) -> String {
+    let Some(world) = &pack.world else {
+        return STORY_LOCALE.to_owned();
+    };
+    if world
+        .lexicons
+        .iter()
+        .any(|lexicon| lexicon.id == STORY_LOCALE)
+    {
+        return STORY_LOCALE.to_owned();
+    }
+    world
+        .lexicons
+        .first()
+        .map_or_else(|| STORY_LOCALE.to_owned(), |lexicon| lexicon.id.clone())
 }
 
 /// Validated StoryPacks plus the reviewed media map for their cues.
@@ -353,8 +395,11 @@ struct StoryMediaManifest {
 }
 
 impl StoryCatalog {
-    /// Loads every `*.story.json` in `directory` (non-recursive), validating
-    /// each pack with `story-core`, plus the optional reviewed media map. Any
+    /// Loads every `*.story.json` in `directory` and in its direct
+    /// subdirectories (one level, real directories only, never symlinks;
+    /// for example `parser/` for StoryPack v3 parser adventures), validating
+    /// each pack with `story-core`, plus the optional reviewed media map of
+    /// the top directory. At most 1,024 entries are scanned in total. Any
     /// invalid pack fails the whole load: the server never starts with a
     /// partially trusted catalog.
     pub fn load_dir(directory: &Path) -> Result<Self, StoryCatalogError> {
@@ -362,22 +407,41 @@ impl StoryCatalog {
             path: path.display().to_string(),
             message: error.to_string(),
         };
+        // (relative name, depth) of every scanned file; directories are
+        // queued breadth-first and bounded by the same entry budget.
         let mut names = Vec::new();
-        for entry in std::fs::read_dir(directory).map_err(|error| io_error(directory, error))? {
-            if names.len() >= MAX_CATALOG_DIRECTORY_ENTRIES {
-                return Err(StoryCatalogError::TooManyEntries);
-            }
-            let entry = entry.map_err(|error| io_error(directory, error))?;
-            if let Some(name) = entry.file_name().to_str() {
-                names.push(name.to_owned());
+        let mut scanned = 0_usize;
+        let mut pending = vec![(PathBuf::new(), 0_usize)];
+        while let Some((relative, depth)) = pending.pop() {
+            let current = directory.join(&relative);
+            for entry in std::fs::read_dir(&current).map_err(|error| io_error(&current, error))? {
+                scanned = scanned.saturating_add(1);
+                if scanned > MAX_CATALOG_DIRECTORY_ENTRIES {
+                    return Err(StoryCatalogError::TooManyEntries);
+                }
+                let entry = entry.map_err(|error| io_error(&current, error))?;
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let kind = entry
+                    .file_type()
+                    .map_err(|error| io_error(&current, error))?;
+                if kind.is_dir() {
+                    if depth < CATALOG_SUBDIRECTORY_DEPTH && !name.starts_with('.') {
+                        pending.push((relative.join(&name), depth + 1));
+                    }
+                } else {
+                    names.push((relative.join(&name), depth));
+                }
             }
         }
         names.sort();
         let mut packs = Vec::new();
         let mut media = BTreeMap::new();
-        for name in names {
-            let path = directory.join(&name);
-            if name == STORY_MEDIA_FILE {
+        for (relative, depth) in names {
+            let path = directory.join(&relative);
+            let name = relative.to_string_lossy().into_owned();
+            if depth == 0 && name == STORY_MEDIA_FILE {
                 let bytes = read_bounded(&path, MAX_MEDIA_MANIFEST_BYTES, &name)?;
                 media = parse_media_manifest(&bytes)?;
             } else if name.ends_with(".story.json") {
@@ -444,6 +508,7 @@ impl StoryCatalog {
                 .unwrap_or(pack.id.as_str())
                 .to_owned();
             let id = pack.id.clone();
+            let language = pack_language(&pack);
             if stories
                 .insert(
                     id.clone(),
@@ -452,6 +517,7 @@ impl StoryCatalog {
                         title,
                         pack,
                         pack_sha256,
+                        language,
                     }),
                 )
                 .is_some()
@@ -596,6 +662,13 @@ pub enum StoryFailure {
     UnknownMember,
     /// A shared-instance setting is out of range.
     InvalidSetting,
+    /// `story.command` in a story without a parser world.
+    NoParser,
+    /// A command line that is too long, or free text while no prompt is
+    /// shown (an active dialogue).
+    InvalidCommand,
+    /// Too many parser command lines from this account.
+    CommandsRateLimited,
 }
 
 impl StoryFailure {
@@ -627,6 +700,9 @@ impl StoryFailure {
             Self::NotShared => StoryErrorCode::NotShared,
             Self::UnknownMember => StoryErrorCode::UnknownMember,
             Self::InvalidSetting => StoryErrorCode::InvalidSetting,
+            Self::NoParser => StoryErrorCode::NoParser,
+            Self::InvalidCommand => StoryErrorCode::InvalidCommand,
+            Self::CommandsRateLimited => StoryErrorCode::RateLimited,
         }
     }
 
@@ -682,6 +758,13 @@ impl StoryFailure {
             Self::InvalidSetting => {
                 "Valor no válido: el plazo de votación va de 30 a 120 segundos."
             }
+            Self::NoParser => {
+                "Esta historia no entiende texto libre: elige una de las acciones numeradas."
+            }
+            Self::InvalidCommand => {
+                "Escribe una orden de hasta 256 bytes mientras la historia muestre el indicador «>»."
+            }
+            Self::CommandsRateLimited => "Demasiadas órdenes seguidas. Espera un momento.",
         }
     }
 
@@ -735,6 +818,9 @@ pub struct StoryMetrics {
     shared_invitations: AtomicU64,
     shared_kicks: AtomicU64,
     shared_seat_lapses: AtomicU64,
+    commands_accepted: AtomicU64,
+    commands_rejected: AtomicU64,
+    commands_rate_limited: AtomicU64,
 }
 
 impl StoryMetrics {
@@ -813,6 +899,11 @@ impl StoryMetrics {
                 "tiamud_story_shared_kicks_total {}\n",
                 "# TYPE tiamud_story_shared_seat_lapses_total counter\n",
                 "tiamud_story_shared_seat_lapses_total {}\n",
+                "# TYPE tiamud_story_commands_total counter\n",
+                "tiamud_story_commands_total{{result=\"accepted\"}} {}\n",
+                "tiamud_story_commands_total{{result=\"rejected\"}} {}\n",
+                "# TYPE tiamud_story_command_rate_limited_total counter\n",
+                "tiamud_story_command_rate_limited_total {}\n",
             ),
             catalog_stories,
             self.live.load(Ordering::Relaxed),
@@ -841,6 +932,9 @@ impl StoryMetrics {
             self.shared_invitations.load(Ordering::Relaxed),
             self.shared_kicks.load(Ordering::Relaxed),
             self.shared_seat_lapses.load(Ordering::Relaxed),
+            self.commands_accepted.load(Ordering::Relaxed),
+            self.commands_rejected.load(Ordering::Relaxed),
+            self.commands_rate_limited.load(Ordering::Relaxed),
         )
     }
 }
@@ -910,6 +1004,14 @@ impl StoryAction {
 }
 
 impl StoryProjection {
+    /// The free-text prompt of the view, when it accepts parser commands.
+    pub fn prompt(&self) -> Option<&protocol::StoryPrompt> {
+        self.items.iter().find_map(|item| match item {
+            StoryItem::Scene { prompt, .. } => prompt.as_ref(),
+            _ => None,
+        })
+    }
+
     /// Every action the view offers, numbered from 1 in this order: gamebook
     /// choices, dialogue options, then each verb (or verb → target pair).
     pub fn actions(&self) -> Vec<StoryAction> {
@@ -1038,6 +1140,22 @@ pub fn render_text(projection: &StoryProjection) -> String {
                 let _ = write!(text, "* {line}\r\n");
             }
             StoryItem::Block {
+                kind: StoryBlockKind::Command,
+                text: line,
+                ..
+            } => {
+                let _ = write!(text, "> {line}\r\n");
+            }
+            StoryItem::Block {
+                kind: StoryBlockKind::Reply,
+                text: reply,
+                ..
+            } => {
+                for line in reply.split('\n').filter(|line| !line.trim().is_empty()) {
+                    let _ = write!(text, "{line}\r\n");
+                }
+            }
+            StoryItem::Block {
                 kind: StoryBlockKind::Line,
                 speaker,
                 text: line,
@@ -1087,7 +1205,21 @@ pub fn render_text(projection: &StoryProjection) -> String {
         for (index, action) in projection.actions().iter().enumerate() {
             let _ = write!(text, "{}) {}\r\n", index + 1, action.label());
         }
-        text.push_str("Escribe un número para elegir, «deshacer» (undo) o «salir» (leave).\r\n");
+        match projection.prompt() {
+            Some(prompt) if prompt.question => {
+                text.push_str(
+                    "Responde a la pregunta o escribe otra orden; «deshacer» (undo) o «salir» (leave).\r\n",
+                );
+            }
+            Some(_) => {
+                text.push_str(
+                    "Escribe una orden (por ejemplo «mira», «inventario» o «coge la llave»), «deshacer» (undo) o «salir» (leave).\r\n",
+                );
+            }
+            None => text.push_str(
+                "Escribe un número para elegir, «deshacer» (undo) o «salir» (leave).\r\n",
+            ),
+        }
     }
     text
 }
@@ -1265,6 +1397,26 @@ pub fn parse_story_input(input: &str) -> StoryInputCommand {
         _ => StoryInputCommand::Other,
     }
 }
+
+/// Parses one line typed inside a parser story (StoryPack v3). The reserved
+/// words of [`parse_story_input`] keep their meaning (numbers, `deshacer`,
+/// `salir`, `guardar N`, `votar N`, `compartir`…), which matches the
+/// parser's own `deshacer`/`salir` meta commands; `look`/`l` and a bare
+/// `guardar`/`cargar` (no slot) go to the parser instead, as its look verb
+/// and its save/restore meta commands. Everything else (`Other`) is a parser
+/// command line.
+pub fn parse_parser_story_input(input: &str) -> StoryInputCommand {
+    let lower = input.trim().to_lowercase();
+    match lower.as_str() {
+        "look" | "l" | "guardar" | "save" | "cargar" | "load" | "restore" => {
+            StoryInputCommand::Other
+        }
+        _ => parse_story_input(input),
+    }
+}
+
+/// Help of a parser story.
+pub const PARSER_STORY_HELP: &str = "Historia con parser: escribe órdenes como «mira», «inventario», «coge la llave», «n» o «abre la puerta con la llave». También «deshacer» (undo), «guardar N» (save), «cargar N» (load), «partidas» (saves) o «salir» (leave).";
 
 pub const STORY_INPUT_HELP: &str = "Estás absorto en una historia: escribe un número para elegir, «ver» (look), «deshacer» (undo), «guardar N» (save), «cargar N» (load), «partidas» (saves), «borrar N» (delete), «compartir» (share) o «salir» (leave).";
 
@@ -1460,8 +1612,32 @@ impl StoryAction {
     }
 }
 
+/// What a transport must do after a parser command besides showing its view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandFollowUp {
+    /// `guardar`/`cargar` without a slot: show the slot listing.
+    Slots,
+    /// The parser's quit command (`fin`, `salir`, `quit`): leave the story
+    /// exactly like the reserved `salir`/`leave`, autosave included.
+    Leave,
+}
+
+/// Answer to one parser command line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandReply {
+    pub view: StoryProjection,
+    pub follow_up: Option<CommandFollowUp>,
+}
+
 enum Command {
     View(oneshot::Sender<StoryProjection>),
+    /// One line of free text for the parser (StoryPack v3).
+    Text {
+        from: AccountId,
+        text: String,
+        view_rev: u32,
+        reply: oneshot::Sender<Result<CommandReply, StoryFailure>>,
+    },
     Input {
         from: AccountId,
         request: StoryRequest,
@@ -1646,6 +1822,8 @@ struct ManagerInner {
     slot_reads: KeyedRateLimiter<AccountId>,
     joins: KeyedRateLimiter<AccountId>,
     invites: KeyedRateLimiter<AccountId>,
+    /// Parser command lines per account (StoryPack v3).
+    commands: KeyedRateLimiter<AccountId>,
     /// Lowercase character name → invitation inboxes of its sessions.
     inboxes: Mutex<HashMap<String, Vec<(u64, InboxSender)>>>,
     next_inbox: AtomicU64,
@@ -1945,6 +2123,11 @@ impl StoryManager {
                 joins: KeyedRateLimiter::per_minute_tracking(
                     JOINS_PER_MINUTE,
                     JOIN_BURST,
+                    MAX_TRACKED_SLOT_ACCOUNTS,
+                ),
+                commands: KeyedRateLimiter::per_minute_tracking(
+                    COMMANDS_PER_MINUTE,
+                    COMMAND_BURST,
                     MAX_TRACKED_SLOT_ACCOUNTS,
                 ),
                 invites: KeyedRateLimiter::per_minute_tracking(
@@ -2372,6 +2555,57 @@ impl StoryLink {
             .await
     }
 
+    /// True when the story accepts free-text parser commands (StoryPack v3).
+    pub fn is_parser(&self) -> bool {
+        self.story.is_parser()
+    }
+
+    /// Applies one line of free text typed against view `view_rev` of a
+    /// parser story. Lines are bounded to 256 bytes and rate limited per
+    /// account. In a shared instance only the host (host and vote modes:
+    /// free text is never put to a vote) or the turn holder (turns mode)
+    /// may type. The parser's meta commands map to the session's own
+    /// operations: `deshacer` undoes, `reiniciar` restarts after a typed
+    /// confirmation, `puntos`/`ayuda` answer in the view, and `guardar`,
+    /// `cargar` and `fin` come back as a [`CommandFollowUp`].
+    pub async fn command(&self, text: &str, view_rev: u32) -> Result<CommandReply, StoryFailure> {
+        let result = self.command_inner(text, view_rev).await;
+        let metrics = &self.inner.metrics;
+        if result.is_ok() {
+            &metrics.commands_accepted
+        } else {
+            &metrics.commands_rejected
+        }
+        .fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
+    async fn command_inner(&self, text: &str, view_rev: u32) -> Result<CommandReply, StoryFailure> {
+        if !self.story.is_parser() {
+            return Err(StoryFailure::NoParser);
+        }
+        if text.len() > MAX_COMMAND_BYTES {
+            return Err(StoryFailure::InvalidCommand);
+        }
+        if !self.inner.commands.check(self.account, Instant::now()) {
+            self.inner
+                .metrics
+                .commands_rate_limited
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(StoryFailure::CommandsRateLimited);
+        }
+        let from = self.account;
+        let text = text.to_owned();
+        self.request(|reply| Command::Text {
+            from,
+            text,
+            view_rev,
+            reply,
+        })
+        .await
+        .and_then(|result| result)
+    }
+
     pub async fn undo(&self) -> Result<StoryProjection, StoryFailure> {
         let from = self.account;
         let result = self
@@ -2666,6 +2900,37 @@ impl SharedCore {
         }
     }
 
+    /// A parser command line. Free text is never votable: in host and vote
+    /// modes only the host types, in turns mode only the turn holder. A
+    /// line that executed world commands takes the turn; parse errors and
+    /// questions keep it.
+    fn command(
+        &mut self,
+        inner: &ManagerInner,
+        instance: &mut Instance,
+        from: AccountId,
+        text: &str,
+        view_rev: u32,
+    ) -> Result<CommandReply, StoryFailure> {
+        self.table.route_command(from)?;
+        let host = self.table.is_host(from);
+        let before = (instance.view_rev, instance.state.turn);
+        let result = instance.command(text, view_rev, &inner.catalog.media, host);
+        if instance.view_rev != before.0 {
+            let taken = instance.state.turn > before.1;
+            self.table
+                .on_new_view(instance.view_rev, taken, tokio::time::Instant::now());
+            if taken {
+                inner
+                    .metrics
+                    .shared_decisions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            self.publish(instance);
+        }
+        result
+    }
+
     fn vote_leaf(
         &mut self,
         inner: &ManagerInner,
@@ -2834,6 +3099,18 @@ async fn run_instance(
         match command {
             Command::View(reply) => {
                 let _ = reply.send(instance.resume_projection());
+            }
+            Command::Text {
+                from,
+                text,
+                view_rev,
+                reply,
+            } => {
+                let result = match shared.as_mut() {
+                    None => instance.command(&text, view_rev, media, true),
+                    Some(core) => core.command(&inner, &mut instance, from, &text, view_rev),
+                };
+                let _ = reply.send(result);
             }
             Command::Input {
                 from,
@@ -3070,7 +3347,22 @@ struct Instance {
     /// Deterministic id state for reproducible fixtures; `None` (the
     /// production path) draws every id from the secure RNG.
     id_state: Option<u64>,
+    /// Echo of the parser command the next projection answers.
+    echo: Option<String>,
+    /// Server notes (meta command hints) shown after the parser replies of
+    /// the next projection.
+    notes: Vec<&'static str>,
+    /// View revision that showed the restart confirmation; a second
+    /// `reiniciar` typed against exactly that view restarts the story.
+    restart_armed: Option<u32>,
 }
+
+const RESTART_CONFIRM_NOTE: &str = "¿Seguro que quieres reiniciar la historia desde el principio? Escribe «reiniciar» otra vez para confirmarlo; cualquier otra orden lo cancela. Podrás «deshacer» el reinicio.";
+const RESTARTED_NOTE: &str = "La historia vuelve a empezar.";
+const SAVE_NOTE: &str =
+    "Para guardar escribe «guardar N» (ranuras 1 a 9) o usa el panel de partidas guardadas.";
+const RESTORE_NOTE: &str = "Para cargar escribe «cargar N» (la ranura 0 es el autoguardado) o usa el panel de partidas guardadas.";
+const QUIT_NOTE: &str = "Sales de la historia.";
 
 impl Instance {
     fn new(
@@ -3107,6 +3399,9 @@ impl Instance {
             music: None,
             current,
             id_state,
+            echo: None,
+            notes: Vec::new(),
+            restart_armed: None,
         };
         instance.project(&initial_cues, media)?;
         Ok(instance)
@@ -3237,6 +3532,172 @@ impl Instance {
         Ok(self.current.clone())
     }
 
+    /// Applies one parser command line (StoryPack v3) typed against view
+    /// `view_rev`. `manage` allows the meta commands that replace the game
+    /// for every participant (undo, restart): always in a solo instance,
+    /// only for the host of a shared one. Any failure leaves the state
+    /// exactly as it was.
+    fn command(
+        &mut self,
+        text: &str,
+        view_rev: u32,
+        media: &BTreeMap<String, String>,
+        manage: bool,
+    ) -> Result<CommandReply, StoryFailure> {
+        if text.len() > MAX_COMMAND_BYTES {
+            return Err(StoryFailure::InvalidCommand);
+        }
+        if view_rev != self.view_rev {
+            return Err(StoryFailure::StaleView);
+        }
+        if self.state.ended.is_some() {
+            return Err(StoryFailure::Ended);
+        }
+        // Only the very next input may confirm a restart.
+        let armed = self.restart_armed.take() == Some(self.view_rev);
+        let stepped = step_command(
+            &self.story.pack,
+            &self.state,
+            text,
+            Some(self.story.language()),
+        )
+        .map_err(|error| {
+            use tiamud_story_core::StoryError as Core;
+            match error {
+                Core::Ended => StoryFailure::Ended,
+                Core::NoParser => StoryFailure::NoParser,
+                Core::InDialogue => StoryFailure::InvalidCommand,
+                error => {
+                    warn!(%error, "story command failed");
+                    StoryFailure::Internal
+                }
+            }
+        })?;
+        let echo = echo_text(text);
+        let advanced = stepped.state.turn != self.state.turn;
+        let meta = stepped.meta.first().map(|meta| meta.action.clone());
+        let reply = |view: StoryProjection, follow_up: Option<CommandFollowUp>| CommandReply {
+            view,
+            follow_up,
+        };
+        match meta.as_deref() {
+            // A line such as «coge la llave. deshacer» first runs its
+            // commands; undoing then pops exactly that line. A bare
+            // «deshacer» undoes the last applied input, like `story.undo`.
+            Some("undo") => {
+                if !manage {
+                    return Err(StoryFailure::HostOnly);
+                }
+                if advanced {
+                    self.apply(stepped.state, &stepped.events, echo, Vec::new(), media)?;
+                }
+                self.undo(media).map(|view| reply(view, None))
+            }
+            Some("restart") => {
+                if !manage {
+                    return Err(StoryFailure::HostOnly);
+                }
+                if armed && !advanced {
+                    return self.restart(echo, media).map(|view| reply(view, None));
+                }
+                let view = self.apply(
+                    stepped.state,
+                    &stepped.events,
+                    echo,
+                    vec![RESTART_CONFIRM_NOTE],
+                    media,
+                )?;
+                self.restart_armed = Some(self.view_rev);
+                Ok(reply(view, None))
+            }
+            Some("save") => self
+                .apply(stepped.state, &stepped.events, echo, vec![SAVE_NOTE], media)
+                .map(|view| reply(view, Some(CommandFollowUp::Slots))),
+            Some("restore") => self
+                .apply(
+                    stepped.state,
+                    &stepped.events,
+                    echo,
+                    vec![RESTORE_NOTE],
+                    media,
+                )
+                .map(|view| reply(view, Some(CommandFollowUp::Slots))),
+            Some("quit") => self
+                .apply(stepped.state, &stepped.events, echo, vec![QUIT_NOTE], media)
+                .map(|view| reply(view, Some(CommandFollowUp::Leave))),
+            // `score` and `help` are already answered in the transcript.
+            _ => self
+                .apply(stepped.state, &stepped.events, echo, Vec::new(), media)
+                .map(|view| reply(view, None)),
+        }
+    }
+
+    /// Replaces the state with the result of a parser line and projects
+    /// it. Only a line that executed world commands (the turn advanced) is
+    /// an undo step; parse errors and questions are not.
+    fn apply(
+        &mut self,
+        next: StoryState,
+        events: &[StoryEvent],
+        echo: Option<String>,
+        notes: Vec<&'static str>,
+        media: &BTreeMap<String, String>,
+    ) -> Result<StoryProjection, StoryFailure> {
+        let advanced = next.turn != self.state.turn;
+        let previous = std::mem::replace(&mut self.state, next);
+        let music = self.music.clone();
+        if advanced {
+            self.undo.push(previous.clone());
+        }
+        self.echo = echo;
+        self.notes = notes;
+        if self.project(events, media).is_err() {
+            self.state = previous;
+            self.music = music;
+            if advanced {
+                self.undo.pop();
+            }
+            self.echo = None;
+            self.notes.clear();
+            return Err(StoryFailure::Internal);
+        }
+        Ok(self.current.clone())
+    }
+
+    /// Restarts the story from its start with a fresh seed. The previous
+    /// state is an undo step, so `deshacer` brings the old game back.
+    fn restart(
+        &mut self,
+        echo: Option<String>,
+        media: &BTreeMap<String, String>,
+    ) -> Result<StoryProjection, StoryFailure> {
+        let seed = next_id_word(&mut self.id_state);
+        let fresh = StoryState::new(&self.story.pack, seed).map_err(|_| StoryFailure::Internal)?;
+        let scene_cues = core_view(&self.story.pack, &fresh)
+            .map_err(|_| StoryFailure::Internal)?
+            .cues;
+        let mut events = Vec::with_capacity(scene_cues.len() + 1);
+        if self.music.is_some() {
+            events.push(StoryEvent::Cue(Cue::StopMusic));
+        }
+        events.extend(scene_cues.into_iter().map(StoryEvent::Cue));
+        let previous = std::mem::replace(&mut self.state, fresh);
+        let music = self.music.clone();
+        self.undo.push(previous.clone());
+        self.echo = echo;
+        self.notes = vec![RESTARTED_NOTE];
+        if self.project(&events, media).is_err() {
+            self.state = previous;
+            self.music = music;
+            self.undo.pop();
+            self.echo = None;
+            self.notes.clear();
+            return Err(StoryFailure::Internal);
+        }
+        self.seed = seed;
+        Ok(self.current.clone())
+    }
+
     /// Ordinal (in [`StoryProjection::actions`] order) of the action that
     /// `request` addresses in view `view_rev`; validated like an input.
     fn ordinal_of(&self, request: &StoryRequest, view_rev: u32) -> Result<usize, StoryFailure> {
@@ -3348,7 +3809,12 @@ impl Instance {
     ) -> Result<(), tiamud_story_core::StoryError> {
         let story = self.story.clone();
         let pack = &story.pack;
-        let pages = view_pages(pack, &self.state, STORY_LOCALE)?;
+        // Any new view cancels a pending restart confirmation; the command
+        // that shows the confirmation arms it again after projecting.
+        self.restart_armed = None;
+        let echo = self.echo.take();
+        let notes = std::mem::take(&mut self.notes);
+        let pages = view_pages(pack, &self.state, story.language())?;
         let event_items = events
             .iter()
             .filter_map(|event| render_event(pack, event))
@@ -3383,6 +3849,8 @@ impl Instance {
                         text,
                         score: scene_score,
                         ending: scene_ending,
+                        prompt,
+                        question,
                         ..
                     } => {
                         title = scene_title.clone();
@@ -3397,7 +3865,15 @@ impl Instance {
                             text,
                             score: scene_score,
                             ending: ending.map(|kind| StoryEnding { kind }),
+                            prompt: prompt.map(|text| protocol::StoryPrompt { text, question }),
                         });
+                        if let Some(echo) = &echo {
+                            items.push(StoryItem::Block {
+                                kind: StoryBlockKind::Command,
+                                speaker: None,
+                                text: echo.clone(),
+                            });
+                        }
                         if let Some((events, cues)) = extras.take() {
                             items.extend(cues);
                             items.extend(events);
@@ -3474,6 +3950,46 @@ impl Instance {
                 }
             }
         }
+        // The parser transcript is rendered as the last speakerless blocks
+        // of the view (after menu and dialogue text): mark them as replies.
+        let replies = self.state.transcript.len();
+        let mut marked = 0;
+        let mut last_block = None;
+        for (index, item) in items.iter_mut().enumerate().rev() {
+            let StoryItem::Block { kind, speaker, .. } = item else {
+                continue;
+            };
+            last_block = last_block.or(Some(index));
+            if *kind == StoryBlockKind::Line && speaker.is_none() && marked < replies {
+                *kind = StoryBlockKind::Reply;
+                marked += 1;
+            }
+        }
+        // Server notes (meta command hints) follow the parser replies.
+        let at = last_block.map_or_else(
+            || {
+                items
+                    .iter()
+                    .position(|item| {
+                        !matches!(
+                            item,
+                            StoryItem::Scene { .. }
+                                | StoryItem::Cue { .. }
+                                | StoryItem::Portrait { .. }
+                        )
+                    })
+                    .unwrap_or(items.len())
+            },
+            |index| index + 1,
+        );
+        items.splice(
+            at..at,
+            notes.into_iter().map(|note| StoryItem::Block {
+                kind: StoryBlockKind::Reply,
+                speaker: None,
+                text: note.to_owned(),
+            }),
+        );
         self.view_rev = self.view_rev.saturating_add(1);
         self.ids = ids;
         self.current = StoryProjection {
@@ -3568,6 +4084,22 @@ fn bounded_text(text: &str) -> String {
     text[..cut].to_owned()
 }
 
+/// The echo of a typed command: control characters removed, whitespace
+/// collapsed, at most [`MAX_COMMAND_BYTES`]. `None` for a blank line.
+fn echo_text(text: &str) -> Option<String> {
+    let cleaned = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut cut = collapsed.len().min(MAX_COMMAND_BYTES);
+    while !collapsed.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let echo = &collapsed[..cut];
+    (!echo.is_empty()).then(|| echo.to_owned())
+}
+
 /// Renders the player-visible part of one event. Hidden variables, node
 /// entries, menu bookkeeping and media cues produce no text (menu responses
 /// and dialogue lines arrive as `line` blocks of the view itself).
@@ -3642,3 +4174,6 @@ mod slot_tests;
 
 #[cfg(test)]
 mod shared_tests;
+
+#[cfg(test)]
+mod parser_tests;

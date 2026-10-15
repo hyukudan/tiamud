@@ -15,10 +15,10 @@ use super::{
     bounded_utf8_prefix, escape_negotiated_mxp_text,
 };
 use crate::story_sessions::{
-    InvitationInbox, SHARED_STORY_HELP, STORY_INPUT_HELP, SharedFrame, StoryCommand, StoryFailure,
-    StoryInputCommand, StoryLink, StoryManager, StoryProjection, mode_label, parse_story_command,
-    parse_story_input, render_continue_offer, render_listing, render_lobby, render_slots,
-    render_tally, render_text,
+    CommandFollowUp, InvitationInbox, PARSER_STORY_HELP, SHARED_STORY_HELP, STORY_INPUT_HELP,
+    SharedFrame, StoryCommand, StoryFailure, StoryInputCommand, StoryLink, StoryManager,
+    StoryProjection, mode_label, parse_parser_story_input, parse_story_command, parse_story_input,
+    render_continue_offer, render_listing, render_lobby, render_slots, render_tally, render_text,
 };
 use serde_json::json;
 use std::io;
@@ -326,7 +326,17 @@ impl TelnetStory {
         let Some(link) = self.link.clone() else {
             return self.outside(output, input, line).await;
         };
-        let result = match parse_story_input(line) {
+        let parsed = if link.is_parser() {
+            parse_parser_story_input(line)
+        } else {
+            parse_story_input(line)
+        };
+        let result = match parsed {
+            // In a parser story (StoryPack v3) every non-reserved line is a
+            // parser command; reserved words keep their story meaning.
+            StoryInputCommand::Other if link.is_parser() => {
+                return self.command(output, input, &link, line).await;
+            }
             StoryInputCommand::Number(number) => {
                 let action = self.last_view.as_ref().and_then(|view| {
                     view.actions()
@@ -357,17 +367,7 @@ impl TelnetStory {
             }
             StoryInputCommand::Undo => link.undo().await,
             StoryInputCommand::Look => return self.refresh(output, input).await,
-            StoryInputCommand::Leave => {
-                let outcome = link.leave().await;
-                self.leave_locally(output, input, "left")?;
-                let message = if outcome.is_ok_and(|outcome| outcome.autosaved) {
-                    "Sales de la historia y vuelves al mundo. Tu progreso quedó en el autoguardado."
-                } else {
-                    "Sales de la historia y vuelves al mundo."
-                };
-                write_line(output, input, message)?;
-                return Ok(StoryLineOutcome::Left);
-            }
+            StoryInputCommand::Leave => return self.leave(output, input, &link).await,
             StoryInputCommand::Seats => {
                 match self.frame() {
                     Some(frame) => {
@@ -477,6 +477,8 @@ impl TelnetStory {
             StoryInputCommand::Other => {
                 let help = if link.is_shared() {
                     SHARED_STORY_HELP
+                } else if link.is_parser() {
+                    PARSER_STORY_HELP
                 } else {
                     STORY_INPUT_HELP
                 };
@@ -485,6 +487,55 @@ impl TelnetStory {
             }
         };
         self.show(output, input, result).await
+    }
+
+    /// Leaves the story (reserved `salir`/`leave` or the parser's quit).
+    async fn leave(
+        &mut self,
+        output: &TelnetOutputQueue,
+        input: &mut TelnetInput,
+        link: &StoryLink,
+    ) -> io::Result<StoryLineOutcome> {
+        let outcome = link.leave().await;
+        self.leave_locally(output, input, "left")?;
+        let message = if outcome.is_ok_and(|outcome| outcome.autosaved) {
+            "Sales de la historia y vuelves al mundo. Tu progreso quedó en el autoguardado."
+        } else {
+            "Sales de la historia y vuelves al mundo."
+        };
+        write_line(output, input, message)?;
+        Ok(StoryLineOutcome::Left)
+    }
+
+    /// One parser line: the view echoes and answers it; `guardar`/`cargar`
+    /// without a slot also list the slots and the parser's quit leaves.
+    async fn command(
+        &mut self,
+        output: &TelnetOutputQueue,
+        input: &mut TelnetInput,
+        link: &StoryLink,
+        line: &str,
+    ) -> io::Result<StoryLineOutcome> {
+        let view_rev = self.last_view.as_ref().map_or(0, |view| view.view_rev);
+        let reply = match link.command(line, view_rev).await {
+            Ok(reply) => reply,
+            Err(failure) => return self.show(output, input, Err(failure)).await,
+        };
+        let outcome = self.show(output, input, Ok(reply.view)).await?;
+        if outcome != StoryLineOutcome::Handled {
+            return Ok(outcome);
+        }
+        match reply.follow_up {
+            None => Ok(outcome),
+            Some(CommandFollowUp::Slots) => {
+                match link.slots().await {
+                    Ok(slots) => self.slots(output, input, slots, false)?,
+                    Err(failure) => write_line(output, input, failure.message())?,
+                }
+                Ok(outcome)
+            }
+            Some(CommandFollowUp::Leave) => self.leave(output, input, link).await,
+        }
     }
 
     async fn outside(
@@ -742,6 +793,10 @@ impl TelnetSession {
         let mut output = Vec::new();
         if self.gmcp.supports("tiamud.story") {
             let actions = view.actions();
+            // Free-text prompt of a parser story (StoryPack v3), else null.
+            let prompt = view
+                .prompt()
+                .map(|prompt| json!({"text": prompt.text, "question": prompt.question}));
             let mut stats = Vec::new();
             let mut inventory = Vec::new();
             let mut present = Vec::new();
@@ -777,6 +832,7 @@ impl TelnetSession {
                 "score": view.score,
                 "ending": view.ending.map(ending_name),
                 "canUndo": view.can_undo,
+                "prompt": prompt,
                 "dialogue": dialogue,
                 "choices": choices(None),
                 "present": present,
@@ -791,6 +847,7 @@ impl TelnetSession {
                     "score": view.score,
                     "ending": view.ending.map(ending_name),
                     "canUndo": view.can_undo,
+                    "prompt": prompt,
                     "choices": choices(Some(FALLBACK_LABEL_BYTES)),
                     "truncated": true,
                     "overflow": {"package": "Tiamud.Story.View", "maximumBytes": MAX_GMCP_BYTES},

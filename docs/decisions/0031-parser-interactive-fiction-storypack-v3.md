@@ -209,3 +209,36 @@ verbos del pack; su JSON base se analiza una sola vez por proceso.
   para S6).
 - **Nuevas variantes de `StoryEvent` para meta**: rompería la coincidencia
   exhaustiva del servidor S2 sin aportar nada a la transición pura.
+
+## Nota de estado (2026-10-15): cableado al servidor
+
+Añadida después de la decisión; no cambia el estado propuesto. Las sesiones
+S2/S7 ([ADR 0029](0029-story-session-instances-and-story-protocol.md),
+[ADR 0033](0033-shared-story-instances-and-voting.md)) juegan ya packs v3 con
+la API pública `step_command`, sin cambiar `story-core` ni `story-parser`:
+
+- Protocolo aditivo: cliente `story.command {text, viewRev}` (≤256 bytes,
+  estricto); en `story.view` la escena lleva `prompt?: {text, question}` y hay
+  bloques `command` (eco) y `reply` (transcripción y avisos del servidor);
+  códigos `no_parser` e `invalid_command`. Se eligió `prompt` dentro de
+  `story.view` en lugar de un mensaje `story.prompt` separado: el aviso
+  pertenece a la vista y viaja con su `viewRev`.
+- Idioma por instancia: `es` si el pack tiene léxico castellano, si no su
+  primer léxico; la vista se resuelve en ese idioma. No hay elección por
+  sesión.
+- Órdenes meta → operaciones de sesión dentro de la instancia de escritor
+  único: `deshacer` (una línea con órdenes previas deshace exactamente esa
+  línea), `reiniciar` con confirmación tecleada sobre esa misma vista
+  (deshacible), `puntos`/`ayuda` en la vista, `guardar`/`cargar` sin ranura →
+  aviso y `story.slots`, `fin` → salir con autoguardado. Solo las líneas que
+  ejecutan órdenes del mundo son pasos de deshacer y consumen turno.
+- Límites: 256 bytes, `viewRev` vigente, 120 líneas/min por cuenta (ráfaga
+  20). Compartidas: el texto libre nunca se vota (anfitrión en modos
+  `host`/`vote`, titular del turno en `turns`).
+- Telnet: toda línea no reservada es una orden; las palabras reservadas
+  conservan su significado (`look`/`l` y `guardar`/`cargar` sin número van al
+  parser). GMCP `Tiamud.Story.View.prompt`.
+- El catálogo examina también los subdirectorios directos de
+  `TIAMUD_STORY_DIR`.
+
+Ver el [registro del cableado](../project/log/2026-10-15-story-parser-server-wiring-s5.md).

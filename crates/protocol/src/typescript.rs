@@ -87,6 +87,7 @@ fn declarations(config: &Config) -> Vec<String> {
         StoryEndingKind::decl(config),
         StoryEnding::decl(config),
         StoryCueAction::decl(config),
+        StoryPrompt::decl(config),
         StoryItem::decl(config),
         StoryView::decl(config),
         StoryLeftReason::decl(config),
@@ -111,6 +112,8 @@ fn declarations(config: &Config) -> Vec<String> {
         StoryTallyEntry::decl(config),
         StoryTally::decl(config),
         StoryInvitation::decl(config),
+        // Parser stories (ADR 0031 server wiring).
+        StoryCommandData::decl(config),
     ]
 }
 

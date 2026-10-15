@@ -201,4 +201,37 @@ describe('StoryPanel (shared story)', () => {
     });
     expect(solo.body).toContain('Share story');
   });
+
+  it('offers a labelled command field with the prompt and a log of replies in parser stories', () => {
+    const parser = (question: boolean) => view([
+      {
+        type: 'scene', title: 'El faro', text: 'Sala de la linterna', score: 20, ending: null,
+        prompt: { text: '>', question },
+      },
+      { type: 'block', kind: 'command', text: 'enciende la lampara' },
+      { type: 'block', kind: 'reply', text: '¿Cuál quieres decir: la lámpara o el fanal?' },
+    ]);
+    const { body } = render(StoryPanel, {
+      props: { ...props(parser(false)), oncommand: () => true },
+    });
+    expect(body).toContain('role="log"');
+    expect(body).toContain('aria-label="Story replies"');
+    expect(body).toContain('enciende la lampara');
+    expect(body).toContain('¿Cuál quieres decir');
+    expect(body).toContain('<label for="story-command"');
+    expect(body).toContain('Your command');
+    expect(body).toContain('maxlength="256"');
+    expect(body).toContain('aria-describedby="story-command-help"');
+    expect(body).toContain('Up and Down recall earlier');
+    expect(body).not.toContain('Press 1');
+    const asked = render(StoryPanel, {
+      props: { ...props(parser(true)), oncommand: () => true },
+    });
+    expect(asked.body).toContain('Answer the question');
+    // Without a prompt (gamebooks, endings) there is no command field.
+    const plain = render(StoryPanel, {
+      props: { ...props(view([scene()])), oncommand: () => true },
+    });
+    expect(plain.body).not.toContain('story-command');
+  });
 });

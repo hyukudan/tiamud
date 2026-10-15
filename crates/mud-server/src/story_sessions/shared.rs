@@ -369,6 +369,25 @@ impl Table {
         Ok(())
     }
 
+    /// Who may type a parser command line (StoryPack v3). Free text is never
+    /// put to a vote: in host and vote modes only the host types (the
+    /// others still vote on the numbered actions of a view that has them),
+    /// in turns mode only the turn holder; spectators never.
+    pub fn route_command(&self, from: AccountId) -> Result<(), StoryFailure> {
+        match (self.role(from), self.mode) {
+            (None, _) => Err(StoryFailure::NotInStory),
+            (Some(StorySeatRole::Spectator), _) => Err(StoryFailure::Spectator),
+            (Some(StorySeatRole::Host), StoryDecisionMode::Host | StoryDecisionMode::Vote) => {
+                Ok(())
+            }
+            (Some(_), StoryDecisionMode::Host | StoryDecisionMode::Vote) => {
+                Err(StoryFailure::HostOnly)
+            }
+            (Some(_), StoryDecisionMode::Turns) if self.turn == Some(from) => Ok(()),
+            (Some(_), StoryDecisionMode::Turns) => Err(StoryFailure::NotYourTurn),
+        }
+    }
+
     /// How a story input (`story.choose`, `story.menu`, `story.dialogue` or a
     /// typed number) of `from` is handled.
     pub fn route(&self, from: AccountId) -> Result<Route, StoryFailure> {

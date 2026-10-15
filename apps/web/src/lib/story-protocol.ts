@@ -12,6 +12,7 @@ import type {
   StoryItem,
   StoryLeft,
   StoryLobby,
+  StoryPrompt,
   StoryRestored,
   StorySaved,
   StorySeat,
@@ -40,8 +41,21 @@ const STORY_ERROR_CODES: readonly StoryErrorCode[] = [
   'stale_view', 'unknown_choice', 'ended', 'nothing_to_undo', 'busy', 'internal',
   'slots_unavailable', 'invalid_slot', 'slot_empty', 'slot_corrupt', 'slot_incompatible',
   'slot_capacity', 'rate_limited', 'host_only', 'spectator', 'not_your_turn', 'unknown_code',
-  'seats_full', 'not_shared', 'unknown_member', 'invalid_setting',
+  'seats_full', 'not_shared', 'unknown_member', 'invalid_setting', 'no_parser',
+  'invalid_command',
 ];
+
+/** Maximum UTF-8 bytes of one `story.command` line (StoryPack v3 parser). */
+export const MAX_STORY_COMMAND_BYTES = 256;
+const MAX_STORY_PROMPT = 64;
+
+const parsePrompt = (value: unknown): StoryPrompt | undefined => {
+  if (!isRecord(value) || !exactKeys(value, ['text', 'question'])) return undefined;
+  const prompt = text(value.text, MAX_STORY_PROMPT);
+  return prompt && typeof value.question === 'boolean'
+    ? { text: prompt, question: value.question }
+    : undefined;
+};
 
 /** Highest save slot; `0` is the autosave. At most ten slots per story. */
 const MAX_SLOT = 9;
@@ -115,7 +129,9 @@ export const parseStoryItem = (value: unknown): StoryItem | undefined => {
   if (!isRecord(value)) return undefined;
   switch (value.type) {
     case 'scene': {
-      if (!exactKeys(value, ['type', 'title', 'text', 'score', 'ending'])) return undefined;
+      if (!exactKeys(value, ['type', 'title', 'text', 'score', 'ending'], ['prompt'])) {
+        return undefined;
+      }
       const title = text(value.title, MAX_STORY_LABEL);
       const prose = typeof value.text === 'string' && value.text.length <= MAX_STORY_TEXT
         ? value.text
@@ -123,9 +139,12 @@ export const parseStoryItem = (value: unknown): StoryItem | undefined => {
       const score = typeof value.score === 'number' && Number.isSafeInteger(value.score) &&
         Math.abs(value.score) <= MAX_SCORE ? value.score : undefined;
       const ending = parseEnding(value.ending);
-      return title && prose !== undefined && score !== undefined && ending !== undefined
-        ? { type: 'scene', title, text: prose, score, ending }
-        : undefined;
+      const prompt = value.prompt === undefined ? undefined : parsePrompt(value.prompt);
+      if (!title || prose === undefined || score === undefined || ending === undefined ||
+        (value.prompt !== undefined && !prompt)) return undefined;
+      return prompt
+        ? { type: 'scene', title, text: prose, score, ending, prompt }
+        : { type: 'scene', title, text: prose, score, ending };
     }
     case 'cue':
       return parseCue(value);
@@ -138,7 +157,8 @@ export const parseStoryItem = (value: unknown): StoryItem | undefined => {
       const body = text(value.text, MAX_STORY_TEXT);
       const speaker = value.speaker === undefined ? undefined : text(value.speaker, MAX_STORY_LABEL);
       if (!body || (value.speaker !== undefined && !speaker) ||
-        (value.kind !== 'event' && value.kind !== 'line')) return undefined;
+        (value.kind !== 'event' && value.kind !== 'line' && value.kind !== 'command' &&
+          value.kind !== 'reply')) return undefined;
       return speaker
         ? { type: 'block', kind: value.kind, speaker, text: body }
         : { type: 'block', kind: value.kind, text: body };
@@ -442,12 +462,18 @@ export interface StoryPresentation {
   choices: { id: string; label: string }[];
   dialogue: { id: string; label: string }[];
   verbs: StoryVerbPresentation[];
+  /** Free-text prompt of a parser story; absent when no text is accepted. */
+  prompt?: StoryPrompt;
+  /** Echo of the command this view answers (parser stories). */
+  command?: string;
+  /** Parser replies to that command, in order. */
+  replies: string[];
 }
 
 export function presentStory(view: AssembledStoryView): StoryPresentation {
   const model: StoryPresentation = {
     title: '', paragraphs: [], score: 0, events: [], lines: [], present: [], stats: [],
-    inventory: [], choices: [], dialogue: [], verbs: [],
+    inventory: [], choices: [], dialogue: [], verbs: [], replies: [],
   };
   for (const item of view.items) {
     switch (item.type) {
@@ -456,9 +482,12 @@ export function presentStory(view: AssembledStoryView): StoryPresentation {
         model.paragraphs = item.text.split('\n').filter((line) => line.trim().length > 0);
         model.score = item.score;
         model.ending = item.ending?.kind;
+        if (item.prompt) model.prompt = item.prompt;
         break;
       case 'block':
         if (item.kind === 'event') model.events.push(item.text);
+        else if (item.kind === 'command') model.command = item.text;
+        else if (item.kind === 'reply') model.replies.push(item.text);
         else model.lines.push(item.speaker ? { speaker: item.speaker, text: item.text } : { text: item.text });
         break;
       case 'portrait':

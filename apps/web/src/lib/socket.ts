@@ -21,6 +21,7 @@ import {
   createStoryMode,
   createStoryShare,
   createStoryVote,
+  createStoryCommand,
   createSyncRequest,
   createTalentPerform,
   parseServerMessage,
@@ -413,6 +414,12 @@ export class TiamudConnection {
   storyVote(choiceId: string | undefined, viewRev: number): boolean {
     if (this.#socket?.readyState !== WebSocket.OPEN) return false;
     this.#socket.send(JSON.stringify(createStoryVote(choiceId, viewRev)));
+    return true;
+  }
+
+  storyCommand(text: string, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryCommand(text, viewRev)));
     return true;
   }
 
