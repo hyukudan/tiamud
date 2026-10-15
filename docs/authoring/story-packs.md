@@ -18,7 +18,9 @@ driven by free text — proposed in
 (see [Parser worlds](#parser-worlds-format-v3)). ADR 0025, 0028 and 0031 are
 still **Proposed**. The server's single-player story sessions (S2, ADR 0029)
 play v1/v2 packs through `story.*`; there is no `story.command` message yet,
-so a v3 parser world is only playable offline with `tiamud-story play`.
+so a v3 parser world is only playable offline with `tiamud-story play`. Optional
+[Lua scripts](#lua-scripts-format-v3-optional) (ADR 0034, proposed) run
+only in the offline tools; the server rejects packs that declare them.
 
 The Rust types and validator in `crates/story-core` are the exact authority.
 The published [JSON Schema](../../crates/story-tools/schema/story-pack.v3.schema.json)
@@ -545,6 +547,99 @@ or dialogue text, rendered in every lexicon language. `prompt` tells a client
 that free text is accepted; it is absent after the end and while a v2
 dialogue waits. Authored ids, object state and rules never appear.
 
+## Lua scripts (format v3, optional)
+
+Proposed in [ADR 0034](../decisions/0034-lua-scripts-in-storypacks.md) and
+available offline only: `tiamud-story` validates, tests and plays packs with
+scripts, but the **server rejects them** (its validation has no script host),
+so a scripted pack cannot be published to the S2 catalog yet. Prefer the
+closed DSL; reach for a script only for a rule the DSL cannot express, such
+as the custom combat round of the sample
+[`duelo-en-el-paso.story.json`](../../crates/story-script/fixtures/duelo-en-el-paso.story.json).
+
+A script is a **pure function**. It reads a copy of the state and either
+answers a yes/no question or *emits intents*; it never changes the story
+itself. Every intent is an ordinary effect, checked against what the script
+declared before it is applied.
+
+```json
+"scripts": [
+  {
+    "id": "asalto",
+    "kind": "effect",
+    "source": "function run(story, args)\n  ...\nend\n",
+    "writes": ["vigor", "vigor_bandido", "ronda"],
+    "goto": ["victoria", "derrota"],
+    "score": true
+  },
+  {
+    "id": "puede_huir",
+    "kind": "condition",
+    "source": "function check(story, args)\n  return story.vars.vigor >= 4\nend\n"
+  }
+]
+```
+
+Use them like any condition or effect, with up to 8 constant integer or
+boolean arguments:
+
+```json
+{ "script": { "id": "asalto", "args": { "arma": 1 } } }
+```
+
+- **Condition scripts** (`kind: "condition"`) define `check(story, args)` and
+  must return a boolean. They take no grants and cannot emit anything.
+- **Effect scripts** (`kind: "effect"`) define `run(story, args)` and emit
+  intents with `fx`. **Grants** limit what they may touch: `writes`
+  (variables for `fx.set`/`fx.add`), `items` (`fx.give`/`fx.take`), `goto`
+  (`fx.go`), `objects` (`fx.move`/`fx.set_object`), `score: true`
+  (`fx.score`) and `ends: true` (`fx.finish`). An intent outside the grants,
+  of the wrong type or out of range fails the step.
+
+The `story` argument is a read-only copy: `story.node`, `story.turn`,
+`story.score`, `story.vars` (id → integer or boolean), `story.items` and
+`story.visited` (id → `true`) and, in parser worlds, `story.objects` (id →
+`at`, `open`, `locked`, `lit`, `worn`; `at` is `carried`, `nowhere`,
+`room:<node>` or `in:<object>`). Writing to it changes nothing.
+
+| Lua helper | Intent |
+| --- | --- |
+| `fx.set(var, n_or_bool)` / `fx.add(var, n)` | `set` / `add` (integers clamp to the declared bounds) |
+| `fx.give(item)` / `fx.take(item)` | `give` / `take` |
+| `fx.go(node)` | `goto` (`goto` is a Lua keyword) |
+| `fx.score(n)` | `score` |
+| `fx.finish(id, "victory" \| "defeat" \| "neutral")` | `end` |
+| `fx.move(obj, "carried" \| "nowhere" \| "room:<node>" \| "in:<object>")` | `move_object` |
+| `fx.set_object(obj, "open" \| "locked" \| "lit" \| "worn", bool)` | `set_object` |
+| `dice(count, sides)`, `tiamud.random(n)` | seeded dice: `1..=n` |
+
+Intents apply in order after `run` returns, exactly like authored effects
+and against the same 64-effect budget; `roll`, `if`, `cue` and nested
+`script` cannot be emitted. Read `story` for decisions: it does not reflect
+your own earlier intents.
+
+**Determinism and sandbox.** Every call runs in a fresh Lua 5.4 VM with no
+files, network, OS, clock, `load`, `require`, `print`, `next`,
+`string.format`, pattern functions or `math.random`. `pairs` iterates in
+sorted key order and `tostring` of a table returns `"table"`. Randomness
+comes only from `dice`/`tiamud.random`: effect scripts are seeded from the
+story's RNG (so the same seed and inputs replay exactly, and `undo` restores
+it), condition scripts from the state without advancing it. Quotas per call:
+64 KiB of source, 2 MiB of memory, 100 000 instructions, 25 ms, 32 intents of
+at most 1 KiB per field; at most 16 script calls per step or view.
+
+**Failures.** A compile error, Lua error, exhausted quota, non-boolean
+`check`, malformed or ungranted intent, or exceeded call budget fails the
+whole step and leaves the state untouched. `tiamud-story validate` compiles
+every script (without calling it) and reports errors at
+`scripts[i].source` with the script id and line (`asalto:2: …`); `play` and
+`test` print the same located message. A server would show players only a
+generic error.
+
+**Lints.** The lints cannot look inside Lua: they assume an effect script may
+change everything it is granted, count its `goto` grants as exits and
+`ends: true` as a possible ending, and report scripts nothing references.
+
 ## Limits
 
 | Quantity | Limit |
@@ -578,6 +673,9 @@ dialogue waits. Authored ids, object state and rules never appear.
 | Player line | 256 bytes, 16 words, 4 commands (parser limits) |
 | Test script file / steps | 256 KiB / 4096 |
 | Interactive input line | 256 bytes (longer lines are discarded whole) |
+| Lua scripts / source per script / all sources | 32 / 64 KiB / 256 KiB |
+| Script grants per list / arguments per reference | 64 / 8 |
+| Script calls per step or view / intents per call | 16 / 32 |
 
 ## The `tiamud-story` CLI
 

@@ -20,6 +20,11 @@
 //! rules and a default library driven by `tiamud-story-parser`
 //! ([`StoryInput::Command`], [`step_command`]). The server does not wire it
 //! yet.
+//!
+//! Optional scripts (ADR 0034, phase S6) are evaluated only through a
+//! caller-supplied [`ScriptHost`] passed to the `*_scripted` entry points;
+//! this crate never runs Lua. Without a host every script reference fails
+//! closed, and [`StoryPack::validate`] rejects packs that declare scripts.
 
 #![forbid(unsafe_code)]
 
