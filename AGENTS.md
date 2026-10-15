@@ -100,9 +100,9 @@ matriz, memoria y documentación pública a la vez.
   `Resident|Retired` para las áreas de una generación de catálogo. SQLite y
   PostgreSQL la confirman con personajes/eventos en su transacción existente;
   ambos adaptadores usan esquema v16 y no hay tabla espejo ni custodia SQL de
-  trade o botín. DTO exactos v1-v8 se seleccionan por `snapshotVersion`;
+  trade o botín. DTO exactos v1-v9 se seleccionan por `snapshotVersion`;
   snapshots v1-v5 conservan su límite legado de 1 MiB y v6-v7 admiten hasta
-  2 MiB; v8 mantiene ese máximo. El DTO v6 estricto rechaza campos v7 y
+  2 MiB; v8 y v9 (aditivo, reparto de botín 4C) mantienen ese máximo. El DTO v6 estricto rechaza campos v7 y
   normaliza a afijos vacíos y
   `nextRewardOpenId: 1` sin inventar procedencia.
   v1-v3 se convierten a vínculo `unbound` y un campo
