@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "seed": 3,
+  "steps": [
+    { "expect": { "node": "inicio", "turn": 0, "choices": 1 } },
+    { "choose": 1 },
+    { "expect": { "node": "combate", "choices": 2, "has": ["pocion"] } },
+    { "choose": 1 },
+    { "expect": { "node": "combate", "vars": { "ronda": 1 }, "choices": 2 } },
+    { "choose": 2 },
+    { "expect": { "node": "combate", "lacks": ["pocion"], "choices": 1 } },
+    { "choose": 1 },
+    { "expect": { "ended": true, "ending": "paso-libre", "score": 50, "vars": { "ronda": 2, "vigor_bandido": 0 }, "choices": 0 } },
+    "undo",
+    { "expect": { "node": "combate", "ended": false, "vars": { "ronda": 1 }, "score": 0 } }
+  ]
+}

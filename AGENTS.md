@@ -490,6 +490,11 @@ matriz, memoria y documentación pública a la vez.
 - Lua 5.4 se ejecuta en VM nueva, solo con capacidades, sin sistema de archivos,
   red, procesos, módulos nativos ni debug. Código, memoria, instrucciones,
   tiempo y eventos tienen cuotas; un batch admite ocho módulos y 50 ms.
+- Los scripts Lua opcionales de StoryPack (S6, ADR 0034 propuesto) reutilizan
+  ese sandbox: funciones puras sobre una copia acotada del estado que solo
+  emiten intenciones del DSL cerrado limitadas por grants, con 16 llamadas por
+  paso; solo las herramientas offline los ejecutan y el servidor rechaza packs
+  que los declaran.
 - IA editorial es opcional, solo de autoría y fuera del juego. `none` es el
   proveedor predeterminado; endpoints locales usan loopback y remotos HTTPS.
   Ningún borrador se publica sin validación y revisión humana.
@@ -609,6 +614,10 @@ No existe LRU ni política automática de memoria.
 | `crates/story-core/` | Ruleset narrativo puro StoryPack v1–v3: librojuego S0, menús, retratos y diálogos S4 y mundos con parser S5 (ADR 0025, 0028 y 0031 propuestos); el servidor lo juega vía `story_sessions` (S2, ADR 0029 propuesto) con slots persistidos (S3, ADR 0030 propuesto) e instancias compartidas con asientos, votación y turnos (S7 parcial, ADR 0033 propuesto) |
 | `crates/story-tools/` | CLI offline `tiamud-story` de autoría StoryPack: validate/lints, preview, test, play, fmt y esquema JSON (S1 herramientas) |
 | `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5; integrado en `story-core` con StoryPack v3, ADR 0031 propuesto; jugable en el servidor con `story.command`, Web y Telnet, parcial) |
+| `crates/story-core/` | Ruleset narrativo puro StoryPack v1–v3: librojuego S0, menús, retratos y diálogos S4 y mundos con parser S5 (ADR 0025, 0028 y 0031 propuestos); el servidor lo juega vía `story_sessions` (S2, ADR 0029 propuesto) con slots persistidos (S3, ADR 0030 propuesto) e instancias compartidas con asientos, votación y turnos (S7 parcial, ADR 0033 propuesto); expone puntos de enganche `ScriptHost` para scripts opcionales (S6, ADR 0034 propuesto) sin depender de Lua |
+| `crates/story-tools/` | CLI offline `tiamud-story` de autoría StoryPack: validate/lints, preview, test, play, fmt y esquema JSON (S1 herramientas); ejecuta packs con scripts Lua mediante `story-script` |
+| `crates/story-script/` | Anfitrión Lua opcional de StoryPacks (S6, ADR 0034 propuesto): scripts puros con cuotas que emiten intenciones cerradas de `story-core` limitadas por grants; lo usan `tiamud-story` y sus pruebas, no el servidor (que rechaza packs con scripts) |
+| `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5; integrado en `story-core` con StoryPack v3, ADR 0031 propuesto; sin cablear al servidor) |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
 | `crates/telnet-codec/` | Parser Telnet de producción compartido con fuzzing |
 | `crates/cell-frame/` | Renderizado de celdas acotado |

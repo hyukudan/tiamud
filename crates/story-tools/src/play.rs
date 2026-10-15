@@ -23,7 +23,9 @@
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
-use tiamud_story_core::{StoryPack, StoryState, StoryView, UndoRing, Value, step_command, view};
+use tiamud_story_core::{StoryPack, StoryState, StoryView, UndoRing, Value};
+
+use crate::runtime::{step_command, view};
 
 use crate::render::{render_events, render_view};
 use crate::script::{ChooseError, Stepped, UNDO_CAPACITY, choose, menu_by_number, say};

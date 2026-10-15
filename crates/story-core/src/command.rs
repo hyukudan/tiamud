@@ -13,6 +13,7 @@ use tiamud_story_parser::{
 use crate::engine::{Exec, active_dialogue, holds};
 use crate::messages::definite;
 use crate::runtime::{contents, held, inside, lit, room_objects, visible, visible_objects};
+use crate::script::{ScriptHost, Scripts};
 use crate::world::{LexiconRef, LibraryMessage as M, Location, Rule, RulePhase, World};
 use crate::{
     MAX_EFFECTS_PER_CHOICE, MAX_MULTI_OBJECTS, MAX_PARSER_REPLY_BYTES, MAX_PENDING_ANSWERS,
@@ -112,12 +113,34 @@ pub fn step_command(
     text: &str,
     language: Option<&str>,
 ) -> Result<CommandStep, StoryError> {
+    step_command_in(pack, state, text, language, &Scripts::none())
+}
+
+/// [`step_command`] with a [`ScriptHost`] for packs that declare scripts
+/// (ADR 0034). The script budget covers the whole line.
+pub fn step_command_scripted(
+    pack: &StoryPack,
+    state: &StoryState,
+    text: &str,
+    language: Option<&str>,
+    host: &dyn ScriptHost,
+) -> Result<CommandStep, StoryError> {
+    step_command_in(pack, state, text, language, &Scripts::with(host))
+}
+
+pub(crate) fn step_command_in(
+    pack: &StoryPack,
+    state: &StoryState,
+    text: &str,
+    language: Option<&str>,
+    scripts: &Scripts<'_>,
+) -> Result<CommandStep, StoryError> {
     state.check_against(pack)?;
     if state.ended.is_some() {
         return Err(StoryError::Ended);
     }
     let world = pack.world.as_ref().ok_or(StoryError::NoParser)?;
-    if active_dialogue(pack, state)?.is_some() {
+    if active_dialogue(pack, state, scripts)?.is_some() {
         return Err(StoryError::InDialogue);
     }
     let pending = state.pending.clone();
@@ -129,7 +152,7 @@ pub fn step_command(
         .ok_or_else(|| StoryError::InvalidPack("world has no lexicon".to_owned()))?;
     let parser = build_parser(lexicon)
         .map_err(|error| StoryError::InvalidPack(bounded_message(error.to_string())))?;
-    let mut exec = Exec::resume(pack, state.clone());
+    let mut exec = Exec::resume(pack, state.clone(), scripts);
     exec.state.transcript.clear();
     exec.state.pending = None;
     let mut run = Run {
@@ -516,7 +539,14 @@ impl<'a> Run<'a> {
                     .direction
                     .as_deref()
                     .is_none_or(|wanted| Some(wanted) == direction);
-            if keyed && holds(self.pack, self.state(), rule.when.as_ref())? {
+            if keyed
+                && holds(
+                    self.pack,
+                    self.state(),
+                    rule.when.as_ref(),
+                    self.exec.scripts,
+                )?
+            {
                 return Ok(Some(rule));
             }
         }
@@ -747,7 +777,12 @@ impl<'a> Run<'a> {
             self.say(M::NoExit, None, None);
             return Ok(false);
         };
-        if !holds(self.pack, self.state(), exit.when.as_ref())? {
+        if !holds(
+            self.pack,
+            self.state(),
+            exit.when.as_ref(),
+            self.exec.scripts,
+        )? {
             if exit.blocked.is_some() {
                 self.reply(Reply::Blocked {
                     node,

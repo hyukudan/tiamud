@@ -18,6 +18,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tiamud-story-core = { path = "../story-core" }
 tiamud-story-parser = { path = "../story-parser" }
+tiamud-story-script = { path = "../story-script" }
 
 [dev-dependencies]
 tempfile.workspace = true

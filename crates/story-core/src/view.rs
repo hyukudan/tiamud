@@ -7,6 +7,7 @@ use crate::engine::{
     active_dialogue, available_choices, choice_token, current_node, dialogue_node, menu_verbs,
     option_token, target_token, verb_targets, verb_token,
 };
+use crate::script::{ScriptHost, Scripts};
 use crate::{
     Cue, Ending, LastResponse, LocalizedText, MAX_VIEW_BYTES, StoryError, StoryPack, StoryState,
     TargetKind, TextBlock, Value,
@@ -115,18 +116,39 @@ pub struct ViewDialogue {
     pub options: Vec<ViewChoice>,
 }
 
-/// Builds the player view of `state`.
+/// Builds the player view of `state`. A condition that references a script
+/// fails closed with [`StoryError::ScriptUnavailable`]; use
+/// [`view_scripted`] for packs with scripts.
 pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryError> {
+    view_in(pack, state, &Scripts::none())
+}
+
+/// [`view`] with a [`ScriptHost`] for packs that declare scripts (ADR 0034).
+/// Condition scripts see the same state, and the same seed, as the next
+/// step, so the offered choices and the choices `step` accepts agree.
+pub fn view_scripted(
+    pack: &StoryPack,
+    state: &StoryState,
+    host: &dyn ScriptHost,
+) -> Result<StoryView, StoryError> {
+    view_in(pack, state, &Scripts::with(host))
+}
+
+fn view_in(
+    pack: &StoryPack,
+    state: &StoryState,
+    scripts: &Scripts<'_>,
+) -> Result<StoryView, StoryError> {
     state.check_against(pack)?;
     let node = current_node(pack, state)?;
     let open = state.ended.is_none();
     let dialogue = if open {
-        active_dialogue(pack, state)?
+        active_dialogue(pack, state, scripts)?
     } else {
         None
     };
     let choices = if open && dialogue.is_none() {
-        available_choices(pack, state, node)?
+        available_choices(pack, state, node, scripts)?
             .into_iter()
             .enumerate()
             .map(|(ordinal, choice)| ViewChoice {
@@ -139,8 +161,11 @@ pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryErro
     };
     let menu = if open && dialogue.is_none() && node.menu.is_some() {
         let mut verbs = Vec::new();
-        for (ordinal, verb) in menu_verbs(pack, state, node)?.into_iter().enumerate() {
-            let targets = verb_targets(pack, state, node, verb)?
+        for (ordinal, verb) in menu_verbs(pack, state, node, scripts)?
+            .into_iter()
+            .enumerate()
+        {
+            let targets = verb_targets(pack, state, node, verb, scripts)?
                 .into_iter()
                 .enumerate()
                 .map(|(target, (_, label))| ViewTarget {
@@ -180,7 +205,7 @@ pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryErro
         .collect();
     let mut portraits = Vec::new();
     for presence in &node.present {
-        if crate::engine::holds(pack, state, presence.when.as_ref())?
+        if crate::engine::holds(pack, state, presence.when.as_ref(), scripts)?
             && let Some(character) = pack.character(&presence.character)
         {
             portraits.push(ViewPortrait {
@@ -361,7 +386,20 @@ pub fn view_pages(
     state: &StoryState,
     locale: &str,
 ) -> Result<Vec<ViewPage>, StoryError> {
-    let full = view(pack, state)?;
+    page_view(view(pack, state)?, locale)
+}
+
+/// [`view_pages`] with a [`ScriptHost`] for packs that declare scripts.
+pub fn view_pages_scripted(
+    pack: &StoryPack,
+    state: &StoryState,
+    locale: &str,
+    host: &dyn ScriptHost,
+) -> Result<Vec<ViewPage>, StoryError> {
+    page_view(view_scripted(pack, state, host)?, locale)
+}
+
+fn page_view(full: StoryView, locale: &str) -> Result<Vec<ViewPage>, StoryError> {
     let text = |value: &LocalizedText| value.resolve(locale).unwrap_or_default().to_owned();
     let mut items = vec![PageItem::Scene {
         title: text(&full.title),

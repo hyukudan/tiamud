@@ -11,6 +11,7 @@ members = [
     "crates/scripting",
     "crates/story-core",
     "crates/story-parser",
+    "crates/story-script",
     "crates/story-tools",
     "crates/telnet-codec",
     "crates/tiamud-admin",

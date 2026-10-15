@@ -7,7 +7,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use thiserror::Error;
-use tiamud_story_core::{DialoguePosition, MAX_ID_BYTES, StoryState, view};
+use tiamud_story_core::{DialoguePosition, MAX_ID_BYTES, StoryState};
 use tiamud_story_tools::{
     STORY_PACK_SCHEMA, ToolError,
     format::canonical_json,
@@ -16,6 +16,7 @@ use tiamud_story_tools::{
     play::play,
     read_bounded,
     render::render_view,
+    runtime::view,
     script::{MAX_SCRIPT_BYTES, ScriptError, StoryScript, run_script},
 };
 
@@ -193,8 +194,13 @@ fn run(cli: Cli) -> Result<(), CliError> {
                     pack.dialogues.len()
                 )
             };
+            let scripts = if pack.scripts.is_empty() {
+                String::new()
+            } else {
+                format!(", {} Lua script(s)", pack.scripts.len())
+            };
             println!(
-                "valid StoryPack {:?} (format v{}): {} node(s), {} choice(s), {} variable(s), {} item(s){menus}{world}; {} warning(s), {} lint(s)",
+                "valid StoryPack {:?} (format v{}): {} node(s), {} choice(s), {} variable(s), {} item(s){menus}{world}{scripts}; {} warning(s), {} lint(s)",
                 pack.id,
                 pack.format_version,
                 pack.nodes.len(),

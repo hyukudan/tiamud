@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::rng::SplitMix64;
+use crate::script::{ScriptHost, Scripts};
 use crate::state::key;
 use crate::world::{Location, ObjectFlag};
 use crate::{
@@ -106,18 +107,27 @@ pub fn resolve_choice<'a>(
     state: &StoryState,
     token_text: &str,
 ) -> Result<&'a Choice, StoryError> {
+    resolve_choice_in(pack, state, token_text, &Scripts::none())
+}
+
+fn resolve_choice_in<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+    token_text: &str,
+    scripts: &Scripts<'_>,
+) -> Result<&'a Choice, StoryError> {
     state.check_against(pack)?;
     if state.ended.is_some() {
         return Err(StoryError::Ended);
     }
-    if active_dialogue(pack, state)?.is_some() {
+    if active_dialogue(pack, state, scripts)?.is_some() {
         return Err(StoryError::InDialogue);
     }
     let Token::Choice(ordinal) = current_token(state, token_text)? else {
         return Err(StoryError::MalformedToken);
     };
     let node = current_node(pack, state)?;
-    available_choices(pack, state, node)?
+    available_choices(pack, state, node, scripts)?
         .into_iter()
         .nth(ordinal)
         .ok_or(StoryError::UnknownChoice)
@@ -130,18 +140,40 @@ pub fn resolve_menu<'a>(
     verb_token: &str,
     target_token: Option<&str>,
 ) -> Result<MenuSelection<'a>, StoryError> {
+    resolve_menu_in(pack, state, verb_token, target_token, &Scripts::none())
+}
+
+/// [`resolve_menu`] for packs with scripts: menu and target conditions that
+/// reference scripts are evaluated through `host` (ADR 0034).
+pub fn resolve_menu_scripted<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+    verb_token: &str,
+    target_token: Option<&str>,
+    host: &dyn ScriptHost,
+) -> Result<MenuSelection<'a>, StoryError> {
+    resolve_menu_in(pack, state, verb_token, target_token, &Scripts::with(host))
+}
+
+fn resolve_menu_in<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+    verb_token: &str,
+    target_token: Option<&str>,
+    scripts: &Scripts<'_>,
+) -> Result<MenuSelection<'a>, StoryError> {
     state.check_against(pack)?;
     if state.ended.is_some() {
         return Err(StoryError::Ended);
     }
-    if active_dialogue(pack, state)?.is_some() {
+    if active_dialogue(pack, state, scripts)?.is_some() {
         return Err(StoryError::InDialogue);
     }
     let Token::Verb(verb_ordinal) = current_token(state, verb_token)? else {
         return Err(StoryError::MalformedToken);
     };
     let node = current_node(pack, state)?;
-    let verb = *menu_verbs(pack, state, node)?
+    let verb = *menu_verbs(pack, state, node, scripts)?
         .get(verb_ordinal)
         .ok_or(StoryError::UnknownChoice)?;
     let target = match (verb.targets, target_token) {
@@ -154,7 +186,7 @@ pub fn resolve_menu<'a>(
             if owner != verb_ordinal {
                 return Err(StoryError::BadTarget);
             }
-            let (id, _) = *verb_targets(pack, state, node, verb)?
+            let (id, _) = *verb_targets(pack, state, node, verb, scripts)?
                 .get(ordinal)
                 .ok_or(StoryError::UnknownChoice)?;
             Some(id)
@@ -172,11 +204,20 @@ pub fn resolve_dialogue_option<'a>(
     state: &StoryState,
     token_text: &str,
 ) -> Result<&'a DialogueOption, StoryError> {
+    resolve_dialogue_option_in(pack, state, token_text, &Scripts::none())
+}
+
+fn resolve_dialogue_option_in<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+    token_text: &str,
+    scripts: &Scripts<'_>,
+) -> Result<&'a DialogueOption, StoryError> {
     state.check_against(pack)?;
     if state.ended.is_some() {
         return Err(StoryError::Ended);
     }
-    let Some(active) = active_dialogue(pack, state)? else {
+    let Some(active) = active_dialogue(pack, state, scripts)? else {
         return Err(StoryError::NotInDialogue);
     };
     let Token::Option(ordinal) = current_token(state, token_text)? else {
@@ -190,29 +231,55 @@ pub fn resolve_dialogue_option<'a>(
 }
 
 /// Applies one input. Pure: `state` is not modified; on error nothing changes.
+///
+/// A pack reference to a script fails closed with
+/// [`StoryError::ScriptUnavailable`]; use [`step_scripted`] for such packs.
 pub fn step(
     pack: &StoryPack,
     state: &StoryState,
     input: StoryInput,
 ) -> Result<(StoryState, Vec<StoryEvent>), StoryError> {
+    step_in(pack, state, input, &Scripts::none())
+}
+
+/// [`step`] with a [`ScriptHost`] for packs that declare scripts (ADR 0034).
+/// At most [`crate::MAX_SCRIPT_CALLS_PER_STEP`] script invocations run; any
+/// script failure, rejected intent or exhausted budget fails the whole step
+/// and leaves `state` untouched, exactly like every other step error.
+pub fn step_scripted(
+    pack: &StoryPack,
+    state: &StoryState,
+    input: StoryInput,
+    host: &dyn ScriptHost,
+) -> Result<(StoryState, Vec<StoryEvent>), StoryError> {
+    step_in(pack, state, input, &Scripts::with(host))
+}
+
+fn step_in(
+    pack: &StoryPack,
+    state: &StoryState,
+    input: StoryInput,
+    scripts: &Scripts<'_>,
+) -> Result<(StoryState, Vec<StoryEvent>), StoryError> {
     match input {
         StoryInput::Choose { token } => {
-            let choice = resolve_choice(pack, state, &token)?;
-            let mut exec = Exec::begin(pack, state)?;
+            let choice = resolve_choice_in(pack, state, &token, scripts)?;
+            let mut exec = Exec::begin(pack, state, scripts)?;
             exec.run(&choice.effects, 0)?;
             exec.finish_move(choice.target.as_deref())?;
             Ok(exec.finish())
         }
         StoryInput::MenuAction { verb, target } => {
-            let selection = resolve_menu(pack, state, &verb, target.as_deref())?;
-            menu_action(pack, state, selection)
+            let selection = resolve_menu_in(pack, state, &verb, target.as_deref(), scripts)?;
+            menu_action(pack, state, selection, scripts)
         }
         StoryInput::DialogueChoice { token } => {
-            let option = resolve_dialogue_option(pack, state, &token)?;
-            dialogue_choice(pack, state, option)
+            let option = resolve_dialogue_option_in(pack, state, &token, scripts)?;
+            dialogue_choice(pack, state, option, scripts)
         }
         StoryInput::Command { text, language } => {
-            let stepped = crate::command::step_command(pack, state, &text, language.as_deref())?;
+            let stepped =
+                crate::command::step_command_in(pack, state, &text, language.as_deref(), scripts)?;
             Ok((stepped.state, stepped.events))
         }
     }
@@ -222,6 +289,7 @@ fn menu_action(
     pack: &StoryPack,
     state: &StoryState,
     selection: MenuSelection<'_>,
+    scripts: &Scripts<'_>,
 ) -> Result<(StoryState, Vec<StoryEvent>), StoryError> {
     let node = current_node(pack, state)?;
     let menu = node
@@ -232,7 +300,7 @@ fn menu_action(
         .entries
         .iter()
         .find(|entry| entry.verb == selection.verb && entry.target.as_deref() == selection.target);
-    let mut exec = Exec::begin(pack, state)?;
+    let mut exec = Exec::begin(pack, state, scripts)?;
     let mut answered = StoryEvent::MenuAnswered {
         verb: selection.verb.to_owned(),
         target: selection.target.map(str::to_owned),
@@ -245,7 +313,7 @@ fn menu_action(
         return Ok(exec.finish());
     };
     // Responses are chosen against the state *before* this use is counted.
-    let response = select_response(pack, &exec.state, node, entry)?;
+    let response = select_response(pack, &exec.state, node, entry, scripts)?;
     let counter = key(&[&node.id, &entry.id]);
     let uses = exec.state.menu_uses.get(&counter).copied().unwrap_or(0);
     exec.state
@@ -300,12 +368,13 @@ fn dialogue_choice(
     pack: &StoryPack,
     state: &StoryState,
     option: &DialogueOption,
+    scripts: &Scripts<'_>,
 ) -> Result<(StoryState, Vec<StoryEvent>), StoryError> {
     let position = state.dialogue.clone().ok_or(StoryError::NotInDialogue)?;
     let dialogue = pack
         .dialogue(&position.dialogue)
         .ok_or_else(|| StoryError::StateMismatch("dialogue is unknown".to_owned()))?;
-    let mut exec = Exec::begin(pack, state)?;
+    let mut exec = Exec::begin(pack, state, scripts)?;
     // `begin` drops an inactive dialogue; this one is active, so restore it.
     exec.state.dialogue = Some(position.clone());
     if option.once {
@@ -348,6 +417,7 @@ fn select_response<'a>(
     state: &StoryState,
     node: &Node,
     entry: &'a MenuEntry,
+    scripts: &Scripts<'_>,
 ) -> Result<Option<&'a Response>, StoryError> {
     for response in &entry.responses {
         if response.once
@@ -359,7 +429,7 @@ fn select_response<'a>(
         }
         let open = match &response.when {
             None => true,
-            Some(condition) => evaluate(pack, state, condition, 0)?,
+            Some(condition) => evaluate(pack, state, condition, 0, scripts)?,
         };
         if open {
             return Ok(Some(response));
@@ -447,10 +517,11 @@ pub(crate) fn available_choices<'a>(
     pack: &StoryPack,
     state: &StoryState,
     node: &'a Node,
+    scripts: &Scripts<'_>,
 ) -> Result<Vec<&'a Choice>, StoryError> {
     let mut out = Vec::new();
     for choice in &node.choices {
-        if holds(pack, state, choice.when.as_ref())? {
+        if holds(pack, state, choice.when.as_ref(), scripts)? {
             out.push(choice);
         }
     }
@@ -462,13 +533,14 @@ pub(crate) fn menu_verbs<'a>(
     pack: &'a StoryPack,
     state: &StoryState,
     node: &Node,
+    scripts: &Scripts<'_>,
 ) -> Result<Vec<&'a VerbDecl>, StoryError> {
     let Some(menu) = &node.menu else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
     for offered in &menu.verbs {
-        if holds(pack, state, offered.when.as_ref())? {
+        if holds(pack, state, offered.when.as_ref(), scripts)? {
             let verb = pack
                 .verb(&offered.verb)
                 .ok_or_else(|| StoryError::InvalidPack("menu names an unknown verb".to_owned()))?;
@@ -484,20 +556,21 @@ pub(crate) fn verb_targets<'a>(
     state: &StoryState,
     node: &'a Node,
     verb: &VerbDecl,
+    scripts: &Scripts<'_>,
 ) -> Result<Vec<(&'a str, &'a LocalizedText)>, StoryError> {
     let mut out = Vec::new();
     match verb.targets {
         TargetKind::None => {}
         TargetKind::Hotspot => {
             for hotspot in &node.hotspots {
-                if holds(pack, state, hotspot.when.as_ref())? {
+                if holds(pack, state, hotspot.when.as_ref(), scripts)? {
                     out.push((hotspot.id.as_str(), &hotspot.label));
                 }
             }
         }
         TargetKind::Character => {
             for presence in &node.present {
-                if holds(pack, state, presence.when.as_ref())? {
+                if holds(pack, state, presence.when.as_ref(), scripts)? {
                     let character = pack.character(&presence.character).ok_or_else(|| {
                         StoryError::InvalidPack("presence names an unknown character".to_owned())
                     })?;
@@ -526,6 +599,7 @@ pub(crate) struct ActiveDialogue<'a> {
 pub(crate) fn active_dialogue<'a>(
     pack: &'a StoryPack,
     state: &StoryState,
+    scripts: &Scripts<'_>,
 ) -> Result<Option<ActiveDialogue<'a>>, StoryError> {
     let Some((dialogue, node)) = dialogue_node(pack, state)? else {
         return Ok(None);
@@ -539,7 +613,7 @@ pub(crate) fn active_dialogue<'a>(
         {
             continue;
         }
-        if holds(pack, state, option.when.as_ref())? {
+        if holds(pack, state, option.when.as_ref(), scripts)? {
             options.push(option);
         }
     }
@@ -567,10 +641,11 @@ pub(crate) fn holds(
     pack: &StoryPack,
     state: &StoryState,
     condition: Option<&Condition>,
+    scripts: &Scripts<'_>,
 ) -> Result<bool, StoryError> {
     match condition {
         None => Ok(true),
-        Some(condition) => evaluate(pack, state, condition, 0),
+        Some(condition) => evaluate(pack, state, condition, 0, scripts),
     }
 }
 
@@ -579,6 +654,7 @@ pub(crate) fn evaluate(
     state: &StoryState,
     condition: &Condition,
     depth: usize,
+    scripts: &Scripts<'_>,
 ) -> Result<bool, StoryError> {
     if depth >= MAX_CONDITION_DEPTH {
         return Err(StoryError::InvalidPack("condition is too deep".to_owned()));
@@ -586,7 +662,7 @@ pub(crate) fn evaluate(
     Ok(match condition {
         Condition::All(children) => {
             for child in children {
-                if !evaluate(pack, state, child, depth + 1)? {
+                if !evaluate(pack, state, child, depth + 1, scripts)? {
                     return Ok(false);
                 }
             }
@@ -594,13 +670,13 @@ pub(crate) fn evaluate(
         }
         Condition::Any(children) => {
             for child in children {
-                if evaluate(pack, state, child, depth + 1)? {
+                if evaluate(pack, state, child, depth + 1, scripts)? {
                     return Ok(true);
                 }
             }
             false
         }
-        Condition::Not(child) => !evaluate(pack, state, child, depth + 1)?,
+        Condition::Not(child) => !evaluate(pack, state, child, depth + 1, scripts)?,
         Condition::VarCmp { var, op, value } => match state.vars.get(var) {
             Some(Value::Int(current)) => op.apply(*current, *value),
             _ => {
@@ -644,6 +720,7 @@ pub(crate) fn evaluate(
         }
         Condition::PlayerIn(node) => state.node == *node,
         Condition::TurnCmp { op, value } => op.apply(i64::from(state.turn), *value),
+        Condition::Script(script) => scripts.check(pack, state, script)?,
     })
 }
 
@@ -659,6 +736,7 @@ fn object_state<'a>(
 
 pub(crate) struct Exec<'a> {
     pub(crate) pack: &'a StoryPack,
+    pub(crate) scripts: &'a Scripts<'a>,
     rng: SplitMix64,
     pub(crate) state: StoryState,
     pub(crate) events: Vec<StoryEvent>,
@@ -670,7 +748,11 @@ pub(crate) struct Exec<'a> {
 impl<'a> Exec<'a> {
     /// Starts a turn: advances the bounded turn counter, clears the last menu
     /// response and drops a dialogue position that no longer blocks.
-    fn begin(pack: &'a StoryPack, state: &StoryState) -> Result<Self, StoryError> {
+    fn begin(
+        pack: &'a StoryPack,
+        state: &StoryState,
+        scripts: &'a Scripts<'a>,
+    ) -> Result<Self, StoryError> {
         let mut next = state.clone();
         next.turn = state
             .turn
@@ -681,6 +763,7 @@ impl<'a> Exec<'a> {
         next.dialogue = None;
         Ok(Self {
             pack,
+            scripts,
             rng: SplitMix64::from_state(state.rng),
             state: next,
             events: Vec::new(),
@@ -693,11 +776,16 @@ impl<'a> Exec<'a> {
     /// Continues from `state` without advancing the turn, for parser
     /// commands that count their own turns. Clears the last menu response
     /// and drops a dialogue position that no longer blocks.
-    pub(crate) fn resume(pack: &'a StoryPack, mut state: StoryState) -> Self {
+    pub(crate) fn resume(
+        pack: &'a StoryPack,
+        mut state: StoryState,
+        scripts: &'a Scripts<'a>,
+    ) -> Self {
         state.last = None;
         state.dialogue = None;
         Self {
             pack,
+            scripts,
             rng: SplitMix64::from_state(state.rng),
             state,
             events: Vec::new(),
@@ -835,7 +923,7 @@ impl<'a> Exec<'a> {
                 then,
                 otherwise,
             } => {
-                let branch = if evaluate(self.pack, &self.state, when, 0)? {
+                let branch = if evaluate(self.pack, &self.state, when, 0, self.scripts)? {
                     then
                 } else {
                     otherwise
@@ -859,6 +947,23 @@ impl<'a> Exec<'a> {
             Effect::End(ending) => self.end(ending.clone()),
             Effect::MoveObject { obj, to } => self.move_object(obj, to)?,
             Effect::SetObject { obj, flag, value } => self.set_object(obj, *flag, *value)?,
+            Effect::Script(script) => {
+                // The seed comes from the story RNG, so the script's own dice
+                // are part of the deterministic sequence of this state.
+                let seed = self.rng.next_u64();
+                let scripts = self.scripts;
+                let intents = scripts.run(self.pack, &self.state, script, seed)?;
+                // Intents are a checked closed subset (no `if`, `roll`, `cue`
+                // or `script`), applied like authored effects and charged to
+                // the same per-step effect budget.
+                for intent in &intents {
+                    if self.ended {
+                        break;
+                    }
+                    self.budget = self.budget.checked_sub(1).ok_or(StoryError::EffectBudget)?;
+                    self.apply(intent, depth)?;
+                }
+            }
         }
         Ok(())
     }

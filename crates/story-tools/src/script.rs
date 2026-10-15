@@ -40,8 +40,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use tiamud_story_core::{
     Location, MAX_ITEMS, MAX_OBJECTS, MAX_VARIABLES, StoryError, StoryEvent, StoryInput, StoryPack,
-    StoryState, UndoRing, Value, resolve_menu, step, step_command, view,
+    StoryState, UndoRing, Value,
 };
+
+use crate::runtime::{resolve_menu, step, step_command, view};
 
 /// Newest script document version accepted by this module.
 pub const STORY_SCRIPT_FORMAT_VERSION: u32 = 3;

@@ -8,8 +8,10 @@
 //! steps, interactive line length and interactive command count.
 //!
 //! The narrative rules themselves live in `tiamud-story-core`; these tools
-//! only drive [`tiamud_story_core::step`] and [`tiamud_story_core::view`] and
-//! add static authoring lints on top of the core validator.
+//! only drive its `step`/`view` entry points and add static authoring lints
+//! on top of the core validator. Packs with Lua scripts (ADR 0034) are
+//! validated with `tiamud-story-script` (scripts compiled in the sandbox) and
+//! run through its Lua host; see [`runtime`].
 
 #![forbid(unsafe_code)]
 
@@ -17,6 +19,7 @@ pub mod format;
 pub mod lint;
 pub mod play;
 pub mod render;
+pub mod runtime;
 pub mod script;
 
 use std::fs::File;
@@ -105,9 +108,10 @@ pub fn parse_pack(path: &Path) -> Result<StoryPack, ToolError> {
 /// report carries the core lint warnings.
 pub fn load_pack(path: &Path) -> Result<(StoryPack, ValidationReport), ToolError> {
     let pack = parse_pack(path)?;
-    let report = pack.validate().map_err(|errors| ToolError::Invalid {
-        path: path.to_path_buf(),
-        errors,
-    })?;
+    let report =
+        tiamud_story_script::validate_pack(&pack).map_err(|errors| ToolError::Invalid {
+            path: path.to_path_buf(),
+            errors,
+        })?;
     Ok((pack, report))
 }

@@ -5,7 +5,7 @@
 //! so the schema cannot silently grow beyond what is checked here.
 
 use serde_json::{Value, json};
-use tiamud_story_core::StoryPack;
+use tiamud_story_core::{MAX_SCRIPT_ARGS, MAX_SCRIPT_GRANTS, MAX_SCRIPTS, StoryPack};
 use tiamud_story_tools::{
     STORY_PACK_SCHEMA, STORY_PACK_SCHEMA_V1, STORY_PACK_SCHEMA_V2, format::canonical_json,
 };
@@ -502,4 +502,54 @@ fn v3_schema_bounds_match_core_constants() {
         root["properties"]["format_version"]["enum"],
         json!([1, 2, 3])
     );
+}
+
+fn duelo() -> Value {
+    serde_json::from_slice(include_bytes!(
+        "../../story-script/fixtures/duelo-en-el-paso.story.json"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn scripted_packs_satisfy_the_schema_and_bad_script_shapes_do_not() {
+    let root = schema();
+    let original = duelo();
+    assert!(valid(&root, &root, &original));
+    let pack = StoryPack::from_json_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+    let canonical: Value = serde_json::from_slice(&canonical_json(&pack).unwrap()).unwrap();
+    assert!(valid(&root, &root, &canonical));
+    // Older schemas know nothing of scripts.
+    let v2: Value = serde_json::from_str(STORY_PACK_SCHEMA_V2).unwrap();
+    assert!(!valid(&v2, &v2, &original));
+
+    let defs = &root["$defs"];
+    assert_eq!(root["properties"]["scripts"]["maxItems"], MAX_SCRIPTS);
+    assert_eq!(
+        defs["script"]["properties"]["writes"]["maxItems"],
+        MAX_SCRIPT_GRANTS
+    );
+    assert_eq!(
+        defs["scriptRef"]["properties"]["args"]["maxProperties"],
+        MAX_SCRIPT_ARGS
+    );
+
+    type Mutation = Box<dyn Fn(&mut Value)>;
+    let mutations: Vec<Mutation> = vec![
+        Box::new(|pack| pack["scripts"][0]["kind"] = json!("macro")),
+        Box::new(|pack| pack["scripts"][0]["lenguaje"] = json!("lua")),
+        Box::new(|pack| pack["scripts"][0]["score"] = json!("si")),
+        Box::new(|pack| pack["scripts"][0]["writes"] = json!("vigor")),
+        Box::new(|pack| {
+            pack["nodes"][1]["choices"][0]["effects"][0]["script"]["args"] = json!({ "arma": "x" })
+        }),
+        Box::new(|pack| pack["nodes"][1]["choices"][0]["effects"][0]["script"]["peso"] = json!(1)),
+        Box::new(|pack| pack["nodes"][1]["choices"][2]["when"] = json!({ "script": "puede_huir" })),
+    ];
+    for mutate in mutations {
+        let mut document = original.clone();
+        mutate(&mut document);
+        assert!(!valid(&root, &root, &document), "{document}");
+        assert!(!loader_accepts(&document), "{document}");
+    }
 }
