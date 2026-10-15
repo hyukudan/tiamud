@@ -7,6 +7,7 @@ use crate::{
     },
     persistence::{BoardEntry, BoardPage, MailMessage, MailPage, StoreError},
     social::{SocialChannel, SocialMessage},
+    story_sessions::StoryManager,
     telnet_transport::{TelnetStream, TelnetTransport},
     world_actor::{CharacterBackgroundSelection, GameError, WorldHandle},
 };
@@ -479,9 +480,16 @@ pub(crate) struct TelnetRuntime {
     auth_rate_limiter: Arc<AuthRateLimiter>,
     active_session_limiter: Arc<ActiveSessionLimiter>,
     metrics: Arc<RuntimeMetrics>,
+    stories: Option<StoryManager>,
 }
 
 impl TelnetRuntime {
+    /// Enables story sessions (ADR 0029) for authenticated Telnet players.
+    pub(crate) fn with_stories(mut self, stories: Option<StoryManager>) -> Self {
+        self.stories = stories;
+        self
+    }
+
     pub(crate) fn new(
         world: WorldHandle,
         command_rate_per_second: u32,
@@ -497,6 +505,7 @@ impl TelnetRuntime {
             auth_rate_limiter,
             active_session_limiter,
             metrics,
+            stories: None,
         }
     }
 }
@@ -687,6 +696,7 @@ async fn serve(
         },
         &runtime.world,
         entered,
+        runtime.stories.clone(),
         runtime.command_rate_per_second,
         runtime.command_burst,
         shutdown,
@@ -1150,6 +1160,7 @@ async fn serve_entered(
     io: EnteredTelnetIo<'_>,
     world: &WorldHandle,
     entered: crate::world_actor::EnteredWorld,
+    stories: Option<StoryManager>,
     command_rate_per_second: u32,
     command_burst: u32,
     mut shutdown: watch::Receiver<bool>,
@@ -1161,6 +1172,10 @@ async fn serve_entered(
         input,
     } = io;
     write_scene(output, input, &entered.scene, &entered.player)?;
+    // While in a story the character stays parked in its room; world scene
+    // output is suspended and re-rendered when the story ends.
+    let mut story = story::TelnetStory::new(stories, entered.account_id);
+    story.resume(output, input).await?;
     write_prompt(output, input)?;
     let mut last_revision = entered.scene.revision;
     let mut ignore_world_through_revision = None;
@@ -1200,6 +1215,8 @@ async fn serve_entered(
                         )?;
                         write_prompt(output, input)?;
                     }
+                    Some(SessionDelivery::World(_) | SessionDelivery::WorldLagged)
+                        if story.active() => {}
                     Some(SessionDelivery::World(delivery)) => {
                         if ignore_world_through_revision
                             .is_some_and(|revision| delivery.scene.revision <= revision)
@@ -1290,6 +1307,24 @@ async fn serve_entered(
                             continue;
                         }
                         rate_violations = 0;
+                        match story.line(output, input, &command).await? {
+                            story::StoryLineOutcome::World => {}
+                            story::StoryLineOutcome::Handled => {
+                                write_prompt(output, input)?;
+                                continue;
+                            }
+                            story::StoryLineOutcome::Left => {
+                                let (scene, _presentation, player) = world
+                                    .current_state(entered.session_id)
+                                    .await
+                                    .map_err(io::Error::other)?;
+                                last_revision = scene.revision;
+                                ignore_world_through_revision = Some(scene.revision);
+                                write_scene(output, input, &scene, &player)?;
+                                write_prompt(output, input)?;
+                                continue;
+                            }
+                        }
                         match parse_action(&command) {
                             Ok(action) => match world.apply(entered.session_id, action).await {
                                 Ok(outcome) => {
@@ -3032,6 +3067,7 @@ const GMCP_PACKAGES: &[&str] = &[
     "Tiamud.CellFrame 1",
     "Tiamud.Client 1",
     "Tiamud.Overflow 1",
+    "Tiamud.Story 1",
 ];
 
 fn append_initial_gmcp(output: &mut Vec<u8>) {
@@ -3802,6 +3838,8 @@ impl TelnetInput {
         }
     }
 }
+
+mod story;
 
 #[cfg(test)]
 mod tests {

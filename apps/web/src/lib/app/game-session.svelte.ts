@@ -15,9 +15,12 @@ import type {
   RewardOddsData,
   SceneSnapshot,
   ServerNoticeData,
+  StoryError,
+  StoryView,
   SyncRecoveryData,
   TradeContentsData,
 } from '../protocol';
+import { StoryViewAssembler, type AssembledStoryView } from '../story-protocol';
 import { isLootRollProjection } from '../dashboard/loot';
 import {
   clearStoredAccess,
@@ -80,7 +83,10 @@ export type SessionConnection = Pick<
   TiamudConnection,
   'connect' | 'close' | 'submit' | 'perform' | 'performAbility' | 'promote' |
   'acquireTalent' | 'updateCapabilities'
->;
+> & Partial<Pick<
+  TiamudConnection,
+  'storyChoose' | 'storyDialogue' | 'storyMenu' | 'storyUndo' | 'storyLeave'
+>>;
 
 export interface AudioSink {
   play(channel: 'music' | 'ambience' | 'effects', url: string, loop?: boolean): Promise<boolean>;
@@ -132,6 +138,11 @@ export class GameSession {
   command = $state('');
   rememberedCommands = $state<string[]>([]);
   historyCursor = $state(0);
+  /** Complete current story view while the session is inside a story. */
+  story = $state<AssembledStoryView>();
+  storyError = $state<StoryError>();
+  /** True between sending a story input and its answer. */
+  storyPending = $state(false);
 
   /** Scene entities that can carry an optional sprite. */
   readonly visualEntities = $derived.by((): VisualSceneEntity[] =>
@@ -145,6 +156,7 @@ export class GameSession {
   readonly #visualCueTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #pendingStructuredActions = new Map<string, PendingStructuredAction>();
   readonly #seenMessageCueKeys: string[] = [];
+  readonly #storyParts = new StoryViewAssembler();
   readonly #deps: GameSessionDeps;
 
   constructor(deps: GameSessionDeps) {
@@ -170,9 +182,37 @@ export class GameSession {
   handleMessage = (message: LiveServerMessage): void => {
     switch (message.type) {
       case 'server.welcome':
+        // A new connection starts outside any story; the server re-sends
+        // `story.entered` and the current view if the instance still lives.
+        this.#clearStory();
         if (message.data.motd) {
           this.notice = { level: 'info', message: message.data.motd };
         }
+        return;
+      case 'story.entered':
+        this.#storyParts.reset();
+        this.storyError = undefined;
+        return;
+      case 'story.view':
+        this.#applyStoryPart(message.data);
+        return;
+      case 'story.error':
+        this.storyPending = false;
+        this.storyError = message.data;
+        return;
+      case 'story.left':
+        this.#clearStory();
+        this.#replaceHistory([
+          ...this.history,
+          {
+            id: `story-left-${message.seq ?? createRequestId()}`,
+            command: 'Story',
+            state: 'complete',
+            response: message.data.reason === 'left'
+              ? 'You leave the story and return to the world.'
+              : 'The story closed after inactivity; its progress was not saved.',
+          },
+        ]);
         return;
       case 'scene.snapshot': {
         const retained = reconcileScenePresentationCues(
@@ -249,6 +289,8 @@ export class GameSession {
   handleStateChange = (state: ConnectionState): void => {
     this.connectionState = state;
     if (state === 'disconnected') {
+      this.storyPending = false;
+      this.#storyParts.reset();
       this.#markPendingInterrupted();
       this.#cancelVisualCues();
       this.#apply(clearedPanels());
@@ -332,6 +374,52 @@ export class GameSession {
     const id = createRequestId();
     const sent = this.#connection?.acquireTalent(graphId, nodeId, id) ?? false;
     this.#recordSubmission(label, id, sent);
+  };
+
+  /** Takes a gamebook choice or answers the dialogue with an opaque id. */
+  chooseStory = (id: string): void => {
+    const view = this.story;
+    const item = view?.items.find((candidate) => 'id' in candidate && candidate.id === id);
+    if (!view || this.storyPending || !item) return;
+    const sent = item.type === 'choice'
+      ? this.#connection?.storyChoose?.(id, view.viewRev)
+      : item.type === 'dialogueOption'
+        ? this.#connection?.storyDialogue?.(id, view.viewRev)
+        : false;
+    this.#markStorySent(sent);
+  };
+
+  /** Applies a menu verb, with one of its targets when the verb needs one. */
+  storyMenu = (verb: string, target?: string): void => {
+    const view = this.story;
+    if (!view || this.storyPending) return;
+    const verbItem = view.items.find((item) => item.type === 'verb' && item.id === verb);
+    if (verbItem?.type !== 'verb' || verbItem.needsTarget !== (target !== undefined)) return;
+    if (target !== undefined &&
+      !view.items.some((item) => item.type === 'target' && item.id === target && item.verb === verb)) {
+      return;
+    }
+    this.#markStorySent(this.#connection?.storyMenu?.(verb, target, view.viewRev));
+  };
+
+  #markStorySent(sent: boolean | undefined): void {
+    if (sent) {
+      this.storyPending = true;
+      this.storyError = undefined;
+    }
+  }
+
+  undoStory = (): void => {
+    if (!this.story || this.storyPending) return;
+    if (this.#connection?.storyUndo?.()) {
+      this.storyPending = true;
+      this.storyError = undefined;
+    }
+  };
+
+  leaveStory = (): void => {
+    if (!this.story) return;
+    if (this.#connection?.storyLeave?.()) this.storyPending = true;
   };
 
   navigateCommandHistory = (event: KeyboardEvent): void => {
@@ -452,6 +540,7 @@ export class GameSession {
     this.scene = undefined;
     this.#cancelVisualCues();
     this.player = undefined;
+    this.#clearStory();
     this.#apply(clearedPanels());
     this.notice = undefined;
     this.history = [];
@@ -459,6 +548,29 @@ export class GameSession {
   }
 
   // --- helpers ------------------------------------------------------------
+
+  #applyStoryPart(part: StoryView): void {
+    const view = this.#storyParts.push(part);
+    if (!view) return;
+    this.story = view;
+    this.storyPending = false;
+    // Cues are presentation only and pass the same audio allowlist as scenes.
+    for (const cue of view.items) {
+      if (cue.type !== 'cue') continue;
+      if (cue.action === 'play' && cue.url) {
+        void this.#deps.audio?.play(cue.channel, cue.url, cue.loop);
+      } else if (cue.action === 'stop') {
+        this.#deps.audio?.stop(cue.channel);
+      }
+    }
+  }
+
+  #clearStory(): void {
+    this.#storyParts.reset();
+    this.story = undefined;
+    this.storyError = undefined;
+    this.storyPending = false;
+  }
 
   #views(): WorldViews {
     return {

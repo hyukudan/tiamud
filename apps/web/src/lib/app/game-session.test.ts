@@ -37,6 +37,11 @@ function harness() {
     promote: vi.fn(() => true),
     acquireTalent: vi.fn(() => true),
     updateCapabilities: vi.fn(() => true),
+    storyChoose: vi.fn(() => true),
+    storyDialogue: vi.fn(() => true),
+    storyMenu: vi.fn(() => true),
+    storyUndo: vi.fn(() => true),
+    storyLeave: vi.fn(() => true),
   } satisfies SessionConnection;
   const storage = new Map<string, string>();
   const historyView: HistoryView = {
@@ -214,5 +219,57 @@ describe('GameSession', () => {
     } as never)).toBe(false);
     expect(created).toBe(0);
     expect(session.accessError).toBe('Your session has expired. Sign in again.');
+  });
+
+  it('assembles story views, routes inputs by kind and plays reviewed cues', () => {
+    const { session, connection, callbacks, audio } = harness();
+    const VERB = 'c1111111111111111';
+    const TARGET = 'c2222222222222222';
+    const OPTION = 'c3333333333333333';
+    const url = `/assets/${'b'.repeat(64)}/audio-x.ogg`;
+    const scene = { type: 'scene', title: 'Lluvia', text: 'Llueve.', score: 0, ending: null };
+    callbacks().onMessage(message('story.entered', { storyId: 'lluvia-de-neon', title: 'Lluvia' }, 4));
+    callbacks().onMessage(message('story.view', {
+      viewRev: 1, part: 0, parts: 2, turn: 0, canUndo: false,
+      items: [scene, { type: 'cue', action: 'play', channel: 'music', url, loop: true }],
+    }, 5));
+    expect(session.story).toBeUndefined();
+    callbacks().onMessage(message('story.view', {
+      viewRev: 1, part: 1, parts: 2, turn: 0, canUndo: false,
+      items: [
+        { type: 'verb', id: VERB, label: 'MIRAR', needsTarget: true },
+        { type: 'target', verb: VERB, id: TARGET, label: 'Ventana' },
+        { type: 'dialogueOption', id: OPTION, label: 'Hola' },
+      ],
+    }, 6));
+    expect(session.story?.items).toHaveLength(5);
+    expect(audio.play).toHaveBeenCalledWith('music', url, true);
+
+    session.storyMenu(VERB);
+    expect(connection.storyMenu).not.toHaveBeenCalled();
+    session.storyMenu(VERB, TARGET);
+    expect(connection.storyMenu).toHaveBeenCalledWith(VERB, TARGET, 1);
+    expect(session.storyPending).toBe(true);
+    session.chooseStory(OPTION);
+    expect(connection.storyDialogue).not.toHaveBeenCalled();
+    callbacks().onMessage(message('story.error', { code: 'stale_view', message: 'Vista anterior.' }, 7));
+    expect(session.storyPending).toBe(false);
+    expect(session.storyError?.code).toBe('stale_view');
+    session.chooseStory(OPTION);
+    expect(connection.storyDialogue).toHaveBeenCalledWith(OPTION, 1);
+    session.chooseStory('c9999999999999999');
+    expect(connection.storyChoose).not.toHaveBeenCalled();
+
+    callbacks().onMessage(message('story.left', { reason: 'left' }, 8));
+    expect(session.story).toBeUndefined();
+    expect(session.history.at(-1)?.response).toContain('return to the world');
+
+    // A new connection starts outside the story until the server re-sends it.
+    callbacks().onMessage(message('story.view', {
+      viewRev: 2, part: 0, parts: 1, turn: 1, canUndo: true, items: [scene],
+    }, 9));
+    expect(session.story).toBeDefined();
+    callbacks().onMessage(message('server.welcome', { serverName: 'Tiamud', motd: 'Hi' }, 1));
+    expect(session.story).toBeUndefined();
   });
 });

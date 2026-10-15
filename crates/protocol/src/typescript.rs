@@ -78,6 +78,21 @@ fn declarations(config: &Config) -> Vec<String> {
         BoardPostSummary::decl(config),
         BoardList::decl(config),
         BoardEntry::decl(config),
+        // Story sessions (ADR 0029).
+        StoryChooseData::decl(config),
+        StoryMenuData::decl(config),
+        StoryEmptyData::decl(config),
+        StoryEntered::decl(config),
+        StoryBlockKind::decl(config),
+        StoryEndingKind::decl(config),
+        StoryEnding::decl(config),
+        StoryCueAction::decl(config),
+        StoryItem::decl(config),
+        StoryView::decl(config),
+        StoryLeftReason::decl(config),
+        StoryLeft::decl(config),
+        StoryErrorCode::decl(config),
+        StoryError::decl(config),
     ]
 }
 

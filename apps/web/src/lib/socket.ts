@@ -5,6 +5,11 @@ import {
   createCommandSubmit,
   createHeartbeatAck,
   createPromotionPerform,
+  createStoryChoose,
+  createStoryDialogue,
+  createStoryLeave,
+  createStoryMenu,
+  createStoryUndo,
   createSyncRequest,
   createTalentPerform,
   parseServerMessage,
@@ -330,6 +335,36 @@ export class TiamudConnection {
   acquireTalent(graphId: string, nodeId: string, requestId: string): boolean {
     if (this.#socket?.readyState !== WebSocket.OPEN) return false;
     this.#socket.send(JSON.stringify(createTalentPerform(graphId, nodeId, requestId)));
+    return true;
+  }
+
+  storyChoose(id: string, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryChoose(id, viewRev)));
+    return true;
+  }
+
+  storyDialogue(id: string, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryDialogue(id, viewRev)));
+    return true;
+  }
+
+  storyMenu(verb: string, target: string | undefined, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryMenu(verb, target, viewRev)));
+    return true;
+  }
+
+  storyUndo(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryUndo()));
+    return true;
+  }
+
+  storyLeave(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryLeave()));
     return true;
   }
 

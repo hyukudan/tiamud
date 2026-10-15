@@ -2862,6 +2862,7 @@ dependencies = [
  "tiamud-persistence-sqlite",
  "tiamud-protocol",
  "tiamud-scripting",
+ "tiamud-story-core",
  "tiamud-telnet-codec",
  "tokio",
  "tokio-rustls",

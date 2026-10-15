@@ -8,6 +8,7 @@ mod persistence_postgres;
 mod runtime_content;
 mod social;
 mod staff;
+mod story_sessions;
 mod telnet;
 mod telnet_transport;
 mod web;
@@ -88,6 +89,29 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         optional_env("TIAMUD_AREA_CATALOG")?,
     )?;
     let legacy_area_generation_ack = optional_env("TIAMUD_ACK_LEGACY_AREA_GENERATION")?;
+    // Story sessions are disabled unless a StoryPack directory is configured.
+    // A configured catalog is validated completely before any backend opens.
+    let story_config = story_sessions::story_config(
+        optional_env("TIAMUD_STORY_DIR")?,
+        optional_env("TIAMUD_STORY_MAX_INSTANCES")?,
+        optional_env("TIAMUD_STORY_IDLE_SECONDS")?,
+    )?;
+    let stories = match &story_config.directory {
+        Some(directory) => {
+            let catalog = story_sessions::StoryCatalog::load_dir(directory)?;
+            info!(
+                stories = catalog.len(),
+                max_instances = story_config.limits.max_instances,
+                idle_seconds = story_config.limits.idle_timeout.as_secs(),
+                "story catalog loaded"
+            );
+            Some(story_sessions::StoryManager::new(
+                catalog,
+                story_config.limits.clone(),
+            ))
+        }
+        None => None,
+    };
     // Catalog mode must fail before opening a backend because opening either
     // backend may create a database or run migrations. Pin and validate the
     // exact generation, including its verified monolithic fallback, first.
@@ -265,6 +289,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         command_burst,
         shutdown: shutdown_receiver.clone(),
         action_replay: web::action_replay_cache(),
+        stories: stories.clone(),
     };
 
     let app = Router::new()
@@ -302,7 +327,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         auth_rate_limiter,
         active_session_limiter,
         metrics,
-    );
+    )
+    .with_stories(stories);
     let telnet_task = tokio::spawn(async move {
         if let Err(error) = telnet::run(
             telnet_listener,

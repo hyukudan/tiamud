@@ -101,6 +101,14 @@ pub enum ServerMessageType {
     MediaPlay,
     #[serde(rename = "media.stop")]
     MediaStop,
+    #[serde(rename = "story.entered")]
+    StoryEntered,
+    #[serde(rename = "story.view")]
+    StoryView,
+    #[serde(rename = "story.left")]
+    StoryLeft,
+    #[serde(rename = "story.error")]
+    StoryError,
 }
 
 impl ServerMessageType {
@@ -133,6 +141,10 @@ impl ServerMessageType {
             Self::SyncPlayer => "sync.player",
             Self::MediaPlay => "media.play",
             Self::MediaStop => "media.stop",
+            Self::StoryEntered => "story.entered",
+            Self::StoryView => "story.view",
+            Self::StoryLeft => "story.left",
+            Self::StoryError => "story.error",
         }
     }
 }
@@ -151,6 +163,16 @@ pub enum ClientMessageType {
     SyncRequest,
     #[serde(rename = "client.heartbeat")]
     ClientHeartbeat,
+    #[serde(rename = "story.choose")]
+    StoryChoose,
+    #[serde(rename = "story.menu")]
+    StoryMenu,
+    #[serde(rename = "story.dialogue")]
+    StoryDialogue,
+    #[serde(rename = "story.undo")]
+    StoryUndo,
+    #[serde(rename = "story.leave")]
+    StoryLeave,
 }
 
 /// A sequenced server→client envelope.
@@ -786,6 +808,207 @@ pub struct BoardEntry {
     pub expires_at: i64,
     pub can_delete: bool,
     pub can_report: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Story sessions (ADR 0029, phase S2 of ADR 0025)
+// ---------------------------------------------------------------------------
+
+/// Bytes of an opaque per-view story id (`c` + 16 lowercase hex digits).
+pub const STORY_CHOICE_ID_BYTES: usize = 17;
+
+/// `story.choose` and `story.dialogue`: takes a gamebook choice or answers the
+/// active dialogue. `id` is an opaque per-view id and `viewRev` the revision
+/// that published it; a stale revision or an id that was never published is
+/// rejected without changing state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoryChooseData {
+    pub id: String,
+    pub view_rev: u32,
+}
+
+/// `story.menu`: applies a menu verb, with one of that verb's targets when the
+/// verb needs one. Both are opaque ids of the same view.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoryMenuData {
+    pub verb: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub target: Option<String>,
+    pub view_rev: u32,
+}
+
+/// `story.undo` and `story.leave` carry exactly `{}`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields)]
+pub struct StoryEmptyData {}
+
+/// `story.entered`: the session now routes input to a story instance.
+/// `storyId` is the public catalog id the player typed, never a node id.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StoryEntered {
+    pub story_id: String,
+    pub title: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "lowercase")]
+pub enum StoryBlockKind {
+    /// What the last transition did (dice, items, score, visible stats).
+    Event,
+    /// A menu response or dialogue line, optionally spoken by a character.
+    Line,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "lowercase")]
+pub enum StoryEndingKind {
+    Victory,
+    Defeat,
+    Neutral,
+}
+
+/// Ending kind only; the authored ending id stays on the server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+pub struct StoryEnding {
+    pub kind: StoryEndingKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "lowercase")]
+pub enum StoryCueAction {
+    Play,
+    Stop,
+}
+
+/// One self-contained piece of a story view, in display order. Ids are
+/// opaque per view; authored ids, use counters and RNG state never appear.
+/// Presentation-only items (`cue`, `portrait`) may be ignored without losing
+/// any playable fact.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum StoryItem {
+    /// Title, node prose, score and ending of the current scene.
+    Scene {
+        title: String,
+        text: String,
+        score: i64,
+        ending: Option<StoryEnding>,
+    },
+    /// Media cue. `url` is present only for `play` and only when the
+    /// authored asset id resolved through the reviewed story media map to a
+    /// content-addressed `/assets/<sha256>/audio-*.{opus,ogg,mp3}` path.
+    Cue {
+        action: StoryCueAction,
+        channel: MediaChannel,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        url: Option<String>,
+        #[serde(rename = "loop")]
+        looped: bool,
+    },
+    /// A character present in the scene (portrait images are not delivered
+    /// in S2; the name is the text equivalent).
+    Portrait { name: String },
+    Block {
+        kind: StoryBlockKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        speaker: Option<String>,
+        text: String,
+    },
+    /// A visible stat with its value rendered as text.
+    Stat { label: String, value: String },
+    /// An inventory entry.
+    Item { name: String },
+    /// A gamebook choice (`story.choose`).
+    Choice { id: String, label: String },
+    /// A menu verb (`story.menu`). With `needsTarget`, one of the following
+    /// `target` items naming this verb must accompany it.
+    Verb {
+        id: String,
+        label: String,
+        #[serde(rename = "needsTarget")]
+        needs_target: bool,
+    },
+    /// A target of the verb whose id is `verb`.
+    Target {
+        verb: String,
+        id: String,
+        label: String,
+    },
+    /// An option of the active dialogue (`story.dialogue` or `story.choose`).
+    #[serde(rename = "dialogueOption")]
+    DialogueOption { id: String, label: String },
+}
+
+/// One part of a story view. A view whose encoding would exceed the frame
+/// budget is split into `parts` frames sharing `viewRev`; the client applies
+/// the view once every part `0..parts` has arrived, concatenating `items` in
+/// part order.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StoryView {
+    pub view_rev: u32,
+    pub part: u16,
+    pub parts: u16,
+    pub turn: u32,
+    pub can_undo: bool,
+    pub items: Vec<StoryItem>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "lowercase")]
+pub enum StoryLeftReason {
+    /// The player left.
+    Left,
+    /// The instance no longer exists: idle eviction or closed by another
+    /// session of the account (S2 has no save slots).
+    Evicted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+pub struct StoryLeft {
+    pub reason: StoryLeftReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "snake_case")]
+pub enum StoryErrorCode {
+    Disabled,
+    UnknownStory,
+    AlreadyInStory,
+    Capacity,
+    NotInStory,
+    StaleView,
+    UnknownChoice,
+    Ended,
+    NothingToUndo,
+    Busy,
+    Internal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+pub struct StoryError {
+    pub code: StoryErrorCode,
+    pub message: String,
 }
 
 #[cfg(test)]
