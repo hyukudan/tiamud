@@ -438,6 +438,7 @@ crates/world-pack/           authoring model, composition and CLI
 crates/scripting/            quota-bounded Lua capabilities
 crates/story-core/           pure narrative ruleset prototype (StoryPack, S0)
 crates/story-tools/          offline StoryPack authoring CLI (tiamud-story, S1)
+crates/story-parser/         standalone ES/EN interactive-fiction parser library (not integrated)
 crates/asset-pipeline/       deterministic, reviewed media pipeline
 crates/editorial-ai/         optional authoring-only AI
 crates/tiamud-admin/         operator integrity and recovery

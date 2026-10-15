@@ -5,6 +5,12 @@
   biblioteca, y la parte de herramientas de S1 (CLI offline `tiamud-story` en
   `crates/story-tools` y esquema JSON publicado) también existe; ver
   [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  Nota de estado (2026-10-15): existe además una biblioteca aislada de parser
+  de ficción interactiva castellano/inglés (`crates/story-parser`, entregada
+  como «núcleo S4 del parser»; en la tabla de fases de este ADR el parser
+  figura como S5). No depende de `story-core` ni está integrada: ningún
+  StoryPack, actor, protocolo `story.command` ni cliente la usa, y su
+  integración sigue requiriendo el ADR propio de parser e idioma.
   Nada de este ADR modifica decisiones aceptadas hasta que se acepte.
 - Fecha: 2026-10-15
 - Alcance: nuevo runtime narrativo hermano de `tiamud-core`
