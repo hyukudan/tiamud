@@ -204,7 +204,7 @@ sus implicaciones de autorización, moderación y persistencia.
 | S2 | Actor de instancia en el servidor, límites globales/por cuenta, desalojo por inactividad, protocolo `story.*`, paridad Telnet/GMCP, Playwright | **Sí** (protocolo y actor) |
 | S3 | Slots de guardado persistidos, esquema SQL v16 SQLite/PostgreSQL, migración y paridad | **Sí** (persistencia: [ADR 0030](0030-story-save-slots-and-schema-v16.md), propuesto; capa de persistencia implementada, sin conectar a S2) |
 | S4 | Aventuras por menús de verbos: `story.menu`, diálogos, retratos y cues vía pipeline de medios | **Sí** (modelo de menús/diálogo: [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md), propuesto; su modelo de núcleo StoryPack v2 existe como biblioteca) |
-| S5 | Parser de ficción interactiva en castellano (`story.command`/`story.prompt`), gramática acotada y determinista | **Sí** (parser e idioma: [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md), propuesto; núcleo StoryPack v3 implementado como biblioteca, sin cablear) |
+| S5 | Parser de ficción interactiva en castellano (`story.command`/`story.prompt`), gramática acotada y determinista | **Sí** (parser e idioma: [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md), propuesto; núcleo StoryPack v3 implementado y cableado a las sesiones con `story.command`, parcial) |
 | S6 | Integración opcional de scripts con el sandbox Lua y cuotas | **Sí** |
 | S7 | Multijugador: instancias compartidas, votos, espectadores, asíncrono | **Sí** |
 | S8 | Herramientas de autoría avanzadas, importadores y aceptación (carga, soak de instancias) | Solo si cambia arquitectura |

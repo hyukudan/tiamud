@@ -608,7 +608,7 @@ No existe LRU ni política automática de memoria.
 | `crates/scripting/` | Capacidades Lua con cuotas |
 | `crates/story-core/` | Ruleset narrativo puro StoryPack v1–v3: librojuego S0, menús, retratos y diálogos S4 y mundos con parser S5 (ADR 0025, 0028 y 0031 propuestos); el servidor lo juega vía `story_sessions` (S2, ADR 0029 propuesto) con slots persistidos (S3, ADR 0030 propuesto) e instancias compartidas con asientos, votación y turnos (S7 parcial, ADR 0033 propuesto) |
 | `crates/story-tools/` | CLI offline `tiamud-story` de autoría StoryPack: validate/lints, preview, test, play, fmt y esquema JSON (S1 herramientas) |
-| `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5; integrado en `story-core` con StoryPack v3, ADR 0031 propuesto; sin cablear al servidor) |
+| `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5; integrado en `story-core` con StoryPack v3, ADR 0031 propuesto; jugable en el servidor con `story.command`, Web y Telnet, parcial) |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
 | `crates/telnet-codec/` | Parser Telnet de producción compartido con fuzzing |
 | `crates/cell-frame/` | Renderizado de celdas acotado |

@@ -185,3 +185,13 @@ al desalojar, salir o reiniciar quedan matizadas así:
   (ráfaga 10) con el limitador de cubeta por clave del servidor.
 
 Ver el [registro de la conexión](../project/log/2026-10-15-story-save-slots-wired-s2-s3.md).
+
+## Nota de estado (2026-10-15): catálogo con subdirectorios y parser
+
+Añadida después de la decisión; no cambia el estado propuesto. El catálogo
+carga ahora los `*.story.json` de `TIAMUD_STORY_DIR` **y de sus
+subdirectorios directos** (sin ocultos ni enlaces simbólicos a directorios,
+con el mismo límite de 1.024 entradas examinadas y 64 packs; `story-media.json`
+solo en el directorio raíz), de modo que StoryPack v3 con parser
+(`parser/…`) se juegan con `story.command`; ver la nota de
+[ADR 0031](0031-parser-interactive-fiction-storypack-v3.md).

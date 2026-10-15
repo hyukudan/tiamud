@@ -1281,9 +1281,11 @@ Server messages:
   sequenced frame would exceed 15 KiB is split into `parts` frames that share
   `viewRev`; the client applies the view only when parts `0..parts` arrived
   in order and concatenates `items`. `items` are tagged by `type`:
-  `scene {title, text, score, ending: null | {kind: victory|defeat|neutral}}`
-  (exactly one per view), `cue {action: play|stop, channel, url?, loop}`,
-  `portrait {name}`, `block {kind: event|line, speaker?, text}`,
+  `scene {title, text, score, ending: null | {kind: victory|defeat|neutral},
+  prompt?: {text, question}}` (exactly one per view; `prompt` only in parser
+  stories, see [Parser stories](#parser-stories)),
+  `cue {action: play|stop, channel, url?, loop}`,
+  `portrait {name}`, `block {kind: event|line|command|reply, speaker?, text}`,
   `stat {label, value}`, `item {name}`, `choice {id, label}`,
   `verb {id, label, needsTarget}`, `target {verb, id, label}` (where `verb` is
   the id of a verb of the same view) and `dialogueOption {id, label}`. Every
@@ -1302,7 +1304,8 @@ Server messages:
   `slot_corrupt`, `slot_incompatible`, `slot_capacity`, `rate_limited`, and
   for shared instances `host_only`, `spectator`, `not_your_turn`,
   `unknown_code`, `seats_full`, `not_shared`, `unknown_member`,
-  `invalid_setting`. `stale_view` is followed by the current view. `message` is Spanish
+  `invalid_setting`, and for parser stories `no_parser` and
+  `invalid_command`. `stale_view` is followed by the current view. `message` is Spanish
   player-facing text and never names authored ids, digests or store details.
 - `story.slots`: `{slots: [{slot, updatedAt, compatible}], offerContinue}`.
   At most ten entries in ascending, unique `slot` order (`0..=9`; `0` is the
@@ -1361,6 +1364,53 @@ after `partidas`/`borrar`) and `Tiamud.Story.Left {reason}`. An
 oversized summary degrades to bounded labels with `truncated`/`overflow`, then
 to `{viewRev, choiceCount, truncated, overflow}`, always under 8 KiB. Story
 cues use `Client.Media.Play`/`Stop` only with the media opt-in.
+
+### Parser stories
+
+A StoryPack v3 with a parser world ([ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md),
+proposed) is played with free text. While such a story accepts text, its
+`scene` item carries `prompt: {text, question}`: `text` is the prompt to show
+(`>` by default) and `question` is true while the parser waits for the answer
+to the question shown in the last `reply` block (which object, or what with).
+`prompt` is absent after the ending, while a dialogue must be answered and in
+every gamebook or menu story. The instance plays in the pack's language
+(Spanish when the pack has a Spanish lexicon, else its first lexicon).
+
+- Client `story.command {text, viewRev}`: one line of at most 256 UTF-8 bytes
+  typed against view `viewRev` (strict; a longer `text`, a missing field or
+  `viewRev: 0` is an invalid envelope). Answered by the new `story.view`, whose
+  first `block {kind: command}` echoes the line (control characters removed)
+  and whose `block {kind: reply}` items are the parser's replies (library
+  messages, rule texts, room descriptions, questions and errors) and server
+  hints. A stale `viewRev` answers `stale_view` plus the current view; a
+  story without a parser answers `no_parser`; text while no prompt is shown
+  answers `invalid_command`. Lines are rate limited per account (120 per
+  minute, burst 20) with `rate_limited`.
+- Meta commands of the parser map to session operations: `deshacer`/`undo`
+  undoes like `story.undo` (a line that ran commands before it undoes exactly
+  that line); `reiniciar`/`restart` first shows a confirmation and restarts
+  from the beginning only when typed again against that very view (any other
+  input cancels; the restart is itself undoable); `puntos`/`score` and
+  `ayuda`/`help` answer in the view; `guardar`/`cargar` without a slot add a
+  hint and are followed by `story.slots` (or its error); the quit command
+  (`fin`, `salir`, `quit`) leaves the story like `story.leave`, autosave
+  included. Only executed world commands are undo steps and take turns;
+  parse errors and questions do not.
+- `command.submit` inside a parser story: reserved words keep their story
+  meaning (numbers, `deshacer`, `salir`, `ver`, `guardar N`, `cargar N`,
+  `partidas`, `borrar N`, `continuar`, `votar N`, `asientos`, `compartir`,
+  `invitar`, `expulsar`, `modo`, `historias`); `look`/`l` and a bare
+  `guardar`/`cargar` go to the parser, and every other line is a parser
+  command answered by an `action.result` (`ok: true`, no message) plus the
+  same frames as `story.command`. Telnet behaves identically, printing the
+  echo as `> línea` and the replies as text, and `Tiamud.Story.View` gains
+  `prompt: {text, question} | null`.
+- Shared parser stories never put free text to a vote: in `host` and `vote`
+  modes only the host types (others receive `host_only` and still vote on
+  numbered actions of views that have them); in `turns` mode only the turn
+  holder types (`not_your_turn`), and the turn passes only after a line that
+  executed world commands; spectators receive `spectator`. Undo and restart
+  from a parser line are host-only, like `story.undo`.
 
 ## Shared story instances
 

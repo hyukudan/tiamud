@@ -515,6 +515,26 @@ returns them to the host, which handles undo, save slots, quitting and
 restarting. `puntos` and `ayuda` also answer in the transcript (`help` can be
 replaced through `messages`).
 
+### Playing on the server
+
+Put the pack in `TIAMUD_STORY_DIR` or in one of its direct subdirectories
+(for example `parser/`); the server validates it at startup like any other
+pack. Players enter with `historia <id>` and then type commands: the browser
+shows a command field with the prompt (`>`), Up/Down history and the replies;
+Telnet treats every line that is not a reserved story word as a command.
+The instance plays in Spanish when the pack has an `es` lexicon, otherwise in
+its first lexicon. On the server the meta commands do this: `deshacer` undoes
+the last input, `reiniciar` asks for confirmation and restarts when typed
+again (and can itself be undone), `guardar`/`cargar` without a number point
+to the save slots (`guardar 3`, `cargar 0` or the saved-games panel),
+`fin`/`salir` leave the story with an autosave, and `puntos`/`ayuda` answer in
+place. Lines are limited to 256 bytes and only commands that do something in
+the world take a turn. In a shared story typed commands are never voted: the
+host types in host and vote modes and the turn holder in turns mode. Keep
+reserved story words (`ver`, `partidas`, `continuar`, `votar`, `asientos`,
+`compartir`, `invitar`, `expulsar`, `modo`, `historias`) out of pack verbs:
+on Telnet they never reach the parser.
+
 ### Library messages
 
 Every default message has a key that `world.messages` can replace for any
