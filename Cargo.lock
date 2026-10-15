@@ -2916,6 +2916,7 @@ dependencies = [
  "thiserror",
  "tiamud-story-core",
  "tiamud-story-parser",
+ "tiamud-story-script",
 ]
 
 [[package]]

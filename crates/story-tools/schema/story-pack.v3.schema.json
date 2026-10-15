@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:tiamud:schema:story-pack:v3",
   "title": "Tiamud StoryPack v3",
-  "description": "Structural schema of the canonical StoryPack v3 document. Format v3 adds the parser world: a `world` section (shipped lexicons with pack verbs, objects with locations and properties, before/instead/after rules, library message overrides, intro and maximum score), `room` data on nodes (name, exits by canonical direction, darkness) and object conditions and effects. v1 and v2 documents also satisfy it. `tiamud-story validate` is authoritative: it also checks references, byte limits, nesting and effect budgets, value ranges, v1/v2/v3 feature gating, lexicon compilation, parser words and authoring lints. Optional fields are omitted rather than written as null in canonical form.",
+  "description": "Structural schema of the canonical StoryPack v3 document. Format v3 adds the parser world: a `world` section (shipped lexicons with pack verbs, objects with locations and properties, before/instead/after rules, library message overrides, intro and maximum score), `room` data on nodes (name, exits by canonical direction, darkness) and object conditions and effects. An optional `scripts` section (ADR 0034) declares sandboxed Lua scripts referenced by `script` conditions and effects; packs that declare scripts only validate and run with a script host (`tiamud-story-script`). v1 and v2 documents also satisfy it. `tiamud-story validate` is authoritative: it also checks references, byte limits, nesting and effect budgets, value ranges, v1/v2/v3 feature gating, lexicon compilation, parser words and authoring lints. Optional fields are omitted rather than written as null in canonical form.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -81,6 +81,13 @@
     },
     "world": {
       "$ref": "#/$defs/world"
+    },
+    "scripts": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/script"
+      }
     }
   },
   "$defs": {
@@ -684,7 +691,7 @@
       ]
     },
     "condition": {
-      "description": "Closed condition AST. Nesting is limited to 8 levels and 64 nodes per tree. `uses` (v2) compares a menu entry use counter. Format v3 adds `carried`, `object_at`, `object_is`, `visible`, `player_in` and `turn_cmp`.",
+      "description": "Closed condition AST. Nesting is limited to 8 levels and 64 nodes per tree. `uses` (v2) compares a menu entry use counter. Format v3 adds `carried`, `object_at`, `object_is`, `visible`, `player_in` and `turn_cmp`. `script` (ADR 0034) evaluates a declared condition script.",
       "oneOf": [
         {
           "type": "object",
@@ -937,6 +944,18 @@
               }
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "script"
+          ],
+          "properties": {
+            "script": {
+              "$ref": "#/$defs/scriptRef"
+            }
+          }
         }
       ]
     },
@@ -1040,7 +1059,7 @@
       }
     },
     "effect": {
-      "description": "Closed effect DSL. A choice, response or dialogue option holds at most 64 effects counting nested `if` branches, nested at most 4 levels. Format v3 adds `move_object` and `set_object`.",
+      "description": "Closed effect DSL. A choice, response or dialogue option holds at most 64 effects counting nested `if` branches, nested at most 4 levels. Format v3 adds `move_object` and `set_object`. `script` (ADR 0034) runs a declared effect script and applies its granted intents.",
       "oneOf": [
         {
           "type": "object",
@@ -1286,6 +1305,18 @@
                   "type": "boolean"
                 }
               }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "script"
+          ],
+          "properties": {
+            "script": {
+              "$ref": "#/$defs/scriptRef"
             }
           }
         }
@@ -1716,6 +1747,96 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1000000000
+        }
+      }
+    },
+    "script": {
+      "description": "A Lua 5.4 script (ADR 0034). A `condition` script defines `check(story, args)` returning a boolean and takes no grants; an `effect` script defines `run(story, args)` and emits intents through `fx`, each limited to its grants. Sources are at most 64 KiB each and 256 KiB together; the host compiles them.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "source"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "condition",
+            "effect"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "writes": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "goto": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "objects": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "score": {
+          "type": "boolean"
+        },
+        "ends": {
+          "type": "boolean"
+        }
+      }
+    },
+    "scriptRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "args": {
+          "type": "object",
+          "maxProperties": 8,
+          "propertyNames": {
+            "$ref": "#/$defs/id"
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer",
+                "minimum": -1000000000,
+                "maximum": 1000000000
+              }
+            ]
+          }
         }
       }
     }

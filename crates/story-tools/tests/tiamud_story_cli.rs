@@ -496,3 +496,69 @@ fn reports_parser_world_lints() {
         );
     }
 }
+
+fn duelo() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../story-script/fixtures/duelo-en-el-paso.story.json")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn validates_tests_and_plays_a_pack_with_lua_scripts() {
+    let output = run(&["validate", &duelo(), "--deny-warnings"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "valid StoryPack \"duelo-en-el-paso\" (format v3): 5 node(s), 4 choice(s), 5 variable(s), 1 item(s), 3 Lua script(s); 0 warning(s), 0 lint(s)\n"
+    );
+    let output = run(&[
+        "test",
+        &duelo(),
+        "--script",
+        &fixture("duelo-victoria.script.json"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("story test passed: 11 step(s)"));
+    let output = run_with_stdin(&["play", &duelo(), "--seed", "3"], b"1\n1\n");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Atacar con la espada"));
+}
+
+#[test]
+fn reports_script_compile_errors_runtime_failures_and_unused_scripts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut pack: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(duelo()).unwrap()).unwrap();
+    pack["scripts"][0]["source"] = serde_json::json!("function run()\n  if then\nend");
+    let broken = temp.path().join("roto.story.json");
+    fs::write(&broken, serde_json::to_vec(&pack).unwrap()).unwrap();
+    let output = run(&["validate", broken.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let message = stderr(&output);
+    assert!(
+        message.contains("scripts[0].source") && message.contains("asalto:2:"),
+        "{message}"
+    );
+
+    pack["scripts"][0]["source"] =
+        serde_json::json!("function run(story)\n  return story.nada.campo\nend");
+    pack["nodes"][1]["choices"][2]["when"] = serde_json::json!({ "has_item": "pocion" });
+    let failing = temp.path().join("falla.story.json");
+    fs::write(&failing, serde_json::to_vec(&pack).unwrap()).unwrap();
+    let output = run(&["validate", failing.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output)
+            .contains("lint: scripts[1] (puede_huir): script is declared but never referenced"),
+        "{}",
+        stdout(&output)
+    );
+    let output = run_with_stdin(&["play", failing.to_str().unwrap()], b"1\n1\n");
+    let transcript = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        transcript.contains("asalto:2: attempt to index a nil value")
+            && !transcript.contains("stack traceback"),
+        "{transcript}"
+    );
+}

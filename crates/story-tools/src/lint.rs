@@ -127,6 +127,30 @@ struct Mutations<'a> {
     unlocked: BTreeSet<&'a str>,
 }
 
+/// Everything an effect script is granted may change (ADR 0034): the lints
+/// cannot see inside Lua, so they assume each grant is exercised both ways.
+fn script_mutations<'a>(pack: &'a StoryPack, out: &mut Mutations<'a>) {
+    for script in &pack.scripts {
+        if script.kind != tiamud_story_core::ScriptKind::Effect {
+            continue;
+        }
+        for var in &script.writes {
+            out.any_int.insert(var);
+            let sets = out.sets.entry(var).or_default();
+            sets.push(Value::Bool(true));
+            sets.push(Value::Bool(false));
+        }
+        for item in &script.items {
+            out.given.insert(item);
+            out.taken.insert(item);
+        }
+        for obj in &script.objects {
+            out.moved.insert(obj);
+            out.unlocked.insert(obj);
+        }
+    }
+}
+
 fn collect_mutations<'a>(effects: &'a [Effect], out: &mut Mutations<'a>) {
     for effect in effects {
         match effect {
@@ -177,6 +201,7 @@ impl<'a> Facts<'a> {
         for effects in all_effect_lists(pack) {
             collect_mutations(effects, &mut mutations);
         }
+        script_mutations(pack, &mut mutations);
         let mut int_ranges = BTreeMap::new();
         let mut bool_values = BTreeMap::new();
         for decl in &pack.variables {
@@ -297,6 +322,8 @@ impl<'a> Facts<'a> {
             | Condition::ObjectAt { .. }
             | Condition::ObjectIs { .. }
             | Condition::Visible(_) => Truth::Maybe,
+            // Lua is opaque to the lints.
+            Condition::Script(_) => Truth::Maybe,
         }
     }
 
@@ -530,7 +557,7 @@ impl Graph {
 }
 
 fn walk_targets<'a>(
-    facts: &Facts<'_>,
+    facts: &Facts<'a>,
     prune: bool,
     effects: &'a [Effect],
     targets: &mut Vec<&'a str>,
@@ -540,6 +567,12 @@ fn walk_targets<'a>(
         match effect {
             Effect::Goto(node) => targets.push(node),
             Effect::End(_) => *can_end = true,
+            Effect::Script(script) => {
+                if let Some(decl) = facts.pack.scripts.iter().find(|decl| decl.id == script.id) {
+                    targets.extend(decl.goto.iter().map(String::as_str));
+                    *can_end |= decl.ends;
+                }
+            }
             Effect::Roll {
                 test: Some(test), ..
             } => {
@@ -702,6 +735,7 @@ fn lint_world(pack: &StoryPack, report: &mut LintReport) {
     for effects in all_effect_lists(pack) {
         collect_mutations(effects, &mut mutations);
     }
+    script_mutations(pack, &mut mutations);
     // Objects the parser can never single out: every word of one is also a
     // word of another that starts in the same room (or is carried).
     let rooms: Vec<Option<BTreeSet<&str>>> = world
@@ -1051,6 +1085,17 @@ pub fn lint(pack: &StoryPack) -> LintReport {
     lint_dialogues(&facts, &mut report);
     lint_portraits(pack, &mut report);
     lint_world(pack, &mut report);
+    for id in tiamud_story_script::unused_scripts(pack) {
+        let index = pack
+            .scripts
+            .iter()
+            .position(|script| script.id == id)
+            .unwrap_or_default();
+        report.push(
+            format!("scripts[{index}] ({id})"),
+            "script is declared but never referenced",
+        );
+    }
 
     let loose = Graph::build(&facts, false);
     let strict = Graph::build(&facts, true);

@@ -146,7 +146,7 @@ impl LuaStoryHost {
             call.seed,
             self.limits,
         )
-        .map_err(|error| ScriptFailure::new(error.to_string()))
+        .map_err(|error| ScriptFailure::new(diagnostic(&error.to_string())))
     }
 }
 
@@ -176,6 +176,19 @@ impl ScriptHost for LuaStoryHost {
             })
             .collect()
     }
+}
+
+/// Author-facing diagnostic without the Lua stack traceback, which only
+/// repeats the location already in the first line.
+fn diagnostic(message: &str) -> String {
+    message
+        .split_once(
+            "
+stack traceback",
+        )
+        .map_or(message, |(head, _)| head)
+        .trim_end()
+        .to_owned()
 }
 
 /// Full source handed to the VM: prelude and authored source on one line.
