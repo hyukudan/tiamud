@@ -46,6 +46,7 @@ import type {
   StoryTally,
   StoryView,
   StoryVoteData,
+  StoryCommandData,
   SyncPlayer,
   SyncRequestData,
   SyncScene,
@@ -58,6 +59,7 @@ import {
   MIN_STORY_VOTE_SECONDS,
   STORY_CHOICE_ID,
   STORY_JOIN_CODE,
+  MAX_STORY_COMMAND_BYTES,
   parseStoryEntered,
   parseStoryError,
   parseStoryInvitation,
@@ -737,6 +739,8 @@ export type StoryKick = Envelope<'story.kick', StoryNameData>;
 export type StoryMode = Envelope<'story.mode', StoryModeData>;
 
 export type StoryVote = Envelope<'story.vote', StoryVoteData>;
+
+export type StoryCommand = Envelope<'story.command', StoryCommandData>;
 
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -3212,6 +3216,21 @@ export function createStoryMode(mode: StoryDecisionMode, voteSeconds?: number): 
     type: 'story.mode',
     data: voteSeconds === undefined ? { mode } : { mode, voteSeconds },
   };
+}
+
+/**
+ * `story.command`: one line of free text for a parser story, typed against
+ * view `viewRev`. Lines are 1..256 UTF-8 bytes after trimming.
+ */
+export function createStoryCommand(text: string, viewRev: number): StoryCommand {
+  const line = text.trim();
+  if (line.length === 0 || new TextEncoder().encode(line).length > MAX_STORY_COMMAND_BYTES ||
+    !Number.isSafeInteger(viewRev) || viewRev < 1 || viewRev > 0xffff_ffff) {
+    throw new Error(
+      `A story command is 1..${MAX_STORY_COMMAND_BYTES} bytes for a positive view revision.`,
+    );
+  }
+  return { v: PROTOCOL_VERSION, type: 'story.command', data: { text: line, viewRev } };
 }
 
 /**

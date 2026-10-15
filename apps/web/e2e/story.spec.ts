@@ -183,6 +183,43 @@ test('the sample Spanish gamebook is playable to an ending with keyboard and but
   await expect(page.getByRole('heading', { name: 'Lantern Square' })).toBeVisible();
 });
 
+test('the Spanish parser adventure is playable to its ending by typing commands', async ({ page }) => {
+  const story = load('story-faro.json');
+  const panel = await enterStory(page, story);
+  await expect(panel.getByRole('textbox', { name: 'Your command' })).toBeVisible();
+  const field = panel.locator('#story-command');
+  await expect(panel.getByRole('log', { name: 'Story replies' }))
+    .toContainText('La tormenta te sorprendió');
+  await expectNoViolations(page);
+
+  const steps = story.steps.slice(0, -1);
+  for (const [index, step] of steps.entries()) {
+    const text = step.label ?? '';
+    // Up recalls the previous command from the local history.
+    if (index === 1) {
+      await field.press('ArrowUp');
+      await expect(field).toHaveValue(steps[0].label ?? '');
+      await field.press('ArrowDown');
+      await expect(field).toHaveValue('');
+    }
+    // The lamp is ambiguous: the last line answers the parser's question.
+    if (index === steps.length - 1) {
+      await expect(panel.getByRole('textbox', { name: 'Answer the question' })).toBeVisible();
+    }
+    await field.fill(text);
+    await field.press('Enter');
+    await expect(panel.locator('.story-command')).toHaveText(`> ${text}`);
+    // Focus stays in the command field after each answer.
+    if (index < steps.length - 1) await expect(field).toBeFocused();
+  }
+  await expect(panel.getByRole('log', { name: 'Story replies' }))
+    .toContainText('Abres el globo de cristal');
+  await expect(panel.getByRole('status')).toContainText('Victory.');
+  await expect(panel.getByRole('textbox')).toHaveCount(0);
+  await expectAccepted(page, steps.length);
+  await expectNoViolations(page);
+});
+
 test('the verb-menu adventure plays verbs, targets and dialogue to its ending', async ({ page }) => {
   const story = load('story-lluvia.json');
   const panel = await enterStory(page, story);

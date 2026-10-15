@@ -45,6 +45,8 @@
     onkick?: (name: string) => void;
     onmode?: (mode: StoryDecisionMode, voteSeconds?: number) => void;
     onwithdraw?: () => void;
+    /** Sends one parser command line; returns whether it was sent. */
+    oncommand?: (text: string) => boolean;
   }
 
   let {
@@ -76,7 +78,46 @@
     onkick,
     onmode,
     onwithdraw,
+    oncommand,
   }: Props = $props();
+
+  /** Commands typed in this panel, oldest first (bounded). */
+  const MAX_COMMAND_HISTORY = 50;
+  let commandText = $state('');
+  let commandInput = $state<HTMLInputElement>();
+  let commandHistory = $state<string[]>([]);
+  let historyIndex = $state<number>();
+
+  function submitCommand(event: SubmitEvent): void {
+    event.preventDefault();
+    const line = commandText.trim();
+    if (!line || !oncommand?.(line)) return;
+    if (commandHistory[commandHistory.length - 1] !== line) {
+      commandHistory = [...commandHistory, line].slice(-MAX_COMMAND_HISTORY);
+    }
+    historyIndex = undefined;
+    commandText = '';
+  }
+
+  function handleCommandKey(event: KeyboardEvent): void {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    if (commandHistory.length === 0) return;
+    event.preventDefault();
+    if (event.key === 'ArrowUp') {
+      historyIndex = historyIndex === undefined
+        ? commandHistory.length - 1
+        : Math.max(0, historyIndex - 1);
+      commandText = commandHistory[historyIndex];
+    } else if (historyIndex !== undefined) {
+      historyIndex += 1;
+      if (historyIndex >= commandHistory.length) {
+        historyIndex = undefined;
+        commandText = '';
+      } else {
+        commandText = commandHistory[historyIndex];
+      }
+    }
+  }
 
   const spectating = $derived(lobby?.you === 'spectator');
   /** Votes of the current view by opaque leaf id. */
@@ -155,6 +196,8 @@
     if (revision === shownRevision) return;
     shownRevision = revision;
     const active = typeof document === 'undefined' ? null : document.activeElement;
+    // Typing parser commands keeps the focus in the command field.
+    if (active && active === commandInput) return;
     const focusWasInside = !active || active === document.body ||
       (panel?.contains(active) ?? false);
     if (focusWasInside) void tick().then(() => heading?.focus());
@@ -205,7 +248,50 @@
     {/if}
   </div>
 
+  {#if story.command || story.replies.length > 0}
+    <div class="story-replies" role="log" aria-live="polite" aria-label="Story replies" {lang}>
+      {#if story.command}
+        <p class="story-command"><span aria-hidden="true">&gt;</span> {story.command}</p>
+      {/if}
+      {#each story.replies as reply, index (index)}
+        {#each reply.split('\n').filter((line) => line.trim().length > 0) as line, part (part)}
+          <p class="story-reply">{line}</p>
+        {/each}
+      {/each}
+    </div>
+  {/if}
+
   {#if error}<p class="story-error" role="alert">{error.message}</p>{/if}
+
+  {#if story.prompt && oncommand && !spectating}
+    <form class="story-prompt" onsubmit={submitCommand}>
+      <label for="story-command">
+        {story.prompt.question ? 'Answer the question' : 'Your command'}
+      </label>
+      <div class="story-prompt-row">
+        <span class="story-prompt-symbol" aria-hidden="true">{story.prompt.text}</span>
+        <input
+          id="story-command"
+          type="text"
+          bind:this={commandInput}
+          bind:value={commandText}
+          onkeydown={handleCommandKey}
+          maxlength="256"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          readonly={!connected}
+          aria-describedby="story-command-help"
+          {lang}
+        />
+        <button type="submit" disabled={!connected || pending}>Send</button>
+      </div>
+      <p id="story-command-help" class="story-hint">
+        Type what you do, for example «mira», «coge la llave» or «n». Up and Down recall earlier
+        commands.
+      </p>
+    </form>
+  {/if}
 
   {#if lobby}
     <StoryLobby
@@ -476,6 +562,43 @@
 
   .story-choices button[aria-pressed='true'] {
     outline: 2px solid #d9c27a;
+  }
+
+  .story-replies p {
+    margin: 0 0 0.5rem;
+    line-height: 1.6;
+  }
+
+  .story-command {
+    font-family: ui-monospace, monospace;
+    opacity: 0.85;
+  }
+
+  .story-prompt {
+    display: grid;
+    gap: 0.35rem;
+  }
+
+  .story-prompt-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .story-prompt-symbol {
+    font-family: ui-monospace, monospace;
+  }
+
+  .story-prompt input {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 2.75rem;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #82744f;
+    border-radius: 0.2rem;
+    background: #1d1a12;
+    color: #f3ecd9;
+    font: inherit;
   }
 
   .story-notice,

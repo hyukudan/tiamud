@@ -352,6 +352,7 @@
           onkick={session.kickFromStory}
           onmode={session.setStoryMode}
           onwithdraw={session.withdrawStoryVote}
+          oncommand={session.commandStory}
         />
       {:else if session.scene}
         {#if atmosphereImage}

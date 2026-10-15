@@ -53,6 +53,7 @@ function harness() {
     storyInvite: vi.fn(() => true),
     storyKick: vi.fn(() => true),
     storyMode: vi.fn(() => true),
+    storyCommand: vi.fn(() => true),
   } satisfies SessionConnection;
   const storage = new Map<string, string>();
   const historyView: HistoryView = {
@@ -282,6 +283,31 @@ describe('GameSession', () => {
     expect(session.story).toBeDefined();
     callbacks().onMessage(message('server.welcome', { serverName: 'Tiamud', motd: 'Hi' }, 1));
     expect(session.story).toBeUndefined();
+  });
+
+  it('sends parser commands only while the view shows a prompt', () => {
+    const { session, connection, callbacks } = harness();
+    const scene = { type: 'scene', title: 'Faro', text: 'Playa', score: 0, ending: null };
+    callbacks().onMessage(message('story.entered', { storyId: 'faro-de-punta-gris', title: 'Faro' }, 2));
+    callbacks().onMessage(message('story.view', {
+      viewRev: 1, part: 0, parts: 1, turn: 0, canUndo: false, items: [scene],
+    }, 3));
+    expect(session.commandStory('mira')).toBe(false);
+    callbacks().onMessage(message('story.view', {
+      viewRev: 2, part: 0, parts: 1, turn: 0, canUndo: false,
+      items: [{ ...scene, prompt: { text: '>', question: false } }],
+    }, 4));
+    expect(session.commandStory('   ')).toBe(false);
+    expect(session.commandStory('a'.repeat(257))).toBe(false);
+    expect(connection.storyCommand).not.toHaveBeenCalled();
+    expect(session.commandStory('  coge la medalla ')).toBe(true);
+    expect(connection.storyCommand).toHaveBeenCalledWith('coge la medalla', 2);
+    expect(session.storyPending).toBe(true);
+    // One line at a time: nothing else is sent until the answer arrives.
+    expect(session.commandStory('n')).toBe(false);
+    callbacks().onMessage(message('story.error', { code: 'rate_limited', message: 'Espera.' }, 5));
+    expect(session.storyPending).toBe(false);
+    expect(session.commandStory('n')).toBe(true);
   });
 
   it('offers to continue, saves, lists and restores story slots', () => {
