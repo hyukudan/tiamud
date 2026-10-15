@@ -677,7 +677,7 @@ traffic.
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
-| `story.entered`, `story.view`, `story.left`, `story.error` | Single-player story session state; see [Story sessions](#story-sessions). Critical priority. |
+| `story.entered`, `story.view`, `story.left`, `story.error`, `story.slots`, `story.saved`, `story.restored` | Single-player story session state and save slots; see [Story sessions](#story-sessions). Critical priority. |
 
 State messages are coalescible, while narrative output has lower priority than
 critical results. When a connection cannot drain critical output within the
@@ -1254,7 +1254,9 @@ channel. Media never carries exclusive gameplay information.
 ## Story sessions
 
 Story sessions ([ADR 0029](../decisions/0029-story-session-instances-and-story-protocol.md),
-proposed) are an additive, single-player, in-memory surface. They exist only
+proposed) are an additive, single-player surface whose live state is in memory
+and whose save slots persist in the backend
+([ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md), proposed). They exist only
 when the server is started with `TIAMUD_STORY_DIR`; otherwise every story
 command answers that stories are unavailable.
 
@@ -1264,7 +1266,10 @@ correlated `action.result`, then `story.entered` and the current
 `story.view`. While a session is in a story, other `command.submit` lines and
 every `action.perform` are answered with `ok: false` and never reach the world;
 typed numbers choose the numbered action, `deshacer`/`undo` undoes,
-`ver`/`look` re-sends the view and `salir`/`leave`/`salir historia` leave. The
+`ver`/`look` re-sends the view and `salir`/`leave`/`salir historia` leave.
+`guardar N`/`save N`, `cargar N`/`load N`/`restore N`, `partidas`/`saves`,
+`borrar N`/`delete N` and `continuar`/`continue` mirror the slot messages
+below, answered with an `action.result` plus the same typed frames. The
 character stays connected and visible in its room.
 
 Server messages:
@@ -1290,7 +1295,21 @@ Server messages:
 - `story.error`: `{code, message}` with `code` one of `disabled`,
   `unknown_story`, `already_in_story`, `capacity`, `not_in_story`,
   `stale_view`, `unknown_choice`, `ended`, `nothing_to_undo`, `busy`,
-  `internal`. `stale_view` is followed by the current view.
+  `internal`, `slots_unavailable`, `invalid_slot`, `slot_empty`,
+  `slot_corrupt`, `slot_incompatible`, `slot_capacity`, `rate_limited`.
+  `stale_view` is followed by the current view. `message` is Spanish
+  player-facing text and never names authored ids, digests or store details.
+- `story.slots`: `{slots: [{slot, updatedAt, compatible}], offerContinue}`.
+  At most ten entries in ascending, unique `slot` order (`0..=9`; `0` is the
+  autosave). `updatedAt` is Unix seconds of the last write; `compatible` is
+  false when the slot was saved with another revision (SHA-256) of the
+  StoryPack and would be refused. No saved state, digest, turn or summary of
+  hidden variables is sent. `offerContinue` is true only in the listing sent
+  right after `story.view` when entering a **fresh** instance of a story with a
+  compatible autosave; resuming a live instance sends no listing.
+- `story.saved`: `{slot, updatedAt}` with `slot` in `1..=9`.
+- `story.restored`: `{slot}`; the restored `story.view` (new `viewRev`,
+  `canUndo: false`) follows immediately.
 
 Client messages (all strict, unknown fields rejected):
 
@@ -1299,13 +1318,31 @@ Client messages (all strict, unknown fields rejected):
 - `story.menu {verb, target?, viewRev}`: `target` is required exactly when the
   verb has `needsTarget` and must be a `target` of that verb.
 - `story.undo {}` and `story.leave {}`: exactly an empty object.
+- `story.save {slot}`: `slot` in `1..=9`; slot `0` answers `invalid_slot`.
+  Answered by `story.saved`.
+- `story.restore {slot}`: `slot` in `0..=9`. Answered by `story.restored` and
+  the new view, or `slot_empty`, `slot_corrupt`, `slot_incompatible`.
+- `story.deleteSlot {slot}`: `slot` in `0..=9`. Answered by the remaining
+  `story.slots` or `slot_empty`.
+- `story.slots {}` and `story.continue {}` (restore of slot `0`): exactly an
+  empty object.
+
+A `slot` above 9 or of another JSON type is an invalid envelope. Slot
+operations require being inside the story; per account, `save`/`deleteSlot`
+share a budget of 6 per minute and `slots`/`restore`/`continue` one of 30 per
+minute (burst 10), answered with `rate_limited` beyond it. Leaving, idle
+eviction and graceful shutdown write the autosave (slot `0`) when the
+instance has progress (turn > 0); a failed autosave never blocks leaving.
+Restoring re-validates the stored document against the current pack and
+replaces the game; undo history is never persisted, so it restarts empty.
 
 A stale `viewRev`, an id that was never published, an id of the wrong kind or
 a target of another verb is rejected without changing state. After
 `sync.request` and after every reconnection of the account, the server
 re-sends `story.entered` and the current view (with only the current music as
-cue). An idle instance (30 minutes by default) is evicted and lost; there are
-no save slots before S3.
+cue). An idle instance (30 minutes by default) is evicted; its progress
+survives only in the autosave slot, when the server has a store that
+implements slots.
 
 Telnet renders the same view as text: title, prose, events, speaker lines,
 present characters, stats and inventory, then every action numbered
@@ -1313,7 +1350,9 @@ present characters, stats and inventory, then every action numbered
 `VERB → target` pairs). GMCP clients that negotiated `Tiamud.Story 1` receive
 `Tiamud.Story.View` (`viewRev`, `title`, `turn`, `score`, `ending`,
 `canUndo`, `dialogue`, numbered `choices` with labels, `present`, `stats`,
-`inventory`; no prose and no ids) and `Tiamud.Story.Left {reason}`. An
+`inventory`; no prose and no ids), `Tiamud.Story.Slots {slots: [{slot,
+updatedAt, compatible}], offerContinue}` (after entering a fresh instance and
+after `partidas`/`borrar`) and `Tiamud.Story.Left {reason}`. An
 oversized summary degrades to bounded labels with `truncated`/`overflow`, then
 to `{viewRev, choiceCount, truncated, overflow}`, always under 8 KiB. Story
 cues use `Client.Media.Play`/`Stop` only with the media opt-in.

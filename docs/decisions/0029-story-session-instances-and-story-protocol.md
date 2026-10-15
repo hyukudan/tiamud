@@ -1,8 +1,9 @@
 # ADR 0029: instancias de sesión de historia y protocolo `story.*`
 
 - Estado: propuesta. Implementada de forma incremental en este árbol como fase
-  S2 de [ADR 0025](0025-narrative-ruleset-story-core.md) (un jugador, en
-  memoria, sin slots persistidos); ver
+  S2 de [ADR 0025](0025-narrative-ruleset-story-core.md) (un jugador, estado
+  vivo en memoria; slots persistidos conectados después, ver la nota de estado
+  al final); ver
   [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md). Nada de este ADR
   cambia decisiones aceptadas hasta que se acepte.
 - Fecha: 2026-10-15
@@ -146,3 +147,41 @@ degradación acotada bajo 8 KiB) y `Tiamud.Story.Left`. Los cues van por
   percepción en `tiamud-core` y en el actor del mundo, que S2 no debe tocar.
 - **Un actor global para todas las historias**: acopla latencia y fallos de
   partidas independientes.
+
+## Nota de estado (2026-10-15): slots de guardado conectados
+
+Añadida después de la decisión; no cambia el estado propuesto. Los slots de
+[ADR 0030](0030-story-save-slots-and-schema-v16.md) están conectados a este
+gestor de instancias, por lo que las frases anteriores sobre progreso perdido
+al desalojar, salir o reiniciar quedan matizadas así:
+
+- El gestor recibe el `CharacterStore` medido al arrancar
+  (`attach_store`). Sin store, toda operación de slot responde
+  `slots_unavailable` y salir no autoguarda.
+- La instancia solo entrega su `StoryState` serializado (`to_json`) o acepta
+  uno ya revalidado; las llamadas al store se hacen en la tarea de la sesión
+  (o en la tarea de la instancia que ya se está cerrando al desalojar), con
+  límite de 5 s y a través de la cola del worker de persistencia. El actor
+  del mundo no participa.
+- Slots manuales `1..=9`; el slot `0` es el autoguardado, escrito al salir,
+  al desalojar por inactividad y en el apagado ordenado (que deja de admitir
+  instancias nuevas y espera como máximo 10 s antes de drenar el mundo y el
+  worker de persistencia), solo si la partida tiene progreso (turno > 0). Un
+  autoguardado fallido se registra y cuenta, nunca bloquea la salida.
+- Cargar exige la revisión exacta del pack (SHA-256 de sus bytes, conjunto
+  compatible vacío) y revalida con `StoryState::from_json_slice`; un fallo es
+  `slot_corrupt` o `slot_incompatible` sin cambiar la partida viva. Restaurar
+  reinicia el anillo de deshacer: **el historial de deshacer no se persiste**.
+- Al entrar en una instancia **nueva** se envía `story.slots` con
+  `offerContinue` si hay un autoguardado compatible; reanudar una instancia
+  viva no lo repite.
+- Protocolo aditivo: cliente `story.save {slot}`, `story.restore {slot}`,
+  `story.slots {}`, `story.deleteSlot {slot}`, `story.continue {}`; servidor
+  `story.slots`, `story.saved`, `story.restored` (seguido de `story.view`) y
+  siete códigos nuevos de `story.error`. Telnet `guardar/save N`,
+  `cargar/load/restore N`, `partidas/saves`, `borrar/delete N`,
+  `continuar/continue` y GMCP `Tiamud.Story.Slots`.
+- Límite por cuenta: 6 escrituras (guardar/borrar) y 30 lecturas por minuto
+  (ráfaga 10) con el limitador de cubeta por clave del servidor.
+
+Ver el [registro de la conexión](../project/log/2026-10-15-story-save-slots-wired-s2-s3.md).

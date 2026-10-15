@@ -123,9 +123,13 @@ matriz, memoria y documentación pública a la vez.
   digest del pack, estado opaco ≤ 64 KiB con SHA-256 de bytes exactos y límites
   por cuenta (16 historias, 1 MiB). Cargar verifica digest y metadatos y falla
   cerrado ante otra revisión del pack no declarada compatible; el llamador
-  revalida con `story-core`. El mover valida y copia esas filas. No está
-  conectada a sesiones, protocolo ni clientes, y sus pruebas PostgreSQL no se
-  han ejecutado contra un servidor real.
+  revalida con `story-core`. El mover valida y copia esas filas. Está
+  conectada a las sesiones S2 (`story.save/restore/slots/deleteSlot/continue`,
+  Telnet `guardar/cargar/partidas/borrar/continuar`, autoguardado en el slot 0
+  al salir, al desalojar por inactividad y en el apagado ordenado; revalida con
+  `StoryState::from_json_slice` contra el SHA-256 exacto del pack y no persiste
+  el historial de deshacer). Sus pruebas PostgreSQL no se han ejecutado contra
+  un servidor real.
 - Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
   sufijo diagnóstico cubierto de 10.000 secuencias.
 - Autenticación registrada compartida entre web y Telnet. Trabajo Argon2id,
@@ -597,7 +601,7 @@ No existe LRU ni política automática de memoria.
 | `crates/persistence-postgres/` | PostgreSQL esquema v16, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
-| `crates/story-core/` | Ruleset narrativo puro StoryPack v1/v2: librojuego S0 y menús, retratos y diálogos S4 (ADR 0025 y 0028 propuestos); el servidor lo juega en memoria vía `story_sessions` (S2, ADR 0029 propuesto), sin persistencia |
+| `crates/story-core/` | Ruleset narrativo puro StoryPack v1/v2: librojuego S0 y menús, retratos y diálogos S4 (ADR 0025 y 0028 propuestos); el servidor lo juega vía `story_sessions` (S2, ADR 0029 propuesto) con slots persistidos (S3, ADR 0030 propuesto) |
 | `crates/story-tools/` | CLI offline `tiamud-story` de autoría StoryPack: validate/lints, preview, test, play, fmt y esquema JSON (S1 herramientas) |
 | `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5, sin integrar con `story-core` ni servidor) |
 | `crates/asset-pipeline/` | Compilador de medios determinista |

@@ -93,8 +93,22 @@ than 1,024 directory entries stops the server.
 - `TIAMUD_STORY_MAX_INSTANCES` (`1..=4096`, default `256`) bounds live
   instances; each account may hold one.
 - `TIAMUD_STORY_IDLE_SECONDS` (`60..=86400`, default `1800`) evicts an idle
-  instance. Eviction, leaving and restarts lose progress: there are no
-  persisted save slots before S3.
+  instance.
+- Save slots ([ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md),
+  proposed) live in the configured backend's `story_saves` table (schema v16)
+  and go through the same measured store and persistence worker; there is no
+  separate setting. Players save to slots `1..=9`; slot `0` is the autosave
+  written on leave, on idle eviction and on graceful shutdown when the game
+  has progress. On shutdown the server stops the listeners, then autosaves
+  every live instance (bounded to 10 s overall, 5 s per store call) before
+  draining the world actor and the persistence worker; instances still
+  running when a process is killed are lost. Loading a slot re-validates it
+  against the exact pack bytes (SHA-256): **replacing a `*.story.json` with
+  a different revision makes earlier slots of that story unloadable**
+  (`slot_incompatible`), by design, until StoryPack can declare compatible
+  revisions. The undo history is not persisted. Per account: 16 stories with
+  saves, 1 MiB of state, 6 slot writes and 30 slot reads per minute. Backups
+  of the database include the slots.
 - An optional `story-media.json` in the same directory,
   `{"formatVersion":1,"assets":{"<asset-id>":"assets/<sha256>/audio-<name>.ogg"}}`,
   maps authored cue asset ids to reviewed content-addressed audio already
@@ -105,7 +119,13 @@ Story metrics carry no story, node or account labels:
 `tiamud_story_instances_started_total`,
 `tiamud_story_instances_closed_total{reason}`,
 `tiamud_story_enter_rejected_total{reason}` and
-`tiamud_story_inputs_total{result}`. While a player is in a story the
+`tiamud_story_inputs_total{result}`,
+`tiamud_story_saves_total{kind=manual|autosave,result=ok|failed}`,
+`tiamud_story_restores_total{result=ok|rejected}` and
+`tiamud_story_slot_rate_limited_total`; `closed_total{reason}` also counts
+`shutdown`. A rising `saves_total{kind="autosave",result="failed"}` usually
+means accounts at their slot capacity or a store problem (see the server
+log, which never logs state contents). While a player is in a story the
 character stays connected and visible in its room.
 
 ## Rate limits and metrics
