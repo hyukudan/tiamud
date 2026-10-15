@@ -1,22 +1,59 @@
+import type {
+  ActionResult,
+  BoardCatalog,
+  BoardEntry,
+  BoardKey,
+  BoardList,
+  BoardPostSummary,
+  ChatChannel,
+  ChatMessage,
+  ClientHeartbeatData,
+  ClientHelloData,
+  ClientMessageType,
+  CommandSubmitData,
+  ContainerContents,
+  EntityRemove,
+  EntityUpsert,
+  InventoryPatch,
+  MailList,
+  MailMessage,
+  MailMessageSummary,
+  MapSnapshot,
+  MediaPlay,
+  MediaStop,
+  ProtocolVersion,
+  ScenePatch,
+  ServerHeartbeat,
+  ServerMessageType,
+  ServerNotice,
+  ServerWelcome,
+  SyncPlayer,
+  SyncRequestData,
+  SyncScene,
+  TradeContents,
+  VitalsUpdate,
+} from './generated/protocol';
 import { isRecord } from './guards';
 
-export const PROTOCOL_VERSION = 1 as const;
+// Wire shapes generated from `crates/protocol` (the Rust source of truth).
+// The validators below still check every inbound frame at runtime and return
+// these generated types, refined only where the client normalises a value.
+export type * from './generated/protocol';
+
+export const PROTOCOL_VERSION: ProtocolVersion = 1;
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 
-export interface Envelope<TType extends string, TData> {
-  v: number;
+export interface Envelope<TType extends ServerMessageType | ClientMessageType, TData> {
+  v: ProtocolVersion;
   type: TType;
   seq?: number;
   id?: string;
   data: TData;
 }
 
-export interface ServerWelcomeData {
-  serverName?: string;
-  motd?: string;
-  sessionId?: string;
-}
+/** The client tolerates a welcome without its informational fields. */
+export type ServerWelcomeData = Partial<ServerWelcome>;
 
 export interface SceneImage {
   alt: string;
@@ -141,17 +178,10 @@ export interface SceneSnapshot {
   weather: SceneWeather;
 }
 
-export interface ActionResultData {
-  requestId?: string;
-  ok: boolean;
-  message?: string;
-}
+/** The wire `message: string | null` is normalised to an optional string. */
+export type ActionResultData = Omit<ActionResult, 'message'> & { message?: string };
 
-export interface ServerNoticeData {
-  level?: 'info' | 'warning' | 'error';
-  code?: string;
-  message: string;
-}
+export type ServerNoticeData = ServerNotice;
 
 export interface MessageAppendData {
   revision: number;
@@ -173,18 +203,9 @@ export interface MessageAppendData {
   cue?: MessagePresentationCue;
 }
 
-export interface SyncSceneData {
-  syncId: string;
-  afterSeq: number;
-  scene: SceneSnapshot;
-}
+export type SyncSceneData = SyncScene<SceneSnapshot>;
 
-export interface SyncPlayerData {
-  syncId: string;
-  afterSeq: number;
-  player: PlayerStateSnapshot;
-  complete: true;
-}
+export type SyncPlayerData = SyncPlayer<PlayerStateSnapshot>;
 
 export interface SyncRecoveryData {
   syncId: string;
@@ -193,32 +214,13 @@ export interface SyncRecoveryData {
   player: PlayerStateSnapshot;
 }
 
-export interface ScenePatchData {
-  viewId: string;
-  revision: number;
-  title?: string;
-  prose?: string[];
-  image?: SceneImage | null;
-  exits?: SceneExit[];
-  weather?: SceneWeather;
-}
-
-interface EntityUpdateBase {
-  viewId: string;
-  revision: number;
-  id: string;
-}
+export type ScenePatchData = ScenePatch<SceneImage, SceneExit, SceneWeather>;
 
 export type EntityUpsertData =
-  | (EntityUpdateBase & { kind: 'item'; entity: SceneItem })
-  | (EntityUpdateBase & { kind: 'npc'; entity: SceneNpc });
+  | (EntityUpsert<SceneItem> & { kind: 'item' })
+  | (EntityUpsert<SceneNpc> & { kind: 'npc' });
 
-export interface EntityRemoveData {
-  viewId: string;
-  revision: number;
-  kind: 'item' | 'npc';
-  id: string;
-}
+export type EntityRemoveData = EntityRemove;
 
 export type MessagePresentationCueKind = 'attack' | 'hit' | 'heal' | 'defeat';
 
@@ -230,59 +232,28 @@ export interface MessagePresentationCue {
   durationMs: number;
 }
 
-export interface VitalsUpdateData {
-  revision: number;
-  character: PlayerCharacterSnapshot;
-}
+export type VitalsUpdateData = VitalsUpdate<PlayerCharacterSnapshot>;
 
-export interface InventoryPatchData {
-  revision: number;
-  inventory: PlayerItemSnapshot[];
-  equipment: EquippedItemSnapshot[];
-  inventoryCapacity: InventoryCapacitySnapshot;
-}
+export type InventoryPatchData = InventoryPatch<
+  PlayerItemSnapshot,
+  EquippedItemSnapshot,
+  InventoryCapacitySnapshot
+>;
 
-export interface TradeContentsData {
-  tradeId: string;
-  container: string;
-  items: ContainerItemSnapshot[];
-  page: number;
-  totalPages: number;
-  capacity: InventoryCapacitySnapshot;
-}
+export type TradeContentsData = TradeContents<ContainerItemSnapshot, InventoryCapacitySnapshot>;
 
-export interface MapSnapshotData {
-  revision: number;
-  map: PlayerStateSnapshot['map'];
-}
+export type MapSnapshotData = MapSnapshot<PlayerStateSnapshot['map']>;
 
-export interface ServerHeartbeatData {
-  nonce: number;
-  timeoutMs: number;
-}
+export type ServerHeartbeatData = ServerHeartbeat;
 
-export interface MediaPlayData {
-  channel: 'music' | 'ambience' | 'effects';
-  url: string;
-  loop: boolean;
-}
+export type MediaPlayData = MediaPlay;
 
-export interface MediaStopData {
-  channel?: 'music' | 'ambience' | 'effects';
-}
+/** The client tolerates a stop without a channel (stop everything). */
+export type MediaStopData = Partial<MediaStop>;
 
-export type CommunityChannel = 'general' | 'newbie' | 'staff';
+export type CommunityChannel = Extract<ChatChannel, 'general' | 'newbie' | 'staff'>;
 
-export type SocialMessageChannel =
-  | 'announcement'
-  | 'say'
-  | 'yell'
-  | 'shout'
-  | 'tell'
-  | 'telepathy'
-  | 'emote'
-  | 'party'
-  | CommunityChannel;
+export type SocialMessageChannel = ChatChannel;
 
 export type StaffReportResolution = 'dismissed' | 'action_taken' | 'no_action';
 
@@ -307,11 +278,7 @@ export type StaffCapability =
   | 'staff.announce'
   | 'staff.audit';
 
-export interface SocialMessageData {
-  channel: SocialMessageChannel;
-  sender: string;
-  text: string;
-}
+export type SocialMessageData = ChatMessage;
 
 /** Retained for the v1 `chat.message` envelope name. */
 export type ChatMessageData = SocialMessageData;
@@ -482,13 +449,10 @@ export interface InventoryCapacitySnapshot {
 
 export type ContainerItemSnapshot = Omit<PlayerItemSnapshot, 'description'>;
 
-export interface ContainerContentsData {
-  container: string;
-  items: ContainerItemSnapshot[];
-  page: number;
-  totalPages: number;
-  capacity: InventoryCapacitySnapshot;
-}
+export type ContainerContentsData = ContainerContents<
+  ContainerItemSnapshot,
+  InventoryCapacitySnapshot
+>;
 
 export interface RewardOddsGuaranteedRow {
   label: string;
@@ -526,58 +490,17 @@ export interface RewardOddsData {
   affixes: RewardOddsAffixRow[];
 }
 
-export interface MailMessageSummary {
-  id: string;
-  sender: string;
-  subject: string;
-  createdAt: number;
-  expiresAt: number;
-  read: boolean;
-}
+export type MailListData = MailList;
 
-export interface MailListData {
-  page: number;
-  totalPages: number;
-  totalMessages: number;
-  unreadCount: number;
-  capacity: number;
-  messages: MailMessageSummary[];
-}
+export type MailMessageData = MailMessage;
 
-export interface MailMessageData extends MailMessageSummary {
-  body: string;
-}
+/** The validator only accepts the fixed 90-day retention. */
+export type BoardCatalogData = BoardCatalog & { retentionDays: 90 };
 
-export type BoardKey = 'general' | 'newbie';
+/** The validator only accepts the fixed 1,000-post board capacity. */
+export type BoardListData = BoardList & { capacity: 1000 };
 
-export interface BoardCatalogData {
-  boards: Array<{ key: BoardKey; label: string; description: string; canPost: boolean }>;
-  retentionDays: 90;
-}
-
-export interface BoardPostSummary {
-  postId: string;
-  board: BoardKey;
-  author: string;
-  subject: string;
-  createdAt: number;
-  expiresAt: number;
-  canDelete: boolean;
-  canReport: boolean;
-}
-
-export interface BoardListData {
-  board: BoardKey;
-  page: number;
-  totalPages: number;
-  totalPosts: number;
-  capacity: 1000;
-  posts: BoardPostSummary[];
-}
-
-export interface BoardEntryData extends BoardPostSummary {
-  body: string;
-}
+export type BoardEntryData = BoardEntry;
 
 export interface PlayerStateSnapshot {
   revision: number;
@@ -692,29 +615,9 @@ export type LiveServerMessage = Exclude<
   Envelope<'sync.scene', SyncSceneData> | Envelope<'sync.player', SyncPlayerData>
 >;
 
-export type ClientHello = Envelope<
-  'client.hello',
-  {
-    client: 'web';
-    capabilities: {
-      images: readonly ('avif' | 'webp' | 'jpeg')[];
-      reducedMotion: boolean;
-      audio: boolean;
-    };
-    auth: {
-      token: string;
-      characterId: number;
-    };
-  }
->;
+export type ClientHello = Envelope<'client.hello', ClientHelloData>;
 
-export type CommandSubmit = Envelope<
-  'command.submit',
-  {
-    requestId: string;
-    command: string;
-  }
->;
+export type CommandSubmit = Envelope<'command.submit', CommandSubmitData>;
 
 export interface ActionPerformFields {
   abilityId?: string;
@@ -754,9 +657,9 @@ export type ActionPerform = Envelope<
   }
 >;
 
-export type SyncRequest = Envelope<'sync.request', { afterSeq: number }>;
+export type SyncRequest = Envelope<'sync.request', SyncRequestData>;
 
-export type ClientHeartbeat = Envelope<'client.heartbeat', { nonce: number }>;
+export type ClientHeartbeat = Envelope<'client.heartbeat', ClientHeartbeatData>;
 
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;

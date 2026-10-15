@@ -7,6 +7,7 @@ members = [
     "crates/mud-server",
     "crates/persistence-postgres",
     "crates/persistence-sqlite",
+    "crates/protocol",
     "crates/scripting",
     "crates/story-core",
     "crates/telnet-codec",

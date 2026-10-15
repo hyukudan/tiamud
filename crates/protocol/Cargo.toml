@@ -1,0 +1,19 @@
+[package]
+name = "tiamud-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# TypeScript generation is test-only: every `TS` derive is applied under
+# `cfg_attr(test, ...)`, so ts-rs never enters the release dependency graph.
+ts-rs = { version = "12.0.1", default-features = false, features = ["serde-compat"] }
