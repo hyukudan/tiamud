@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use super::{OutboundHandle, OutboundPriority, queue_action_result, queue_sequenced};
 use crate::story_sessions::{
-    InvitationInbox, SHARED_STORY_HELP, STORY_INPUT_HELP, SharedFrame, StoryCommand, StoryFailure,
-    StoryInputCommand, StoryLink, StoryManager, StoryProjection, StoryRequest, parse_story_command,
-    parse_story_input, render_listing, render_lobby, render_slots,
+    CommandFollowUp, InvitationInbox, SHARED_STORY_HELP, STORY_INPUT_HELP, SharedFrame,
+    StoryCommand, StoryFailure, StoryInputCommand, StoryLink, StoryManager, StoryProjection,
+    StoryRequest, parse_parser_story_input, parse_story_command, parse_story_input, render_listing,
+    render_lobby, render_slots,
 };
 use tiamud_core::AccountId;
 use tiamud_protocol::{self as protocol, ServerMessageType, StoryDecisionMode, StoryLeftReason};
@@ -274,6 +275,32 @@ impl WebStorySession {
         };
         match link.input(request, view_rev).await {
             Ok(view) => self.publish_reply(outbound, sequence, view),
+            Err(failure) => self.fail(outbound, sequence, failure).await,
+        }
+    }
+
+    /// `story.command {text, viewRev}`: one parser line. The view answers it
+    /// (echo and replies as blocks); `guardar`/`cargar` without a slot also
+    /// list the slots and the parser's quit command leaves the story.
+    pub(super) async fn command(
+        &mut self,
+        outbound: &OutboundHandle,
+        sequence: &mut u64,
+        text: &str,
+        view_rev: u32,
+    ) -> bool {
+        let Some(link) = self.link.clone() else {
+            return queue_error(outbound, sequence, StoryFailure::NotInStory);
+        };
+        match link.command(text, view_rev).await {
+            Ok(reply) => {
+                self.publish_reply(outbound, sequence, reply.view)
+                    && match reply.follow_up {
+                        None => true,
+                        Some(CommandFollowUp::Slots) => self.slots(outbound, sequence).await,
+                        Some(CommandFollowUp::Leave) => self.leave(outbound, sequence).await,
+                    }
+            }
             Err(failure) => self.fail(outbound, sequence, failure).await,
         }
     }
@@ -599,7 +626,23 @@ impl WebStorySession {
                 sequence,
             );
         };
-        match parse_story_input(text) {
+        let parsed = if link.is_parser() {
+            parse_parser_story_input(text)
+        } else {
+            parse_story_input(text)
+        };
+        match parsed {
+            StoryInputCommand::Other if link.is_parser() => {
+                // Free text of a parser story: the view echoes and answers it.
+                let view_rev = self.last_view.as_ref().map_or(0, |view| view.view_rev);
+                if text.len() > crate::story_sessions::MAX_COMMAND_BYTES {
+                    return self
+                        .text_failure(outbound, sequence, request_id, StoryFailure::InvalidCommand)
+                        .await;
+                }
+                queue_action_result(outbound, sequence, request_id, true, None)
+                    && self.command(outbound, sequence, text, view_rev).await
+            }
             StoryInputCommand::Number(number) => {
                 let action = self.last_view.as_ref().and_then(|view| {
                     view.actions()

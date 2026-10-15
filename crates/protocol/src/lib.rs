@@ -213,6 +213,8 @@ pub enum ClientMessageType {
     StoryMode,
     #[serde(rename = "story.vote")]
     StoryVote,
+    #[serde(rename = "story.command")]
+    StoryCommand,
 }
 
 /// A sequenced server→client envelope.
@@ -906,6 +908,12 @@ pub enum StoryBlockKind {
     Event,
     /// A menu response or dialogue line, optionally spoken by a character.
     Line,
+    /// Echo of the free-text command the view answers (StoryPack v3 parser
+    /// stories), already bounded and stripped of control characters.
+    Command,
+    /// A parser reply to that command: a library message, an authored rule
+    /// text, a room description or the parser's own question or error.
+    Reply,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -940,12 +948,16 @@ pub enum StoryCueAction {
 #[cfg_attr(test, derive(TS))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum StoryItem {
-    /// Title, node prose, score and ending of the current scene.
+    /// Title, node prose, score and ending of the current scene. `prompt`
+    /// is present while the story accepts free text (`story.command`).
     Scene {
         title: String,
         text: String,
         score: i64,
         ending: Option<StoryEnding>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        prompt: Option<StoryPrompt>,
     },
     /// Media cue. `url` is present only for `play` and only when the
     /// authored asset id resolved through the reviewed story media map to a
@@ -992,6 +1004,29 @@ pub enum StoryItem {
     /// An option of the active dialogue (`story.dialogue` or `story.choose`).
     #[serde(rename = "dialogueOption")]
     DialogueOption { id: String, label: String },
+}
+
+/// The free-text prompt of a parser story (StoryPack v3). `text` is the
+/// prompt to show (`>` by default); `question` is true while the parser
+/// waits for the answer to the question shown in the last `reply` block.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+pub struct StoryPrompt {
+    pub text: String,
+    pub question: bool,
+}
+
+/// Maximum UTF-8 bytes of one `story.command` line (the parser's own bound).
+pub const MAX_STORY_COMMAND_BYTES: usize = 256;
+
+/// `story.command`: one line of free text for the parser of the current
+/// story, typed against view `viewRev`. At most 256 bytes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StoryCommandData {
+    pub text: String,
+    pub view_rev: u32,
 }
 
 /// One part of a story view. A view whose encoding would exceed the frame
@@ -1076,6 +1111,10 @@ pub enum StoryErrorCode {
     UnknownMember,
     /// A shared-instance setting is outside its documented range.
     InvalidSetting,
+    /// The story has no parser: `story.command` needs a StoryPack v3 world.
+    NoParser,
+    /// The command line is empty or longer than 256 bytes.
+    InvalidCommand,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

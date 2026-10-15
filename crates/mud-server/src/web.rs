@@ -651,6 +651,11 @@ enum ClientMessage {
         mode: protocol::StoryDecisionMode,
         vote_seconds: Option<u16>,
     },
+    /// `story.command {text, viewRev}`: free text for a parser story.
+    StoryCommand {
+        text: String,
+        view_rev: u32,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1247,7 +1252,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                     | ClientMessage::StoryJoin { .. }
                     | ClientMessage::StoryInvite { .. }
                     | ClientMessage::StoryKick { .. }
-                    | ClientMessage::StoryMode { .. }) => {
+                    | ClientMessage::StoryMode { .. }
+                    | ClientMessage::StoryCommand { .. }) => {
                         if !command_limiter.check(Instant::now()) {
                             if !queue_notice(&outbound, &mut sequence, "Command rate limit exceeded.") {
                                 break;
@@ -1290,6 +1296,9 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             }
                             ClientMessage::StoryMode { mode, vote_seconds } => {
                                 story.mode(&outbound, &mut sequence, mode, vote_seconds).await
+                            }
+                            ClientMessage::StoryCommand { text, view_rev } => {
+                                story.command(&outbound, &mut sequence, &text, view_rev).await
                             }
                             _ => story.leave(&outbound, &mut sequence).await,
                         };
@@ -3123,6 +3132,19 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 "story.slots" => ClientMessage::StorySlots,
                 "story.share" => ClientMessage::StoryShare,
                 _ => ClientMessage::StoryRestore { slot: 0 },
+            })
+        }
+        "story.command" => {
+            let data = serde_json::from_value::<protocol::StoryCommandData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            // Shape only; the instance answers stale views and the parser
+            // answers empty or unknown text.
+            if data.text.len() > protocol::MAX_STORY_COMMAND_BYTES || data.view_rev == 0 {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(ClientMessage::StoryCommand {
+                text: data.text,
+                view_rev: data.view_rev,
             })
         }
         "story.vote" => {

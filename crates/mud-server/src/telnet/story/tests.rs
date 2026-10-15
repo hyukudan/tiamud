@@ -338,3 +338,92 @@ fn oversized_gmcp_story_summary_degrades_within_the_limit() {
     assert_eq!(summary["truncated"], true);
     assert_eq!(summary["viewRev"], 4);
 }
+
+fn faro_stories() -> StoryManager {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../story-core/fixtures/parser/faro-de-punta-gris.story.json"),
+    )
+    .unwrap();
+    let pack = StoryPack::from_json_slice(&bytes).unwrap();
+    StoryManager::new(
+        StoryCatalog::from_packs(vec![pack], BTreeMap::new()).unwrap(),
+        StoryLimits::default(),
+    )
+}
+
+fn story_view_gmcp(gmcp: &[String]) -> serde_json::Value {
+    gmcp.iter()
+        .rev()
+        .find_map(|payload| payload.strip_prefix("Tiamud.Story.View "))
+        .map(|json| serde_json::from_str(json).unwrap())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn telnet_lines_are_parser_commands_in_a_parser_story() {
+    let output = TelnetOutputQueue::new(256, 1024 * 1024);
+    let mut input = gmcp_input(r#"["Tiamud.Story 1"]"#, false);
+    let mut story = TelnetStory::new(Some(faro_stories()), AccountId(9));
+    assert_eq!(
+        story
+            .line(&output, &mut input, "historia faro-de-punta-gris")
+            .await
+            .unwrap(),
+        StoryLineOutcome::Handled
+    );
+    let (text, gmcp) = drain(&output);
+    assert!(text.contains("Playa de guijarros\r\n"));
+    assert!(text.contains("La tormenta te sorprendió"));
+    assert!(text.contains("Escribe una orden"));
+    let summary = story_view_gmcp(&gmcp);
+    assert_eq!(summary["prompt"]["text"], ">");
+    assert_eq!(summary["prompt"]["question"], false);
+
+    // Any non-reserved line is a parser command, echoed before its replies.
+    story
+        .line(&output, &mut input, "examina la barca")
+        .await
+        .unwrap();
+    let (text, _) = drain(&output);
+    assert!(text.contains("> examina la barca\r\n"));
+    assert!(text.contains("medalla de plata"));
+
+    // A question keeps the prompt in question mode until it is answered.
+    story.line(&output, &mut input, "pon").await.unwrap();
+    let (text, gmcp) = drain(&output);
+    assert!(text.contains("Responde a la pregunta"));
+    assert_eq!(story_view_gmcp(&gmcp)["prompt"]["question"], true);
+    story.line(&output, &mut input, "mira").await.unwrap();
+    let (_, gmcp) = drain(&output);
+    assert_eq!(story_view_gmcp(&gmcp)["prompt"]["question"], false);
+
+    // Reserved words keep their meaning; `deshacer` undoes the last command.
+    story.line(&output, &mut input, "deshacer").await.unwrap();
+    let (_, gmcp) = drain(&output);
+    assert_eq!(story_view_gmcp(&gmcp)["turn"], 1);
+    // A bare «guardar» is the parser's save: a hint plus the slot answer.
+    story.line(&output, &mut input, "guardar").await.unwrap();
+    let (text, _) = drain(&output);
+    assert!(text.contains("guardar N"));
+    assert!(text.contains("no están disponibles"));
+    // An over-long line is refused without touching the story.
+    story
+        .line(&output, &mut input, &"x".repeat(300))
+        .await
+        .unwrap();
+    let (text, _) = drain(&output);
+    assert!(text.contains("256 bytes"));
+    // The parser's quit leaves like «salir».
+    assert_eq!(
+        story.line(&output, &mut input, "fin").await.unwrap(),
+        StoryLineOutcome::Left
+    );
+    let (text, gmcp) = drain(&output);
+    assert!(text.contains("Sales de la historia y vuelves al mundo."));
+    assert!(
+        gmcp.iter()
+            .any(|payload| payload.starts_with("Tiamud.Story.Left"))
+    );
+    assert!(!story.active());
+}

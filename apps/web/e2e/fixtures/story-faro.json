@@ -1,0 +1,906 @@
+{
+  "steps": [
+    {
+      "input": {
+        "data": {
+          "text": "examina la barca",
+          "viewRev": 1
+        },
+        "type": "story.command"
+      },
+      "label": "examina la barca",
+      "view": [
+        {
+          "canUndo": false,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 0,
+              "text": "Playa de guijarros",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "reply",
+              "text": "La tormenta te sorprendió remando de vuelta a casa y el mar te ha escupido en la cala de Punta Gris. Esta noche el faro está apagado, y ahí fuera hay barcos que lo necesitan.\nEscribe «ayuda» si no sabes por dónde empezar.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Playa de guijarros",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Una cala de guijarros negros encajada entre dos espolones de roca. El mar, del color del plomo, rompe sin ganas contra una barca varada. Hacia el norte, un sendero sube hasta la explanada del faro.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 0,
+          "viewRev": 1
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "coge la medalla",
+          "viewRev": 2
+        },
+        "type": "story.command"
+      },
+      "label": "coge la medalla",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 0,
+              "text": "Playa de guijarros",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "examina la barca",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Una barca de remos medio hundida en los guijarros, con el casco cubierto de algas. Alguien la usa para guardar cosas.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Dentro de la barca varada ves una medalla de plata.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 1,
+          "viewRev": 2
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "n",
+          "viewRev": 3
+        },
+        "type": "story.command"
+      },
+      "label": "n",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 0,
+              "text": "Playa de guijarros",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "coge la medalla",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Coges la medalla de plata.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 2,
+          "viewRev": 3
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "habla con remedios",
+          "viewRev": 4
+        },
+        "type": "story.command"
+      },
+      "label": "habla con remedios",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 0,
+              "text": "Explanada del faro",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "n",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Explanada del faro",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Una explanada de hierba rala azotada por el viento. Al norte se alza la torre blanca del faro, con su puerta verde; al este, una caseta de tablas; al sur, el sendero baja a la playa.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Puedes ver Remedios.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 3,
+          "viewRev": 4
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "dale la medalla a remedios",
+          "viewRev": 5
+        },
+        "type": "story.command"
+      },
+      "label": "dale la medalla a remedios",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 0,
+              "text": "Explanada del faro",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "habla con remedios",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "—El faro lleva tres noches apagado desde que se llevaron al farero al hospital —dice Remedios sin levantar la vista de la red—. Yo tengo la llave, pero esta mañana perdí la medalla de mi Andrés en la playa y no me muevo de aquí hasta encontrarla.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 4,
+          "viewRev": 5
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "e",
+          "viewRev": 6
+        },
+        "type": "story.command"
+      },
+      "label": "e",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 5,
+              "text": "Explanada del faro",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "dale la medalla a remedios",
+              "type": "block"
+            },
+            {
+              "kind": "event",
+              "text": "Puntuación +5 (total 5)",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Remedios coge la medalla con las dos manos y se la lleva a los labios. Luego rebusca en el delantal y te pone en la mano una llave de hierro. —La del faro. Date prisa.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 5,
+          "viewRev": 6
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "abre el cofre",
+          "viewRev": 7
+        },
+        "type": "story.command"
+      },
+      "label": "abre el cofre",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 5,
+              "text": "Caseta de los aparejos",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "e",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Caseta de los aparejos",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Una caseta que huele a brea y a sal. De las paredes cuelgan redes remendadas mil veces. La única salida está al oeste.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Puedes ver un cofre de marinero.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 6,
+          "viewRev": 7
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "coge la lámpara y enciéndela",
+          "viewRev": 8
+        },
+        "type": "story.command"
+      },
+      "label": "coge la lámpara y enciéndela",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 5,
+              "text": "Caseta de los aparejos",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "abre el cofre",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Abres el cofre de marinero.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Dentro del cofre de marinero ves una lámpara de aceite.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 7,
+          "viewRev": 8
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "o",
+          "viewRev": 9
+        },
+        "type": "story.command"
+      },
+      "label": "o",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 5,
+              "text": "Caseta de los aparejos",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "coge la lámpara y enciéndela",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Coges la lámpara de aceite.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Enciendes la lámpara de aceite.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 9,
+          "viewRev": 9
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "abre la puerta con la llave",
+          "viewRev": 10
+        },
+        "type": "story.command"
+      },
+      "label": "abre la puerta con la llave",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 5,
+              "text": "Explanada del faro",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "o",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Explanada del faro",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Una explanada de hierba rala azotada por el viento. Al norte se alza la torre blanca del faro, con su puerta verde; al este, una caseta de tablas; al sur, el sendero baja a la playa.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Puedes ver Remedios.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 10,
+          "viewRev": 10
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "abre la puerta. n",
+          "viewRev": 11
+        },
+        "type": "story.command"
+      },
+      "label": "abre la puerta. n",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 10,
+              "text": "Explanada del faro",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "abre la puerta con la llave",
+              "type": "block"
+            },
+            {
+              "kind": "event",
+              "text": "Puntuación +5 (total 10)",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Abres la cerradura de la puerta del faro con la llave de hierro.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "La cerradura cede con un quejido de hierro viejo.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 11,
+          "viewRev": 11
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "lee el cuaderno",
+          "viewRev": 12
+        },
+        "type": "story.command"
+      },
+      "label": "lee el cuaderno",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 10,
+              "text": "Vestíbulo del faro",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "abre la puerta. n",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Abres la puerta del faro.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Vestíbulo del faro",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "La planta baja del faro: un cuarto redondo y encalado con una mesa de pino bajo la ventana. Una escalera de caracol sube hacia la oscuridad; la puerta da al sur.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Puedes ver un cuaderno de bitácora.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 13,
+          "viewRev": 12
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "sube",
+          "viewRev": 13
+        },
+        "type": "story.command"
+      },
+      "label": "sube",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 10,
+              "text": "Vestíbulo del faro",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "lee el cuaderno",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "La última anotación, con letra temblorosa: «El fanal está seco. Antes de prenderlo hay que llenar el depósito con la aceitera que dejé en la escalera. Sin aceite, la mecha solo da humo».",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 14,
+          "viewRev": 13
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "coge la aceitera",
+          "viewRev": 14
+        },
+        "type": "story.command"
+      },
+      "label": "coge la aceitera",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 10,
+              "text": "Escalera de caracol",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "sube",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Escalera de caracol",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Los peldaños de hierro giran y giran pegados al muro. Huele a aceite rancio. Arriba se adivina la sala de la linterna; abajo, el vestíbulo.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Puedes ver una aceitera de latón.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 15,
+          "viewRev": 14
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "sube",
+          "viewRev": 15
+        },
+        "type": "story.command"
+      },
+      "label": "sube",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 10,
+              "text": "Escalera de caracol",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "coge la aceitera",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "La aceitera está pegajosa de grasa.",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Coges la aceitera de latón.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 16,
+          "viewRev": 15
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "llena el depósito con la aceitera",
+          "viewRev": 16
+        },
+        "type": "story.command"
+      },
+      "label": "llena el depósito con la aceitera",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 10,
+              "text": "Sala de la linterna",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "sube",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Sala de la linterna",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "La sala de la linterna, en lo alto de la torre. En el centro reposa el gran fanal, rodeado por una lente de cristal tallado; a su lado, un depósito de latón. Por los ventanales se ve llegar la tormenta.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 17,
+          "viewRev": 16
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "enciende la lampara",
+          "viewRev": 17
+        },
+        "type": "story.command"
+      },
+      "label": "enciende la lampara",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": false,
+                "text": ">"
+              },
+              "score": 20,
+              "text": "Sala de la linterna",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "llena el depósito con la aceitera",
+              "type": "block"
+            },
+            {
+              "kind": "event",
+              "text": "Puntuación +10 (total 20)",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Vacías la aceitera en el depósito hasta que el aceite asoma por el borde. Dejas la lata vacía en un rincón.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 18,
+          "viewRev": 17
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "text": "el fanal",
+          "viewRev": 18
+        },
+        "type": "story.command"
+      },
+      "label": "el fanal",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "prompt": {
+                "question": true,
+                "text": ">"
+              },
+              "score": 20,
+              "text": "Sala de la linterna",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "enciende la lampara",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "¿Cuál quieres decir: la lámpara de aceite o el fanal?",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 18,
+          "viewRev": 18
+        }
+      ]
+    },
+    {
+      "input": null,
+      "label": null,
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": {
+                "kind": "victory"
+              },
+              "score": 30,
+              "text": "La mecha prende con un chasquido y la lente multiplica la llama hasta convertirla en un haz que barre el mar. Allá abajo, entre las olas, las luces de los pesqueros viran hacia el puerto. Cuando amanece, Remedios sube con dos tazas de café y se sienta a tu lado sin decir nada.",
+              "title": "El faro de Punta Gris",
+              "type": "scene"
+            },
+            {
+              "kind": "command",
+              "text": "el fanal",
+              "type": "block"
+            },
+            {
+              "kind": "event",
+              "text": "Puntuación +10 (total 30)",
+              "type": "block"
+            },
+            {
+              "kind": "reply",
+              "text": "Abres el globo de cristal y acercas la llama de tu lámpara a la mecha empapada.",
+              "type": "block"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 19,
+          "viewRev": 19
+        }
+      ]
+    }
+  ],
+  "storyId": "faro-de-punta-gris",
+  "title": "El faro de Punta Gris"
+}

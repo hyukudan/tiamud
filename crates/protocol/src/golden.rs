@@ -527,6 +527,7 @@ fn story_payloads_have_their_documented_shape() {
                     text: "Un pasillo.".into(),
                     score: -3,
                     ending: None,
+                    prompt: None,
                 },
                 StoryItem::Cue {
                     action: StoryCueAction::Stop,
@@ -857,4 +858,69 @@ fn shared_story_payloads_have_their_documented_shape() {
     assert!(serde_json::from_value::<StoryJoinData>(json!({"code": "ABCD2345"})).is_err());
     assert!(serde_json::from_value::<StoryModeData>(json!({"mode": "chaos"})).is_err());
     assert!(serde_json::from_value::<StoryNameData>(json!({"name": "B", "x": 1})).is_err());
+}
+
+#[test]
+fn parser_story_payloads_have_their_documented_shape() {
+    assert_wire(
+        StoryView {
+            view_rev: 5,
+            part: 0,
+            parts: 1,
+            turn: 3,
+            can_undo: true,
+            items: vec![
+                StoryItem::Scene {
+                    title: "Linterna".into(),
+                    text: "Linterna".into(),
+                    score: 10,
+                    ending: None,
+                    prompt: Some(StoryPrompt {
+                        text: ">".into(),
+                        question: true,
+                    }),
+                },
+                StoryItem::Block {
+                    kind: StoryBlockKind::Command,
+                    speaker: None,
+                    text: "enciende la lampara".into(),
+                },
+                StoryItem::Block {
+                    kind: StoryBlockKind::Reply,
+                    speaker: None,
+                    text: "¿Cuál quieres decir?".into(),
+                },
+            ],
+        },
+        json!({
+            "viewRev": 5, "part": 0, "parts": 1, "turn": 3, "canUndo": true,
+            "items": [
+                {"type": "scene", "title": "Linterna", "text": "Linterna", "score": 10, "ending": null,
+                 "prompt": {"text": ">", "question": true}},
+                {"type": "block", "kind": "command", "text": "enciende la lampara"},
+                {"type": "block", "kind": "reply", "text": "¿Cuál quieres decir?"}
+            ]
+        }),
+    );
+    for (code, wire) in [
+        (StoryErrorCode::NoParser, "no_parser"),
+        (StoryErrorCode::InvalidCommand, "invalid_command"),
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), json!(wire));
+    }
+    let command: StoryCommandData =
+        serde_json::from_value(json!({"text": "coge la llave", "viewRev": 4})).unwrap();
+    assert_eq!(command.text, "coge la llave");
+    assert_eq!(command.view_rev, 4);
+    for rejected in [
+        json!({"text": "n"}),
+        json!({"viewRev": 4}),
+        json!({"text": "n", "viewRev": 4, "x": 1}),
+        json!({"text": 1, "viewRev": 4}),
+        json!({"text": "n", "viewRev": -1}),
+    ] {
+        assert!(serde_json::from_value::<StoryCommandData>(rejected).is_err());
+    }
+    assert!(serde_json::from_value::<ClientMessageType>(json!("story.command")).is_ok());
+    assert_eq!(MAX_STORY_COMMAND_BYTES, 256);
 }

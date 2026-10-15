@@ -412,3 +412,159 @@ async fn browser_saves_leaves_reenters_and_continues_with_sqlite_slots() {
         ["action.result", "story.restored", "story.view"]
     );
 }
+
+fn parser_stories() -> StoryManager {
+    let read = |path: &str| {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../story-core/fixtures")
+                .join(path),
+        )
+        .unwrap();
+        StoryPack::from_json_slice(&bytes).unwrap()
+    };
+    StoryManager::new(
+        StoryCatalog::from_packs(
+            vec![
+                read("parser/faro-de-punta-gris.story.json"),
+                read("cripta-del-nigromante.story.json"),
+            ],
+            BTreeMap::new(),
+        )
+        .unwrap(),
+        StoryLimits::default(),
+    )
+}
+
+fn view_rev(view: &Value) -> u32 {
+    u32::try_from(view["viewRev"].as_u64().unwrap()).unwrap()
+}
+
+fn kinds<'a>(view: &'a Value, kind: &str) -> Vec<&'a str> {
+    view["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "block" && item["kind"] == kind)
+        .map(|item| item["text"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn browser_plays_a_parser_story_with_story_command_and_typed_text() {
+    let manager = parser_stories();
+    let out = outbound();
+    let mut seq = 1;
+    let mut session = WebStorySession::new(Some(manager), AccountId(1), false);
+    assert_eq!(
+        session
+            .text_command(&out, &mut seq, "r1", "historia faro-de-punta-gris")
+            .await,
+        Some(true)
+    );
+    let entered = frames(&out);
+    let view = last_view(&entered).clone();
+    assert_eq!(view["items"][0]["prompt"]["text"], ">");
+    assert_eq!(view["items"][0]["prompt"]["question"], false);
+
+    // `story.command` echoes the line and answers with reply blocks.
+    assert!(
+        session
+            .command(&out, &mut seq, "examina la barca", view_rev(&view))
+            .await
+    );
+    let answered = frames(&out);
+    assert_eq!(types(&answered), ["story.view"]);
+    let view = last_view(&answered).clone();
+    assert_eq!(kinds(&view, "command"), ["examina la barca"]);
+    assert!(
+        kinds(&view, "reply")
+            .join("\n")
+            .contains("una medalla de plata")
+    );
+
+    // A stale view is answered with the current one; nothing changes.
+    assert!(session.command(&out, &mut seq, "n", 1).await);
+    let stale = frames(&out);
+    assert_eq!(types(&stale), ["story.error", "story.view"]);
+    assert_eq!(stale[0]["data"]["code"], "stale_view");
+    assert_eq!(view_rev(last_view(&stale)), view_rev(&view));
+
+    // Typed text through `command.submit` reaches the parser too, while
+    // reserved words keep their meaning.
+    assert_eq!(
+        session
+            .text_command(&out, &mut seq, "r2", "coge la medalla")
+            .await,
+        Some(true)
+    );
+    let typed = frames(&out);
+    assert_eq!(types(&typed), ["action.result", "story.view"]);
+    assert_eq!(typed[0]["data"]["ok"], true);
+    let view = last_view(&typed).clone();
+    assert_eq!(kinds(&view, "reply"), ["Coges la medalla de plata."]);
+
+    // «guardar» without a slot lists the slots (none here: no store).
+    assert!(
+        session
+            .command(&out, &mut seq, "guardar", view_rev(&view))
+            .await
+    );
+    let save = frames(&out);
+    assert_eq!(types(&save), ["story.view", "story.error"]);
+    assert_eq!(save[1]["data"]["code"], "slots_unavailable");
+    let view = last_view(&save).clone();
+
+    // The parser's quit leaves the story like «salir».
+    assert!(
+        session
+            .command(&out, &mut seq, "fin", view_rev(&view))
+            .await
+    );
+    let quit = frames(&out);
+    assert_eq!(types(&quit), ["story.view", "story.left"]);
+    assert!(!session.active());
+
+    // A gamebook refuses free text with a typed error.
+    assert_eq!(
+        session
+            .text_command(&out, &mut seq, "r3", "historia cripta-del-nigromante")
+            .await,
+        Some(true)
+    );
+    let view = last_view(&frames(&out)).clone();
+    assert!(view["items"][0].get("prompt").is_none());
+    assert!(
+        session
+            .command(&out, &mut seq, "mira", view_rev(&view))
+            .await
+    );
+    let refused = frames(&out);
+    assert_eq!(types(&refused), ["story.error"]);
+    assert_eq!(refused[0]["data"]["code"], "no_parser");
+}
+
+#[test]
+fn story_command_envelopes_are_shape_checked() {
+    assert!(matches!(
+        parse_client_message(r#"{"v":1,"type":"story.command","data":{"text":"coge la llave","viewRev":2}}"#),
+        Ok(ClientMessage::StoryCommand { text, view_rev: 2 }) if text == "coge la llave"
+    ));
+    let long = format!(
+        r#"{{"v":1,"type":"story.command","data":{{"text":"{}","viewRev":2}}}}"#,
+        "a".repeat(257)
+    );
+    for invalid in [
+        r#"{"v":1,"type":"story.command","data":{"text":"n","viewRev":0}}"#,
+        r#"{"v":1,"type":"story.command","data":{"text":"n"}}"#,
+        r#"{"v":1,"type":"story.command","data":{"text":"n","viewRev":1,"x":1}}"#,
+        r#"{"v":1,"type":"story.command","data":{"text":7,"viewRev":1}}"#,
+        long.as_str(),
+    ] {
+        assert_eq!(
+            parse_client_message(invalid).err(),
+            Some(ClientMessageError::InvalidEnvelope),
+            "{invalid}"
+        );
+    }
+}

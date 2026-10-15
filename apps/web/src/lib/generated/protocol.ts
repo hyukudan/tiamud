@@ -9,7 +9,7 @@ export const WEBSOCKET_SUBPROTOCOL = 'tiamud.v1';
 
 export type ServerMessageType = "server.welcome" | "server.notice" | "server.heartbeat" | "action.result" | "scene.snapshot" | "player.snapshot" | "scene.patch" | "entity.upsert" | "entity.remove" | "vitals.update" | "inventory.patch" | "container.contents" | "trade.contents" | "reward.odds" | "mail.list" | "mail.message" | "board.catalog" | "board.list" | "board.entry" | "map.snapshot" | "message.append" | "chat.message" | "sync.scene" | "sync.player" | "media.play" | "media.stop" | "story.entered" | "story.view" | "story.left" | "story.error" | "story.slots" | "story.saved" | "story.restored" | "story.lobby" | "story.tally" | "story.invitation";
 
-export type ClientMessageType = "client.hello" | "command.submit" | "action.perform" | "sync.request" | "client.heartbeat" | "story.choose" | "story.menu" | "story.dialogue" | "story.undo" | "story.leave" | "story.save" | "story.restore" | "story.slots" | "story.deleteSlot" | "story.continue" | "story.share" | "story.join" | "story.invite" | "story.kick" | "story.mode" | "story.vote";
+export type ClientMessageType = "client.hello" | "command.submit" | "action.perform" | "sync.request" | "client.heartbeat" | "story.choose" | "story.menu" | "story.dialogue" | "story.undo" | "story.leave" | "story.save" | "story.restore" | "story.slots" | "story.deleteSlot" | "story.continue" | "story.share" | "story.join" | "story.invite" | "story.kick" | "story.mode" | "story.vote" | "story.command";
 
 export type ServerEnvelope<T> = { v: ProtocolVersion, type: ServerMessageType, seq: number, data: T, };
 
@@ -105,7 +105,7 @@ export type StoryEmptyData = Record<symbol, never>;
 
 export type StoryEntered = { storyId: string, title: string, };
 
-export type StoryBlockKind = "event" | "line";
+export type StoryBlockKind = "event" | "line" | "command" | "reply";
 
 export type StoryEndingKind = "victory" | "defeat" | "neutral";
 
@@ -113,7 +113,9 @@ export type StoryEnding = { kind: StoryEndingKind, };
 
 export type StoryCueAction = "play" | "stop";
 
-export type StoryItem = { "type": "scene", title: string, text: string, score: number, ending: StoryEnding | null, } | { "type": "cue", action: StoryCueAction, channel: MediaChannel, url?: string, loop: boolean, } | { "type": "portrait", name: string, } | { "type": "block", kind: StoryBlockKind, speaker?: string, text: string, } | { "type": "stat", label: string, value: string, } | { "type": "item", name: string, } | { "type": "choice", id: string, label: string, } | { "type": "verb", id: string, label: string, needsTarget: boolean, } | { "type": "target", verb: string, id: string, label: string, } | { "type": "dialogueOption", id: string, label: string, };
+export type StoryPrompt = { text: string, question: boolean, };
+
+export type StoryItem = { "type": "scene", title: string, text: string, score: number, ending: StoryEnding | null, prompt?: StoryPrompt, } | { "type": "cue", action: StoryCueAction, channel: MediaChannel, url?: string, loop: boolean, } | { "type": "portrait", name: string, } | { "type": "block", kind: StoryBlockKind, speaker?: string, text: string, } | { "type": "stat", label: string, value: string, } | { "type": "item", name: string, } | { "type": "choice", id: string, label: string, } | { "type": "verb", id: string, label: string, needsTarget: boolean, } | { "type": "target", verb: string, id: string, label: string, } | { "type": "dialogueOption", id: string, label: string, };
 
 export type StoryView = { viewRev: number, part: number, parts: number, turn: number, canUndo: boolean, items: Array<StoryItem>, };
 
@@ -121,7 +123,7 @@ export type StoryLeftReason = "left" | "evicted" | "kicked" | "ended";
 
 export type StoryLeft = { reason: StoryLeftReason, };
 
-export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited" | "host_only" | "spectator" | "not_your_turn" | "unknown_code" | "seats_full" | "not_shared" | "unknown_member" | "invalid_setting";
+export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited" | "host_only" | "spectator" | "not_your_turn" | "unknown_code" | "seats_full" | "not_shared" | "unknown_member" | "invalid_setting" | "no_parser" | "invalid_command";
 
 export type StoryError = { code: StoryErrorCode, message: string, };
 
@@ -173,3 +175,5 @@ export type StoryTallyEntry = { choiceId: string, votes: number, };
 export type StoryTally = { viewRev: number, mode: StoryDecisionMode, choices: Array<StoryTallyEntry>, voted: number, eligible: number, remainingSeconds?: number, yourVote?: string, };
 
 export type StoryInvitation = { host: string, storyId: string, title: string, code: string, };
+
+export type StoryCommandData = { text: string, viewRev: number, };
