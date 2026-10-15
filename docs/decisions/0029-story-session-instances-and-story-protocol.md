@@ -195,3 +195,28 @@ con el mismo límite de 1.024 entradas examinadas y 64 packs; `story-media.json`
 solo en el directorio raíz), de modo que StoryPack v3 con parser
 (`parser/…`) se juegan con `story.command`; ver la nota de
 [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md).
+
+## Nota de estado (2026-10-15): imágenes, locale por sesión y prompt
+
+Añadida después de la decisión; no cambia el estado propuesto. Sustituye lo
+dicho arriba sobre fondos y retratos (ya se entregan como imagen revisada) y
+sobre el locale fijo:
+
+- `story-media.json` admite `formatVersion` 2 con `images` (≤256): id →
+  `{manifest: "assets/<sha256>/manifest.json", alt: {locale: texto}}`;
+  rutas de otra forma, alt ausente, con controles o de más de 512 bytes, o
+  campos desconocidos impiden el arranque. `story.view` añade los campos
+  opcionales `scene.background` y `portrait.image` (`{manifest, alt}`), sin
+  depender del opt-in de audio. Los fixtures traen un mapa revisado con arte
+  de muestra original de `lluvia-de-neon`.
+- Locale por sesión: `historia <id> [locale]` (también `story`, y
+  `historia compartir <id> [locale]`) elige entre los léxicos del mundo
+  parser o los locales del título del pack; por defecto `es` si existe. Un
+  locale no ofrecido es `unknown_locale`; una instancia viva conserva el
+  suyo y quien se une a una compartida juega en el del anfitrión.
+  `story.entered` añade `locale` y `locales`. Texto, eventos, alt y léxico
+  siguen el locale; los mensajes del servidor siguen en castellano.
+- El prompt del parser lo define el pack (`world.prompt`, ver
+  [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md)).
+
+Ver el [registro](../project/log/2026-10-15-story-presentation-locale-compat.md).

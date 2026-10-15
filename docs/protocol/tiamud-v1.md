@@ -1263,9 +1263,12 @@ when the server is started with `TIAMUD_STORY_DIR`; otherwise every story
 command answers that stories are unavailable.
 
 Entering and listing reuse `command.submit`: `historias`/`stories` returns the
-catalog in `action.result.message`; `historia <id>`/`story <id>` answers with a
-correlated `action.result`, then `story.entered` and the current
-`story.view`. While a session is in a story, other `command.submit` lines and
+catalog in `action.result.message`; `historia <id> [locale]`/`story <id>
+[locale]` answers with a correlated `action.result`, then `story.entered` and
+the current `story.view`. The optional locale picks one of the story's
+languages for a **new** instance (`en`, or `en-GB` for `en`); without it the
+story's default (Spanish when offered) is used, a language the story does not
+offer answers `unknown_locale`, and a live instance keeps its language. While a session is in a story, other `command.submit` lines and
 every `action.perform` are answered with `ok: false` and never reach the world;
 typed numbers choose the numbered action, `deshacer`/`undo` undoes,
 `ver`/`look` re-sends the view and `salir`/`leave`/`salir historia` leave.
@@ -1276,16 +1279,22 @@ character stays connected and visible in its room.
 
 Server messages:
 
-- `story.entered`: `{storyId, title}`. `storyId` is the public catalog id.
+- `story.entered`: `{storyId, title, locale, locales}`. `storyId` is the
+  public catalog id; `title` is in the instance language `locale`; `locales`
+  (1–16 lowercase tags, default first, containing `locale`) lists the
+  languages the story can be played in. Every text of the views, including
+  image alt text, is in `locale`; server hints and error messages stay
+  Spanish. Clients written before this field treat a missing `locale` as
+  `es`.
 - `story.view`: `{viewRev, part, parts, turn, canUndo, items}`. A view whose
   sequenced frame would exceed 15 KiB is split into `parts` frames that share
   `viewRev`; the client applies the view only when parts `0..parts` arrived
   in order and concatenates `items`. `items` are tagged by `type`:
   `scene {title, text, score, ending: null | {kind: victory|defeat|neutral},
-  prompt?: {text, question}}` (exactly one per view; `prompt` only in parser
-  stories, see [Parser stories](#parser-stories)),
+  prompt?: {text, question}, background?: image}` (exactly one per view;
+  `prompt` only in parser stories, see [Parser stories](#parser-stories)),
   `cue {action: play|stop, channel, url?, loop}`,
-  `portrait {name}`, `block {kind: event|line|command|reply, speaker?, text}`,
+  `portrait {name, image?}`, `block {kind: event|line|command|reply, speaker?, text}`,
   `stat {label, value}`, `item {name}`, `choice {id, label}`,
   `verb {id, label, needsTarget}`, `target {verb, id, label}` (where `verb` is
   the id of a verb of the same view) and `dialogueOption {id, label}`. Every
@@ -1293,7 +1302,16 @@ Server messages:
   derived from authored ids, ordinals or prose, and stops resolving when the
   next view is published. A `play` cue carries a content-addressed
   `/assets/<sha256>/audio-*.{opus,ogg,mp3}` URL resolved from the reviewed
-  story media map; cues are omitted for clients without audio.
+  story media map; cues are omitted for clients without audio. An `image` is
+  `{manifest, alt}`: `manifest` is exactly
+  `/assets/<64 lowercase hex>/manifest.json`, a reviewed asset-pipeline
+  manifest (schema 2, opaque AVIF/WebP/JPEG variants, the same contract as
+  world scene images) that the client fetches, validates and renders only
+  when multimedia is allowed; `alt` is 1–512 bytes of plain one-line text in
+  the instance language. It is present only when the authored background or
+  portrait id is listed in the reviewed story media map; an unlisted id sends
+  no image and loses nothing playable (the scene text and `portrait.name`
+  remain). Images are sent regardless of the audio opt-in.
 - `story.left`: `{reason: left|evicted|kicked|ended}`. `evicted` also covers
   an instance closed by another session of the same account (or a lapsed
   shared seat); `kicked` and `ended` belong to shared instances.
@@ -1304,14 +1322,16 @@ Server messages:
   `slot_corrupt`, `slot_incompatible`, `slot_capacity`, `rate_limited`, and
   for shared instances `host_only`, `spectator`, `not_your_turn`,
   `unknown_code`, `seats_full`, `not_shared`, `unknown_member`,
-  `invalid_setting`, and for parser stories `no_parser` and
-  `invalid_command`. `stale_view` is followed by the current view. `message` is Spanish
+  `invalid_setting`, for parser stories `no_parser` and
+  `invalid_command`, and `unknown_locale` when entering in a language the
+  story does not offer. `stale_view` is followed by the current view. `message` is Spanish
   player-facing text and never names authored ids, digests or store details.
 - `story.slots`: `{slots: [{slot, updatedAt, compatible}], offerContinue}`.
   At most ten entries in ascending, unique `slot` order (`0..=9`; `0` is the
   autosave). `updatedAt` is Unix seconds of the last write; `compatible` is
   false when the slot was saved with another revision (SHA-256) of the
-  StoryPack and would be refused. No saved state, digest, turn or summary of
+  StoryPack that the current pack does not declare in its
+  `compatible_revisions`, and would be refused. No saved state, digest, turn or summary of
   hidden variables is sent. `offerContinue` is true only in the listing sent
   right after `story.view` when entering a **fresh** instance of a story with a
   compatible autosave; resuming a live instance sends no listing.
@@ -1329,7 +1349,10 @@ Client messages (all strict, unknown fields rejected):
 - `story.save {slot}`: `slot` in `1..=9`; slot `0` answers `invalid_slot`.
   Answered by `story.saved`.
 - `story.restore {slot}`: `slot` in `0..=9`. Answered by `story.restored` and
-  the new view, or `slot_empty`, `slot_corrupt`, `slot_incompatible`.
+  the new view, or `slot_empty`, `slot_corrupt`, `slot_incompatible`. A slot
+  of a declared compatible revision whose state no longer re-validates
+  against the current pack is `slot_incompatible`; one of the exact revision
+  that fails is `slot_corrupt`.
 - `story.deleteSlot {slot}`: `slot` in `0..=9`. Answered by the remaining
   `story.slots` or `slot_empty`.
 - `story.slots {}` and `story.continue {}` (restore of slot `0`): exactly an
@@ -1352,8 +1375,9 @@ cue). An idle instance (30 minutes by default) is evicted; its progress
 survives only in the autosave slot, when the server has a store that
 implements slots.
 
-Telnet renders the same view as text: title, prose, events, speaker lines,
-present characters, stats and inventory, then every action numbered
+Telnet renders the same view as text: title, the background's alt text as
+`[…]` when the view carries a background image, prose, events, speaker
+lines, present characters, stats and inventory, then every action numbered
 `1) …` in the browser's order (choices, dialogue options, verbs or
 `VERB → target` pairs). GMCP clients that negotiated `Tiamud.Story 1` receive
 `Tiamud.Story.View` (`viewRev`, `title`, `turn`, `score`, `ending`,
@@ -1370,11 +1394,13 @@ cues use `Client.Media.Play`/`Stop` only with the media opt-in.
 A StoryPack v3 with a parser world ([ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md),
 proposed) is played with free text. While such a story accepts text, its
 `scene` item carries `prompt: {text, question}`: `text` is the prompt to show
-(`>` by default) and `question` is true while the parser waits for the answer
+(the pack's `world.prompt` in the instance language, at most 64 bytes, else
+`>`) and `question` is true while the parser waits for the answer
 to the question shown in the last `reply` block (which object, or what with).
 `prompt` is absent after the ending, while a dialogue must be answered and in
-every gamebook or menu story. The instance plays in the pack's language
-(Spanish when the pack has a Spanish lexicon, else its first lexicon).
+every gamebook or menu story. The instance plays in the language chosen on
+entry among the world's lexicons (by default Spanish when the pack has a
+Spanish lexicon, else its first lexicon); the parser uses that lexicon.
 
 - Client `story.command {text, viewRev}`: one line of at most 256 UTF-8 bytes
   typed against view `viewRev` (strict; a longer `text`, a missing field or

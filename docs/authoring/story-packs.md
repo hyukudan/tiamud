@@ -16,9 +16,11 @@ interactive fiction — rooms with exits, objects, rules and a default library
 driven by free text — proposed in
 [ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md)
 (see [Parser worlds](#parser-worlds-format-v3)). ADR 0025, 0028 and 0031 are
-still **Proposed**. The server's single-player story sessions (S2, ADR 0029)
-play v1/v2 packs through `story.*`; there is no `story.command` message yet,
-so a v3 parser world is only playable offline with `tiamud-story play`. Optional
+still **Proposed**. The server's story sessions (S2, ADR 0029) play v1–v3
+packs through `story.*` (parser worlds through `story.command`), with
+reviewed background and portrait images, a per-session language and
+declared save-compatible revisions (see
+[Presentation, languages and save compatibility](#presentation-languages-and-save-compatibility)). Optional
 [Lua scripts](#lua-scripts-format-v3-optional) (ADR 0034, proposed) run
 only in the offline tools; the server rejects packs that declare them.
 
@@ -36,9 +38,10 @@ The reviewed Spanish examples are the gamebook
 [`lluvia-de-neon.story.json`](../../crates/story-core/fixtures/lluvia-de-neon.story.json)
 (format v2), and the lighthouse text adventure
 [`parser/faro-de-punta-gris.story.json`](../../crates/story-core/fixtures/parser/faro-de-punta-gris.story.json)
-(format v3). The v3 fixture lives in a subdirectory because the S2 server
-catalog loads every `*.story.json` directly inside `fixtures/`, and a parser
-world cannot be played there yet.
+(format v3). The v3 fixture lives in the `parser/` subdirectory; the server
+catalog scans `TIAMUD_STORY_DIR` and its direct subdirectories, so the whole
+`fixtures/` directory, with its reviewed `story-media.json`, is a playable
+catalog.
 
 ## Document
 
@@ -376,6 +379,10 @@ with its walkthrough
   [Library messages](#library-messages)).
 - `intro` is shown once, before the first room description; `max_score`
   turns the score line into "N de M puntos".
+- `prompt` (optional) is the parser prompt per locale, for example
+  `{ "es": "¿Qué haces?", "en": "What now?" }`: one line of at most 64 bytes
+  per locale, shown by the browser next to the command field and sent to
+  GMCP clients. Without it the prompt is `>`.
 
 ### Rooms and exits
 
@@ -522,10 +529,12 @@ replaced through `messages`).
 Put the pack in `TIAMUD_STORY_DIR` or in one of its direct subdirectories
 (for example `parser/`); the server validates it at startup like any other
 pack. Players enter with `historia <id>` and then type commands: the browser
-shows a command field with the prompt (`>`), Up/Down history and the replies;
-Telnet treats every line that is not a reserved story word as a command.
-The instance plays in Spanish when the pack has an `es` lexicon, otherwise in
-its first lexicon. On the server the meta commands do this: `deshacer` undoes
+shows a command field with the prompt (`world.prompt`, else `>`), Up/Down
+history and the replies; Telnet treats every line that is not a reserved
+story word as a command. By default the instance plays in Spanish when the
+pack has an `es` lexicon, otherwise in its first lexicon; `historia <id> en`
+picks another lexicon of the pack (see [Languages](#languages-and-the-session-locale)).
+On the server the meta commands do this: `deshacer` undoes
 the last input, `reiniciar` asks for confirmation and restarts when typed
 again (and can itself be undone), `guardar`/`cargar` without a number point
 to the save slots (`guardar 3`, `cargar 0` or the saved-games panel),
@@ -566,6 +575,86 @@ replies, parser questions and errors — arrives as text blocks after any menu
 or dialogue text, rendered in every lexicon language. `prompt` tells a client
 that free text is accepted; it is absent after the end and while a v2
 dialogue waits. Authored ids, object state and rules never appear.
+
+## Presentation, languages and save compatibility
+
+### Background and portrait images
+
+`background` and portrait ids are reviewed asset ids, never URLs. The server
+turns an id into an image only through the reviewed story media map,
+`story-media.json` at the top of `TIAMUD_STORY_DIR` (format 2):
+
+```json
+{
+  "formatVersion": 2,
+  "assets": { "musica-lluvia": "assets/<sha256>/audio-lluvia.ogg" },
+  "images": {
+    "fondo-oficina": {
+      "manifest": "assets/<sha256>/manifest.json",
+      "alt": { "es": "Un despacho de detective de noche…", "en": "A detective's office at night…" }
+    }
+  }
+}
+```
+
+- `assets` maps audio cue ids to content-addressed audio, as before (format
+  1 files with only `assets` still load).
+- `images` (at most 256) maps a background or portrait id to the
+  **manifest** of an opaque image published by the asset pipeline
+  (`tiamud-assets build`, AVIF/WebP/JPEG variants at 640 and 1280 px with
+  dimensions, hashes, author, licence, provenance and review time, the same
+  schema as world scenes) and its alternative text in 1–16 locales (1–512
+  bytes each, one line). The manifest's own English `alt` is not used by
+  stories; the map's alt is resolved in the session language.
+- An id that is missing from the map simply has no image: the scene text
+  and the character names already carry everything. Unreviewed paths,
+  remote URLs, missing alt text or unknown fields fail the server start.
+
+The browser downloads the image only when multimedia is allowed (not in
+reader mode, with Save-Data or with images off); otherwise, and when the
+manifest or the picture cannot be loaded, it shows the background's alt text
+instead. Telnet prints the background's alt text as `[…]` under the scene
+title; portraits stay as the "Presentes" names. The sample art of
+`lluvia-de-neon` (office and club backgrounds, Lola's and Dámaso's neutral
+portraits) is mapped in
+[`crates/story-core/fixtures/story-media.json`](../../crates/story-core/fixtures/story-media.json);
+the alley and dawn backgrounds and the other expressions are deliberately
+unmapped. Its sources and provenance are in
+[`apps/web/artwork/story-lluvia/`](../../apps/web/artwork/story-lluvia/PROVENANCE.md).
+
+### Languages and the session locale
+
+A story can be played in each of its languages: the lexicons of a parser
+world (`world.lexicons`), or the locales of the pack title for packs without
+a parser. Spanish is the default when offered, else the first one. Players
+choose when they enter: `historia <id> en` (`story <id> en`, also
+`historia compartir <id> en`); `en-GB` selects `en`. A language the story
+does not offer is refused with `unknown_locale`. Every text of the view —
+title, scene, labels, events, parser replies, image alt text — and the parser
+lexicon follow the session language; untranslated text falls back as
+described under *Localized text*. The language is fixed when the instance
+starts: re-entering a live instance keeps it, and people joining a shared
+story play in the host's language. Server interface lines (help, hints,
+errors) stay Spanish. Translate the title of a v1/v2 pack into every
+language you want to offer.
+
+### Compatible revisions
+
+A save slot is bound to the SHA-256 of the exact pack file. When a new
+revision only changes text or presentation, list the older revisions whose
+saved games should still load:
+
+```json
+"compatible_revisions": ["<sha256 of the previous .story.json file>"]
+```
+
+At most 16 lowercase hexadecimal digests, unique, format v3 only (`fmt
+--upgrade` first). Get the digest with `sha256sum old.story.json` before
+replacing the file. A slot written by a listed revision is shown as
+compatible and is re-validated against the new pack when loaded: if its
+state no longer fits (an unknown node, item or object, a changed variable
+set or bound), loading fails with `slot_incompatible` and nothing changes.
+Nothing is migrated, so do not list a revision whose state shape you changed.
 
 ## Lua scripts (format v3, optional)
 
@@ -694,6 +783,9 @@ change everything it is granted, count its `goto` grants as exits and
 | Test script file / steps | 256 KiB / 4096 |
 | Interactive input line | 256 bytes (longer lines are discarded whole) |
 | Lua scripts / source per script / all sources | 32 / 64 KiB / 256 KiB |
+| Parser prompt | 64 bytes per locale, one line |
+| Compatible revisions | 16 SHA-256 digests |
+| Story media map: audio assets / images / alt text | 256 / 256 / 1–16 locales of 512 bytes |
 | Script grants per list / arguments per reference | 64 / 8 |
 | Script calls per step or view / intents per call | 16 / 32 |
 

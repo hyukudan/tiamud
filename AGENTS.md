@@ -127,8 +127,10 @@ matriz, memoria y documentación pública a la vez.
   conectada a las sesiones S2 (`story.save/restore/slots/deleteSlot/continue`,
   Telnet `guardar/cargar/partidas/borrar/continuar`, autoguardado en el slot 0
   al salir, al desalojar por inactividad y en el apagado ordenado; revalida con
-  `StoryState::from_json_slice` contra el SHA-256 exacto del pack y no persiste
-  el historial de deshacer). Sus pruebas PostgreSQL no se han ejecutado contra
+  `StoryState::from_json_slice` contra el SHA-256 exacto del pack o una
+  revisión declarada en `compatible_revisions` de StoryPack v3, que si ya no
+  encaja falla con `slot_incompatible`, y no persiste el historial de
+  deshacer). Sus pruebas PostgreSQL no se han ejecutado contra
   un servidor real.
 - Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
   sufijo diagnóstico cubierto de 10.000 secuencias.

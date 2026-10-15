@@ -160,3 +160,16 @@ scripts v2, `fmt --upgrade` y el esquema JSON v2 publicado.
 - **Repetición derivada del texto mostrado**: viola la regla de no derivar
   estado de la prosa.
 - **Truncar vistas grandes**: perdería contenido jugable; se pagina.
+
+## Nota de estado (2026-10-15): fondos y retratos entregados como imagen
+
+Añadida después de la decisión; no cambia el estado propuesto. Los ids de
+`background` y de retrato siguen siendo ids de activo revisado, nunca URL. El
+servidor los resuelve solo mediante el mapa revisado `story-media.json`
+(formato 2, `images`: manifiesto de pipeline `assets/<sha256>/manifest.json`
+con variantes AVIF/WebP/JPEG, licencia y procedencia, más texto alternativo
+localizado) y envía `scene.background` y `portrait.image` como
+`{manifest, alt}`; un id sin entrada no produce imagen y el texto conserva
+todo lo jugable. El navegador muestra fondo y retratos solo con multimedia
+permitida y cae al texto alternativo; Telnet imprime el alt del fondo. Ver el
+[registro](../project/log/2026-10-15-story-presentation-locale-compat.md).

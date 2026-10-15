@@ -105,14 +105,35 @@ than 1,024 directory entries stops the server.
   running when a process is killed are lost. Loading a slot re-validates it
   against the exact pack bytes (SHA-256): **replacing a `*.story.json` with
   a different revision makes earlier slots of that story unloadable**
-  (`slot_incompatible`), by design, until StoryPack can declare compatible
-  revisions. The undo history is not persisted. Per account: 16 stories with
+  (`slot_incompatible`), by design, unless the new StoryPack v3 lists the old
+  file's SHA-256 in `compatible_revisions` (at most 16); such slots are
+  re-validated against the new pack and still fail closed with
+  `slot_incompatible` when their state no longer fits. Record
+  `sha256sum <old>.story.json` before replacing a pack. The undo history is
+  not persisted. Per account: 16 stories with
   saves, 1 MiB of state, 6 slot writes and 30 slot reads per minute. Backups
   of the database include the slots.
-- An optional `story-media.json` in the same directory,
+- An optional `story-media.json` at the top of the directory (≤64 KiB) is the
+  reviewed story media map. Format 1,
   `{"formatVersion":1,"assets":{"<asset-id>":"assets/<sha256>/audio-<name>.ogg"}}`,
   maps authored cue asset ids to reviewed content-addressed audio already
-  served by the web build. Unmapped cues never play.
+  served by the web build. Format 2 adds `"images": {"<id>": {"manifest":
+  "assets/<sha256>/manifest.json", "alt": {"es": "…", "en": "…"}}}` (≤256
+  images, 1–16 alt locales of ≤512 bytes) for scene backgrounds and character
+  portraits. Each manifest must be a bundle published by `tiamud-assets
+  build` (atmosphere profile: AVIF/WebP/JPEG at 640/1280 px with author,
+  licence, provenance and review time) and served from the web build's
+  `/assets/`, exactly like world scene images: deploy the bundle with the web
+  assets before (or together with) the map. The server checks only the path
+  shape and the alt text at startup and sends `{manifest, alt}`; browsers
+  fetch and integrity-check the manifest and fall back to the alt text when
+  it is missing, so a forgotten bundle loses the picture, never play. Unmapped
+  cues never play and unmapped images are never shown. The reviewed fixtures
+  directory `crates/story-core/fixtures` ships such a map for the
+  `lluvia-de-neon` sample art in `apps/web/public/assets/`.
+- Players choose a story language on entry (`historia <id> en`) among the
+  pack's lexicons (parser stories) or title locales; Spanish is the default
+  when offered. No setting is needed.
 
 Story metrics carry no story, node or account labels:
 `tiamud_story_catalog_stories`, `tiamud_story_instances`,
