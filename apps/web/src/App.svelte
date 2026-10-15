@@ -300,6 +300,19 @@
     </div>
   </header>
 
+  {#if session.storyInvitation && !session.story}
+    {@const invitation = session.storyInvitation}
+    <aside class="notice story-invitation" aria-labelledby="story-invitation-text">
+      <p id="story-invitation-text" role="status">
+        {invitation.host} invites you to the shared story «<span lang="es">{invitation.title}</span>».
+        Join code {invitation.code}.
+      </p>
+      <button type="button" onclick={() => session.joinStory(invitation.code)}>Join story</button>
+      <button type="button" onclick={() => session.joinStory(invitation.code, true)}>Watch</button>
+      <button type="button" aria-label="Dismiss invitation" onclick={session.dismissStoryInvitation}>×</button>
+    </aside>
+  {/if}
+
   {#if session.notice}
     <aside class:warning={session.notice.level === 'warning'} class:error={session.notice.level === 'error'} class="notice">
       <p role={session.notice.level === 'error' ? 'alert' : 'status'}>{session.notice.message}</p>
@@ -330,6 +343,15 @@
           onslots={session.refreshStorySlots}
           oncontinue={session.continueStory}
           ondismisscontinue={session.dismissStoryContinue}
+          lobby={session.storyLobby}
+          tally={session.storyTally}
+          deadline={session.storyDeadline}
+          votes={session.storyVotes}
+          onshare={session.shareStory}
+          oninvite={session.inviteToStory}
+          onkick={session.kickFromStory}
+          onmode={session.setStoryMode}
+          onwithdraw={session.withdrawStoryVote}
         />
       {:else if session.scene}
         {#if atmosphereImage}

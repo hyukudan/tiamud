@@ -183,10 +183,15 @@ async fn two_browsers_share_vote_and_recover() {
         find(&voted, "action.result")["message"],
         format!("Votas por: {}", first_choice(&view).1)
     );
+    // The reply itself carries the tally (an acknowledgement).
+    assert_eq!(types(&voted), ["action.result", "story.tally"]);
+    assert_eq!(find(&voted, "story.tally")["voted"], 1);
+    assert_eq!(find(&voted, "story.tally")["yourVote"], leaf.as_str());
     aria.pump().await;
-    let tally = aria.take();
-    assert_eq!(find(&tally, "story.tally")["voted"], 1);
-    assert_eq!(find(&tally, "story.tally")["yourVote"], leaf.as_str());
+    assert!(aria.take().is_empty());
+    // Repeating the same vote changes nothing but is still acknowledged.
+    assert!(aria.command("1").await);
+    assert_eq!(types(&aria.take()), ["action.result", "story.tally"]);
     bruno.pump().await;
     let tally = find(&bruno.take(), "story.tally").clone();
     assert_eq!(tally["voted"], 1);
@@ -236,9 +241,10 @@ async fn two_browsers_share_vote_and_recover() {
             .await
     );
     let decided = bruno.take();
+    assert_eq!(types(&decided), ["story.view", "story.tally"]);
     assert_eq!(view_rev(find(&decided, "story.view")), view_rev(&view) + 1);
     bruno.pump().await;
-    assert_eq!(types(&bruno.take()), ["story.tally"], "no duplicate view");
+    assert!(bruno.take().is_empty(), "no duplicate view");
     aria.pump().await;
     let aria_decided = aria.take();
     assert_eq!(types(&aria_decided), ["story.view", "story.tally"]);

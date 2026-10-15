@@ -28,16 +28,24 @@ import type {
   ServerNotice,
   ServerWelcome,
   StoryChooseData,
+  StoryDecisionMode,
   StoryEmptyData,
   StoryEntered,
   StoryError,
+  StoryInvitation,
+  StoryJoinData,
   StoryLeft,
+  StoryLobby,
   StoryMenuData,
+  StoryModeData,
+  StoryNameData,
   StoryRestored,
   StorySaved,
   StorySlotData,
   StorySlots,
+  StoryTally,
   StoryView,
+  StoryVoteData,
   SyncPlayer,
   SyncRequestData,
   SyncScene,
@@ -46,9 +54,16 @@ import type {
 } from './generated/protocol';
 import { isRecord } from './guards';
 import {
+  MAX_STORY_VOTE_SECONDS,
+  MIN_STORY_VOTE_SECONDS,
+  STORY_CHOICE_ID,
+  STORY_JOIN_CODE,
   parseStoryEntered,
   parseStoryError,
+  parseStoryInvitation,
   parseStoryLeft,
+  parseStoryLobby,
+  parseStoryTally,
   parseStoryRestored,
   parseStorySaved,
   parseStorySlots,
@@ -635,7 +650,10 @@ export type ServerMessage =
   | Envelope<'story.error', StoryError>
   | Envelope<'story.slots', StorySlots>
   | Envelope<'story.saved', StorySaved>
-  | Envelope<'story.restored', StoryRestored>;
+  | Envelope<'story.restored', StoryRestored>
+  | Envelope<'story.lobby', StoryLobby>
+  | Envelope<'story.tally', StoryTally>
+  | Envelope<'story.invitation', StoryInvitation>;
 
 export type LiveServerMessage = Exclude<
   ServerMessage,
@@ -707,6 +725,18 @@ export type StoryDeleteSlot = Envelope<'story.deleteSlot', StorySlotData>;
 export type StoryListSlots = Envelope<'story.slots', StoryEmptyData>;
 
 export type StoryContinue = Envelope<'story.continue', StoryEmptyData>;
+
+export type StoryShare = Envelope<'story.share', StoryEmptyData>;
+
+export type StoryJoin = Envelope<'story.join', StoryJoinData>;
+
+export type StoryInvite = Envelope<'story.invite', StoryNameData>;
+
+export type StoryKick = Envelope<'story.kick', StoryNameData>;
+
+export type StoryMode = Envelope<'story.mode', StoryModeData>;
+
+export type StoryVote = Envelope<'story.vote', StoryVoteData>;
 
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -2652,6 +2682,18 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const data = parseStoryRestored(candidate.data);
       return data ? { ...base, type: candidate.type, data } : undefined;
     }
+    case 'story.lobby': {
+      const data = parseStoryLobby(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.tally': {
+      const data = parseStoryTally(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.invitation': {
+      const data = parseStoryInvitation(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
     case 'server.heartbeat': {
       const nonce = positiveIntegerOrUndefined(candidate.data.nonce);
       const timeoutMs = positiveIntegerOrUndefined(candidate.data.timeoutMs);
@@ -3115,4 +3157,76 @@ export function createStoryListSlots(): StoryListSlots {
 /** `story.continue`: restores the autosave offered on entry. */
 export function createStoryContinue(): StoryContinue {
   return { v: PROTOCOL_VERSION, type: 'story.continue', data: {} };
+}
+
+// --- Shared story instances (ADR 0033) -------------------------------------
+
+/** `story.share`: opens the current story to other characters. */
+export function createStoryShare(): StoryShare {
+  return { v: PROTOCOL_VERSION, type: 'story.share', data: {} };
+}
+
+/** `story.join`: joins a shared story by its eight-character code. */
+export function createStoryJoin(code: string, spectate: boolean): StoryJoin {
+  const normalized = code.trim().toUpperCase();
+  if (!STORY_JOIN_CODE.test(normalized)) {
+    throw new Error('A join code has eight letters and digits.');
+  }
+  return { v: PROTOCOL_VERSION, type: 'story.join', data: { code: normalized, spectate } };
+}
+
+const CONTROL_CHARACTER = /\p{Cc}/u;
+
+function memberName(name: string): StoryNameData {
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || new TextEncoder().encode(trimmed).length > 64 ||
+    CONTROL_CHARACTER.test(trimmed)) {
+    throw new Error('A character name must be 1..64 bytes without control characters.');
+  }
+  return { name: trimmed };
+}
+
+/** `story.invite` (host): sends the join code to a connected character. */
+export function createStoryInvite(name: string): StoryInvite {
+  return { v: PROTOCOL_VERSION, type: 'story.invite', data: memberName(name) };
+}
+
+/** `story.kick` (host): removes a participant by name. */
+export function createStoryKick(name: string): StoryKick {
+  return { v: PROTOCOL_VERSION, type: 'story.kick', data: memberName(name) };
+}
+
+/** `story.mode` (host): decision mode and, optionally, the vote window. */
+export function createStoryMode(mode: StoryDecisionMode, voteSeconds?: number): StoryMode {
+  if (mode !== 'host' && mode !== 'vote' && mode !== 'turns') {
+    throw new Error('Unknown decision mode.');
+  }
+  if (voteSeconds !== undefined && (!Number.isSafeInteger(voteSeconds) ||
+    voteSeconds < MIN_STORY_VOTE_SECONDS || voteSeconds > MAX_STORY_VOTE_SECONDS)) {
+    throw new Error(
+      `The vote window must be ${MIN_STORY_VOTE_SECONDS}..${MAX_STORY_VOTE_SECONDS} seconds.`,
+    );
+  }
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'story.mode',
+    data: voteSeconds === undefined ? { mode } : { mode, voteSeconds },
+  };
+}
+
+/**
+ * `story.vote`: a vote for the action whose opaque leaf id is `choiceId`
+ * (choice, dialogue option, untargeted verb or verb target) of view
+ * `viewRev`; `undefined` withdraws the vote.
+ */
+export function createStoryVote(choiceId: string | undefined, viewRev: number): StoryVote {
+  if ((choiceId !== undefined && !STORY_CHOICE_ID.test(choiceId)) ||
+    !Number.isSafeInteger(viewRev) || viewRev < 1 || viewRev > 0xffff_ffff) {
+    throw new Error('A story vote needs an opaque choice id and a positive view revision.');
+  }
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'story.vote',
+    data: choiceId === undefined ? { viewRev } : { choiceId, viewRev },
+  };
 }

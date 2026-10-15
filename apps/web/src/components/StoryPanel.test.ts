@@ -121,3 +121,84 @@ describe('StoryPanel', () => {
     expect(body).not.toContain('Continue saved game');
   });
 });
+
+describe('StoryPanel (shared story)', () => {
+  const CHOICE = 'c0123456789abcdef';
+  const OTHER = 'c1123456789abcdef';
+  const lobby = (you: 'host' | 'player' | 'spectator', mode: 'vote' | 'host' | 'turns' = 'vote') => ({
+    mode,
+    voteSeconds: 60,
+    you,
+    ...(you === 'host' ? { code: 'ABCD2345' } : {}),
+    seats: [
+      { name: 'Aria', role: 'host' as const, connected: true, turn: mode === 'turns' },
+      { name: 'Bruno', role: 'player' as const, connected: false, turn: false },
+    ],
+    spectators: 1,
+    maxSeats: 8,
+    maxSpectators: 32,
+  });
+  const shared = (you: 'host' | 'player' | 'spectator', mode: 'vote' | 'host' | 'turns' = 'vote') => ({
+    ...props(view([
+      scene(),
+      { type: 'choice', id: CHOICE, label: 'Avanzar' },
+      { type: 'choice', id: OTHER, label: 'Huir' },
+    ], false)),
+    lobby: lobby(you, mode),
+    tally: {
+      viewRev: 3, mode, choices: [{ choiceId: CHOICE, votes: 2 }], voted: 2, eligible: 2,
+      remainingSeconds: 30, yourVote: CHOICE,
+    },
+    deadline: Date.now() + 30_000,
+    votes: you !== 'spectator' && (mode === 'vote' || (mode === 'host' && you !== 'host')),
+    onsave: () => undefined,
+    onrestore: () => undefined,
+    onshare: () => undefined,
+    oninvite: () => true,
+    onkick: () => undefined,
+    onmode: () => undefined,
+    onwithdraw: () => undefined,
+  });
+
+  it('shows seats, the code, vote counts, the countdown and host controls to the host', () => {
+    const { body } = render(StoryPanel, { props: shared('host') });
+    for (const text of [
+      'Shared story', 'Majority vote · 60 s window · you are the host.', 'Join code:', 'ABCD2345',
+      'aria-label="Seats"', 'Aria', 'disconnected, seat held', 'aria-label="Remove Bruno"',
+      'Seats 2/8 · spectators 1/32', 'Votes: 2 of 2.', 'You voted.', '· 2 votes',
+      'role="timer"', 'The vote closes in 30 s.', 'Withdraw my vote', 'aria-label="Host controls"',
+      'Decision mode', 'Apply rules', 'aria-label="Invite a character"', 'Saved games',
+      'Press 1–2 to vote.',
+    ]) expect(body, text).toContain(text);
+    expect(body).toContain('aria-pressed="true"');
+    expect(body).toContain('aria-pressed="false"');
+    expect(body).not.toContain('Share story');
+    expect(body).not.toContain(CHOICE);
+  });
+
+  it('hides the code, host controls and saves from players', () => {
+    const { body } = render(StoryPanel, { props: shared('player') });
+    expect(body).toContain('you are the player.');
+    for (const text of ['ABCD2345', 'Remove Bruno', 'Host controls', 'Saved games']) {
+      expect(body, text).not.toContain(text);
+    }
+  });
+
+  it('disables every action for spectators', () => {
+    const { body } = render(StoryPanel, { props: shared('spectator') });
+    expect(body).toContain('You are watching as a spectator.');
+    expect(body).not.toContain('Press 1');
+    const choices = body.slice(body.indexOf('story-choices'));
+    expect(choices.match(/<button[^>]*disabled/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('names the turn holder in turns mode and offers sharing to a solo story', () => {
+    const { body } = render(StoryPanel, { props: shared('host', 'turns') });
+    expect(body).toContain('Turn: Aria.');
+    expect(body).toContain('The turn passes in 30 s.');
+    const solo = render(StoryPanel, {
+      props: { ...props(view([scene()])), onshare: () => undefined },
+    });
+    expect(solo.body).toContain('Share story');
+  });
+});

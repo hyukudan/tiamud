@@ -3,16 +3,23 @@
 // here before the session applies it.
 import type {
   MediaChannel,
+  StoryDecisionMode,
   StoryEnding,
   StoryEntered,
   StoryError,
   StoryErrorCode,
+  StoryInvitation,
   StoryItem,
   StoryLeft,
+  StoryLobby,
   StoryRestored,
   StorySaved,
+  StorySeat,
+  StorySeatRole,
   StorySlotSummary,
   StorySlots,
+  StoryTally,
+  StoryTallyEntry,
   StoryView,
 } from './generated/protocol';
 import { isRecord } from './guards';
@@ -32,7 +39,8 @@ const STORY_ERROR_CODES: readonly StoryErrorCode[] = [
   'disabled', 'unknown_story', 'already_in_story', 'capacity', 'not_in_story',
   'stale_view', 'unknown_choice', 'ended', 'nothing_to_undo', 'busy', 'internal',
   'slots_unavailable', 'invalid_slot', 'slot_empty', 'slot_corrupt', 'slot_incompatible',
-  'slot_capacity', 'rate_limited',
+  'slot_capacity', 'rate_limited', 'host_only', 'spectator', 'not_your_turn', 'unknown_code',
+  'seats_full', 'not_shared', 'unknown_member', 'invalid_setting',
 ];
 
 /** Highest save slot; `0` is the autosave. At most ten slots per story. */
@@ -199,10 +207,126 @@ export function parseStoryEntered(data: Record<string, unknown>): StoryEntered |
 }
 
 export function parseStoryLeft(data: Record<string, unknown>): StoryLeft | undefined {
-  return exactKeys(data, ['reason']) && (data.reason === 'left' || data.reason === 'evicted')
+  return exactKeys(data, ['reason']) && (data.reason === 'left' || data.reason === 'evicted' ||
+    data.reason === 'kicked' || data.reason === 'ended')
     ? { reason: data.reason }
     : undefined;
 }
+
+// --- Shared story instances (ADR 0033) -------------------------------------
+
+/** Absolute caps of one shared instance and the vote window bounds. */
+export const MAX_STORY_SEATS = 8;
+export const MAX_STORY_SPECTATORS = 32;
+export const MIN_STORY_VOTE_SECONDS = 30;
+export const MAX_STORY_VOTE_SECONDS = 120;
+export const STORY_JOIN_CODE = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/;
+const MAX_MEMBER_NAME = 64;
+
+const decisionMode = (value: unknown): StoryDecisionMode | undefined =>
+  value === 'host' || value === 'vote' || value === 'turns' ? value : undefined;
+
+const seatRole = (value: unknown): StorySeatRole | undefined =>
+  value === 'host' || value === 'player' || value === 'spectator' ? value : undefined;
+
+const boundedCount = (value: unknown, maximum: number): number | undefined =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maximum
+    ? value
+    : undefined;
+
+const parseSeat = (value: unknown): StorySeat | undefined => {
+  if (!isRecord(value) || !exactKeys(value, ['name', 'role', 'connected', 'turn'])) return undefined;
+  const name = text(value.name, MAX_MEMBER_NAME);
+  const role = seatRole(value.role);
+  return name && (role === 'host' || role === 'player') &&
+    typeof value.connected === 'boolean' && typeof value.turn === 'boolean'
+    ? { name, role, connected: value.connected, turn: value.turn }
+    : undefined;
+};
+
+/**
+ * `story.lobby`: at most eight seats with exactly one host (the first seat),
+ * at most one turn holder, and the join code only when the recipient hosts.
+ */
+export function parseStoryLobby(data: Record<string, unknown>): StoryLobby | undefined {
+  if (!exactKeys(
+    data,
+    ['mode', 'voteSeconds', 'you', 'seats', 'spectators', 'maxSeats', 'maxSpectators'],
+    ['code'],
+  )) return undefined;
+  const mode = decisionMode(data.mode);
+  const you = seatRole(data.you);
+  const voteSeconds = typeof data.voteSeconds === 'number' && Number.isSafeInteger(data.voteSeconds) &&
+    data.voteSeconds >= MIN_STORY_VOTE_SECONDS && data.voteSeconds <= MAX_STORY_VOTE_SECONDS
+    ? data.voteSeconds
+    : undefined;
+  const maxSeats = boundedCount(data.maxSeats, MAX_STORY_SEATS);
+  const maxSpectators = boundedCount(data.maxSpectators, MAX_STORY_SPECTATORS);
+  const spectators = boundedCount(data.spectators, MAX_STORY_SPECTATORS);
+  const seats = boundedArray(data.seats, MAX_STORY_SEATS, parseSeat);
+  if (!mode || !you || voteSeconds === undefined || maxSeats === undefined ||
+    maxSpectators === undefined || spectators === undefined || !seats ||
+    seats.length > maxSeats || spectators > maxSpectators) return undefined;
+  if (seats.length > 0 && (seats[0].role !== 'host' ||
+    seats.slice(1).some((seat) => seat.role === 'host'))) return undefined;
+  if (seats.filter((seat) => seat.turn).length > (mode === 'turns' ? 1 : 0)) return undefined;
+  const code = data.code;
+  if (code !== undefined &&
+    (you !== 'host' || typeof code !== 'string' || !STORY_JOIN_CODE.test(code))) {
+    return undefined;
+  }
+  const lobby: StoryLobby = { mode, voteSeconds, you, seats, spectators, maxSeats, maxSpectators };
+  if (typeof code === 'string') lobby.code = code;
+  return lobby;
+}
+
+const parseTallyEntry = (value: unknown): StoryTallyEntry | undefined => {
+  if (!isRecord(value) || !exactKeys(value, ['choiceId', 'votes'])) return undefined;
+  const choiceId = opaqueId(value.choiceId);
+  const votes = boundedCount(value.votes, MAX_STORY_SEATS);
+  return choiceId && votes !== undefined && votes > 0 ? { choiceId, votes } : undefined;
+};
+
+/** `story.tally`: public counts only; never voter identities. */
+export function parseStoryTally(data: Record<string, unknown>): StoryTally | undefined {
+  if (!exactKeys(
+    data,
+    ['viewRev', 'mode', 'choices', 'voted', 'eligible'],
+    ['remainingSeconds', 'yourVote'],
+  )) return undefined;
+  const viewRev = u32(data.viewRev, 1);
+  const mode = decisionMode(data.mode);
+  const choices = boundedArray(data.choices, MAX_STORY_SEATS, parseTallyEntry);
+  const voted = boundedCount(data.voted, MAX_STORY_SEATS);
+  const eligible = boundedCount(data.eligible, MAX_STORY_SEATS);
+  const remaining = data.remainingSeconds === undefined
+    ? undefined
+    : boundedCount(data.remainingSeconds, MAX_STORY_VOTE_SECONDS);
+  const yourVote = data.yourVote === undefined ? undefined : opaqueId(data.yourVote);
+  if (viewRev === undefined || !mode || !choices || voted === undefined || eligible === undefined ||
+    (data.remainingSeconds !== undefined && remaining === undefined) ||
+    (data.yourVote !== undefined && !yourVote)) return undefined;
+  const ids = choices.map((entry) => entry.choiceId);
+  if (new Set(ids).size !== ids.length ||
+    choices.reduce((sum, entry) => sum + entry.votes, 0) !== voted ||
+    (yourVote !== undefined && !ids.includes(yourVote))) return undefined;
+  const tally: StoryTally = { viewRev, mode, choices, voted, eligible };
+  if (remaining !== undefined) tally.remainingSeconds = remaining;
+  if (yourVote !== undefined) tally.yourVote = yourVote;
+  return tally;
+}
+
+/** `story.invitation`: who invited this character, to what, with which code. */
+export function parseStoryInvitation(data: Record<string, unknown>): StoryInvitation | undefined {
+  if (!exactKeys(data, ['host', 'storyId', 'title', 'code'])) return undefined;
+  const host = text(data.host, MAX_MEMBER_NAME);
+  const title = text(data.title, MAX_STORY_LABEL);
+  return host && title && typeof data.storyId === 'string' && STORY_ID.test(data.storyId) &&
+    typeof data.code === 'string' && STORY_JOIN_CODE.test(data.code)
+    ? { host, storyId: data.storyId, title, code: data.code }
+    : undefined;
+}
+
 
 export function parseStoryError(data: Record<string, unknown>): StoryError | undefined {
   if (!exactKeys(data, ['code', 'message'])) return undefined;

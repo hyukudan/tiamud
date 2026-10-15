@@ -15,6 +15,12 @@ import {
   createStoryLeave,
   createStoryMenu,
   createStoryUndo,
+  createStoryInvite,
+  createStoryJoin,
+  createStoryKick,
+  createStoryMode,
+  createStoryShare,
+  createStoryVote,
   createSyncRequest,
   createTalentPerform,
   parseServerMessage,
@@ -25,6 +31,7 @@ import {
   type SyncRecoveryData,
 } from './protocol';
 import { WEBSOCKET_SUBPROTOCOL } from './brand';
+import type { StoryDecisionMode } from './generated/protocol';
 
 export interface ConnectionCallbacks {
   onMessage(message: LiveServerMessage): void;
@@ -400,6 +407,42 @@ export class TiamudConnection {
   storyContinue(): boolean {
     if (this.#socket?.readyState !== WebSocket.OPEN) return false;
     this.#socket.send(JSON.stringify(createStoryContinue()));
+    return true;
+  }
+
+  storyVote(choiceId: string | undefined, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryVote(choiceId, viewRev)));
+    return true;
+  }
+
+  storyShare(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryShare()));
+    return true;
+  }
+
+  storyJoin(code: string, spectate: boolean): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryJoin(code, spectate)));
+    return true;
+  }
+
+  storyInvite(name: string): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryInvite(name)));
+    return true;
+  }
+
+  storyKick(name: string): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryKick(name)));
+    return true;
+  }
+
+  storyMode(mode: StoryDecisionMode, voteSeconds?: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryMode(mode, voteSeconds)));
     return true;
   }
 

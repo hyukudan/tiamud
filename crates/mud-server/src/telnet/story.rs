@@ -598,9 +598,26 @@ impl TelnetStory {
     ) -> io::Result<StoryLineOutcome> {
         match result {
             Ok(view) => {
-                // A shared view already delivered by a frame is not repeated.
-                if self.frames.is_none() || view.view_rev > self.sent_view_rev {
+                let Some(frame) = self
+                    .frames
+                    .as_mut()
+                    .map(|frames| frames.borrow_and_update().clone())
+                else {
                     self.render(output, input, view)?;
+                    return Ok(StoryLineOutcome::Handled);
+                };
+                // Shared: apply the frame published before the reply, never
+                // repeat a view, and always answer with the current tally.
+                if let Some(reason) = frame.removal(self.account) {
+                    return self.removed(output, input, reason);
+                }
+                let before = self.sent_tally;
+                self.push_frame(output, input, &frame, false)?;
+                if view.view_rev > self.sent_view_rev {
+                    self.render(output, input, view)?;
+                }
+                if self.sent_tally == before {
+                    self.write_tally(output, input, &frame)?;
                 }
                 Ok(StoryLineOutcome::Handled)
             }

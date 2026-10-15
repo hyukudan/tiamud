@@ -229,17 +229,36 @@ impl WebStorySession {
             && queue_tally(outbound, sequence, frame.tally(self.account))
     }
 
-    /// Publishes a reply's view unless a shared frame already delivered it.
+    /// Answers an accepted input. A solo instance publishes the reply's
+    /// view. A shared one applies the latest frame now (the instance
+    /// publishes it before replying) and always answers with at least the
+    /// current tally, so an unchanged vote still acknowledges the request.
     fn publish_reply(
         &mut self,
         outbound: &OutboundHandle,
         sequence: &mut u64,
         view: StoryProjection,
     ) -> bool {
-        if self.frames.is_some() && view.view_rev <= self.sent_view_rev {
-            return true;
+        let Some(frame) = self
+            .frames
+            .as_mut()
+            .map(|frames| frames.borrow_and_update().clone())
+        else {
+            return self.publish(outbound, sequence, view);
+        };
+        if let Some(reason) = frame.removal(self.account) {
+            self.clear_link();
+            return queue_left(outbound, sequence, reason, self.audio);
         }
-        self.publish(outbound, sequence, view)
+        let before = self.sent_tally;
+        let mut sent = self.push_frame(outbound, sequence, &frame, false);
+        if view.view_rev > self.sent_view_rev {
+            sent &= self.publish(outbound, sequence, view);
+        }
+        if self.sent_tally == before {
+            sent &= queue_tally(outbound, sequence, frame.tally(self.account));
+        }
+        sent
     }
 
     /// `story.choose`, `story.dialogue` or `story.menu`.

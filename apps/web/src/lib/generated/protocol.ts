@@ -121,7 +121,7 @@ export type StoryLeftReason = "left" | "evicted" | "kicked" | "ended";
 
 export type StoryLeft = { reason: StoryLeftReason, };
 
-export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited" | "host_only" | "spectator" | "not_your_turn" | "unknown_code" | "seats_full" | "not_shared";
+export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited" | "host_only" | "spectator" | "not_your_turn" | "unknown_code" | "seats_full" | "not_shared" | "unknown_member" | "invalid_setting";
 
 export type StoryError = { code: StoryErrorCode, message: string, };
 
