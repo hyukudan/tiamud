@@ -8,6 +8,7 @@ use super::*;
 pub struct TradeId(pub u64);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum TradePhase {
     Requested,

@@ -45,3 +45,9 @@ rcgen = "0.13.2"
 tempfile.workspace = true
 # Paused clock for shared story vote windows and seat grace (ADR 0033).
 tokio = { workspace = true, features = ["test-util"] }
+# TypeScript generation is test-only: every `TS` derive is applied under
+# `cfg_attr(test, ...)`, so ts-rs never enters the release dependency graph.
+# `no-serde-warnings` silences the build-time notice for `deserialize_with`
+# on the two tri-state `action.perform` fields, whose TypeScript type is
+# given explicitly by a `ts(type = ...)` override.
+ts-rs = { version = "12.0.1", default-features = false, features = ["serde-compat", "no-serde-warnings"] }

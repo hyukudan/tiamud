@@ -109,3 +109,5 @@ pub struct AccountSnapshot {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod typescript;

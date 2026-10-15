@@ -50,22 +50,30 @@ pub struct TelepathyPlan {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SceneImage {
     pub alt: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(test, ts(optional = nullable))]
     pub localized_alt: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub manifest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub avif: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub webp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub jpeg: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub height: Option<u32>,
 }
 
@@ -73,6 +81,7 @@ pub struct SceneImage {
 /// URLs always refer to reviewed, immutable assets; transports still require
 /// explicit client consent before sending or playing a cue.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SceneAudio {
     pub channel: String,
@@ -82,6 +91,7 @@ pub struct SceneAudio {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SceneExit {
     pub id: String,
@@ -90,6 +100,7 @@ pub struct SceneExit {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SceneAction {
     pub label: String,
@@ -97,6 +108,7 @@ pub struct SceneAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum LootAccessView {
     Yours,
@@ -104,14 +116,17 @@ pub enum LootAccessView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SceneLootAccessView {
     pub access: LootAccessView,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub expires_in_ticks: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SceneItem {
     pub id: String,
@@ -126,15 +141,19 @@ pub struct SceneItem {
     pub transfer_policy: ItemTransferPolicy,
     pub bound_to_you: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub affix: Option<ItemAffixView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub container_capacity: Option<InventoryCapacityView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub loot: Option<SceneLootAccessView>,
     pub actions: Vec<SceneAction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SceneNpc {
     pub id: String,
@@ -146,6 +165,7 @@ pub struct SceneNpc {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct WeatherView {
     pub condition: String,
@@ -155,6 +175,7 @@ pub struct WeatherView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SceneView {
     pub view_id: String,
@@ -162,8 +183,10 @@ pub struct SceneView {
     pub title: String,
     pub prose: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub image: Option<SceneImage>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub audio: Option<SceneAudio>,
     pub exits: Vec<SceneExit>,
     pub items: Vec<SceneItem>,
@@ -177,6 +200,7 @@ pub struct SceneView {
 /// session. Content identifiers (quest and commodity slugs) are intentionally
 /// stable because clients need them to submit their corresponding actions.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerStateView {
     pub revision: u64,
@@ -187,20 +211,24 @@ pub struct PlayerStateView {
     pub map: DiscoveredMapView,
     pub quests: Vec<QuestView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub party: Option<PartyView>,
     pub party_invites: Vec<PartyInviteView>,
     pub economy: EconomyView,
     pub social: SocialView,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub trade: Option<TradeView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerCharacterView {
     pub name: String,
     pub lineage: LineageView,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub background: Option<BackgroundView>,
     pub base_class: ClassView,
     pub active_class: ClassView,
@@ -226,6 +254,7 @@ pub struct PlayerCharacterView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SkillView {
     pub id: String,
@@ -234,6 +263,7 @@ pub struct SkillView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerItemView {
     pub id: String,
@@ -252,13 +282,16 @@ pub struct PlayerItemView {
     pub can_give: bool,
     pub can_trade: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub affix: Option<ItemAffixView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub container_capacity: Option<InventoryCapacityView>,
     pub actions: Vec<SceneAction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EquippedItemView {
     pub id: String,
@@ -273,13 +306,16 @@ pub struct EquippedItemView {
     pub transfer_policy: ItemTransferPolicy,
     pub bound_to_you: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub affix: Option<ItemAffixView>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub container_capacity: Option<InventoryCapacityView>,
     pub actions: Vec<SceneAction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct InventoryCapacityView {
     pub used_slots: u16,
@@ -289,6 +325,7 @@ pub struct InventoryCapacityView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ItemAffixView {
     pub label: String,
@@ -298,6 +335,7 @@ pub struct ItemAffixView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RewardOddsView {
     pub selector: String,
@@ -309,15 +347,18 @@ pub struct RewardOddsView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RewardOddsGuaranteedRow {
     pub label: String,
     pub quantity: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub affix_pool_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RewardOddsWeightedRow {
     pub pool_label: String,
@@ -328,15 +369,18 @@ pub struct RewardOddsWeightedRow {
     pub probability_numerator: u64,
     pub probability_denominator: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub affix_pool_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RewardOddsAffixRow {
     pub parent_outcome_label: String,
     pub affix_label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub position: Option<AffixPosition>,
     pub attack_bonus_delta: i32,
     pub heal_amount_delta: i32,
@@ -355,6 +399,7 @@ pub struct ContainerContentsView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TradeOfferLineView {
     pub target: String,
@@ -364,6 +409,7 @@ pub struct TradeOfferLineView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TradeOfferView {
     pub coins: u64,
@@ -371,6 +417,7 @@ pub struct TradeOfferView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TradeView {
     pub id: String,
@@ -398,6 +445,7 @@ pub struct TradeContentsView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredMapView {
     pub current_room_id: String,
@@ -406,6 +454,7 @@ pub struct DiscoveredMapView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct MapRoomView {
     pub id: String,
@@ -414,15 +463,18 @@ pub struct MapRoomView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct MapPathView {
     pub from: String,
     pub direction: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub to: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct QuestView {
     pub id: String,
@@ -435,6 +487,7 @@ pub struct QuestView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PartyView {
     pub leader: bool,
@@ -443,6 +496,7 @@ pub struct PartyView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PartyMemberView {
     pub id: String,
@@ -452,6 +506,7 @@ pub struct PartyMemberView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PartyInviteView {
     pub leader_name: String,
@@ -460,6 +515,7 @@ pub struct PartyInviteView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct EconomyView {
     pub coins: u64,
@@ -471,6 +527,7 @@ pub struct EconomyView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct CommodityView {
     pub id: String,
@@ -479,6 +536,7 @@ pub struct CommodityView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ShopItemView {
     pub id: String,
@@ -491,12 +549,14 @@ pub struct ShopItemView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SocialView {
     pub online: Vec<OnlineCharacterView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct OnlineCharacterView {
     pub id: String,
