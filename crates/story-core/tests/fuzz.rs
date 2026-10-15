@@ -3,12 +3,15 @@
 //! exactly reproducible.
 
 use tiamud_story_core::{
-    Choice, CmpOp, Condition, Cue, DiceSpec, Effect, Ending, EndingKind, ItemDecl, LocalizedText,
-    Node, RollTest, StoryError, StoryInput, StoryPack, StoryState, Value, VariableDecl,
-    VariableKind, step, view,
+    CharacterDecl, Choice, CmpOp, Condition, Cue, Dialogue, DialogueNext, DialogueNode,
+    DialogueOption, DiceSpec, Effect, Ending, EndingKind, Hotspot, ItemDecl, LocalizedText,
+    MAX_VIEW_BYTES, Menu, MenuDefault, MenuEntry, MenuVerb, Node, Presence, Response, RollTest,
+    StoryError, StoryInput, StoryPack, StoryState, StoryView, TargetKind, TextBlock, Value,
+    VariableDecl, VariableKind, VerbDecl, step, view, view_pages,
 };
 
 const FIXTURE: &[u8] = include_bytes!("../fixtures/cripta-del-nigromante.story.json");
+const NOIR: &[u8] = include_bytes!("../fixtures/lluvia-de-neon.story.json");
 
 struct Gen(u64);
 
@@ -53,17 +56,70 @@ fn assert_bounded(pack: &StoryPack, state: &StoryState) {
 
 /// Random walk over available choices; on a validated pack every step with a
 /// view token must succeed.
+/// Every input the view offers: choices, then menu verb/target pairs, then
+/// dialogue options.
+fn actions(current: &StoryView) -> Vec<StoryInput> {
+    let mut out: Vec<StoryInput> = current
+        .choices
+        .iter()
+        .map(|choice| StoryInput::Choose {
+            token: choice.token.clone(),
+        })
+        .collect();
+    if let Some(menu) = &current.menu {
+        for verb in &menu.verbs {
+            if verb.needs_target {
+                out.extend(verb.targets.iter().map(|target| StoryInput::MenuAction {
+                    verb: verb.token.clone(),
+                    target: Some(target.token.clone()),
+                }));
+            } else {
+                out.push(StoryInput::MenuAction {
+                    verb: verb.token.clone(),
+                    target: None,
+                });
+            }
+        }
+    }
+    if let Some(dialogue) = &current.dialogue {
+        out.extend(
+            dialogue
+                .options
+                .iter()
+                .map(|option| StoryInput::DialogueChoice {
+                    token: option.token.clone(),
+                }),
+        );
+    }
+    out
+}
+
+fn assert_pages_bounded(pack: &StoryPack, state: &StoryState) {
+    // Locales only change which text is measured; one exercises the path.
+    for locale in ["es"] {
+        let pages = view_pages(pack, state, locale).expect("validated packs paginate");
+        assert!(!pages.is_empty());
+        for page in &pages {
+            assert!(serde_json::to_vec(page).unwrap().len() <= MAX_VIEW_BYTES);
+            assert_eq!(usize::from(page.pages), pages.len());
+        }
+    }
+}
+
+/// Random walk over available inputs; on a validated pack every step with a
+/// view token must succeed.
 fn walk(pack: &StoryPack, seed: u64, rng: &mut Gen, steps: usize) -> StoryState {
     let mut state = StoryState::new(pack, seed).expect("initial state");
     assert_bounded(pack, &state);
     for _ in 0..steps {
         let current = view(pack, &state).expect("view");
-        if current.choices.is_empty() {
+        let inputs = actions(&current);
+        if inputs.is_empty() {
             break;
         }
-        let token = rng.pick(&current.choices).token.clone();
-        let (next, _) = step(pack, &state, StoryInput::Choose { token })
-            .expect("valid pack and token never fail");
+        let input = rng.pick(&inputs).clone();
+        let (next, _) = step(pack, &state, input).expect("valid pack and token never fail");
+        assert_pages_bounded(pack, &next);
         assert_eq!(next.turn, state.turn + 1);
         assert_bounded(pack, &next);
         state = next;
@@ -86,6 +142,29 @@ fn random_walks_on_fixture_respect_bounds_and_end() {
     assert!(
         endings.len() >= 2,
         "random play reaches several endings: {endings:?}"
+    );
+}
+
+#[test]
+fn random_walks_on_menu_fixture_respect_bounds_pages_and_end() {
+    let pack = StoryPack::from_json_slice(NOIR).unwrap();
+    pack.validate().unwrap();
+    let mut rng = Gen(7);
+    let mut endings = std::collections::BTreeSet::new();
+    for seed in 0..60 {
+        let state = walk(&pack, seed, &mut rng, 150);
+        if let Some(ending) = state.ended {
+            endings.insert(ending.id);
+        }
+        if seed < 10 {
+            let again = walk(&pack, seed, &mut Gen(seed), 40);
+            assert_eq!(again, walk(&pack, seed, &mut Gen(seed), 40));
+        }
+    }
+    assert_eq!(
+        endings.len(),
+        2,
+        "random menu play reaches both endings: {endings:?}"
     );
 }
 
@@ -200,7 +279,13 @@ const ITEM_POOL: &[&str] = &["llave", "mapa", "fantasma"];
 fn gen_condition(rng: &mut Gen, depth: usize) -> Condition {
     let leaf = depth >= 10 || rng.chance(60);
     if leaf {
-        match rng.below(4) {
+        match rng.below(5) {
+            4 => Condition::Uses {
+                node: rng.pick(NODE_POOL).to_string(),
+                entry: rng.pick(ENTRY_POOL).to_string(),
+                op: CmpOp::Ge,
+                value: rng.below(4) as i64,
+            },
             0 => Condition::VarCmp {
                 var: rng.pick(INT_POOL).to_string(),
                 op: *rng.pick(&[
@@ -302,30 +387,310 @@ fn gen_effect(rng: &mut Gen, depth: usize) -> Effect {
     }
 }
 
-fn gen_pack(rng: &mut Gen) -> StoryPack {
-    let text = |s: &str| LocalizedText::single("es", s);
-    let node_count = 1 + rng.below(6);
-    let nodes = (0..node_count)
-        .map(|index| Node {
-            id: if rng.chance(3) {
-                "n0".to_owned()
+const HOTSPOT_POOL: &[&str] = &["mesa", "puerta", "nada"];
+const CHARACTER_POOL: &[&str] = &["ana", "bruno", "fantasma"];
+const VERB_POOL: &[&str] = &["mirar", "hablar", "usar", "pensar", "volar"];
+const TARGET_POOL: &[&str] = &["mesa", "puerta", "ana", "bruno", "llave", "mapa", "nada"];
+const DIALOGUE_POOL: &[&str] = &["charla", "nada"];
+const DIALOGUE_NODE_POOL: &[&str] = &["d0", "d1", "d2", "dx"];
+const ENTRY_POOL: &[&str] = &["e0", "e1", "ex"];
+
+fn text(s: &str) -> LocalizedText {
+    LocalizedText::single("es", s)
+}
+
+fn gen_blocks(rng: &mut Gen, min: usize) -> Vec<TextBlock> {
+    (0..min + rng.below(3))
+        .map(|_| {
+            let speaker = rng.chance(40).then(|| {
+                if rng.chance(3) {
+                    "fantasma".to_owned()
+                } else {
+                    rng.pick(&CHARACTER_POOL[..2]).to_string()
+                }
+            });
+            let expression = (speaker.is_some() && rng.chance(30))
+                .then(|| rng.pick(&["neutral", "enfadada", "triste"]).to_string());
+            TextBlock {
+                speaker,
+                expression,
+                text: text(if rng.chance(1) { " " } else { "Texto" }),
+            }
+        })
+        .collect()
+}
+
+fn rare_condition(rng: &mut Gen) -> Option<Condition> {
+    rng.chance(10).then(|| gen_condition(rng, 0))
+}
+
+fn rare_effects(rng: &mut Gen) -> Vec<Effect> {
+    if rng.chance(30) {
+        vec![gen_effect(rng, 0)]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Mostly consistent menus with rare deliberate defects, so both accepted
+/// and rejected v2 packs are frequent.
+fn gen_menu(
+    rng: &mut Gen,
+    node: usize,
+    node_count: usize,
+    hotspots: &[Hotspot],
+    present: &[Presence],
+) -> Menu {
+    let mut verbs: Vec<MenuVerb> = Vec::new();
+    for verb in &VERB_POOL[..4] {
+        if rng.chance(60) {
+            verbs.push(MenuVerb {
+                verb: verb.to_string(),
+                when: rare_condition(rng),
+            });
+        }
+    }
+    if rng.chance(3) {
+        verbs.push(MenuVerb {
+            verb: "volar".to_owned(),
+            when: None,
+        });
+    }
+    if verbs.is_empty() && !rng.chance(5) {
+        verbs.push(MenuVerb {
+            verb: "pensar".to_owned(),
+            when: None,
+        });
+    }
+    let offered: Vec<String> = verbs.iter().map(|verb| verb.verb.clone()).collect();
+    let mut entries: Vec<MenuEntry> = Vec::new();
+    for index in 0..rng.below(5) {
+        if offered.is_empty() {
+            break;
+        }
+        let verb = if rng.chance(3) {
+            rng.pick(VERB_POOL).to_string()
+        } else {
+            rng.pick(&offered).clone()
+        };
+        let candidates: Vec<String> = match verb.as_str() {
+            "mirar" => hotspots.iter().map(|hotspot| hotspot.id.clone()).collect(),
+            "hablar" => present.iter().map(|p| p.character.clone()).collect(),
+            "usar" => vec!["llave".to_owned(), "mapa".to_owned()],
+            _ => Vec::new(),
+        };
+        let target = if rng.chance(3) {
+            Some(rng.pick(TARGET_POOL).to_string())
+        } else if verb == "pensar" {
+            None
+        } else if candidates.is_empty() {
+            continue;
+        } else {
+            Some(rng.pick(&candidates).clone())
+        };
+        if !rng.chance(3)
+            && entries
+                .iter()
+                .any(|entry| entry.verb == verb && entry.target == target)
+        {
+            continue;
+        }
+        let response_count = if rng.chance(3) { 0 } else { 1 + rng.below(3) };
+        let mut responses = Vec::new();
+        for response in 0..response_count {
+            // Usually counts this entry's own uses; rarely a missing entry.
+            let entry = if rng.chance(3) {
+                rng.pick(ENTRY_POOL).to_string()
             } else {
-                format!("n{index}")
-            },
-            text: text("Texto de prueba"),
-            ending: rng.chance(20).then(|| Ending {
-                id: format!("e{index}"),
-                kind: EndingKind::Victory,
-            }),
-            choices: (0..rng.below(4))
-                .map(|choice| Choice {
-                    id: format!("c{choice}"),
-                    label: text("Opción"),
-                    when: rng.chance(40).then(|| gen_condition(rng, 0)),
-                    effects: (0..rng.below(5)).map(|_| gen_effect(rng, 0)).collect(),
-                    target: rng.chance(70).then(|| rng.pick(NODE_POOL).to_string()),
-                })
-                .collect(),
+                format!("e{index}")
+            };
+            responses.push(Response {
+                id: format!("r{response}"),
+                when: rng.chance(30).then(|| Condition::Uses {
+                    node: format!("n{node}"),
+                    entry,
+                    op: CmpOp::Lt,
+                    value: rng.below(3) as i64,
+                }),
+                once: rng.chance(50),
+                blocks: gen_blocks(rng, 1),
+                effects: rare_effects(rng),
+                target: rng
+                    .chance(15)
+                    .then(|| format!("n{}", rng.below(node_count))),
+                dialogue: rng.chance(30).then(|| {
+                    if rng.chance(5) {
+                        "nada".to_owned()
+                    } else {
+                        rng.pick(&DIALOGUE_POOL[..1]).to_string()
+                    }
+                }),
+            });
+        }
+        let exhausted = if rng.chance(50) {
+            gen_blocks(rng, 1)
+        } else {
+            Vec::new()
+        };
+        entries.push(MenuEntry {
+            id: format!("e{index}"),
+            verb,
+            target,
+            responses,
+            exhausted,
+        });
+    }
+    let mut defaults = Vec::new();
+    for verb in &offered {
+        if rng.chance(30) {
+            defaults.push(MenuDefault {
+                verb: verb.clone(),
+                blocks: gen_blocks(rng, 1),
+            });
+        }
+    }
+    Menu {
+        verbs,
+        entries,
+        defaults,
+    }
+}
+
+fn gen_dialogue(rng: &mut Gen) -> Dialogue {
+    let count = 1 + rng.below(3);
+    let mut nodes = Vec::new();
+    for index in 0..count {
+        let lines = gen_blocks(rng, 1);
+        let option_count = if rng.chance(3) { 0 } else { 1 + rng.below(3) };
+        let mut options = Vec::new();
+        for option in 0..option_count {
+            let when = rare_condition(rng);
+            let once = rng.chance(50);
+            let effects = rare_effects(rng);
+            let next = match rng.below(3) {
+                0 => DialogueNext::Goto(if rng.chance(3) {
+                    rng.pick(DIALOGUE_NODE_POOL).to_string()
+                } else {
+                    format!("d{}", rng.below(count))
+                }),
+                1 => DialogueNext::Return,
+                _ => DialogueNext::Exit,
+            };
+            options.push(DialogueOption {
+                id: format!("o{option}"),
+                label: text("Decir"),
+                when,
+                once,
+                effects,
+                next,
+            });
+        }
+        nodes.push(DialogueNode {
+            id: format!("d{index}"),
+            lines,
+            options,
+        });
+    }
+    Dialogue {
+        id: "charla".to_owned(),
+        start: if rng.chance(3) {
+            "dx".to_owned()
+        } else {
+            "d0".to_owned()
+        },
+        nodes,
+    }
+}
+
+fn gen_pack(rng: &mut Gen) -> StoryPack {
+    let node_count = 1 + rng.below(6);
+    let v2 = rng.chance(60);
+    let nodes = (0..node_count)
+        .map(|index| {
+            let mut hotspots = Vec::new();
+            let mut present = Vec::new();
+            if v2 {
+                let count = rng.below(3);
+                for slot_id in HOTSPOT_POOL.iter().take(count) {
+                    let id = if rng.chance(3) {
+                        rng.pick(HOTSPOT_POOL).to_string()
+                    } else {
+                        slot_id.to_string()
+                    };
+                    hotspots.push(Hotspot {
+                        id,
+                        label: text("Cosa"),
+                        when: rare_condition(rng),
+                    });
+                }
+                let count = rng.below(3);
+                for slot_character in CHARACTER_POOL.iter().take(count) {
+                    let character = if rng.chance(3) {
+                        rng.pick(CHARACTER_POOL).to_string()
+                    } else {
+                        slot_character.to_string()
+                    };
+                    present.push(Presence {
+                        character,
+                        expression: rng.chance(30).then(|| "enfadada".to_owned()),
+                        when: rare_condition(rng),
+                    });
+                }
+            }
+            let menu = (v2 && rng.chance(70))
+                .then(|| gen_menu(rng, index, node_count, &hotspots, &present));
+            (index, hotspots, present, menu)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|(index, hotspots, present, menu)| {
+            // v2 scenes keep few, simple choices and rarely end, so that
+            // many generated v2 packs validate.
+            let simple = v2;
+            Node {
+                background: (v2 && rng.chance(30)).then(|| "fondo-calle".to_owned()),
+                cues: if v2 && rng.chance(20) {
+                    vec![Cue::Music {
+                        asset: "musica".to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                hotspots,
+                present,
+                menu,
+                id: if rng.chance(3) {
+                    "n0".to_owned()
+                } else {
+                    format!("n{index}")
+                },
+                text: text("Texto de prueba"),
+                ending: rng.chance(if simple { 2 } else { 20 }).then(|| Ending {
+                    id: format!("e{index}"),
+                    kind: EndingKind::Victory,
+                }),
+                choices: (0..rng.below(if simple { 2 } else { 4 }))
+                    .map(|choice| Choice {
+                        id: format!("c{choice}"),
+                        label: text("Opción"),
+                        when: rng
+                            .chance(if simple { 5 } else { 40 })
+                            .then(|| gen_condition(rng, 0)),
+                        effects: if simple {
+                            rare_effects(rng)
+                        } else {
+                            (0..rng.below(5)).map(|_| gen_effect(rng, 0)).collect()
+                        },
+                        target: rng.chance(70).then(|| {
+                            if simple {
+                                format!("n{}", rng.below(node_count))
+                            } else {
+                                rng.pick(NODE_POOL).to_string()
+                            }
+                        }),
+                    })
+                    .collect(),
+            }
         })
         .collect();
     let int_var = |id: &str, rng: &mut Gen| VariableDecl {
@@ -338,8 +703,45 @@ fn gen_pack(rng: &mut Gen) -> StoryPack {
             initial: if rng.chance(5) { 50 } else { 0 },
         },
     };
+    let verb = |id: &str, targets: TargetKind, rng: &mut Gen| {
+        let min = usize::from(rng.chance(95));
+        VerbDecl {
+            id: id.to_owned(),
+            label: text(id),
+            targets,
+            default: gen_blocks(rng, min),
+        }
+    };
+    let character = |id: &str| CharacterDecl {
+        id: id.to_owned(),
+        name: text(id),
+        portraits: [("neutral".to_owned(), format!("retrato-{id}"))]
+            .into_iter()
+            .collect(),
+        default_expression: None,
+    };
     StoryPack {
-        format_version: 1,
+        format_version: if v2 || rng.chance(30) { 2 } else { 1 },
+        verbs: if v2 {
+            vec![
+                verb("mirar", TargetKind::Hotspot, rng),
+                verb("hablar", TargetKind::Character, rng),
+                verb("usar", TargetKind::Item, rng),
+                verb("pensar", TargetKind::None, rng),
+            ]
+        } else {
+            Vec::new()
+        },
+        characters: if v2 {
+            vec![character("ana"), character("bruno")]
+        } else {
+            Vec::new()
+        },
+        dialogues: if v2 && rng.chance(70) {
+            vec![gen_dialogue(rng)]
+        } else {
+            Vec::new()
+        },
         id: "generada".to_owned(),
         title: text("Generada"),
         start: if rng.chance(5) {
@@ -381,12 +783,18 @@ fn generated_packs_validate_soundly() {
     // Soundness: whatever validation accepts must run without any runtime
     // pack error, effect-budget error or bound violation.
     let mut rng = Gen(6);
-    let (mut valid, mut invalid) = (0, 0);
+    let (mut valid, mut invalid, mut valid_menus, mut valid_dialogues) = (0, 0, 0, 0);
     for _ in 0..4000 {
         let pack = gen_pack(&mut rng);
         match pack.validate() {
             Ok(_) => {
                 valid += 1;
+                if pack.nodes.iter().any(|node| node.menu.is_some()) {
+                    valid_menus += 1;
+                }
+                if !pack.dialogues.is_empty() {
+                    valid_dialogues += 1;
+                }
                 for _ in 0..3 {
                     let seed = rng.next();
                     walk(&pack, seed, &mut rng, 25);
@@ -402,21 +810,19 @@ fn generated_packs_validate_soundly() {
                 if let Ok(state) = StoryState::new(&pack, rng.next())
                     && let Ok(current) = view(&pack, &state)
                 {
-                    for choice in current.choices {
-                        let _ = step(
-                            &pack,
-                            &state,
-                            StoryInput::Choose {
-                                token: choice.token,
-                            },
-                        );
+                    let _ = view_pages(&pack, &state, "es");
+                    for input in actions(&current) {
+                        if let Ok((next, _)) = step(&pack, &state, input) {
+                            let _ = view(&pack, &next);
+                            let _ = view_pages(&pack, &next, "es");
+                        }
                     }
                 }
             }
         }
     }
     assert!(
-        valid > 100 && invalid > 100,
-        "valid={valid} invalid={invalid}"
+        valid > 100 && invalid > 100 && valid_menus > 50 && valid_dialogues > 20,
+        "valid={valid} invalid={invalid} menus={valid_menus} dialogues={valid_dialogues}"
     );
 }

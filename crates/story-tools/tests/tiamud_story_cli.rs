@@ -5,6 +5,8 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
+use tiamud_story_core::StoryPack;
+
 fn fixture(name: &str) -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -54,8 +56,126 @@ fn validates_reviewed_fixture_without_findings() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "valid StoryPack \"cripta-del-nigromante\": 10 node(s), 13 choice(s), 5 variable(s), 2 item(s); 0 warning(s), 0 lint(s)\n"
+        "valid StoryPack \"cripta-del-nigromante\" (format v1): 10 node(s), 13 choice(s), 5 variable(s), 2 item(s); 0 warning(s), 0 lint(s)\n"
     );
+
+    let output = run(&["validate", &noir(), "--deny-warnings"]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(
+        stdout(&output),
+        "valid StoryPack \"lluvia-de-neon\" (format v2): 5 node(s), 0 choice(s), 5 variable(s), 2 item(s), 6 verb(s), 14 menu entr(y/ies), 2 character(s), 2 dialogue(s); 0 warning(s), 0 lint(s)\n"
+    );
+}
+
+fn noir() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../story-core/fixtures/lluvia-de-neon.story.json")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn reports_menu_dialogue_and_portrait_lints() {
+    let pack = fixture("menu-lints.story.json");
+    let output = run(&["validate", &pack]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report = stdout(&output);
+    for expected in [
+        "lint: nodes[0].menu.verbs[3] (sala/rezar): menu verb condition can never hold",
+        "lint: nodes[0].menu.entries[0] (sala/mirar-caja): menu entry can never be selected",
+        "lint: nodes[0].menu.entries[1] (sala/usar-fantasma): menu entry can never be selected",
+        "lint: nodes[0].menu.entries[2] (sala/mirar-mesa).responses[1] (sombra): response is shadowed",
+        "lint: nodes[0].menu.entries[2] (sala/mirar-mesa).exhausted: \"nothing new\" text can never be shown",
+        "lint: nodes[0].menu.entries[4] (sala/usar-llave).responses[0] (abrir): response condition can never hold",
+        "lint: dialogues[0] (charla).nodes[0] (hola).options[1] (secreto): option condition can never hold",
+        "lint: dialogues[0] (charla).nodes[1] (perdido): dialogue node is unreachable from the dialogue start",
+        "lint: dialogues[1] (huerfano): dialogue is never started by any response",
+        "lint: verbs[2].default[0]: expression \"risa\" is not declared in the portraits of \"eva\"",
+        "lint: characters[0].default_expression: expression \"sonrisa\" is not declared",
+        "lint: nodes[0].present[0]: expression \"furiosa\" is not declared",
+        "lint: nodes[0].menu.entries[3].responses[0].blocks[0]: \"eva\" has no portrait for its default expression \"sonrisa\"",
+    ] {
+        assert!(
+            report.contains(expected),
+            "missing {expected:?} in\n{report}"
+        );
+    }
+    let output = run(&["validate", &pack, "--deny-warnings"]);
+    assert!(!output.status.success());
+}
+
+#[test]
+fn menu_scenes_preview_test_and_play_like_a_telnet_player() {
+    let pack = noir();
+    let output = run(&["preview", &pack]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let scene = stdout(&output);
+    assert!(scene.starts_with("== Lluvia de neón ==\n[fondo: fondo-oficina]\n"));
+    assert!(scene.contains(
+        "Acciones:\n1) MIRAR: 1) Escritorio · 2) Ventana · 3) Terminal · 4) Puerta\n2) INVESTIGAR: "
+    ));
+    assert!(scene.contains("3) USAR: (nada)\n"));
+    assert!(!scene.contains("investigar-mesa") && !scene.contains("pista_tarjeta"));
+
+    let output = run(&["preview", &pack, "--node", "club", "--locale", "en"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let scene = stdout(&output);
+    assert!(scene.contains("Present: Lola [portrait: retrato-lola-neutral]"));
+    assert!(scene.contains("2) TALK: 1) Lola\n"));
+
+    let output = run(&[
+        "preview",
+        &pack,
+        "--node",
+        "club",
+        "--dialogue",
+        "charla-lola/iker",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let scene = stdout(&output);
+    assert!(scene.contains(
+        "» Lola [retrato: retrato-lola-nerviosa]: —No conozco a ningún Iker. Y baja la voz.\n"
+    ));
+    assert!(scene.contains("Respuestas:\n1) Cambiar de tema\n"));
+    assert!(!scene.contains("Acciones:"));
+    let output = run(&["preview", &pack, "--dialogue", "nada"]);
+    assert!(!output.status.success());
+
+    let script = fixture("lluvia-victoria.script.json");
+    let output = run(&["test", &pack, "--script", &script]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "story test passed: 30 step(s), 16 choice(s), 13 expectation(s); final node \"callejon\" at turn 15\n"
+    );
+
+    let input = "investigar ventana\n2 2\nINVESTIGAR VENTANA\nmirar nevera\nusar\n7\n2 1\nusar tarjeta\nmoverse puerta\nhablar lola\nmirar barra\n2\n1\n3\n1\nestado\nsalir\n";
+    let output = run_with_stdin(&["play", &pack, "--seed", "5"], input.as_bytes());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let transcript = stdout(&output);
+    for expected in [
+        "» El cristal está sucio de hollín.",
+        "» Te fijas mejor: un dron de vigilancia",
+        "» El dron sigue ahí. Nada nuevo.",
+        "No existe esa opción.",
+        "Ese verbo necesita un objetivo: N M.",
+        "» Entre facturas sin pagar encuentras una tarjeta",
+        "[Obtienes: Tarjeta de memoria]",
+        "[sonido: sfx-pista]",
+        "» Insertas la tarjeta.",
+        "[música: musica-club]",
+        "» Lola [retrato: retrato-lola-neutral]: —Otra vez la pasma.",
+        "Respuestas:\n1) Preguntar por Iker Soto\n2) Pedir un café solo\n3) Despedirte\n",
+        "» Lola [retrato: retrato-lola-sonriente]: —Por fin alguien que no pide sintéticos.",
+        "var lola_confia = true",
+    ] {
+        assert!(
+            transcript.contains(expected),
+            "missing {expected:?} in\n{transcript}"
+        );
+    }
+    // A verb typed while the dialogue waits is not understood.
+    assert!(transcript.contains("No entiendo."));
 }
 
 #[test]
@@ -258,5 +378,29 @@ fn prints_the_published_schema() {
     let output = run(&["schema"]);
     assert!(output.status.success());
     let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(schema["title"], "Tiamud StoryPack v1");
+    assert_eq!(schema["title"], "Tiamud StoryPack v2");
+}
+
+#[test]
+fn fmt_upgrade_rewrites_v1_packs_as_v2_losslessly() {
+    let temp = tempfile::tempdir().unwrap();
+    let upgraded = temp.path().join("upgraded.story.json");
+    let output = run(&[
+        "fmt",
+        &cripta(),
+        "--upgrade",
+        "--output",
+        upgraded.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let before = StoryPack::from_json_slice(&fs::read(cripta()).unwrap()).unwrap();
+    let mut after = StoryPack::from_json_slice(&fs::read(&upgraded).unwrap()).unwrap();
+    assert_eq!(after.format_version, 2);
+    after.format_version = 1;
+    assert_eq!(before, after, "only the version changes");
+    let output = run(&["validate", upgraded.to_str().unwrap(), "--deny-warnings"]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert!(stdout(&output).contains("(format v2)"));
+    let output = run(&["fmt", &cripta(), "--upgrade", "--check"]);
+    assert!(!output.status.success(), "--upgrade conflicts with --check");
 }

@@ -4,14 +4,21 @@
 //! [`Write`], so the same loop serves a terminal and tests. Commands:
 //! a choice number, `deshacer`/`undo`, `estado`/`state`, `mirar`/`look`,
 //! `ayuda`/`help` and `salir`/`quit`. End of input also quits.
+//!
+//! Menu scenes (format v2) add: `N` for a verb without target, `N M` for verb
+//! `N` on target `M`, `cN` for a gamebook choice, and the displayed words
+//! themselves, for example `mirar mesa` or `investigar ventana`. Words are
+//! matched case- and accent-insensitively against the labels the view
+//! offers, exactly as a Telnet client would type them; a lone `mirar` still
+//! redraws the scene. While a dialogue waits, a number answers it.
 
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
-use tiamud_story_core::{StoryPack, StoryState, UndoRing, Value, view};
+use tiamud_story_core::{StoryPack, StoryState, StoryView, UndoRing, Value, view};
 
 use crate::render::{render_events, render_view};
-use crate::script::{ChooseError, UNDO_CAPACITY, choose};
+use crate::script::{ChooseError, Stepped, UNDO_CAPACITY, choose, menu_by_number, say};
 
 /// Longest accepted input line in bytes; longer lines are discarded whole.
 pub const MAX_INPUT_BYTES: usize = 256;
@@ -76,10 +83,140 @@ fn read_line_bounded<R: BufRead>(input: &mut R, limit: usize) -> io::Result<Line
 
 fn help(spanish: bool) -> &'static str {
     if spanish {
-        "Órdenes: número de opción, deshacer, estado, mirar, ayuda, salir.\n"
+        "Órdenes: número de opción, deshacer, estado, mirar, ayuda, salir.\n\
+         Menús: N (verbo), N M (verbo y objetivo), cN (opción), o las palabras: «mirar mesa».\n"
     } else {
-        "Commands: choice number, undo, state, look, help, quit.\n"
+        "Commands: choice number, undo, state, look, help, quit.\n\
+         Menus: N (verb), N M (verb and target), cN (choice), or the words: \"look desk\".\n"
     }
+}
+
+enum Rejected {
+    Unknown,
+    Choose(ChooseError),
+}
+
+impl From<ChooseError> for Rejected {
+    fn from(error: ChooseError) -> Self {
+        Self::Choose(error)
+    }
+}
+
+fn choose_message(error: &ChooseError, spanish: bool) -> String {
+    let text = match (error, spanish) {
+        (ChooseError::Ended, true) => "La historia ha terminado: deshacer o salir.",
+        (ChooseError::Ended, false) => "The story has ended: undo or quit.",
+        (ChooseError::OutOfRange { .. } | ChooseError::NotOffered, true) => "No existe esa opción.",
+        (ChooseError::OutOfRange { .. } | ChooseError::NotOffered, false) => "No such choice.",
+        (ChooseError::NoMenu, true) => "Esta escena no tiene menú de verbos.",
+        (ChooseError::NoMenu, false) => "This scene has no verb menu.",
+        (ChooseError::NoDialogue, true) => "Nadie espera tu respuesta.",
+        (ChooseError::NoDialogue, false) => "Nobody is waiting for an answer.",
+        (ChooseError::NeedsTarget, true) => "Ese verbo necesita un objetivo: N M.",
+        (ChooseError::NeedsTarget, false) => "That verb needs a target: N M.",
+        (ChooseError::UnexpectedTarget, true) => "Ese verbo no lleva objetivo.",
+        (ChooseError::UnexpectedTarget, false) => "That verb takes no target.",
+        (ChooseError::Story(error), _) => return format!("error: {error}"),
+    };
+    text.to_owned()
+}
+
+/// Folds case and Spanish accents so typed words match displayed labels.
+fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            other => other,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Turns one typed line into an input on the current view. Only labels and
+/// numbers the view itself offers are matched; no authored id is exposed.
+fn interpret(
+    pack: &StoryPack,
+    state: &StoryState,
+    current: &StoryView,
+    text: &str,
+) -> Result<Stepped, Rejected> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let numbers: Option<Vec<usize>> = words.iter().map(|word| word.parse().ok()).collect();
+    if current.dialogue.is_some() {
+        return match numbers.as_deref() {
+            Some([number]) => Ok(say(pack, state, *number)?),
+            _ => Err(Rejected::Unknown),
+        };
+    }
+    if current.menu.is_none() {
+        return match numbers.as_deref() {
+            Some([number]) => Ok(choose(pack, state, *number)?),
+            _ => Err(Rejected::Unknown),
+        };
+    }
+    if let [word] = words.as_slice()
+        && let Some(number) = word.strip_prefix('c').and_then(|rest| rest.parse().ok())
+    {
+        return Ok(choose(pack, state, number)?);
+    }
+    match numbers.as_deref() {
+        Some([verb]) => return Ok(menu_by_number(pack, state, *verb, None)?),
+        Some([verb, target]) => return Ok(menu_by_number(pack, state, *verb, Some(*target))?),
+        Some(_) => return Err(Rejected::Unknown),
+        None => {}
+    }
+    // Words: the first is a verb label, the rest a target label.
+    let menu = current.menu.as_ref().ok_or(Rejected::Unknown)?;
+    let (first, rest) = words.split_first().ok_or(Rejected::Unknown)?;
+    let first = fold(first);
+    let wanted = fold(&rest.join(" "));
+    let locale_labels = |label: &tiamud_story_core::LocalizedText| -> Vec<String> {
+        label.0.values().map(|value| fold(value)).collect()
+    };
+    let (verb_index, verb) = menu
+        .verbs
+        .iter()
+        .enumerate()
+        .find(|(_, verb)| locale_labels(&verb.label).contains(&first))
+        .ok_or(Rejected::Unknown)?;
+    if !verb.needs_target {
+        return if wanted.is_empty() {
+            Ok(menu_by_number(pack, state, verb_index + 1, None)?)
+        } else {
+            Err(ChooseError::UnexpectedTarget.into())
+        };
+    }
+    if wanted.is_empty() {
+        return Err(ChooseError::NeedsTarget.into());
+    }
+    let exact: Vec<usize> = (0..verb.targets.len())
+        .filter(|index| locale_labels(&verb.targets[*index].label).contains(&wanted))
+        .collect();
+    let partial: Vec<usize> = (0..verb.targets.len())
+        .filter(|index| {
+            locale_labels(&verb.targets[*index].label)
+                .iter()
+                .any(|label| label.contains(&wanted))
+        })
+        .collect();
+    let target = match (exact.as_slice(), partial.as_slice()) {
+        ([only], _) | ([], [only]) => *only,
+        _ => return Err(ChooseError::NotOffered.into()),
+    };
+    Ok(menu_by_number(
+        pack,
+        state,
+        verb_index + 1,
+        Some(target + 1),
+    )?)
 }
 
 /// Author-facing dump of the full state, hidden variables included.
@@ -187,8 +324,9 @@ pub fn play<R: BufRead, W: Write>(
                     }
                 )?,
             },
-            other => match other.parse::<usize>() {
-                Ok(number) => match choose(pack, &state, number) {
+            other => {
+                let current = view(pack, &state).map_err(to_io)?;
+                match interpret(pack, &state, &current, other) {
                     Ok((next, events)) => {
                         write!(output, "{}", render_events(pack, &events, locale))?;
                         undo.push(std::mem::replace(&mut state, next));
@@ -198,36 +336,20 @@ pub fn play<R: BufRead, W: Write>(
                             render_view(&view(pack, &state).map_err(to_io)?, locale)
                         )?;
                     }
-                    Err(ChooseError::Ended) => writeln!(
+                    Err(Rejected::Unknown) => writeln!(
                         output,
                         "{}",
                         if spanish {
-                            "La historia ha terminado: deshacer o salir."
+                            "No entiendo. Escribe «ayuda»."
                         } else {
-                            "The story has ended: undo or quit."
+                            "Unknown command. Type \"help\"."
                         }
                     )?,
-                    Err(ChooseError::OutOfRange { .. }) => writeln!(
-                        output,
-                        "{}",
-                        if spanish {
-                            "No existe esa opción."
-                        } else {
-                            "No such choice."
-                        }
-                    )?,
-                    Err(ChooseError::Story(error)) => writeln!(output, "error: {error}")?,
-                },
-                Err(_) => writeln!(
-                    output,
-                    "{}",
-                    if spanish {
-                        "No entiendo. Escribe «ayuda»."
-                    } else {
-                        "Unknown command. Type \"help\"."
+                    Err(Rejected::Choose(error)) => {
+                        writeln!(output, "{}", choose_message(&error, spanish))?
                     }
-                )?,
-            },
+                }
+            }
         }
     }
     output.flush()?;

@@ -7,7 +7,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use thiserror::Error;
-use tiamud_story_core::{MAX_ID_BYTES, StoryState, view};
+use tiamud_story_core::{DialoguePosition, MAX_ID_BYTES, StoryState, view};
 use tiamud_story_tools::{
     STORY_PACK_SCHEMA, ToolError,
     format::canonical_json,
@@ -46,6 +46,10 @@ enum Command {
         /// evaluated against the initial state.
         #[arg(long)]
         node: Option<String>,
+        /// Dialogue to render as `dialogue` (its start node) or
+        /// `dialogue/node`, on top of the scene.
+        #[arg(long)]
+        dialogue: Option<String>,
         #[arg(long, default_value = "es")]
         locale: String,
         #[arg(long, default_value_t = 0)]
@@ -77,8 +81,11 @@ enum Command {
         /// Replace an existing output file.
         #[arg(long, requires = "output")]
         force: bool,
+        /// Rewrite a format v1 pack as format v2 (a lossless version bump).
+        #[arg(long, conflicts_with = "check")]
+        upgrade: bool,
     },
-    /// Print the published JSON Schema of StoryPack format v1.
+    /// Print the published JSON Schema of the current StoryPack format (v2).
     Schema,
 }
 
@@ -92,6 +99,8 @@ enum CliError {
     BadNode,
     #[error("unknown node {0:?}")]
     UnknownNode(String),
+    #[error("unknown dialogue or dialogue node {0:?}")]
+    UnknownDialogue(String),
     #[error("locale must be 2..=35 ASCII letters, digits or '-'")]
     BadLocale,
     #[error("story error: {0}")]
@@ -158,9 +167,27 @@ fn run(cli: Cli) -> Result<(), CliError> {
             }
             let choices: usize = pack.nodes.iter().map(|node| node.choices.len()).sum();
             let findings = report.warnings.len() + lints.lints.len();
+            let entries: usize = pack
+                .nodes
+                .iter()
+                .filter_map(|node| node.menu.as_ref())
+                .map(|menu| menu.entries.len())
+                .sum();
+            let menus = if pack.verbs.is_empty() && pack.dialogues.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {} verb(s), {} menu entr(y/ies), {} character(s), {} dialogue(s)",
+                    pack.verbs.len(),
+                    entries,
+                    pack.characters.len(),
+                    pack.dialogues.len()
+                )
+            };
             println!(
-                "valid StoryPack {:?}: {} node(s), {} choice(s), {} variable(s), {} item(s); {} warning(s), {} lint(s)",
+                "valid StoryPack {:?} (format v{}): {} node(s), {} choice(s), {} variable(s), {} item(s){menus}; {} warning(s), {} lint(s)",
                 pack.id,
+                pack.format_version,
                 pack.nodes.len(),
                 choices,
                 pack.variables.len(),
@@ -175,6 +202,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Preview {
             pack: path,
             node,
+            dialogue,
             locale,
             seed,
         } => {
@@ -193,6 +221,30 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 state.node = target.id.clone();
                 state.visited.insert(target.id.clone());
                 state.ended = target.ending.clone();
+            }
+            if let Some(spec) = dialogue {
+                if spec.is_empty() || spec.len() > 2 * MAX_ID_BYTES + 1 {
+                    return Err(CliError::BadNode);
+                }
+                let (dialogue_id, node_id) = match spec.split_once('/') {
+                    Some((dialogue_id, node_id)) => (dialogue_id, Some(node_id)),
+                    None => (spec.as_str(), None),
+                };
+                let found = pack
+                    .dialogues
+                    .iter()
+                    .find(|candidate| candidate.id == dialogue_id)
+                    .ok_or_else(|| CliError::UnknownDialogue(spec.clone()))?;
+                let start = node_id.unwrap_or(found.start.as_str());
+                let dialogue_node = found
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.id == start)
+                    .ok_or_else(|| CliError::UnknownDialogue(spec.clone()))?;
+                state.dialogue = Some(DialoguePosition {
+                    dialogue: found.id.clone(),
+                    node: dialogue_node.id.clone(),
+                });
             }
             let scene = view(&pack, &state)?;
             print!("{}", render_view(&scene, &locale));
@@ -245,8 +297,12 @@ fn run(cli: Cli) -> Result<(), CliError> {
             check,
             output,
             force,
+            upgrade,
         } => {
-            let (pack, _) = load_pack(&path)?;
+            let (mut pack, _) = load_pack(&path)?;
+            if upgrade && !pack.upgrade() {
+                eprintln!("note: {path:?} already uses the current format");
+            }
             let canonical = canonical_json(&pack)?;
             if check {
                 let current = read_bounded(&path, tiamud_story_core::MAX_PACK_BYTES)?;

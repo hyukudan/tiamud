@@ -1,20 +1,33 @@
-//! Turn-based transition and player view.
+//! Turn-based transition: gamebook choices, menu actions and dialogue
+//! choices, all addressed by opaque per-view tokens.
 
 use serde::{Deserialize, Serialize};
 
 use crate::rng::SplitMix64;
+use crate::state::key;
 use crate::{
-    Choice, Condition, Cue, Effect, Ending, LocalizedText, MAX_CONDITION_DEPTH, MAX_DICE_COUNT,
-    MAX_DICE_SIDES, MAX_EFFECT_DEPTH, MAX_EFFECTS_PER_CHOICE, MAX_SCORE_ABS, MAX_TOKEN_BYTES,
-    MAX_TURNS, Node, StoryError, StoryPack, StoryState, Value, VariableKind,
+    Choice, Condition, Cue, Dialogue, DialogueNext, DialogueNode, DialogueOption, DialoguePosition,
+    Effect, Ending, LastResponse, LocalizedText, MAX_CONDITION_DEPTH, MAX_DICE_COUNT,
+    MAX_DICE_SIDES, MAX_EFFECT_DEPTH, MAX_EFFECTS_PER_CHOICE, MAX_MENU_USES, MAX_SCORE_ABS,
+    MAX_TOKEN_BYTES, MAX_TURNS, MenuEntry, Node, Response, StoryError, StoryPack, StoryState,
+    TargetKind, Value, VariableKind, VerbDecl,
 };
 
-/// Player input for one turn.
+/// Player input for one turn. Every string is an opaque token taken from the
+/// current view; tokens from an earlier view are rejected as stale.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoryInput {
     /// Takes the choice named by an opaque token from the current view.
     Choose { token: String },
+    /// Applies a menu verb, with a target token when the verb takes one.
+    MenuAction {
+        verb: String,
+        #[serde(default)]
+        target: Option<String>,
+    },
+    /// Answers the active dialogue with an option token.
+    DialogueChoice { token: String },
 }
 
 /// Ordered, internal record of what one step did. A transport layer projects
@@ -52,83 +65,28 @@ pub enum StoryEvent {
         total: i64,
     },
     Ended(Ending),
+    /// A menu action was answered. `entry`/`response` are absent when a
+    /// default answered it.
+    MenuAnswered {
+        verb: String,
+        target: Option<String>,
+        entry: Option<String>,
+        response: Option<String>,
+    },
+    DialogueEntered {
+        dialogue: String,
+        node: String,
+    },
+    DialogueExited {
+        dialogue: String,
+    },
 }
 
-/// What a player may see: resolved node text, available choices behind opaque
-/// tokens, the visible stat sheet and inventory. Hidden variables, authored
-/// choice ids, unavailable choices and RNG state are never included.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoryView {
-    pub title: LocalizedText,
-    pub text: LocalizedText,
-    pub turn: u32,
-    pub choices: Vec<ViewChoice>,
-    pub stats: Vec<ViewStat>,
-    pub inventory: Vec<LocalizedText>,
-    pub score: i64,
-    pub ending: Option<Ending>,
-}
-
-/// A selectable choice. `token` is bound to the view's turn and the choice's
-/// ordinal among the *available* choices; it never encodes the authored id or
-/// label, and reveals nothing about hidden choices.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ViewChoice {
-    pub token: String,
-    pub label: LocalizedText,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ViewStat {
-    pub label: LocalizedText,
-    pub value: Value,
-}
-
-/// Builds the player view of `state`.
-pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryError> {
-    state.check_against(pack)?;
-    let node = current_node(pack, state)?;
-    let choices = if state.ended.is_some() {
-        Vec::new()
-    } else {
-        available(state, node)?
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, choice)| ViewChoice {
-                token: token(state.turn, ordinal),
-                label: choice.label.clone(),
-            })
-            .collect()
-    };
-    let stats = pack
-        .variables
-        .iter()
-        .filter(|decl| decl.visible)
-        .filter_map(|decl| {
-            let value = *state.vars.get(&decl.id)?;
-            let label = decl
-                .label
-                .clone()
-                .unwrap_or_else(|| LocalizedText::single("es", &decl.id));
-            Some(ViewStat { label, value })
-        })
-        .collect();
-    let inventory = pack
-        .items
-        .iter()
-        .filter(|item| state.inventory.contains(&item.id))
-        .map(|item| item.name.clone())
-        .collect();
-    Ok(StoryView {
-        title: pack.title.clone(),
-        text: node.text.clone(),
-        turn: state.turn,
-        choices,
-        stats,
-        inventory,
-        score: state.score,
-        ending: state.ended.clone(),
-    })
+/// Authored ids a menu action resolved to. For authoring tools and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuSelection<'a> {
+    pub verb: &'a str,
+    pub target: Option<&'a str>,
 }
 
 /// Resolves a token to the authored choice it names in the current view.
@@ -142,14 +100,82 @@ pub fn resolve_choice<'a>(
     if state.ended.is_some() {
         return Err(StoryError::Ended);
     }
-    let (turn, ordinal) = parse_token(token_text)?;
-    if turn != state.turn {
-        return Err(StoryError::StaleChoice);
+    if active_dialogue(pack, state)?.is_some() {
+        return Err(StoryError::InDialogue);
     }
+    let Token::Choice(ordinal) = current_token(state, token_text)? else {
+        return Err(StoryError::MalformedToken);
+    };
     let node = current_node(pack, state)?;
-    available(state, node)?
+    available_choices(state, node)?
         .into_iter()
         .nth(ordinal)
+        .ok_or(StoryError::UnknownChoice)
+}
+
+/// Resolves a verb token (and target token) to authored ids.
+pub fn resolve_menu<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+    verb_token: &str,
+    target_token: Option<&str>,
+) -> Result<MenuSelection<'a>, StoryError> {
+    state.check_against(pack)?;
+    if state.ended.is_some() {
+        return Err(StoryError::Ended);
+    }
+    if active_dialogue(pack, state)?.is_some() {
+        return Err(StoryError::InDialogue);
+    }
+    let Token::Verb(verb_ordinal) = current_token(state, verb_token)? else {
+        return Err(StoryError::MalformedToken);
+    };
+    let node = current_node(pack, state)?;
+    let verb = *menu_verbs(pack, state, node)?
+        .get(verb_ordinal)
+        .ok_or(StoryError::UnknownChoice)?;
+    let target = match (verb.targets, target_token) {
+        (TargetKind::None, None) => None,
+        (TargetKind::None, Some(_)) | (_, None) => return Err(StoryError::BadTarget),
+        (_, Some(text)) => {
+            let Token::Target(owner, ordinal) = current_token(state, text)? else {
+                return Err(StoryError::MalformedToken);
+            };
+            if owner != verb_ordinal {
+                return Err(StoryError::BadTarget);
+            }
+            let (id, _) = *verb_targets(pack, state, node, verb)?
+                .get(ordinal)
+                .ok_or(StoryError::UnknownChoice)?;
+            Some(id)
+        }
+    };
+    Ok(MenuSelection {
+        verb: verb.id.as_str(),
+        target,
+    })
+}
+
+/// Resolves a dialogue option token to the authored option.
+pub fn resolve_dialogue_option<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+    token_text: &str,
+) -> Result<&'a DialogueOption, StoryError> {
+    state.check_against(pack)?;
+    if state.ended.is_some() {
+        return Err(StoryError::Ended);
+    }
+    let Some(active) = active_dialogue(pack, state)? else {
+        return Err(StoryError::NotInDialogue);
+    };
+    let Token::Option(ordinal) = current_token(state, token_text)? else {
+        return Err(StoryError::MalformedToken);
+    };
+    active
+        .options
+        .get(ordinal)
+        .copied()
         .ok_or(StoryError::UnknownChoice)
 }
 
@@ -159,50 +185,229 @@ pub fn step(
     state: &StoryState,
     input: StoryInput,
 ) -> Result<(StoryState, Vec<StoryEvent>), StoryError> {
-    let StoryInput::Choose { token } = input;
-    let choice = resolve_choice(pack, state, &token)?;
-    let mut next = state.clone();
-    next.turn = state
-        .turn
-        .checked_add(1)
-        .filter(|turn| *turn <= MAX_TURNS)
-        .ok_or(StoryError::TurnLimit)?;
-    let mut exec = Exec {
-        pack,
-        rng: SplitMix64::from_state(state.rng),
-        state: next,
-        events: Vec::new(),
-        budget: MAX_EFFECTS_PER_CHOICE,
-        destination: None,
-        ended: false,
-    };
-    exec.run(&choice.effects, 0)?;
-    if !exec.ended
-        && let Some(destination) = exec.destination.take().or_else(|| choice.target.clone())
-    {
-        exec.enter(&destination)?;
+    match input {
+        StoryInput::Choose { token } => {
+            let choice = resolve_choice(pack, state, &token)?;
+            let mut exec = Exec::begin(pack, state)?;
+            exec.run(&choice.effects, 0)?;
+            exec.finish_move(choice.target.as_deref())?;
+            Ok(exec.finish())
+        }
+        StoryInput::MenuAction { verb, target } => {
+            let selection = resolve_menu(pack, state, &verb, target.as_deref())?;
+            menu_action(pack, state, selection)
+        }
+        StoryInput::DialogueChoice { token } => {
+            let option = resolve_dialogue_option(pack, state, &token)?;
+            dialogue_choice(pack, state, option)
+        }
     }
-    let Exec {
-        mut state,
-        rng,
-        events,
-        ..
-    } = exec;
-    state.rng = rng.state();
-    Ok((state, events))
 }
 
-fn token(turn: u32, ordinal: usize) -> String {
+fn menu_action(
+    pack: &StoryPack,
+    state: &StoryState,
+    selection: MenuSelection<'_>,
+) -> Result<(StoryState, Vec<StoryEvent>), StoryError> {
+    let node = current_node(pack, state)?;
+    let menu = node
+        .menu
+        .as_ref()
+        .ok_or_else(|| StoryError::InvalidPack("node has no menu".to_owned()))?;
+    let entry = menu
+        .entries
+        .iter()
+        .find(|entry| entry.verb == selection.verb && entry.target.as_deref() == selection.target);
+    let mut exec = Exec::begin(pack, state)?;
+    let mut answered = StoryEvent::MenuAnswered {
+        verb: selection.verb.to_owned(),
+        target: selection.target.map(str::to_owned),
+        entry: None,
+        response: None,
+    };
+    let Some(entry) = entry else {
+        exec.state.last = Some(default_response(node, selection.verb));
+        exec.events.push(answered);
+        return Ok(exec.finish());
+    };
+    // Responses are chosen against the state *before* this use is counted.
+    let response = select_response(&exec.state, node, entry)?;
+    let counter = key(&[&node.id, &entry.id]);
+    let uses = exec.state.menu_uses.get(&counter).copied().unwrap_or(0);
+    exec.state
+        .menu_uses
+        .insert(counter, uses.saturating_add(1).min(MAX_MENU_USES));
+    if let StoryEvent::MenuAnswered {
+        entry: answered_entry,
+        response: answered_response,
+        ..
+    } = &mut answered
+    {
+        *answered_entry = Some(entry.id.clone());
+        *answered_response = response.map(|response| response.id.clone());
+    }
+    exec.events.push(answered);
+    let Some(response) = response else {
+        exec.state.last = Some(if entry.exhausted.is_empty() {
+            default_response(node, selection.verb)
+        } else {
+            LastResponse::Exhausted {
+                node: node.id.clone(),
+                entry: entry.id.clone(),
+            }
+        });
+        return Ok(exec.finish());
+    };
+    if response.once {
+        exec.state
+            .spent_responses
+            .insert(key(&[&node.id, &entry.id, &response.id]));
+    }
+    exec.state.last = Some(LastResponse::Entry {
+        node: node.id.clone(),
+        entry: entry.id.clone(),
+        response: response.id.clone(),
+    });
+    exec.run(&response.effects, 0)?;
+    let moved = exec.finish_move(response.target.as_deref())?;
+    if !moved
+        && !exec.ended
+        && let Some(dialogue_id) = &response.dialogue
+    {
+        let dialogue = pack
+            .dialogue(dialogue_id)
+            .ok_or_else(|| StoryError::InvalidPack("response names no dialogue".to_owned()))?;
+        exec.enter_dialogue(dialogue, &dialogue.start)?;
+    }
+    Ok(exec.finish())
+}
+
+fn dialogue_choice(
+    pack: &StoryPack,
+    state: &StoryState,
+    option: &DialogueOption,
+) -> Result<(StoryState, Vec<StoryEvent>), StoryError> {
+    let position = state.dialogue.clone().ok_or(StoryError::NotInDialogue)?;
+    let dialogue = pack
+        .dialogue(&position.dialogue)
+        .ok_or_else(|| StoryError::StateMismatch("dialogue is unknown".to_owned()))?;
+    let mut exec = Exec::begin(pack, state)?;
+    // `begin` drops an inactive dialogue; this one is active, so restore it.
+    exec.state.dialogue = Some(position.clone());
+    if option.once {
+        exec.state
+            .spent_options
+            .insert(key(&[&position.dialogue, &position.node, &option.id]));
+    }
+    exec.run(&option.effects, 0)?;
+    let moved = exec.finish_move(None)?;
+    if exec.ended || moved {
+        return Ok(exec.finish());
+    }
+    match &option.next {
+        DialogueNext::Goto(node) => exec.enter_dialogue(dialogue, node)?,
+        DialogueNext::Return => exec.enter_dialogue(dialogue, &dialogue.start)?,
+        DialogueNext::Exit => exec.leave_dialogue(),
+    }
+    Ok(exec.finish())
+}
+
+fn default_response(node: &Node, verb: &str) -> LastResponse {
+    let scene_default = node
+        .menu
+        .as_ref()
+        .is_some_and(|menu| menu.defaults.iter().any(|default| default.verb == verb));
+    if scene_default {
+        LastResponse::SceneDefault {
+            node: node.id.clone(),
+            verb: verb.to_owned(),
+        }
+    } else {
+        LastResponse::VerbDefault {
+            verb: verb.to_owned(),
+        }
+    }
+}
+
+fn select_response<'a>(
+    state: &StoryState,
+    node: &Node,
+    entry: &'a MenuEntry,
+) -> Result<Option<&'a Response>, StoryError> {
+    for response in &entry.responses {
+        if response.once
+            && state
+                .spent_responses
+                .contains(&key(&[&node.id, &entry.id, &response.id]))
+        {
+            continue;
+        }
+        let open = match &response.when {
+            None => true,
+            Some(condition) => evaluate(state, condition, 0)?,
+        };
+        if open {
+            return Ok(Some(response));
+        }
+    }
+    Ok(None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Token {
+    Choice(usize),
+    Verb(usize),
+    Target(usize, usize),
+    Option(usize),
+}
+
+pub(crate) fn choice_token(turn: u32, ordinal: usize) -> String {
     format!("t{turn}c{ordinal}")
 }
 
-fn parse_token(text: &str) -> Result<(u32, usize), StoryError> {
+pub(crate) fn verb_token(turn: u32, ordinal: usize) -> String {
+    format!("t{turn}v{ordinal}")
+}
+
+pub(crate) fn target_token(turn: u32, verb: usize, ordinal: usize) -> String {
+    format!("t{turn}v{verb}o{ordinal}")
+}
+
+pub(crate) fn option_token(turn: u32, ordinal: usize) -> String {
+    format!("t{turn}d{ordinal}")
+}
+
+fn current_token(state: &StoryState, text: &str) -> Result<Token, StoryError> {
+    let (turn, token) = parse_token(text)?;
+    if turn != state.turn {
+        return Err(StoryError::StaleChoice);
+    }
+    Ok(token)
+}
+
+fn parse_token(text: &str) -> Result<(u32, Token), StoryError> {
     if text.len() > MAX_TOKEN_BYTES {
         return Err(StoryError::MalformedToken);
     }
     let rest = text.strip_prefix('t').ok_or(StoryError::MalformedToken)?;
-    let (turn, ordinal) = rest.split_once('c').ok_or(StoryError::MalformedToken)?;
-    Ok((parse_digits(turn)?, parse_digits(ordinal)?))
+    let split = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or(StoryError::MalformedToken)?;
+    let (turn, rest) = rest.split_at(split);
+    let turn = parse_digits(turn)?;
+    let mut chars = rest.chars();
+    let kind = chars.next().ok_or(StoryError::MalformedToken)?;
+    let body = chars.as_str();
+    let token = match kind {
+        'c' => Token::Choice(parse_digits(body)?),
+        'd' => Token::Option(parse_digits(body)?),
+        'v' => match body.split_once('o') {
+            None => Token::Verb(parse_digits(body)?),
+            Some((verb, target)) => Token::Target(parse_digits(verb)?, parse_digits(target)?),
+        },
+        _ => return Err(StoryError::MalformedToken),
+    };
+    Ok((turn, token))
 }
 
 fn parse_digits<T: std::str::FromStr>(text: &str) -> Result<T, StoryError> {
@@ -215,23 +420,138 @@ fn parse_digits<T: std::str::FromStr>(text: &str) -> Result<T, StoryError> {
     text.parse().map_err(|_| StoryError::MalformedToken)
 }
 
-fn current_node<'a>(pack: &'a StoryPack, state: &StoryState) -> Result<&'a Node, StoryError> {
+pub(crate) fn current_node<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+) -> Result<&'a Node, StoryError> {
     pack.node(&state.node)
         .ok_or_else(|| StoryError::StateMismatch("current node is unknown".to_owned()))
 }
 
-fn available<'a>(state: &StoryState, node: &'a Node) -> Result<Vec<&'a Choice>, StoryError> {
+pub(crate) fn available_choices<'a>(
+    state: &StoryState,
+    node: &'a Node,
+) -> Result<Vec<&'a Choice>, StoryError> {
     let mut out = Vec::new();
     for choice in &node.choices {
-        let open = match &choice.when {
-            None => true,
-            Some(condition) => evaluate(state, condition, 0)?,
-        };
-        if open {
+        if holds(state, choice.when.as_ref())? {
             out.push(choice);
         }
     }
     Ok(out)
+}
+
+/// Verbs the current scene offers, in menu order.
+pub(crate) fn menu_verbs<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+    node: &Node,
+) -> Result<Vec<&'a VerbDecl>, StoryError> {
+    let Some(menu) = &node.menu else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for offered in &menu.verbs {
+        if holds(state, offered.when.as_ref())? {
+            let verb = pack
+                .verb(&offered.verb)
+                .ok_or_else(|| StoryError::InvalidPack("menu names an unknown verb".to_owned()))?;
+            out.push(verb);
+        }
+    }
+    Ok(out)
+}
+
+/// Targets a verb offers in the current scene: `(authored id, label)`.
+pub(crate) fn verb_targets<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+    node: &'a Node,
+    verb: &VerbDecl,
+) -> Result<Vec<(&'a str, &'a LocalizedText)>, StoryError> {
+    let mut out = Vec::new();
+    match verb.targets {
+        TargetKind::None => {}
+        TargetKind::Hotspot => {
+            for hotspot in &node.hotspots {
+                if holds(state, hotspot.when.as_ref())? {
+                    out.push((hotspot.id.as_str(), &hotspot.label));
+                }
+            }
+        }
+        TargetKind::Character => {
+            for presence in &node.present {
+                if holds(state, presence.when.as_ref())? {
+                    let character = pack.character(&presence.character).ok_or_else(|| {
+                        StoryError::InvalidPack("presence names an unknown character".to_owned())
+                    })?;
+                    out.push((character.id.as_str(), &character.name));
+                }
+            }
+        }
+        TargetKind::Item => {
+            for item in &pack.items {
+                if state.inventory.contains(&item.id) {
+                    out.push((item.id.as_str(), &item.name));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The active dialogue's currently available options.
+pub(crate) struct ActiveDialogue<'a> {
+    pub(crate) options: Vec<&'a DialogueOption>,
+}
+
+/// The dialogue the player must answer, if any. A dialogue position whose
+/// node offers no available option does not block the scene menu.
+pub(crate) fn active_dialogue<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+) -> Result<Option<ActiveDialogue<'a>>, StoryError> {
+    let Some((dialogue, node)) = dialogue_node(pack, state)? else {
+        return Ok(None);
+    };
+    let mut options = Vec::new();
+    for option in &node.options {
+        if option.once
+            && state
+                .spent_options
+                .contains(&key(&[&dialogue.id, &node.id, &option.id]))
+        {
+            continue;
+        }
+        if holds(state, option.when.as_ref())? {
+            options.push(option);
+        }
+    }
+    Ok((!options.is_empty()).then_some(ActiveDialogue { options }))
+}
+
+/// The dialogue node the state points at, whether or not it is active.
+pub(crate) fn dialogue_node<'a>(
+    pack: &'a StoryPack,
+    state: &StoryState,
+) -> Result<Option<(&'a Dialogue, &'a DialogueNode)>, StoryError> {
+    let Some(position) = &state.dialogue else {
+        return Ok(None);
+    };
+    let dialogue = pack
+        .dialogue(&position.dialogue)
+        .ok_or_else(|| StoryError::StateMismatch("dialogue is unknown".to_owned()))?;
+    let node = dialogue
+        .node(&position.node)
+        .ok_or_else(|| StoryError::StateMismatch("dialogue node is unknown".to_owned()))?;
+    Ok(Some((dialogue, node)))
+}
+
+pub(crate) fn holds(state: &StoryState, condition: Option<&Condition>) -> Result<bool, StoryError> {
+    match condition {
+        None => Ok(true),
+        Some(condition) => evaluate(state, condition, 0),
+    }
 }
 
 fn evaluate(state: &StoryState, condition: &Condition, depth: usize) -> Result<bool, StoryError> {
@@ -274,6 +594,19 @@ fn evaluate(state: &StoryState, condition: &Condition, depth: usize) -> Result<b
                 ));
             }
         },
+        Condition::Uses {
+            node,
+            entry,
+            op,
+            value,
+        } => {
+            let uses = state
+                .menu_uses
+                .get(&key(&[node, entry]))
+                .copied()
+                .unwrap_or(0);
+            op.apply(i64::from(uses), *value)
+        }
     })
 }
 
@@ -287,7 +620,58 @@ struct Exec<'a> {
     ended: bool,
 }
 
-impl Exec<'_> {
+impl<'a> Exec<'a> {
+    /// Starts a turn: advances the bounded turn counter, clears the last menu
+    /// response and drops a dialogue position that no longer blocks.
+    fn begin(pack: &'a StoryPack, state: &StoryState) -> Result<Self, StoryError> {
+        let mut next = state.clone();
+        next.turn = state
+            .turn
+            .checked_add(1)
+            .filter(|turn| *turn <= MAX_TURNS)
+            .ok_or(StoryError::TurnLimit)?;
+        next.last = None;
+        next.dialogue = None;
+        Ok(Self {
+            pack,
+            rng: SplitMix64::from_state(state.rng),
+            state: next,
+            events: Vec::new(),
+            budget: MAX_EFFECTS_PER_CHOICE,
+            destination: None,
+            ended: false,
+        })
+    }
+
+    /// Enters the effect destination, or `fallback`. Returns true on a move.
+    fn finish_move(&mut self, fallback: Option<&str>) -> Result<bool, StoryError> {
+        if self.ended {
+            return Ok(false);
+        }
+        match self
+            .destination
+            .take()
+            .or_else(|| fallback.map(str::to_owned))
+        {
+            Some(destination) => {
+                self.enter(&destination)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn finish(self) -> (StoryState, Vec<StoryEvent>) {
+        let Exec {
+            mut state,
+            rng,
+            events,
+            ..
+        } = self;
+        state.rng = rng.state();
+        (state, events)
+    }
+
     fn run(&mut self, effects: &[Effect], depth: usize) -> Result<(), StoryError> {
         if depth > MAX_EFFECT_DEPTH {
             return Err(StoryError::EffectBudget);
@@ -413,24 +797,54 @@ impl Exec<'_> {
         Ok(())
     }
 
+    /// Moves to a scene: leaves any dialogue, records the visit, emits the
+    /// scene's cues and ends the story on an ending node.
     fn enter(&mut self, node_id: &str) -> Result<(), StoryError> {
         let node = self
             .pack
             .node(node_id)
             .ok_or_else(|| StoryError::InvalidPack("destination node is missing".to_owned()))?;
+        self.leave_dialogue();
         self.state.node = node.id.clone();
         self.state.visited.insert(node.id.clone());
         self.events.push(StoryEvent::NodeEntered {
             node: node.id.clone(),
         });
+        for cue in &node.cues {
+            self.events.push(StoryEvent::Cue(cue.clone()));
+        }
         if let Some(ending) = &node.ending {
             self.end(ending.clone());
         }
         Ok(())
     }
 
+    fn enter_dialogue(&mut self, dialogue: &Dialogue, node_id: &str) -> Result<(), StoryError> {
+        let node = dialogue
+            .node(node_id)
+            .ok_or_else(|| StoryError::InvalidPack("dialogue node is missing".to_owned()))?;
+        self.state.dialogue = Some(DialoguePosition {
+            dialogue: dialogue.id.clone(),
+            node: node.id.clone(),
+        });
+        self.events.push(StoryEvent::DialogueEntered {
+            dialogue: dialogue.id.clone(),
+            node: node.id.clone(),
+        });
+        Ok(())
+    }
+
+    fn leave_dialogue(&mut self) {
+        if let Some(position) = self.state.dialogue.take() {
+            self.events.push(StoryEvent::DialogueExited {
+                dialogue: position.dialogue,
+            });
+        }
+    }
+
     fn end(&mut self, ending: Ending) {
         self.ended = true;
+        self.leave_dialogue();
         self.state.ended = Some(ending.clone());
         self.events.push(StoryEvent::Ended(ending));
     }
@@ -505,8 +919,11 @@ mod tests {
 
     #[test]
     fn tokens_parse_only_canonical_forms() {
-        assert_eq!(parse_token("t0c0"), Ok((0, 0)));
-        assert_eq!(parse_token("t12c3"), Ok((12, 3)));
+        assert_eq!(parse_token("t0c0"), Ok((0, Token::Choice(0))));
+        assert_eq!(parse_token("t12c3"), Ok((12, Token::Choice(3))));
+        assert_eq!(parse_token("t4v2"), Ok((4, Token::Verb(2))));
+        assert_eq!(parse_token("t4v2o7"), Ok((4, Token::Target(2, 7))));
+        assert_eq!(parse_token("t9d1"), Ok((9, Token::Option(1))));
         for bad in [
             "",
             "t",
@@ -523,12 +940,34 @@ mod tests {
             "t99999999999c1",
             "t1 c1",
             "T1c1",
+            "t1v",
+            "t1vo1",
+            "t1v1o",
+            "t1v1o1o1",
+            "t1d",
+            "t1x1",
+            "t1v01",
+            "t1é1",
         ] {
             assert_eq!(parse_token(bad), Err(StoryError::MalformedToken), "{bad:?}");
         }
         assert_eq!(
             parse_token(&format!("t1c{}", "1".repeat(40))),
             Err(StoryError::MalformedToken)
+        );
+    }
+
+    #[test]
+    fn token_builders_round_trip() {
+        assert_eq!(parse_token(&choice_token(3, 4)), Ok((3, Token::Choice(4))));
+        assert_eq!(parse_token(&verb_token(3, 4)), Ok((3, Token::Verb(4))));
+        assert_eq!(
+            parse_token(&target_token(MAX_TURNS, 15, 255)),
+            Ok((MAX_TURNS, Token::Target(15, 255)))
+        );
+        assert_eq!(
+            parse_token(&option_token(0, 15)),
+            Ok((0, Token::Option(15)))
         );
     }
 

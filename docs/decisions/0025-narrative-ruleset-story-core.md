@@ -3,7 +3,10 @@
 - Estado: propuesta. La fase S0 (crate puro `crates/story-core`, sin servidor,
   protocolo, persistencia ni cliente) está implementada como prototipo de
   biblioteca, y la parte de herramientas de S1 (CLI offline `tiamud-story` en
-  `crates/story-tools` y esquema JSON publicado) también existe; ver
+  `crates/story-tools` y esquema JSON publicado) también existe. El modelo de
+  núcleo de S4 (StoryPack v2 con menús, retratos y diálogos) se propone en
+  [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md) y existe solo
+  como biblioteca; ver
   [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
   Nota de estado (2026-10-15): existe además una biblioteca aislada de parser
   de ficción interactiva castellano/inglés (`crates/story-parser`, entregada
@@ -191,7 +194,7 @@ sus implicaciones de autorización, moderación y persistencia.
 | S1 | CLI de autoría (`validate`/`play` en terminal) y esquema JSON publicado del StoryPack | No, salvo cambio de formato |
 | S2 | Actor de instancia en el servidor, límites globales/por cuenta, desalojo por inactividad, protocolo `story.*`, paridad Telnet/GMCP, Playwright | **Sí** (protocolo y actor) |
 | S3 | Slots de guardado persistidos, esquema SQL v16 SQLite/PostgreSQL, migración y paridad | **Sí** (persistencia) |
-| S4 | Aventuras por menús de verbos: `story.menu`, diálogos, retratos y cues vía pipeline de medios | **Sí** (modelo de menús/diálogo) |
+| S4 | Aventuras por menús de verbos: `story.menu`, diálogos, retratos y cues vía pipeline de medios | **Sí** (modelo de menús/diálogo: [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md), propuesto; su modelo de núcleo StoryPack v2 existe como biblioteca) |
 | S5 | Parser de ficción interactiva en castellano (`story.command`/`story.prompt`), gramática acotada y determinista | **Sí** (parser e idioma) |
 | S6 | Integración opcional de scripts con el sandbox Lua y cuotas | **Sí** |
 | S7 | Multijugador: instancias compartidas, votos, espectadores, asíncrono | **Sí** |

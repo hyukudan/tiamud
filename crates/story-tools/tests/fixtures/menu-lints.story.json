@@ -1,0 +1,161 @@
+{
+  "format_version": 2,
+  "id": "lints-de-menu",
+  "title": { "es": "Lints de menú" },
+  "start": "sala",
+  "variables": [{ "id": "nunca", "kind": { "bool": { "initial": false } } }],
+  "items": [
+    { "id": "fantasma", "name": { "es": "Objeto que nadie da" } },
+    { "id": "llave", "name": { "es": "Llave" } }
+  ],
+  "initial_inventory": ["llave"],
+  "verbs": [
+    {
+      "id": "mirar",
+      "label": { "es": "MIRAR" },
+      "targets": "hotspot",
+      "default": [{ "text": { "es": "Nada." } }]
+    },
+    {
+      "id": "usar",
+      "label": { "es": "USAR" },
+      "targets": "item",
+      "default": [{ "text": { "es": "No sirve." } }]
+    },
+    {
+      "id": "hablar",
+      "label": { "es": "HABLAR" },
+      "targets": "character",
+      "default": [{ "speaker": "eva", "expression": "risa", "text": { "es": "—Ja." } }]
+    },
+    {
+      "id": "rezar",
+      "label": { "es": "REZAR" },
+      "targets": "none",
+      "default": [{ "text": { "es": "Silencio." } }]
+    }
+  ],
+  "characters": [
+    {
+      "id": "eva",
+      "name": { "es": "Eva" },
+      "portraits": { "neutral": "retrato-eva" },
+      "default_expression": "sonrisa"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "sala",
+      "text": { "es": "Una sala de pruebas." },
+      "hotspots": [
+        { "id": "mesa", "label": { "es": "Mesa" } },
+        { "id": "caja", "label": { "es": "Caja" }, "when": { "flag": "nunca" } }
+      ],
+      "present": [{ "character": "eva", "expression": "furiosa" }],
+      "menu": {
+        "verbs": [
+          { "verb": "mirar" },
+          { "verb": "usar" },
+          { "verb": "hablar" },
+          { "verb": "rezar", "when": { "flag": "nunca" } }
+        ],
+        "entries": [
+          {
+            "id": "mirar-caja",
+            "verb": "mirar",
+            "target": "caja",
+            "responses": [{ "id": "r", "blocks": [{ "text": { "es": "Una caja." } }] }]
+          },
+          {
+            "id": "usar-fantasma",
+            "verb": "usar",
+            "target": "fantasma",
+            "responses": [{ "id": "r", "blocks": [{ "text": { "es": "Imposible." } }] }]
+          },
+          {
+            "id": "mirar-mesa",
+            "verb": "mirar",
+            "target": "mesa",
+            "responses": [
+              { "id": "siempre", "blocks": [{ "text": { "es": "Una mesa." } }] },
+              { "id": "sombra", "blocks": [{ "text": { "es": "Nunca se ve." } }] }
+            ],
+            "exhausted": [{ "text": { "es": "Tampoco se ve." } }]
+          },
+          {
+            "id": "hablar-eva",
+            "verb": "hablar",
+            "target": "eva",
+            "responses": [
+              {
+                "id": "charla",
+                "blocks": [{ "speaker": "eva", "text": { "es": "—Hola." } }],
+                "dialogue": "charla"
+              }
+            ]
+          },
+          {
+            "id": "usar-llave",
+            "verb": "usar",
+            "target": "llave",
+            "responses": [
+              {
+                "id": "abrir",
+                "when": { "flag": "nunca" },
+                "blocks": [{ "text": { "es": "Se abre." } }],
+                "target": "fin"
+              },
+              {
+                "id": "salir",
+                "blocks": [{ "text": { "es": "Sales." } }],
+                "target": "fin"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "fin",
+      "text": { "es": "Fin." },
+      "ending": { "id": "fin", "kind": "neutral" }
+    }
+  ],
+  "dialogues": [
+    {
+      "id": "charla",
+      "start": "hola",
+      "nodes": [
+        {
+          "id": "hola",
+          "lines": [{ "speaker": "eva", "expression": "neutral", "text": { "es": "—¿Qué quieres?" } }],
+          "options": [
+            { "id": "adios", "label": { "es": "Adiós" } },
+            {
+              "id": "secreto",
+              "label": { "es": "El secreto" },
+              "when": { "flag": "nunca" },
+              "next": { "goto": "perdido" }
+            }
+          ]
+        },
+        {
+          "id": "perdido",
+          "lines": [{ "speaker": "eva", "text": { "es": "—Nunca llegarás aquí." } }],
+          "options": [{ "id": "volver", "label": { "es": "Volver" }, "next": "return" }]
+        }
+      ]
+    },
+    {
+      "id": "huerfano",
+      "start": "solo",
+      "nodes": [
+        {
+          "id": "solo",
+          "lines": [{ "text": { "es": "Nadie inicia este diálogo." } }],
+          "options": [{ "id": "fuera", "label": { "es": "Salir" } }]
+        }
+      ]
+    }
+  ]
+}
