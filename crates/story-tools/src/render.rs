@@ -178,21 +178,26 @@ pub fn render_view(view: &StoryView, locale: &str) -> String {
         );
     }
     let _ = writeln!(out, "{status}");
+    // Parser worlds list what is carried through the `inventario` command;
+    // the item line only shows when the pack also declares items.
+    let parser_world = view.prompt.is_some();
     let inventory: Vec<&str> = view
         .inventory
         .iter()
         .filter_map(|name| name.resolve(locale))
         .collect();
-    let _ = writeln!(
-        out,
-        "{}: {}",
-        labels.inventory,
-        if inventory.is_empty() {
-            labels.empty.to_owned()
-        } else {
-            inventory.join(", ")
-        }
-    );
+    if !(parser_world && inventory.is_empty()) {
+        let _ = writeln!(
+            out,
+            "{}: {}",
+            labels.inventory,
+            if inventory.is_empty() {
+                labels.empty.to_owned()
+            } else {
+                inventory.join(", ")
+            }
+        );
+    }
     out.push('\n');
     if let Some(ending) = &view.ending {
         let _ = writeln!(

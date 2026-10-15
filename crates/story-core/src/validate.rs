@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
+use crate::world::{LocalizedWords, Location, ObjectDecl, ObjectFlag};
 use crate::{
     Condition, Cue, Dialogue, DialogueNext, Effect, Ending, MAX_CHARACTERS, MAX_CHOICES_PER_NODE,
     MAX_CONDITION_DEPTH, MAX_CONDITION_NODES, MAX_CUES_PER_NODE, MAX_DIALOGUE_NODES,
@@ -14,6 +15,13 @@ use crate::{
     MAX_VARIABLES, MAX_VERBS, Node, STORY_PACK_FORMAT_VERSION, STORY_PACK_MIN_FORMAT_VERSION,
     StoryPack, TargetKind, TextBlock, Value, VariableKind, valid_id,
 };
+use crate::{
+    MAX_EXITS, MAX_EXTENSION_VERBS, MAX_FOUND_IN, MAX_LEXICONS, MAX_MESSAGE_BYTES,
+    MAX_OBJECT_NAME_BYTES, MAX_OBJECTS, MAX_RULES, MAX_SCORE_ABS, MAX_TURNS,
+};
+
+const V3_MESSAGE: &str =
+    "format v3 feature in a pack with an older format_version; run `tiamud-story fmt --upgrade`";
 
 /// One located validation finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +105,16 @@ struct Validator<'a> {
     dialogues: BTreeSet<&'a str>,
     /// `(node, entry)` pairs that a `uses` condition may name.
     entries: BTreeSet<(&'a str, &'a str)>,
+    /// World objects by id (format v3).
+    objects: BTreeMap<&'a str, &'a ObjectDecl>,
+    /// Nodes with a room (format v3).
+    rooms: BTreeSet<&'a str>,
+    /// Lexicon languages of the world, in pack order.
+    languages: Vec<&'a str>,
+    /// Actions any lexicon produces.
+    actions: BTreeSet<String>,
+    /// Directions every lexicon knows.
+    directions: BTreeSet<String>,
 }
 
 impl StoryPack {
@@ -115,6 +133,11 @@ impl StoryPack {
             characters: BTreeSet::new(),
             dialogues: BTreeSet::new(),
             entries: BTreeSet::new(),
+            objects: BTreeMap::new(),
+            rooms: BTreeSet::new(),
+            languages: Vec::new(),
+            actions: BTreeSet::new(),
+            directions: BTreeSet::new(),
         };
         validator.run();
         if validator.errors.list.is_empty() {
@@ -208,6 +231,7 @@ impl<'a> Validator<'a> {
             self.v1_compatibility();
         }
         self.declarations();
+        self.world_declarations();
         if !self.nodes.contains_key(pack.start.as_str()) {
             self.error("start", "start node does not exist");
         }
@@ -234,6 +258,7 @@ impl<'a> Validator<'a> {
         for index in 0..pack.dialogues.len() {
             self.dialogue(index);
         }
+        self.world_rules();
         if self.errors.list.is_empty() {
             self.lints();
         }
@@ -426,6 +451,369 @@ impl<'a> Validator<'a> {
             self.effect_list(&format!("{path}.effects"), &choice.effects);
         }
         self.scene(&path, node);
+        self.room(&path, node);
+    }
+
+    /// Format v3 room data of a node: name and exits.
+    fn room(&mut self, path: &str, node: &'a Node) {
+        let Some(room) = &node.room else {
+            return;
+        };
+        let path = format!("{path}.room");
+        if self.pack.format_version < 3 {
+            self.error(path.clone(), V3_MESSAGE);
+        }
+        if self.pack.world.is_none() {
+            self.error(path.clone(), "a room needs a pack `world`");
+        }
+        if node.ending.is_some() {
+            self.error(path.clone(), "an ending node cannot be a room");
+        }
+        if let Err(message) = room.name.check(MAX_LABEL_BYTES, false) {
+            self.error(format!("{path}.name"), message);
+        }
+        if room.exits.len() > MAX_EXITS {
+            self.error(
+                format!("{path}.exits"),
+                format!("at most {MAX_EXITS} exits"),
+            );
+            return;
+        }
+        let mut seen = BTreeSet::new();
+        for (index, exit) in room.exits.iter().enumerate() {
+            let path = format!("{path}.exits[{index}]");
+            if !self.directions.contains(&exit.direction) {
+                self.error(
+                    format!("{path}.direction"),
+                    "not a direction every lexicon knows",
+                );
+            } else if !seen.insert(exit.direction.as_str()) {
+                self.error(format!("{path}.direction"), "duplicate exit direction");
+            }
+            self.node_ref(&format!("{path}.to"), &exit.to);
+            self.optional_condition(&format!("{path}.when"), exit.when.as_ref());
+            if let Some(door) = &exit.door {
+                match self.objects.get(door.as_str()).copied() {
+                    None => self.error(format!("{path}.door"), "unknown object"),
+                    Some(decl) => {
+                        let here = decl.location == Location::Room(node.id.clone())
+                            || decl.found_in.contains(&node.id);
+                        if !decl.openable {
+                            self.error(format!("{path}.door"), "a door must be openable");
+                        }
+                        if !here {
+                            self.error(
+                                format!("{path}.door"),
+                                "a door must stand in the room it leads from (location or found_in)",
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(blocked) = &exit.blocked
+                && let Err(message) = blocked.check(MAX_TEXT_BYTES, true)
+            {
+                self.error(format!("{path}.blocked"), message);
+            }
+        }
+    }
+
+    /// Format v3 world: lexicons, objects, rule ids, messages and score.
+    fn world_declarations(&mut self) {
+        let pack = self.pack;
+        for node in &pack.nodes {
+            if node.room.is_some() {
+                self.rooms.insert(node.id.as_str());
+            }
+        }
+        let Some(world) = &pack.world else {
+            return;
+        };
+        if pack.format_version < 3 {
+            self.error("world", V3_MESSAGE);
+        }
+        if world.lexicons.is_empty() || world.lexicons.len() > MAX_LEXICONS {
+            self.error(
+                "world.lexicons",
+                format!("expected 1..={MAX_LEXICONS} lexicons"),
+            );
+            return;
+        }
+        let mut directions: Option<BTreeSet<String>> = None;
+        for (index, lexicon) in world.lexicons.iter().enumerate() {
+            let path = format!("world.lexicons[{index}]");
+            if self.languages.contains(&lexicon.id.as_str()) {
+                self.error(format!("{path}.id"), "duplicate lexicon");
+                continue;
+            }
+            if lexicon.verbs.len() > MAX_EXTENSION_VERBS {
+                self.error(
+                    format!("{path}.verbs"),
+                    format!("at most {MAX_EXTENSION_VERBS} pack verbs"),
+                );
+                continue;
+            }
+            if let Err(error) = crate::command::build_parser(lexicon) {
+                self.error(path, error.to_string());
+                continue;
+            }
+            self.languages.push(lexicon.id.as_str());
+            if let Ok(actions) = crate::command::lexicon_actions(lexicon) {
+                self.actions.extend(actions);
+            }
+            if let Ok(known) = crate::command::lexicon_directions(lexicon) {
+                directions = Some(match directions {
+                    None => known,
+                    Some(previous) => previous.intersection(&known).cloned().collect(),
+                });
+            }
+        }
+        self.directions = directions.unwrap_or_default();
+        if world.objects.len() > MAX_OBJECTS {
+            self.error("world.objects", format!("at most {MAX_OBJECTS} objects"));
+            return;
+        }
+        if world.rules.len() > MAX_RULES {
+            self.error("world.rules", format!("at most {MAX_RULES} rules"));
+            return;
+        }
+        for (index, decl) in world.objects.iter().enumerate() {
+            let path = format!("world.objects[{index}].id");
+            if !valid_id(&decl.id) {
+                self.error(path, "invalid identifier");
+            } else if self.objects.insert(decl.id.as_str(), decl).is_some() {
+                self.error(path, "duplicate object id");
+            }
+        }
+        for (index, decl) in world.objects.iter().enumerate() {
+            self.object(&format!("world.objects[{index}]"), decl);
+        }
+        // Containment must be a forest.
+        for (index, decl) in world.objects.iter().enumerate() {
+            let mut current = &decl.location;
+            let mut steps = 0usize;
+            while let Location::In(container) = current {
+                steps += 1;
+                if container == &decl.id || steps > world.objects.len() {
+                    self.error(
+                        format!("world.objects[{index}].location"),
+                        "containment cycle",
+                    );
+                    break;
+                }
+                match self.objects.get(container.as_str()) {
+                    Some(holder) => current = &holder.location,
+                    None => break,
+                }
+            }
+        }
+        for (key, text) in &world.messages {
+            if let Err(message) = text.check(MAX_MESSAGE_BYTES, false) {
+                self.error(format!("world.messages.{key:?}"), message);
+            }
+        }
+        if let Some(intro) = &world.intro
+            && let Err(message) = intro.check(MAX_TEXT_BYTES, true)
+        {
+            self.error("world.intro", message);
+        }
+        if let Some(max) = world.max_score
+            && !(1..=MAX_SCORE_ABS).contains(&max)
+        {
+            self.error("world.max_score", format!("expected 1..={MAX_SCORE_ABS}"));
+        }
+    }
+
+    fn object(&mut self, path: &str, decl: &'a ObjectDecl) {
+        if let Err(message) = decl.name.check(MAX_OBJECT_NAME_BYTES, false) {
+            self.error(format!("{path}.name"), message);
+        }
+        if let Err(message) = decl.description.check(MAX_TEXT_BYTES, true) {
+            self.error(format!("{path}.description"), message);
+        }
+        if let Some(text) = &decl.text
+            && let Err(message) = text.check(MAX_TEXT_BYTES, true)
+        {
+            self.error(format!("{path}.text"), message);
+        }
+        self.words(&format!("{path}.nouns"), &decl.nouns, true);
+        self.words(&format!("{path}.adjectives"), &decl.adjectives, false);
+        self.location(&format!("{path}.location"), &decl.location, Some(&decl.id));
+        if decl.found_in.len() > MAX_FOUND_IN {
+            self.error(
+                format!("{path}.found_in"),
+                format!("at most {MAX_FOUND_IN} rooms"),
+            );
+        }
+        if !decl.found_in.is_empty()
+            && (decl.portable || !matches!(decl.location, Location::Room(_)))
+        {
+            self.error(
+                format!("{path}.found_in"),
+                "only fixed objects standing in a room may be found in other rooms",
+            );
+        }
+        for room in &decl.found_in {
+            if !self.rooms.contains(room.as_str()) {
+                self.error(format!("{path}.found_in"), "unknown room");
+            }
+        }
+        let mut contradiction = |message: &str| self.errors.push(path.to_owned(), message);
+        if decl.portable && decl.scenery {
+            contradiction("an object cannot be both portable and scenery");
+        }
+        if decl.open && !(decl.openable || decl.container) {
+            contradiction("only openable objects or containers can be open");
+        }
+        if decl.locked && (!decl.openable || decl.open) {
+            contradiction("a locked object must be openable and closed");
+        }
+        if decl.worn && !(decl.wearable && decl.location == Location::Carried) {
+            contradiction("a worn object must be wearable and carried");
+        }
+        if let Some(key) = &decl.key {
+            if !decl.openable {
+                self.error(format!("{path}.key"), "only openable objects take a key");
+            }
+            match self.objects.get(key.as_str()) {
+                None => self.error(format!("{path}.key"), "unknown object"),
+                Some(found) if found.id == decl.id => {
+                    self.error(format!("{path}.key"), "an object cannot be its own key")
+                }
+                Some(found) if !found.portable => {
+                    self.error(format!("{path}.key"), "a key must be portable")
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// Nouns or adjectives per lexicon language: every key is a lexicon
+    /// language, each word folds to one alphanumeric word the parser accepts.
+    fn words(&mut self, path: &str, words: &LocalizedWords, required: bool) {
+        use tiamud_story_parser::{MAX_SCOPE_WORDS_PER_OBJECT, MAX_WORD_BYTES, fold};
+        for language in words.keys() {
+            if !self.languages.contains(&language.as_str()) {
+                self.error(
+                    format!("{path}.{language}"),
+                    "not a lexicon language of this world",
+                );
+            }
+        }
+        for language in self.languages.clone() {
+            let list = words.get(language).map(Vec::as_slice).unwrap_or_default();
+            if required && list.is_empty() {
+                self.error(
+                    format!("{path}.{language}"),
+                    "at least one noun is required for every lexicon language",
+                );
+            }
+            if list.len() > MAX_SCOPE_WORDS_PER_OBJECT {
+                self.error(
+                    format!("{path}.{language}"),
+                    format!("at most {MAX_SCOPE_WORDS_PER_OBJECT} words"),
+                );
+                continue;
+            }
+            for word in list {
+                let folded = fold(word);
+                if word.len() > MAX_WORD_BYTES * 4
+                    || folded.is_empty()
+                    || folded.len() > MAX_WORD_BYTES
+                    || !folded.chars().all(char::is_alphanumeric)
+                {
+                    self.error(
+                        format!("{path}.{language}"),
+                        format!(
+                            "'{word}' is not one alphanumeric word of 1..={MAX_WORD_BYTES} bytes"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /// An object location: rooms must be room nodes and containers declared
+    /// container objects other than `owner`.
+    fn location(&mut self, path: &str, location: &Location, owner: Option<&str>) {
+        match location {
+            Location::Room(node) => {
+                if !self.rooms.contains(node.as_str()) {
+                    self.error(path, "not a room node");
+                }
+            }
+            Location::In(container) => match self.objects.get(container.as_str()) {
+                None => self.error(path, "unknown object"),
+                Some(decl) if !decl.container => self.error(path, "not a container"),
+                Some(decl) if Some(decl.id.as_str()) == owner => {
+                    self.error(path, "an object cannot contain itself")
+                }
+                Some(_) => {}
+            },
+            Location::Carried | Location::Nowhere => {}
+        }
+    }
+
+    fn object_ref(&mut self, path: &str, obj: &str) {
+        if !self.objects.contains_key(obj) {
+            self.error(path, "unknown object");
+        }
+    }
+
+    /// Format v3 rules: action known to a lexicon, keys and DSL.
+    fn world_rules(&mut self) {
+        let Some(world) = &self.pack.world else {
+            return;
+        };
+        if world.rules.len() > MAX_RULES || world.objects.len() > MAX_OBJECTS {
+            return;
+        }
+        let mut ids = BTreeSet::new();
+        for (index, rule) in world.rules.iter().enumerate() {
+            let path = format!("world.rules[{index}]");
+            if !valid_id(&rule.id) {
+                self.error(format!("{path}.id"), "invalid identifier");
+            } else if !ids.insert(rule.id.as_str()) {
+                self.error(format!("{path}.id"), "duplicate rule id");
+            }
+            if !self.actions.contains(&rule.action) {
+                self.error(
+                    format!("{path}.action"),
+                    "no lexicon of this world produces this action",
+                );
+            }
+            if let Some(obj) = &rule.obj {
+                self.object_ref(&format!("{path}.obj"), obj);
+            }
+            if let Some(obj) = &rule.obj2 {
+                self.object_ref(&format!("{path}.obj2"), obj);
+            }
+            if let Some(direction) = &rule.direction
+                && !self.directions.contains(direction)
+            {
+                self.error(
+                    format!("{path}.direction"),
+                    "not a direction every lexicon knows",
+                );
+            }
+            self.optional_condition(&format!("{path}.when"), rule.when.as_ref());
+            self.effect_list(&format!("{path}.effects"), &rule.effects);
+            if let Some(text) = &rule.text
+                && let Err(message) = text.check(MAX_TEXT_BYTES, true)
+            {
+                self.error(format!("{path}.text"), message);
+            }
+            if rule.text.is_none() && rule.effects.is_empty() {
+                self.warnings
+                    .push(path, "rule has neither text nor effects");
+            }
+        }
+    }
+
+    fn v3(&mut self, path: &str) {
+        if self.pack.format_version < 3 {
+            self.error(path, V3_MESSAGE);
+        }
     }
 
     /// Format v2 scene fields: background, cues, hotspots, presence, menu.
@@ -806,6 +1194,32 @@ impl<'a> Validator<'a> {
                     );
                 }
             }
+            Condition::Carried(obj) | Condition::Visible(obj) => {
+                self.v3(path);
+                self.object_ref(path, obj);
+            }
+            Condition::ObjectAt { obj, at } => {
+                self.v3(path);
+                self.object_ref(&format!("{path}.obj"), obj);
+                self.location(&format!("{path}.at"), at, Some(obj));
+            }
+            Condition::ObjectIs { obj, .. } => {
+                self.v3(path);
+                self.object_ref(&format!("{path}.obj"), obj);
+            }
+            Condition::PlayerIn(node) => {
+                self.v3(path);
+                self.node_ref(path, node);
+            }
+            Condition::TurnCmp { value, .. } => {
+                self.v3(path);
+                if value.unsigned_abs() > u64::from(MAX_TURNS) {
+                    self.error(
+                        format!("{path}.value"),
+                        "comparison constant is out of range",
+                    );
+                }
+            }
         }
     }
 
@@ -901,6 +1315,30 @@ impl<'a> Validator<'a> {
                 }
             }
             Effect::End(ending) => self.ending(path, ending),
+            Effect::MoveObject { obj, to } => {
+                self.v3(path);
+                self.object_ref(&format!("{path}.obj"), obj);
+                self.location(&format!("{path}.to"), to, Some(obj));
+            }
+            Effect::SetObject { obj, flag, .. } => {
+                self.v3(path);
+                match self.objects.get(obj.as_str()).copied() {
+                    None => self.error(format!("{path}.obj"), "unknown object"),
+                    Some(decl) => {
+                        let allowed = match flag {
+                            ObjectFlag::Open | ObjectFlag::Locked => decl.openable,
+                            ObjectFlag::Lit => decl.lightable || decl.lit,
+                            ObjectFlag::Worn => decl.wearable,
+                        };
+                        if !allowed {
+                            self.error(
+                                format!("{path}.flag"),
+                                "the object does not have this flag",
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -921,8 +1359,22 @@ impl<'a> Validator<'a> {
             }
             dialogue_exits.insert(dialogue.id.as_str(), (targets, can_end));
         }
+        // Rule destinations and endings apply from any room (format v3).
+        let mut rule_targets = Vec::new();
+        let mut rules_end = false;
+        if let Some(world) = &pack.world {
+            for rule in &world.rules {
+                collect_targets(&rule.effects, &mut rule_targets);
+                rules_end |= any_end(&rule.effects);
+            }
+        }
         for (index, node) in pack.nodes.iter().enumerate() {
             let mut targets = Vec::new();
+            if let Some(room) = &node.room {
+                targets.extend(room.exits.iter().map(|exit| exit.to.as_str()));
+                targets.extend(rule_targets.iter().copied());
+                ends[index] |= rules_end;
+            }
             for choice in &node.choices {
                 targets.extend(choice.target.as_deref());
                 collect_targets(&choice.effects, &mut targets);
@@ -977,7 +1429,7 @@ impl<'a> Validator<'a> {
             if reachable[index] && ends[index] {
                 ending_reachable = true;
             }
-            if node.menu.is_some() {
+            if node.menu.is_some() || node.room.is_some() {
                 continue;
             }
             if node.choices.is_empty() {

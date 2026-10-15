@@ -42,7 +42,13 @@
       "patterns": [{ "object": true, "prep": "with", "second": true }] },
     { "action": "close", "display": "cerrar",
       "words": ["cerrar", "cierra"],
-      "patterns": [{ "object": true }] },
+      "patterns": [
+        { "object": true, "prep": "with", "second": true, "action": "lock" },
+        { "object": true }
+      ] },
+    { "action": "lock", "display": "bloquear",
+      "words": ["bloquear", "bloquea"],
+      "patterns": [{ "object": true, "prep": "with", "second": true }] },
     { "action": "put_in", "display": "poner",
       "words": ["poner", "pon", "meter", "mete", "colocar", "coloca"],
       "patterns": [
@@ -83,6 +89,12 @@
     { "action": "switch_on", "display": "encender", "words": ["encender", "enciende"],
       "patterns": [{ "object": true }] },
     { "action": "switch_off", "display": "apagar", "words": ["apagar", "apaga"],
+      "patterns": [{ "object": true }] },
+    { "action": "wear", "display": "ponerte",
+      "words": ["vestir", "viste", "ponte", "ponerse", "ponerte"],
+      "patterns": [{ "object": true }] },
+    { "action": "remove", "display": "quitarte",
+      "words": ["quitar", "quita", "quítate", "quitarse", "quitarte", "desvestir"],
       "patterns": [{ "object": true }] },
     { "action": "undo", "display": "deshacer", "meta": true,
       "words": ["deshacer", "deshaz"], "patterns": [{}] },

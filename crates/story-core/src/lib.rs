@@ -15,18 +15,28 @@
 //! or client consumes it yet. See ADR 0025. Format v2 adds the core model of
 //! menu-driven adventures (verb menus, speakers with portraits, dialogue trees
 //! and paginated views) proposed in ADR 0028; it is still library-only.
+//! Format v3 adds the parser world proposed in ADR 0031: rooms with exits,
+//! objects with a location tree and properties, `before`/`instead`/`after`
+//! rules and a default library driven by `tiamud-story-parser`
+//! ([`StoryInput::Command`], [`step_command`]). The server does not wire it
+//! yet.
 
 #![forbid(unsafe_code)]
 
+mod command;
 mod engine;
+mod messages;
 mod pack;
 mod rng;
+mod runtime;
 mod state;
 mod text;
 mod undo;
 mod validate;
 mod view;
+mod world;
 
+pub use command::{CommandStep, MetaRequest, build_parser, step_command};
 pub use engine::{
     MenuSelection, StoryEvent, StoryInput, resolve_choice, resolve_dialogue_option, resolve_menu,
     step,
@@ -37,24 +47,29 @@ pub use pack::{
     MenuEntry, MenuVerb, Node, Presence, Response, RollTest, StoryPack, TargetKind, TextBlock,
     Value, VariableDecl, VariableKind, VerbDecl,
 };
-pub use state::{DialoguePosition, LastResponse, StoryState};
+pub use state::{DialoguePosition, LastResponse, PendingQuestion, Reply, StoryState};
 pub use text::LocalizedText;
 pub use undo::UndoRing;
 pub use validate::{ValidationErrors, ValidationIssue, ValidationReport};
 pub use view::{
     PageItem, StoryView, ViewBlock, ViewChoice, ViewDialogue, ViewMenu, ViewPage, ViewPortrait,
-    ViewStat, ViewTarget, ViewVerb, view, view_pages,
+    ViewPrompt, ViewStat, ViewTarget, ViewVerb, view, view_pages,
+};
+pub use world::{
+    Exit, Gender, LexiconRef, LibraryMessage, LocalizedWords, Location, ObjectDecl, ObjectFlag,
+    ObjectState, Room, Rule, RulePhase, World,
 };
 
 /// Current version of the StoryPack JSON document (v2 adds menus, speakers,
-/// portraits and dialogue trees).
-pub const STORY_PACK_FORMAT_VERSION: u32 = 2;
-/// Oldest StoryPack version still loaded. v1 documents are a strict subset of
-/// v2 and upgrade by rewriting `format_version` only.
+/// portraits and dialogue trees; v3 adds the parser world).
+pub const STORY_PACK_FORMAT_VERSION: u32 = 3;
+/// Oldest StoryPack version still loaded. v1 and v2 documents are strict
+/// subsets of v3 and upgrade by rewriting `format_version` only.
 pub const STORY_PACK_MIN_FORMAT_VERSION: u32 = 1;
 /// Version of the serialized [`StoryState`] document. v1 states (without menu
-/// counters, spent responses or dialogue position) still load.
-pub const STORY_STATE_FORMAT_VERSION: u32 = 2;
+/// counters, spent responses or dialogue position) and v2 states (without
+/// objects, transcript, pronoun or pending question) still load.
+pub const STORY_STATE_FORMAT_VERSION: u32 = 3;
 
 /// Maximum serialized StoryPack size accepted by [`StoryPack::from_json_slice`].
 pub const MAX_PACK_BYTES: usize = 2 * 1024 * 1024;
@@ -142,6 +157,32 @@ pub const MAX_MENU_USES: u16 = 9999;
 /// single page item (one 4096-byte text block, escaped at most 2×, plus a
 /// 256-byte speaker name) is far below this bound.
 pub const MAX_VIEW_BYTES: usize = 12 * 1024;
+/// Maximum lexicons of a parser world.
+pub const MAX_LEXICONS: usize = 4;
+/// Maximum pack verbs added to one lexicon.
+pub const MAX_EXTENSION_VERBS: usize = 32;
+/// Maximum world objects (and therefore parser scope size, which
+/// `tiamud-story-parser` bounds at 128).
+pub const MAX_OBJECTS: usize = 128;
+/// Maximum world rules.
+pub const MAX_RULES: usize = 512;
+/// Maximum exits of one room.
+pub const MAX_EXITS: usize = 16;
+/// Maximum extra rooms of one fixed object (`found_in`).
+pub const MAX_FOUND_IN: usize = 16;
+/// Maximum bytes of one locale of an object name. Articles are added on top
+/// and the parser accepts names up to 256 bytes.
+pub const MAX_OBJECT_NAME_BYTES: usize = 128;
+/// Maximum bytes of one locale of a library message override.
+pub const MAX_MESSAGE_BYTES: usize = 512;
+/// Maximum transcript replies kept for one input.
+pub const MAX_REPLIES: usize = 256;
+/// Maximum bytes of one stored parser question or error.
+pub const MAX_PARSER_REPLY_BYTES: usize = 1024;
+/// Maximum replies chained to one pending parser question.
+pub const MAX_PENDING_ANSWERS: usize = 4;
+/// Maximum objects one `todo`/`all` command acts on.
+pub const MAX_MULTI_OBJECTS: usize = 32;
 
 /// Errors returned by loading, validating against state, or stepping a story.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -178,6 +219,8 @@ pub enum StoryError {
     BadTarget,
     #[error("a single view item exceeds {limit} bytes")]
     ViewTooLarge { limit: usize },
+    #[error("this story has no parser world")]
+    NoParser,
 }
 
 /// Returns true for a bounded authored identifier: 1..=64 bytes, starting with

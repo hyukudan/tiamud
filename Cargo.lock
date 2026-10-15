@@ -2882,6 +2882,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tiamud-story-parser",
 ]
 
 [[package]]
@@ -2903,6 +2904,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiamud-story-core",
+ "tiamud-story-parser",
 ]
 
 [[package]]

@@ -11,11 +11,19 @@
 //! matched case- and accent-insensitively against the labels the view
 //! offers, exactly as a Telnet client would type them; a lone `mirar` still
 //! redraws the scene. While a dialogue waits, a number answers it.
+//!
+//! Parser worlds (format v3) read every other line as free text for the
+//! story's parser, exactly as a player types it (`coge la lámpara y
+//! enciéndela`). Only `estado`/`state` and `salir`/`quit`/`q` stay tool
+//! commands; the parser's meta commands are honoured here: `deshacer`/`undo`
+//! pops the undo ring, `reiniciar`/`restart` starts over, and save/restore
+//! report that slots do not exist offline. A bare number still takes a
+//! gamebook choice when the scene offers one.
 
 use std::fmt::Write as _;
 use std::io::{self, BufRead, Write};
 
-use tiamud_story_core::{StoryPack, StoryState, StoryView, UndoRing, Value, view};
+use tiamud_story_core::{StoryPack, StoryState, StoryView, UndoRing, Value, step_command, view};
 
 use crate::render::{render_events, render_view};
 use crate::script::{ChooseError, Stepped, UNDO_CAPACITY, choose, menu_by_number, say};
@@ -81,7 +89,16 @@ fn read_line_bounded<R: BufRead>(input: &mut R, limit: usize) -> io::Result<Line
     }
 }
 
-fn help(spanish: bool) -> &'static str {
+fn help(spanish: bool, parser: bool) -> &'static str {
+    if parser {
+        return if spanish {
+            "Escribe órdenes como en cualquier aventura: «mira», «coge la lámpara y enciéndela», «norte».\n\
+             Además: «estado» (estado completo, para autores) y «salir».\n"
+        } else {
+            "Type commands as in any text adventure: \"look\", \"take the lamp and light it\", \"north\".\n\
+             Also: \"state\" (full state, for authors) and \"quit\".\n"
+        };
+    }
     if spanish {
         "Órdenes: número de opción, deshacer, estado, mirar, ayuda, salir.\n\
          Menús: N (verbo), N M (verbo y objetivo), cN (opción), o las palabras: «mirar mesa».\n"
@@ -261,7 +278,7 @@ pub fn play<R: BufRead, W: Write>(
     let mut state = StoryState::new(pack, seed).map_err(to_io)?;
     let mut undo = UndoRing::new(UNDO_CAPACITY).map_err(to_io)?;
     let mut commands = 0usize;
-    write!(output, "{}", help(spanish))?;
+    write!(output, "{}", help(spanish, pack.world.is_some()))?;
     write!(
         output,
         "{}",
@@ -295,10 +312,91 @@ pub fn play<R: BufRead, W: Write>(
             }
             Line::Text(bytes) => String::from_utf8_lossy(&bytes).trim().to_lowercase(),
         };
+        if pack.world.is_some()
+            && !matches!(
+                text.as_str(),
+                "" | "salir" | "quit" | "q" | "estado" | "state"
+            )
+        {
+            let current = view(pack, &state).map_err(to_io)?;
+            let number = text.parse::<usize>().ok();
+            if let (Some(number), false) = (number, current.choices.is_empty()) {
+                match choose(pack, &state, number) {
+                    Ok((next, events)) => {
+                        write!(output, "{}", render_events(pack, &events, locale))?;
+                        undo.push(std::mem::replace(&mut state, next));
+                        write!(
+                            output,
+                            "{}",
+                            render_view(&view(pack, &state).map_err(to_io)?, locale)
+                        )?;
+                    }
+                    Err(error) => writeln!(output, "{}", choose_message(&error, spanish))?,
+                }
+                continue;
+            }
+            let language = locale.split('-').next();
+            match step_command(pack, &state, &text, language) {
+                Ok(stepped) => {
+                    write!(output, "{}", render_events(pack, &stepped.events, locale))?;
+                    // A line of only meta commands is not itself undoable.
+                    if !stepped.meta.is_empty() && stepped.state.turn == state.turn {
+                        state = stepped.state;
+                    } else {
+                        undo.push(std::mem::replace(&mut state, stepped.state));
+                    }
+                    let mut redraw = true;
+                    for meta in &stepped.meta {
+                        match meta.action.as_str() {
+                            "undo" => match undo.pop() {
+                                Some(previous) => state = previous,
+                                None => writeln!(
+                                    output,
+                                    "{}",
+                                    if spanish {
+                                        "No hay nada que deshacer."
+                                    } else {
+                                        "Nothing to undo."
+                                    }
+                                )?,
+                            },
+                            "restart" => {
+                                state = StoryState::new(pack, seed).map_err(to_io)?;
+                                undo.clear();
+                            }
+                            "quit" => redraw = false,
+                            "save" | "restore" => writeln!(
+                                output,
+                                "{}",
+                                if spanish {
+                                    "(Sin ranuras de guardado en el modo offline: usa deshacer.)"
+                                } else {
+                                    "(No save slots offline: use undo.)"
+                                }
+                            )?,
+                            _ => {}
+                        }
+                    }
+                    if !redraw {
+                        break;
+                    }
+                    write!(
+                        output,
+                        "{}",
+                        render_view(&view(pack, &state).map_err(to_io)?, locale)
+                    )?;
+                }
+                Err(tiamud_story_core::StoryError::Ended) => {
+                    writeln!(output, "{}", choose_message(&ChooseError::Ended, spanish))?
+                }
+                Err(error) => writeln!(output, "error: {error}")?,
+            }
+            continue;
+        }
         match text.as_str() {
             "" => {}
             "salir" | "quit" | "q" => break,
-            "ayuda" | "help" | "?" => write!(output, "{}", help(spanish))?,
+            "ayuda" | "help" | "?" => write!(output, "{}", help(spanish, pack.world.is_some()))?,
             "estado" | "state" => write!(output, "{}", render_state(&state, seed))?,
             "mirar" | "look" => write!(
                 output,

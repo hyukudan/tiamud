@@ -45,6 +45,18 @@ pub struct StoryView {
     /// Active dialogue options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialogue: Option<ViewDialogue>,
+    /// Free-text prompt of a parser world (format v3); absent after the end,
+    /// while a dialogue must be answered and in packs without a world.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<ViewPrompt>,
+}
+
+/// The parser prompt. `question` is set while the parser waits for the
+/// answer to a question shown in `blocks` (which object, or what with).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewPrompt {
+    pub text: LocalizedText,
+    pub question: bool,
 }
 
 /// A selectable choice or dialogue option. `token` is bound to the view's
@@ -114,7 +126,7 @@ pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryErro
         None
     };
     let choices = if open && dialogue.is_none() {
-        available_choices(state, node)?
+        available_choices(pack, state, node)?
             .into_iter()
             .enumerate()
             .map(|(ordinal, choice)| ViewChoice {
@@ -168,7 +180,7 @@ pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryErro
         .collect();
     let mut portraits = Vec::new();
     for presence in &node.present {
-        if crate::engine::holds(state, presence.when.as_ref())?
+        if crate::engine::holds(pack, state, presence.when.as_ref())?
             && let Some(character) = pack.character(&presence.character)
         {
             portraits.push(ViewPortrait {
@@ -186,6 +198,25 @@ pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryErro
             blocks.push(view_block(pack, line));
         }
     }
+    // Parser transcript (format v3), after menu and dialogue text.
+    for reply in &state.transcript {
+        blocks.push(ViewBlock {
+            speaker: None,
+            portrait: None,
+            text: crate::messages::render(pack, reply),
+        });
+    }
+    let prompt = (open && dialogue.is_none() && pack.world.is_some()).then(|| ViewPrompt {
+        text: LocalizedText::single("es", ">"),
+        question: state.pending.is_some(),
+    });
+    // A room's scene text is its name (or darkness); its description arrives
+    // in the transcript when looked at or entered.
+    let text = match &node.room {
+        Some(room) if crate::runtime::lit(pack, state) => room.name.clone(),
+        Some(_) => crate::messages::library_text(pack, crate::world::LibraryMessage::DarkName),
+        None => node.text.clone(),
+    };
     let dialogue = dialogue.map(|active| ViewDialogue {
         options: active
             .options
@@ -199,7 +230,7 @@ pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryErro
     });
     Ok(StoryView {
         title: pack.title.clone(),
-        text: node.text.clone(),
+        text,
         turn: state.turn,
         choices,
         stats,
@@ -212,6 +243,7 @@ pub fn view(pack: &StoryPack, state: &StoryState) -> Result<StoryView, StoryErro
         blocks,
         menu,
         dialogue,
+        prompt,
     })
 }
 
@@ -276,6 +308,13 @@ pub enum PageItem {
         score: i64,
         background: Option<String>,
         ending: Option<Ending>,
+        /// Parser prompt text (format v3); absent when no free text is
+        /// accepted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        /// True while the parser waits for the answer to its question.
+        #[serde(default, skip_serializing_if = "crate::world::is_false")]
+        question: bool,
     },
     Cue(Cue),
     Portrait {
@@ -330,6 +369,8 @@ pub fn view_pages(
         score: full.score,
         background: full.background.clone(),
         ending: full.ending.clone(),
+        prompt: full.prompt.as_ref().map(|prompt| text(&prompt.text)),
+        question: full.prompt.as_ref().is_some_and(|prompt| prompt.question),
     }];
     items.extend(full.cues.iter().cloned().map(PageItem::Cue));
     items.extend(full.portraits.iter().map(|portrait| PageItem::Portrait {

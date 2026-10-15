@@ -8,11 +8,16 @@ library) and in English. It turns a player line such as
 commands whose objects are ids supplied by the caller.
 
 Current status (see the [completion matrix](../project/COMPLETION_MATRIX.md)):
-this is a **library only**. No StoryPack field, server actor, `story.command`
-message, Telnet or browser surface uses it yet, and it does not depend on
-`tiamud-story-core`. [ADR 0025](../decisions/0025-narrative-ruleset-story-core.md)
-is still **Proposed**, and its phase table requires a dedicated ADR (parser
-and language) before the parser is wired into story sessions.
+the parser is integrated with `tiamud-story-core` as **StoryPack format v3**
+(parser worlds), proposed in
+[ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md) —
+the parser and language ADR that
+[ADR 0025](../decisions/0025-narrative-ruleset-story-core.md) requires — and
+playable offline with `tiamud-story play`. See
+[Integration with story-core](#integration-with-story-core-storypack-v3).
+No server actor, `story.command` message, Telnet or browser surface uses it
+yet. `tiamud-story-parser` does not depend on `tiamud-story-core`; the
+dependency goes the other way.
 
 The Rust types and validator in `crates/story-parser` are the exact
 authority. The shipped lexicons are
@@ -39,8 +44,9 @@ authority. The shipped lexicons are
   (save, restore, undo, score, help, quit, restart) are out-of-world; the
   in-world `inventario`, `mirar`, `examinar` and `esperar` are ordinary verbs.
 - **Enclitic pronouns** (`cógelo`, `ábrela`, `examínalo`, `dáselo`, `dámelo`,
-  `dale`, `háblale`, `cogerla`): the verb word is stripped of the longest
-  matching suffix whose stem is a verb with an object pattern. `direct`
+  `dale`, `háblale`, `cogerla`): the verb word is stripped of the matching
+  suffix that leaves the longest stem that is a verb with an object pattern
+  (`póntela` is `ponte` + `la`, wear it, not `pon` + `tela`). `direct`
   suffixes (`lo`, `la`, `melo`, `selo`…) make the last referenced object the
   first object; `indirect` suffixes (`le`, `les`) fill the recipient
   (`dale la moneda`) or the object of a leading preposition (`háblale`) when
@@ -238,25 +244,44 @@ state, uses `BTreeMap`/`BTreeSet` lookups and is deterministic. Fixed-seed
 fuzz tests feed random bytes, random lexicon word soup, random answers and
 mutated lexicons and assert no panic, bounded outcomes and determinism.
 
-## Planned integration with `story-core`
+## Integration with story-core (StoryPack v3)
 
-Integration is **not implemented**; it requires the parser/language ADR that
-ADR 0025 reserves for the parser phase. The intended shape, which keeps
-`tiamud-story-core` pure:
+[ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md)
+(**Proposed**) integrates the parser into the pure ruleset; the authoring
+side is documented in [Parser worlds](story-packs.md#parser-worlds-format-v3).
+The library shape:
 
-1. A StoryPack gains an optional, versioned parser section (or a sibling
-   file) naming a lexicon and, per item, localized nouns and adjectives.
-   Validation rejects unknown actions and words that break lexicon limits.
-2. The story session implements `Scope` from `StoryState`: items visible in
-   the current node plus the inventory, with `last_referenced` kept in the
-   session (not in prose).
-3. Authored rules map `(action, obj, prep, obj2, direction)` to choices or
-   effects, so a parsed command becomes an ordinary `StoryInput` and `step`
-   stays the only transition. Unmatched commands produce an authored default
-   reply. Meta actions (`undo`, `save`, `restore`…) are handled by the session,
-   never by the ruleset.
-4. `Ambiguous`/`Incomplete` questions are session state: the next
-   `story.command` is passed to `Parser::answer`. Questions never advance the
-   turn.
-5. Browser and Telnet share the same parser and the same rendered questions;
-   ADR 0025's 16 KiB frame and Telnet parity rules apply unchanged.
+1. **Vocabulary.** A StoryPack v3 `world.lexicons` names shipped lexicons by
+   id (`es`, `en`) and may add up to 32 pack verbs per lexicon in this guide's
+   verb format. `tiamud-story-core` compiles the shipped JSON plus those verbs
+   with `Parser::new` (the shipped JSON is parsed once per process); a
+   conflict is a pack validation error. Objects declare nouns and adjectives
+   per lexicon language, validated against the same word rules as scope
+   words. `build_parser` is public for hosts that want to cache parsers.
+2. **Scope over `StoryState`.** Each command gets a fresh `SimpleScope`:
+   visible objects (held, or in the lit room, with every enclosing container
+   open), their definite display names, the pronoun referent from
+   `StoryState.pronoun` while it is visible, and every object word of the
+   world as known vocabulary.
+3. **Input.** `StoryInput::Command { text, language }` (and the richer
+   `step_command`) splits the line with `Parser::split_line` and parses each
+   command with `Parser::parse_segment` after the previous one ran, stopping
+   at the first failure. Rules (`before`/`instead`/`after`) and the default
+   library execute commands; `step` stays the only transition.
+4. **Questions.** `Ambiguous`/`Incomplete` become a bounded
+   `PendingQuestion` in the state (line, command index and up to four answers
+   so far, not the parser's private `Pending`); the next input is passed to
+   `Parser::answer` against the regenerated question. Questions and parse
+   errors do not advance the turn.
+5. **Meta actions** (`undo`, `save`, `restore`, `quit`, `restart`, `score`,
+   `help`) are returned to the host in `CommandStep.meta`; the ruleset never
+   performs them.
+6. **Not yet wired:** server sessions, `story.command`/`story.prompt`, Telnet
+   and the browser. When they are, both transports must share the parser and
+   its rendered questions, and ADR 0025's 16 KiB frame and Telnet parity rules
+   apply unchanged.
+
+The integration added `lock` (`cerrar X con Y`, `bloquear`; `lock X with Y`),
+`wear` (`ponte`, `vestir`; `wear`, `put on`) and `remove` (`quítate`,
+`quitar`; `remove`, `take off`) to both shipped lexicons, and `exit` (`exit`,
+`leave`, `get out`) to English.

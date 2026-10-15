@@ -26,17 +26,27 @@
 //! takes a 1-based dialogue option. `undo` restores the state before the last
 //! accepted input. `expect` asserts any subset of fields. Format v1 scripts
 //! (only `choose`/`undo`/`expect`) still run.
+//!
+//! Format v3 scripts drive parser worlds: `{ "text": "coge la lámpara" }`
+//! types a line exactly as a player would (in the script's `language`, by
+//! default the pack's first lexicon), and a typed `deshacer`/`undo` undoes
+//! like the `undo` step. Expectations gain `carried`, `not_carried`,
+//! `objects` (exact locations such as `{ "llave": "carried" }` or
+//! `{ "aceitera": { "room": "escalera" } }`), `transcript` (substrings the
+//! rendered replies must contain) and `question` (a parser question awaits).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use tiamud_story_core::{
-    MAX_ITEMS, MAX_VARIABLES, StoryError, StoryEvent, StoryInput, StoryPack, StoryState, UndoRing,
-    Value, resolve_menu, step, view,
+    Location, MAX_ITEMS, MAX_OBJECTS, MAX_VARIABLES, StoryError, StoryEvent, StoryInput, StoryPack,
+    StoryState, UndoRing, Value, resolve_menu, step, step_command, view,
 };
 
 /// Newest script document version accepted by this module.
-pub const STORY_SCRIPT_FORMAT_VERSION: u32 = 2;
+pub const STORY_SCRIPT_FORMAT_VERSION: u32 = 3;
+/// Maximum transcript substrings one expectation checks.
+pub const MAX_TRANSCRIPT_CHECKS: usize = 32;
 /// Maximum script document size.
 pub const MAX_SCRIPT_BYTES: usize = 256 * 1024;
 /// Maximum steps in one script.
@@ -50,6 +60,9 @@ pub struct StoryScript {
     pub format_version: u32,
     #[serde(default)]
     pub seed: u64,
+    /// Lexicon language of `text` steps and transcript checks (v3).
+    #[serde(default)]
+    pub language: Option<String>,
     pub steps: Vec<ScriptStep>,
 }
 
@@ -64,8 +77,10 @@ pub enum ScriptStep {
     Act(Action),
     /// 1-based index into the active dialogue options (v2).
     Say(usize),
+    /// A line of free text for the parser (v3).
+    Text(String),
     Undo,
-    Expect(Expectation),
+    Expect(Box<Expectation>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -115,6 +130,22 @@ pub struct Expectation {
     /// Use counters by `node/entry` (v2).
     #[serde(default)]
     pub uses: BTreeMap<String, u16>,
+    /// World objects held directly by the player (v3).
+    #[serde(default)]
+    pub carried: Vec<String>,
+    /// World objects not held directly by the player (v3).
+    #[serde(default)]
+    pub not_carried: Vec<String>,
+    /// Exact object locations (v3).
+    #[serde(default)]
+    pub objects: BTreeMap<String, Location>,
+    /// Substrings the rendered transcript of the last input must contain
+    /// (v3).
+    #[serde(default)]
+    pub transcript: Vec<String>,
+    /// Whether a parser question awaits an answer (v3).
+    #[serde(default)]
+    pub question: Option<bool>,
 }
 
 impl Expectation {
@@ -123,6 +154,14 @@ impl Expectation {
             || self.options.is_some()
             || self.verbs.is_some()
             || !self.uses.is_empty()
+    }
+
+    fn uses_v3(&self) -> bool {
+        !self.carried.is_empty()
+            || !self.not_carried.is_empty()
+            || !self.objects.is_empty()
+            || !self.transcript.is_empty()
+            || self.question.is_some()
     }
 }
 
@@ -189,11 +228,29 @@ impl StoryScript {
                     .map(move |entry| format!("{}/{}", node.id, entry.id))
             })
             .collect();
+        let objects: BTreeSet<&str> = pack
+            .world
+            .iter()
+            .flat_map(|world| &world.objects)
+            .map(|object| object.id.as_str())
+            .collect();
         for (index, step) in self.steps.iter().enumerate() {
             let invalid = |message: String| ScriptError::Invalid {
                 step: index + 1,
                 message,
             };
+            let v3_step = matches!(step, ScriptStep::Text(_))
+                || matches!(step, ScriptStep::Expect(expect) if expect.uses_v3());
+            if v3_step && self.format_version < 3 {
+                return Err(invalid(
+                    "text steps and v3 expectations need script format_version 3".to_owned(),
+                ));
+            }
+            if v3_step && pack.world.is_none() {
+                return Err(invalid(
+                    "text steps and v3 expectations need a pack with a parser world".to_owned(),
+                ));
+            }
             let v2_step = matches!(
                 step,
                 ScriptStep::Menu(_) | ScriptStep::Act(_) | ScriptStep::Say(_)
@@ -219,8 +276,32 @@ impl StoryScript {
                         return Err(invalid(format!("unknown verb {:?}", action.verb)));
                     }
                 }
+                ScriptStep::Text(text) => {
+                    if text.len() > tiamud_story_parser::MAX_INPUT_BYTES {
+                        return Err(invalid(format!(
+                            "text exceeds {} bytes",
+                            tiamud_story_parser::MAX_INPUT_BYTES
+                        )));
+                    }
+                }
                 ScriptStep::Choose(_) | ScriptStep::Say(_) | ScriptStep::Undo => {}
                 ScriptStep::Expect(expect) => {
+                    if expect.carried.len() > MAX_OBJECTS
+                        || expect.not_carried.len() > MAX_OBJECTS
+                        || expect.objects.len() > MAX_OBJECTS
+                        || expect.transcript.len() > MAX_TRANSCRIPT_CHECKS
+                    {
+                        return Err(invalid("expectation lists exceed pack limits".to_owned()));
+                    }
+                    if let Some(object) = expect
+                        .carried
+                        .iter()
+                        .chain(&expect.not_carried)
+                        .chain(expect.objects.keys())
+                        .find(|object| !objects.contains(object.as_str()))
+                    {
+                        return Err(invalid(format!("unknown object {object:?}")));
+                    }
                     if expect.vars.len() > MAX_VARIABLES
                         || expect.has.len() > MAX_ITEMS
                         || expect.lacks.len() > MAX_ITEMS
@@ -442,6 +523,18 @@ pub fn run_script(pack: &StoryPack, script: &StoryScript) -> Result<ScriptReport
                 say(pack, &state, *number)
                     .map_err(|error| failed(format!("say {number}: {error}")))?,
             ),
+            ScriptStep::Text(text) => {
+                let stepped = step_command(pack, &state, text, script.language.as_deref())
+                    .map_err(|error| failed(format!("text {text:?}: {error}")))?;
+                if stepped.meta.iter().any(|meta| meta.action == "undo") {
+                    state = undo
+                        .pop()
+                        .ok_or_else(|| failed("undo: nothing to undo".to_owned()))?;
+                    None
+                } else {
+                    Some((stepped.state, stepped.events))
+                }
+            }
             ScriptStep::Undo => {
                 state = undo
                     .pop()
@@ -449,7 +542,7 @@ pub fn run_script(pack: &StoryPack, script: &StoryScript) -> Result<ScriptReport
                 None
             }
             ScriptStep::Expect(expect) => {
-                check(pack, &state, expect).map_err(failed)?;
+                check(pack, &state, expect, script.language.as_deref()).map_err(failed)?;
                 expectations = expectations.saturating_add(1);
                 None
             }
@@ -467,8 +560,65 @@ pub fn run_script(pack: &StoryPack, script: &StoryScript) -> Result<ScriptReport
     })
 }
 
-fn check(pack: &StoryPack, state: &StoryState, expect: &Expectation) -> Result<(), String> {
+fn check(
+    pack: &StoryPack,
+    state: &StoryState,
+    expect: &Expectation,
+    language: Option<&str>,
+) -> Result<(), String> {
     let mut problems = Vec::new();
+    let location = |object: &str| state.objects.get(object).map(|object| &object.at);
+    for object in &expect.carried {
+        if location(object) != Some(&Location::Carried) {
+            problems.push(format!("object {object:?} is not carried"));
+        }
+    }
+    for object in &expect.not_carried {
+        if location(object) == Some(&Location::Carried) {
+            problems.push(format!("object {object:?} is carried"));
+        }
+    }
+    for (object, wanted) in &expect.objects {
+        if location(object) != Some(wanted) {
+            problems.push(format!(
+                "object {object:?} is at {:?}, expected {wanted:?}",
+                location(object)
+            ));
+        }
+    }
+    if let Some(question) = expect.question
+        && state.pending.is_some() != question
+    {
+        problems.push(if question {
+            "no parser question awaits an answer".to_owned()
+        } else {
+            "a parser question awaits an answer".to_owned()
+        });
+    }
+    if !expect.transcript.is_empty() {
+        let locale = language
+            .or_else(|| {
+                pack.world
+                    .as_ref()
+                    .and_then(|world| world.lexicons.first())
+                    .map(|lexicon| lexicon.id.as_str())
+            })
+            .unwrap_or("es");
+        let current = view(pack, state).map_err(|error| error.to_string())?;
+        let shown: Vec<&str> = current
+            .blocks
+            .iter()
+            .filter_map(|block| block.text.resolve(locale))
+            .collect();
+        let shown = shown.join("\n");
+        for wanted in &expect.transcript {
+            if !shown.contains(wanted.as_str()) {
+                problems.push(format!(
+                    "transcript does not contain {wanted:?}; it reads {shown:?}"
+                ));
+            }
+        }
+    }
     if let Some(node) = &expect.node
         && state.node != *node
     {

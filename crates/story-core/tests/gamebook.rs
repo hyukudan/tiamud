@@ -431,7 +431,7 @@ fn parsing_rejects_unknown_fields_versions_and_oversize() {
         StoryPack::from_json_slice(value.to_string().as_bytes()),
         Err(StoryError::Malformed(_))
     ));
-    for unsupported in [0, 3] {
+    for unsupported in [0, 4] {
         let mut value = fixture_value();
         value["format_version"] = json!(unsupported);
         assert_eq!(

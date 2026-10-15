@@ -3,9 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::rng::SplitMix64;
+use crate::world::{LibraryMessage, Location, ObjectState};
 use crate::{
-    Ending, MAX_MENU_USES, MAX_SCORE_ABS, MAX_STATE_BYTES, MAX_TURNS, STORY_STATE_FORMAT_VERSION,
-    StoryError, StoryPack, Value, VariableKind, bounded_message,
+    Ending, MAX_MENU_USES, MAX_PARSER_REPLY_BYTES, MAX_PENDING_ANSWERS, MAX_REPLIES, MAX_SCORE_ABS,
+    MAX_STATE_BYTES, MAX_TURNS, STORY_STATE_FORMAT_VERSION, StoryError, StoryPack, Value,
+    VariableKind, bounded_message,
 };
 
 /// Position inside the single active dialogue tree.
@@ -33,6 +35,58 @@ pub enum LastResponse {
     SceneDefault { node: String, verb: String },
     /// The verb's own default.
     VerbDefault { verb: String },
+}
+
+/// One line of the parser transcript (format v3). Replies name authored ids
+/// and library message keys, never stored prose, except for the parser's
+/// own rendered question or error, which is bounded. The view renders them
+/// in every lexicon language.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Reply {
+    /// A parser question or error, already rendered in `language`.
+    Parser { language: String, text: String },
+    /// A library message about objects.
+    Message {
+        message: LibraryMessage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        obj: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        obj2: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        list: Vec<String>,
+    },
+    /// The world's introduction text.
+    Intro,
+    /// A room heading.
+    RoomName { node: String },
+    /// A node's text (the room description).
+    RoomText { node: String },
+    /// An object's description.
+    Describe { obj: String },
+    /// An object's readable text.
+    Read { obj: String },
+    /// A rule's text.
+    Rule { rule: String },
+    /// The blocked text of an exit.
+    Blocked { node: String, direction: String },
+    /// The score line.
+    Score { score: i64, turns: u32 },
+}
+
+/// A parser question awaiting the player's reply (format v3). It is stored as
+/// the inputs that produced it, not as parser internals: the line, the index
+/// of its command and the replies given so far. Replaying them against the
+/// unchanged state regenerates the exact question, so the stored form is
+/// small, bounded and independent of the parser's private structures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingQuestion {
+    pub language: String,
+    pub line: String,
+    pub segment: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<String>,
 }
 
 /// Complete, serializable state of one story playthrough.
@@ -70,6 +124,18 @@ pub struct StoryState {
     /// Response of the last menu action (format v2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<LastResponse>,
+    /// Location and flags of every world object (format v3).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub objects: BTreeMap<String, ObjectState>,
+    /// Replies to the last parser input (format v3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<Reply>,
+    /// Object a pronoun (`lo`, `it`) refers to (format v3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pronoun: Option<String>,
+    /// Parser question awaiting an answer (format v3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingQuestion>,
 }
 
 /// Joins authored ids into a state key. Ids never contain `/`.
@@ -110,7 +176,13 @@ impl StoryState {
         }
         let mut visited = BTreeSet::new();
         visited.insert(start.id.clone());
-        Ok(Self {
+        let objects = pack
+            .world
+            .iter()
+            .flat_map(|world| &world.objects)
+            .map(|decl| (decl.id.clone(), ObjectState::initial(decl)))
+            .collect();
+        let mut state = Self {
             format_version: STORY_STATE_FORMAT_VERSION,
             pack_id: pack.id.clone(),
             node: start.id.clone(),
@@ -126,7 +198,19 @@ impl StoryState {
             spent_options: BTreeSet::new(),
             dialogue: None,
             last: None,
-        })
+            objects,
+            transcript: Vec::new(),
+            pronoun: None,
+            pending: None,
+        };
+        if let Some(world) = &pack.world {
+            if world.intro.is_some() {
+                state.transcript.push(Reply::Intro);
+            }
+            let replies = crate::command::look_replies(pack, &state)?;
+            state.transcript.extend(replies);
+        }
+        Ok(state)
     }
 
     /// Verifies that this state belongs to `pack` and respects every bound:
@@ -137,14 +221,21 @@ impl StoryState {
     /// [`crate::step`] exceed a bound.
     pub fn check_against(&self, pack: &StoryPack) -> Result<(), StoryError> {
         let mismatch = |message: &str| Err(StoryError::StateMismatch(message.to_owned()));
+        let v2_fields = !self.menu_uses.is_empty()
+            || !self.spent_responses.is_empty()
+            || !self.spent_options.is_empty()
+            || self.dialogue.is_some()
+            || self.last.is_some();
+        let v3_fields = !self.objects.is_empty()
+            || !self.transcript.is_empty()
+            || self.pronoun.is_some()
+            || self.pending.is_some();
         match self.format_version {
             STORY_STATE_FORMAT_VERSION => {}
-            1 if self.menu_uses.is_empty()
-                && self.spent_responses.is_empty()
-                && self.spent_options.is_empty()
-                && self.dialogue.is_none()
-                && self.last.is_none() => {}
-            1 => return mismatch("a v1 state carries v2 fields"),
+            1 if !v2_fields && !v3_fields => {}
+            1 => return mismatch("a v1 state carries v2 or v3 fields"),
+            2 if !v3_fields => {}
+            2 => return mismatch("a v2 state carries v3 fields"),
             found => return Err(StoryError::UnsupportedVersion { found }),
         }
         if self.pack_id != pack.id {
@@ -224,6 +315,116 @@ impl StoryState {
             };
             if !known {
                 return mismatch("last response is unknown");
+            }
+        }
+        self.check_world(pack)
+    }
+
+    /// Format v3 part of [`StoryState::check_against`]: objects, transcript,
+    /// pronoun and pending question all resolve in the pack and stay bounded.
+    fn check_world(&self, pack: &StoryPack) -> Result<(), StoryError> {
+        let mismatch = |message: &str| Err(StoryError::StateMismatch(message.to_owned()));
+        let Some(world) = &pack.world else {
+            if !self.objects.is_empty()
+                || !self.transcript.is_empty()
+                || self.pronoun.is_some()
+                || self.pending.is_some()
+            {
+                return mismatch("parser state without a pack world");
+            }
+            return Ok(());
+        };
+        if self.objects.len() != world.objects.len() {
+            return mismatch("object set differs from the pack");
+        }
+        for decl in &world.objects {
+            let Some(object) = self.objects.get(&decl.id) else {
+                return mismatch("object is missing");
+            };
+            match &object.at {
+                Location::Room(node) => {
+                    if pack.room(node).is_none() {
+                        return mismatch("object is in an unknown room");
+                    }
+                }
+                Location::In(container) => {
+                    let is_container = pack.object(container).is_some_and(|c| c.container);
+                    if container == &decl.id || !is_container {
+                        return mismatch("object is in an unknown container");
+                    }
+                }
+                Location::Carried | Location::Nowhere => {}
+            }
+            // A container without a lid is always open; otherwise only
+            // openable objects open.
+            let open_ok = if decl.container && !decl.openable {
+                object.open
+            } else {
+                !object.open || decl.openable
+            };
+            if !open_ok
+                || (object.locked && !decl.openable)
+                || (object.lit && !(decl.lightable || decl.lit))
+                || (object.worn && !(decl.wearable && object.at == Location::Carried))
+            {
+                return mismatch("object flags contradict its properties");
+            }
+            if crate::runtime::root(self, &decl.id).is_none() {
+                return mismatch("object containment has a cycle");
+            }
+        }
+        if self.transcript.len() > MAX_REPLIES {
+            return mismatch("transcript is too long");
+        }
+        let languages = world.languages();
+        let object = |id: &String| pack.object(id).is_some();
+        for reply in &self.transcript {
+            let known = match reply {
+                Reply::Parser { language, text } => {
+                    languages.contains(&language.as_str())
+                        && text.len() <= MAX_PARSER_REPLY_BYTES
+                        && !text.chars().any(char::is_control)
+                }
+                Reply::Message {
+                    obj, obj2, list, ..
+                } => {
+                    obj.iter().chain(obj2).all(object)
+                        && list.len() <= world.objects.len()
+                        && list.iter().all(object)
+                }
+                Reply::Intro => world.intro.is_some(),
+                Reply::RoomName { node } => pack.room(node).is_some(),
+                Reply::RoomText { node } => pack.node(node).is_some(),
+                Reply::Describe { obj } => object(obj),
+                Reply::Read { obj } => pack.object(obj).is_some_and(|decl| decl.text.is_some()),
+                Reply::Rule { rule } => world.rule(rule).is_some_and(|rule| rule.text.is_some()),
+                Reply::Blocked { node, direction } => pack.room(node).is_some_and(|room| {
+                    room.exits
+                        .iter()
+                        .any(|exit| exit.direction == *direction && exit.blocked.is_some())
+                }),
+                Reply::Score { score, turns } => {
+                    score.unsigned_abs() <= MAX_SCORE_ABS.unsigned_abs() && *turns <= MAX_TURNS
+                }
+            };
+            if !known {
+                return mismatch("transcript reply is unknown or out of bounds");
+            }
+        }
+        if let Some(pronoun) = &self.pronoun
+            && !object(pronoun)
+        {
+            return mismatch("pronoun names an unknown object");
+        }
+        if let Some(pending) = &self.pending {
+            let bounded = |text: &String| text.len() <= tiamud_story_parser::MAX_INPUT_BYTES;
+            if !languages.contains(&pending.language.as_str())
+                || !bounded(&pending.line)
+                || usize::from(pending.segment) >= tiamud_story_parser::MAX_COMMANDS
+                || pending.answers.len() > MAX_PENDING_ANSWERS
+                || !pending.answers.iter().all(bounded)
+            {
+                return mismatch("pending question is out of bounds");
             }
         }
         Ok(())

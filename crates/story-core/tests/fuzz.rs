@@ -659,6 +659,7 @@ fn gen_pack(rng: &mut Gen) -> StoryPack {
                 hotspots,
                 present,
                 menu,
+                room: None,
                 id: if rng.chance(3) {
                     "n0".to_owned()
                 } else {
@@ -721,6 +722,7 @@ fn gen_pack(rng: &mut Gen) -> StoryPack {
         default_expression: None,
     };
     StoryPack {
+        world: None,
         format_version: if v2 || rng.chance(30) { 2 } else { 1 },
         verbs: if v2 {
             vec![
@@ -825,4 +827,142 @@ fn generated_packs_validate_soundly() {
         valid > 100 && invalid > 100 && valid_menus > 50 && valid_dialogues > 20,
         "valid={valid} invalid={invalid} menus={valid_menus} dialogues={valid_dialogues}"
     );
+}
+
+const FARO: &[u8] = include_bytes!("../fixtures/parser/faro-de-punta-gris.story.json");
+
+/// Words, fragments and junk a player (or an attacker) may type.
+const TEXT_POOL: &[&str] = &[
+    "coge",
+    "deja",
+    "abre",
+    "cierra",
+    "examina",
+    "x",
+    "mira",
+    "i",
+    "n",
+    "s",
+    "e",
+    "o",
+    "sube",
+    "baja",
+    "sal",
+    "entra",
+    "enciende",
+    "apaga",
+    "pon",
+    "mete",
+    "dale",
+    "habla",
+    "lee",
+    "ponte",
+    "quítate",
+    "llena",
+    "espera",
+    "todo",
+    "excepto",
+    "la",
+    "el",
+    "con",
+    "en",
+    "a",
+    "y",
+    "luego",
+    "lámpara",
+    "llave",
+    "puerta",
+    "cofre",
+    "medalla",
+    "remedios",
+    "aceitera",
+    "fanal",
+    "deposito",
+    "barca",
+    "cuaderno",
+    "lente",
+    "cógela",
+    "ábrela",
+    "examínalo",
+    "segunda",
+    "1",
+    "2",
+    "ella",
+    "deshacer",
+    "puntos",
+    "ayuda",
+    "guardar",
+    ",",
+    ".",
+    "xyzzy",
+    "ñandú",
+    "\u{301}",
+    "🦀",
+    "\t",
+    "take",
+    "lamp",
+    "north",
+    "\u{0}",
+];
+
+/// Random free text on the parser fixture: every input on a validated pack
+/// is accepted (or rejected only because the story ended), every state stays
+/// within its bounds and paginates, and replaying the lines is deterministic.
+#[test]
+fn random_text_commands_stay_bounded_and_deterministic() {
+    let pack = StoryPack::from_json_slice(FARO).unwrap();
+    pack.validate().unwrap();
+    let mut rng = Gen(31);
+    let (mut accepted, mut ended) = (0usize, 0usize);
+    for _ in 0..40 {
+        let seed = rng.next();
+        let mut state = StoryState::new(&pack, seed).unwrap();
+        let mut lines = Vec::new();
+        for _ in 0..120 {
+            let words = 1 + rng.below(10);
+            let mut line = String::new();
+            for _ in 0..words {
+                line.push_str(rng.pick::<&str>(TEXT_POOL));
+                line.push(if rng.chance(15) { '.' } else { ' ' });
+            }
+            if rng.chance(2) {
+                line = line.repeat(40);
+            }
+            let language = match rng.below(10) {
+                0 => Some("en".to_owned()),
+                1 => Some("xx-YY".to_owned()),
+                _ => None,
+            };
+            let input = StoryInput::Command {
+                text: line.clone(),
+                language,
+            };
+            match step(&pack, &state, input) {
+                Ok((next, _)) => {
+                    accepted += 1;
+                    assert_bounded(&pack, &next);
+                    assert_pages_bounded(&pack, &next);
+                    lines.push(line);
+                    state = next;
+                }
+                Err(StoryError::Ended) => {
+                    ended += 1;
+                    break;
+                }
+                Err(error) => panic!("{line:?} on a validated pack: {error}"),
+            }
+        }
+        // The pack has only a Spanish lexicon, so every language above
+        // resolves to it and replaying without one reproduces the state.
+        let mut replay = StoryState::new(&pack, seed).unwrap();
+        for line in &lines {
+            let input = StoryInput::Command {
+                text: line.clone(),
+                language: None,
+            };
+            replay = step(&pack, &replay, input).expect("replay").0;
+        }
+        assert_eq!(replay, state);
+    }
+    assert!(accepted > 2000, "accepted={accepted} ended={ended}");
 }
