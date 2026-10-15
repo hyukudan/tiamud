@@ -10,6 +10,47 @@ ignore = [
     { id = "RUSTSEC-2024-0436", reason = "Unmaintained paste 1.0.15 is a transitive ravif/rav1e build dependency with no safe upgrade; keep tracking until the AVIF encoder removes it." },
 ]
 
+[licenses]
+# Every SPDX identifier that appears in the reviewed Rust expressions of
+# scripts/third-party-license-policy.json (`approvedDeclaredLicenseExpressions.rust`)
+# and nothing else. That policy, enforced by
+# scripts/generate-third-party-notices.mjs, stays authoritative and stricter:
+# it approves exact declared expressions on the release graph, while
+# cargo-deny evaluates each expression against this identifier list over its
+# own (all-features, dev-inclusive) graph.
+#
+# Check licenses on the policy's release target:
+#
+#   cargo deny --target x86_64-unknown-linux-gnu check licenses
+#
+# Without `--target`, cargo-deny also walks dependencies that never build for
+# the release target (`libfuzzer-sys`, `(MIT OR Apache-2.0) AND NCSA`, under
+# rav1e's `cfg(fuzzing)`; `webpki-root-certs`, `CDLA-Permissive-2.0`, under
+# rustls-platform-verifier's `wasm32` target). The policy approves neither
+# expression, so they are not allowed here. `[graph]` is left unrestricted so
+# the CI advisories/sources check keeps covering every target.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[licenses.private]
+# Workspace crates are `publish = false` and carry the project's own
+# `MIT OR Apache-2.0` (verified by scripts/verify-project-licenses.sh).
+ignore = true
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
