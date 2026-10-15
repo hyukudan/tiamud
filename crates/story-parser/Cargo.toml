@@ -1,0 +1,13 @@
+[package]
+name = "tiamud-story-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Pure, bounded, data-driven natural-language command parser for Tiamud parser-based interactive fiction (Spanish and English)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

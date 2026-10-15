@@ -2881,6 +2881,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiamud-story-parser"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "tiamud-story-tools"
 version = "0.1.0"
 dependencies = [

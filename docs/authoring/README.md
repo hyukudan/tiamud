@@ -26,7 +26,9 @@ without duplicating every field.
 Branching gamebooks for the separate narrative ruleset (ADR 0025, proposed) use
 **StoryPacks**, not WorldPacks. They are authored and tested offline with
 `tiamud-story`; see [StoryPack authoring](story-packs.md). They are not yet
-playable on a running server.
+playable on a running server. A standalone Spanish/English interactive-fiction
+command parser library exists but is not integrated with StoryPacks yet; see
+[story parser](story-parser.md).
 
 The reviewed example contains:
 
