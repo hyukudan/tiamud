@@ -2,8 +2,8 @@
 
 - Estado: propuesta. La capa de persistencia (esquema v16 en SQLite y
   PostgreSQL, migración v15→v16, mover, API de store y pruebas) está
-  implementada; **no** está conectada a sesiones de historia, protocolo
-  `story.save`/`story.restore` ni clientes. Ver
+  implementada y, desde la nota de estado del final, conectada a sesiones de
+  historia, protocolo y clientes. Ver
   [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
 - Fecha: 2026-10-15
 - Alcance: fase S3 de [ADR 0025](0025-narrative-ruleset-story-core.md)
@@ -186,3 +186,27 @@ Errores tipados: `InvalidStorySave`, `StorySaveTooLarge`, `StorySaveCapacity`,
   regla de ADR 0025 de no migrar implícitamente.
 - **Confiar en el digest aportado por el llamador**: el store calcula el
   digest de los bytes que realmente escribe.
+
+## Nota de estado (2026-10-15): conexión con las sesiones S2
+
+Añadida después de la decisión; no cambia el estado propuesto ni el contrato
+de la tabla. El primer punto de «Fuera de alcance» está implementado (ver
+[ADR 0029, nota de estado](0029-story-session-instances-and-story-protocol.md#nota-de-estado-2026-10-15-slots-de-guardado-conectados)):
+
+- El gestor de instancias es el único llamador. La autorización por cuenta es
+  la de la sesión autenticada: cada operación usa la cuenta de la sesión y la
+  historia en curso; no hay forma de nombrar otra cuenta ni otra historia.
+- `pack_sha256` es el SHA-256 de los bytes exactos del `*.story.json` leído al
+  arrancar; el conjunto compatible se pasa vacío. Cambiar el archivo del pack
+  deja los slots anteriores listados como `compatible: false` y su carga se
+  rechaza con `slot_incompatible`.
+- Los errores tipados del store se traducen a códigos públicos:
+  `StorySaveCapacity` y `StorySaveTooLarge` → `slot_capacity`,
+  `StorySaveCorrupt` (y un fallo de `from_json_slice`) → `slot_corrupt`,
+  `StorySavePackMismatch` → `slot_incompatible`, `StorySaveUnsupported` →
+  `slots_unavailable`, y cualquier otro error o un plazo agotado → `internal`
+  con un mensaje genérico; los detalles quedan en el registro del servidor.
+- El historial de deshacer no se persiste.
+
+Sigue pendiente: declarar revisiones compatibles en StoryPack, exportación
+por cuenta, cuotas globales y la ejecución real de las pruebas PostgreSQL v16.

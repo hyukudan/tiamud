@@ -645,7 +645,6 @@ pub trait CharacterStore: Send + Sync {
     /// that the document's `format_version`/`pack_id` match the metadata,
     /// computes the SHA-256 of the exact bytes and enforces the per-account
     /// caps in the same transaction. Overwriting keeps `created_at`.
-    #[allow(dead_code)] // Wired by the S2 story instance manager.
     async fn save_story_slot(
         &self,
         _write: StorySaveWrite,
@@ -657,7 +656,6 @@ pub trait CharacterStore: Send + Sync {
     /// digest or metadata disagree yields `StorySaveCorrupt`; a row for a pack
     /// revision `pack` does not accept yields `StorySavePackMismatch`. The
     /// caller must still re-validate the state against the pack.
-    #[allow(dead_code)] // Wired by the S2 story instance manager.
     async fn load_story_slot(
         &self,
         _account_id: AccountId,
@@ -670,7 +668,6 @@ pub trait CharacterStore: Send + Sync {
 
     /// List the account's slots for one story in slot order (at most ten),
     /// reading metadata only.
-    #[allow(dead_code)] // Wired by the S2 story instance manager.
     async fn list_story_slots(
         &self,
         _account_id: AccountId,
@@ -681,7 +678,6 @@ pub trait CharacterStore: Send + Sync {
 
     /// Delete one slot; returns whether a row existed. Account deletion
     /// removes every slot through the `ON DELETE CASCADE` foreign key.
-    #[allow(dead_code)] // Wired by the S2 story instance manager.
     async fn delete_story_slot(
         &self,
         _account_id: AccountId,
@@ -1545,14 +1541,10 @@ pub(super) enum Request {
     LoadDomainEvents {
         reply: oneshot::Sender<Result<Vec<DomainEvent>, StoreError>>,
     },
-    // Constructed once the S2 story instance manager calls the store.
-    #[allow(dead_code)]
     SaveStorySlot {
         write: StorySaveWrite,
         reply: oneshot::Sender<Result<StorySaveSummary, StoreError>>,
     },
-    // Constructed once the S2 story instance manager calls the store.
-    #[allow(dead_code)]
     LoadStorySlot {
         account_id: AccountId,
         story_id: String,
@@ -1560,15 +1552,11 @@ pub(super) enum Request {
         pack: StoryPackCompatibility,
         reply: oneshot::Sender<Result<Option<StorySaveRecord>, StoreError>>,
     },
-    // Constructed once the S2 story instance manager calls the store.
-    #[allow(dead_code)]
     ListStorySlots {
         account_id: AccountId,
         story_id: String,
         reply: oneshot::Sender<Result<Vec<StorySaveSummary>, StoreError>>,
     },
-    // Constructed once the S2 story instance manager calls the store.
-    #[allow(dead_code)]
     DeleteStorySlot {
         account_id: AccountId,
         story_id: String,

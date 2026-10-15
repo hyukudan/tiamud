@@ -9,6 +9,10 @@ import type {
   StoryErrorCode,
   StoryItem,
   StoryLeft,
+  StoryRestored,
+  StorySaved,
+  StorySlotSummary,
+  StorySlots,
   StoryView,
 } from './generated/protocol';
 import { isRecord } from './guards';
@@ -27,7 +31,14 @@ const SAFE_AUDIO_URL = /^\/assets\/[a-f0-9]{64}\/audio-[a-z0-9-]+\.(?:opus|ogg|m
 const STORY_ERROR_CODES: readonly StoryErrorCode[] = [
   'disabled', 'unknown_story', 'already_in_story', 'capacity', 'not_in_story',
   'stale_view', 'unknown_choice', 'ended', 'nothing_to_undo', 'busy', 'internal',
+  'slots_unavailable', 'invalid_slot', 'slot_empty', 'slot_corrupt', 'slot_incompatible',
+  'slot_capacity', 'rate_limited',
 ];
+
+/** Highest save slot; `0` is the autosave. At most ten slots per story. */
+const MAX_SLOT = 9;
+/** Unix seconds bound accepted for `updatedAt` (year 9999). */
+const MAX_UNIX_SECONDS = 253_402_300_799;
 
 const exactKeys = (
   value: Record<string, unknown>,
@@ -198,6 +209,55 @@ export function parseStoryError(data: Record<string, unknown>): StoryError | und
   const message = text(data.message, 512);
   const code = STORY_ERROR_CODES.find((candidate) => candidate === data.code);
   return code && message ? { code, message } : undefined;
+}
+
+const slotNumber = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= MAX_SLOT
+    ? value
+    : undefined;
+
+const unixSeconds = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 &&
+    value <= MAX_UNIX_SECONDS ? value : undefined;
+
+const parseSlotSummary = (value: unknown): StorySlotSummary | undefined => {
+  if (!isRecord(value) || !exactKeys(value, ['slot', 'updatedAt', 'compatible'])) return undefined;
+  const slot = slotNumber(value.slot);
+  const updatedAt = unixSeconds(value.updatedAt);
+  return slot !== undefined && updatedAt !== undefined && typeof value.compatible === 'boolean'
+    ? { slot, updatedAt, compatible: value.compatible }
+    : undefined;
+};
+
+/** `story.slots`: unique slots in ascending order, at most ten. */
+export function parseStorySlots(data: Record<string, unknown>): StorySlots | undefined {
+  if (!exactKeys(data, ['slots', 'offerContinue']) || typeof data.offerContinue !== 'boolean') {
+    return undefined;
+  }
+  const slots = boundedArray(data.slots, MAX_SLOT + 1, parseSlotSummary);
+  if (!slots || slots.some((slot, index) => index > 0 && slot.slot <= slots[index - 1].slot)) {
+    return undefined;
+  }
+  // An offer to continue needs a compatible autosave to continue from.
+  if (data.offerContinue && !slots.some((slot) => slot.slot === 0 && slot.compatible)) {
+    return undefined;
+  }
+  return { slots, offerContinue: data.offerContinue };
+}
+
+export function parseStorySaved(data: Record<string, unknown>): StorySaved | undefined {
+  if (!exactKeys(data, ['slot', 'updatedAt'])) return undefined;
+  const slot = slotNumber(data.slot);
+  const updatedAt = unixSeconds(data.updatedAt);
+  return slot !== undefined && slot > 0 && updatedAt !== undefined
+    ? { slot, updatedAt }
+    : undefined;
+}
+
+export function parseStoryRestored(data: Record<string, unknown>): StoryRestored | undefined {
+  if (!exactKeys(data, ['slot'])) return undefined;
+  const slot = slotNumber(data.slot);
+  return slot !== undefined ? { slot } : undefined;
 }
 
 /** A complete story view assembled from every part of one `viewRev`. */

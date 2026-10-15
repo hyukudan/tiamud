@@ -7,9 +7,9 @@ export type ProtocolVersion = 1;
 
 export const WEBSOCKET_SUBPROTOCOL = 'tiamud.v1';
 
-export type ServerMessageType = "server.welcome" | "server.notice" | "server.heartbeat" | "action.result" | "scene.snapshot" | "player.snapshot" | "scene.patch" | "entity.upsert" | "entity.remove" | "vitals.update" | "inventory.patch" | "container.contents" | "trade.contents" | "reward.odds" | "mail.list" | "mail.message" | "board.catalog" | "board.list" | "board.entry" | "map.snapshot" | "message.append" | "chat.message" | "sync.scene" | "sync.player" | "media.play" | "media.stop" | "story.entered" | "story.view" | "story.left" | "story.error";
+export type ServerMessageType = "server.welcome" | "server.notice" | "server.heartbeat" | "action.result" | "scene.snapshot" | "player.snapshot" | "scene.patch" | "entity.upsert" | "entity.remove" | "vitals.update" | "inventory.patch" | "container.contents" | "trade.contents" | "reward.odds" | "mail.list" | "mail.message" | "board.catalog" | "board.list" | "board.entry" | "map.snapshot" | "message.append" | "chat.message" | "sync.scene" | "sync.player" | "media.play" | "media.stop" | "story.entered" | "story.view" | "story.left" | "story.error" | "story.slots" | "story.saved" | "story.restored";
 
-export type ClientMessageType = "client.hello" | "command.submit" | "action.perform" | "sync.request" | "client.heartbeat" | "story.choose" | "story.menu" | "story.dialogue" | "story.undo" | "story.leave";
+export type ClientMessageType = "client.hello" | "command.submit" | "action.perform" | "sync.request" | "client.heartbeat" | "story.choose" | "story.menu" | "story.dialogue" | "story.undo" | "story.leave" | "story.save" | "story.restore" | "story.slots" | "story.deleteSlot" | "story.continue";
 
 export type ServerEnvelope<T> = { v: ProtocolVersion, type: ServerMessageType, seq: number, data: T, };
 
@@ -121,6 +121,25 @@ export type StoryLeftReason = "left" | "evicted";
 
 export type StoryLeft = { reason: StoryLeftReason, };
 
-export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal";
+export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited";
 
 export type StoryError = { code: StoryErrorCode, message: string, };
+
+export type StorySlotData = { slot: number, };
+
+export type StorySlotSummary = { slot: number, 
+/**
+ * Unix seconds of the last write.
+ */
+updatedAt: number, 
+/**
+ * False when the slot was saved with another revision of the story and
+ * would be refused on restore.
+ */
+compatible: boolean, };
+
+export type StorySlots = { slots: Array<StorySlotSummary>, offerContinue: boolean, };
+
+export type StorySaved = { slot: number, updatedAt: number, };
+
+export type StoryRestored = { slot: number, };

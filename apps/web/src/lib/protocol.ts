@@ -33,6 +33,10 @@ import type {
   StoryError,
   StoryLeft,
   StoryMenuData,
+  StoryRestored,
+  StorySaved,
+  StorySlotData,
+  StorySlots,
   StoryView,
   SyncPlayer,
   SyncRequestData,
@@ -45,6 +49,9 @@ import {
   parseStoryEntered,
   parseStoryError,
   parseStoryLeft,
+  parseStoryRestored,
+  parseStorySaved,
+  parseStorySlots,
   parseStoryView,
 } from './story-protocol';
 
@@ -625,7 +632,10 @@ export type ServerMessage =
   | Envelope<'story.entered', StoryEntered>
   | Envelope<'story.view', StoryView>
   | Envelope<'story.left', StoryLeft>
-  | Envelope<'story.error', StoryError>;
+  | Envelope<'story.error', StoryError>
+  | Envelope<'story.slots', StorySlots>
+  | Envelope<'story.saved', StorySaved>
+  | Envelope<'story.restored', StoryRestored>;
 
 export type LiveServerMessage = Exclude<
   ServerMessage,
@@ -687,6 +697,16 @@ export type StoryMenu = Envelope<'story.menu', StoryMenuData>;
 export type StoryUndo = Envelope<'story.undo', StoryEmptyData>;
 
 export type StoryLeave = Envelope<'story.leave', StoryEmptyData>;
+
+export type StorySave = Envelope<'story.save', StorySlotData>;
+
+export type StoryRestore = Envelope<'story.restore', StorySlotData>;
+
+export type StoryDeleteSlot = Envelope<'story.deleteSlot', StorySlotData>;
+
+export type StoryListSlots = Envelope<'story.slots', StoryEmptyData>;
+
+export type StoryContinue = Envelope<'story.continue', StoryEmptyData>;
 
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -2620,6 +2640,18 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const data = parseStoryError(candidate.data);
       return data ? { ...base, type: candidate.type, data } : undefined;
     }
+    case 'story.slots': {
+      const data = parseStorySlots(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.saved': {
+      const data = parseStorySaved(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.restored': {
+      const data = parseStoryRestored(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
     case 'server.heartbeat': {
       const nonce = positiveIntegerOrUndefined(candidate.data.nonce);
       const timeoutMs = positiveIntegerOrUndefined(candidate.data.timeoutMs);
@@ -3050,4 +3082,37 @@ export function createStoryUndo(): StoryUndo {
 
 export function createStoryLeave(): StoryLeave {
   return { v: PROTOCOL_VERSION, type: 'story.leave', data: {} };
+}
+
+/** Highest save slot; `0` is the autosave and `1..=9` are manual slots. */
+export const MAX_STORY_SLOT = 9;
+
+function storySlot(slot: number, minimum: number): StorySlotData {
+  if (!Number.isSafeInteger(slot) || slot < minimum || slot > MAX_STORY_SLOT) {
+    throw new Error(`A story save slot must be an integer in ${minimum}..${MAX_STORY_SLOT}.`);
+  }
+  return { slot };
+}
+
+/** `story.save`: manual slots `1..=9` only; slot 0 is the autosave. */
+export function createStorySave(slot: number): StorySave {
+  return { v: PROTOCOL_VERSION, type: 'story.save', data: storySlot(slot, 1) };
+}
+
+/** `story.restore`: any slot `0..=9`; a `story.restored` and view follow. */
+export function createStoryRestore(slot: number): StoryRestore {
+  return { v: PROTOCOL_VERSION, type: 'story.restore', data: storySlot(slot, 0) };
+}
+
+export function createStoryDeleteSlot(slot: number): StoryDeleteSlot {
+  return { v: PROTOCOL_VERSION, type: 'story.deleteSlot', data: storySlot(slot, 0) };
+}
+
+export function createStoryListSlots(): StoryListSlots {
+  return { v: PROTOCOL_VERSION, type: 'story.slots', data: {} };
+}
+
+/** `story.continue`: restores the autosave offered on entry. */
+export function createStoryContinue(): StoryContinue {
+  return { v: PROTOCOL_VERSION, type: 'story.continue', data: {} };
 }

@@ -126,6 +126,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let store: Arc<dyn CharacterStore> =
         Arc::new(MeasuredCharacterStore::new(store, metrics.clone()));
     let store_shutdown = store.clone();
+    // Story save slots (ADR 0030) go through the same measured store and its
+    // persistence worker queue; never through the world actor.
+    if let Some(stories) = &stories {
+        stories.attach_store(store.clone());
+    }
     let durable_generation_before_recovery = store.load_area_generation().await?;
     let mut recovery = store.load_startup_world_recovery().await?;
     let has_durable_character_authority = store.has_durable_character_authority().await?;
@@ -291,6 +296,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         action_replay: web::action_replay_cache(),
         stories: stories.clone(),
     };
+    let story_shutdown = stories.clone();
 
     let app = Router::new()
         .route("/health/live", get(web::live))
@@ -367,6 +373,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 let _ = area_reconciler_task.await;
             }
         }
+    }
+    // Listeners are closed: autosave every live story instance while the
+    // persistence worker still accepts requests.
+    if let Some(stories) = &story_shutdown
+        && timeout(Duration::from_secs(10), stories.shutdown())
+            .await
+            .is_err()
+    {
+        error!("story autosave on shutdown exceeded its ten-second timeout");
     }
     match timeout(Duration::from_secs(10), world_shutdown.shutdown()).await {
         Ok(Ok(())) => info!("world actor drained and stopped"),

@@ -1,0 +1,226 @@
+{
+  "continue": {
+    "input": {
+      "data": {},
+      "type": "story.continue"
+    },
+    "restored": {
+      "slot": 0
+    },
+    "view": [
+      {
+        "canUndo": false,
+        "items": [
+          {
+            "ending": null,
+            "score": 0,
+            "text": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad.",
+            "title": "La cripta del nigromante",
+            "type": "scene"
+          },
+          {
+            "label": "Destreza",
+            "type": "stat",
+            "value": "9"
+          },
+          {
+            "label": "Resistencia",
+            "type": "stat",
+            "value": "12"
+          },
+          {
+            "id": "cbeeb8da1658eec67",
+            "label": "Coger la antorcha",
+            "type": "choice"
+          },
+          {
+            "id": "cf893a2eefb32555e",
+            "label": "Avanzar por el pasillo del norte",
+            "type": "choice"
+          }
+        ],
+        "part": 0,
+        "parts": 1,
+        "turn": 1,
+        "viewRev": 2
+      }
+    ]
+  },
+  "enter": {
+    "slots": {
+      "offerContinue": false,
+      "slots": []
+    },
+    "view": [
+      {
+        "canUndo": false,
+        "items": [
+          {
+            "ending": null,
+            "score": 0,
+            "text": "Te detienes ante la entrada de la cripta del nigromante. Antes de bajar, pon a prueba tu destreza.",
+            "title": "La cripta del nigromante",
+            "type": "scene"
+          },
+          {
+            "label": "Destreza",
+            "type": "stat",
+            "value": "0"
+          },
+          {
+            "label": "Resistencia",
+            "type": "stat",
+            "value": "12"
+          },
+          {
+            "id": "c910a2dec89025cc1",
+            "label": "Tira un dado y suma 6 para fijar tu destreza",
+            "type": "choice"
+          }
+        ],
+        "part": 0,
+        "parts": 1,
+        "turn": 0,
+        "viewRev": 1
+      }
+    ]
+  },
+  "play": {
+    "input": {
+      "data": {
+        "id": "c910a2dec89025cc1",
+        "viewRev": 1
+      },
+      "type": "story.choose"
+    },
+    "label": "Tira un dado y suma 6 para fijar tu destreza",
+    "view": [
+      {
+        "canUndo": true,
+        "items": [
+          {
+            "ending": null,
+            "score": 0,
+            "text": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad.",
+            "title": "La cripta del nigromante",
+            "type": "scene"
+          },
+          {
+            "kind": "event",
+            "text": "Tirada 1d6+6: [3] → total 9",
+            "type": "block"
+          },
+          {
+            "kind": "event",
+            "text": "Destreza: 0 → 9",
+            "type": "block"
+          },
+          {
+            "label": "Destreza",
+            "type": "stat",
+            "value": "9"
+          },
+          {
+            "label": "Resistencia",
+            "type": "stat",
+            "value": "12"
+          },
+          {
+            "id": "cbeeb8da1658eec67",
+            "label": "Coger la antorcha",
+            "type": "choice"
+          },
+          {
+            "id": "cf893a2eefb32555e",
+            "label": "Avanzar por el pasillo del norte",
+            "type": "choice"
+          }
+        ],
+        "part": 0,
+        "parts": 1,
+        "turn": 1,
+        "viewRev": 2
+      }
+    ]
+  },
+  "reenter": {
+    "slots": {
+      "offerContinue": true,
+      "slots": [
+        {
+          "compatible": true,
+          "slot": 0,
+          "updatedAt": 1760536800
+        },
+        {
+          "compatible": true,
+          "slot": 1,
+          "updatedAt": 1760536800
+        }
+      ]
+    },
+    "view": [
+      {
+        "canUndo": false,
+        "items": [
+          {
+            "ending": null,
+            "score": 0,
+            "text": "Te detienes ante la entrada de la cripta del nigromante. Antes de bajar, pon a prueba tu destreza.",
+            "title": "La cripta del nigromante",
+            "type": "scene"
+          },
+          {
+            "label": "Destreza",
+            "type": "stat",
+            "value": "0"
+          },
+          {
+            "label": "Resistencia",
+            "type": "stat",
+            "value": "12"
+          },
+          {
+            "id": "c910a2dec89025cc1",
+            "label": "Tira un dado y suma 6 para fijar tu destreza",
+            "type": "choice"
+          }
+        ],
+        "part": 0,
+        "parts": 1,
+        "turn": 0,
+        "viewRev": 1
+      }
+    ]
+  },
+  "save": {
+    "input": {
+      "data": {
+        "slot": 1
+      },
+      "type": "story.save"
+    },
+    "saved": {
+      "slot": 1,
+      "updatedAt": 1760536800
+    }
+  },
+  "slots": {
+    "input": {
+      "data": {},
+      "type": "story.slots"
+    },
+    "slots": {
+      "offerContinue": false,
+      "slots": [
+        {
+          "compatible": true,
+          "slot": 1,
+          "updatedAt": 1760536800
+        }
+      ]
+    }
+  },
+  "storyId": "cripta-del-nigromante",
+  "title": "La cripta del nigromante"
+}

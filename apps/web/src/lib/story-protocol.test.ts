@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import fixture from '../../e2e/fixtures/story-cripta.json';
+import slotFixture from '../../e2e/fixtures/story-slots.json';
 import {
   createStoryChoose,
+  createStoryContinue,
+  createStoryDeleteSlot,
   createStoryDialogue,
   createStoryLeave,
+  createStoryListSlots,
   createStoryMenu,
+  createStoryRestore,
+  createStorySave,
   createStoryUndo,
   parseServerMessage,
 } from './protocol';
@@ -13,6 +19,9 @@ import {
   parseStoryEntered,
   parseStoryError,
   parseStoryLeft,
+  parseStoryRestored,
+  parseStorySaved,
+  parseStorySlots,
   parseStoryView,
   presentStory,
 } from './story-protocol';
@@ -137,5 +146,49 @@ describe('story protocol', () => {
     expect(() => createStoryChoose('t0c0', 2)).toThrow();
     expect(() => createStoryChoose(OPTION, 0)).toThrow();
     expect(() => createStoryMenu(VERB, 'nope', 1)).toThrow();
+  });
+
+  it('accepts the recorded save-slot frames and builds slot messages', () => {
+    for (const data of [slotFixture.enter.slots, slotFixture.slots.slots, slotFixture.reenter.slots]) {
+      expect(parseStorySlots(data)).toEqual(data);
+    }
+    expect(parseStorySaved(slotFixture.save.saved)).toEqual(slotFixture.save.saved);
+    expect(parseStoryRestored(slotFixture.continue.restored)).toEqual({ slot: 0 });
+    for (const part of slotFixture.continue.view) expect(parseStoryView(part)).toBeDefined();
+    const raw = JSON.stringify({ v: 1, type: 'story.slots', seq: 9, data: slotFixture.reenter.slots });
+    expect(parseServerMessage(raw)?.type).toBe('story.slots');
+    expect(parseServerMessage(JSON.stringify({ v: 1, type: 'story.saved', seq: 9, data: { slot: 0, updatedAt: 1 } })))
+      .toBeUndefined();
+
+    expect(createStorySave(3)).toEqual({ v: 1, type: 'story.save', data: { slot: 3 } });
+    expect(createStoryRestore(0).data).toEqual({ slot: 0 });
+    expect(createStoryDeleteSlot(9).type).toBe('story.deleteSlot');
+    expect(createStoryListSlots()).toEqual({ v: 1, type: 'story.slots', data: {} });
+    expect(createStoryContinue()).toEqual({ v: 1, type: 'story.continue', data: {} });
+    expect(() => createStorySave(0)).toThrow();
+    expect(() => createStorySave(10)).toThrow();
+    expect(() => createStoryRestore(1.5)).toThrow();
+    expect(() => createStoryDeleteSlot(-1)).toThrow();
+  });
+
+  it('rejects forged, duplicated or inconsistent slot listings', () => {
+    const slot = (value: number, compatible = true) => ({ slot: value, updatedAt: 10, compatible });
+    expect(parseStorySlots({ slots: [slot(0), slot(2)], offerContinue: true })).toBeDefined();
+    for (const data of [
+      { slots: [slot(2), slot(0)], offerContinue: false },
+      { slots: [slot(2), slot(2)], offerContinue: false },
+      { slots: [slot(10)], offerContinue: false },
+      { slots: [slot(1)], offerContinue: true },
+      { slots: [slot(0, false)], offerContinue: true },
+      { slots: [{ ...slot(1), stateJson: '{}' }], offerContinue: false },
+      { slots: [{ ...slot(1), updatedAt: -1 }], offerContinue: false },
+      { slots: [], offerContinue: false, extra: 1 },
+      { slots: Array.from({ length: 11 }, (_, index) => slot(index)), offerContinue: false },
+    ]) expect(parseStorySlots(data)).toBeUndefined();
+    expect(parseStorySaved({ slot: 1, updatedAt: 2, extra: true })).toBeUndefined();
+    expect(parseStoryRestored({ slot: 11 })).toBeUndefined();
+    for (const code of ['slot_empty', 'slot_corrupt', 'slot_incompatible', 'rate_limited']) {
+      expect(parseStoryError({ code, message: 'x' })?.code).toBe(code);
+    }
   });
 });

@@ -201,3 +201,201 @@ test('the verb-menu adventure plays verbs, targets and dialogue to its ending', 
   await expect(panel.getByRole('status')).toContainText('Victory.');
   await expectAccepted(page, story.steps.length - 1);
 });
+
+// Real server payloads of the save → leave → re-enter → continue scenario,
+// recorded by `browser_slot_fixture_is_current` in tiamud-server.
+interface SlotFixture {
+  storyId: string;
+  title: string;
+  enter: { view: unknown[]; slots: unknown };
+  play: { input: { type: string; data: Record<string, unknown> }; label: string; view: unknown[] };
+  save: { input: { type: string; data: Record<string, unknown> }; saved: unknown };
+  slots: { input: { type: string; data: Record<string, unknown> }; slots: unknown };
+  reenter: { view: unknown[]; slots: unknown };
+  continue: { input: { type: string; data: Record<string, unknown> }; restored: unknown; view: unknown[] };
+}
+
+async function installSlotServer(page: Page, story: SlotFixture): Promise<void> {
+  await page.route('**/api/characters', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ characters: [{ id: 7, name: 'Aria' }] }),
+    });
+  });
+  await page.addInitScript((fixture: SlotFixture) => {
+    const state = window as Window & { slotInputs?: string[]; slotRejected?: number };
+    state.slotInputs = [];
+    state.slotRejected = 0;
+    localStorage.setItem('tiamud.access.v1', JSON.stringify({
+      account: { id: 1, name: 'player' },
+      token: 'test-token',
+      expiresAt: Date.now() + 3_600_000,
+      characterId: 7,
+    }));
+    const canonical = (value: unknown): string => JSON.stringify(value, (_key, inner: unknown) =>
+      inner && typeof inner === 'object' && !Array.isArray(inner)
+        ? Object.fromEntries(
+            Object.entries(inner as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)),
+          )
+        : inner);
+
+    class SlotWebSocket extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSING = 2;
+      static readonly CLOSED = 3;
+      readyState = SlotWebSocket.CONNECTING;
+      sequence = 0;
+      entries = 0;
+
+      constructor() {
+        super();
+        queueMicrotask(() => {
+          this.readyState = SlotWebSocket.OPEN;
+          this.dispatchEvent(new Event('open'));
+        });
+      }
+
+      emitFrame(type: string, data: unknown): void {
+        this.sequence += 1;
+        const frame = JSON.stringify({ v: 1, type, seq: this.sequence, data });
+        queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: frame })));
+      }
+
+      emitView(parts: unknown[]): void {
+        for (const part of parts) this.emitFrame('story.view', part);
+      }
+
+      accept(step: { type: string; data: Record<string, unknown> }, message: unknown): boolean {
+        if (canonical(step) === canonical(message)) {
+          state.slotInputs?.push(step.type);
+          return true;
+        }
+        state.slotRejected = (state.slotRejected ?? 0) + 1;
+        this.emitFrame('story.error', { code: 'unknown_choice', message: 'Esa opción no está disponible.' });
+        return false;
+      }
+
+      send(raw: string): void {
+        const message = JSON.parse(raw) as { type: string; data: Record<string, unknown> };
+        const wire = { type: message.type, data: message.data };
+        switch (message.type) {
+          case 'client.hello':
+            this.emitFrame('server.welcome', { serverName: 'Tiamud', motd: 'Welcome.' });
+            this.emitFrame('scene.snapshot', {
+              viewId: 'o1111111111111111', revision: 1, title: 'Lantern Square',
+              prose: ['Rain shines on the stones.'], exits: [], items: [], npcs: [],
+              weather: { condition: 'rainy', day: 1, hour: 2, nextChangeInTicks: 3 },
+            });
+            return;
+          case 'command.submit': {
+            const ok = message.data.command === `historia ${fixture.storyId}`;
+            this.emitFrame('action.result', {
+              requestId: message.data.requestId, ok,
+              message: ok ? `Entras en «${fixture.title}».` : 'Unknown command.',
+            });
+            if (!ok) return;
+            const entry = this.entries === 0 ? fixture.enter : fixture.reenter;
+            this.entries += 1;
+            this.emitFrame('story.entered', { storyId: fixture.storyId, title: fixture.title });
+            this.emitView(entry.view);
+            this.emitFrame('story.slots', entry.slots);
+            return;
+          }
+          case 'story.choose':
+            if (this.accept(fixture.play.input, wire)) this.emitView(fixture.play.view);
+            return;
+          case 'story.save':
+            if (this.accept(fixture.save.input, wire)) this.emitFrame('story.saved', fixture.save.saved);
+            return;
+          case 'story.slots':
+            if (this.accept(fixture.slots.input, wire)) this.emitFrame('story.slots', fixture.slots.slots);
+            return;
+          case 'story.continue':
+            if (this.accept(fixture.continue.input, wire)) {
+              this.emitFrame('story.restored', fixture.continue.restored);
+              this.emitView(fixture.continue.view);
+            }
+            return;
+          case 'story.leave':
+            state.slotInputs?.push('story.leave');
+            this.emitFrame('story.left', { reason: 'left' });
+            return;
+          default:
+            if (message.type.startsWith('story.')) {
+              state.slotRejected = (state.slotRejected ?? 0) + 1;
+            }
+        }
+      }
+
+      close(): void {
+        this.readyState = SlotWebSocket.CLOSED;
+        this.dispatchEvent(new Event('close'));
+      }
+    }
+
+    Object.defineProperty(window, 'WebSocket', { value: SlotWebSocket, configurable: true });
+  }, story);
+}
+
+test('a saved game survives leaving and continues after re-entering, by keyboard', async ({ page }) => {
+  const story = JSON.parse(readFileSync(
+    new URL('./fixtures/story-slots.json', import.meta.url), 'utf8',
+  )) as SlotFixture;
+  await installSlotServer(page, story);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Continue as Aria/i }).click();
+  const command = page.getByLabel('What do you do?');
+  await command.fill(`historia ${story.storyId}`);
+  await command.press('Enter');
+  const panel = page.locator('section.story-panel');
+  await expect(panel.getByRole('heading', { level: 1, name: story.title })).toBeVisible();
+  // No autosave yet: no offer to continue.
+  await expect(panel.getByRole('button', { name: 'Continue saved game' })).toHaveCount(0);
+
+  await panel.getByRole('button', { name: story.play.label }).click();
+  await expect(panel).toContainText('Coger la antorcha');
+
+  // Open the saved games panel from the keyboard; it lists the slots.
+  const toggle = panel.getByRole('button', { name: 'Saved games', exact: true });
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  const saves = panel.getByRole('region', { name: 'Saved games' });
+  await expect(saves.getByRole('heading', { name: 'Saved games' })).toBeFocused();
+  await expect(saves.getByRole('list', { name: 'Save slots' }).getByRole('listitem')).toHaveCount(10);
+  await expectNoViolations(page);
+  // Number keys do not choose story actions while the panel is open.
+  await page.keyboard.press('1');
+
+  await saves.getByRole('button', { name: 'Save to Slot 1' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(panel.getByRole('status').filter({ hasText: 'Saved to slot 1.' })).toBeVisible();
+  await expect(saves.getByRole('button', { name: 'Load Slot 1' })).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await expect(saves).toHaveCount(0);
+  await expect(toggle).toBeFocused();
+
+  await panel.getByRole('button', { name: 'Leave story' }).click();
+  await expect(page.locator('section.story-panel')).toHaveCount(0);
+
+  // Re-entering starts fresh and offers the autosave written on leave.
+  await command.fill(`historia ${story.storyId}`);
+  await command.press('Enter');
+  const again = page.locator('section.story-panel');
+  const offer = again.getByRole('group', { name: /You have an autosaved game/ });
+  await expect(offer).toBeVisible();
+  await expect(again).toContainText('Tira un dado');
+  await offer.getByRole('button', { name: 'Continue saved game' }).click();
+  await expect(again.getByRole('status').filter({ hasText: 'Continued from the autosave.' })).toBeVisible();
+  await expect(again.getByRole('button', { name: 'Avanzar por el pasillo del norte' })).toBeEnabled();
+  await expect(offer).toHaveCount(0);
+
+  const inputs = await page.evaluate(() => {
+    const state = window as Window & { slotInputs?: string[]; slotRejected?: number };
+    return [state.slotInputs, state.slotRejected];
+  });
+  expect(inputs).toEqual([
+    ['story.choose', 'story.slots', 'story.save', 'story.leave', 'story.continue'], 0,
+  ]);
+});

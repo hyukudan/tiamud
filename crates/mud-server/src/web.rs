@@ -620,6 +620,17 @@ enum ClientMessage {
     },
     StoryUndo,
     StoryLeave,
+    StorySave {
+        slot: u8,
+    },
+    /// `story.restore {slot}`; `story.continue` is slot 0.
+    StoryRestore {
+        slot: u8,
+    },
+    StorySlots,
+    StoryDeleteSlot {
+        slot: u8,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1189,7 +1200,11 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                     }
                     message @ (ClientMessage::StoryInput { .. }
                     | ClientMessage::StoryUndo
-                    | ClientMessage::StoryLeave) => {
+                    | ClientMessage::StoryLeave
+                    | ClientMessage::StorySave { .. }
+                    | ClientMessage::StoryRestore { .. }
+                    | ClientMessage::StorySlots
+                    | ClientMessage::StoryDeleteSlot { .. }) => {
                         if !command_limiter.check(Instant::now()) {
                             if !queue_notice(&outbound, &mut sequence, "Command rate limit exceeded.") {
                                 break;
@@ -1207,6 +1222,16 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 story.input(&outbound, &mut sequence, request, view_rev).await
                             }
                             ClientMessage::StoryUndo => story.undo(&outbound, &mut sequence).await,
+                            ClientMessage::StorySave { slot } => {
+                                story.save(&outbound, &mut sequence, slot).await
+                            }
+                            ClientMessage::StoryRestore { slot } => {
+                                story.restore(&outbound, &mut sequence, slot).await
+                            }
+                            ClientMessage::StorySlots => story.slots(&outbound, &mut sequence).await,
+                            ClientMessage::StoryDeleteSlot { slot } => {
+                                story.delete_slot(&outbound, &mut sequence, slot).await
+                            }
                             _ => story.leave(&outbound, &mut sequence).await,
                         };
                         if !delivered
@@ -3015,6 +3040,30 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 ClientMessage::StoryUndo
             } else {
                 ClientMessage::StoryLeave
+            })
+        }
+        "story.save" | "story.restore" | "story.deleteSlot" => {
+            let data = serde_json::from_value::<protocol::StorySlotData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            // Shape only: slot 0 (the autosave) is refused for `story.save` by
+            // the session with a typed `invalid_slot` error.
+            if data.slot > protocol::MAX_STORY_SLOT {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(match envelope.message_type.as_str() {
+                "story.save" => ClientMessage::StorySave { slot: data.slot },
+                "story.restore" => ClientMessage::StoryRestore { slot: data.slot },
+                _ => ClientMessage::StoryDeleteSlot { slot: data.slot },
+            })
+        }
+        "story.slots" | "story.continue" => {
+            if !envelope.data.as_object().is_some_and(Map::is_empty) {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(if envelope.message_type == "story.slots" {
+                ClientMessage::StorySlots
+            } else {
+                ClientMessage::StoryRestore { slot: 0 }
             })
         }
         _ => Err(ClientMessageError::UnknownType),

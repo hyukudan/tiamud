@@ -86,4 +86,38 @@ describe('StoryPanel', () => {
     expect(body).toContain('Final score: 10.');
     expect(body).not.toContain('to choose');
   });
+
+  it('offers to continue a compatible autosave and exposes the saved games control', () => {
+    const slots = [{ slot: 0, updatedAt: 1_760_536_800, compatible: true }];
+    const { body } = render(StoryPanel, {
+      props: {
+        ...props(view([scene()])),
+        slots,
+        offerContinue: true,
+        notice: 'Saved to slot 2.',
+        onsave: () => undefined,
+        onrestore: () => undefined,
+        ondeleteslot: () => undefined,
+        onslots: () => undefined,
+        oncontinue: () => undefined,
+        ondismisscontinue: () => undefined,
+      },
+    });
+    expect(body).toContain('You have an autosaved game from 2025-10-15 14:00 UTC.');
+    expect(body).toContain('Continue saved game');
+    expect(body).toContain('Start over');
+    expect(body).toContain('Saved to slot 2.');
+    expect(body).toContain('aria-expanded="false"');
+    expect(body).toContain('aria-controls="story-saves"');
+    // The panel opens on demand and is not rendered until then.
+    expect(body).not.toContain('id="story-saves"');
+  });
+
+  it('hides slot controls without slot callbacks and the offer without an autosave', () => {
+    const { body } = render(StoryPanel, {
+      props: { ...props(view([scene()])), offerContinue: true, slots: [] },
+    });
+    expect(body).not.toContain('Saved games');
+    expect(body).not.toContain('Continue saved game');
+  });
 });

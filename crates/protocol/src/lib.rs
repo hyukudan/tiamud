@@ -109,6 +109,12 @@ pub enum ServerMessageType {
     StoryLeft,
     #[serde(rename = "story.error")]
     StoryError,
+    #[serde(rename = "story.slots")]
+    StorySlots,
+    #[serde(rename = "story.saved")]
+    StorySaved,
+    #[serde(rename = "story.restored")]
+    StoryRestored,
 }
 
 impl ServerMessageType {
@@ -145,6 +151,9 @@ impl ServerMessageType {
             Self::StoryView => "story.view",
             Self::StoryLeft => "story.left",
             Self::StoryError => "story.error",
+            Self::StorySlots => "story.slots",
+            Self::StorySaved => "story.saved",
+            Self::StoryRestored => "story.restored",
         }
     }
 }
@@ -173,6 +182,16 @@ pub enum ClientMessageType {
     StoryUndo,
     #[serde(rename = "story.leave")]
     StoryLeave,
+    #[serde(rename = "story.save")]
+    StorySave,
+    #[serde(rename = "story.restore")]
+    StoryRestore,
+    #[serde(rename = "story.slots")]
+    StorySlots,
+    #[serde(rename = "story.deleteSlot")]
+    StoryDeleteSlot,
+    #[serde(rename = "story.continue")]
+    StoryContinue,
 }
 
 /// A sequenced server→client envelope.
@@ -1002,6 +1021,20 @@ pub enum StoryErrorCode {
     NothingToUndo,
     Busy,
     Internal,
+    /// Save slots are not available (no persistent store).
+    SlotsUnavailable,
+    /// The slot number is outside the range allowed for the operation.
+    InvalidSlot,
+    /// The slot holds no saved game.
+    SlotEmpty,
+    /// The stored game failed its integrity or ruleset validation.
+    SlotCorrupt,
+    /// The stored game belongs to another revision of the story.
+    SlotIncompatible,
+    /// The account's save capacity (stories or bytes) is exhausted.
+    SlotCapacity,
+    /// Too many slot operations in a short time.
+    RateLimited,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1009,6 +1042,65 @@ pub enum StoryErrorCode {
 pub struct StoryError {
     pub code: StoryErrorCode,
     pub message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Story save slots (ADR 0030, wired to story sessions)
+// ---------------------------------------------------------------------------
+
+/// Highest save slot. Slot `0` is the autosave; `1..=9` are manual.
+pub const MAX_STORY_SLOT: u8 = 9;
+
+/// `story.save`, `story.restore` and `story.deleteSlot`: one slot number.
+/// `story.save` accepts `1..=9`; restoring and deleting also accept the
+/// autosave slot `0`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(deny_unknown_fields)]
+pub struct StorySlotData {
+    pub slot: u8,
+}
+
+/// Metadata of one save slot of the current story. It never carries the
+/// saved state, the pack digest or any authored id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StorySlotSummary {
+    pub slot: u8,
+    /// Unix seconds of the last write.
+    pub updated_at: i64,
+    /// False when the slot was saved with another revision of the story and
+    /// would be refused on restore.
+    pub compatible: bool,
+}
+
+/// `story.slots`: the occupied slots of the current story, in slot order.
+/// `offerContinue` is true only right after entering a fresh instance of a
+/// story that has a compatible autosave (`story.continue` restores it).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StorySlots {
+    pub slots: Vec<StorySlotSummary>,
+    pub offer_continue: bool,
+}
+
+/// `story.saved`: the current game was written to `slot`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct StorySaved {
+    pub slot: u8,
+    pub updated_at: i64,
+}
+
+/// `story.restored`: the game of `slot` replaced the current one; the new
+/// `story.view` follows. Undo history is not persisted and starts empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+pub struct StoryRestored {
+    pub slot: u8,
 }
 
 #[cfg(test)]

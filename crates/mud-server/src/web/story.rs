@@ -6,6 +6,7 @@ use super::{OutboundHandle, OutboundPriority, queue_action_result, queue_sequenc
 use crate::story_sessions::{
     STORY_INPUT_HELP, StoryCommand, StoryFailure, StoryInputCommand, StoryLink, StoryManager,
     StoryProjection, StoryRequest, parse_story_command, parse_story_input, render_listing,
+    render_slots,
 };
 use tiamud_core::AccountId;
 use tiamud_protocol::{self as protocol, ServerMessageType, StoryLeftReason};
@@ -92,11 +93,86 @@ impl WebStorySession {
         };
         self.last_view = None;
         // A vanished instance is already gone; either way the session leaves.
+        // Leaving writes the autosave first when the story had progress.
         let reason = match link.leave().await {
-            Ok(()) => StoryLeftReason::Left,
+            Ok(_) => StoryLeftReason::Left,
             Err(_) => StoryLeftReason::Evicted,
         };
         queue_left(outbound, sequence, reason, self.audio)
+    }
+
+    /// `story.save {slot}`: answered by `story.saved` or `story.error`.
+    pub(super) async fn save(
+        &mut self,
+        outbound: &OutboundHandle,
+        sequence: &mut u64,
+        slot: u8,
+    ) -> bool {
+        let Some(link) = self.link.clone() else {
+            return queue_error(outbound, sequence, StoryFailure::NotInStory);
+        };
+        match link.save(slot).await {
+            Ok(saved) => queue_saved(outbound, sequence, saved),
+            Err(failure) => self.fail(outbound, sequence, failure).await,
+        }
+    }
+
+    /// `story.restore {slot}` and `story.continue` (slot 0): answered by
+    /// `story.restored` followed by the restored `story.view`.
+    pub(super) async fn restore(
+        &mut self,
+        outbound: &OutboundHandle,
+        sequence: &mut u64,
+        slot: u8,
+    ) -> bool {
+        let Some(link) = self.link.clone() else {
+            return queue_error(outbound, sequence, StoryFailure::NotInStory);
+        };
+        match link.restore(slot).await {
+            Ok(view) => {
+                queue_restored(outbound, sequence, slot) && self.publish(outbound, sequence, view)
+            }
+            Err(failure) => self.fail(outbound, sequence, failure).await,
+        }
+    }
+
+    /// `story.slots {}`: the occupied slots of the current story.
+    pub(super) async fn slots(&mut self, outbound: &OutboundHandle, sequence: &mut u64) -> bool {
+        let Some(link) = self.link.clone() else {
+            return queue_error(outbound, sequence, StoryFailure::NotInStory);
+        };
+        match link.slots().await {
+            Ok(slots) => queue_slots(outbound, sequence, slots, false),
+            Err(failure) => self.fail(outbound, sequence, failure).await,
+        }
+    }
+
+    /// `story.deleteSlot {slot}`: answered by the remaining `story.slots`.
+    pub(super) async fn delete_slot(
+        &mut self,
+        outbound: &OutboundHandle,
+        sequence: &mut u64,
+        slot: u8,
+    ) -> bool {
+        let Some(link) = self.link.clone() else {
+            return queue_error(outbound, sequence, StoryFailure::NotInStory);
+        };
+        match link.delete_slot(slot).await {
+            Ok(slots) => queue_slots(outbound, sequence, slots, false),
+            Err(failure) => self.fail(outbound, sequence, failure).await,
+        }
+    }
+
+    /// After entering a fresh instance: the slot listing with the continue
+    /// offer. Nothing is sent without a store or on a listing failure.
+    async fn offer(&mut self, outbound: &OutboundHandle, sequence: &mut u64) -> bool {
+        let Some(link) = self.link.clone() else {
+            return true;
+        };
+        match link.entry_slots().await {
+            Some(slots) => queue_slots(outbound, sequence, slots.slots, slots.offer_continue),
+            None => true,
+        }
     }
 
     /// Handles a `command.submit` line. Returns `None` when the line is an
@@ -147,6 +223,7 @@ impl WebStorySession {
                     queue_action_result(outbound, sequence, request_id, true, Some(message))
                         && queue_entered(outbound, sequence, &link)
                         && self.resend(outbound, sequence).await
+                        && self.offer(outbound, sequence).await
                 }
                 Err(failure) => queue_action_result(
                     outbound,
@@ -207,8 +284,136 @@ impl WebStorySession {
                     .unwrap_or_default();
                 result(true, &listing, outbound, sequence)
             }
+            StoryInputCommand::Save(slot) => {
+                let Some(link) = self.link.clone() else {
+                    return result(
+                        false,
+                        StoryFailure::NotInStory.message(),
+                        outbound,
+                        sequence,
+                    );
+                };
+                match link.save(slot.unwrap_or(u8::MAX)).await {
+                    Ok(saved) => {
+                        result(
+                            true,
+                            &format!("Partida guardada en la ranura {}.", saved.slot),
+                            outbound,
+                            sequence,
+                        ) && queue_saved(outbound, sequence, saved)
+                    }
+                    Err(failure) => {
+                        self.text_failure(outbound, sequence, request_id, failure)
+                            .await
+                    }
+                }
+            }
+            StoryInputCommand::Restore(slot) => {
+                self.text_restore(outbound, sequence, request_id, slot.unwrap_or(u8::MAX))
+                    .await
+            }
+            StoryInputCommand::Continue => {
+                self.text_restore(outbound, sequence, request_id, 0).await
+            }
+            StoryInputCommand::Slots => {
+                let Some(link) = self.link.clone() else {
+                    return result(
+                        false,
+                        StoryFailure::NotInStory.message(),
+                        outbound,
+                        sequence,
+                    );
+                };
+                match link.slots().await {
+                    Ok(slots) => {
+                        result(true, &render_slots(&slots), outbound, sequence)
+                            && queue_slots(outbound, sequence, slots, false)
+                    }
+                    Err(failure) => {
+                        self.text_failure(outbound, sequence, request_id, failure)
+                            .await
+                    }
+                }
+            }
+            StoryInputCommand::Delete(slot) => {
+                let Some(link) = self.link.clone() else {
+                    return result(
+                        false,
+                        StoryFailure::NotInStory.message(),
+                        outbound,
+                        sequence,
+                    );
+                };
+                let slot = slot.unwrap_or(u8::MAX);
+                match link.delete_slot(slot).await {
+                    Ok(slots) => {
+                        result(
+                            true,
+                            &format!("Partida de la ranura {slot} borrada."),
+                            outbound,
+                            sequence,
+                        ) && queue_slots(outbound, sequence, slots, false)
+                    }
+                    Err(failure) => {
+                        self.text_failure(outbound, sequence, request_id, failure)
+                            .await
+                    }
+                }
+            }
             StoryInputCommand::Other => result(false, STORY_INPUT_HELP, outbound, sequence),
         }
+    }
+
+    async fn text_restore(
+        &mut self,
+        outbound: &OutboundHandle,
+        sequence: &mut u64,
+        request_id: &str,
+        slot: u8,
+    ) -> bool {
+        let Some(link) = self.link.clone() else {
+            return queue_action_result(
+                outbound,
+                sequence,
+                request_id,
+                false,
+                Some(StoryFailure::NotInStory.message().to_owned()),
+            );
+        };
+        match link.restore(slot).await {
+            Ok(view) => {
+                let message = if slot == 0 {
+                    "Continúas la partida autoguardada.".to_owned()
+                } else {
+                    format!("Cargas la partida de la ranura {slot}.")
+                };
+                queue_action_result(outbound, sequence, request_id, true, Some(message))
+                    && queue_restored(outbound, sequence, slot)
+                    && self.publish(outbound, sequence, view)
+            }
+            Err(failure) => {
+                self.text_failure(outbound, sequence, request_id, failure)
+                    .await
+            }
+        }
+    }
+
+    /// A failed text slot command: the action result carries the message and
+    /// the typed `story.error` follows (with its usual recovery).
+    async fn text_failure(
+        &mut self,
+        outbound: &OutboundHandle,
+        sequence: &mut u64,
+        request_id: &str,
+        failure: StoryFailure,
+    ) -> bool {
+        queue_action_result(
+            outbound,
+            sequence,
+            request_id,
+            false,
+            Some(failure.message().to_owned()),
+        ) && self.fail(outbound, sequence, failure).await
     }
 
     fn publish(
@@ -276,6 +481,47 @@ pub(super) fn queue_view(
             part,
         )
     })
+}
+
+fn queue_saved(outbound: &OutboundHandle, sequence: &mut u64, saved: protocol::StorySaved) -> bool {
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        ServerMessageType::StorySaved,
+        saved,
+    )
+}
+
+fn queue_restored(outbound: &OutboundHandle, sequence: &mut u64, slot: u8) -> bool {
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        ServerMessageType::StoryRestored,
+        protocol::StoryRestored { slot },
+    )
+}
+
+fn queue_slots(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    slots: Vec<protocol::StorySlotSummary>,
+    offer_continue: bool,
+) -> bool {
+    queue_sequenced(
+        outbound,
+        sequence,
+        OutboundPriority::Critical,
+        None,
+        ServerMessageType::StorySlots,
+        protocol::StorySlots {
+            slots,
+            offer_continue,
+        },
+    )
 }
 
 fn queue_left(

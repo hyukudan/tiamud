@@ -265,3 +265,150 @@ fn story_client_messages_parse_strictly() {
         );
     }
 }
+
+#[test]
+fn story_slot_messages_parse_strictly() {
+    assert!(matches!(
+        parse_client_message(r#"{"v":1,"type":"story.save","data":{"slot":3}}"#),
+        Ok(ClientMessage::StorySave { slot: 3 })
+    ));
+    assert!(matches!(
+        parse_client_message(r#"{"v":1,"type":"story.restore","data":{"slot":0}}"#),
+        Ok(ClientMessage::StoryRestore { slot: 0 })
+    ));
+    assert!(matches!(
+        parse_client_message(r#"{"v":1,"type":"story.deleteSlot","data":{"slot":9}}"#),
+        Ok(ClientMessage::StoryDeleteSlot { slot: 9 })
+    ));
+    assert!(matches!(
+        parse_client_message(r#"{"v":1,"type":"story.slots","data":{}}"#),
+        Ok(ClientMessage::StorySlots)
+    ));
+    assert!(matches!(
+        parse_client_message(r#"{"v":1,"type":"story.continue","data":{}}"#),
+        Ok(ClientMessage::StoryRestore { slot: 0 })
+    ));
+    for invalid in [
+        r#"{"v":1,"type":"story.save","data":{"slot":10}}"#,
+        r#"{"v":1,"type":"story.save","data":{"slot":-1}}"#,
+        r#"{"v":1,"type":"story.save","data":{"slot":"1"}}"#,
+        r#"{"v":1,"type":"story.save","data":{}}"#,
+        r#"{"v":1,"type":"story.restore","data":{"slot":1,"x":1}}"#,
+        r#"{"v":1,"type":"story.deleteSlot","data":{"slot":300}}"#,
+        r#"{"v":1,"type":"story.slots","data":{"x":1}}"#,
+        r#"{"v":1,"type":"story.continue","data":[]}"#,
+    ] {
+        assert_eq!(
+            parse_client_message(invalid).err(),
+            Some(ClientMessageError::InvalidEnvelope),
+            "{invalid}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn browser_saves_leaves_reenters_and_continues_with_sqlite_slots() {
+    use crate::persistence::CharacterStore as _;
+    let directory = tempfile::TempDir::new().unwrap();
+    let store =
+        crate::persistence::SqliteCharacterStore::open(&directory.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+    let account = store.load_or_create_account("Lectora").await.unwrap().id;
+    let manager = stories();
+    manager.attach_store(Arc::new(store));
+    let out = outbound();
+    let mut seq = 1;
+    let mut session = WebStorySession::new(Some(manager.clone()), account, false);
+
+    session
+        .text_command(&out, &mut seq, "r1", &format!("historia {CRIPTA}"))
+        .await;
+    let entered = frames(&out);
+    // A fresh instance lists its (empty) slots without a continue offer.
+    assert_eq!(
+        types(&entered),
+        [
+            "action.result",
+            "story.entered",
+            "story.view",
+            "story.slots"
+        ]
+    );
+    assert_eq!(
+        entered[3]["data"],
+        serde_json::json!({"slots": [], "offerContinue": false})
+    );
+
+    // Slot 0 is the autosave: saving there is a typed error.
+    assert!(session.save(&out, &mut seq, 0).await);
+    let refused = frames(&out);
+    assert_eq!(types(&refused), ["story.error"]);
+    assert_eq!(refused[0]["data"]["code"], "invalid_slot");
+
+    session.text_command(&out, &mut seq, "r2", "1").await;
+    let played = last_view(&frames(&out)).clone();
+    assert!(session.save(&out, &mut seq, 2).await);
+    let saved = frames(&out);
+    assert_eq!(types(&saved), ["story.saved"]);
+    assert_eq!(saved[0]["data"]["slot"], 2);
+
+    assert!(session.slots(&out, &mut seq).await);
+    let listed = frames(&out);
+    assert_eq!(types(&listed), ["story.slots"]);
+    assert_eq!(listed[0]["data"]["slots"][0]["slot"], 2);
+    assert_eq!(listed[0]["data"]["slots"][0]["compatible"], true);
+
+    // Leaving autosaves; entering again offers to continue.
+    assert!(session.leave(&out, &mut seq).await);
+    assert_eq!(types(&frames(&out)), ["story.left"]);
+    session
+        .text_command(&out, &mut seq, "r3", &format!("historia {CRIPTA}"))
+        .await;
+    let again = frames(&out);
+    assert_eq!(
+        types(&again),
+        [
+            "action.result",
+            "story.entered",
+            "story.view",
+            "story.slots"
+        ]
+    );
+    assert_eq!(again[3]["data"]["offerContinue"], true);
+    assert_eq!(last_view(&again)["turn"], 0);
+
+    assert!(session.restore(&out, &mut seq, 0).await);
+    let continued = frames(&out);
+    assert_eq!(types(&continued), ["story.restored", "story.view"]);
+    assert_eq!(continued[0]["data"]["slot"], 0);
+    let view = last_view(&continued);
+    assert_eq!(view["turn"], played["turn"]);
+    assert_eq!(view["canUndo"], false);
+
+    // Text commands mirror the typed messages.
+    session.text_command(&out, &mut seq, "r4", "partidas").await;
+    let text = frames(&out);
+    assert_eq!(types(&text), ["action.result", "story.slots"]);
+    assert!(
+        text[0]["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("0 (autoguardado)")
+    );
+    session.text_command(&out, &mut seq, "r5", "borrar 2").await;
+    let deleted = frames(&out);
+    assert_eq!(types(&deleted), ["action.result", "story.slots"]);
+    assert_eq!(deleted[1]["data"]["slots"].as_array().unwrap().len(), 1);
+    session.text_command(&out, &mut seq, "r6", "cargar 2").await;
+    let empty = frames(&out);
+    assert_eq!(types(&empty), ["action.result", "story.error"]);
+    assert_eq!(empty[1]["data"]["code"], "slot_empty");
+    session
+        .text_command(&out, &mut seq, "r7", "continuar")
+        .await;
+    assert_eq!(
+        types(&frames(&out)),
+        ["action.result", "story.restored", "story.view"]
+    );
+}

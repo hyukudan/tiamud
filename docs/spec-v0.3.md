@@ -50,8 +50,9 @@ validates `noop`, readiness, Web, Telnet and two resident areas. That evidence i
 schema v14 and is not relabeled as v15. See the
 [PostgreSQL v14/PWA log](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
 Schema v16 only adds the `story_saves` table for persisted story save slots
-([ADR 0030](decisions/0030-story-save-slots-and-schema-v16.md), proposed; the
-persistence layer exists but no story session or protocol uses it yet). The
+([ADR 0030](decisions/0030-story-save-slots-and-schema-v16.md), proposed),
+used by story sessions for manual slots and the autosave
+([ADR 0029](decisions/0029-story-session-instances-and-story-protocol.md)). The
 mover validates and copies those rows too. Its PostgreSQL tests are written
 but have not run against a real server, so no PostgreSQL evidence is v16.
 

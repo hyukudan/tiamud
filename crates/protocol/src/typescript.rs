@@ -93,6 +93,12 @@ fn declarations(config: &Config) -> Vec<String> {
         StoryLeft::decl(config),
         StoryErrorCode::decl(config),
         StoryError::decl(config),
+        // Story save slots (ADR 0030).
+        StorySlotData::decl(config),
+        StorySlotSummary::decl(config),
+        StorySlots::decl(config),
+        StorySaved::decl(config),
+        StoryRestored::decl(config),
     ]
 }
 

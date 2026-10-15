@@ -321,6 +321,15 @@
           onmenu={session.storyMenu}
           onundo={session.undoStory}
           onleave={session.leaveStory}
+          slots={session.storySlots}
+          offerContinue={session.storyOfferContinue}
+          notice={session.storyNotice}
+          onsave={session.saveStory}
+          onrestore={session.restoreStory}
+          ondeleteslot={session.deleteStorySlot}
+          onslots={session.refreshStorySlots}
+          oncontinue={session.continueStory}
+          ondismisscontinue={session.dismissStoryContinue}
         />
       {:else if session.scene}
         {#if atmosphereImage}

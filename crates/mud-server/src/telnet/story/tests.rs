@@ -226,6 +226,77 @@ async fn gmcp_story_summary_and_media_follow_negotiation() {
     assert!(gmcp.contains(&r#"Client.Media.Stop {"channel":"music"}"#.to_owned()));
 }
 
+#[tokio::test]
+async fn telnet_saves_loads_lists_deletes_and_continues_with_gmcp_slots() {
+    use crate::persistence::CharacterStore as _;
+    let directory = tempfile::TempDir::new().unwrap();
+    let store =
+        crate::persistence::SqliteCharacterStore::open(&directory.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+    let account = store.load_or_create_account("Lectora").await.unwrap().id;
+    let manager = stories(BTreeMap::new());
+    manager.attach_store(std::sync::Arc::new(store));
+    let output = TelnetOutputQueue::new(256, 1024 * 1024);
+    let mut input = gmcp_input(r#"["Tiamud.Story 1"]"#, false);
+    let mut story = TelnetStory::new(Some(manager), account);
+
+    story
+        .line(&output, &mut input, &format!("historia {CRIPTA}"))
+        .await
+        .unwrap();
+    let (text, gmcp) = drain(&output);
+    assert!(!text.contains("autoguardada"));
+    assert!(gmcp.contains(&r#"Tiamud.Story.Slots {"offerContinue":false,"slots":[]}"#.to_owned()));
+
+    story.line(&output, &mut input, "guardar 0").await.unwrap();
+    assert!(drain(&output).0.contains("la 0 es el autoguardado"));
+    story.line(&output, &mut input, "1").await.unwrap();
+    drain(&output);
+    story.line(&output, &mut input, "save 4").await.unwrap();
+    assert!(
+        drain(&output)
+            .0
+            .contains("Partida guardada en la ranura 4.")
+    );
+    story.line(&output, &mut input, "partidas").await.unwrap();
+    let (text, gmcp) = drain(&output);
+    assert!(text.contains("Partidas guardadas:\r\n  4 — "));
+    assert!(gmcp.iter().any(|payload| {
+        payload.starts_with("Tiamud.Story.Slots ") && payload.contains("\"slot\":4")
+    }));
+
+    // Leaving autosaves; the next entry offers to continue.
+    assert_eq!(
+        story.line(&output, &mut input, "salir").await.unwrap(),
+        StoryLineOutcome::Left
+    );
+    assert!(drain(&output).0.contains("autoguardado"));
+    story
+        .line(&output, &mut input, &format!("historia {CRIPTA}"))
+        .await
+        .unwrap();
+    let (text, gmcp) = drain(&output);
+    assert!(text.contains("Escribe «continuar» (continue)"));
+    assert!(
+        gmcp.iter()
+            .any(|payload| payload.contains("\"offerContinue\":true"))
+    );
+    assert!(text.contains("1) Tira un dado"));
+
+    story.line(&output, &mut input, "continuar").await.unwrap();
+    let (text, _) = drain(&output);
+    assert!(text.contains("Continúas la partida autoguardada."));
+    assert!(text.contains("2) Avanzar por el pasillo del norte"));
+
+    story.line(&output, &mut input, "borrar 4").await.unwrap();
+    assert!(drain(&output).0.contains("Partida de la ranura 4 borrada."));
+    story.line(&output, &mut input, "cargar 4").await.unwrap();
+    assert!(drain(&output).0.contains("Esa ranura está vacía."));
+    story.line(&output, &mut input, "load 12").await.unwrap();
+    assert!(drain(&output).0.contains("del 1 al 9"));
+}
+
 #[test]
 fn oversized_gmcp_story_summary_degrades_within_the_limit() {
     let mut input = gmcp_input(r#"["Tiamud.Story 1"]"#, false);
