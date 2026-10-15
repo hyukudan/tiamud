@@ -361,6 +361,11 @@ pub struct CharacterGameplaySnapshot {
     pub commodities: BTreeMap<String, u32>,
     #[serde(default)]
     pub quests: BTreeMap<String, QuestProgress>,
+    /// WorldPack v10 multi-stage state keyed by durable quest id. A quest has
+    /// an entry only while it is past its first stage, tracks more than one
+    /// objective, or has claimed repeatable completions; older JSON has none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub quest_stages: BTreeMap<String, QuestStageProgress>,
     /// Server-authorized script state. Flags are never projected directly to
     /// clients; they may only influence declarative content conditions.
     #[serde(default)]
@@ -501,6 +506,28 @@ pub struct QuestProgress {
     pub status: QuestStatus,
     pub current: u32,
     pub target: u32,
+}
+
+/// Extra per-quest state that the single-stage [`QuestProgress`] shape
+/// cannot express.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuestStageProgress {
+    /// Zero-based index of the current authored stage.
+    #[serde(default)]
+    pub stage: u32,
+    /// Per-objective counts for a stage with more than one objective.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objectives: Vec<u32>,
+    /// Rewards already claimed by a repeatable quest.
+    #[serde(default)]
+    pub completions: u32,
+}
+
+impl QuestStageProgress {
+    pub fn is_default(&self) -> bool {
+        self.stage == 0 && self.objectives.is_empty() && self.completions == 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

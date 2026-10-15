@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 9,
+  "schemaVersion": 10,
   "id": "lantern-square",
   "name": "Tiamud: Lantern Square",
   "startRoomId": "demo:lantern-square",
@@ -1735,6 +1735,86 @@
             "id": "tiamud:affix-roll:storm-bitten",
             "weight": 6000,
             "affixId": "tiamud:affix:storm-bitten"
+          }
+        ]
+      }
+    ],
+    "commodities": [
+      {
+        "id": "tonic",
+        "name": {
+          "en": "healing tonic"
+        },
+        "maxOwned": 99
+      },
+      {
+        "id": "trail-ration",
+        "name": {
+          "en": "trail ration"
+        },
+        "maxOwned": 99
+      }
+    ],
+    "quests": [
+      {
+        "id": "first-hunt",
+        "name": {
+          "en": "First Hunt"
+        },
+        "summary": {
+          "en": "Defeat one hostile creature; reward 25 coin and 50 experience."
+        },
+        "aliases": [
+          "first hunt",
+          "hunt"
+        ],
+        "repeatability": "once",
+        "stages": [
+          {
+            "id": "hunt",
+            "objectives": [
+              {
+                "kind": "defeat_npc",
+                "count": 1
+              }
+            ]
+          }
+        ],
+        "rewards": {
+          "coins": 25,
+          "experience": 50
+        }
+      }
+    ],
+    "shops": [
+      {
+        "id": "lantern-market",
+        "name": {
+          "en": "Lantern Market"
+        },
+        "roomId": "demo:lantern-square",
+        "stock": [
+          {
+            "stockId": "tonic",
+            "commodityId": "tonic",
+            "buyPrice": 12,
+            "sellPrice": 6,
+            "initialStock": 20,
+            "maxStock": 100,
+            "restock": {
+              "kind": "none"
+            }
+          },
+          {
+            "stockId": "trail-ration",
+            "commodityId": "trail-ration",
+            "buyPrice": 8,
+            "sellPrice": 4,
+            "initialStock": 20,
+            "maxStock": 100,
+            "restock": {
+              "kind": "none"
+            }
           }
         ]
       }

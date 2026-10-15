@@ -2068,6 +2068,65 @@ async fn gameplay_and_runtime_snapshots_round_trip_together() {
 }
 
 #[tokio::test]
+async fn multi_stage_quest_progress_round_trips_through_sqlite() {
+    let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+    let owner = account(&store, "Quest Owner").await;
+    let character = store
+        .load_or_create_character(owner.id, "Quill", "demo:lantern-square")
+        .await
+        .unwrap();
+    let gameplay = CharacterGameplaySnapshot {
+        quests: std::collections::BTreeMap::from([
+            (
+                "demo:errand".into(),
+                tiamud_core::QuestProgress {
+                    status: tiamud_core::QuestStatus::Active,
+                    current: 1,
+                    target: 3,
+                },
+            ),
+            (
+                "first-hunt".into(),
+                tiamud_core::QuestProgress {
+                    status: tiamud_core::QuestStatus::Completed,
+                    current: 1,
+                    target: 1,
+                },
+            ),
+        ]),
+        quest_stages: std::collections::BTreeMap::from([(
+            "demo:errand".into(),
+            tiamud_core::QuestStageProgress {
+                stage: 1,
+                objectives: vec![1, 0],
+                completions: 2,
+            },
+        )]),
+        ..CharacterGameplaySnapshot::default()
+    };
+    let runtime = crate::world_loader::build_loaded_world(
+        &crate::world_loader::default_loaded_world().unwrap(),
+    )
+    .unwrap()
+    .runtime_snapshot();
+    store
+        .commit_action(
+            vec![DurableCharacterSnapshot {
+                character: character.clone(),
+                gameplay: gameplay.clone(),
+            }],
+            runtime,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.load_character_gameplay(character.id).await.unwrap(),
+        gameplay
+    );
+}
+
+#[tokio::test]
 async fn items_given_event_round_trips_through_sqlite() {
     let store = SqliteCharacterStore::open(":memory:").await.unwrap();
     let event = DomainEvent::ItemsGiven {

@@ -308,34 +308,17 @@ impl World {
         session: SessionId,
         action: QuestAction,
     ) -> Result<ActionOutcome, WorldError> {
-        const QUEST_ID: &str = "first-hunt";
-        let character = self.character(session)?;
-        let character_id = character.id;
-        let character_name = character.name.clone();
-        let room_id = room_checked(&self.entities, character.location)?
-            .stable_id
-            .clone();
+        let character_id = self.character(session)?.id;
         match action {
-            QuestAction::List => Ok(ActionOutcome {
-                scene: self.scene_for(session)?,
-                container_contents: None,
-                trade_contents: None,
-                reward_odds: None,
-                output: Some("Available quest: first-hunt — defeat one hostile creature; reward 25 coin and 50 experience.\r\n".into()),
-                changed_character: None,
-                domain_events: Vec::new(),
-            }),
-            QuestAction::Status => {
-                let state = self
+            QuestAction::List | QuestAction::Status => {
+                let gameplay = self
                     .character_gameplay
                     .get(&character_id)
                     .ok_or(WorldError::InvalidEntity)?;
-                let output = match state.quests.get(QUEST_ID) {
-                    None => "The first-hunt quest has not been accepted.\r\n".into(),
-                    Some(progress) => format!(
-                        "First Hunt: {:?} ({}/{}).\r\n",
-                        progress.status, progress.current, progress.target
-                    ),
+                let output = if action == QuestAction::List {
+                    self.quest_list_text(gameplay)
+                } else {
+                    self.quest_status_text(gameplay)
                 };
                 Ok(ActionOutcome {
                     scene: self.scene_for(session)?,
@@ -347,89 +330,9 @@ impl World {
                     domain_events: Vec::new(),
                 })
             }
-            QuestAction::Accept(query) => {
-                if !quest_matches(&query) {
-                    return Err(WorldError::QuestUnavailable);
-                }
-                let state = self
-                    .character_gameplay
-                    .get_mut(&character_id)
-                    .ok_or(WorldError::InvalidEntity)?;
-                if state.quests.contains_key(QUEST_ID) || state.quests.len() >= 32 {
-                    return Err(WorldError::QuestUnavailable);
-                }
-                state.quests.insert(
-                    QUEST_ID.into(),
-                    QuestProgress {
-                        status: QuestStatus::Active,
-                        current: 0,
-                        target: 1,
-                    },
-                );
-                self.finish_adventure_action(
-                    session,
-                    "You accept First Hunt.\r\n".into(),
-                    AdventureEvent::QuestChanged {
-                        character_id,
-                        quest_id: QUEST_ID.into(),
-                        summary: "First Hunt accepted.".into(),
-                    },
-                )
-            }
-            QuestAction::Complete(query) => {
-                if !quest_matches(&query) {
-                    return Err(WorldError::QuestUnavailable);
-                }
-                let rewarded_experience = {
-                    let state = self
-                        .character_gameplay
-                        .get_mut(&character_id)
-                        .ok_or(WorldError::InvalidEntity)?;
-                    let progress = state
-                        .quests
-                        .get_mut(QUEST_ID)
-                        .ok_or(WorldError::QuestUnavailable)?;
-                    if progress.status != QuestStatus::ReadyToClaim {
-                        return Err(WorldError::QuestUnavailable);
-                    }
-                    state.coins = state
-                        .coins
-                        .checked_add(25)
-                        .ok_or(WorldError::QuestUnavailable)?;
-                    state.experience = state
-                        .experience
-                        .checked_add(50)
-                        .ok_or(WorldError::QuestUnavailable)?;
-                    progress.status = QuestStatus::Completed;
-                    state.experience
-                };
-                let mut progression_events = vec![DomainEvent::Gameplay {
-                    event: GameplayEvent::ExperienceGained {
-                        character_id,
-                        character_name: character_name.clone(),
-                        amount: 50,
-                        total: rewarded_experience,
-                        room_id: room_id.clone(),
-                    },
-                }];
-                self.advance_character_progression(
-                    character_id,
-                    &character_name,
-                    &room_id,
-                    &mut progression_events,
-                )?;
-                let mut outcome = self.finish_adventure_action(
-                    session,
-                    "First Hunt complete: you receive 25 coin and 50 experience.\r\n".into(),
-                    AdventureEvent::QuestChanged {
-                        character_id,
-                        quest_id: QUEST_ID.into(),
-                        summary: "First Hunt completed and its reward claimed.".into(),
-                    },
-                )?;
-                outcome.domain_events.extend(progression_events);
-                Ok(outcome)
-            }
+            QuestAction::Accept(query) => self.accept_quest(session, &query),
+            QuestAction::Complete(query) => self.complete_quest(session, &query),
+            QuestAction::Talk(query) => self.talk_to_npc(session, &query),
         }
     }
 
@@ -440,8 +343,12 @@ impl World {
     ) -> Result<ActionOutcome, WorldError> {
         let character = self.character(session)?;
         let character_id = character.id;
-        let at_shop = room_checked(&self.entities, character.location)?.stable_id
-            == self.start_room_stable_id;
+        let room_id = room_checked(&self.entities, character.location)?
+            .stable_id
+            .clone();
+        let content = std::sync::Arc::clone(&self.adventure_content);
+        let shop = self.shop_in_room(&room_id).map(|shop| shop.id.clone());
+        let shop = shop.and_then(|id| content.shops.iter().find(|shop| shop.id == id));
         match action {
             EconomyAction::Balance => {
                 let coins = self
@@ -464,14 +371,22 @@ impl World {
                 })
             }
             EconomyAction::Shop => {
-                if !at_shop {
-                    return Err(WorldError::ShopUnavailable);
-                }
-                let output = commodity_specs()
+                let shop = shop.ok_or(WorldError::ShopUnavailable)?;
+                let output = shop
+                    .stock
                     .iter()
-                    .map(|(id, label, buy, sell)| {
-                        let stock = self.adventure.shop_stock.get(*id).copied().unwrap_or(0);
-                        format!("- {label}: buy {buy}, sell {sell}, stock {stock}\r\n")
+                    .filter_map(|entry| {
+                        let commodity = content.commodity(&entry.commodity_id)?;
+                        let stock = self
+                            .adventure
+                            .shop_stock
+                            .get(&entry.stock_id)
+                            .copied()
+                            .unwrap_or(0);
+                        Some(format!(
+                            "- {}: buy {}, sell {}, stock {stock}\r\n",
+                            commodity.label, entry.buy_price, entry.sell_price
+                        ))
                     })
                     .collect::<String>();
                 Ok(ActionOutcome {
@@ -479,25 +394,26 @@ impl World {
                     container_contents: None,
                     trade_contents: None,
                     reward_odds: None,
-                    output: Some(format!("Lantern Market:\r\n{output}")),
+                    output: Some(format!("{}:\r\n{output}", shop.name)),
                     changed_character: None,
                     domain_events: Vec::new(),
                 })
             }
             EconomyAction::Buy(query) => {
-                if !at_shop {
-                    return Err(WorldError::ShopUnavailable);
-                }
-                let (commodity_id, label, price, _) = resolve_commodity(&query)?;
+                let shop = shop.ok_or(WorldError::ShopUnavailable)?;
+                let (entry, commodity) = Self::resolve_shop_stock(shop, &content, &query)?;
+                let price = entry.buy_price;
+                let label = commodity.label.as_str();
                 if self.spendable_coins(character_id)? < price {
                     return Err(WorldError::InsufficientFunds);
                 }
-                let stock = self
+                if self
                     .adventure
                     .shop_stock
-                    .get_mut(commodity_id)
-                    .ok_or(WorldError::CommodityNotFound)?;
-                if *stock == 0 {
+                    .get(&entry.stock_id)
+                    .ok_or(WorldError::CommodityNotFound)?
+                    == &0
+                {
                     return Err(WorldError::ShopUnavailable);
                 }
                 let state = self
@@ -507,35 +423,40 @@ impl World {
                 if state.coins < price {
                     return Err(WorldError::InsufficientFunds);
                 }
-                let owned = state.commodities.entry(commodity_id.into()).or_default();
-                if *owned >= 99 {
+                let owned = state.commodities.entry(commodity.id.clone()).or_default();
+                if *owned >= commodity.max_owned {
                     return Err(WorldError::ShopUnavailable);
                 }
                 state.coins -= price;
                 *owned += 1;
+                let stock = self
+                    .adventure
+                    .shop_stock
+                    .get_mut(&entry.stock_id)
+                    .ok_or(WorldError::CommodityNotFound)?;
                 *stock -= 1;
                 self.finish_adventure_action(
                     session,
                     format!("You buy {label} for {price} coin.\r\n"),
                     AdventureEvent::EconomyChanged {
                         character_id,
-                        commodity_id: Some(commodity_id.into()),
+                        commodity_id: Some(commodity.id.clone()),
                         summary: format!("A market purchase of {label} is completed."),
                     },
                 )
             }
             EconomyAction::Sell(query) => {
-                if !at_shop {
-                    return Err(WorldError::ShopUnavailable);
-                }
-                let (commodity_id, label, _, price) = resolve_commodity(&query)?;
+                let shop = shop.ok_or(WorldError::ShopUnavailable)?;
+                let (entry, commodity) = Self::resolve_shop_stock(shop, &content, &query)?;
+                let price = entry.sell_price;
+                let label = commodity.label.as_str();
                 let state = self
                     .character_gameplay
                     .get_mut(&character_id)
                     .ok_or(WorldError::InvalidEntity)?;
                 let owned = state
                     .commodities
-                    .get_mut(commodity_id)
+                    .get_mut(&commodity.id)
                     .ok_or(WorldError::CommodityNotOwned)?;
                 if *owned == 0 {
                     return Err(WorldError::CommodityNotOwned);
@@ -548,15 +469,15 @@ impl World {
                 let stock = self
                     .adventure
                     .shop_stock
-                    .entry(commodity_id.into())
+                    .entry(entry.stock_id.clone())
                     .or_default();
-                *stock = stock.saturating_add(1).min(100);
+                *stock = stock.saturating_add(1).min(entry.max_stock);
                 self.finish_adventure_action(
                     session,
                     format!("You sell {label} for {price} coin.\r\n"),
                     AdventureEvent::EconomyChanged {
                         character_id,
-                        commodity_id: Some(commodity_id.into()),
+                        commodity_id: Some(commodity.id.clone()),
                         summary: format!("A market sale of {label} is completed."),
                     },
                 )
@@ -665,32 +586,6 @@ impl World {
             .and_then(|session| self.character(session).ok())
             .map(|character| character.name.clone())
     }
-}
-
-pub(crate) fn quest_matches(query: &str) -> bool {
-    matches!(
-        query.trim().to_ascii_lowercase().as_str(),
-        "first-hunt" | "first hunt" | "hunt"
-    )
-}
-
-pub(crate) fn commodity_specs() -> [(&'static str, &'static str, u64, u64); 2] {
-    [
-        ("tonic", "healing tonic", 12, 6),
-        ("trail-ration", "trail ration", 8, 4),
-    ]
-}
-
-pub(crate) fn resolve_commodity(
-    query: &str,
-) -> Result<(&'static str, &'static str, u64, u64), WorldError> {
-    let query = query.trim().to_ascii_lowercase();
-    commodity_specs()
-        .into_iter()
-        .find(|(id, label, _, _)| {
-            *id == query || label.eq_ignore_ascii_case(&query) || label.starts_with(&query)
-        })
-        .ok_or(WorldError::CommodityNotFound)
 }
 
 pub(crate) fn weather_label(weather: WeatherKind) -> &'static str {

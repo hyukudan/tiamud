@@ -119,6 +119,12 @@ pub struct CompiledArea {
     pub talent_graphs: Vec<crate::TalentGraphDefinition>,
     pub abilities: Vec<crate::AbilityDefinition>,
     pub social_emotes: Vec<crate::SocialEmoteDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commodities: Vec<crate::CommodityDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quests: Vec<crate::QuestDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shops: Vec<crate::ShopDefinition>,
     pub npc_ability_sets: Vec<crate::NpcAbilitySet>,
     pub room_media: Vec<crate::RoomMediaDefinition>,
     pub entity_media: Vec<crate::EntityMediaDefinition>,
@@ -671,6 +677,9 @@ fn validate_ownership_order(entry: &AreaCatalogEntry) -> Result<(), AreaCatalogE
         &entry.ownership.talent_nodes,
         &entry.ownership.abilities,
         &entry.ownership.social_emotes,
+        &entry.ownership.commodities,
+        &entry.ownership.quests,
+        &entry.ownership.shops,
         &entry.ownership.npc_ability_sets,
         &entry.ownership.room_media,
         &entry.ownership.entity_media,
@@ -1318,6 +1327,30 @@ fn world_projection(
             .filter(|value| contains(&ownership.social_emotes, &value.id))
             .cloned()
             .collect(),
+        commodities: document
+            .world
+            .gameplay
+            .commodities
+            .iter()
+            .filter(|value| contains(&ownership.commodities, &value.id))
+            .cloned()
+            .collect(),
+        quests: document
+            .world
+            .gameplay
+            .quests
+            .iter()
+            .filter(|value| contains(&ownership.quests, &value.id))
+            .cloned()
+            .collect(),
+        shops: document
+            .world
+            .gameplay
+            .shops
+            .iter()
+            .filter(|value| contains(&ownership.shops, &value.id))
+            .cloned()
+            .collect(),
         npc_ability_sets: document
             .world
             .gameplay
@@ -1363,6 +1396,27 @@ fn world_projection(
             .cloned()
             .collect(),
     }
+}
+
+/// A monolithic fallback published before WorldPack v10 normalizes with the
+/// implied legacy quest and market, which no pre-v9 AreaPack can own. That
+/// exact content, with no adventure ownership anywhere in the catalog, is the
+/// only unowned adventure content a catalog may carry.
+fn implicit_legacy_adventure(
+    document: &crate::WorldPackDocument,
+    entries: &[AreaCatalogEntry],
+) -> bool {
+    let owned = entries.iter().any(|entry| {
+        !entry.ownership.commodities.is_empty()
+            || !entry.ownership.quests.is_empty()
+            || !entry.ownership.shops.is_empty()
+    });
+    let (commodities, quests, shops) =
+        crate::legacy_adventure_content(&document.world.start_room_id);
+    !owned
+        && document.world.gameplay.commodities == commodities
+        && document.world.gameplay.quests == quests
+        && document.world.gameplay.shops == shops
 }
 
 fn validate_world_coverage(
@@ -1458,6 +1512,26 @@ fn validate_world_coverage(
         |value: &crate::SocialEmoteDefinition| value.id.clone(),
         "social emotes"
     );
+    if !implicit_legacy_adventure(document, entries) {
+        exact_ids!(
+            document.world.gameplay.commodities.iter(),
+            commodities,
+            |value: &crate::CommodityDefinition| value.id.clone(),
+            "commodities"
+        );
+        exact_ids!(
+            document.world.gameplay.quests.iter(),
+            quests,
+            |value: &crate::QuestDefinition| value.id.clone(),
+            "quests"
+        );
+        exact_ids!(
+            document.world.gameplay.shops.iter(),
+            shops,
+            |value: &crate::ShopDefinition| value.id.clone(),
+            "shops"
+        );
+    }
     exact_ids!(
         document.world.gameplay.npc_ability_sets.iter(),
         npc_ability_sets,
@@ -1577,6 +1651,9 @@ fn verify_monolithic_content(
     rebuild_flattened!(rebuilt.world.gameplay.archetypes, archetypes);
     rebuild_flattened!(rebuilt.world.gameplay.abilities, abilities);
     rebuild_flattened!(rebuilt.world.gameplay.social_emotes, social_emotes);
+    rebuild_flattened!(rebuilt.world.gameplay.commodities, commodities);
+    rebuild_flattened!(rebuilt.world.gameplay.quests, quests);
+    rebuild_flattened!(rebuilt.world.gameplay.shops, shops);
     rebuild_flattened!(rebuilt.world.gameplay.npc_ability_sets, npc_ability_sets);
     rebuild_flattened!(rebuilt.room_media, room_media);
     rebuild_flattened!(rebuilt.entity_media, entity_media);
@@ -1690,6 +1767,21 @@ fn verify_monolithic_content(
         document.world.gameplay.social_emotes,
         rebuilt.world.gameplay.social_emotes,
         "social emotes"
+    );
+    exact_content!(
+        document.world.gameplay.commodities,
+        rebuilt.world.gameplay.commodities,
+        "commodities"
+    );
+    exact_content!(
+        document.world.gameplay.quests,
+        rebuilt.world.gameplay.quests,
+        "quests"
+    );
+    exact_content!(
+        document.world.gameplay.shops,
+        rebuilt.world.gameplay.shops,
+        "shops"
     );
     exact_content!(
         document.world.gameplay.npc_ability_sets,
@@ -1910,6 +2002,30 @@ fn verify_single_area_content(
             .filter(|value| !owns(&entry.ownership.social_emotes, &value.id))
             .cloned()
             .collect(),
+        commodities: document
+            .world
+            .gameplay
+            .commodities
+            .iter()
+            .filter(|value| !owns(&entry.ownership.commodities, &value.id))
+            .cloned()
+            .collect(),
+        quests: document
+            .world
+            .gameplay
+            .quests
+            .iter()
+            .filter(|value| !owns(&entry.ownership.quests, &value.id))
+            .cloned()
+            .collect(),
+        shops: document
+            .world
+            .gameplay
+            .shops
+            .iter()
+            .filter(|value| !owns(&entry.ownership.shops, &value.id))
+            .cloned()
+            .collect(),
         npc_ability_sets: document
             .world
             .gameplay
@@ -1984,6 +2100,9 @@ fn validate_global_ownership(entries: &[AreaCatalogEntry]) -> Result<(), AreaCat
             ("talent node", &entry.ownership.talent_nodes),
             ("ability", &entry.ownership.abilities),
             ("social emote", &entry.ownership.social_emotes),
+            ("commodity", &entry.ownership.commodities),
+            ("quest", &entry.ownership.quests),
+            ("shop", &entry.ownership.shops),
             ("script", &entry.ownership.scripts),
             ("scene variant", &entry.ownership.scene_variants),
         ] {
@@ -2288,6 +2407,42 @@ mod tests {
         );
         assert_eq!(square.content_license, "CC-BY-4.0");
         assert_eq!(square.script_license, "MIT OR Apache-2.0");
+    }
+
+    #[test]
+    fn pre_v10_fallback_may_carry_only_the_implied_unowned_legacy_adventure() {
+        let composed = compose_world_project(project_path()).unwrap();
+        let release = release_for(&composed, 7);
+        let built = build_area_release(&composed, &release, None).unwrap();
+        let document = crate::WorldPackDocument::from_json(&built.world_artifact).unwrap();
+        let square = built
+            .catalog
+            .entries
+            .iter()
+            .find(|entry| entry.area_id == "square")
+            .unwrap();
+        assert_eq!(square.ownership.quests, ["first-hunt"]);
+        assert_eq!(square.ownership.shops, ["lantern-market"]);
+        validate_world_coverage(&document, &built.catalog.entries).unwrap();
+
+        // A catalog published before AreaPack v9 owns no adventure content,
+        // while its v9 fallback normalizes with the implied legacy content.
+        let mut legacy_entries = built.catalog.entries.clone();
+        for entry in &mut legacy_entries {
+            entry.ownership.commodities.clear();
+            entry.ownership.quests.clear();
+            entry.ownership.shops.clear();
+        }
+        validate_world_coverage(&document, &legacy_entries).unwrap();
+
+        // Any other unowned adventure content still fails closed.
+        let mut altered = document.clone();
+        altered.world.gameplay.shops[0].stock[0].buy_price = 13;
+        assert!(validate_world_coverage(&altered, &legacy_entries).is_err());
+        assert!(validate_world_coverage(&altered, &built.catalog.entries).is_ok());
+        let mut extra = document;
+        extra.world.gameplay.quests[0].id = "second-hunt".into();
+        assert!(validate_world_coverage(&extra, &built.catalog.entries).is_err());
     }
 
     #[test]

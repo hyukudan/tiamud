@@ -6,12 +6,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod adventure;
 mod area_catalog;
 mod area_registry;
 mod authoring;
 mod composition;
 mod progression;
 
+pub use adventure::{
+    CommodityDefinition, MAX_ADVENTURE_LABEL_BYTES, MAX_ADVENTURE_SUMMARY_BYTES, MAX_COMMODITIES,
+    MAX_COMMODITY_OWNED, MAX_QUEST_ALIASES, MAX_QUEST_OBJECTIVE_COUNT,
+    MAX_QUEST_OBJECTIVES_PER_STAGE, MAX_QUEST_PREREQUISITE_DEPTH, MAX_QUEST_PREREQUISITE_NODES,
+    MAX_QUEST_REWARD_COINS, MAX_QUEST_REWARD_EXPERIENCE, MAX_QUEST_STAGES, MAX_QUESTS,
+    MAX_SHOP_PRICE, MAX_SHOP_RESTOCK_INTERVAL_TICKS, MAX_SHOP_STOCK, MAX_SHOP_STOCK_ENTRIES,
+    MAX_SHOPS, QuestDefinition, QuestObjectiveDefinition, QuestRepeatability,
+    QuestRewardDefinition, QuestStageDefinition, ShopDefinition, ShopRestockPolicy,
+    ShopStockEntryDefinition, legacy_adventure_content,
+};
 pub use area_catalog::{
     AREA_BUNDLE_SCHEMA_VERSION, AREA_CATALOG_SCHEMA_VERSION, AREA_RELEASE_SCHEMA_VERSION,
     AreaBundle, AreaCatalog, AreaCatalogEntry, AreaCatalogError, AreaCompatibility, AreaPortal,
@@ -60,7 +71,7 @@ pub use progression::{
     RequirementPredicate, TalentGraphDefinition, TalentNodeDefinition, TalentRankDefinition,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 pub const MAX_ROOM_TITLE_BYTES: usize = 128;
 pub const MAX_ROOM_DESCRIPTION_BYTES: usize = 8_192;
 pub const MAX_ITEM_PROTOTYPES: usize = 1_024;
@@ -287,6 +298,15 @@ pub struct GameplayDefinition {
     pub affixes: Vec<AffixDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub affix_pools: Vec<AffixPoolDefinition>,
+    /// WorldPack v10 abstract counted goods (ADR 0032).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commodities: Vec<CommodityDefinition>,
+    /// WorldPack v10 data-driven quests (ADR 0032).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quests: Vec<QuestDefinition>,
+    /// WorldPack v10 room-bound commodity shops (ADR 0032).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shops: Vec<ShopDefinition>,
 }
 
 impl GameplayDefinition {
@@ -304,6 +324,9 @@ impl GameplayDefinition {
             && self.loot_sources.is_empty()
             && self.affixes.is_empty()
             && self.affix_pools.is_empty()
+            && self.commodities.is_empty()
+            && self.quests.is_empty()
+            && self.shops.is_empty()
     }
 }
 
@@ -1223,6 +1246,31 @@ impl WorldPack {
                 | InitialItemLocation::Staged => {}
             }
         }
+
+        let npc_prototype_ids = self
+            .gameplay
+            .npc_prototypes
+            .iter()
+            .map(|prototype| prototype.id.as_str())
+            .collect::<HashSet<_>>();
+        let npc_spawn_rooms = self
+            .gameplay
+            .npc_spawns
+            .iter()
+            .map(|spawn| (spawn.id.as_str(), spawn.room_id.as_str()))
+            .collect::<HashMap<_, _>>();
+        adventure::validate_adventure(
+            &self.gameplay.commodities,
+            &self.gameplay.quests,
+            &self.gameplay.shops,
+            &adventure::AdventureReferences {
+                rooms: &room_ids,
+                item_prototypes: &item_prototype_ids,
+                npc_prototypes: &npc_prototype_ids,
+                npc_spawns: &npc_spawn_rooms,
+            },
+            &mut errors,
+        );
 
         if errors.is_empty() {
             Ok(())

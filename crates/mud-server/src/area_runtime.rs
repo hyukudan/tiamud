@@ -775,6 +775,7 @@ impl AreaLoadCoordinator {
                     self.inner.pinned.abilities.clone(),
                 )?;
                 world.configure_social_emotes(self.inner.pinned.social_emotes.clone())?;
+                world.configure_adventure_content(self.inner.pinned.adventure.clone())?;
                 Ok(())
             },
         )

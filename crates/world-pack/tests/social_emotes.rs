@@ -221,7 +221,7 @@ fn ids_commands_names_counts_and_nested_fields_are_closed() {
 
 #[test]
 fn worldpack_v2_through_v8_normalize_empty_and_reject_social_emote_smuggling() {
-    for version in 2..CURRENT_SCHEMA_VERSION {
+    for version in 2..9 {
         let mut legacy = world(Vec::new());
         legacy["schemaVersion"] = json!(version);
         legacy["gameplay"]
@@ -243,7 +243,7 @@ fn worldpack_v2_through_v8_normalize_empty_and_reject_social_emote_smuggling() {
 
 #[test]
 fn areapack_v1_through_v7_normalize_empty_and_reject_social_emote_smuggling() {
-    for version in 1..AREA_PACK_SCHEMA_VERSION {
+    for version in 1..8 {
         let legacy = json!({"schemaVersion": version, "id": "demo"});
         let normalized: AreaPack = serde_json::from_value(legacy.clone()).unwrap();
         assert_eq!(normalized.schema_version, AREA_PACK_SCHEMA_VERSION);

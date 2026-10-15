@@ -299,7 +299,10 @@ impl World {
             .npcs
             .iter()
             .all(|(npc_id, npc)| npc_id == &npc.stable_id && self.npcs.contains_key(npc_id));
-        if !item_ids_match || !npc_ids_match {
+        if !item_ids_match
+            || !npc_ids_match
+            || !self.valid_shop_stock(&snapshot.adventure.shop_stock)
+        {
             return Err(WorldError::InvalidRuntimeSnapshot);
         }
 

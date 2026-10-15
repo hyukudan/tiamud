@@ -219,6 +219,8 @@ pub enum QuestAction {
     Accept(String),
     Status,
     Complete(String),
+    /// `talk <npc>`: speak with a visible living NPC (quest objective).
+    Talk(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

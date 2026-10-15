@@ -735,7 +735,7 @@ impl Condition {
         }
     }
 
-    fn canonicalize(&mut self) {
+    pub(crate) fn canonicalize(&mut self) {
         match self {
             Self::All(conditions) | Self::Any(conditions) => {
                 for condition in conditions.iter_mut() {
@@ -1511,6 +1511,22 @@ fn reject_legacy_social_emote_fields(
     Ok(())
 }
 
+fn reject_legacy_adventure_fields(
+    value: &serde_json::Value,
+    schema_version: u64,
+) -> Result<(), String> {
+    if value.get("gameplay").is_some_and(|gameplay| {
+        ["commodities", "quests", "shops"]
+            .into_iter()
+            .any(|field| gameplay.get(field).is_some())
+    }) {
+        return Err(format!(
+            "WorldPack v{schema_version} cannot declare v10 commodities, quests or shops"
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_v6_rewards(value: &mut serde_json::Value) -> Result<(), String> {
     reject_native_legacy_item_fields(value)?;
     let root = value
@@ -1588,7 +1604,13 @@ impl WorldPackDocument {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or_default();
         let legacy_schema = schema_version == 2 || schema_version == 3;
-        if (2..u64::from(crate::CURRENT_SCHEMA_VERSION)).contains(&schema_version) {
+        let legacy_adventure =
+            (2..u64::from(crate::CURRENT_SCHEMA_VERSION)).contains(&schema_version);
+        if legacy_adventure {
+            reject_legacy_adventure_fields(&value, schema_version)
+                .map_err(DocumentToolError::LegacyItems)?;
+        }
+        if (2..=8).contains(&schema_version) {
             reject_legacy_social_emote_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
         }
@@ -1618,7 +1640,7 @@ impl WorldPackDocument {
             reject_legacy_reward_fields(&value, schema_version)
                 .map_err(DocumentToolError::LegacyItems)?;
             normalize_v6_rewards(&mut value).map_err(DocumentToolError::LegacyItems)?;
-        } else if schema_version == 7 || schema_version == 8 {
+        } else if (7..=9).contains(&schema_version) {
             normalize_v6_rewards(&mut value).map_err(DocumentToolError::LegacyItems)?;
         } else if schema_version == u64::from(crate::CURRENT_SCHEMA_VERSION) {
             reject_native_legacy_item_fields(&value).map_err(DocumentToolError::LegacyItems)?;
@@ -1634,6 +1656,16 @@ impl WorldPackDocument {
         }
         if legacy_schema {
             document.world.schema_version = crate::CURRENT_SCHEMA_VERSION;
+        }
+        if legacy_adventure {
+            // Every pre-v10 runtime hardcoded the starter quest and market.
+            // Normalization makes that behaviour explicit instead of
+            // silently removing it from older reviewed packs.
+            let (commodities, quests, shops) =
+                crate::legacy_adventure_content(&document.world.start_room_id);
+            document.world.gameplay.commodities = commodities;
+            document.world.gameplay.quests = quests;
+            document.world.gameplay.shops = shops;
         }
         Ok(document)
     }
@@ -2255,6 +2287,45 @@ impl WorldPackDocument {
                     .iter()
                     .map(|emote| (&emote.id, emote)),
             ),
+            commodities: diff_entities(
+                self.world
+                    .gameplay
+                    .commodities
+                    .iter()
+                    .map(|value| (&value.id, value)),
+                other
+                    .world
+                    .gameplay
+                    .commodities
+                    .iter()
+                    .map(|value| (&value.id, value)),
+            ),
+            quests: diff_entities(
+                self.world
+                    .gameplay
+                    .quests
+                    .iter()
+                    .map(|value| (&value.id, value)),
+                other
+                    .world
+                    .gameplay
+                    .quests
+                    .iter()
+                    .map(|value| (&value.id, value)),
+            ),
+            shops: diff_entities(
+                self.world
+                    .gameplay
+                    .shops
+                    .iter()
+                    .map(|value| (&value.id, value)),
+                other
+                    .world
+                    .gameplay
+                    .shops
+                    .iter()
+                    .map(|value| (&value.id, value)),
+            ),
             npc_ability_sets: diff_entities(
                 self.world
                     .gameplay
@@ -2395,6 +2466,28 @@ impl WorldPackDocument {
             .world
             .gameplay
             .social_emotes
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        // Stage, objective and stock order is semantic and stays authored.
+        document
+            .world
+            .gameplay
+            .commodities
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        document
+            .world
+            .gameplay
+            .quests
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        for quest in &mut document.world.gameplay.quests {
+            quest.aliases.sort();
+            if let Some(prerequisite) = &mut quest.prerequisite {
+                prerequisite.canonicalize();
+            }
+        }
+        document
+            .world
+            .gameplay
+            .shops
             .sort_by(|left, right| left.id.cmp(&right.id));
         document
             .world
@@ -2874,6 +2967,9 @@ pub struct WorldPackDiff {
     pub archetypes: EntityDiff,
     pub abilities: EntityDiff,
     pub social_emotes: EntityDiff,
+    pub commodities: EntityDiff,
+    pub quests: EntityDiff,
+    pub shops: EntityDiff,
     pub npc_ability_sets: EntityDiff,
     pub loot_tables: EntityDiff,
     pub loot_sources: EntityDiff,
@@ -2898,6 +2994,9 @@ impl WorldPackDiff {
             && self.archetypes.is_empty()
             && self.abilities.is_empty()
             && self.social_emotes.is_empty()
+            && self.commodities.is_empty()
+            && self.quests.is_empty()
+            && self.shops.is_empty()
             && self.npc_ability_sets.is_empty()
             && self.loot_tables.is_empty()
             && self.loot_sources.is_empty()
@@ -2932,6 +3031,9 @@ impl fmt::Display for WorldPackDiff {
         write_entity_diff(formatter, "archetypes", &self.archetypes)?;
         write_entity_diff(formatter, "abilities", &self.abilities)?;
         write_entity_diff(formatter, "social emotes", &self.social_emotes)?;
+        write_entity_diff(formatter, "commodities", &self.commodities)?;
+        write_entity_diff(formatter, "quests", &self.quests)?;
+        write_entity_diff(formatter, "shops", &self.shops)?;
         write_entity_diff(formatter, "NPC ability sets", &self.npc_ability_sets)?;
         write_entity_diff(formatter, "loot tables", &self.loot_tables)?;
         write_entity_diff(formatter, "loot sources", &self.loot_sources)?;

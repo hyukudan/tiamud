@@ -286,6 +286,11 @@ impl World {
             .ok_or(WorldError::InvalidAreaLifecycle)?;
         world.start_room = start_room;
         world.start_room_stable_id = start_room_id.to_owned();
+        // The compatibility default binds its market to the start room; never
+        // leave it on the internal bootstrap anchor.
+        if *world.adventure_content == AdventureContent::legacy(BOOTSTRAP_ROOM_ID) {
+            world.adventure_content = std::sync::Arc::new(AdventureContent::legacy(start_room_id));
+        }
         Ok((world, outcome))
     }
 
