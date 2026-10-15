@@ -4157,6 +4157,197 @@ mod tests {
             assert!(output.len() <= TELNET_CELL_FRAME_MAX_BYTES + 256);
         }
     }
+    fn graphics_session(graphics: &str, color: ColorPolicy) -> TelnetSession {
+        let mut session = gmcp_cell_frame_session();
+        session.handle(vec![TelnetEvent::Subnegotiation {
+            option: OPT_GMCP,
+            data: format!(r#"Tiamud.Client.Set {{"graphics":"{graphics}","decorative":true}}"#)
+                .into_bytes(),
+        }]);
+        session.capabilities.presentation.color = color;
+        session
+    }
+
+    fn assert_scene_golden(name: &str, actual: &[u8]) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden/telnet-scene")
+            .join(name);
+        if std::env::var_os("TIAMUD_UPDATE_GOLDEN").is_some() {
+            std::fs::write(&path, actual).unwrap();
+            return;
+        }
+        let expected = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!("missing golden {path:?} ({error}); run with TIAMUD_UPDATE_GOLDEN=1")
+        });
+        assert!(
+            expected == actual,
+            "telnet scene golden {name} differs ({} vs {} bytes). If intentional, regenerate with \
+             TIAMUD_UPDATE_GOLDEN=1 cargo test --locked -p tiamud-server telnet_scene_ and \
+             review the diff. For PNG modes, `telnet_scene_png_pixels_*` shows whether pixels \
+             changed.\nexpected: {:?}\nactual:   {:?}",
+            expected.len(),
+            actual.len(),
+            String::from_utf8_lossy(&expected),
+            String::from_utf8_lossy(actual),
+        );
+    }
+
+    #[test]
+    fn telnet_scene_golden_bytes_for_every_graphics_mode() {
+        let cases = [
+            ("kitty", ColorPolicy::Plain, "kitty.bin"),
+            ("iterm2", ColorPolicy::Plain, "iterm2.bin"),
+            ("sixel", ColorPolicy::Plain, "sixel.bin"),
+            ("ansi", ColorPolicy::Ansi16, "ansi-16.bin"),
+            ("ansi", ColorPolicy::Ansi256, "ansi-256.bin"),
+            ("ansi", ColorPolicy::TrueColor, "ansi-truecolor.bin"),
+        ];
+        for (mode, color, name) in cases {
+            let session = graphics_session(mode, color);
+            let output = render_scene_cell_frame(&sample_scene(), &session).unwrap();
+            assert_scene_golden(name, &output);
+        }
+    }
+
+    #[test]
+    fn telnet_scene_truecolor_and_256_fallback_select_distinct_escapes() {
+        let render = |color| {
+            let session = graphics_session("ansi", color);
+            String::from_utf8(render_scene_cell_frame(&sample_scene(), &session).unwrap()).unwrap()
+        };
+        let truecolor = render(ColorPolicy::TrueColor);
+        let ansi256 = render(ColorPolicy::Ansi256);
+        let ansi16 = render(ColorPolicy::Ansi16);
+        let plain = render(ColorPolicy::Plain);
+        assert!(truecolor.contains(";38;2;") && !truecolor.contains(";38;5;"));
+        assert!(ansi256.contains(";38;5;") && !ansi256.contains(";38;2;"));
+        assert!(!ansi16.contains(";38;"));
+        // Plain colour policy degrades to the 16-colour tier, never to raw 24-bit.
+        assert_eq!(plain, ansi16);
+    }
+
+    #[test]
+    fn telnet_scene_png_pixels_match_the_cell_backgrounds() {
+        fn base64_value(byte: u8) -> u32 {
+            u32::from(match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                other => panic!("invalid base64 byte {other}"),
+            })
+        }
+        let frame = atmospheric_cell_frame(&sample_scene());
+        for (mode, marker) in [("kitty", "m=0;"), ("iterm2", "preserveAspectRatio=1:")] {
+            let session = graphics_session(mode, ColorPolicy::TrueColor);
+            let output = render_scene_cell_frame(&sample_scene(), &session).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            let start = text.find(marker).unwrap() + marker.len();
+            let payload: String = text[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+                .collect();
+            let (mut png_bytes, mut acc, mut bits) = (Vec::new(), 0_u32, 0);
+            for byte in payload.bytes().filter(|b| *b != b'=') {
+                acc = (acc << 6) | base64_value(byte);
+                bits += 6;
+                if bits >= 8 {
+                    bits -= 8;
+                    png_bytes.push((acc >> bits) as u8);
+                    acc &= (1 << bits) - 1;
+                }
+            }
+            let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes))
+                .read_info()
+                .unwrap();
+            let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
+            let info = reader.next_frame(&mut buffer).unwrap();
+            assert_eq!(
+                (info.width, info.height),
+                (u32::from(frame.width) * 4, u32::from(frame.height) * 6),
+                "{mode}: PNG dimensions changed"
+            );
+            for (index, cell) in frame.cells.iter().enumerate() {
+                let color = frame.palette[usize::from(cell.background)];
+                let x = (index % usize::from(frame.width)) * 4;
+                let y = (index / usize::from(frame.width)) * 6;
+                let offset = (y * info.width as usize + x) * 3;
+                assert_eq!(
+                    buffer[offset..offset + 3],
+                    [color.red, color.green, color.blue],
+                    "{mode}: pixel of cell {index} changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn telnet_scene_frame_is_bounded_and_independent_of_naws() {
+        let frame = atmospheric_cell_frame(&sample_scene());
+        assert!(frame.width <= tiamud_cell_frame::MAX_WIDTH);
+        assert!(frame.height <= tiamud_cell_frame::MAX_HEIGHT);
+        assert!(
+            usize::from(frame.width) * usize::from(frame.height) <= TELNET_CELL_FRAME_MAX_CELLS
+        );
+        for mode in ["kitty", "iterm2", "sixel", "ansi"] {
+            let baseline = render_scene_cell_frame(
+                &sample_scene(),
+                &graphics_session(mode, ColorPolicy::TrueColor),
+            )
+            .unwrap();
+            assert!(baseline.len() <= TELNET_CELL_FRAME_MAX_BYTES + 256);
+            for (columns, rows) in [(1_u16, 1_u16), (20, 5), (80, 24), (u16::MAX, u16::MAX)] {
+                let mut session = graphics_session(mode, ColorPolicy::TrueColor);
+                session.capabilities.columns = Some(columns);
+                session.capabilities.rows = Some(rows);
+                assert_eq!(
+                    render_scene_cell_frame(&sample_scene(), &session).unwrap(),
+                    baseline,
+                    "{mode}: output must not depend on NAWS {columns}x{rows}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn telnet_scene_reduced_or_disabled_graphics_emit_no_graphics_escapes() {
+        const GRAPHICS_MARKERS: [&[u8]; 4] = [b"\x1b_G", b"\x1bPq", b"\x1b]1337", b"\x1b["];
+        // Never negotiated: nothing from the cell-frame path.
+        assert!(render_scene_cell_frame(&sample_scene(), &TelnetSession::default()).is_none());
+        // Every accessibility blocker disables the graphic for every mode.
+        for mode in ["kitty", "iterm2", "sixel", "ansi"] {
+            for blocker in [
+                r#""plain":true"#,
+                r#""reducedMotion":true"#,
+                r#""screenReader":true"#,
+                r#""decorative":false"#,
+            ] {
+                let mut session = gmcp_cell_frame_session();
+                session.handle(vec![TelnetEvent::Subnegotiation {
+                    option: OPT_GMCP,
+                    data: format!(r#"Tiamud.Client.Set {{"graphics":"{mode}",{blocker}}}"#)
+                        .into_bytes(),
+                }]);
+                assert!(
+                    render_scene_cell_frame(&sample_scene(), &session).is_none(),
+                    "{mode} with {blocker} must not render"
+                );
+            }
+        }
+        // The full scene render for an unnegotiated session carries no graphics bytes.
+        let text = render_scene(&sample_scene(), &TelnetSession::default());
+        for marker in GRAPHICS_MARKERS {
+            assert!(
+                !text.as_bytes().windows(marker.len()).any(|w| w == marker),
+                "plain scene leaked {marker:?}"
+            );
+        }
+        // The decorative alt line precedes every enabled payload.
+        let session = graphics_session("kitty", ColorPolicy::Plain);
+        let output = render_scene_cell_frame(&sample_scene(), &session).unwrap();
+        assert!(output.starts_with(b"\r\n[Decorative: "));
+    }
 
     #[test]
     fn accessibility_preferences_override_graphics_assets_media_and_links() {
