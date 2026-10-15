@@ -35,7 +35,7 @@ assets can be served from the process or a proxy on the same host. PostgreSQL is
 recommended for new public installations; SQLite is the local, service-free
 alternative. One is selected and dual-writing never happens.
 
-Both adapters implement schema v16. It preserves the social and staff relations
+Both adapters implement schema v17. It preserves the social and staff relations
 of v9/v10 and transactionally widens the physical bound of the current opaque
 snapshot to 2 MiB. Legacy snapshots v1–v5 remain limited to 1 MiB when decoded;
 v6, v7 and v8 admit 2 MiB. The SQLite→PostgreSQL move copies these relations,
@@ -55,6 +55,16 @@ used by story sessions for manual slots and the autosave
 ([ADR 0029](decisions/0029-story-session-instances-and-story-protocol.md)). The
 mover validates and copies those rows too. Its PostgreSQL tests are written
 but have not run against a real server, so no PostgreSQL evidence is v16.
+Schema v17 stores the runtime snapshot sectioned
+([ADR 0035](decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
+proposed): `world_runtime` keeps the version, a scalar head document, a
+manifest and the event watermark, and `world_runtime_sections` keeps ten closed
+sections with their revision and SHA-256. Commits rewrite only the sections
+that the durable baseline cannot prove unchanged; recovery reassembles the
+same snapshot DTO, applies the 1/2 MiB ceiling to the assembled document and
+fails closed on any mismatch. The mover verifies and copies the rows byte for
+byte. Its PostgreSQL tests are written but have not run, so no PostgreSQL
+evidence is v17.
 
 Operations are in [single-host.md](operations/single-host.md). Microservices and
 orchestration are not a goal without measured load that justifies them.
@@ -362,7 +372,7 @@ identities into active characters; for cohorts or beneficiaries that appear only
 in loot, an `existence-only` query is performed. Then the still-open loot
 encounters and their combat state are cancelled in a commit prior to readiness;
 already-resolved `groundLoot` rights survive intact. SQLite and PostgreSQL commit
-the snapshot as the single global authority in their schema v16 transaction; there
+the snapshot as the single global authority in their schema v17 transaction; there
 is no mirror loot or escrow table and no dual write.
 
 The main limits are 1,024 prototypes and 8,192 initial instances per WorldPack,
@@ -754,7 +764,7 @@ create a sequence and are not inferred from prose. Reference:
 | Transparent sprite profile | WebP alpha + PNG implemented |
 | Safe entity sidecar | Implemented; no sample sprites |
 | Combat hints | NPC attack/hit/defeat; no player/heal/tombstone |
-| Social phase 1 and current schema v16 | Groups/chat/reply/channels and Web/Telnet/GMCP parity implemented; real PostgreSQL v13/v14/v15 remains historical evidence, not a v16 pass |
+| Social phase 1 and current schema v17 | Groups/chat/reply/channels and Web/Telnet/GMCP parity implemented; real PostgreSQL v13/v14/v15 remains historical evidence, not a v16 or v17 pass |
 | Communication phase 5A | Authored direct online telepathy with cost/cooldowns, per-room blocking, private suppression, commit before delivery and Web/Telnet/GMCP parity; telepathy does not persist or deliver offline/group |
 | Communication phase 5B | Authored local emotes with closed templates and non-recursive render, closed local targeting without none/optional/required, per-receiver ignore/block, commit before delivery and Web/Telnet/GMCP parity; no free text, persistence or global/group emotes |
 | Communication phase 5C | Explicit offline mail with per-account quotas, bounded mailbox/expiry/pagination, opaque references, acceptance that does not leak policy/capacity, report with 90-day evidence and Web/Telnet/`Tiamud.Mail 1` parity; no general history, outbox, attachments or group mail |

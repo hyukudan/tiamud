@@ -1186,7 +1186,7 @@ advance its version.
 Invalid references, cycles, depth, capacity, counter, owner, binding,
 participant, reservation, cohort, or provenance are also rejected.
 
-SQLite and PostgreSQL use schema v16. `world_area_generation` stores only
+SQLite and PostgreSQL use schema v17. `world_area_generation` stores only
 `worldId`, active digest, previous digest, activation sequence, and timestamp;
 paths are derived from the configured registry. A 6C transition updates that row
 and the v8 snapshot in the same transaction via compare-and-swap. It is not
@@ -1210,12 +1210,15 @@ restart. Those temporary aggregates do not remain in the active world.
 The runtime allows up to 65,536 instances. Inherited raw v1-v5 snapshots keep the
 physical limit of 1 MiB; v6–v8 snapshots, as well as each new
 admission/commit, allow up to 2 MiB. The sum of inspected owner sheets remains
-limited to 1 MiB and each sheet to 64 KiB. SQLite and PostgreSQL schema v16 store
-the snapshot as opaque `TEXT` within the existing transaction. The v10→v11
-migration transactionally raises the runtime singleton's physical constraint to
-2 MiB and preserves version, JSON, covered sequence, and date; it does not
-convert the JSON or create another authority. There is no mirror/escrow/loot
-table, double write, or `jsonb`.
+limited to 1 MiB and each sheet to 64 KiB. SQLite and PostgreSQL schema v17 store
+the snapshot as opaque `TEXT` within the existing transaction, split into a
+scalar head, a manifest and ten digested sections that are rewritten only when
+they change ([ADR 0035](decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
+proposed); the 1/2 MiB limits apply to the reassembled document, which is the
+same snapshot DTO. The v10→v11 migration transactionally raised the runtime
+singleton's physical constraint to 2 MiB, and v16→v17 splits that document into
+sections without converting its content; neither creates another authority.
+There is no mirror/escrow/loot table, double write, or `jsonb`.
 
 After a future stable release, renaming an ID will require an alias, tombstone,
 or explicit migration. Never recycle a published ID for another meaning.
