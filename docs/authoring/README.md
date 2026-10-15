@@ -23,6 +23,11 @@ without duplicating every field.
 5. Compile and reference [atmospheric media or sprites](media.md).
 6. Run all the [validation and publishing gates](validation-and-publishing.md).
 
+Branching gamebooks for the separate narrative ruleset (ADR 0025, proposed) use
+**StoryPacks**, not WorldPacks. They are authored and tested offline with
+`tiamud-story`; see [StoryPack authoring](story-packs.md). They are not yet
+playable on a running server.
+
 The reviewed example contains:
 
 - project: [`worlds/lantern-square.project.json`](../../worlds/lantern-square.project.json);

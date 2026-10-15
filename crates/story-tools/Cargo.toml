@@ -1,0 +1,22 @@
+[package]
+name = "tiamud-story-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Offline StoryPack authoring tools: validate, lint, preview, scripted tests, format and an interactive player"
+
+[[bin]]
+name = "tiamud-story"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tiamud-story-core = { path = "../story-core" }
+
+[dev-dependencies]
+tempfile.workspace = true

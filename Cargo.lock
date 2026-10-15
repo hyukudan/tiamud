@@ -2862,6 +2862,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiamud-story-tools"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tiamud-story-core",
+]
+
+[[package]]
 name = "tiamud-telnet-codec"
 version = "0.1.0"
 
