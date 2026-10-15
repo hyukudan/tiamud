@@ -631,6 +631,26 @@ enum ClientMessage {
     StoryDeleteSlot {
         slot: u8,
     },
+    /// `story.vote {choiceId?, viewRev}` (ADR 0033).
+    StoryVote {
+        leaf: Option<String>,
+        view_rev: u32,
+    },
+    StoryShare,
+    StoryJoin {
+        code: String,
+        spectate: bool,
+    },
+    StoryInvite {
+        name: String,
+    },
+    StoryKick {
+        name: String,
+    },
+    StoryMode {
+        mode: protocol::StoryDecisionMode,
+        vote_seconds: Option<u16>,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1005,7 +1025,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
     }
     // A reconnect resumes the account's live story instance, if any.
     let mut story =
-        story::WebStorySession::new(state.stories.clone(), entered.account_id, audio_enabled);
+        story::WebStorySession::new(state.stories.clone(), entered.account_id, audio_enabled)
+            .with_name(&last_player.character.name);
     if !story.resume(&outbound, &mut sequence).await {
         finish_websocket_driver(&outbound, driver).await;
         return;
@@ -1153,6 +1174,22 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                     None => break,
                 }
             }
+            event = story.next_event() => {
+                let was_in_story = story.active();
+                if !story.handle_event(&outbound, &mut sequence, event)
+                    || (was_in_story
+                        && !story.active()
+                        && !queue_media_transition(
+                            &outbound,
+                            &mut sequence,
+                            audio_enabled,
+                            None,
+                            last_scene.audio.as_ref(),
+                        ))
+                {
+                    break;
+                }
+            }
             inbound = inbound_rx.recv() => {
                 let Some(message) = inbound else { break };
                 let Message::Text(text) = message else {
@@ -1204,7 +1241,13 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                     | ClientMessage::StorySave { .. }
                     | ClientMessage::StoryRestore { .. }
                     | ClientMessage::StorySlots
-                    | ClientMessage::StoryDeleteSlot { .. }) => {
+                    | ClientMessage::StoryDeleteSlot { .. }
+                    | ClientMessage::StoryVote { .. }
+                    | ClientMessage::StoryShare
+                    | ClientMessage::StoryJoin { .. }
+                    | ClientMessage::StoryInvite { .. }
+                    | ClientMessage::StoryKick { .. }
+                    | ClientMessage::StoryMode { .. }) => {
                         if !command_limiter.check(Instant::now()) {
                             if !queue_notice(&outbound, &mut sequence, "Command rate limit exceeded.") {
                                 break;
@@ -1231,6 +1274,22 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             ClientMessage::StorySlots => story.slots(&outbound, &mut sequence).await,
                             ClientMessage::StoryDeleteSlot { slot } => {
                                 story.delete_slot(&outbound, &mut sequence, slot).await
+                            }
+                            ClientMessage::StoryVote { leaf, view_rev } => {
+                                story.vote(&outbound, &mut sequence, leaf, view_rev).await
+                            }
+                            ClientMessage::StoryShare => story.share(&outbound, &mut sequence).await,
+                            ClientMessage::StoryJoin { code, spectate } => {
+                                story.join(&outbound, &mut sequence, &code, spectate).await
+                            }
+                            ClientMessage::StoryInvite { name } => {
+                                story.invite(&outbound, &mut sequence, &name).await
+                            }
+                            ClientMessage::StoryKick { name } => {
+                                story.kick(&outbound, &mut sequence, &name).await
+                            }
+                            ClientMessage::StoryMode { mode, vote_seconds } => {
+                                story.mode(&outbound, &mut sequence, mode, vote_seconds).await
                             }
                             _ => story.leave(&outbound, &mut sequence).await,
                         };
@@ -3056,14 +3115,70 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 _ => ClientMessage::StoryDeleteSlot { slot: data.slot },
             })
         }
-        "story.slots" | "story.continue" => {
+        "story.slots" | "story.continue" | "story.share" => {
             if !envelope.data.as_object().is_some_and(Map::is_empty) {
                 return Err(ClientMessageError::InvalidEnvelope);
             }
-            Ok(if envelope.message_type == "story.slots" {
-                ClientMessage::StorySlots
+            Ok(match envelope.message_type.as_str() {
+                "story.slots" => ClientMessage::StorySlots,
+                "story.share" => ClientMessage::StoryShare,
+                _ => ClientMessage::StoryRestore { slot: 0 },
+            })
+        }
+        "story.vote" => {
+            let data = serde_json::from_value::<protocol::StoryVoteData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            if data
+                .choice_id
+                .as_deref()
+                .is_some_and(|id| !valid_story_id_shape(id))
+                || data.view_rev == 0
+            {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(ClientMessage::StoryVote {
+                leaf: data.choice_id,
+                view_rev: data.view_rev,
+            })
+        }
+        "story.join" => {
+            let data = serde_json::from_value::<protocol::StoryJoinData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            // Shape only; the code itself is checked (and rate limited) later.
+            if data.code.is_empty()
+                || data.code.len() > protocol::STORY_JOIN_CODE_BYTES
+                || !data.code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(ClientMessage::StoryJoin {
+                code: data.code,
+                spectate: data.spectate,
+            })
+        }
+        "story.invite" | "story.kick" => {
+            let data = serde_json::from_value::<protocol::StoryNameData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            let name = data.name.trim();
+            if name.is_empty()
+                || name.len() > crate::story_sessions::shared::MAX_MEMBER_NAME_BYTES
+                || name.chars().any(char::is_control)
+            {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            let name = name.to_owned();
+            Ok(if envelope.message_type == "story.invite" {
+                ClientMessage::StoryInvite { name }
             } else {
-                ClientMessage::StoryRestore { slot: 0 }
+                ClientMessage::StoryKick { name }
+            })
+        }
+        "story.mode" => {
+            let data = serde_json::from_value::<protocol::StoryModeData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            Ok(ClientMessage::StoryMode {
+                mode: data.mode,
+                vote_seconds: data.vote_seconds,
             })
         }
         _ => Err(ClientMessageError::UnknownType),

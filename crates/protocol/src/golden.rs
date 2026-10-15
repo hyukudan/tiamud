@@ -70,6 +70,9 @@ fn message_type_names_match_serde_names() {
         ServerMessageType::StorySlots,
         ServerMessageType::StorySaved,
         ServerMessageType::StoryRestored,
+        ServerMessageType::StoryLobby,
+        ServerMessageType::StoryTally,
+        ServerMessageType::StoryInvitation,
     ] {
         assert_eq!(
             serde_json::to_value(message_type).unwrap(),
@@ -647,6 +650,12 @@ fn story_payloads_have_their_documented_shape() {
         "story.slots",
         "story.deleteSlot",
         "story.continue",
+        "story.share",
+        "story.join",
+        "story.invite",
+        "story.kick",
+        "story.mode",
+        "story.vote",
     ] {
         assert!(serde_json::from_value::<ClientMessageType>(json!(name)).is_ok());
     }
@@ -708,4 +717,144 @@ fn story_slot_payloads_have_their_documented_shape() {
     ] {
         assert!(serde_json::from_value::<StorySlotData>(rejected).is_err());
     }
+}
+
+#[test]
+fn shared_story_payloads_have_their_documented_shape() {
+    assert_wire(
+        StoryLobby {
+            mode: StoryDecisionMode::Vote,
+            vote_seconds: 60,
+            you: StorySeatRole::Host,
+            code: Some("ABCD2345".into()),
+            seats: vec![
+                StorySeat {
+                    name: "Aria".into(),
+                    role: StorySeatRole::Host,
+                    connected: true,
+                    turn: false,
+                },
+                StorySeat {
+                    name: "Bruno".into(),
+                    role: StorySeatRole::Player,
+                    connected: false,
+                    turn: false,
+                },
+            ],
+            spectators: 1,
+            max_seats: 8,
+            max_spectators: 32,
+        },
+        json!({
+            "mode": "vote",
+            "voteSeconds": 60,
+            "you": "host",
+            "code": "ABCD2345",
+            "seats": [
+                {"name": "Aria", "role": "host", "connected": true, "turn": false},
+                {"name": "Bruno", "role": "player", "connected": false, "turn": false}
+            ],
+            "spectators": 1,
+            "maxSeats": 8,
+            "maxSpectators": 32
+        }),
+    );
+    assert_wire(
+        StoryLobby {
+            mode: StoryDecisionMode::Turns,
+            vote_seconds: 30,
+            you: StorySeatRole::Spectator,
+            code: None,
+            seats: Vec::new(),
+            spectators: 0,
+            max_seats: 2,
+            max_spectators: 0,
+        },
+        json!({
+            "mode": "turns", "voteSeconds": 30, "you": "spectator", "seats": [],
+            "spectators": 0, "maxSeats": 2, "maxSpectators": 0
+        }),
+    );
+    assert_wire(
+        StoryTally {
+            view_rev: 4,
+            mode: StoryDecisionMode::Vote,
+            choices: vec![StoryTallyEntry {
+                choice_id: "c0123456789abcdef".into(),
+                votes: 2,
+            }],
+            voted: 2,
+            eligible: 3,
+            remaining_seconds: Some(41),
+            your_vote: Some("c0123456789abcdef".into()),
+        },
+        json!({
+            "viewRev": 4, "mode": "vote",
+            "choices": [{"choiceId": "c0123456789abcdef", "votes": 2}],
+            "voted": 2, "eligible": 3, "remainingSeconds": 41,
+            "yourVote": "c0123456789abcdef"
+        }),
+    );
+    assert_wire(
+        StoryTally {
+            view_rev: 1,
+            mode: StoryDecisionMode::Host,
+            choices: Vec::new(),
+            voted: 0,
+            eligible: 1,
+            remaining_seconds: None,
+            your_vote: None,
+        },
+        json!({"viewRev": 1, "mode": "host", "choices": [], "voted": 0, "eligible": 1}),
+    );
+    assert_wire(
+        StoryInvitation {
+            host: "Aria".into(),
+            story_id: "cripta".into(),
+            title: "Cripta".into(),
+            code: "ABCD2345".into(),
+        },
+        json!({"host": "Aria", "storyId": "cripta", "title": "Cripta", "code": "ABCD2345"}),
+    );
+    for (reason, wire) in [
+        (StoryLeftReason::Kicked, "kicked"),
+        (StoryLeftReason::Ended, "ended"),
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), json!(wire));
+    }
+    for (code, wire) in [
+        (StoryErrorCode::HostOnly, "host_only"),
+        (StoryErrorCode::Spectator, "spectator"),
+        (StoryErrorCode::NotYourTurn, "not_your_turn"),
+        (StoryErrorCode::UnknownCode, "unknown_code"),
+        (StoryErrorCode::SeatsFull, "seats_full"),
+        (StoryErrorCode::NotShared, "not_shared"),
+        (StoryErrorCode::UnknownMember, "unknown_member"),
+        (StoryErrorCode::InvalidSetting, "invalid_setting"),
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), json!(wire));
+    }
+
+    let vote: StoryVoteData =
+        serde_json::from_value(json!({"choiceId": "c0123456789abcdef", "viewRev": 2})).unwrap();
+    assert_eq!(vote.choice_id.as_deref(), Some("c0123456789abcdef"));
+    let abstain: StoryVoteData = serde_json::from_value(json!({"viewRev": 2})).unwrap();
+    assert_eq!(abstain.choice_id, None);
+    let join: StoryJoinData =
+        serde_json::from_value(json!({"code": "ABCD2345", "spectate": false})).unwrap();
+    assert!(!join.spectate);
+    let mode: StoryModeData =
+        serde_json::from_value(json!({"mode": "turns", "voteSeconds": 45})).unwrap();
+    assert_eq!(mode.mode, StoryDecisionMode::Turns);
+    let name: StoryNameData = serde_json::from_value(json!({"name": "Bruno"})).unwrap();
+    assert_eq!(name.name, "Bruno");
+    for rejected in [
+        json!({"viewRev": 2, "x": 1}),
+        json!({"choiceId": "c0123456789abcdef"}),
+    ] {
+        assert!(serde_json::from_value::<StoryVoteData>(rejected).is_err());
+    }
+    assert!(serde_json::from_value::<StoryJoinData>(json!({"code": "ABCD2345"})).is_err());
+    assert!(serde_json::from_value::<StoryModeData>(json!({"mode": "chaos"})).is_err());
+    assert!(serde_json::from_value::<StoryNameData>(json!({"name": "B", "x": 1})).is_err());
 }
