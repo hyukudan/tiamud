@@ -440,9 +440,12 @@ matriz, memoria y documentación pública a la vez.
   las cargas cliente salvo `action.perform` y las cargas servidor propias del
   transporte; `web.rs` construye con ellas todo mensaje WebSocket con bytes
   idénticos a la construcción `json!` previa (pruebas golden). El TypeScript
-  generado con ts-rs (solo dev) se versiona en `apps/web/src/lib/generated/`.
-  `action.perform` y las formas internas de escena/jugador siguen escritas a
-  mano en ambos lados.
+  generado con ts-rs (solo dev, `cfg_attr(test)`) se versiona en
+  `apps/web/src/lib/generated/`: `protocol.ts` desde `tiamud-protocol`,
+  `core.ts` desde las vistas de `tiamud-core` y `server.ts` desde
+  `ActionPerformData` y la presentación de `tiamud-server`. El cliente no
+  duplica a mano ninguna forma de cable; solo refina los campos que su
+  validador estrecha o normaliza.
 - Una recuperación devuelve `sync.scene` y `sync.player` correlacionados, cada
   uno bajo 16 KiB; el navegador valida y aplica el par atómicamente. La ventana
   semántica Web para escenas es 14 KiB y conserva en orden botín propio,
@@ -656,9 +659,10 @@ No existe LRU ni política automática de memoria.
   loader, datos revisados y CLI tests.
 - Protocolo web suele exigir serialización Rust, parser TypeScript estricto,
   socket/recovery, Playwright y revisión Telnet/GMCP. Los tipos de cable viven
-  en `crates/protocol`: cambia el tipo, añade su prueba golden y regenera
-  `apps/web/src/lib/generated/protocol.ts`; no relajes la validación en tiempo
-  de ejecución de `protocol.ts` por existir tipos generados.
+  en `crates/protocol` y las proyecciones en `tiamud-core`/`tiamud-server`:
+  cambia el tipo, añade su prueba golden y regenera
+  `apps/web/src/lib/generated/`; no relajes la validación en tiempo de
+  ejecución de `protocol.ts` por existir tipos generados.
 - Medios pasan por manifiestos revisados y percepción.
 - Usa aritmética checked/saturating y límites explícitos; falla cerrado ante
   autoridad, esquema o seguridad ambiguos.
@@ -686,10 +690,10 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 `cargo test --workspace --locked` incluye la comprobación de que
-`apps/web/src/lib/generated/protocol.ts` coincide con `crates/protocol`. Para
-regenerarlo tras cambiar un tipo de cable, ejecuta
-`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol` y
-revisa el diff.
+`apps/web/src/lib/generated/{protocol,core,server}.ts` coinciden con
+`tiamud-protocol`, `tiamud-core` y `tiamud-server`. Para regenerarlos tras
+cambiar un tipo de cable o una vista proyectada, ejecuta
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript` y revisa el diff.
 
 PostgreSQL requiere una base desechable y autoridad explícita:
 

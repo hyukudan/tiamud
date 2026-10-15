@@ -3,7 +3,10 @@
 - Estado: propuesto. Implementado de forma incremental en este árbol (ver
   [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md)); queda pendiente
   de aceptación del propietario. No cambia el formato de cable, el límite de
-  16 KiB ni ninguna decisión aceptada.
+  16 KiB ni ninguna decisión aceptada. Actualización 2026-10-15: las formas
+  internas de `tiamud-core` (escena, jugador, objeto, mapa, evento y odds), la
+  anotación de presentación y `action.perform` también se generan (puntos 3–5
+  y [registro](../project/log/2026-10-15-core-view-codegen-deny-licenses-and-flaky-tests.md)).
 - Fecha: 2026-10-15
 - Alcance: protocolo navegador `tiamud.v1` (servidor `web.rs` y cliente
   `apps/web/src/lib/protocol.ts`)
@@ -39,31 +42,48 @@ prueba lo detectara antes de Playwright.
    (`web_protocol_golden_tests.rs`) comparan valor y bytes con copias literales
    de la construcción `json!` previa usando proyecciones reales del dominio.
 3. Los tipos TypeScript se generan con [ts-rs](https://github.com/Aleph-Alpha/ts-rs)
-   (MIT) en `apps/web/src/lib/generated/protocol.ts`, archivo versionado. ts-rs
-   es solo `dev-dependency` y el derive se aplica con `cfg_attr(test, ...)`: no
-   entra en el grafo de release ni en `THIRD_PARTY_NOTICES.md`. Los enteros de
-   64 bits se emiten como `number`.
-4. La prueba `typescript::generated_typescript_is_current` forma parte de
-   `cargo test --workspace --locked` y falla si el archivo versionado está
-   obsoleto. Regenerar es explícito:
-   `TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol`.
+   (MIT) en archivos versionados de `apps/web/src/lib/generated/`, uno por
+   crate propietario del tipo: `protocol.ts` (`tiamud-protocol`), `core.ts`
+   (proyecciones de `tiamud-core`: escena, jugador, objeto, mapa, evento
+   narrativo, odds de recompensa y vocabularios cerrados de staff/canal) y
+   `server.ts` (`tiamud-server`: `ActionPerformData` y la anotación de
+   presentación de `runtime_content`). En los tres crates ts-rs es solo
+   `dev-dependency` y el derive se aplica con `cfg_attr(test, ...)`: no entra
+   en el grafo de release ni en `THIRD_PARTY_NOTICES.md`. Por eso cada crate
+   genera solo sus propios tipos; `server.ts` nombra los vocabularios de
+   `tiamud-core`/`tiamud-protocol` con `ts(type = ...)` y los importa de
+   `core.ts`/`protocol.ts`. Los enteros de 64 bits se emiten como `number`.
+   Ningún atributo serde cambia, así que el JSON de cable es idéntico.
+4. Las pruebas `typescript::generated_typescript_is_current` (protocolo y
+   núcleo) y `web::typescript::generated_typescript_is_current` (servidor)
+   forman parte de `cargo test --workspace --locked` y fallan si el archivo
+   versionado está obsoleto. Regenerar es explícito:
+   `TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript`.
 5. El cliente conserva toda su validación estricta en tiempo de ejecución. Los
    validadores devuelven los tipos generados; solo se refinan donde el cliente
    normaliza (`ActionResultData` convierte `message: null` en ausente,
    `ServerWelcomeData` y `MediaStopData` toleran campos ausentes, y tablones
-   fijan los literales 90/1000 que el validador exige).
+   fijan los literales 90/1000 que el validador exige) o estrecha un campo que
+   el servidor proyecta como cadena (rareza, ranura de equipo, estado de
+   misión, tipo y objetivo de habilidad, capa de presentación) y convierte
+   `nextCost`/`recoveryInTicks: null` en ausentes. `SceneImage` y la fuente
+   visual añaden campos solo de cliente (PNG/`srcset` resueltos del
+   manifiesto y fuentes reservadas), y la escena normalizada tolera
+   `viewId`/`revision` ausentes.
 
 ## Consecuencias
 
 - Un cambio de forma en el servidor rompe primero la compilación Rust, después
   la prueba de obsolescencia y finalmente `svelte-check`, en lugar de aparecer
   solo en Playwright.
-- Siguen escritos a mano y deben mantenerse alineados: `ActionPerformData` del
-  servidor (depende de enums de `tiamud-core` y de la semántica tri-estado de
-  `NullableField`), `ActionPerformFields` del cliente, las formas internas de
-  escena/jugador/objeto/mapa/evento/odds del cliente y `ScenePresentation`.
-  Generarlas exige derivar tipos en `tiamud-core`/`runtime_content` y es
-  trabajo posterior.
+- Desde la actualización del 2026-10-15 ya no quedan formas de cable de
+  `tiamud.v1` duplicadas a mano en el cliente: `ActionPerformFields` es
+  `Omit<ActionPerformData, 'requestId' | 'action'>` generado, y las formas de
+  escena/jugador/objeto/mapa/evento/odds y `ScenePresentation` son los tipos
+  generados con los refinamientos del punto 5. Siguen a mano, por diseño, esos
+  refinamientos (vocabularios que el servidor proyecta como `String`) y la
+  semántica tri-estado de `NullableField`, cuyo tipo TypeScript
+  (`T | null` opcional) se declara con `ts(type = ...)`.
 - La API HTTP de cuentas sigue usando `json!` y no forma parte de este ADR.
 - Añadir un mensaje v1 exige ahora: tipo en `crates/protocol`, prueba golden,
   regeneración del TypeScript, validador estricto en `protocol.ts`, revisión

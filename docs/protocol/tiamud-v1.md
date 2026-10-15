@@ -148,14 +148,28 @@ server builds every WebSocket message from these types; the encoded JSON is
 byte-identical to the former hand-built objects, which golden tests in both
 crates pin.
 
-`apps/web/src/lib/generated/protocol.ts` is generated from those types with
-ts-rs (a test-only dependency) and committed. `cargo test --workspace --locked`
-fails when it is stale; regenerate with
-`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol`.
+TypeScript declarations are generated with ts-rs (a test-only dependency under
+`cfg_attr(test, ...)`, outside the release graph) and committed under
+`apps/web/src/lib/generated/`, one file per owning crate:
+
+- `protocol.ts` from `tiamud-protocol` (envelope, vocabularies, transport
+  payloads);
+- `core.ts` from `tiamud-core` (the embedded scene, player, item, map,
+  narrative-event and reward-odds projections, plus the closed staff/channel
+  vocabularies accepted by `action.perform`);
+- `server.ts` from `tiamud-server` (the `action.perform` payload and the scene
+  presentation annotation).
+
+`cargo test --workspace --locked` fails when any of them is stale; regenerate
+with
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript`.
 Generated declarations describe the wire, not trust: the official client still
 validates every inbound frame at runtime in `protocol.ts`, and its validators
-return the generated types. Still hand-mirrored: the `action.perform` field set
-and the inner scene/player/item/map/event/reward-odds/presentation shapes.
+return the generated types. The client refines a generated type only where its
+validator narrows a field the server projects as a string (item rarity,
+equipment slot, quest status, ability kind/targeting, presentation layer) or
+normalises `null` to absent (`nextCost`, `recoveryInTicks`,
+`action.result.message`); no `tiamud.v1` wire shape is hand-mirrored any more.
 
 ### Additive v1 rollout policy
 
