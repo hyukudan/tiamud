@@ -2848,6 +2848,7 @@ dependencies = [
  "flate2",
  "hex",
  "mime_guess",
+ "png",
  "postgres",
  "rand_core 0.6.4",
  "rcgen",

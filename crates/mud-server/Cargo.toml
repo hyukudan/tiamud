@@ -39,5 +39,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 fd-lock.workspace = true
+png.workspace = true
 rcgen = "0.13.2"
 tempfile.workspace = true
