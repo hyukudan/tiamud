@@ -658,10 +658,17 @@ Nothing is migrated, so do not list a revision whose state shape you changed.
 
 ## Lua scripts (format v3, optional)
 
-Proposed in [ADR 0034](../decisions/0034-lua-scripts-in-storypacks.md) and
-available offline only: `tiamud-story` validates, tests and plays packs with
-scripts, but the **server rejects them** (its validation has no script host),
-so a scripted pack cannot be published to the S2 catalog yet. Prefer the
+Proposed in [ADR 0034](../decisions/0034-lua-scripts-in-storypacks.md).
+`tiamud-story` validates, tests and plays packs with scripts. The server
+plays them only when the operator starts it with `TIAMUD_STORY_SCRIPTS=1`
+(off by default; without it a scripted pack in the catalog **stops the
+server at startup**), compiling every script while the catalog loads. In a
+session a failing script, an exhausted quota or the per-input time budget
+(100 ms by default for all calls of one input) shows players only a generic
+error and leaves the game unchanged; the author detail (`id:line`) goes to
+the server log, and three failures in a row close the instance after
+autosaving its last good state. See
+[`single-host.md`](../operations/single-host.md#story-sessions). Prefer the
 closed DSL; reach for a script only for a rule the DSL cannot express, such
 as the custom combat round of the sample
 [`duelo-en-el-paso.story.json`](../../crates/story-script/fixtures/duelo-en-el-paso.story.json).

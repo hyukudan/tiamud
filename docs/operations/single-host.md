@@ -175,6 +175,40 @@ and `tiamud_story_shared_seat_lapses_total`. A closed shared instance counts
 in `tiamud_story_instances_closed_total{reason="left"}` when its last seat
 leaves or lapses.
 
+Lua scripts in StoryPacks ([ADR 0034](../decisions/0034-lua-scripts-in-storypacks.md),
+proposed, phase S6) are **off by default**. Without the switch a
+`*.story.json` that declares `scripts` stops the server at startup, like any
+invalid pack. All settings fail closed out of range, are refused without
+`TIAMUD_STORY_DIR`, and the limits are refused without the switch:
+
+- `TIAMUD_STORY_SCRIPTS` (`0` or `1`, default `0`) lets the catalog load
+  scripted packs; every script is compiled in the sandbox while the catalog
+  loads, and one that does not compile stops the server.
+- `TIAMUD_STORY_SCRIPT_BUDGET_MS` (`10..=400`, default `100`) aggregate wall
+  time of all script calls of one input, on top of the sandbox quotas of each
+  call (2 MiB, 100,000 instructions, 25 ms, at most 16 calls per input).
+- `TIAMUD_STORY_SCRIPT_WORKERS` (`1..=64`, default the host's parallelism up
+  to 16) script jobs running at once on Tokio's blocking pool; scripts never
+  run on an async worker or in the world actor.
+- `TIAMUD_STORY_SCRIPT_QUEUE` (`0..=1024`, default four times the workers)
+  further jobs that may wait for a worker. Beyond it an input is answered
+  `busy` and nothing changes.
+
+A failing script, quota or budget shows players a generic error (Spanish or
+English, after the story's language) and leaves the game unchanged; the
+author-facing detail (`script:line: …`) is logged as `story script failed`
+with the story id. Three consecutive failures close the instance after
+autosaving its last good state (`story instance closed after repeated script
+failures`). Script metrics carry no story or script labels:
+`tiamud_story_script_invocations_total`,
+`tiamud_story_script_failures_total`,
+`tiamud_story_script_budget_exceeded_total`,
+`tiamud_story_script_busy_total` and
+`tiamud_story_instances_closed_total{reason="script_failures"}`. A rising busy
+count means the pool is saturated (raise the workers only on a host with
+spare cores); a rising budget count points at a pack whose scripts are too
+heavy.
+
 ## Rate limits and metrics
 
 The environment example configures bounded browser authentication and command

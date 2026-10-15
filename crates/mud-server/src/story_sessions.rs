@@ -24,6 +24,12 @@
 //! turns) and every participant's session follows a `watch` of the latest
 //! shared frame, so slow sessions coalesce instead of queueing.
 //!
+//! With `TIAMUD_STORY_SCRIPTS=1` a pack may declare Lua scripts (ADR 0034,
+//! phase S6). Such an instance runs story-core through a budgeted Lua host
+//! and moves its state onto the bounded script pool of [`scripts`] for every
+//! operation that may evaluate a script, so Lua never runs on an async
+//! worker; see that module.
+//!
 //! The ruleset is `tiamud-story-core`; this module only serializes inputs,
 //! projects views and enforces bounds. It never reads `tiamud-core` world
 //! state and the world actor never sees story input.
@@ -39,7 +45,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod scripts;
 pub mod shared;
+use scripts::{BudgetHost, ScriptCounters, ScriptPool, ScriptSettings};
 use shared::{SharedLimits, Table};
 
 use crate::{
@@ -61,8 +69,10 @@ use tiamud_protocol::{
     StorySeatRole,
 };
 use tiamud_story_core::{
-    Cue, EndingKind, MAX_PACK_BYTES, PageItem, StoryEvent, StoryInput, StoryPack, StoryState,
-    UndoRing, Value, step, step_command, view as core_view, view_pages,
+    CommandStep, Cue, EndingKind, MAX_PACK_BYTES, PageItem, StoryError as CoreError, StoryEvent,
+    StoryInput, StoryPack, StoryState, StoryView, UndoRing, Value, ViewPage, step, step_command,
+    step_command_scripted, step_scripted, view as core_view, view_pages, view_pages_scripted,
+    view_scripted,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
@@ -147,6 +157,8 @@ pub struct StoryLimits {
     pub idle_timeout: Duration,
     /// Seats, spectators, vote window and seat grace of shared instances.
     pub shared: SharedLimits,
+    /// Lua StoryPack scripts (ADR 0034, phase S6): off by default.
+    pub scripts: ScriptSettings,
 }
 
 impl Default for StoryLimits {
@@ -155,6 +167,7 @@ impl Default for StoryLimits {
             max_instances: DEFAULT_MAX_INSTANCES,
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_SECONDS),
             shared: SharedLimits::default(),
+            scripts: ScriptSettings::default(),
         }
     }
 }
@@ -201,6 +214,88 @@ pub enum StoryConfigError {
         shared::MAX_GRACE_SECONDS
     )]
     InvalidGraceSeconds,
+    #[error("TIAMUD_STORY_SCRIPTS must be 0 or 1")]
+    InvalidScriptsFlag,
+    #[error(
+        "TIAMUD_STORY_SCRIPT_BUDGET_MS must be an integer in {}..={}",
+        scripts::MIN_SCRIPT_BUDGET_MS,
+        scripts::MAX_SCRIPT_BUDGET_MS
+    )]
+    InvalidScriptBudget,
+    #[error(
+        "TIAMUD_STORY_SCRIPT_WORKERS must be an integer in 1..={}",
+        scripts::MAX_SCRIPT_WORKERS
+    )]
+    InvalidScriptWorkers,
+    #[error(
+        "TIAMUD_STORY_SCRIPT_QUEUE must be an integer in 0..={}",
+        scripts::MAX_SCRIPT_QUEUE
+    )]
+    InvalidScriptQueue,
+    #[error("story script limits were configured but TIAMUD_STORY_SCRIPTS is not 1")]
+    ScriptLimitsWithoutScripts,
+}
+
+/// Raw script settings (`TIAMUD_STORY_SCRIPTS`,
+/// `TIAMUD_STORY_SCRIPT_BUDGET_MS`, `TIAMUD_STORY_SCRIPT_WORKERS`,
+/// `TIAMUD_STORY_SCRIPT_QUEUE`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ScriptStoryEnv {
+    pub enabled: Option<String>,
+    pub budget_ms: Option<String>,
+    pub workers: Option<String>,
+    pub queue: Option<String>,
+}
+
+/// Applies the S6 script settings to `config`. Scripts stay disabled unless
+/// `TIAMUD_STORY_SCRIPTS=1`; the other settings require it, and every value
+/// out of range fails closed.
+pub fn apply_script_story_env(
+    config: &mut StoryConfig,
+    env: &ScriptStoryEnv,
+) -> Result<(), StoryConfigError> {
+    let limits_set = env.budget_ms.is_some() || env.workers.is_some() || env.queue.is_some();
+    if config.directory.is_none() && (env.enabled.is_some() || limits_set) {
+        return Err(StoryConfigError::LimitsWithoutDirectory);
+    }
+    let enabled = match env.enabled.as_deref() {
+        None | Some("0") => false,
+        Some("1") => true,
+        Some(_) => return Err(StoryConfigError::InvalidScriptsFlag),
+    };
+    if !enabled && limits_set {
+        return Err(StoryConfigError::ScriptLimitsWithoutScripts);
+    }
+    let scripts = &mut config.limits.scripts;
+    scripts.enabled = enabled;
+    if let Some(value) = env.budget_ms.as_deref() {
+        let millis = value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| {
+                (scripts::MIN_SCRIPT_BUDGET_MS..=scripts::MAX_SCRIPT_BUDGET_MS).contains(value)
+            })
+            .ok_or(StoryConfigError::InvalidScriptBudget)?;
+        scripts.budget = Duration::from_millis(millis);
+    }
+    if let Some(value) = env.workers.as_deref() {
+        scripts.workers = value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| (1..=scripts::MAX_SCRIPT_WORKERS).contains(value))
+            .ok_or(StoryConfigError::InvalidScriptWorkers)?;
+        if env.queue.is_none() {
+            scripts.queue = scripts.workers.saturating_mul(4);
+        }
+    }
+    if let Some(value) = env.queue.as_deref() {
+        scripts.queue = value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value <= scripts::MAX_SCRIPT_QUEUE)
+            .ok_or(StoryConfigError::InvalidScriptQueue)?;
+    }
+    Ok(())
 }
 
 /// Raw shared-instance settings (`TIAMUD_STORY_MAX_SEATS`,
@@ -328,6 +423,9 @@ pub struct CatalogStory {
     pub id: String,
     pub title: String,
     pack: StoryPack,
+    /// The pack declares Lua scripts (ADR 0034): its instances run
+    /// story-core with the script host, off the async runtime.
+    scripted: bool,
     /// Lowercase hexadecimal SHA-256 of the exact pack bytes; the revision a
     /// save slot is bound to (ADR 0030).
     pack_sha256: String,
@@ -540,8 +638,19 @@ impl StoryCatalog {
     /// each pack with `story-core`, plus the optional reviewed media map of
     /// the top directory. At most 1,024 entries are scanned in total. Any
     /// invalid pack fails the whole load: the server never starts with a
-    /// partially trusted catalog.
+    /// partially trusted catalog. Packs that declare Lua scripts are
+    /// refused (scripts disabled); see [`StoryCatalog::load_dir_with`].
+    #[cfg(test)]
     pub fn load_dir(directory: &Path) -> Result<Self, StoryCatalogError> {
+        Self::load_dir_with(directory, false)
+    }
+
+    /// [`StoryCatalog::load_dir`] with the S6 script switch: with `scripts`
+    /// a pack may declare Lua scripts, and each one is validated by
+    /// `tiamud-story-script` (declarations, grants and references, plus
+    /// every source compiled in the sandbox with its entry function).
+    /// Without it such a pack fails the load like any invalid pack.
+    pub fn load_dir_with(directory: &Path, scripts: bool) -> Result<Self, StoryCatalogError> {
         let io_error = |path: &Path, error: std::io::Error| StoryCatalogError::Io {
             path: path.display().to_string(),
             message: error.to_string(),
@@ -601,7 +710,7 @@ impl StoryCatalog {
         if packs.is_empty() {
             return Err(StoryCatalogError::Empty);
         }
-        Self::from_named_packs(packs, media)
+        Self::from_named_packs(packs, media, scripts)
     }
 
     /// Builds a catalog from in-memory packs (tests).
@@ -609,6 +718,16 @@ impl StoryCatalog {
     pub fn from_packs(
         packs: Vec<StoryPack>,
         media: impl Into<StoryMedia>,
+    ) -> Result<Self, StoryCatalogError> {
+        Self::from_packs_with(packs, media, false)
+    }
+
+    /// [`StoryCatalog::from_packs`] with the S6 script switch (tests).
+    #[cfg(test)]
+    pub fn from_packs_with(
+        packs: Vec<StoryPack>,
+        media: impl Into<StoryMedia>,
+        scripts: bool,
     ) -> Result<Self, StoryCatalogError> {
         let media = media.into();
         let named = packs
@@ -620,19 +739,33 @@ impl StoryCatalog {
                 (format!("{}.story.json", pack.id), pack, digest)
             })
             .collect();
-        Self::from_named_packs(named, media)
+        Self::from_named_packs(named, media, scripts)
     }
 
     fn from_named_packs(
         packs: Vec<(String, StoryPack, String)>,
         media: StoryMedia,
+        scripts: bool,
     ) -> Result<Self, StoryCatalogError> {
         if packs.len() > MAX_CATALOG_STORIES {
             return Err(StoryCatalogError::TooManyStories);
         }
         let mut stories = BTreeMap::new();
         for (file, pack, pack_sha256) in packs {
-            if let Err(errors) = pack.validate() {
+            let scripted = !pack.scripts.is_empty();
+            if scripted && !scripts {
+                return Err(StoryCatalogError::Invalid {
+                    file,
+                    reason: "the pack declares Lua scripts but TIAMUD_STORY_SCRIPTS is not 1"
+                        .to_owned(),
+                });
+            }
+            let validated = if scripted {
+                tiamud_story_script::validate_pack(&pack).map(|_| ())
+            } else {
+                pack.validate().map(|_| ())
+            };
+            if let Err(errors) = validated {
                 return Err(StoryCatalogError::Invalid {
                     file,
                     reason: errors
@@ -658,6 +791,7 @@ impl StoryCatalog {
                         id: id.clone(),
                         title,
                         pack,
+                        scripted,
                         pack_sha256,
                         language,
                         locales,
@@ -879,6 +1013,9 @@ pub enum StoryFailure {
     InvalidCommand,
     /// Too many parser command lines from this account.
     CommandsRateLimited,
+    /// A Lua script of the story failed (error, quota or per-input budget;
+    /// ADR 0034). Nothing changed; the author detail is only logged.
+    Script,
 }
 
 impl StoryFailure {
@@ -914,6 +1051,7 @@ impl StoryFailure {
             Self::InvalidCommand => StoryErrorCode::InvalidCommand,
             Self::UnknownLocale => StoryErrorCode::UnknownLocale,
             Self::CommandsRateLimited => StoryErrorCode::RateLimited,
+            Self::Script => StoryErrorCode::Internal,
         }
     }
 
@@ -979,6 +1117,24 @@ impl StoryFailure {
                 "Esta historia no está disponible en ese idioma. Escribe «historia <id>» para jugarla en su idioma predeterminado."
             }
             Self::CommandsRateLimited => "Demasiadas órdenes seguidas. Espera un momento.",
+            Self::Script => {
+                "La historia no pudo aplicar esa acción y nada ha cambiado. Prueba otra cosa o vuelve a intentarlo."
+            }
+        }
+    }
+
+    /// [`StoryFailure::message`] in the session's story locale: English
+    /// sessions (`en`, `en-*`) get English text for the failures a player
+    /// of an English story can meet while playing; everything else stays in
+    /// Spanish, the server's language.
+    pub fn message_in(self, locale: &str) -> &'static str {
+        let english = locale == "en" || locale.starts_with("en-");
+        match self {
+            Self::Script if english => {
+                "The story could not apply that action and nothing changed. Try something else or try again."
+            }
+            Self::Busy if english => "The story is busy. Please try again.",
+            _ => self.message(),
         }
     }
 
@@ -995,10 +1151,11 @@ impl StoryFailure {
         }
     }
 
-    pub fn protocol_error(self) -> protocol::StoryError {
+    /// `story.error` with the message in the session's story locale.
+    pub fn protocol_error_in(self, locale: &str) -> protocol::StoryError {
         protocol::StoryError {
             code: self.code(),
-            message: self.message().to_owned(),
+            message: self.message_in(locale).to_owned(),
         }
     }
 }
@@ -1035,6 +1192,10 @@ pub struct StoryMetrics {
     commands_accepted: AtomicU64,
     commands_rejected: AtomicU64,
     commands_rate_limited: AtomicU64,
+    /// Instances closed after repeated script failures.
+    closed_script_failures: AtomicU64,
+    /// Lua script calls, failures, exhausted budgets and pool refusals.
+    scripts: Arc<ScriptCounters>,
 }
 
 impl StoryMetrics {
@@ -1067,6 +1228,28 @@ impl StoryMetrics {
     }
 
     pub fn prometheus(&self, catalog_stories: usize) -> String {
+        let mut text = self.base_prometheus(catalog_stories);
+        let _ = write!(
+            text,
+            concat!(
+                "# TYPE tiamud_story_script_invocations_total counter\n",
+                "tiamud_story_script_invocations_total {}\n",
+                "# TYPE tiamud_story_script_failures_total counter\n",
+                "tiamud_story_script_failures_total {}\n",
+                "# TYPE tiamud_story_script_budget_exceeded_total counter\n",
+                "tiamud_story_script_budget_exceeded_total {}\n",
+                "# TYPE tiamud_story_script_busy_total counter\n",
+                "tiamud_story_script_busy_total {}\n",
+            ),
+            self.scripts.invocations.load(Ordering::Relaxed),
+            self.scripts.failures.load(Ordering::Relaxed),
+            self.scripts.budget_exceeded.load(Ordering::Relaxed),
+            self.scripts.busy.load(Ordering::Relaxed),
+        );
+        text
+    }
+
+    fn base_prometheus(&self, catalog_stories: usize) -> String {
         format!(
             concat!(
                 "# TYPE tiamud_story_catalog_stories gauge\n",
@@ -1079,6 +1262,7 @@ impl StoryMetrics {
                 "tiamud_story_instances_closed_total{{reason=\"left\"}} {}\n",
                 "tiamud_story_instances_closed_total{{reason=\"evicted\"}} {}\n",
                 "tiamud_story_instances_closed_total{{reason=\"shutdown\"}} {}\n",
+                "tiamud_story_instances_closed_total{{reason=\"script_failures\"}} {}\n",
                 "# TYPE tiamud_story_enter_rejected_total counter\n",
                 "tiamud_story_enter_rejected_total{{reason=\"capacity\"}} {}\n",
                 "tiamud_story_enter_rejected_total{{reason=\"account\"}} {}\n",
@@ -1125,6 +1309,7 @@ impl StoryMetrics {
             self.closed_left.load(Ordering::Relaxed),
             self.closed_evicted.load(Ordering::Relaxed),
             self.closed_shutdown.load(Ordering::Relaxed),
+            self.closed_script_failures.load(Ordering::Relaxed),
             self.rejected_capacity.load(Ordering::Relaxed),
             self.rejected_account.load(Ordering::Relaxed),
             self.rejected_unknown.load(Ordering::Relaxed),
@@ -1936,6 +2121,38 @@ enum Command {
     },
 }
 
+impl Command {
+    /// Whether handling this command may evaluate story scripts (ADR 0034):
+    /// such commands of a scripted story run on the script pool.
+    const fn may_run_scripts(&self) -> bool {
+        matches!(
+            self,
+            Self::Text { .. }
+                | Self::Input { .. }
+                | Self::Vote { .. }
+                | Self::Undo { .. }
+                | Self::Restore { .. }
+        )
+    }
+
+    /// Answers a command that did not run (the script pool was saturated).
+    fn reject(self, failure: StoryFailure) {
+        match self {
+            Self::Text { reply, .. } => {
+                let _ = reply.send(Err(failure));
+            }
+            Self::Input { reply, .. }
+            | Self::Vote { reply, .. }
+            | Self::Undo { reply, .. }
+            | Self::Restore { reply, .. } => {
+                let _ = reply.send(Err(failure));
+            }
+            // Never refused: dropping the reply answers `gone`.
+            _ => {}
+        }
+    }
+}
+
 /// A serialized `StoryState` ready for a slot write.
 #[derive(Clone, Debug)]
 struct SavedState {
@@ -2062,6 +2279,8 @@ struct ManagerInner {
     next_inbox: AtomicU64,
     /// Set by graceful shutdown: no new instance starts afterwards.
     closing: AtomicBool,
+    /// Bounded blocking pool of scripted instances (ADR 0034).
+    pool: ScriptPool,
 }
 
 impl ManagerInner {
@@ -2093,6 +2312,7 @@ impl ManagerInner {
             CloseReason::Left => &self.metrics.closed_left,
             CloseReason::Evicted => &self.metrics.closed_evicted,
             CloseReason::Shutdown => &self.metrics.closed_shutdown,
+            CloseReason::ScriptFailures => &self.metrics.closed_script_failures,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -2273,6 +2493,8 @@ enum CloseReason {
     Left,
     Evicted,
     Shutdown,
+    /// Repeated Lua script failures (ADR 0034) or a lost script job.
+    ScriptFailures,
 }
 
 /// Owner of the story catalog and every live instance.
@@ -2339,13 +2561,16 @@ impl Drop for InvitationInbox {
 
 impl StoryManager {
     pub fn new(catalog: StoryCatalog, limits: StoryLimits) -> Self {
+        let metrics = StoryMetrics::default();
+        let pool = ScriptPool::new(&limits.scripts, metrics.scripts.clone());
         Self {
             inner: Arc::new(ManagerInner {
                 catalog,
                 limits,
                 live: Mutex::new(Registry::default()),
                 next_instance: AtomicU64::new(1),
-                metrics: StoryMetrics::default(),
+                metrics,
+                pool,
                 store: OnceLock::new(),
                 slot_writes: KeyedRateLimiter::per_minute_tracking(
                     SLOT_WRITES_PER_MINUTE,
@@ -2542,14 +2767,22 @@ impl StoryManager {
                 .fetch_add(1, Ordering::Relaxed);
             return Err(StoryFailure::Capacity);
         }
-        let instance = Instance::new(
-            story.clone(),
-            locale.clone(),
-            seed,
-            id_seed,
-            &self.inner.catalog.media,
-        )
-        .map_err(|_| StoryFailure::Internal)?;
+        // A scripted story projects its start scene on the script pool when
+        // its task starts (it may evaluate condition scripts); queued
+        // requests wait for it in the mailbox.
+        let scripts = story.scripted.then(|| {
+            BudgetHost::new(
+                self.inner.limits.scripts.budget,
+                self.inner.metrics.scripts.clone(),
+            )
+        });
+        let mut instance = Instance::prepare(story.clone(), locale.clone(), seed, id_seed, scripts)
+            .map_err(|_| StoryFailure::Internal)?;
+        if !story.scripted {
+            instance
+                .start(&self.inner.catalog.media)
+                .map_err(|_| StoryFailure::Internal)?;
+        }
         let instance_id = self.inner.next_instance.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel(INSTANCE_MAILBOX);
         let route = Route {
@@ -3328,47 +3561,218 @@ async fn close_instance_task(
     }
 }
 
+/// The single-writer state an instance task owns. A scripted story moves it
+/// to the script pool and back for every operation that may run a script.
+struct Live {
+    instance: Instance,
+    shared: Option<SharedCore>,
+}
+
+/// What a handled command leaves the instance task to do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Flow {
+    Continue,
+    /// The instance closed (leave or shutdown); the task exits.
+    Exit,
+}
+
+/// What woke an instance task.
+enum Wake {
+    Command(Option<Command>),
+    /// Clock tick of a shared instance.
+    Tick,
+}
+
+/// Outcome of a job offloaded to the script pool.
+enum Offloaded<R, P> {
+    Done(Live, R),
+    /// The pool was saturated: nothing ran and the payload comes back.
+    Busy(Live, P),
+    /// The job panicked; the instance comes back for its autosave. Every
+    /// story-core call is pure, so its state is the last good one.
+    Panicked(Live),
+    /// The blocking task was lost together with the instance.
+    Lost,
+}
+
+/// Runs `job` on the bounded script pool with the instance moved there, so
+/// a blocking Lua call never runs on a Tokio worker. The per-input script
+/// budget starts with the job.
+async fn offload<P, R>(
+    inner: &Arc<ManagerInner>,
+    live: Live,
+    payload: P,
+    job: impl FnOnce(&ManagerInner, &mut Live, P) -> R + Send + 'static,
+) -> Offloaded<R, P>
+where
+    P: Send + 'static,
+    R: Send + 'static,
+{
+    let admission = match inner.pool.admit() {
+        Ok(admission) => admission,
+        Err(scripts::PoolBusy) => return Offloaded::Busy(live, payload),
+    };
+    let task_inner = inner.clone();
+    let outcome = admission
+        .run(move || {
+            let mut live = live;
+            live.instance.begin_scripts();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                job(&task_inner, &mut live, payload)
+            }));
+            (live, result)
+        })
+        .await;
+    match outcome {
+        Some((live, Ok(result))) => Offloaded::Done(live, result),
+        Some((live, Err(_))) => Offloaded::Panicked(live),
+        None => Offloaded::Lost,
+    }
+}
+
+/// How often a scripted instance retries the pool for its start scene.
+const SCRIPT_START_RETRIES: u32 = 20;
+const SCRIPT_START_RETRY: Duration = Duration::from_millis(50);
+
+/// Projects the start scene of a scripted story on the script pool. `None`
+/// when it failed or the pool stayed saturated; the instance is then
+/// unregistered and its queued requests answer `gone`.
+async fn start_scripted(inner: &Arc<ManagerInner>, id: u64, mut live: Live) -> Option<Live> {
+    for _ in 0..SCRIPT_START_RETRIES {
+        match offload(inner, live, (), |inner, live, ()| {
+            live.instance.start(&inner.catalog.media)
+        })
+        .await
+        {
+            Offloaded::Done(back, Ok(())) => return Some(back),
+            Offloaded::Done(back, Err(error)) => {
+                warn!(story = %back.instance.story.id, %error, "scripted story could not start");
+                break;
+            }
+            Offloaded::Busy(back, ()) => {
+                live = back;
+                tokio::time::sleep(SCRIPT_START_RETRY).await;
+            }
+            Offloaded::Panicked(_) | Offloaded::Lost => {
+                warn!(instance = id, "scripted story start was lost");
+                break;
+            }
+        }
+    }
+    inner.close_instance(id, CloseReason::ScriptFailures);
+    None
+}
+
+/// One clock tick of a shared instance; `false` when it closes.
+fn tick_live(inner: &ManagerInner, live: &mut Live, id: u64) -> bool {
+    match live.shared.as_mut() {
+        Some(core) => core.tick(inner, &mut live.instance, id),
+        None => true,
+    }
+}
+
 async fn run_instance(
     inner: Arc<ManagerInner>,
     owner: AccountId,
     instance_id: u64,
-    mut instance: Instance,
+    instance: Instance,
     mut receiver: mpsc::Receiver<Command>,
 ) {
     let idle = inner.limits.idle_timeout;
-    let mut shared: Option<SharedCore> = None;
+    let scripted = instance.scripts.is_some();
+    let max_failures = inner.limits.scripts.max_failures;
+    let mut live = Live {
+        instance,
+        shared: None,
+    };
+    if scripted {
+        match start_scripted(&inner, instance_id, live).await {
+            Some(started) => live = started,
+            None => return,
+        }
+    }
     let mut clock = tokio::time::interval(SHARED_TICK);
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_activity = tokio::time::Instant::now();
     loop {
-        let command = if let Some(core) = shared.as_mut() {
+        let wake = if live.shared.is_some() {
             tokio::select! {
-                command = receiver.recv() => command,
-                _ = clock.tick() => {
-                    let idle_for = last_activity.elapsed();
-                    if idle_for >= idle {
-                        info!(instance = instance_id, "idle shared story instance evicted");
-                        close_instance_task(
-                            &inner, instance_id, owner, &instance, Some(core),
-                            CloseReason::Evicted, protocol::StoryLeftReason::Evicted,
-                        ).await;
-                        return;
-                    }
-                    if !core.tick(&inner, &mut instance, instance_id) {
-                        info!(instance = instance_id, "shared story instance ended");
-                        close_instance_task(
-                            &inner, instance_id, owner, &instance, Some(core),
-                            CloseReason::Left, protocol::StoryLeftReason::Ended,
-                        ).await;
-                        return;
-                    }
-                    continue;
-                }
+                command = receiver.recv() => Wake::Command(command),
+                _ = clock.tick() => Wake::Tick,
             }
         } else {
-            tokio::time::timeout(idle, receiver.recv())
-                .await
-                .unwrap_or_default()
+            Wake::Command(
+                tokio::time::timeout(idle, receiver.recv())
+                    .await
+                    .unwrap_or_default(),
+            )
+        };
+        let command = match wake {
+            Wake::Tick => {
+                if last_activity.elapsed() >= idle {
+                    info!(instance = instance_id, "idle shared story instance evicted");
+                    close_instance_task(
+                        &inner,
+                        instance_id,
+                        owner,
+                        &live.instance,
+                        live.shared.as_ref(),
+                        CloseReason::Evicted,
+                        protocol::StoryLeftReason::Evicted,
+                    )
+                    .await;
+                    return;
+                }
+                // A scripted tick (a closed vote or turn may apply an
+                // action) runs on the pool; when it is saturated the tick
+                // is skipped untouched and retried on the next one.
+                let alive = if scripted {
+                    match offload(&inner, live, (), move |inner, live, ()| {
+                        tick_live(inner, live, instance_id)
+                    })
+                    .await
+                    {
+                        Offloaded::Done(back, alive) => {
+                            live = back;
+                            alive
+                        }
+                        Offloaded::Busy(back, ()) => {
+                            live = back;
+                            true
+                        }
+                        Offloaded::Panicked(back) => {
+                            close_after_script_failures(&inner, instance_id, owner, &back).await;
+                            return;
+                        }
+                        Offloaded::Lost => {
+                            inner.close_instance(instance_id, CloseReason::ScriptFailures);
+                            return;
+                        }
+                    }
+                } else {
+                    tick_live(&inner, &mut live, instance_id)
+                };
+                if !alive {
+                    info!(instance = instance_id, "shared story instance ended");
+                    close_instance_task(
+                        &inner,
+                        instance_id,
+                        owner,
+                        &live.instance,
+                        live.shared.as_ref(),
+                        CloseReason::Left,
+                        protocol::StoryLeftReason::Ended,
+                    )
+                    .await;
+                    return;
+                }
+                if live.instance.script_failures >= max_failures {
+                    close_after_script_failures(&inner, instance_id, owner, &live).await;
+                    return;
+                }
+                continue;
+            }
+            Wake::Command(command) => command,
         };
         let Some(command) = command else {
             info!(instance = instance_id, "idle story instance evicted");
@@ -3378,8 +3782,8 @@ async fn run_instance(
                 &inner,
                 instance_id,
                 owner,
-                &instance,
-                shared.as_ref(),
+                &live.instance,
+                live.shared.as_ref(),
                 CloseReason::Evicted,
                 protocol::StoryLeftReason::Evicted,
             )
@@ -3387,199 +3791,274 @@ async fn run_instance(
             return;
         };
         last_activity = tokio::time::Instant::now();
-        let media = &inner.catalog.media;
-        match command {
-            Command::View(reply) => {
-                let _ = reply.send(instance.resume_projection());
-            }
-            Command::Text {
-                from,
-                text,
-                view_rev,
-                reply,
-            } => {
-                let result = match shared.as_mut() {
-                    None => instance.command(&text, view_rev, media, true),
-                    Some(core) => core.command(&inner, &mut instance, from, &text, view_rev),
-                };
-                let _ = reply.send(result);
-            }
-            Command::Input {
-                from,
-                request,
-                view_rev,
-                reply,
-            } => {
-                let result = match shared.as_mut() {
-                    None => instance.input(&request, view_rev, media),
-                    Some(core) => core.input(&inner, &mut instance, from, &request, view_rev),
-                };
-                let _ = reply.send(result);
-            }
-            Command::Vote {
-                from,
-                leaf,
-                view_rev,
-                reply,
-            } => {
-                let result = match shared.as_mut() {
-                    None => Err(StoryFailure::NotShared),
-                    Some(core) => {
-                        core.vote_leaf(&inner, &mut instance, from, leaf.as_deref(), view_rev)
-                    }
-                };
-                let _ = reply.send(result);
-            }
-            Command::Undo { from, reply } => {
-                let result = match shared.as_mut() {
-                    None => instance.undo(media),
-                    Some(core) => core.table.require_host(from).and_then(|()| {
-                        let result = instance.undo(media);
-                        if result.is_ok() {
-                            core.table.on_new_view(
-                                instance.view_rev,
-                                false,
-                                tokio::time::Instant::now(),
-                            );
-                            core.publish(&instance);
-                        }
-                        result
-                    }),
-                };
-                let _ = reply.send(result);
-            }
-            Command::Snapshot { from, reply } => {
-                let result = match shared.as_ref() {
-                    Some(core) => core.table.require_host(from),
-                    None => Ok(()),
+        let flow = if scripted && command.may_run_scripts() {
+            match offload(&inner, live, command, move |inner, live, command| {
+                handle_command(inner, owner, instance_id, live, command, true)
+            })
+            .await
+            {
+                Offloaded::Done(back, flow) => {
+                    live = back;
+                    flow
                 }
-                .and_then(|()| SavedState::of(&instance.state));
-                let _ = reply.send(result);
-            }
-            Command::Restore { from, state, reply } => {
-                let result = match shared.as_mut() {
-                    None => instance.restore(*state, media),
-                    Some(core) => core.table.require_host(from).and_then(|()| {
-                        let result = instance.restore(*state, media);
-                        if result.is_ok() {
-                            core.table.on_new_view(
-                                instance.view_rev,
-                                false,
-                                tokio::time::Instant::now(),
-                            );
-                            core.publish(&instance);
-                        }
-                        result
-                    }),
-                };
-                let _ = reply.send(result);
-            }
-            Command::Leave {
-                from,
-                reason,
-                reply,
-            } => {
-                if let (Some(core), CloseReason::Left) = (shared.as_mut(), reason) {
-                    let removal = core.table.leave(from, tokio::time::Instant::now());
-                    inner.remove_member(from, instance_id);
-                    if !removal.closed {
-                        // Fewer seats may complete the vote of the view.
-                        let _ = core.tick(&inner, &mut instance, instance_id);
-                        core.publish(&instance);
-                        let _ = reply.send(None);
-                        continue;
-                    }
-                    inner.close_instance(instance_id, reason);
-                    core.close(&instance, protocol::StoryLeftReason::Ended);
-                    let _ = reply.send(instance.progress());
+                Offloaded::Busy(back, command) => {
+                    live = back;
+                    command.reject(StoryFailure::Busy);
+                    Flow::Continue
+                }
+                Offloaded::Panicked(back) => {
+                    close_after_script_failures(&inner, instance_id, owner, &back).await;
                     return;
                 }
-                // Unregister before acknowledging so the session can start
-                // another story immediately.
-                inner.close_instance(instance_id, reason);
-                if let Some(core) = &shared {
-                    core.close(&instance, protocol::StoryLeftReason::Evicted);
+                Offloaded::Lost => {
+                    inner.close_instance(instance_id, CloseReason::ScriptFailures);
+                    return;
                 }
-                let _ = reply.send(instance.progress());
-                return;
             }
-            Command::Share { from, name, reply } => {
-                let result = if let Some(core) = &shared {
-                    core.table
-                        .role(from)
-                        .map(|_| ())
-                        .ok_or(StoryFailure::NotInStory)
-                } else if from != owner {
-                    Err(StoryFailure::NotInStory)
-                } else {
-                    let core = share_instance(&inner, instance_id, from, &name, &instance);
-                    let result = core.as_ref().map(|_| ()).ok_or(StoryFailure::Internal);
-                    shared = core;
-                    result
-                };
-                let _ = reply.send(result);
-            }
-            Command::Join {
-                from,
-                name,
-                spectate,
-                reply,
-            } => {
-                let result = match shared.as_mut() {
-                    None => Err(StoryFailure::NotShared),
-                    Some(core) => core.table.join(from, &name, spectate).map(|()| {
-                        core.publish(&instance);
-                    }),
-                };
-                let _ = reply.send(result);
-            }
-            Command::Kick { from, name, reply } => {
-                let result = match shared.as_mut() {
-                    None => Err(StoryFailure::NotShared),
-                    Some(core) => core
-                        .table
-                        .kick(from, &name, tokio::time::Instant::now())
-                        .map(|(target, _)| {
-                            inner.remove_member(target, instance_id);
-                            inner.metrics.shared_kicks.fetch_add(1, Ordering::Relaxed);
-                            let _ = core.tick(&inner, &mut instance, instance_id);
-                            core.publish(&instance);
-                        }),
-                };
-                let _ = reply.send(result);
-            }
-            Command::Mode {
-                from,
-                mode,
-                vote_seconds,
-                reply,
-            } => {
-                let result = match shared.as_mut() {
-                    None => Err(StoryFailure::NotShared),
-                    Some(core) => core
-                        .table
-                        .set_mode(from, mode, vote_seconds, tokio::time::Instant::now())
-                        .map(|()| core.publish(&instance)),
-                };
-                let _ = reply.send(result);
-            }
-            Command::InviteInfo { from, reply } => {
-                let result = match shared.as_ref() {
-                    None => Err(StoryFailure::NotShared),
-                    Some(core) => core.table.require_host(from).map(|()| {
-                        let host = core
-                            .table
-                            .seats()
-                            .first()
-                            .map(|seat| seat.name.clone())
-                            .unwrap_or_default();
-                        (host, core.table.code().to_owned())
-                    }),
-                };
-                let _ = reply.send(result);
-            }
+        } else {
+            handle_command(&inner, owner, instance_id, &mut live, command, scripted)
+        };
+        if flow == Flow::Exit {
+            return;
+        }
+        if scripted && live.instance.script_failures >= max_failures {
+            close_after_script_failures(&inner, instance_id, owner, &live).await;
+            return;
         }
     }
+}
+
+/// Closes an instance whose scripts keep failing (or whose script job
+/// panicked). Every failed step left the state untouched, so the autosave
+/// holds the last good state.
+async fn close_after_script_failures(inner: &ManagerInner, id: u64, owner: AccountId, live: &Live) {
+    warn!(
+        story = %live.instance.story.id,
+        instance = id,
+        "story instance closed after repeated script failures"
+    );
+    close_instance_task(
+        inner,
+        id,
+        owner,
+        &live.instance,
+        live.shared.as_ref(),
+        CloseReason::ScriptFailures,
+        protocol::StoryLeftReason::Evicted,
+    )
+    .await;
+}
+
+/// Handles one command on the single-writer state. Synchronous: for a
+/// scripted story the commands that may run scripts are called on the
+/// script pool, and `scripted` defers the opportunistic vote ticks of
+/// leave and kick to the clock (which runs on the pool too).
+fn handle_command(
+    inner: &ManagerInner,
+    owner: AccountId,
+    instance_id: u64,
+    live: &mut Live,
+    command: Command,
+    scripted: bool,
+) -> Flow {
+    let Live { instance, shared } = live;
+    let media = &inner.catalog.media;
+    match command {
+        Command::View(reply) => {
+            let _ = reply.send(instance.resume_projection());
+        }
+        Command::Text {
+            from,
+            text,
+            view_rev,
+            reply,
+        } => {
+            let result = match shared.as_mut() {
+                None => instance.command(&text, view_rev, media, true),
+                Some(core) => core.command(inner, instance, from, &text, view_rev),
+            };
+            let _ = reply.send(result);
+        }
+        Command::Input {
+            from,
+            request,
+            view_rev,
+            reply,
+        } => {
+            let result = match shared.as_mut() {
+                None => instance.input(&request, view_rev, media),
+                Some(core) => core.input(inner, instance, from, &request, view_rev),
+            };
+            let _ = reply.send(result);
+        }
+        Command::Vote {
+            from,
+            leaf,
+            view_rev,
+            reply,
+        } => {
+            let result = match shared.as_mut() {
+                None => Err(StoryFailure::NotShared),
+                Some(core) => core.vote_leaf(inner, instance, from, leaf.as_deref(), view_rev),
+            };
+            let _ = reply.send(result);
+        }
+        Command::Undo { from, reply } => {
+            let result = match shared.as_mut() {
+                None => instance.undo(media),
+                Some(core) => core.table.require_host(from).and_then(|()| {
+                    let result = instance.undo(media);
+                    if result.is_ok() {
+                        core.table.on_new_view(
+                            instance.view_rev,
+                            false,
+                            tokio::time::Instant::now(),
+                        );
+                        core.publish(instance);
+                    }
+                    result
+                }),
+            };
+            let _ = reply.send(result);
+        }
+        Command::Snapshot { from, reply } => {
+            let result = match shared.as_ref() {
+                Some(core) => core.table.require_host(from),
+                None => Ok(()),
+            }
+            .and_then(|()| SavedState::of(&instance.state));
+            let _ = reply.send(result);
+        }
+        Command::Restore { from, state, reply } => {
+            let result = match shared.as_mut() {
+                None => instance.restore(*state, media),
+                Some(core) => core.table.require_host(from).and_then(|()| {
+                    let result = instance.restore(*state, media);
+                    if result.is_ok() {
+                        core.table.on_new_view(
+                            instance.view_rev,
+                            false,
+                            tokio::time::Instant::now(),
+                        );
+                        core.publish(instance);
+                    }
+                    result
+                }),
+            };
+            let _ = reply.send(result);
+        }
+        Command::Leave {
+            from,
+            reason,
+            reply,
+        } => {
+            if let (Some(core), CloseReason::Left) = (shared.as_mut(), reason) {
+                let removal = core.table.leave(from, tokio::time::Instant::now());
+                inner.remove_member(from, instance_id);
+                if !removal.closed {
+                    // Fewer seats may complete the vote of the view. A
+                    // scripted story leaves that to the next clock tick,
+                    // which runs on the script pool.
+                    if !scripted {
+                        let _ = core.tick(inner, instance, instance_id);
+                    }
+                    core.publish(instance);
+                    let _ = reply.send(None);
+                    return Flow::Continue;
+                }
+                inner.close_instance(instance_id, reason);
+                core.close(instance, protocol::StoryLeftReason::Ended);
+                let _ = reply.send(instance.progress());
+                return Flow::Exit;
+            }
+            // Unregister before acknowledging so the session can start
+            // another story immediately.
+            inner.close_instance(instance_id, reason);
+            if let Some(core) = &shared {
+                core.close(instance, protocol::StoryLeftReason::Evicted);
+            }
+            let _ = reply.send(instance.progress());
+            return Flow::Exit;
+        }
+        Command::Share { from, name, reply } => {
+            let result = if let Some(core) = &shared {
+                core.table
+                    .role(from)
+                    .map(|_| ())
+                    .ok_or(StoryFailure::NotInStory)
+            } else if from != owner {
+                Err(StoryFailure::NotInStory)
+            } else {
+                let core = share_instance(inner, instance_id, from, &name, instance);
+                let result = core.as_ref().map(|_| ()).ok_or(StoryFailure::Internal);
+                *shared = core;
+                result
+            };
+            let _ = reply.send(result);
+        }
+        Command::Join {
+            from,
+            name,
+            spectate,
+            reply,
+        } => {
+            let result = match shared.as_mut() {
+                None => Err(StoryFailure::NotShared),
+                Some(core) => core.table.join(from, &name, spectate).map(|()| {
+                    core.publish(instance);
+                }),
+            };
+            let _ = reply.send(result);
+        }
+        Command::Kick { from, name, reply } => {
+            let result = match shared.as_mut() {
+                None => Err(StoryFailure::NotShared),
+                Some(core) => core
+                    .table
+                    .kick(from, &name, tokio::time::Instant::now())
+                    .map(|(target, _)| {
+                        inner.remove_member(target, instance_id);
+                        inner.metrics.shared_kicks.fetch_add(1, Ordering::Relaxed);
+                        if !scripted {
+                            let _ = core.tick(inner, instance, instance_id);
+                        }
+                        core.publish(instance);
+                    }),
+            };
+            let _ = reply.send(result);
+        }
+        Command::Mode {
+            from,
+            mode,
+            vote_seconds,
+            reply,
+        } => {
+            let result = match shared.as_mut() {
+                None => Err(StoryFailure::NotShared),
+                Some(core) => core
+                    .table
+                    .set_mode(from, mode, vote_seconds, tokio::time::Instant::now())
+                    .map(|()| core.publish(instance)),
+            };
+            let _ = reply.send(result);
+        }
+        Command::InviteInfo { from, reply } => {
+            let result = match shared.as_ref() {
+                None => Err(StoryFailure::NotShared),
+                Some(core) => core.table.require_host(from).map(|()| {
+                    let host = core
+                        .table
+                        .seats()
+                        .first()
+                        .map(|seat| seat.name.clone())
+                        .unwrap_or_default();
+                    (host, core.table.code().to_owned())
+                }),
+            };
+            let _ = reply.send(result);
+        }
+    }
+    Flow::Continue
 }
 
 /// Makes a solo instance shared: draws a unique join code, builds the table
@@ -3649,6 +4128,10 @@ struct Instance {
     /// View revision that showed the restart confirmation; a second
     /// `reiniciar` typed against exactly that view restarts the story.
     restart_armed: Option<u32>,
+    /// Lua script host of a scripted story (ADR 0034); `None` otherwise.
+    scripts: Option<BudgetHost>,
+    /// Consecutive script failures; any successful projection resets it.
+    script_failures: u32,
 }
 
 const RESTART_CONFIRM_NOTE: &str = "¿Seguro que quieres reiniciar la historia desde el principio? Escribe «reiniciar» otra vez para confirmarlo; cualquier otra orden lo cancela. Podrás «deshacer» el reinicio.";
@@ -3659,21 +4142,17 @@ const RESTORE_NOTE: &str = "Para cargar escribe «cargar N» (la ranura 0 es el 
 const QUIT_NOTE: &str = "Sales de la historia.";
 
 impl Instance {
-    fn new(
+    /// A new instance before its first projection ([`Instance::start`]).
+    /// Nothing here evaluates a script.
+    fn prepare(
         story: Arc<CatalogStory>,
         locale: String,
         seed: u64,
         id_state: Option<u64>,
-        media: &StoryMedia,
-    ) -> Result<Self, tiamud_story_core::StoryError> {
+        scripts: Option<BudgetHost>,
+    ) -> Result<Self, CoreError> {
         let state = StoryState::new(&story.pack, seed)?;
         let undo = UndoRing::new(UNDO_CAPACITY)?;
-        // The start scene's cues play on entry like any later scene's.
-        let initial_cues = core_view(&story.pack, &state)?
-            .cues
-            .into_iter()
-            .map(StoryEvent::Cue)
-            .collect::<Vec<_>>();
         let current = StoryProjection {
             story_id: story.id.clone(),
             title: story.title_in(&locale),
@@ -3684,7 +4163,7 @@ impl Instance {
             can_undo: false,
             items: Vec::new(),
         };
-        let mut instance = Self {
+        let instance = Self {
             story,
             locale,
             seed,
@@ -3698,9 +4177,86 @@ impl Instance {
             echo: None,
             notes: Vec::new(),
             restart_armed: None,
+            scripts,
+            script_failures: 0,
         };
-        instance.project(&initial_cues, media)?;
         Ok(instance)
+    }
+
+    /// Projects the start scene. The start scene's cues play on entry like
+    /// any later scene's. For a scripted story this may run scripts, so it
+    /// runs on the script pool like every other scripted operation.
+    fn start(&mut self, media: &StoryMedia) -> Result<(), CoreError> {
+        let initial_cues = self
+            .core_view_of(&self.state)?
+            .cues
+            .into_iter()
+            .map(StoryEvent::Cue)
+            .collect::<Vec<_>>();
+        self.project(&initial_cues, media)
+    }
+
+    /// Starts the aggregate script budget of one input.
+    fn begin_scripts(&self) {
+        if let Some(host) = &self.scripts {
+            let _ = host.begin();
+        }
+    }
+
+    fn core_view_of(&self, state: &StoryState) -> Result<StoryView, CoreError> {
+        match &self.scripts {
+            Some(host) => view_scripted(&self.story.pack, state, host),
+            None => core_view(&self.story.pack, state),
+        }
+    }
+
+    fn core_step(&self, input: StoryInput) -> Result<(StoryState, Vec<StoryEvent>), CoreError> {
+        match &self.scripts {
+            Some(host) => step_scripted(&self.story.pack, &self.state, input, host),
+            None => step(&self.story.pack, &self.state, input),
+        }
+    }
+
+    fn core_command(&self, text: &str) -> Result<CommandStep, CoreError> {
+        let language = Some(self.locale.as_str());
+        match &self.scripts {
+            Some(host) => {
+                step_command_scripted(&self.story.pack, &self.state, text, language, host)
+            }
+            None => step_command(&self.story.pack, &self.state, text, language),
+        }
+    }
+
+    fn core_pages(&self) -> Result<Vec<ViewPage>, CoreError> {
+        match &self.scripts {
+            Some(host) => view_pages_scripted(&self.story.pack, &self.state, &self.locale, host),
+            None => view_pages(&self.story.pack, &self.state, &self.locale),
+        }
+    }
+
+    /// The public failure of a story-core error: a script error, quota or
+    /// exhausted budget becomes the generic [`StoryFailure::Script`] (the
+    /// author-facing detail goes to the server log only) and counts towards
+    /// closing the instance; anything else is `fallback`.
+    fn core_failure(&mut self, error: &CoreError, fallback: StoryFailure) -> StoryFailure {
+        match error {
+            CoreError::Script { .. }
+            | CoreError::ScriptBudget { .. }
+            | CoreError::ScriptUnavailable => {
+                self.script_failures = self.script_failures.saturating_add(1);
+                warn!(
+                    story = %self.story.id,
+                    %error,
+                    consecutive = self.script_failures,
+                    "story script failed"
+                );
+                StoryFailure::Script
+            }
+            error => {
+                warn!(%error, "story operation failed");
+                fallback
+            }
+        }
     }
 
     /// The current view with its transition cues replaced by the music that
@@ -3798,32 +4354,32 @@ impl Instance {
                 }
             }
         };
-        let (next, events) = step(&self.story.pack, &self.state, input).map_err(|error| {
-            use tiamud_story_core::StoryError as Core;
-            match error {
-                Core::Ended => StoryFailure::Ended,
-                Core::StaleChoice => StoryFailure::StaleView,
-                Core::UnknownChoice
-                | Core::MalformedToken
-                | Core::BadTarget
-                | Core::InDialogue
-                | Core::NotInDialogue => StoryFailure::UnknownChoice,
-                error => {
-                    warn!(%error, "story step failed");
-                    StoryFailure::Internal
-                }
+        let (next, events) = match self.core_step(input) {
+            Ok(stepped) => stepped,
+            Err(error) => {
+                use tiamud_story_core::StoryError as Core;
+                return Err(match error {
+                    Core::Ended => StoryFailure::Ended,
+                    Core::StaleChoice => StoryFailure::StaleView,
+                    Core::UnknownChoice
+                    | Core::MalformedToken
+                    | Core::BadTarget
+                    | Core::InDialogue
+                    | Core::NotInDialogue => StoryFailure::UnknownChoice,
+                    error => self.core_failure(&error, StoryFailure::Internal),
+                });
             }
-        })?;
+        };
         let previous = std::mem::replace(&mut self.state, next);
         let music = self.music.clone();
         self.undo.push(previous.clone());
-        if self.project(&events, media).is_err() {
+        if let Err(error) = self.project(&events, media) {
             // Restore the exact previous state; a projection failure never
             // leaves a half-applied transition.
             self.state = previous;
             self.music = music;
             self.undo.pop();
-            return Err(StoryFailure::Internal);
+            return Err(self.core_failure(&error, StoryFailure::Internal));
         }
         Ok(self.current.clone())
     }
@@ -3851,24 +4407,18 @@ impl Instance {
         }
         // Only the very next input may confirm a restart.
         let armed = self.restart_armed.take() == Some(self.view_rev);
-        let stepped = step_command(
-            &self.story.pack,
-            &self.state,
-            text,
-            Some(self.locale.as_str()),
-        )
-        .map_err(|error| {
-            use tiamud_story_core::StoryError as Core;
-            match error {
-                Core::Ended => StoryFailure::Ended,
-                Core::NoParser => StoryFailure::NoParser,
-                Core::InDialogue => StoryFailure::InvalidCommand,
-                error => {
-                    warn!(%error, "story command failed");
-                    StoryFailure::Internal
-                }
+        let stepped = match self.core_command(text) {
+            Ok(stepped) => stepped,
+            Err(error) => {
+                use tiamud_story_core::StoryError as Core;
+                return Err(match error {
+                    Core::Ended => StoryFailure::Ended,
+                    Core::NoParser => StoryFailure::NoParser,
+                    Core::InDialogue => StoryFailure::InvalidCommand,
+                    error => self.core_failure(&error, StoryFailure::Internal),
+                });
             }
-        })?;
+        };
         let echo = echo_text(text);
         let advanced = stepped.state.turn != self.state.turn;
         let meta = stepped.meta.first().map(|meta| meta.action.clone());
@@ -3947,7 +4497,7 @@ impl Instance {
         }
         self.echo = echo;
         self.notes = notes;
-        if self.project(events, media).is_err() {
+        if let Err(error) = self.project(events, media) {
             self.state = previous;
             self.music = music;
             if advanced {
@@ -3955,7 +4505,7 @@ impl Instance {
             }
             self.echo = None;
             self.notes.clear();
-            return Err(StoryFailure::Internal);
+            return Err(self.core_failure(&error, StoryFailure::Internal));
         }
         Ok(self.current.clone())
     }
@@ -3969,9 +4519,10 @@ impl Instance {
     ) -> Result<StoryProjection, StoryFailure> {
         let seed = next_id_word(&mut self.id_state);
         let fresh = StoryState::new(&self.story.pack, seed).map_err(|_| StoryFailure::Internal)?;
-        let scene_cues = core_view(&self.story.pack, &fresh)
-            .map_err(|_| StoryFailure::Internal)?
-            .cues;
+        let scene_cues = match self.core_view_of(&fresh) {
+            Ok(view) => view.cues,
+            Err(error) => return Err(self.core_failure(&error, StoryFailure::Internal)),
+        };
         let mut events = Vec::with_capacity(scene_cues.len() + 1);
         if self.music.is_some() {
             events.push(StoryEvent::Cue(Cue::StopMusic));
@@ -3982,13 +4533,13 @@ impl Instance {
         self.undo.push(previous.clone());
         self.echo = echo;
         self.notes = vec![RESTARTED_NOTE];
-        if self.project(&events, media).is_err() {
+        if let Err(error) = self.project(&events, media) {
             self.state = previous;
             self.music = music;
             self.undo.pop();
             self.echo = None;
             self.notes.clear();
-            return Err(StoryFailure::Internal);
+            return Err(self.core_failure(&error, StoryFailure::Internal));
         }
         self.seed = seed;
         Ok(self.current.clone())
@@ -4053,9 +4604,10 @@ impl Instance {
         state: StoryState,
         media: &StoryMedia,
     ) -> Result<StoryProjection, StoryFailure> {
-        let scene_cues = core_view(&self.story.pack, &state)
-            .map_err(|_| StoryFailure::SlotCorrupt)?
-            .cues;
+        let scene_cues = match self.core_view_of(&state) {
+            Ok(view) => view.cues,
+            Err(error) => return Err(self.core_failure(&error, StoryFailure::SlotCorrupt)),
+        };
         let undo = UndoRing::new(UNDO_CAPACITY).map_err(|_| StoryFailure::Internal)?;
         let mut events = Vec::with_capacity(scene_cues.len() + 1);
         if self.music.is_some() {
@@ -4065,11 +4617,11 @@ impl Instance {
         let previous_state = std::mem::replace(&mut self.state, state);
         let previous_undo = std::mem::replace(&mut self.undo, undo);
         let music = self.music.clone();
-        if self.project(&events, media).is_err() {
+        if let Err(error) = self.project(&events, media) {
             self.state = previous_state;
             self.undo = previous_undo;
             self.music = music;
-            return Err(StoryFailure::SlotCorrupt);
+            return Err(self.core_failure(&error, StoryFailure::SlotCorrupt));
         }
         Ok(self.current.clone())
     }
@@ -4079,9 +4631,10 @@ impl Instance {
             return Err(StoryFailure::NothingToUndo);
         };
         let current = std::mem::replace(&mut self.state, previous);
-        if self.project(&[], media).is_err() {
-            self.state = current;
-            return Err(StoryFailure::Internal);
+        if let Err(error) = self.project(&[], media) {
+            let previous = std::mem::replace(&mut self.state, current);
+            self.undo.push(previous);
+            return Err(self.core_failure(&error, StoryFailure::Internal));
         }
         Ok(self.current.clone())
     }
@@ -4111,7 +4664,7 @@ impl Instance {
         self.restart_armed = None;
         let echo = self.echo.take();
         let notes = std::mem::take(&mut self.notes);
-        let pages = view_pages(pack, &self.state, &locale)?;
+        let pages = self.core_pages()?;
         let event_items = events
             .iter()
             .filter_map(|event| render_event(pack, event, &locale))
@@ -4292,6 +4845,7 @@ impl Instance {
             }),
         );
         self.view_rev = self.view_rev.saturating_add(1);
+        self.script_failures = 0;
         self.ids = ids;
         self.current = StoryProjection {
             story_id: story.id.clone(),
@@ -4481,3 +5035,6 @@ mod parser_tests;
 
 #[cfg(test)]
 mod media_tests;
+
+#[cfg(test)]
+mod script_tests;

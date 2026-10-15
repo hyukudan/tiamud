@@ -16,9 +16,10 @@ use super::{
 };
 use crate::story_sessions::{
     CommandFollowUp, InvitationInbox, PARSER_STORY_HELP, SHARED_STORY_HELP, STORY_INPUT_HELP,
-    SharedFrame, StoryCommand, StoryFailure, StoryInputCommand, StoryLink, StoryManager,
-    StoryProjection, mode_label, parse_parser_story_input, parse_story_command, parse_story_input,
-    render_continue_offer, render_listing, render_lobby, render_slots, render_tally, render_text,
+    STORY_LOCALE, SharedFrame, StoryCommand, StoryFailure, StoryInputCommand, StoryLink,
+    StoryManager, StoryProjection, mode_label, parse_parser_story_input, parse_story_command,
+    parse_story_input, render_continue_offer, render_listing, render_lobby, render_slots,
+    render_tally, render_text,
 };
 use serde_json::json;
 use std::io;
@@ -687,7 +688,8 @@ impl TelnetStory {
                 Box::pin(self.refresh(output, input)).await
             }
             Err(failure) => {
-                write_line(output, input, failure.message())?;
+                let locale = self.link.as_ref().map_or(STORY_LOCALE, StoryLink::locale);
+                write_line(output, input, failure.message_in(locale))?;
                 Ok(StoryLineOutcome::Handled)
             }
         }

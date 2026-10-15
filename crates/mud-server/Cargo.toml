@@ -19,6 +19,7 @@ tiamud-persistence-postgres = { path = "../persistence-postgres" }
 tiamud-persistence-sqlite = { path = "../persistence-sqlite" }
 tiamud-protocol = { path = "../protocol" }
 tiamud-story-core = { path = "../story-core" }
+tiamud-story-script = { path = "../story-script" }
 tiamud-scripting = { path = "../scripting" }
 tiamud-telnet-codec = { path = "../telnet-codec" }
 postgres.workspace = true

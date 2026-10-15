@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use super::{OutboundHandle, OutboundPriority, queue_action_result, queue_sequenced};
 use crate::story_sessions::{
-    CommandFollowUp, InvitationInbox, SHARED_STORY_HELP, STORY_INPUT_HELP, SharedFrame,
-    StoryCommand, StoryFailure, StoryInputCommand, StoryLink, StoryManager, StoryProjection,
-    StoryRequest, parse_parser_story_input, parse_story_command, parse_story_input, render_listing,
-    render_lobby, render_slots,
+    CommandFollowUp, InvitationInbox, SHARED_STORY_HELP, STORY_INPUT_HELP, STORY_LOCALE,
+    SharedFrame, StoryCommand, StoryFailure, StoryInputCommand, StoryLink, StoryManager,
+    StoryProjection, StoryRequest, parse_parser_story_input, parse_story_command,
+    parse_story_input, render_listing, render_lobby, render_slots,
 };
 use tiamud_core::AccountId;
 use tiamud_protocol::{self as protocol, ServerMessageType, StoryDecisionMode, StoryLeftReason};
@@ -887,12 +887,13 @@ impl WebStorySession {
         request_id: &str,
         failure: StoryFailure,
     ) -> bool {
+        let locale = self.link.as_ref().map_or(STORY_LOCALE, StoryLink::locale);
         queue_action_result(
             outbound,
             sequence,
             request_id,
             false,
-            Some(failure.message().to_owned()),
+            Some(failure.message_in(locale).to_owned()),
         ) && self.fail(outbound, sequence, failure).await
     }
 
@@ -930,7 +931,10 @@ impl WebStorySession {
                 queue_error(outbound, sequence, failure)
                     && Box::pin(self.resend(outbound, sequence)).await
             }
-            _ => queue_error(outbound, sequence, failure),
+            _ => {
+                let locale = self.link.as_ref().map_or(STORY_LOCALE, StoryLink::locale);
+                queue_error_in(outbound, sequence, failure, locale)
+            }
         }
     }
 }
@@ -1066,13 +1070,23 @@ pub(super) fn queue_error(
     sequence: &mut u64,
     failure: StoryFailure,
 ) -> bool {
+    queue_error_in(outbound, sequence, failure, STORY_LOCALE)
+}
+
+/// `story.error` with the message in the story's locale.
+fn queue_error_in(
+    outbound: &OutboundHandle,
+    sequence: &mut u64,
+    failure: StoryFailure,
+    locale: &str,
+) -> bool {
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::Critical,
         None,
         ServerMessageType::StoryError,
-        failure.protocol_error(),
+        failure.protocol_error_in(locale),
     )
 }
 

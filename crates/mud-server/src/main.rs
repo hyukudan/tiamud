@@ -107,9 +107,23 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             grace_seconds: optional_env("TIAMUD_STORY_SEAT_GRACE_SECONDS")?,
         },
     )?;
+    // Lua StoryPack scripts (ADR 0034, S6): off unless TIAMUD_STORY_SCRIPTS=1;
+    // with it every script is compiled while the catalog loads.
+    story_sessions::apply_script_story_env(
+        &mut story_config,
+        &story_sessions::ScriptStoryEnv {
+            enabled: optional_env("TIAMUD_STORY_SCRIPTS")?,
+            budget_ms: optional_env("TIAMUD_STORY_SCRIPT_BUDGET_MS")?,
+            workers: optional_env("TIAMUD_STORY_SCRIPT_WORKERS")?,
+            queue: optional_env("TIAMUD_STORY_SCRIPT_QUEUE")?,
+        },
+    )?;
     let stories = match &story_config.directory {
         Some(directory) => {
-            let catalog = story_sessions::StoryCatalog::load_dir(directory)?;
+            let catalog = story_sessions::StoryCatalog::load_dir_with(
+                directory,
+                story_config.limits.scripts.enabled,
+            )?;
             info!(
                 stories = catalog.len(),
                 max_instances = story_config.limits.max_instances,
@@ -118,6 +132,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 max_spectators = story_config.limits.shared.max_spectators,
                 vote_seconds = story_config.limits.shared.vote_seconds,
                 seat_grace_seconds = story_config.limits.shared.grace.as_secs(),
+                scripts = story_config.limits.scripts.enabled,
+                script_budget_ms = story_config.limits.scripts.budget.as_millis(),
+                script_workers = story_config.limits.scripts.workers,
+                script_queue = story_config.limits.scripts.queue,
                 "story catalog loaded"
             );
             Some(story_sessions::StoryManager::new(
