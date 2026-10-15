@@ -58,6 +58,13 @@ pub struct StoryPack {
     /// only runs through a [`crate::ScriptHost`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scripts: Vec<ScriptDecl>,
+    /// Earlier revisions of this pack whose saved games still load (format
+    /// v3): lowercase hexadecimal SHA-256 digests of their exact file bytes,
+    /// at most [`crate::MAX_COMPATIBLE_REVISIONS`]. A slot written by a listed
+    /// revision is re-validated against this pack before it is restored;
+    /// nothing is migrated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compatible_revisions: Vec<String>,
 }
 
 impl StoryPack {

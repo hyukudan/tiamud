@@ -15,6 +15,10 @@
           "canUndo": false,
           "items": [
             {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
@@ -140,6 +144,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
@@ -270,6 +278,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
@@ -400,6 +412,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
@@ -530,6 +546,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
@@ -675,6 +695,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
@@ -820,6 +844,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
@@ -827,6 +855,10 @@
               "type": "scene"
             },
             {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "name": "Lola",
               "type": "portrait"
             },
@@ -957,6 +989,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
@@ -964,6 +1000,10 @@
               "type": "scene"
             },
             {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "name": "Lola",
               "type": "portrait"
             },
@@ -1020,6 +1060,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
@@ -1027,6 +1071,10 @@
               "type": "scene"
             },
             {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "name": "Lola",
               "type": "portrait"
             },
@@ -1073,6 +1121,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
@@ -1080,6 +1132,10 @@
               "type": "scene"
             },
             {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "name": "Lola",
               "type": "portrait"
             },
@@ -1126,6 +1182,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
@@ -1133,6 +1193,10 @@
               "type": "scene"
             },
             {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "name": "Lola",
               "type": "portrait"
             },
@@ -1259,6 +1323,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
@@ -1266,6 +1334,10 @@
               "type": "scene"
             },
             {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "name": "Lola",
               "type": "portrait"
             },
@@ -1416,6 +1488,10 @@
           "canUndo": true,
           "items": [
             {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
               "ending": null,
               "score": 0,
               "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
@@ -1428,6 +1504,10 @@
               "type": "block"
             },
             {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
               "name": "Lola",
               "type": "portrait"
             },
@@ -1594,6 +1674,10 @@
               "type": "scene"
             },
             {
+              "image": {
+                "alt": "Silueta de Dámaso, un hombre corpulento con sombrero de ala ancha, recortada contra una luz ámbar.",
+                "manifest": "/assets/8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/manifest.json"
+              },
               "name": "Dámaso",
               "type": "portrait"
             },
@@ -1663,6 +1747,10 @@
               "type": "scene"
             },
             {
+              "image": {
+                "alt": "Silueta de Dámaso, un hombre corpulento con sombrero de ala ancha, recortada contra una luz ámbar.",
+                "manifest": "/assets/8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/manifest.json"
+              },
               "name": "Dámaso",
               "type": "portrait"
             },

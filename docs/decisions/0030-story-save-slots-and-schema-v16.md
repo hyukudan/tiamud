@@ -210,3 +210,16 @@ de la tabla. El primer punto de «Fuera de alcance» está implementado (ver
 
 Sigue pendiente: declarar revisiones compatibles en StoryPack, exportación
 por cuenta, cuotas globales y la ejecución real de las pruebas PostgreSQL v16.
+
+## Nota de estado (2026-10-15): revisiones compatibles declaradas
+
+Añadida después de la decisión; no cambia el estado propuesto ni el esquema
+v16. StoryPack v3 admite `compatible_revisions`: hasta 16 SHA-256 en
+hexadecimal minúscula, únicos, de revisiones anteriores del pack. La sesión
+los pasa como `compatible_pack_sha256` al cargar (antes, conjunto vacío) y los
+cuenta como compatibles en `story.slots`. El estado cargado de una revisión
+declarada se revalida contra el pack actual con
+`StoryState::from_json_slice`; si ya no encaja, la carga falla con
+`slot_incompatible` sin cambiar la partida viva (un fallo de la revisión
+exacta sigue siendo `slot_corrupt`). No hay migración. Ver el
+[registro](../project/log/2026-10-15-story-presentation-locale-compat.md).

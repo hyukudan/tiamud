@@ -242,3 +242,14 @@ la API pública `step_command`, sin cambiar `story-core` ni `story-parser`:
   `TIAMUD_STORY_DIR`.
 
 Ver el [registro del cableado](../project/log/2026-10-15-story-parser-server-wiring-s5.md).
+
+## Nota de estado (2026-10-15): prompt del pack y locale por sesión
+
+Añadida después de la decisión; no cambia el estado propuesto. `world.prompt`
+(opcional, texto localizado de una línea y ≤64 bytes por locale) sustituye al
+`>` fijo en `ViewPrompt`; sin él se mantiene `>`. El servidor ya admite
+locale por sesión: el jugador elige uno de los `world.lexicons` al entrar
+(`historia <id> en`) y el léxico del parser, la vista y las respuestas siguen
+ese locale. `compatible_revisions` (formato v3) declara revisiones con
+partidas cargables, ver [ADR 0030](0030-story-save-slots-and-schema-v16.md).
+El esquema JSON v3 publicado incluye ambos campos. Ver el [registro](../project/log/2026-10-15-story-presentation-locale-compat.md).

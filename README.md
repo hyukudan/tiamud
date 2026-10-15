@@ -148,8 +148,9 @@ server bundles the web build and the reviewed Lantern Square WorldPack.
 Single-player StoryPack sessions (phase S2, with persisted save slots and an
 autosave from phase S3) are off by default. To try the sample gamebook and menu adventure locally, add
 `TIAMUD_STORY_DIR=crates/story-core/fixtures` to the command above, then type
-`historias` and `historia cripta-del-nigromante` (or `story lluvia-de-neon`)
-in the browser or Telnet. See
+`historias` and `historia cripta-del-nigromante` (or `story lluvia-de-neon`,
+which shows the reviewed sample backgrounds and portraits in the browser;
+`historia lluvia-de-neon en` plays it in English) in the browser or Telnet. See
 [ADR 0029](docs/decisions/0029-story-session-instances-and-story-protocol.md)
 and [single-host operation](docs/operations/single-host.md#story-sessions).
 

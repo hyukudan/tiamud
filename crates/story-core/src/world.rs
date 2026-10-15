@@ -34,6 +34,10 @@ pub struct World {
     /// Maximum score shown by the `score` meta command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_score: Option<i64>,
+    /// Parser prompt text per locale (for example `{"es": "¿Qué haces?"}`);
+    /// one line of at most [`crate::MAX_PROMPT_BYTES`] bytes. Absent: `>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<LocalizedText>,
 }
 
 impl World {

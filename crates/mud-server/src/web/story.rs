@@ -553,19 +553,24 @@ impl WebStorySession {
                 Some(render_listing(&manager.listing())),
             ),
             StoryCommand::Leave => failed(StoryFailure::NotInStory, outbound, sequence),
-            StoryCommand::Enter(story_id) => match manager.enter(self.account, &story_id) {
-                Ok(link) => {
-                    let message = format!("Entras en «{}».", link.title());
-                    self.set_link(link.clone());
-                    queue_action_result(outbound, sequence, request_id, true, Some(message))
-                        && queue_entered(outbound, sequence, &link)
-                        && self.resend(outbound, sequence).await
-                        && self.offer(outbound, sequence).await
+            StoryCommand::Enter(story_id, locale) => {
+                match manager.enter_in(self.account, &story_id, locale.as_deref()) {
+                    Ok(link) => {
+                        let message = format!("Entras en «{}».", link.title());
+                        self.set_link(link.clone());
+                        queue_action_result(outbound, sequence, request_id, true, Some(message))
+                            && queue_entered(outbound, sequence, &link)
+                            && self.resend(outbound, sequence).await
+                            && self.offer(outbound, sequence).await
+                    }
+                    Err(failure) => failed(failure, outbound, sequence),
                 }
-                Err(failure) => failed(failure, outbound, sequence),
-            },
-            StoryCommand::Host(story_id) => {
-                match manager.host(self.account, &self.name, &story_id).await {
+            }
+            StoryCommand::Host(story_id, locale) => {
+                match manager
+                    .host(self.account, &self.name, &story_id, locale.as_deref())
+                    .await
+                {
                     Ok(link) => {
                         let message = format!(
                             "Compartes «{}». {}",
@@ -940,6 +945,8 @@ fn queue_entered(outbound: &OutboundHandle, sequence: &mut u64, link: &StoryLink
         protocol::StoryEntered {
             story_id: link.story_id().to_owned(),
             title: link.title().to_owned(),
+            locale: link.locale().to_owned(),
+            locales: link.locales().to_vec(),
         },
     )
 }

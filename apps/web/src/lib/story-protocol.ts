@@ -8,6 +8,7 @@ import type {
   StoryEntered,
   StoryError,
   StoryErrorCode,
+  StoryImage,
   StoryInvitation,
   StoryItem,
   StoryLeft,
@@ -35,6 +36,13 @@ const MAX_SCORE = 1_000_000_000;
 export const STORY_CHOICE_ID = /^c[0-9a-f]{16}$/;
 const STORY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const SAFE_AUDIO_URL = /^\/assets\/[a-f0-9]{64}\/audio-[a-z0-9-]+\.(?:opus|ogg|mp3)$/;
+/** Reviewed pipeline manifest of a story background or portrait. */
+const SAFE_IMAGE_MANIFEST = /^\/assets\/[a-f0-9]{64}\/manifest\.json$/;
+/** Maximum alternative text of one story image (UTF-8 bytes on the server). */
+const MAX_STORY_IMAGE_ALT = 512;
+const STORY_LOCALE = /^[a-z][a-z0-9-]{1,34}$/;
+/** Maximum languages one story offers. */
+const MAX_STORY_LOCALES = 16;
 
 const STORY_ERROR_CODES: readonly StoryErrorCode[] = [
   'disabled', 'unknown_story', 'already_in_story', 'capacity', 'not_in_story',
@@ -42,7 +50,7 @@ const STORY_ERROR_CODES: readonly StoryErrorCode[] = [
   'slots_unavailable', 'invalid_slot', 'slot_empty', 'slot_corrupt', 'slot_incompatible',
   'slot_capacity', 'rate_limited', 'host_only', 'spectator', 'not_your_turn', 'unknown_code',
   'seats_full', 'not_shared', 'unknown_member', 'invalid_setting', 'no_parser',
-  'invalid_command',
+  'invalid_command', 'unknown_locale',
 ];
 
 /** Maximum UTF-8 bytes of one `story.command` line (StoryPack v3 parser). */
@@ -116,6 +124,16 @@ const parseCue = (value: Record<string, unknown>): StoryItem | undefined => {
   return { type: 'cue', action: 'play', channel: cueChannel, url: value.url, loop: value.loop };
 };
 
+/** A reviewed story image: its pipeline manifest and plain alt text. */
+export const parseStoryImage = (value: unknown): StoryImage | undefined => {
+  if (!isRecord(value) || !exactKeys(value, ['manifest', 'alt'])) return undefined;
+  const alt = text(value.alt, MAX_STORY_IMAGE_ALT);
+  return typeof value.manifest === 'string' && SAFE_IMAGE_MANIFEST.test(value.manifest) &&
+    alt && alt.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(alt)
+    ? { manifest: value.manifest, alt }
+    : undefined;
+};
+
 const parseEnding = (value: unknown): StoryEnding | null | undefined => {
   if (value === null) return null;
   return isRecord(value) && exactKeys(value, ['kind']) &&
@@ -129,7 +147,7 @@ export const parseStoryItem = (value: unknown): StoryItem | undefined => {
   if (!isRecord(value)) return undefined;
   switch (value.type) {
     case 'scene': {
-      if (!exactKeys(value, ['type', 'title', 'text', 'score', 'ending'], ['prompt'])) {
+      if (!exactKeys(value, ['type', 'title', 'text', 'score', 'ending'], ['prompt', 'background'])) {
         return undefined;
       }
       const title = text(value.title, MAX_STORY_LABEL);
@@ -140,17 +158,23 @@ export const parseStoryItem = (value: unknown): StoryItem | undefined => {
         Math.abs(value.score) <= MAX_SCORE ? value.score : undefined;
       const ending = parseEnding(value.ending);
       const prompt = value.prompt === undefined ? undefined : parsePrompt(value.prompt);
+      const background = value.background === undefined ? undefined : parseStoryImage(value.background);
       if (!title || prose === undefined || score === undefined || ending === undefined ||
-        (value.prompt !== undefined && !prompt)) return undefined;
-      return prompt
-        ? { type: 'scene', title, text: prose, score, ending, prompt }
-        : { type: 'scene', title, text: prose, score, ending };
+        (value.prompt !== undefined && !prompt) ||
+        (value.background !== undefined && !background)) return undefined;
+      const scene: StoryItem = { type: 'scene', title, text: prose, score, ending };
+      if (prompt) scene.prompt = prompt;
+      if (background) scene.background = background;
+      return scene;
     }
     case 'cue':
       return parseCue(value);
     case 'portrait': {
       const name = text(value.name, MAX_STORY_LABEL);
-      return exactKeys(value, ['type', 'name']) && name ? { type: 'portrait', name } : undefined;
+      const image = value.image === undefined ? undefined : parseStoryImage(value.image);
+      if (!exactKeys(value, ['type', 'name'], ['image']) || !name ||
+        (value.image !== undefined && !image)) return undefined;
+      return image ? { type: 'portrait', name, image } : { type: 'portrait', name };
     }
     case 'block': {
       if (!exactKeys(value, ['type', 'kind', 'text'], ['speaker'])) return undefined;
@@ -218,11 +242,21 @@ export function parseStoryView(data: Record<string, unknown>): StoryView | undef
   return { viewRev, part, parts, turn, canUndo: data.canUndo, items };
 }
 
+/**
+ * `story.entered`. `locale`/`locales` name the instance language and the
+ * languages the story offers; older servers omit them (Spanish only).
+ */
 export function parseStoryEntered(data: Record<string, unknown>): StoryEntered | undefined {
-  if (!exactKeys(data, ['storyId', 'title'])) return undefined;
+  if (!exactKeys(data, ['storyId', 'title'], ['locale', 'locales'])) return undefined;
   const title = text(data.title, MAX_STORY_LABEL);
+  const locale = data.locale === undefined ? 'es' : data.locale;
+  const locales = data.locales === undefined ? [locale] : data.locales;
+  if (typeof locale !== 'string' || !STORY_LOCALE.test(locale) || !Array.isArray(locales) ||
+    locales.length === 0 || locales.length > MAX_STORY_LOCALES ||
+    !locales.every((entry) => typeof entry === 'string' && STORY_LOCALE.test(entry)) ||
+    new Set(locales).size !== locales.length || !locales.includes(locale)) return undefined;
   return typeof data.storyId === 'string' && STORY_ID.test(data.storyId) && title
-    ? { storyId: data.storyId, title }
+    ? { storyId: data.storyId, title, locale, locales: locales as string[] }
     : undefined;
 }
 
@@ -457,6 +491,10 @@ export interface StoryPresentation {
   events: string[];
   lines: { speaker?: string; text: string }[];
   present: string[];
+  /** Characters present with their reviewed portrait, when one was sent. */
+  portraits: { name: string; image?: StoryImage }[];
+  /** Reviewed background of the scene, when one was sent. */
+  background?: StoryImage;
   stats: { label: string; value: string }[];
   inventory: string[];
   choices: { id: string; label: string }[];
@@ -472,7 +510,7 @@ export interface StoryPresentation {
 
 export function presentStory(view: AssembledStoryView): StoryPresentation {
   const model: StoryPresentation = {
-    title: '', paragraphs: [], score: 0, events: [], lines: [], present: [], stats: [],
+    title: '', paragraphs: [], score: 0, events: [], lines: [], present: [], portraits: [], stats: [],
     inventory: [], choices: [], dialogue: [], verbs: [], replies: [],
   };
   for (const item of view.items) {
@@ -483,6 +521,7 @@ export function presentStory(view: AssembledStoryView): StoryPresentation {
         model.score = item.score;
         model.ending = item.ending?.kind;
         if (item.prompt) model.prompt = item.prompt;
+        if (item.background) model.background = item.background;
         break;
       case 'block':
         if (item.kind === 'event') model.events.push(item.text);
@@ -492,6 +531,7 @@ export function presentStory(view: AssembledStoryView): StoryPresentation {
         break;
       case 'portrait':
         model.present.push(item.name);
+        model.portraits.push(item.image ? { name: item.name, image: item.image } : { name: item.name });
         break;
       case 'stat':
         model.stats.push({ label: item.label, value: item.value });

@@ -298,6 +298,70 @@ async fn a_changed_pack_revision_refuses_older_slots() {
     );
 }
 
+/// The digest the in-memory catalog records for `pack` (its canonical JSON).
+fn revision_of(pack: &StoryPack) -> String {
+    sha256_hex(&serde_json::to_vec(pack).unwrap())
+}
+
+#[tokio::test]
+async fn declared_compatible_revisions_load_after_revalidation() {
+    let fixture = fixture().await;
+    // Revision A: the fixture as a StoryPack v3 document.
+    let mut first = cripta();
+    first.upgrade();
+    let original = stories_with(first.clone(), &fixture.store, Duration::from_secs(60));
+    let link = original.enter(fixture.account, CRIPTA).unwrap();
+    let saved_view = advance(&link, link.view().await.unwrap(), 2).await;
+    link.save(1).await.unwrap();
+    assert!(link.leave().await.unwrap().autosaved);
+
+    // Revision B declares A compatible: both slots are listed as
+    // compatible, continue is offered and the state loads unchanged.
+    let mut second = first.clone();
+    second.title = serde_json::from_value(serde_json::json!({"es": "La cripta (2.ª)"})).unwrap();
+    second.compatible_revisions = vec![revision_of(&first)];
+    let revised = stories_with(second.clone(), &fixture.store, Duration::from_secs(60));
+    let link = revised.enter(fixture.account, CRIPTA).unwrap();
+    let offer = link.entry_slots().await.unwrap();
+    assert!(offer.offer_continue);
+    assert!(offer.slots.iter().all(|slot| slot.compatible));
+    let restored = link.restore(1).await.unwrap();
+    assert_eq!(shape(&restored).1, saved_view.turn);
+    assert_eq!(
+        shape(&restored).3,
+        shape(&saved_view).3,
+        "same choices after the compatible load"
+    );
+    assert!(link.restore(0).await.is_ok());
+    assert!(link.leave().await.is_ok());
+
+    // Revision C also declares A compatible but adds a variable, so A's
+    // state no longer re-validates: typed `slot_incompatible`, no change.
+    let mut third = first.clone();
+    let mut variables = serde_json::to_value(&third.variables).unwrap();
+    variables.as_array_mut().unwrap().push(serde_json::json!({
+        "id": "nueva", "kind": {"bool": {"initial": false}}
+    }));
+    third.variables = serde_json::from_value(variables).unwrap();
+    third.compatible_revisions = vec![revision_of(&first)];
+    third.validate().unwrap();
+    let strict = stories_with(third, &fixture.store, Duration::from_secs(60));
+    let link = strict.enter(fixture.account, CRIPTA).unwrap();
+    let before = link.view().await.unwrap();
+    assert_eq!(link.restore(1).await, Err(StoryFailure::SlotIncompatible));
+    let after = link.view().await.unwrap();
+    assert_eq!(shape(&before), shape(&after));
+    assert_eq!(after.view_rev, before.view_rev);
+    assert!(link.leave().await.is_ok());
+
+    // Revision D lists nothing: A's slots are refused as before.
+    let mut fourth = second;
+    fourth.compatible_revisions.clear();
+    let refused = stories_with(fourth, &fixture.store, Duration::from_secs(60));
+    let link = refused.enter(fixture.account, CRIPTA).unwrap();
+    assert_eq!(link.restore(1).await, Err(StoryFailure::SlotIncompatible));
+}
+
 #[tokio::test]
 async fn slot_numbers_capacity_and_unavailable_store_are_typed() {
     let fixture = fixture().await;

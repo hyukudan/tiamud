@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "assetId": "sha256:fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2",
+  "revision": 1,
+  "kind": "atmosphere",
+  "alt": "A detective's office at night: a wide rain-streaked window over dark towers, a pink neon sign across the street and a desk lamp glowing on the desk.",
+  "focalPoint": {
+    "xPerMille": 500,
+    "yPerMille": 500
+  },
+  "dominantColor": "#211a3c",
+  "author": "Tiamud project contributors",
+  "license": "CC-BY-4.0",
+  "provenance": "Original placeholder drawn only from code (gradients and geometric shapes) by apps/web/artwork/story-lluvia/generate.py for the lluvia-de-neon StoryPack; no external image, font, photograph or model was used.",
+  "generator": "apps/web/artwork/story-lluvia/generate.py (deterministic Pillow drawing)",
+  "contentClassification": "general",
+  "humanReviewedAt": "2026-10-15T00:00:00Z",
+  "source": {
+    "sha256": "1c079238a0393abb9cbcb9971751ff8817e516b5e01f733f7135c59464583a77",
+    "width": 1280,
+    "height": 560
+  },
+  "variants": [
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 640,
+      "height": 280,
+      "bytes": 7054,
+      "sha256": "6497642f3707540af2c7c5acb20a9270cddc8675c0290fcf8cf757df0bbdab93",
+      "path": "fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/scene-640.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 640,
+      "height": 280,
+      "bytes": 10448,
+      "sha256": "0cd41813a25a4e762df99bbf598820a1d705f88c8e293ecf0519c45b1e2e6c17",
+      "path": "fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/scene-640.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 640,
+      "height": 280,
+      "bytes": 27320,
+      "sha256": "28a37bf50889a2e0711e1eefb6a74fc08427c26b37b24a14368bb6be0d8913a4",
+      "path": "fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/scene-640.jpg"
+    },
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 1280,
+      "height": 560,
+      "bytes": 22441,
+      "sha256": "e9839294bae6f92e48e732bbc73c0091a496fbcbc84767efa8067efc622d0583",
+      "path": "fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/scene-1280.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 1280,
+      "height": 560,
+      "bytes": 23914,
+      "sha256": "ebca9d362c8aed37a420e445f0d872c2b8949f70417071e271868c79210d8d5e",
+      "path": "fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/scene-1280.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 1280,
+      "height": 560,
+      "bytes": 79533,
+      "sha256": "9d5bb8f4b63adf9667916600dbcfe756614272f813b53c6647bfb51057d10628",
+      "path": "fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/scene-1280.jpg"
+    }
+  ]
+}

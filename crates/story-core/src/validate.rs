@@ -15,6 +15,7 @@ use crate::{
     MAX_VARIABLES, MAX_VERBS, Node, STORY_PACK_FORMAT_VERSION, STORY_PACK_MIN_FORMAT_VERSION,
     StoryPack, TargetKind, TextBlock, Value, VariableKind, valid_id,
 };
+use crate::{MAX_COMPATIBLE_REVISIONS, MAX_PROMPT_BYTES};
 use crate::{
     MAX_EXITS, MAX_EXTENSION_VERBS, MAX_FOUND_IN, MAX_LEXICONS, MAX_MESSAGE_BYTES,
     MAX_OBJECT_NAME_BYTES, MAX_OBJECTS, MAX_RULES, MAX_SCORE_ABS, MAX_TURNS,
@@ -262,6 +263,7 @@ impl<'a> Validator<'a> {
         }
         self.declarations();
         self.world_declarations();
+        self.compatible_revisions();
         self.script_declarations();
         if !self.nodes.contains_key(pack.start.as_str()) {
             self.error("start", "start node does not exist");
@@ -652,6 +654,40 @@ impl<'a> Validator<'a> {
             && !(1..=MAX_SCORE_ABS).contains(&max)
         {
             self.error("world.max_score", format!("expected 1..={MAX_SCORE_ABS}"));
+        }
+        if let Some(prompt) = &world.prompt
+            && let Err(message) = prompt.check(MAX_PROMPT_BYTES, false)
+        {
+            self.error("world.prompt", message);
+        }
+    }
+
+    /// Format v3 save compatibility: bounded, unique SHA-256 digests.
+    fn compatible_revisions(&mut self) {
+        let pack = self.pack;
+        if pack.compatible_revisions.is_empty() {
+            return;
+        }
+        self.v3("compatible_revisions");
+        if pack.compatible_revisions.len() > MAX_COMPATIBLE_REVISIONS {
+            self.error(
+                "compatible_revisions",
+                format!("at most {MAX_COMPATIBLE_REVISIONS} revisions"),
+            );
+            return;
+        }
+        let mut seen = BTreeSet::new();
+        for (index, digest) in pack.compatible_revisions.iter().enumerate() {
+            let path = format!("compatible_revisions[{index}]");
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                self.error(path, "expected a lowercase hexadecimal SHA-256 digest");
+            } else if !seen.insert(digest.as_str()) {
+                self.error(path, "duplicate revision");
+            }
         }
     }
 

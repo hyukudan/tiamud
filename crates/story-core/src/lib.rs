@@ -193,6 +193,10 @@ pub const MAX_PARSER_REPLY_BYTES: usize = 1024;
 pub const MAX_PENDING_ANSWERS: usize = 4;
 /// Maximum objects one `todo`/`all` command acts on.
 pub const MAX_MULTI_OBJECTS: usize = 32;
+/// Maximum bytes of one locale of the authored parser prompt.
+pub const MAX_PROMPT_BYTES: usize = 64;
+/// Maximum earlier pack revisions a pack declares save-compatible.
+pub const MAX_COMPATIBLE_REVISIONS: usize = 16;
 /// Maximum declared scripts (ADR 0034).
 pub const MAX_SCRIPTS: usize = 32;
 /// Maximum bytes of one script source; equal to the Lua sandbox's own

@@ -724,6 +724,7 @@ fn gen_pack(rng: &mut Gen) -> StoryPack {
     StoryPack {
         world: None,
         scripts: Vec::new(),
+        compatible_revisions: Vec::new(),
         format_version: if v2 || rng.chance(30) { 2 } else { 1 },
         verbs: if v2 {
             vec![

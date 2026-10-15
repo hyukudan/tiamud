@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "assetId": "sha256:7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98",
+  "revision": 1,
+  "kind": "atmosphere",
+  "alt": "A dim nightclub bar: shelves of bottles in purple light, a cyan neon sign and empty stools along the counter.",
+  "focalPoint": {
+    "xPerMille": 500,
+    "yPerMille": 500
+  },
+  "dominantColor": "#23102b",
+  "author": "Tiamud project contributors",
+  "license": "CC-BY-4.0",
+  "provenance": "Original placeholder drawn only from code (gradients and geometric shapes) by apps/web/artwork/story-lluvia/generate.py for the lluvia-de-neon StoryPack; no external image, font, photograph or model was used.",
+  "generator": "apps/web/artwork/story-lluvia/generate.py (deterministic Pillow drawing)",
+  "contentClassification": "general",
+  "humanReviewedAt": "2026-10-15T00:00:00Z",
+  "source": {
+    "sha256": "c51c1ee77b408fb96269921952065b5293c3b1e9296eab302fdc51f39d387114",
+    "width": 1280,
+    "height": 560
+  },
+  "variants": [
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 640,
+      "height": 280,
+      "bytes": 3792,
+      "sha256": "ddfdea3e23f1d5032855293d849a5650d25ace27d16754d974653d5ee91b0ce9",
+      "path": "7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/scene-640.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 640,
+      "height": 280,
+      "bytes": 4772,
+      "sha256": "eb24457b688c3ae6261a15b0978ae5a645b4f848acb235aca6968cd2be96648b",
+      "path": "7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/scene-640.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 640,
+      "height": 280,
+      "bytes": 22258,
+      "sha256": "41fe232050f06ff37f1fa66b9e7a2804a4d67c5ddf3cafa093a642f27b7349a6",
+      "path": "7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/scene-640.jpg"
+    },
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 1280,
+      "height": 560,
+      "bytes": 5755,
+      "sha256": "70299b05e940d134c52568c22d521d6c0e0cc478cfdce3c3d8214a02b272c269",
+      "path": "7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/scene-1280.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 1280,
+      "height": 560,
+      "bytes": 9622,
+      "sha256": "0bf83882d5c469afa52752defc3e2bf4f905a0e03b14e46b8d869c9f438c9c0d",
+      "path": "7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/scene-1280.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 1280,
+      "height": 560,
+      "bytes": 56319,
+      "sha256": "fb5eceb1290d9bc456cdf2e5aa8cf9c84f7786e64543ae91a500963935f4e4ce",
+      "path": "7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/scene-1280.jpg"
+    }
+  ]
+}
