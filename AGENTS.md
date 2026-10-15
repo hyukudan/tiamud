@@ -601,7 +601,7 @@ No existe LRU ni política automática de memoria.
 | `crates/persistence-postgres/` | PostgreSQL esquema v16, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
-| `crates/story-core/` | Ruleset narrativo puro StoryPack v1/v2: librojuego S0 y menús, retratos y diálogos S4 (ADR 0025 y 0028 propuestos); el servidor lo juega vía `story_sessions` (S2, ADR 0029 propuesto) con slots persistidos (S3, ADR 0030 propuesto) |
+| `crates/story-core/` | Ruleset narrativo puro StoryPack v1/v2: librojuego S0 y menús, retratos y diálogos S4 (ADR 0025 y 0028 propuestos); el servidor lo juega vía `story_sessions` (S2, ADR 0029 propuesto) con slots persistidos (S3, ADR 0030 propuesto) e instancias compartidas con asientos, votación y turnos (S7 parcial, ADR 0033 propuesto) |
 | `crates/story-tools/` | CLI offline `tiamud-story` de autoría StoryPack: validate/lints, preview, test, play, fmt y esquema JSON (S1 herramientas) |
 | `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5, sin integrar con `story-core` ni servidor) |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
