@@ -126,17 +126,11 @@ impl ItemLocationIndex {
     pub(crate) fn at<'a>(
         &'a self,
         location: &SharedItemLocation,
-    ) -> impl DoubleEndedIterator<Item = &'a ItemInstanceId> + 'a {
+    ) -> impl DoubleEndedIterator<Item = &'a ItemInstanceId> + use<'a> {
         self.by_location
             .get(location)
             .into_iter()
             .flat_map(BTreeSet::iter)
-    }
-
-    pub(crate) fn contains_any(&self, location: &SharedItemLocation) -> bool {
-        self.by_location
-            .get(location)
-            .is_some_and(|items| !items.is_empty())
     }
 }
 
@@ -163,7 +157,7 @@ impl ItemInstances {
     pub(crate) fn ids_at<'a>(
         &'a self,
         location: &SharedItemLocation,
-    ) -> impl DoubleEndedIterator<Item = &'a ItemInstanceId> + 'a {
+    ) -> impl DoubleEndedIterator<Item = &'a ItemInstanceId> + use<'a> {
         self.location_index().at(location)
     }
 }

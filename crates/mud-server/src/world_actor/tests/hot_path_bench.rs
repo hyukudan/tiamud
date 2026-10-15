@@ -19,7 +19,12 @@ struct BenchWorld {
     route: (Direction, Direction),
 }
 
-fn bench_world(characters: usize, room_items: usize, carried_per_character: usize) -> BenchWorld {
+fn bench_world(
+    characters: usize,
+    staged_items: usize,
+    items_per_room: usize,
+    carried_per_character: usize,
+) -> BenchWorld {
     let loaded = crate::world_loader::default_loaded_world().unwrap();
     let mut world = crate::world_loader::build_loaded_world(&loaded).unwrap();
     let rooms = loaded
@@ -80,13 +85,21 @@ fn bench_world(characters: usize, room_items: usize, carried_per_character: usiz
             tiamud_core::ItemProvenance::RuntimeCreated { created_tick: 0 },
         );
     };
-    for index in 0..room_items {
-        add_item(
-            &mut snapshot,
-            RuntimeItemLocation::Room {
-                room_id: rooms[index % rooms.len()].clone(),
-            },
-        );
+    // Staged instances model a large world whose items are mostly out of
+    // every player's sight: they cost nothing to render but every former
+    // full scan walked them.
+    for _ in 0..staged_items {
+        add_item(&mut snapshot, RuntimeItemLocation::Staged);
+    }
+    for room in &rooms {
+        for _ in 0..items_per_room {
+            add_item(
+                &mut snapshot,
+                RuntimeItemLocation::Room {
+                    room_id: room.clone(),
+                },
+            );
+        }
     }
     for character in 0..characters {
         for _ in 0..carried_per_character {
@@ -145,14 +158,14 @@ fn per_op(total: Duration, count: usize) -> f64 {
 async fn hot_path_measurement() {
     const TICKS: usize = 10;
     const COMMANDS: usize = 20;
-    for (characters, room_items, carried) in [(50, 2_000, 10), (200, 2_000, 10)] {
+    for (characters, staged, per_room, carried) in [(50, 5_000, 5, 10), (200, 5_000, 5, 10)] {
         let BenchWorld {
             mut world,
             store,
             sessions,
             mover,
             route,
-        } = bench_world(characters, room_items, carried);
+        } = bench_world(characters, staged, per_room, carried);
         let roles = sessions
             .iter()
             .map(|session| (*session, AccountRole::Player))

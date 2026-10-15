@@ -1059,7 +1059,15 @@ impl World {
     }
 
     pub fn reserved_item_ids(&self) -> Result<BTreeSet<ItemInstanceId>, WorldError> {
-        let graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
+        let graph = build_item_subgraph_index(
+            &self.item_instances,
+            &self.item_prototypes,
+            self.trades
+                .values()
+                .flat_map(|trade| trade.offers.values())
+                .flat_map(|offer| &offer.lines)
+                .flat_map(|line| &line.item_ids),
+        )?;
         reserved_item_ids_with_graph(&self.trades, &graph)
     }
 

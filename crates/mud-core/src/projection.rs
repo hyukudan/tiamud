@@ -9,7 +9,6 @@ impl World {
         let character_id = self.character(session)?.id;
         let observer = self.observer(session)?;
         let visual_scene = self.can_receive_visual_scene(session)?;
-        let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
         let mut exits = Vec::new();
         for (direction, destination) in &current_room.exits {
             if !self.exit_visible_to(session, &current_room.stable_id, *direction)? {
@@ -34,19 +33,7 @@ impl World {
         }
         let visible_item_ids = self
             .item_instances
-            .iter()
-            .filter_map(|(item_id, instance)| match &instance.location {
-                SharedItemLocation::Room(room_id) if room_id == &current_room.stable_id => {
-                    Some(item_id)
-                }
-                SharedItemLocation::Staged
-                | SharedItemLocation::Carried(_)
-                | SharedItemLocation::Room(_)
-                | SharedItemLocation::Equipped(_, _)
-                | SharedItemLocation::HeldByNpc(_)
-                | SharedItemLocation::Contained(_)
-                | SharedItemLocation::Consumed => None,
-            })
+            .ids_at(&SharedItemLocation::Room(current_room.stable_id.clone()))
             .map(|item_id| {
                 self.item_visible_to(session, item_id, &current_room.stable_id)
                     .map(|visible| visible.then_some(item_id))
@@ -56,6 +43,11 @@ impl World {
             .flatten()
             .cloned()
             .collect::<Vec<_>>();
+        let item_graph = build_item_subgraph_index(
+            &self.item_instances,
+            &self.item_prototypes,
+            visible_item_ids.iter(),
+        )?;
         let mut item_buckets = BTreeMap::<(u8, Option<u64>), Vec<ItemInstanceId>>::new();
         for item_id in visible_item_ids {
             let key = match self.scene_loot_access(character_id, &item_id)? {
@@ -246,11 +238,7 @@ impl World {
         let observer = self.observer(session)?;
         let visible_ids = self
             .item_instances
-            .iter()
-            .filter_map(|(stable_id, instance)| {
-                matches!(&instance.location, SharedItemLocation::Room(room_id) if room_id == &current_room.stable_id)
-                    .then_some(stable_id)
-            })
+            .ids_at(&SharedItemLocation::Room(current_room.stable_id.clone()))
             .map(|item_id| {
                 self.item_visible_to(session, item_id, &current_room.stable_id)
                     .map(|visible| visible.then_some(item_id.clone()))
@@ -338,17 +326,16 @@ impl World {
             .character_gameplay
             .get(&character.id)
             .ok_or(WorldError::InvalidEntity)?;
-        let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
-
         let carried_item_ids = self
             .item_instances
-            .iter()
-            .filter_map(|(item_id, instance)| {
-                matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
-                    .then_some(item_id)
-            })
+            .ids_at(&SharedItemLocation::Carried(character.id))
             .cloned()
             .collect::<Vec<_>>();
+        let item_graph = build_item_subgraph_index(
+            &self.item_instances,
+            &self.item_prototypes,
+            carried_item_ids.iter().chain(gameplay.equipment.values()),
+        )?;
         let reserved_items = self.reserved_item_ids()?;
         let groups = derive_stack_groups(
             &self.item_instances,

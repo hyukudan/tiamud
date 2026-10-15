@@ -1789,3 +1789,167 @@ fn item_presentation_text_is_bounded_before_it_reaches_transports() {
     multiline.description = "First line.\n\tSecond line.".into();
     assert!(World::from_definition(definition_for(multiline)).is_ok());
 }
+
+fn full_scan_location_index(world: &World) -> BTreeMap<SharedItemLocation, Vec<ItemInstanceId>> {
+    let mut expected = BTreeMap::<SharedItemLocation, Vec<ItemInstanceId>>::new();
+    for (item_id, instance) in world.item_instances.iter() {
+        expected
+            .entry(instance.location.clone())
+            .or_default()
+            .push(item_id.clone());
+    }
+    expected
+}
+
+fn assert_location_index_matches_full_scan(world: &World, locations: &[SharedItemLocation]) {
+    let expected = full_scan_location_index(world);
+    for location in locations.iter().chain(expected.keys()) {
+        let indexed = world
+            .item_instances
+            .ids_at(location)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            indexed,
+            expected.get(location).cloned().unwrap_or_default(),
+            "{location:?}"
+        );
+    }
+    let full = build_item_graph_index(&world.item_instances, &world.item_prototypes).unwrap();
+    let roots = world
+        .item_instances
+        .iter()
+        .filter(|(_, instance)| !matches!(instance.location, SharedItemLocation::Contained(_)))
+        .map(|(item_id, _)| item_id)
+        .collect::<Vec<_>>();
+    let partial =
+        build_item_subgraph_index(&world.item_instances, &world.item_prototypes, roots).unwrap();
+    assert_eq!(partial.subtree_weights, full.subtree_weights);
+    assert_eq!(partial.subtree_transferable, full.subtree_transferable);
+    assert_eq!(partial.children, full.children);
+    for character_id in [CharacterId(1), CharacterId(2)] {
+        assert_eq!(
+            world.inventory_totals(character_id).unwrap(),
+            character_inventory_totals_with_graph(
+                character_id,
+                &world.item_instances,
+                &world.item_prototypes,
+                &full,
+            )
+            .unwrap()
+        );
+    }
+}
+
+#[test]
+fn item_location_index_matches_full_scan_after_random_operations() {
+    let mut tonic = item_prototype("test:tonic", "healing tonic", "Restorative.", &["tonic"]);
+    tonic.stack_policy = ItemStackPolicy::Fungible;
+    tonic.max_stack_units = 5;
+    tonic.weight_grams = 100;
+    let mut satchel = item_prototype("test:satchel", "satchel", "A satchel.", &["satchel"]);
+    satchel.weight_grams = 500;
+    satchel.container = Some(ItemContainerDefinition {
+        max_slots: 50,
+        max_weight_grams: 100_000,
+    });
+    let room = |id: &str| RoomDefinition {
+        stable_id: id.into(),
+        title: id.into(),
+        prose: vec!["A test room.".into()],
+        image: None,
+        audio: None,
+        item_ids: Vec::new(),
+        exits: Vec::new(),
+    };
+    let mut instances = Vec::new();
+    for index in 0..6 {
+        instances.push(item_instance(
+            &format!("test:satchel-{index}"),
+            "test:satchel",
+            InitialItemLocation::Room("test:a".into()),
+        ));
+    }
+    for index in 0..40 {
+        instances.push(item_instance(
+            &format!("test:tonic-{index:02}"),
+            "test:tonic",
+            InitialItemLocation::Room(if index % 2 == 0 { "test:a" } else { "test:b" }.into()),
+        ));
+    }
+    let mut world = World::from_definition(WorldDefinition {
+        start_room_id: "test:a".into(),
+        item_prototypes: vec![tonic, satchel],
+        initial_item_instances: instances,
+        rooms: vec![room("test:a"), room("test:b")],
+    })
+    .unwrap();
+    let satchels = (0..6)
+        .map(|index| ItemInstanceId(format!("test:satchel-{index}")))
+        .collect::<Vec<_>>();
+    let tonics = (0..40)
+        .map(|index| ItemInstanceId(format!("test:tonic-{index:02}")))
+        .collect::<Vec<_>>();
+    let mut top_level = vec![
+        SharedItemLocation::Room("test:a".into()),
+        SharedItemLocation::Room("test:b".into()),
+        SharedItemLocation::Carried(CharacterId(1)),
+        SharedItemLocation::Carried(CharacterId(2)),
+        SharedItemLocation::Equipped(CharacterId(1), EquipmentSlot::Weapon),
+        SharedItemLocation::HeldByNpc("test:npc".into()),
+        SharedItemLocation::Staged,
+        SharedItemLocation::Consumed,
+    ];
+    let mut every_location = top_level.clone();
+    every_location.extend(
+        satchels
+            .iter()
+            .map(|satchel| SharedItemLocation::Contained(satchel.clone())),
+    );
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as usize
+    };
+    let mut checkpoints = Vec::new();
+    assert_location_index_matches_full_scan(&world, &every_location);
+    for step in 0..600 {
+        match next(10) {
+            // Move a tonic anywhere, including into a satchel.
+            0..=4 => {
+                let tonic = &tonics[next(tonics.len())];
+                let destination = every_location[next(every_location.len())].clone();
+                world.item_instances.get_mut(tonic).unwrap().location = destination;
+            }
+            // Containers only move between top-level locations, so the
+            // graph stays acyclic and within the depth bound.
+            5 | 6 => {
+                let satchel = &satchels[next(satchels.len())];
+                let destination = top_level[next(top_level.len())].clone();
+                world.item_instances.get_mut(satchel).unwrap().location = destination;
+            }
+            7 => checkpoints.push(world.checkpoint()),
+            8 => {
+                if let Some(checkpoint) = checkpoints.pop() {
+                    world.restore_checkpoint(checkpoint);
+                }
+            }
+            _ => {
+                // Prospective-copy pattern used by the mutation helpers.
+                let mut prospective = world.item_instances.clone();
+                let tonic = &tonics[next(tonics.len())];
+                prospective.get_mut(tonic).unwrap().location =
+                    SharedItemLocation::Carried(CharacterId(2));
+                if next(2) == 0 {
+                    world.item_instances = prospective;
+                }
+            }
+        }
+        if step % 97 == 0 {
+            top_level.rotate_left(1);
+        }
+        assert_location_index_matches_full_scan(&world, &every_location);
+    }
+}

@@ -27,7 +27,52 @@ impl World {
         &self,
         character_id: CharacterId,
     ) -> Result<(u32, u64), WorldError> {
-        character_inventory_totals(character_id, &self.item_instances, &self.item_prototypes)
+        // Same totals as a full scan: the location index yields exactly the
+        // carried and equipped roots, and the subgraph covers their contents.
+        let index = self.item_instances.location_index();
+        let carried = index
+            .at(&SharedItemLocation::Carried(character_id))
+            .collect::<Vec<_>>();
+        let equipped = [
+            EquipmentSlot::Weapon,
+            EquipmentSlot::Body,
+            EquipmentSlot::Trinket,
+        ]
+        .into_iter()
+        .flat_map(|slot| index.at(&SharedItemLocation::Equipped(character_id, slot)))
+        .collect::<Vec<_>>();
+        let graph = build_item_subgraph_index(
+            &self.item_instances,
+            &self.item_prototypes,
+            carried.iter().chain(equipped.iter()).copied(),
+        )?;
+        let mut carried_quantities = BTreeMap::<(String, ItemBinding), usize>::new();
+        for item_id in &carried {
+            let instance = self
+                .item_instances
+                .get(*item_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            *carried_quantities
+                .entry((instance.prototype_id.clone(), instance.binding))
+                .or_default() += 1;
+        }
+        let mut weight = 0_u64;
+        for item_id in carried.iter().chain(equipped.iter()) {
+            weight = weight
+                .checked_add(graph.subtree_weight(item_id)?)
+                .ok_or(WorldError::InvalidEntity)?;
+        }
+        let mut slots = 0_u32;
+        for ((prototype_id, _), quantity) in carried_quantities {
+            let prototype = self
+                .item_prototypes
+                .get(&prototype_id)
+                .ok_or(WorldError::InvalidEntity)?;
+            slots = slots
+                .checked_add(stack_slots(prototype, quantity)?)
+                .ok_or(WorldError::InvalidEntity)?;
+        }
+        Ok((slots, weight))
     }
 
     pub(crate) fn inventory_usage_for_capacity(
@@ -185,16 +230,21 @@ impl World {
     pub fn inventory_as_plain_text(&self, session: SessionId) -> Result<String, WorldError> {
         let character = self.character(session)?;
         let observer_salt = self.observer(session)?.salt;
-        let item_graph = build_item_graph_index(&self.item_instances, &self.item_prototypes)?;
         let carried_ids = self
             .item_instances
-            .iter()
-            .filter_map(|(item_id, instance)| {
-                matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
-                    .then_some(item_id)
-            })
+            .ids_at(&SharedItemLocation::Carried(character.id))
             .cloned()
             .collect::<Vec<_>>();
+        let item_graph = build_item_subgraph_index(
+            &self.item_instances,
+            &self.item_prototypes,
+            carried_ids.iter().chain(
+                self.character_gameplay
+                    .get(&character.id)
+                    .into_iter()
+                    .flat_map(|gameplay| gameplay.equipment.values()),
+            ),
+        )?;
         let mut item_rows = derive_stack_groups(
             &self.item_instances,
             &self.item_prototypes,
@@ -556,25 +606,32 @@ impl World {
     ) -> Result<Vec<ItemInstanceId>, WorldError> {
         let character = self.character(session)?;
         let room_id = &room_checked(&self.entities, character.location)?.stable_id;
-        self.item_instances
-            .iter()
-            .map(|(item_id, instance)| {
-                let accessible = if let Some(container_id) = direct_container {
-                    matches!(&instance.location, SharedItemLocation::Contained(parent) if parent == container_id)
-                } else {
-                    match scope {
-                        ItemScope::Carried => {
-                            matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
-                        }
-                        ItemScope::CurrentRoom => {
-                            matches!(&instance.location, SharedItemLocation::Room(item_room) if item_room == room_id)
-                        }
-                        ItemScope::Accessible => {
-                            matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
-                                || matches!(&instance.location, SharedItemLocation::Room(item_room) if item_room == room_id)
-                        }
-                    }
-                };
+        // The location index yields exactly the instances that can pass the
+        // accessibility test below, in the same ascending ID order as the
+        // former full scan.
+        let carried = SharedItemLocation::Carried(character.id);
+        let in_room = SharedItemLocation::Room(room_id.clone());
+        let mut item_ids = BTreeSet::<&ItemInstanceId>::new();
+        if let Some(container_id) = direct_container {
+            item_ids.extend(
+                self.item_instances
+                    .ids_at(&SharedItemLocation::Contained(container_id.clone())),
+            );
+        } else {
+            if matches!(scope, ItemScope::Carried | ItemScope::Accessible) {
+                item_ids.extend(self.item_instances.ids_at(&carried));
+            }
+            if matches!(scope, ItemScope::CurrentRoom | ItemScope::Accessible) {
+                item_ids.extend(self.item_instances.ids_at(&in_room));
+            }
+        }
+        item_ids
+            .into_iter()
+            .map(|item_id| {
+                let instance = self
+                    .item_instances
+                    .get(item_id)
+                    .ok_or(WorldError::InvalidEntity)?;
                 let visible = match &instance.location {
                     SharedItemLocation::Room(item_room) => {
                         self.item_visible_to(session, item_id, item_room)?
@@ -586,7 +643,7 @@ impl World {
                     | SharedItemLocation::HeldByNpc(_)
                     | SharedItemLocation::Consumed => false,
                 };
-                Ok((accessible && visible).then_some(item_id.clone()))
+                Ok(visible.then(|| item_id.clone()))
             })
             .collect::<Result<Vec<_>, WorldError>>()
             .map(|items| items.into_iter().flatten().collect())
@@ -1277,6 +1334,88 @@ impl ItemGraphIndex {
     }
 }
 
+/// Builds the same per-item facts as [`build_item_graph_index`] but only for
+/// the subtrees rooted at `roots`, using the location index to find children
+/// instead of scanning every instance. Read-only projections use it; durable
+/// mutation paths keep validating the complete prospective graph.
+pub(crate) fn build_item_subgraph_index<'a>(
+    instances: &ItemInstances,
+    prototypes: &HashMap<String, ItemPrototype>,
+    roots: impl IntoIterator<Item = &'a ItemInstanceId>,
+) -> Result<ItemGraphIndex, WorldError> {
+    fn visit(
+        item_id: &ItemInstanceId,
+        depth: usize,
+        instances: &ItemInstances,
+        prototypes: &HashMap<String, ItemPrototype>,
+        graph: &mut ItemGraphIndex,
+    ) -> Result<(u64, bool), WorldError> {
+        if let (Some(weight), Some(transferable)) = (
+            graph.subtree_weights.get(item_id),
+            graph.subtree_transferable.get(item_id),
+        ) {
+            return Ok((*weight, *transferable));
+        }
+        if depth > MAX_CONTAINER_DEPTH {
+            return Err(WorldError::InvalidEntity);
+        }
+        let instance = instances.get(item_id).ok_or(WorldError::InvalidEntity)?;
+        let prototype = prototypes
+            .get(&instance.prototype_id)
+            .ok_or(WorldError::InvalidEntity)?;
+        let mut weight = u64::from(prototype.weight_grams);
+        let mut transferable = prototype.transfer_policy == ItemTransferPolicy::Transferable
+            && instance.binding == ItemBinding::Unbound;
+        let children = instances
+            .ids_at(&SharedItemLocation::Contained(item_id.clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !children.is_empty() {
+            if prototype.container.is_none() {
+                return Err(WorldError::InvalidEntity);
+            }
+            for child in &children {
+                let (child_weight, child_transferable) =
+                    visit(child, depth + 1, instances, prototypes, graph)?;
+                weight = weight
+                    .checked_add(child_weight)
+                    .ok_or(WorldError::InvalidEntity)?;
+                transferable &= child_transferable;
+            }
+            graph.children.insert(item_id.clone(), children);
+        }
+        graph.subtree_weights.insert(item_id.clone(), weight);
+        graph
+            .subtree_transferable
+            .insert(item_id.clone(), transferable);
+        Ok((weight, transferable))
+    }
+
+    let mut graph = ItemGraphIndex {
+        children: BTreeMap::new(),
+        subtree_weights: BTreeMap::new(),
+        subtree_transferable: BTreeMap::new(),
+    };
+    for root in roots {
+        // A root's own ancestry depth bounds how deep its subtree may go.
+        let mut depth = 0_usize;
+        let mut current = root;
+        while let Some(ItemInstance {
+            location: SharedItemLocation::Contained(parent),
+            ..
+        }) = instances.get(current)
+        {
+            depth = depth.checked_add(1).ok_or(WorldError::InvalidEntity)?;
+            if depth > MAX_CONTAINER_DEPTH {
+                return Err(WorldError::InvalidEntity);
+            }
+            current = parent;
+        }
+        visit(root, depth, instances, prototypes, &mut graph)?;
+    }
+    Ok(graph)
+}
+
 pub(crate) fn build_item_graph_index(
     instances: &BTreeMap<ItemInstanceId, ItemInstance>,
     prototypes: &HashMap<String, ItemPrototype>,
@@ -1429,15 +1568,6 @@ pub(crate) fn container_usage(
         used_weight_grams: u32::try_from(used_weight).map_err(|_| WorldError::InvalidEntity)?,
         max_weight_grams: capacity.max_weight_grams,
     })
-}
-
-pub(crate) fn character_inventory_totals(
-    character_id: CharacterId,
-    instances: &BTreeMap<ItemInstanceId, ItemInstance>,
-    prototypes: &HashMap<String, ItemPrototype>,
-) -> Result<(u32, u64), WorldError> {
-    let graph = build_item_graph_index(instances, prototypes)?;
-    character_inventory_totals_with_graph(character_id, instances, prototypes, &graph)
 }
 
 pub(crate) fn character_inventory_totals_with_graph(
