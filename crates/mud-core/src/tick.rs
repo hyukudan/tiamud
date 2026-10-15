@@ -84,12 +84,17 @@ impl World {
             .iter()
             .filter_map(|event| match event {
                 DomainEvent::Gameplay {
-                    event: GameplayEvent::NpcDefeated { character_id, .. },
-                } => Some(*character_id),
+                    event:
+                        GameplayEvent::NpcDefeated {
+                            character_id,
+                            npc_id,
+                            ..
+                        },
+                } => Some((*character_id, npc_id.clone())),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for character_id in defeated {
+        for (character_id, npc_id) in defeated {
             // TODO(progression-signals): replace this legacy kill-side skill
             // increment once WorldPack can author event-triggered GrantSets.
             // Removing it before that hook exists would silently change the
@@ -101,25 +106,9 @@ impl World {
             {
                 *rank = rank.saturating_add(1).min(MAX_SKILL_VALUE);
             }
-            if let Some(progress) = self
-                .character_gameplay
-                .get_mut(&character_id)
-                .and_then(|state| state.quests.get_mut("first-hunt"))
-                && progress.status == QuestStatus::Active
-            {
-                progress.current = progress.current.saturating_add(1).min(progress.target);
-                if progress.current >= progress.target {
-                    progress.status = QuestStatus::ReadyToClaim;
-                }
-                events.push(DomainEvent::Adventure {
-                    event: AdventureEvent::QuestChanged {
-                        character_id,
-                        quest_id: "first-hunt".into(),
-                        summary: "First Hunt is ready to claim.".into(),
-                    },
-                });
-            }
+            events.extend(self.advance_quests(character_id, QuestTrigger::DefeatedNpc(&npc_id))?);
         }
+        self.restock_shops(tick);
         if self
             .adventure
             .parties

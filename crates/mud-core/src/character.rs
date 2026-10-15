@@ -27,18 +27,7 @@ impl World {
             .character_gameplay
             .get(&character.id)
             .ok_or(WorldError::InvalidEntity)?;
-        let actor_quest_states = gameplay
-            .quests
-            .iter()
-            .map(|(id, progress)| {
-                let status = match progress.status {
-                    QuestStatus::Active => "active",
-                    QuestStatus::ReadyToClaim => "ready_to_claim",
-                    QuestStatus::Completed => "completed",
-                };
-                format!("{id}:{status}")
-            })
-            .collect();
+        let actor_quest_states = quest_state_strings(&self.adventure_content, gameplay);
         let actor_content_preferences = gameplay
             .script_flags
             .iter()
@@ -398,22 +387,7 @@ impl World {
                     && (1..=MAX_STATUS_MAGNITUDE).contains(&effect.magnitude)
             })
             && snapshot.effects.len() <= MAX_ACTIVE_EFFECTS;
-        let adventure_valid = snapshot.commodities.len() <= commodity_specs().len()
-            && snapshot.commodities.iter().all(|(id, amount)| {
-                commodity_specs().iter().any(|(known, _, _, _)| known == id) && *amount <= 99
-            })
-            && snapshot.quests.len() <= 32
-            && snapshot.quests.iter().all(|(id, progress)| {
-                id == "first-hunt"
-                    && progress.target == 1
-                    && progress.current <= progress.target
-                    && match progress.status {
-                        QuestStatus::Active => progress.current < progress.target,
-                        QuestStatus::ReadyToClaim | QuestStatus::Completed => {
-                            progress.current == progress.target
-                        }
-                    }
-            })
+        let adventure_valid = valid_character_adventure_state(&self.adventure_content, snapshot)
             && snapshot.script_flags.len() <= 64
             && snapshot
                 .script_flags

@@ -574,41 +574,74 @@ impl World {
             (&left.from, &left.direction, &left.to).cmp(&(&right.from, &right.direction, &right.to))
         });
 
-        let (quest_status, quest_current, quest_target, quest_actions) =
-            match gameplay.quests.get("first-hunt") {
-                None => (
-                    "available",
-                    0,
-                    1,
-                    vec![SceneAction {
-                        label: "Accept".into(),
-                        command: "quest accept first-hunt".into(),
-                    }],
-                ),
-                Some(progress) => {
-                    let (status, actions) = match progress.status {
-                        QuestStatus::Active => ("active", Vec::new()),
-                        QuestStatus::ReadyToClaim => (
-                            "readyToClaim",
-                            vec![SceneAction {
-                                label: "Claim reward".into(),
-                                command: "quest complete first-hunt".into(),
-                            }],
-                        ),
-                        QuestStatus::Completed => ("completed", Vec::new()),
-                    };
-                    (status, progress.current, progress.target, actions)
+        let mut quests = self
+            .visible_quests(gameplay)
+            .map(|quest| {
+                let (status, current, target, actions) = match gameplay.quests.get(&quest.id) {
+                    None => (
+                        "available",
+                        0,
+                        quest.stages.first().map_or(0, |stage| {
+                            stage
+                                .objectives
+                                .iter()
+                                .map(QuestObjective::target)
+                                .fold(0_u32, u32::saturating_add)
+                        }),
+                        vec![SceneAction {
+                            label: "Accept".into(),
+                            command: format!("quest accept {}", quest.id),
+                        }],
+                    ),
+                    Some(progress) => {
+                        let (status, actions) = match progress.status {
+                            QuestStatus::Active => ("active", Vec::new()),
+                            QuestStatus::ReadyToClaim => (
+                                "readyToClaim",
+                                vec![SceneAction {
+                                    label: "Claim reward".into(),
+                                    command: format!("quest complete {}", quest.id),
+                                }],
+                            ),
+                            QuestStatus::Completed if quest.repeatable => (
+                                "completed",
+                                vec![SceneAction {
+                                    label: "Accept".into(),
+                                    command: format!("quest accept {}", quest.id),
+                                }],
+                            ),
+                            QuestStatus::Completed => ("completed", Vec::new()),
+                        };
+                        (status, progress.current, progress.target, actions)
+                    }
+                };
+                let stage_summary = (status == "active")
+                    .then(|| {
+                        let index = gameplay
+                            .quest_stages
+                            .get(&quest.id)
+                            .map_or(0, |extra| extra.stage);
+                        quest
+                            .stages
+                            .get(usize::try_from(index).ok()?)?
+                            .summary
+                            .clone()
+                    })
+                    .flatten();
+                QuestView {
+                    id: quest.id.clone(),
+                    label: quest.name.clone(),
+                    summary: stage_summary.unwrap_or_else(|| quest.summary.clone()),
+                    status: status.into(),
+                    current,
+                    target,
+                    actions,
                 }
-            };
-        let quests = vec![QuestView {
-            id: "first-hunt".into(),
-            label: "First Hunt".into(),
-            summary: "Defeat one hostile creature; reward 25 coin and 50 experience.".into(),
-            status: quest_status.into(),
-            current: quest_current,
-            target: quest_target,
-            actions: quest_actions,
-        }];
+            })
+            .collect::<Vec<_>>();
+        // Held quests first, then available ones, each in canonical ID order.
+        quests.sort_by_key(|quest| quest.status == "available");
+        quests.truncate(MAX_PROJECTED_QUESTS);
 
         let party = self.party_for_member(character.id).map(|party_id| {
             let party = &self.adventure.parties[&party_id];
@@ -664,52 +697,72 @@ impl World {
             .collect::<Vec<_>>();
         party_invites.sort_by(|left, right| left.leader_name.cmp(&right.leader_name));
 
-        let commodities = commodity_specs()
+        let content = std::sync::Arc::clone(&self.adventure_content);
+        let commodities = content
+            .commodities
             .iter()
-            .filter_map(|(id, label, _, _)| {
-                let quantity = gameplay.commodities.get(*id).copied().unwrap_or(0);
+            .filter_map(|commodity| {
+                let quantity = gameplay
+                    .commodities
+                    .get(&commodity.id)
+                    .copied()
+                    .unwrap_or(0);
                 (quantity > 0).then(|| CommodityView {
-                    id: (*id).into(),
-                    label: (*label).into(),
+                    id: commodity.id.clone(),
+                    label: commodity.label.clone(),
                     quantity,
                 })
             })
             .collect();
-        let shop_available = current_room.stable_id == self.start_room_stable_id;
         let spendable_coins = self.spendable_coins(character.id)?;
-        let shop = if shop_available {
-            commodity_specs()
-                .iter()
-                .map(|(id, label, buy_price, sell_price)| {
-                    let stock = self.adventure.shop_stock.get(*id).copied().unwrap_or(0);
-                    let owned = gameplay.commodities.get(*id).copied().unwrap_or(0);
-                    let mut actions = Vec::new();
-                    if stock > 0 && spendable_coins >= *buy_price && owned < 99 {
-                        actions.push(SceneAction {
-                            label: "Buy".into(),
-                            command: format!("buy {id}"),
-                        });
-                    }
-                    if owned > 0 {
-                        actions.push(SceneAction {
-                            label: "Sell".into(),
-                            command: format!("sell {id}"),
-                        });
-                    }
-                    ShopItemView {
-                        id: (*id).into(),
-                        label: (*label).into(),
-                        buy_price: *buy_price,
-                        sell_price: *sell_price,
-                        stock,
-                        owned,
-                        actions,
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let shop_available = self.shop_in_room(&current_room.stable_id).is_some();
+        let shop = self
+            .shop_in_room(&current_room.stable_id)
+            .map(|shop| {
+                shop.stock
+                    .iter()
+                    .filter_map(|entry| {
+                        let commodity = content.commodity(&entry.commodity_id)?;
+                        let stock = self
+                            .adventure
+                            .shop_stock
+                            .get(&entry.stock_id)
+                            .copied()
+                            .unwrap_or(0);
+                        let owned = gameplay
+                            .commodities
+                            .get(&commodity.id)
+                            .copied()
+                            .unwrap_or(0);
+                        let mut actions = Vec::new();
+                        if stock > 0
+                            && spendable_coins >= entry.buy_price
+                            && owned < commodity.max_owned
+                        {
+                            actions.push(SceneAction {
+                                label: "Buy".into(),
+                                command: format!("buy {}", commodity.id),
+                            });
+                        }
+                        if owned > 0 {
+                            actions.push(SceneAction {
+                                label: "Sell".into(),
+                                command: format!("sell {}", commodity.id),
+                            });
+                        }
+                        Some(ShopItemView {
+                            id: commodity.id.clone(),
+                            label: commodity.label.clone(),
+                            buy_price: entry.buy_price,
+                            sell_price: entry.sell_price,
+                            stock,
+                            owned,
+                            actions,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mut online = self
             .connected_characters()?

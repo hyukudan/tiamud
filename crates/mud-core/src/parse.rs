@@ -242,6 +242,14 @@ pub fn parse_action(input: &str) -> Result<PlayerAction, ParseActionError> {
             return Ok(PlayerAction::Quest(constructor(target)));
         }
     }
+    if normalised == "talk" || normalised == "talk to" {
+        return Err(ParseActionError::MissingTarget { command: "talk" });
+    }
+    for command in ["talk to", "talk"] {
+        if let Some(target) = command_tail_phrase(input, command) {
+            return Ok(PlayerAction::Quest(QuestAction::Talk(target)));
+        }
+    }
     if normalised == "who" {
         return Ok(PlayerAction::Social(SocialAction::Who));
     }

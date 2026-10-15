@@ -138,10 +138,15 @@ matriz, memoria y documentación pública a la vez.
 
 ### Mundo, personajes y juego
 
-- WorldPack v9 es canónico; AreaPack v8 es la autoría modular nativa y
-  WorldProject permanece en v2. WorldPack v8/v7/v6/v5/v4/v3/v2,
-  AreaPack v7/v6/v5/v4/v3/v2/v1 y Envy/Merc solo entran por
-  normalización/importación.
+- WorldPack v10 es canónico; AreaPack v9 es la autoría modular nativa y
+  WorldProject permanece en v2. WorldPack v9/v8/v7/v6/v5/v4/v3/v2,
+  AreaPack v8/v7/v6/v5/v4/v3/v2/v1 y Envy/Merc solo entran por
+  normalización/importación. WorldPack v10/AreaPack v9 declaran misiones,
+  mercancías y tiendas como datos
+  ([ADR 0032](docs/decisions/0032-worldpack-v10-quests-and-shops.md),
+  propuesto); normalizar un WorldPack v2–v9 hace explícitos la misión
+  `first-hunt` y el mercado que el núcleo tenía cableados. Sus IDs, el orden de
+  etapas/objetivos y los `stockId` son durables.
 - El arranque elige una fuente de mundo. `TIAMUD_WORLD_PACK` selecciona un
   WorldPack monolítico externo revisado; sin variables de mundo se usa el
   embebido. Como alternativa 6B, `TIAMUD_AREA_REGISTRY` y
@@ -293,7 +298,7 @@ matriz, memoria y documentación pública a la vez.
   `contents` pagina 20 grupos; Web, Telnet y GMCP reciben cantidad, slots, peso
   total, capacidad, política de transferencia y estado de vínculo mediante
   referencias opacas.
-- WorldPack v9 y AreaPack v8 aceptan el vocabulario cerrado `transferable`,
+- WorldPack v10/v9 y AreaPack v9/v8 aceptan el vocabulario cerrado `transferable`,
   `character_bound` y `non_transferable`, igual que WorldPack v6/v5 y AreaPack
   v5/v4;
   WorldPack v4/AreaPack v3 y anteriores solo normalizan `transferable`. La primera adquisición liga

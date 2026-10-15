@@ -36,6 +36,8 @@ pub struct World {
     pub(crate) npcs: Shared<BTreeMap<String, Npc>>,
     pub(crate) abilities: BTreeMap<String, AbilityDefinition>,
     pub(crate) social_emotes: BTreeMap<String, SocialEmoteDefinition>,
+    /// Immutable WorldPack v10 quest, commodity and shop catalog.
+    pub(crate) adventure_content: std::sync::Arc<AdventureContent>,
     pub(crate) progression: ProgressionCatalog,
     pub(crate) progression_catalog: CharacterCreationCatalogView,
     pub(crate) world_progression_flags: Shared<BTreeSet<String>>,
@@ -405,6 +407,9 @@ impl World {
             npcs: BTreeMap::new().into(),
             abilities: BTreeMap::new(),
             social_emotes: BTreeMap::new(),
+            adventure_content: std::sync::Arc::new(AdventureContent::legacy(
+                &definition.start_room_id,
+            )),
             progression,
             progression_catalog,
             world_progression_flags: BTreeSet::new().into(),
@@ -1499,6 +1504,16 @@ impl World {
 
 impl World {
     pub fn apply(
+        &mut self,
+        session: SessionId,
+        action: PlayerAction,
+    ) -> Result<ActionOutcome, WorldError> {
+        let mut outcome = self.apply_action(session, action)?;
+        self.refresh_state_quests(session, &mut outcome)?;
+        Ok(outcome)
+    }
+
+    fn apply_action(
         &mut self,
         session: SessionId,
         action: PlayerAction,

@@ -9,6 +9,7 @@ mod items;
 mod loot;
 mod parse;
 mod perception;
+mod quests;
 mod snapshot;
 mod staff;
 mod trade;

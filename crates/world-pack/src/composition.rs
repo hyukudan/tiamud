@@ -21,17 +21,18 @@ use thiserror::Error;
 use crate::{
     AbilityDefinition, AdvancedClassDefinition, AffixDefinition, AffixPoolDefinition,
     ArchetypeDefinition, BackgroundDefinition, BaseClassDefinition, CharacterDefaultsDefinition,
-    CharacterProgressionDefinition, ContentTest, EntityMediaDefinition, EntityMediaKind,
-    ExitTarget, GameplayDefinition, GrantDefinition, InitialItemInstance, ItemPrototype,
-    LevelThresholdDefinition, LineageDefinition, LootSourceDefinition, LootTableDefinition,
-    NpcAbilitySet, NpcPrototype, NpcSpawn, RequirementDefinition, RequirementPredicate, Room,
-    RoomMediaDefinition, RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition,
+    CharacterProgressionDefinition, CommodityDefinition, ContentTest, EntityMediaDefinition,
+    EntityMediaKind, ExitTarget, GameplayDefinition, GrantDefinition, InitialItemInstance,
+    ItemPrototype, LevelThresholdDefinition, LineageDefinition, LootSourceDefinition,
+    LootTableDefinition, NpcAbilitySet, NpcPrototype, NpcSpawn, QuestDefinition,
+    RequirementDefinition, RequirementPredicate, Room, RoomMediaDefinition,
+    RoomPerceptionDefinition, RoomSceneVariants, ScriptDefinition, ShopDefinition,
     SocialEmoteDefinition, SourceMetadata, TalentGraphDefinition, ValidationErrors, WorldPack,
     WorldPackDocument,
 };
 
 pub const WORLD_PROJECT_SCHEMA_VERSION: u32 = 2;
-pub const AREA_PACK_SCHEMA_VERSION: u32 = 8;
+pub const AREA_PACK_SCHEMA_VERSION: u32 = 9;
 pub const MAX_PROJECT_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_AREA_COUNT: usize = 256;
 pub const MAX_AREA_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -161,6 +162,12 @@ pub struct AreaPack {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub social_emotes: Vec<SocialEmoteDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commodities: Vec<CommodityDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quests: Vec<QuestDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shops: Vec<ShopDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub npc_ability_sets: Vec<NpcAbilitySet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub room_media: Vec<RoomMediaDefinition>,
@@ -256,6 +263,12 @@ impl<'de> Deserialize<'de> for AreaPack {
             #[serde(default)]
             social_emotes: Vec<SocialEmoteDefinition>,
             #[serde(default)]
+            commodities: Vec<CommodityDefinition>,
+            #[serde(default)]
+            quests: Vec<QuestDefinition>,
+            #[serde(default)]
+            shops: Vec<ShopDefinition>,
+            #[serde(default)]
             npc_ability_sets: Vec<NpcAbilitySet>,
             #[serde(default)]
             room_media: Vec<RoomMediaDefinition>,
@@ -281,8 +294,12 @@ impl<'de> Deserialize<'de> for AreaPack {
             reject_legacy_area_communication_fields(&value, schema_version)
                 .map_err(D::Error::custom)?;
         }
-        if (1..u64::from(AREA_PACK_SCHEMA_VERSION)).contains(&schema_version) {
+        if (1..=7).contains(&schema_version) {
             reject_legacy_area_social_emote_fields(&value, schema_version)
+                .map_err(D::Error::custom)?;
+        }
+        if (1..u64::from(AREA_PACK_SCHEMA_VERSION)).contains(&schema_version) {
+            reject_legacy_area_adventure_fields(&value, schema_version)
                 .map_err(D::Error::custom)?;
         }
         if schema_version == 1 || schema_version == 2 {
@@ -302,7 +319,7 @@ impl<'de> Deserialize<'de> for AreaPack {
             normalize_v5_area_rewards(&mut value).map_err(D::Error::custom)?;
         } else if schema_version == 6 || schema_version == 7 {
             normalize_v5_area_rewards(&mut value).map_err(D::Error::custom)?;
-        } else if schema_version == u64::from(AREA_PACK_SCHEMA_VERSION) {
+        } else if schema_version == 8 || schema_version == u64::from(AREA_PACK_SCHEMA_VERSION) {
             reject_native_area_legacy_item_fields(&value).map_err(D::Error::custom)?;
         }
         let raw: RawAreaPack = serde_json::from_value(value).map_err(D::Error::custom)?;
@@ -313,6 +330,7 @@ impl<'de> Deserialize<'de> for AreaPack {
             && raw.schema_version != 5
             && raw.schema_version != 6
             && raw.schema_version != 7
+            && raw.schema_version != 8
             && raw.schema_version != AREA_PACK_SCHEMA_VERSION
         {
             return Err(D::Error::custom(format!(
@@ -361,6 +379,9 @@ impl<'de> Deserialize<'de> for AreaPack {
             talent_graphs: raw.talent_graphs,
             abilities: raw.abilities,
             social_emotes: raw.social_emotes,
+            commodities: raw.commodities,
+            quests: raw.quests,
+            shops: raw.shops,
             npc_ability_sets: raw.npc_ability_sets,
             room_media: raw.room_media,
             entity_media: raw.entity_media,
@@ -487,6 +508,21 @@ fn reject_legacy_area_communication_fields(
     Ok(())
 }
 
+fn reject_legacy_area_adventure_fields(
+    value: &serde_json::Value,
+    schema_version: u64,
+) -> Result<(), String> {
+    if ["commodities", "quests", "shops"]
+        .into_iter()
+        .any(|field| value.get(field).is_some())
+    {
+        return Err(format!(
+            "AreaPack v{schema_version} cannot declare v9 commodities, quests or shops"
+        ));
+    }
+    Ok(())
+}
+
 fn reject_legacy_area_social_emote_fields(
     value: &serde_json::Value,
     schema_version: u64,
@@ -601,6 +637,12 @@ pub struct AreaOwnership {
     pub talent_nodes: Vec<String>,
     pub abilities: Vec<String>,
     pub social_emotes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commodities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quests: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shops: Vec<String>,
     pub npc_ability_sets: Vec<String>,
     pub room_media: Vec<String>,
     pub entity_media: Vec<String>,
@@ -1135,6 +1177,24 @@ fn compose_loaded(
         )?;
         register_entities(
             &mut global_ids,
+            "commodity",
+            &pack.id,
+            pack.commodities.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "quest",
+            &pack.id,
+            pack.quests.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
+            "shop",
+            &pack.id,
+            pack.shops.iter().map(|v| &v.id),
+        )?;
+        register_entities(
+            &mut global_ids,
             "script",
             &pack.id,
             pack.scripts.iter().map(|v| &v.id),
@@ -1247,6 +1307,14 @@ fn compose_loaded(
                         .map(|value| value.id.clone())
                         .collect(),
                 ),
+                commodities: sorted(
+                    pack.commodities
+                        .iter()
+                        .map(|value| value.id.clone())
+                        .collect(),
+                ),
+                quests: sorted(pack.quests.iter().map(|value| value.id.clone()).collect()),
+                shops: sorted(pack.shops.iter().map(|value| value.id.clone()).collect()),
                 npc_ability_sets: sorted(
                     pack.npc_ability_sets
                         .iter()
@@ -1343,6 +1411,13 @@ fn compose_loaded(
             .gameplay
             .social_emotes
             .extend(pack.social_emotes.clone());
+        document
+            .world
+            .gameplay
+            .commodities
+            .extend(pack.commodities.clone());
+        document.world.gameplay.quests.extend(pack.quests.clone());
+        document.world.gameplay.shops.extend(pack.shops.clone());
         document
             .world
             .gameplay
@@ -1577,6 +1652,14 @@ pub(crate) fn ownership_for_area(pack: &AreaPack) -> AreaOwnership {
                 .map(|value| value.id.clone())
                 .collect(),
         ),
+        commodities: sorted(
+            pack.commodities
+                .iter()
+                .map(|value| value.id.clone())
+                .collect(),
+        ),
+        quests: sorted(pack.quests.iter().map(|value| value.id.clone()).collect()),
+        shops: sorted(pack.shops.iter().map(|value| value.id.clone()).collect()),
         npc_ability_sets: sorted(
             pack.npc_ability_sets
                 .iter()
@@ -2644,6 +2727,9 @@ pub(crate) fn audit_area_pack_keys(value: &serde_json::Value) -> Result<(), Comp
             "talentGraphs",
             "abilities",
             "socialEmotes",
+            "commodities",
+            "quests",
+            "shops",
             "npcAbilitySets",
             "roomMedia",
             "entityMedia",

@@ -61,9 +61,12 @@ orchestration are not a goal without measured load that justifies them.
 
 ## World data and authoring
 
-WorldPack v9 is the canonical target. AreaPack v8 allows strict modular
-composition under WorldProject v2. WorldPack v8/v7/v6/v5/v4/v3/v2, AreaPack
-v7/v6/v5/v4/v3/v2/v1 and Envy/Merc are normalized on import or composition; the
+WorldPack v10 is the canonical target. AreaPack v9 allows strict modular
+composition under WorldProject v2. WorldPack v9/v8/v7/v6/v5/v4/v3/v2, AreaPack
+v8/v7/v6/v5/v4/v3/v2/v1 and Envy/Merc are normalized on import or composition
+(WorldPack v2–v9 gain the implied legacy `first-hunt` quest and market; quests,
+commodities and shops are WorldPack v10 data per the proposed
+[ADR 0032](decisions/0032-worldpack-v10-quests-and-shops.md)); the
 domain keeps no legacy vocabulary and invents no seals, affixes, telepathy or
 emotes.
 
@@ -228,7 +231,7 @@ contracts are in
 
 ### Items, inventory and loot 3A–4B
 
-WorldPack v9 separates `itemPrototypes`, which contain reusable content and
+WorldPack v10 separates `itemPrototypes`, which contain reusable content and
 rules, from `initialItemInstances`, which assign each durable unit to a room, an
 `npc_spawn`, `staged` or another container instance. At runtime `ItemInstanceId`
 is an internal typed string; new instances use a monotonic sequence included in
@@ -279,8 +282,8 @@ quantity, `put <item> in <container>` moves carried roots and
 1..=256 units. `contents` paginates twenty groups and avoids embedding recursive
 trees in the sheets or scenes.
 
-The current WorldPack v9 and AreaPack v8, like WorldPack v8/v7/v6/v5 and AreaPack
-v7/v6/v5/v4, accept the closed vocabulary `transferable`, `character_bound` and
+The current WorldPack v10 and AreaPack v9, like WorldPack v9/v8/v7/v6/v5 and AreaPack
+v8/v7/v6/v5/v4, accept the closed vocabulary `transferable`, `character_bound` and
 `non_transferable`; WorldPack v4, AreaPack v3 and earlier formats only normalize
 `transferable`. The effective owner of an instance is obtained by following at
 most four containment edges up to a carried or equipped root. The first
@@ -367,9 +370,9 @@ The main limits are 1,024 prototypes and 8,192 initial instances per WorldPack,
 v6–v8 snapshots. The aggregate budget of inspected owner
 sheets at startup remains 1 MiB and each sheet has a maximum of 64 KiB. Lantern
 Square contains 3 rooms, 10 prototypes, 9 initial instances, 2 tables, 1 source,
-1 affix, 1 pool, 1 telepathic ability and 1 room emote; the canonical WorldPack
-occupies 53,567 bytes and has SHA-256
-`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
+1 affix, 1 pool, 1 telepathic ability, 1 room emote, 2 commodities, 1 quest and
+1 shop; the canonical WorldPack v10 occupies 55,264 bytes and has SHA-256
+`666dda61438a6a1e2b17d6ef0ba825b4d72c7e1b9d122e93284d71dab8ab4092`.
 
 WorldPack v7/AreaPack v6 admit guaranteed drops and weighted pools with integer
 weights. Entries are canonically ordered and each selection uses rejection
@@ -739,7 +742,7 @@ create a sequence and are not inferred from prose. Reference:
 | --- | --- |
 | Combat and bounded abilities | Baseline implemented and tested |
 | Cumulative limits and level without refill | Implemented and tested |
-| WorldPack v9/AreaPack v8/WorldProject v2, validator, normalizer and catalog | Integrated; WorldPack v8/v7/v6/v5/v4/v3/v2 and AreaPack v7/v6/v5/v4/v3/v2/v1 entries normalize without inventing seals, affixes, telepathy, emotes or absent loot |
+| WorldPack v10/AreaPack v9/WorldProject v2, validator, normalizer and catalog | Integrated; WorldPack v9/v8/v7/v6/v5/v4/v3/v2 and AreaPack v8/v7/v6/v5/v4/v3/v2/v1 entries normalize without inventing seals, affixes, telepathy, emotes or absent loot; WorldPack v2–v9 gain only the implied legacy quest and market (ADR 0032, proposed) |
 | Areas 6A/6B/6C | Local catalog/bundles, additive loading and full quiescent replacement implemented. 6C adds SQL v14 identity, exact startup, SIGHUP, private staging, migration-free compatibility, zero sessions/leases, snapshot+pointer CAS and explicit rollback. The gate passes 774 Rust tests/329 server and the reaudit 0 P1/0 P2; the SQLite smoke G0→G1→G0/restart is retained. Real PostgreSQL 18 passes 20/20 adapter tests and 7/7 server tests with v14 CAS; its smoke binds G0 sequence 1 and validates `noop`, readiness, Web, Telnet and two resident areas. No per-area replacement/unload or LRU |
 | Areas 6D | Partial: snapshot v8, SQL v15, checkpoints, SCC/reverse closure, pins, internal same-revision retirement/rehydration and fail-closed recovery implemented. Server passes 337/337 and PostgreSQL v15 22/22+8/8; no operational surface, budget/LRU, RSS measurement or aggregated integral gate |
 | Lineage/class/talent/promotion and persistence | Implemented and tested |

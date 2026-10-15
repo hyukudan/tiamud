@@ -716,14 +716,13 @@ pub fn validate_world_runtime_snapshot_semantics(
                     .keys()
                     .all(|invitee| invitee.0 > 0 && !party.members.contains(invitee))
         })
-        && snapshot.adventure.shop_stock.len() == commodity_specs().len()
-        && commodity_specs().iter().all(|(id, _, _, _)| {
-            snapshot
-                .adventure
-                .shop_stock
-                .get(*id)
-                .is_some_and(|stock| *stock <= 100)
-        })
+        && snapshot.adventure.shop_stock.len()
+            <= MAX_ADVENTURE_SHOPS * MAX_ADVENTURE_SHOP_STOCK_ENTRIES
+        && snapshot
+            .adventure
+            .shop_stock
+            .iter()
+            .all(|(id, stock)| valid_definition_id(id) && *stock <= MAX_ADVENTURE_SHOP_STOCK)
         && snapshot.adventure.next_weather_tick > 0;
     let npc_shape_valid = snapshot.npcs.iter().all(|(npc_id, npc)| {
         npc_id == &npc.stable_id
@@ -782,6 +781,7 @@ impl Default for CharacterGameplaySnapshot {
             coins: default_coin_balance(),
             commodities: BTreeMap::new(),
             quests: BTreeMap::new(),
+            quest_stages: BTreeMap::new(),
             script_flags: BTreeSet::new(),
             scheduled_script_flags: Vec::new(),
         }
