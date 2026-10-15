@@ -127,6 +127,7 @@ pub struct ItemContainerDefinition {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ItemTransferPolicy {
     Transferable,
@@ -196,6 +197,7 @@ pub struct ItemPrototypeDefinition {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AffixPosition {
     Prefix,
@@ -276,6 +278,7 @@ pub struct WorldDefinition {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum EffectKind {
     Regeneration,
@@ -283,6 +286,7 @@ pub enum EffectKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveEffect {
     pub kind: EffectKind,

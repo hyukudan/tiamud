@@ -397,11 +397,11 @@ node --test scripts/bot.test.mjs scripts/verify-soak-report.test.mjs scripts/tel
 node scripts/smoke.mjs
 ```
 
-`cargo test --workspace --locked` also fails if
-`apps/web/src/lib/generated/protocol.ts` is stale against the typed protocol in
-`crates/protocol`; regenerate it with
-`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol` and
-review the diff.
+`cargo test --workspace --locked` also fails if any of
+`apps/web/src/lib/generated/{protocol,core,server}.ts` is stale against
+`crates/protocol`, the `tiamud-core` views or the `tiamud-server`
+`action.perform`/presentation types; regenerate them with
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript` and review the diff.
 
 The baseline is verified locally per phase with formatting, strict clippy,
 workspace tests, the web client and license checks. Exact per-phase figures,

@@ -232,6 +232,7 @@ pub enum EconomyAction {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AccountRole {
     Player,
@@ -251,6 +252,7 @@ impl AccountRole {
 /// deliberately unrelated to character level, class, talents or WorldPack
 /// content.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 pub enum StaffCapability {
     #[serde(rename = "reports.view")]
     ReportsView,
@@ -321,6 +323,7 @@ impl StaffCapability {
 /// Operational profile used to seed a reviewed capability bundle.
 /// `lore_title` is stored separately and never authorizes an action.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum StaffProfileKey {
     Helper,
@@ -449,6 +452,7 @@ pub enum StaffAction {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum StaffReportResolution {
     Dismissed,
@@ -476,6 +480,7 @@ impl StaffReportResolution {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum SocialChannelName {
     General,

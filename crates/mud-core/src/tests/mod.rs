@@ -15,6 +15,21 @@ mod staff;
 mod trade;
 mod world;
 
+/// Asserts that a projected identifier is an opaque per-observer selector
+/// (`o` + 16 lowercase hex digits) and therefore not a durable domain ID.
+///
+/// Matching the exact shape is deterministic. A substring check such as
+/// `!id.contains("101")` is not: the selector is derived from a random
+/// per-session salt, so its hex digits contain `101` in a small fraction of
+/// runs even though nothing leaked.
+#[track_caller]
+fn assert_opaque_id(id: &str) {
+    assert!(
+        is_opaque_id_shaped(id),
+        "expected an opaque selector, got {id:?}"
+    );
+}
+
 fn item_prototype(
     id: &str,
     name: &str,

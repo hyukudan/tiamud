@@ -10,6 +10,8 @@ import type {
   ClientHeartbeatData,
   ClientHelloData,
   ClientMessageType,
+  CombatCue,
+  CombatCueKind,
   CommandSubmitData,
   ContainerContents,
   EntityRemove,
@@ -53,6 +55,9 @@ import type {
   TradeContents,
   VitalsUpdate,
 } from './generated/protocol';
+import type * as Core from './generated/core';
+import type * as Server from './generated/server';
+import type { ActionPerformData } from './generated/server';
 import { isRecord } from './guards';
 import {
   MAX_STORY_VOTE_SECONDS,
@@ -72,10 +77,15 @@ import {
   parseStoryView,
 } from './story-protocol';
 
-// Wire shapes generated from `crates/protocol` (the Rust source of truth).
-// The validators below still check every inbound frame at runtime and return
-// these generated types, refined only where the client normalises a value.
+// Wire shapes generated from the Rust source of truth: envelopes and
+// transport payloads from `crates/protocol` (`generated/protocol.ts`), the
+// embedded core projections from `tiamud-core` (`generated/core.ts`) and the
+// `action.perform`/presentation shapes from `tiamud-server`
+// (`generated/server.ts`). The validators below still check every inbound
+// frame at runtime and return these generated types, refined only where the
+// client narrows or normalises a value.
 export type * from './generated/protocol';
+export type { ActionPerformData } from './generated/server';
 
 export const PROTOCOL_VERSION: ProtocolVersion = 1;
 
@@ -92,21 +102,26 @@ export interface Envelope<TType extends ServerMessageType | ClientMessageType, T
 /** The client tolerates a welcome without its informational fields. */
 export type ServerWelcomeData = Partial<ServerWelcome>;
 
-export interface SceneImage {
-  alt: string;
-  localizedAlt?: Record<string, string>;
-  manifest?: string;
-  avif?: string;
+/**
+ * Replaces fields of a generated wire type. Used only where the validator
+ * below narrows a field (a closed vocabulary the server projects as a string)
+ * or normalises it (`null` to absent); every other field is the generated one.
+ */
+type Refine<T, R> = Omit<T, keyof R> & R;
+
+/**
+ * Scene image as the client renders it: the generated `SceneImage` plus the
+ * PNG fallback and `srcset` strings that `assets.ts` resolves from the
+ * reviewed manifest after validation. None of these extra fields is sent by
+ * the server.
+ */
+export type SceneImage = Core.SceneImage & {
   avifSrcset?: string;
-  webp?: string;
   webpSrcset?: string;
-  jpeg?: string;
   jpegSrcset?: string;
   png?: string;
   pngSrcset?: string;
-  width?: number;
-  height?: number;
-}
+};
 
 export function localizedImageAlt(image: SceneImage | undefined, locale: string): string | undefined {
   if (!image) return undefined;
@@ -119,126 +134,89 @@ export function localizedImageAlt(image: SceneImage | undefined, locale: string)
   return exact ?? base ?? english ?? entries.toSorted(([left], [right]) => left.localeCompare(right))[0]?.[1] ?? image.alt;
 }
 
-export interface SceneExit {
-  id: string;
-  label: string;
-  command: string;
-}
+export type SceneExit = Core.SceneExit;
 
-export interface SceneAction {
-  label: string;
-  command: string;
-}
+export type SceneAction = Core.SceneAction;
 
-export type SceneEntityPose = 'idle' | 'attack' | 'hit' | 'defeated';
+export type SceneEntityPose = keyof Server.ProjectedPoses;
 
-export interface SceneEntityVisualSource {
-  /**
-   * Optional manifest/AVIF fields remain reserved for additive negotiation.
-   * The v1 server emits only validated direct WebP/PNG raster sources and
-   * sheds optional annotations before the 16 KiB frame boundary.
-   */
+/**
+ * Optional manifest/AVIF fields remain reserved for additive negotiation.
+ * The v1 server emits only validated direct WebP/PNG raster sources and
+ * sheds optional annotations before the 16 KiB frame boundary.
+ */
+export type SceneEntityVisualSource = Server.ProjectedSource & {
   manifest?: string;
   avif?: string;
-  webp?: string;
-  png?: string;
-}
+};
 
-export interface SceneEntityVisual {
-  alt: string;
-  decorative: boolean;
-  footprint: { width: number; height: number };
-  preferredAnchor?: { x: number; y: number };
-  priority: number;
-  layer: 'midground' | 'foreground' | 'overlay';
-  poses: Record<'idle', SceneEntityVisualSource> & Partial<
-    Record<Exclude<SceneEntityPose, 'idle'>, SceneEntityVisualSource>
-  >;
-}
+/** The server projects the layer as a string; the validator narrows it. */
+export type SceneEntityLayer = 'midground' | 'foreground' | 'overlay';
 
-export interface SceneEntityPresentation extends SceneEntityVisual {
-  id: string;
-}
+export type SceneEntityVisual = Refine<Omit<Server.ProjectedEntityMedia, 'id'>, {
+  layer: SceneEntityLayer;
+  poses: { [Pose in keyof Server.ProjectedPoses]: SceneEntityVisualSource };
+}>;
 
-export interface ScenePresentation {
+export type SceneEntityPresentation = SceneEntityVisual & Pick<Server.ProjectedEntityMedia, 'id'>;
+
+export type ScenePresentation = Refine<Server.ScenePresentation, {
   entities: SceneEntityPresentation[];
-}
+}>;
 
-export interface SceneItem {
-  id: string;
-  label: string;
-  description: string;
-  rarity: ItemRarity;
-  itemLevel: number;
-  weightGrams: number;
-  quantity: number;
-  stackSlots: number;
-  totalWeightGrams: number;
-  transferPolicy: ItemTransferPolicy;
-  boundToYou: boolean;
-  affix?: ItemAffixSnapshot;
-  containerCapacity?: InventoryCapacitySnapshot;
-  loot?: SceneLootAccess;
-  actions: SceneAction[];
-}
+/** The server projects rarity as a string; the validator narrows it. */
+export type ItemRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
 
+export type ItemTransferPolicy = Core.ItemTransferPolicy;
+
+export type ItemAffixSnapshot = Core.ItemAffixView;
+
+export type InventoryCapacitySnapshot = Core.InventoryCapacityView;
+
+/** The validator only accepts the exact `yours`/`reserved` field sets. */
 export type SceneLootAccess =
-  | { access: 'yours'; expiresInTicks: number }
-  | { access: 'reserved' };
+  | Refine<Core.SceneLootAccessView, { access: 'yours'; expiresInTicks: number }>
+  | Refine<Omit<Core.SceneLootAccessView, 'expiresInTicks'>, { access: 'reserved' }>;
 
-export interface SceneNpc {
-  id: string;
-  label: string;
-  description: string;
-  health: number;
-  maxHealth: number;
-  actions: SceneAction[];
-}
+export type SceneItem = Refine<Core.SceneItem, { rarity: ItemRarity; loot?: SceneLootAccess }>;
 
-export interface SceneWeather {
-  condition: string;
-  day: number;
-  hour: number;
-  nextChangeInTicks: number;
-}
+export type SceneNpc = Core.SceneNpc;
 
-export interface SceneSnapshot {
+export type SceneWeather = Core.WeatherView;
+
+/**
+ * Normalised scene: `viewId`/`revision` stay optional because the lenient
+ * scene normaliser tolerates their absence, the image is the client-enriched
+ * one, and the presentation annotation is merged into the same object.
+ */
+export type SceneSnapshot = Refine<Core.SceneView, {
   viewId?: string;
   revision?: number;
-  title: string;
-  prose: string[];
   image?: SceneImage;
-  presentation?: ScenePresentation;
-  exits: SceneExit[];
   items: SceneItem[];
-  npcs: SceneNpc[];
-  weather: SceneWeather;
-}
+}> & { presentation?: ScenePresentation };
 
 /** The wire `message: string | null` is normalised to an optional string. */
 export type ActionResultData = Omit<ActionResult, 'message'> & { message?: string };
 
 export type ServerNoticeData = ServerNotice;
 
-export interface MessageAppendData {
-  revision: number;
-  kind:
-    | 'characterMoved'
-    | 'itemTaken'
-    | 'itemDropped'
-    | 'itemGiven'
-    | 'tradeRequested'
-    | 'tradeChanged'
-    | 'tradeCompleted'
-    | 'tradeCancelled'
-    | 'gameplay'
-    | 'adventure';
-  text: string;
-  actorId: string;
-  targetId?: string;
-  itemId?: string;
-  cue?: MessagePresentationCue;
-}
+export type MessagePresentationCueKind = CombatCueKind | 'heal';
+
+/**
+ * Narrative presentation cue. The server emits the generated `CombatCue`; the
+ * validator also tolerates the reserved `heal` kind and an omitted entity or
+ * pose, and narrows `intensity` to its 1–3 range.
+ */
+export type MessagePresentationCue = Refine<CombatCue, {
+  kind: MessagePresentationCueKind;
+  entityId?: string;
+  pose?: SceneEntityPose;
+  intensity: 1 | 2 | 3;
+}>;
+
+/** `message.append`: the generated narrative event with its optional cue. */
+export type MessageAppendData = Core.ViewEvent & { cue?: MessagePresentationCue };
 
 export type SyncSceneData = SyncScene<SceneSnapshot>;
 
@@ -259,16 +237,6 @@ export type EntityUpsertData =
 
 export type EntityRemoveData = EntityRemove;
 
-export type MessagePresentationCueKind = 'attack' | 'hit' | 'heal' | 'defeat';
-
-export interface MessagePresentationCue {
-  kind: MessagePresentationCueKind;
-  entityId?: string;
-  pose?: SceneEntityPose;
-  intensity: 1 | 2 | 3;
-  durationMs: number;
-}
-
 export type VitalsUpdateData = VitalsUpdate<PlayerCharacterSnapshot>;
 
 export type InventoryPatchData = InventoryPatch<
@@ -288,202 +256,53 @@ export type MediaPlayData = MediaPlay;
 /** The client tolerates a stop without a channel (stop everything). */
 export type MediaStopData = Partial<MediaStop>;
 
-export type CommunityChannel = Extract<ChatChannel, 'general' | 'newbie' | 'staff'>;
+export type CommunityChannel = Core.SocialChannelName;
 
 export type SocialMessageChannel = ChatChannel;
 
-export type StaffReportResolution = 'dismissed' | 'action_taken' | 'no_action';
+export type StaffReportResolution = Core.StaffReportResolution;
 
-export type StaffProfile =
-  | 'helper'
-  | 'builder'
-  | 'moderator'
-  | 'administrator'
-  | 'implementor';
+export type StaffProfile = Core.StaffProfileKey;
 
-export type StaffCapability =
-  | 'reports.view'
-  | 'reports.resolve'
-  | 'moderation.mute'
-  | 'moderation.ban'
-  | 'staff.assign'
-  | 'staff.inspect'
-  | 'staff.where'
-  | 'staff.goto'
-  | 'staff.transfer'
-  | 'staff.restore'
-  | 'staff.announce'
-  | 'staff.audit';
+export type StaffCapability = Core.StaffCapability;
 
 export type SocialMessageData = ChatMessage;
 
 /** Retained for the v1 `chat.message` envelope name. */
 export type ChatMessageData = SocialMessageData;
 
-export interface PlayerCharacterSnapshot {
-  name: string;
-  level: number;
-  experience: number;
-  nextLevelExperience: number;
-  health: number;
-  maxHealth: number;
-  strength: number;
-  defence: number;
-  skills: Array<{ id: string; label: string; rank: number }>;
-  effects: Array<{
-    kind: 'regeneration' | 'strength';
-    magnitude: number;
-    remainingTicks: number;
-  }>;
+/** The server projects these as strings; the validator narrows them. */
+export type AbilityKind = 'martial' | 'spell' | 'utility';
+export type AbilityTargeting = 'self' | 'optionalTarget' | 'explicitTarget';
+
+export type AbilitySnapshot = Refine<Core.AbilityView, {
+  kind: AbilityKind;
+  targeting: AbilityTargeting;
+}>;
+
+/** The wire `nextCost: number | null` is normalised to an optional number. */
+export type TalentNodeSnapshot = Refine<Core.TalentNodeView, { nextCost?: number }>;
+
+export type TalentGraphSnapshot = Refine<Core.TalentGraphView, { nodes: TalentNodeSnapshot[] }>;
+
+/** The wire `recoveryInTicks: number | null` is normalised to optional. */
+export type PlayerCharacterSnapshot = Refine<Core.PlayerCharacterView, {
   recoveryInTicks?: number;
-  lineage: {
-    id: string;
-    label: string;
-    description: string;
-  };
-  background?: {
-    id: string;
-    label: string;
-    description: string;
-  };
-  baseClass: {
-    id: string;
-    label: string;
-    description: string;
-  };
-  activeClass: {
-    id: string;
-    label: string;
-    description: string;
-  };
-  classHistory: Array<{
-    id: string;
-    label: string;
-    description: string;
-  }>;
-  attributes: Array<{
-    id: string;
-    label: string;
-    value: number;
-  }>;
-  resistances: Array<{
-    damageType: 'physical' | 'arcane' | 'fire' | 'frost' | 'lightning';
-    percent: number;
-  }>;
-  statuses: Array<{
-    id: string;
-    label: string;
-    kind: 'attribute_modifier' | 'regeneration' | 'damage_over_time' | 'stun';
-    magnitude: number;
-    remainingTicks: number;
-  }>;
-  resources: Array<{
-    id: string;
-    label: string;
-    current: number;
-    max: number;
-  }>;
-  abilities: Array<{
-    id: string;
-    name: string;
-    description: string;
-    kind: 'martial' | 'spell' | 'utility';
-    resourceCosts: Array<{
-      resourceId: string;
-      label: string;
-      amount: number;
-    }>;
-    cooldownRemaining: number;
-    usable: boolean;
-    purpose: 'gameplay' | 'telepathy';
-    targeting: 'self' | 'optionalTarget' | 'explicitTarget';
-  }>;
-  progressionPoints: Record<string, number>;
-  talents: Array<{
-    id: string;
-    label: string;
-    description: string;
-    pointPoolId: string;
-    availablePoints: number;
-    nodes: Array<{
-      id: string;
-      label: string;
-      description: string;
-      rank: number;
-      maxRank: number;
-      nextCost?: number;
-      available: boolean;
-      requirements: Array<{ met: boolean; text: string }>;
-      command: string;
-    }>;
-  }>;
-  promotions: Array<{
-    class: {
-      id: string;
-      label: string;
-      description: string;
-    };
-    available: boolean;
-    requirements: Array<{ met: boolean; text: string }>;
-    command: string;
-  }>;
-}
+  abilities: AbilitySnapshot[];
+  talents: TalentGraphSnapshot[];
+}>;
 
-export interface PlayerItemSnapshot {
-  id: string;
-  label: string;
-  description: string;
+export type PlayerItemSnapshot = Refine<Core.PlayerItemView, { rarity: ItemRarity }>;
+
+/** The server projects the slot as a string; the validator narrows it. */
+export type EquipmentSlot = 'weapon' | 'body' | 'trinket';
+
+export type EquippedItemSnapshot = Refine<Core.EquippedItemView, {
   rarity: ItemRarity;
-  itemLevel: number;
-  weightGrams: number;
-  quantity: number;
-  availableQuantity: number;
-  reservedForTrade: number;
-  stackSlots: number;
-  totalWeightGrams: number;
-  transferPolicy: ItemTransferPolicy;
-  boundToYou: boolean;
-  affix?: ItemAffixSnapshot;
-  canGive: boolean;
-  canTrade: boolean;
-  containerCapacity?: InventoryCapacitySnapshot;
-  actions: SceneAction[];
-}
+  slot: EquipmentSlot;
+}>;
 
-export interface EquippedItemSnapshot {
-  id: string;
-  slot: 'weapon' | 'body' | 'trinket';
-  label: string;
-  rarity: ItemRarity;
-  itemLevel: number;
-  weightGrams: number;
-  quantity: number;
-  stackSlots: number;
-  totalWeightGrams: number;
-  transferPolicy: ItemTransferPolicy;
-  boundToYou: boolean;
-  affix?: ItemAffixSnapshot;
-  containerCapacity?: InventoryCapacitySnapshot;
-  actions: SceneAction[];
-}
-
-export type ItemRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
-export type ItemTransferPolicy = 'transferable' | 'character_bound' | 'non_transferable';
-
-export interface ItemAffixSnapshot {
-  label: string;
-  position: 'prefix' | 'suffix';
-  attackBonusDelta: number;
-  healAmountDelta: number;
-}
-
-export interface InventoryCapacitySnapshot {
-  usedSlots: number;
-  maxSlots: number;
-  usedWeightGrams: number;
-  maxWeightGrams: number;
-}
-
+/** Paged container/trade frames omit item prose (see `web.rs`). */
 export type ContainerItemSnapshot = Omit<PlayerItemSnapshot, 'description'>;
 
 export type ContainerContentsData = ContainerContents<
@@ -491,41 +310,13 @@ export type ContainerContentsData = ContainerContents<
   InventoryCapacitySnapshot
 >;
 
-export interface RewardOddsGuaranteedRow {
-  label: string;
-  quantity: number;
-  affixPoolLabel?: string;
-}
+export type RewardOddsGuaranteedRow = Core.RewardOddsGuaranteedRow;
 
-export interface RewardOddsWeightedRow {
-  poolLabel: string;
-  rolls: number;
-  outcomeLabel: string;
-  minQuantity: number;
-  maxQuantity: number;
-  probabilityNumerator: number;
-  probabilityDenominator: number;
-  affixPoolLabel?: string;
-}
+export type RewardOddsWeightedRow = Core.RewardOddsWeightedRow;
 
-export interface RewardOddsAffixRow {
-  parentOutcomeLabel: string;
-  affixLabel: string;
-  position?: 'prefix' | 'suffix';
-  attackBonusDelta: number;
-  healAmountDelta: number;
-  conditionalProbabilityNumerator: number;
-  conditionalProbabilityDenominator: number;
-}
+export type RewardOddsAffixRow = Core.RewardOddsAffixRow;
 
-export interface RewardOddsData {
-  selector: string;
-  page: number;
-  totalPages: number;
-  guaranteed: RewardOddsGuaranteedRow[];
-  weighted: RewardOddsWeightedRow[];
-  affixes: RewardOddsAffixRow[];
-}
+export type RewardOddsData = Core.RewardOddsView;
 
 export type MailListData = MailList;
 
@@ -539,85 +330,25 @@ export type BoardListData = BoardList & { capacity: 1000 };
 
 export type BoardEntryData = BoardEntry;
 
-export interface PlayerStateSnapshot {
-  revision: number;
+/** The server projects quest status as a string; the validator narrows it. */
+export type QuestStatus = 'available' | 'active' | 'readyToClaim' | 'completed';
+
+export type QuestSnapshot = Refine<Core.QuestView, { status: QuestStatus }>;
+
+export type PlayerStateSnapshot = Refine<Core.PlayerStateView, {
   character: PlayerCharacterSnapshot;
   inventory: PlayerItemSnapshot[];
   equipment: EquippedItemSnapshot[];
-  inventoryCapacity: InventoryCapacitySnapshot;
-  map: {
-    currentRoomId: string;
-    rooms: Array<{ id: string; title: string; current: boolean }>;
-    paths: Array<{ from: string; direction: string; to?: string }>;
-  };
-  quests: Array<{
-    id: string;
-    label: string;
-    summary: string;
-    status: 'available' | 'active' | 'readyToClaim' | 'completed';
-    current: number;
-    target: number;
-    actions: SceneAction[];
-  }>;
-  party?: {
-    leader: boolean;
-    members: Array<{ id: string; name: string; leader: boolean; online: boolean }>;
-    actions: SceneAction[];
-  };
-  partyInvites: Array<{
-    leaderName: string;
-    expiresInTicks: number;
-    actions: SceneAction[];
-  }>;
-  economy: {
-    coins: number;
-    reservedCoins: number;
-    spendableCoins: number;
-    commodities: Array<{ id: string; label: string; quantity: number }>;
-    shopAvailable: boolean;
-    shop: Array<{
-      id: string;
-      label: string;
-      buyPrice: number;
-      sellPrice: number;
-      stock: number;
-      owned: number;
-      actions: SceneAction[];
-    }>;
-  };
-  social: {
-    online: Array<{ id: string; name: string; selfCharacter: boolean; nearby: boolean }>;
-  };
-  trade?: TradeSnapshot;
-}
+  quests: QuestSnapshot[];
+}>;
 
-export type TradePhase = 'requested' | 'negotiating';
+export type TradePhase = Core.TradePhase;
 
-export interface TradeOfferLineSnapshot {
-  target: string;
-  label: string;
-  quantity: number;
-  container: boolean;
-}
+export type TradeOfferLineSnapshot = Core.TradeOfferLineView;
 
-export interface TradeOfferSnapshot {
-  coins: number;
-  lines: TradeOfferLineSnapshot[];
-}
+export type TradeOfferSnapshot = Core.TradeOfferView;
 
-export interface TradeSnapshot {
-  id: string;
-  phase: TradePhase;
-  counterparty: string;
-  expiresInTicks: number;
-  stateRevision: number;
-  ownConfirmed: boolean;
-  counterpartyConfirmed: boolean;
-  ownOffer: TradeOfferSnapshot;
-  counterpartyOffer: TradeOfferSnapshot;
-  canAccept: boolean;
-  canConfirm: boolean;
-}
+export type TradeSnapshot = Core.TradeView;
 
 export type ServerMessage =
   | Envelope<'server.welcome', ServerWelcomeData>
@@ -666,43 +397,14 @@ export type ClientHello = Envelope<'client.hello', ClientHelloData>;
 
 export type CommandSubmit = Envelope<'command.submit', CommandSubmitData>;
 
-export interface ActionPerformFields {
-  abilityId?: string;
-  emote?: string;
-  target?: string;
-  recipient?: string;
-  container?: string;
-  quantity?: number;
-  page?: number;
-  tradeId?: string;
-  coins?: number;
-  stateRevision?: number;
-  message?: string;
-  channel?: CommunityChannel;
-  reason?: string;
-  mailId?: string;
-  postId?: string;
-  board?: BoardKey;
-  subject?: string;
-  body?: string;
-  reportId?: number;
-  resolution?: StaffReportResolution;
-  profile?: StaffProfile | null;
-  loreTitle?: string | null;
-  capability?: StaffCapability;
-  enabled?: boolean;
-}
+/**
+ * `action.perform` fields other than `requestId`/`action`, generated from the
+ * server's `ActionPerformData`. `createActionPerform` still validates every
+ * field it sends.
+ */
+export type ActionPerformFields = Omit<ActionPerformData, 'requestId' | 'action'>;
 
-export type ActionPerform = Envelope<
-  'action.perform',
-  ActionPerformFields & {
-    requestId: string;
-    action: string;
-    classId?: string;
-    graphId?: string;
-    nodeId?: string;
-  }
->;
+export type ActionPerform = Envelope<'action.perform', ActionPerformData>;
 
 export type SyncRequest = Envelope<'sync.request', SyncRequestData>;
 
@@ -808,18 +510,15 @@ const parseInventoryCapacity = (value: unknown): InventoryCapacitySnapshot | und
   return { usedSlots, maxSlots, usedWeightGrams, maxWeightGrams };
 };
 
-interface ItemStackProjection {
-  quantity: number;
-  stackSlots: number;
-  totalWeightGrams: number;
-  containerCapacity?: InventoryCapacitySnapshot;
-}
+type ItemStackProjection = Pick<
+  PlayerItemSnapshot,
+  'quantity' | 'stackSlots' | 'totalWeightGrams' | 'containerCapacity'
+>;
 
-interface ItemTradeProjection {
-  availableQuantity: number;
-  reservedForTrade: number;
-  canTrade: boolean;
-}
+type ItemTradeProjection = Pick<
+  PlayerItemSnapshot,
+  'availableQuantity' | 'reservedForTrade' | 'canTrade'
+>;
 
 const parseItemTradeProjection = (
   value: Record<string, unknown>,

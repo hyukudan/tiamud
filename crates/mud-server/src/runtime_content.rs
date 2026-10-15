@@ -551,6 +551,7 @@ impl RuntimeContent {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ScenePresentation {
     pub(crate) entities: Vec<ProjectedEntityMedia>,
@@ -571,6 +572,7 @@ impl ScenePresentation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectedEntityMedia {
     id: String,
@@ -578,6 +580,7 @@ pub(crate) struct ProjectedEntityMedia {
     decorative: bool,
     footprint: ProjectedFootprint,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     preferred_anchor: Option<ProjectedAnchor>,
     priority: i16,
     layer: &'static str,
@@ -610,7 +613,8 @@ impl ProjectedEntityMedia {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-struct ProjectedFootprint {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) struct ProjectedFootprint {
     width: f32,
     height: f32,
 }
@@ -618,7 +622,8 @@ struct ProjectedFootprint {
 impl Eq for ProjectedFootprint {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-struct ProjectedAnchor {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) struct ProjectedAnchor {
     x: f32,
     y: f32,
 }
@@ -626,10 +631,13 @@ struct ProjectedAnchor {
 impl Eq for ProjectedAnchor {}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-struct ProjectedSource {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) struct ProjectedSource {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     webp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     png: Option<String>,
 }
 
@@ -643,13 +651,17 @@ impl From<&EntitySpriteSource> for ProjectedSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-struct ProjectedPoses {
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) struct ProjectedPoses {
     idle: ProjectedSource,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     attack: Option<ProjectedSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     hit: Option<ProjectedSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     defeated: Option<ProjectedSource>,
 }
 

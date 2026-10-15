@@ -449,6 +449,7 @@ pub enum GameplayEvent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub enum ViewEventKind {
     CharacterMoved,
@@ -465,6 +466,7 @@ pub enum ViewEventKind {
 
 /// Perception-safe projection of one domain event for one observer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ViewEvent {
     pub revision: u64,
@@ -472,8 +474,10 @@ pub struct ViewEvent {
     pub text: String,
     pub actor_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub target_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
     pub item_id: Option<String>,
 }
 

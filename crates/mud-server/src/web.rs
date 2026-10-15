@@ -154,7 +154,11 @@ struct ClientHelloCredentials {
     audio: bool,
 }
 
+/// `action.perform` payload. Its TypeScript shape is generated into
+/// `apps/web/src/lib/generated/server.ts` (see `web/typescript.rs`); the
+/// closed vocabularies come from `tiamud-core` and are named, not inlined.
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(optional_fields))]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ActionPerformData {
     request_id: String,
@@ -166,6 +170,7 @@ struct ActionPerformData {
     #[serde(default)]
     post_id: Option<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "BoardKey", optional))]
     board: Option<BoardKey>,
     #[serde(default)]
     subject: Option<String>,
@@ -198,22 +203,28 @@ struct ActionPerformData {
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "SocialChannelName", optional))]
     channel: Option<SocialChannelName>,
     #[serde(default)]
     duration_seconds: Option<u64>,
     #[serde(default)]
     reason: Option<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "AccountRole", optional))]
     role: Option<AccountRole>,
     #[serde(default)]
     report_id: Option<i64>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "StaffReportResolution", optional))]
     resolution: Option<StaffReportResolution>,
     #[serde(default, deserialize_with = "deserialize_nullable_field")]
+    #[cfg_attr(test, ts(type = "StaffProfileKey | null", optional = nullable))]
     profile: NullableField<StaffProfileKey>,
     #[serde(default, deserialize_with = "deserialize_nullable_field")]
+    #[cfg_attr(test, ts(type = "string | null", optional = nullable))]
     lore_title: NullableField<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "StaffCapability", optional))]
     capability: Option<StaffCapability>,
     #[serde(default)]
     enabled: Option<bool>,
@@ -4960,6 +4971,9 @@ fn websocket_request_allowed(headers: &HeaderMap) -> bool {
 }
 
 mod story;
+
+#[cfg(test)]
+mod typescript;
 
 #[cfg(test)]
 #[path = "web_protocol_golden_tests.rs"]
