@@ -144,6 +144,14 @@ TIAMUD_TELNET_MODE=plaintext cargo run --locked -p tiamud-server
 Open <http://127.0.0.1:8080> or connect Telnet to `127.0.0.1:4000`. The Rust
 server bundles the web build and the reviewed Lantern Square WorldPack.
 
+Single-player StoryPack sessions (phase S2, in memory, no save slots) are off
+by default. To try the sample gamebook and menu adventure locally, add
+`TIAMUD_STORY_DIR=crates/story-core/fixtures` to the command above, then type
+`historias` and `historia cripta-del-nigromante` (or `story lluvia-de-neon`)
+in the browser or Telnet. See
+[ADR 0029](docs/decisions/0029-story-session-instances-and-story-protocol.md)
+and [single-host operation](docs/operations/single-host.md#story-sessions).
+
 > Unencrypted Telnet is a local-development exception. It must not be exposed to
 > the internet: registration and login would travel in the clear. Telnet TLS is
 > the default mode and fails closed without a valid certificate and key.

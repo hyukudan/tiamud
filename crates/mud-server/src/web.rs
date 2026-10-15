@@ -10,6 +10,7 @@ use crate::{
         MailMessage, MailPage, StoreError,
     },
     social::{MAX_CHAT_MESSAGE_BYTES, MAX_SOCIAL_TARGET_BYTES},
+    story_sessions::{STORY_INPUT_HELP, parse_story_command},
     world_actor::{
         CharacterBackgroundSelection, CombatCueKind, GameError, ProjectedViewEvent, WorldHandle,
     },
@@ -91,6 +92,8 @@ pub struct AppState {
     pub command_burst: u32,
     pub shutdown: watch::Receiver<bool>,
     pub(crate) action_replay: Arc<Mutex<RequestCache>>,
+    /// `None` when story sessions are disabled (no `TIAMUD_STORY_DIR`).
+    pub(crate) stories: Option<crate::story_sessions::StoryManager>,
 }
 
 pub(crate) fn action_replay_cache() -> Arc<Mutex<RequestCache>> {
@@ -598,13 +601,25 @@ struct RequestedAction {
     signature: String,
     action: Result<PlayerAction, String>,
     trade_selector: Option<String>,
+    /// Raw `command.submit` text, checked for story commands before the world.
+    text: Option<String>,
 }
 
 #[derive(Debug)]
 enum ClientMessage {
     Action(RequestedAction),
-    Sync { after_seq: u64 },
-    Heartbeat { nonce: u64 },
+    Sync {
+        after_seq: u64,
+    },
+    Heartbeat {
+        nonce: u64,
+    },
+    StoryInput {
+        request: crate::story_sessions::StoryRequest,
+        view_rev: u32,
+    },
+    StoryUndo,
+    StoryLeave,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -702,13 +717,17 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     state
         .metrics
         .set_database_queue_depth(state.store.queue_depth());
+    let mut body = state.metrics.prometheus(state.world.queue_depth());
+    if let Some(stories) = &state.stories {
+        body.push_str(&stories.prometheus());
+    }
     (
         StatusCode::OK,
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        Body::from(state.metrics.prometheus(state.world.queue_depth())),
+        Body::from(body),
     )
         .into_response()
 }
@@ -973,6 +992,13 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
         finish_websocket_driver(&outbound, driver).await;
         return;
     }
+    // A reconnect resumes the account's live story instance, if any.
+    let mut story =
+        story::WebStorySession::new(state.stories.clone(), entered.account_id, audio_enabled);
+    if !story.resume(&outbound, &mut sequence).await {
+        finish_websocket_driver(&outbound, driver).await;
+        return;
+    }
 
     let mut protocol_errors = 0_u8;
     let mut rate_violations = 0_u8;
@@ -1156,7 +1182,91 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             &last_scene,
                             &last_presentation,
                             &last_player,
-                        ) {
+                        ) || !story.resend(&outbound, &mut sequence).await
+                        {
+                            break;
+                        }
+                    }
+                    message @ (ClientMessage::StoryInput { .. }
+                    | ClientMessage::StoryUndo
+                    | ClientMessage::StoryLeave) => {
+                        if !command_limiter.check(Instant::now()) {
+                            if !queue_notice(&outbound, &mut sequence, "Command rate limit exceeded.") {
+                                break;
+                            }
+                            rate_violations += 1;
+                            if rate_violations >= MAX_PROTOCOL_ERRORS {
+                                break;
+                            }
+                            continue;
+                        }
+                        rate_violations = 0;
+                        let was_in_story = story.active();
+                        let delivered = match message {
+                            ClientMessage::StoryInput { request, view_rev } => {
+                                story.input(&outbound, &mut sequence, request, view_rev).await
+                            }
+                            ClientMessage::StoryUndo => story.undo(&outbound, &mut sequence).await,
+                            _ => story.leave(&outbound, &mut sequence).await,
+                        };
+                        if !delivered
+                            || (was_in_story
+                                && !story.active()
+                                && !queue_media_transition(
+                                    &outbound,
+                                    &mut sequence,
+                                    audio_enabled,
+                                    None,
+                                    last_scene.audio.as_ref(),
+                                ))
+                        {
+                            break;
+                        }
+                    }
+                    ClientMessage::Action(requested)
+                        if story.active()
+                            || requested
+                                .text
+                                .as_deref()
+                                .is_some_and(|text| parse_story_command(text).is_some()) =>
+                    {
+                        if !command_limiter.check(Instant::now()) {
+                            if !queue_notice(&outbound, &mut sequence, "Command rate limit exceeded.") {
+                                break;
+                            }
+                            rate_violations += 1;
+                            if rate_violations >= MAX_PROTOCOL_ERRORS {
+                                break;
+                            }
+                            continue;
+                        }
+                        rate_violations = 0;
+                        let was_in_story = story.active();
+                        let delivered = match requested.text.as_deref() {
+                            Some(text) => story
+                                .text_command(&outbound, &mut sequence, &requested.request_id, text)
+                                .await
+                                .unwrap_or(true),
+                            // Structured world actions wait until the story ends.
+                            None => queue_action_result(
+                                &outbound,
+                                &mut sequence,
+                                &requested.request_id,
+                                false,
+                                Some(STORY_INPUT_HELP.to_owned()),
+                            ),
+                        };
+                        if !delivered
+                            || (was_in_story
+                                && !story.active()
+                                && !queue_media_transition(
+                                    &outbound,
+                                    &mut sequence,
+                                    audio_enabled,
+                                    None,
+                                    last_scene.audio.as_ref(),
+                                ))
+                        {
                             break;
                         }
                     }
@@ -1985,7 +2095,7 @@ fn safe_audio_channel(channel: &str) -> Option<protocol::MediaChannel> {
     protocol::MediaChannel::from_name(channel)
 }
 
-fn safe_content_addressed_audio_url(value: &str) -> bool {
+pub(crate) fn safe_content_addressed_audio_url(value: &str) -> bool {
     if value.len() > 161 || value.contains(['?', '#', '\\']) {
         return false;
     }
@@ -2659,6 +2769,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 signature: format!("command:{}", data.command),
                 action: parse_action(&data.command).map_err(|error| error.to_string()),
                 trade_selector: None,
+                text: Some(data.command),
             }))
         }
         "action.perform" => {
@@ -2839,6 +2950,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 signature,
                 action,
                 trade_selector,
+                text: None,
             }))
         }
         "sync.request" => {
@@ -2856,8 +2968,64 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
             }
             Ok(ClientMessage::Heartbeat { nonce: data.nonce })
         }
+        "story.choose" | "story.dialogue" => {
+            let data = serde_json::from_value::<protocol::StoryChooseData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            // Shape only: whether the id was ever published is decided by the
+            // instance, which rejects forged and stale ids without changes.
+            if !valid_story_id_shape(&data.id) || data.view_rev == 0 {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            let request = if envelope.message_type == "story.choose" {
+                crate::story_sessions::StoryRequest::Choose { id: data.id }
+            } else {
+                crate::story_sessions::StoryRequest::Dialogue { id: data.id }
+            };
+            Ok(ClientMessage::StoryInput {
+                request,
+                view_rev: data.view_rev,
+            })
+        }
+        "story.menu" => {
+            let data = serde_json::from_value::<protocol::StoryMenuData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            if !valid_story_id_shape(&data.verb)
+                || data
+                    .target
+                    .as_deref()
+                    .is_some_and(|target| !valid_story_id_shape(target))
+                || data.view_rev == 0
+            {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(ClientMessage::StoryInput {
+                request: crate::story_sessions::StoryRequest::Menu {
+                    verb: data.verb,
+                    target: data.target,
+                },
+                view_rev: data.view_rev,
+            })
+        }
+        "story.undo" | "story.leave" => {
+            // Exactly `{}`: serde would also accept an empty array.
+            if !envelope.data.as_object().is_some_and(Map::is_empty) {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(if envelope.message_type == "story.undo" {
+                ClientMessage::StoryUndo
+            } else {
+                ClientMessage::StoryLeave
+            })
+        }
         _ => Err(ClientMessageError::UnknownType),
     }
+}
+
+/// Bounded alphanumeric shape of a story id; publication is checked later.
+fn valid_story_id_shape(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= protocol::STORY_CHOICE_ID_BYTES
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 struct UniqueJsonValue(Value);
@@ -4604,6 +4772,8 @@ fn websocket_request_allowed(headers: &HeaderMap) -> bool {
             .authority()
             .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
 }
+
+mod story;
 
 #[cfg(test)]
 #[path = "web_protocol_golden_tests.rs"]

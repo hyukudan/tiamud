@@ -27,6 +27,13 @@ import type {
   ServerMessageType,
   ServerNotice,
   ServerWelcome,
+  StoryChooseData,
+  StoryEmptyData,
+  StoryEntered,
+  StoryError,
+  StoryLeft,
+  StoryMenuData,
+  StoryView,
   SyncPlayer,
   SyncRequestData,
   SyncScene,
@@ -34,6 +41,12 @@ import type {
   VitalsUpdate,
 } from './generated/protocol';
 import { isRecord } from './guards';
+import {
+  parseStoryEntered,
+  parseStoryError,
+  parseStoryLeft,
+  parseStoryView,
+} from './story-protocol';
 
 // Wire shapes generated from `crates/protocol` (the Rust source of truth).
 // The validators below still check every inbound frame at runtime and return
@@ -608,7 +621,11 @@ export type ServerMessage =
   | Envelope<'server.heartbeat', ServerHeartbeatData>
   | Envelope<'media.play', MediaPlayData>
   | Envelope<'media.stop', MediaStopData>
-  | Envelope<'chat.message', ChatMessageData>;
+  | Envelope<'chat.message', ChatMessageData>
+  | Envelope<'story.entered', StoryEntered>
+  | Envelope<'story.view', StoryView>
+  | Envelope<'story.left', StoryLeft>
+  | Envelope<'story.error', StoryError>;
 
 export type LiveServerMessage = Exclude<
   ServerMessage,
@@ -660,6 +677,16 @@ export type ActionPerform = Envelope<
 export type SyncRequest = Envelope<'sync.request', SyncRequestData>;
 
 export type ClientHeartbeat = Envelope<'client.heartbeat', ClientHeartbeatData>;
+
+export type StoryChoose = Envelope<'story.choose', StoryChooseData>;
+
+export type StoryDialogue = Envelope<'story.dialogue', StoryChooseData>;
+
+export type StoryMenu = Envelope<'story.menu', StoryMenuData>;
+
+export type StoryUndo = Envelope<'story.undo', StoryEmptyData>;
+
+export type StoryLeave = Envelope<'story.leave', StoryEmptyData>;
 
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -2577,6 +2604,22 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       }
       return { ...base, type: candidate.type, data: { channel, sender, text } };
     }
+    case 'story.entered': {
+      const data = parseStoryEntered(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.view': {
+      const data = parseStoryView(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.left': {
+      const data = parseStoryLeft(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.error': {
+      const data = parseStoryError(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
     case 'server.heartbeat': {
       const nonce = positiveIntegerOrUndefined(candidate.data.nonce);
       const timeoutMs = positiveIntegerOrUndefined(candidate.data.timeoutMs);
@@ -2973,4 +3016,38 @@ export function createHeartbeatAck(nonce: number): ClientHeartbeat {
     type: 'client.heartbeat',
     data: { nonce },
   };
+}
+
+/** `story.choose` for an opaque id published by view `viewRev`. */
+export function createStoryChoose(id: string, viewRev: number): StoryChoose {
+  if (!/^c[0-9a-f]{16}$/.test(id) || !Number.isSafeInteger(viewRev) || viewRev < 1 ||
+    viewRev > 0xffff_ffff) {
+    throw new Error('A story choice needs an opaque choice id and a positive view revision.');
+  }
+  return { v: PROTOCOL_VERSION, type: 'story.choose', data: { id, viewRev } };
+}
+
+/** `story.dialogue` for an opaque dialogue-option id of view `viewRev`. */
+export function createStoryDialogue(id: string, viewRev: number): StoryDialogue {
+  const { data } = createStoryChoose(id, viewRev);
+  return { v: PROTOCOL_VERSION, type: 'story.dialogue', data };
+}
+
+/** `story.menu`: a verb id plus, when the verb needs one, a target id of it. */
+export function createStoryMenu(verb: string, target: string | undefined, viewRev: number): StoryMenu {
+  createStoryChoose(verb, viewRev);
+  if (target !== undefined) createStoryChoose(target, viewRev);
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'story.menu',
+    data: target === undefined ? { verb, viewRev } : { verb, target, viewRev },
+  };
+}
+
+export function createStoryUndo(): StoryUndo {
+  return { v: PROTOCOL_VERSION, type: 'story.undo', data: {} };
+}
+
+export function createStoryLeave(): StoryLeave {
+  return { v: PROTOCOL_VERSION, type: 'story.leave', data: {} };
 }

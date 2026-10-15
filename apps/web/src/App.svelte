@@ -13,6 +13,7 @@
   import WelcomeGate from './components/WelcomeGate.svelte';
   import AccountAccess from './components/AccountAccess.svelte';
   import PreferencesPanel from './components/PreferencesPanel.svelte';
+  import StoryPanel from './components/StoryPanel.svelte';
   import { PRODUCT_NAME } from './lib/brand';
   import type { CharacterSelection } from './lib/auth';
   import {
@@ -308,7 +309,20 @@
 
   <main>
     <section class="scene" aria-labelledby="scene-title">
-      {#if session.scene}
+      {#if session.story}
+        <!-- While absorbed in a story the character stays parked in its room. -->
+        <StoryPanel
+          view={session.story}
+          connected={session.connectionState === 'connected'}
+          pending={session.storyPending}
+          error={session.storyError}
+          headingId="scene-title"
+          onchoose={session.chooseStory}
+          onmenu={session.storyMenu}
+          onundo={session.undoStory}
+          onleave={session.leaveStory}
+        />
+      {:else if session.scene}
         {#if atmosphereImage}
           <div class="visual-stage">
             {#key imageRenderKey}

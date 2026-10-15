@@ -13,7 +13,7 @@
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "e2e": "playwright test",
-    "test": "vitest run --exclude e2e/**"
+    "test": "vitest run --exclude 'e2e/**'"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",

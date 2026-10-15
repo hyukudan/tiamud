@@ -63,6 +63,10 @@ fn message_type_names_match_serde_names() {
         ServerMessageType::SyncPlayer,
         ServerMessageType::MediaPlay,
         ServerMessageType::MediaStop,
+        ServerMessageType::StoryEntered,
+        ServerMessageType::StoryView,
+        ServerMessageType::StoryLeft,
+        ServerMessageType::StoryError,
     ] {
         assert_eq!(
             serde_json::to_value(message_type).unwrap(),
@@ -493,4 +497,149 @@ fn client_payloads_keep_their_strict_shapes() {
         serde_json::from_value::<ClientEnvelope>(json!({"v": 1, "type": "x", "data": {}, "x": 1}))
             .is_err()
     );
+}
+
+#[test]
+fn story_payloads_have_their_documented_shape() {
+    assert_wire(
+        StoryEntered {
+            story_id: "cripta-del-nigromante".into(),
+            title: "La cripta".into(),
+        },
+        json!({"storyId": "cripta-del-nigromante", "title": "La cripta"}),
+    );
+    assert_wire(
+        StoryView {
+            view_rev: 2,
+            part: 0,
+            parts: 1,
+            turn: 1,
+            can_undo: true,
+            items: vec![
+                StoryItem::Scene {
+                    title: "La cripta".into(),
+                    text: "Un pasillo.".into(),
+                    score: -3,
+                    ending: None,
+                },
+                StoryItem::Cue {
+                    action: StoryCueAction::Stop,
+                    channel: MediaChannel::Music,
+                    url: None,
+                    looped: false,
+                },
+                StoryItem::Cue {
+                    action: StoryCueAction::Play,
+                    channel: MediaChannel::Effects,
+                    url: Some("/assets/x/audio-a.ogg".into()),
+                    looped: false,
+                },
+                StoryItem::Portrait {
+                    name: "Lola".into(),
+                },
+                StoryItem::Block {
+                    kind: StoryBlockKind::Event,
+                    speaker: None,
+                    text: "Tirada 2d6".into(),
+                },
+                StoryItem::Block {
+                    kind: StoryBlockKind::Line,
+                    speaker: Some("Lola".into()),
+                    text: "Hola.".into(),
+                },
+                StoryItem::Stat {
+                    label: "Vida".into(),
+                    value: "12".into(),
+                },
+                StoryItem::Item {
+                    name: "Antorcha".into(),
+                },
+                StoryItem::Choice {
+                    id: "c0123456789abcdef".into(),
+                    label: "Avanzar".into(),
+                },
+                StoryItem::Verb {
+                    id: "c1111111111111111".into(),
+                    label: "Mirar".into(),
+                    needs_target: true,
+                },
+                StoryItem::Target {
+                    verb: "c1111111111111111".into(),
+                    id: "c2222222222222222".into(),
+                    label: "Mesa".into(),
+                },
+                StoryItem::DialogueOption {
+                    id: "c3333333333333333".into(),
+                    label: "Adiós".into(),
+                },
+            ],
+        },
+        json!({
+            "viewRev": 2, "part": 0, "parts": 1, "turn": 1, "canUndo": true,
+            "items": [
+                {"type": "scene", "title": "La cripta", "text": "Un pasillo.", "score": -3, "ending": null},
+                {"type": "cue", "action": "stop", "channel": "music", "loop": false},
+                {"type": "cue", "action": "play", "channel": "effects", "url": "/assets/x/audio-a.ogg", "loop": false},
+                {"type": "portrait", "name": "Lola"},
+                {"type": "block", "kind": "event", "text": "Tirada 2d6"},
+                {"type": "block", "kind": "line", "speaker": "Lola", "text": "Hola."},
+                {"type": "stat", "label": "Vida", "value": "12"},
+                {"type": "item", "name": "Antorcha"},
+                {"type": "choice", "id": "c0123456789abcdef", "label": "Avanzar"},
+                {"type": "verb", "id": "c1111111111111111", "label": "Mirar", "needsTarget": true},
+                {"type": "target", "verb": "c1111111111111111", "id": "c2222222222222222", "label": "Mesa"},
+                {"type": "dialogueOption", "id": "c3333333333333333", "label": "Adiós"}
+            ]
+        }),
+    );
+    assert_wire(
+        StoryEnding {
+            kind: StoryEndingKind::Victory,
+        },
+        json!({"kind": "victory"}),
+    );
+    assert_wire(
+        StoryLeft {
+            reason: StoryLeftReason::Evicted,
+        },
+        json!({"reason": "evicted"}),
+    );
+    assert_wire(
+        StoryError {
+            code: StoryErrorCode::StaleView,
+            message: "x".into(),
+        },
+        json!({"code": "stale_view", "message": "x"}),
+    );
+
+    let choose: StoryChooseData =
+        serde_json::from_value(json!({"id": "c0123456789abcdef", "viewRev": 3})).unwrap();
+    assert_eq!(choose.view_rev, 3);
+    for rejected in [
+        json!({"id": "c0", "viewRev": 3, "x": 1}),
+        json!({"id": "c0"}),
+        json!({"id": 1, "viewRev": 3}),
+        json!({"id": "c0", "viewRev": -1}),
+    ] {
+        assert!(serde_json::from_value::<StoryChooseData>(rejected).is_err());
+    }
+    let menu: StoryMenuData = serde_json::from_value(json!({"verb": "c1", "viewRev": 3})).unwrap();
+    assert_eq!(menu.target, None);
+    assert!(
+        serde_json::from_value::<StoryMenuData>(
+            json!({"verb": "c1", "target": "c2", "viewRev": 3, "x": 1})
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_value::<StoryEmptyData>(json!({})).is_ok());
+    assert!(serde_json::from_value::<StoryEmptyData>(json!({"x": 1})).is_err());
+    for name in [
+        "story.choose",
+        "story.menu",
+        "story.dialogue",
+        "story.undo",
+        "story.leave",
+    ] {
+        assert!(serde_json::from_value::<ClientMessageType>(json!(name)).is_ok());
+    }
 }

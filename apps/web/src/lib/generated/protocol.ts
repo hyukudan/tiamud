@@ -7,9 +7,9 @@ export type ProtocolVersion = 1;
 
 export const WEBSOCKET_SUBPROTOCOL = 'tiamud.v1';
 
-export type ServerMessageType = "server.welcome" | "server.notice" | "server.heartbeat" | "action.result" | "scene.snapshot" | "player.snapshot" | "scene.patch" | "entity.upsert" | "entity.remove" | "vitals.update" | "inventory.patch" | "container.contents" | "trade.contents" | "reward.odds" | "mail.list" | "mail.message" | "board.catalog" | "board.list" | "board.entry" | "map.snapshot" | "message.append" | "chat.message" | "sync.scene" | "sync.player" | "media.play" | "media.stop";
+export type ServerMessageType = "server.welcome" | "server.notice" | "server.heartbeat" | "action.result" | "scene.snapshot" | "player.snapshot" | "scene.patch" | "entity.upsert" | "entity.remove" | "vitals.update" | "inventory.patch" | "container.contents" | "trade.contents" | "reward.odds" | "mail.list" | "mail.message" | "board.catalog" | "board.list" | "board.entry" | "map.snapshot" | "message.append" | "chat.message" | "sync.scene" | "sync.player" | "media.play" | "media.stop" | "story.entered" | "story.view" | "story.left" | "story.error";
 
-export type ClientMessageType = "client.hello" | "command.submit" | "action.perform" | "sync.request" | "client.heartbeat";
+export type ClientMessageType = "client.hello" | "command.submit" | "action.perform" | "sync.request" | "client.heartbeat" | "story.choose" | "story.menu" | "story.dialogue" | "story.undo" | "story.leave";
 
 export type ServerEnvelope<T> = { v: ProtocolVersion, type: ServerMessageType, seq: number, data: T, };
 
@@ -96,3 +96,31 @@ export type BoardPostSummary = { postId: string, board: BoardKey, author: string
 export type BoardList = { board: BoardKey, page: number, totalPages: number, totalPosts: number, capacity: number, posts: Array<BoardPostSummary>, };
 
 export type BoardEntry = { postId: string, board: BoardKey, author: string, subject: string, body: string, createdAt: number, expiresAt: number, canDelete: boolean, canReport: boolean, };
+
+export type StoryChooseData = { id: string, viewRev: number, };
+
+export type StoryMenuData = { verb: string, target?: string, viewRev: number, };
+
+export type StoryEmptyData = Record<symbol, never>;
+
+export type StoryEntered = { storyId: string, title: string, };
+
+export type StoryBlockKind = "event" | "line";
+
+export type StoryEndingKind = "victory" | "defeat" | "neutral";
+
+export type StoryEnding = { kind: StoryEndingKind, };
+
+export type StoryCueAction = "play" | "stop";
+
+export type StoryItem = { "type": "scene", title: string, text: string, score: number, ending: StoryEnding | null, } | { "type": "cue", action: StoryCueAction, channel: MediaChannel, url?: string, loop: boolean, } | { "type": "portrait", name: string, } | { "type": "block", kind: StoryBlockKind, speaker?: string, text: string, } | { "type": "stat", label: string, value: string, } | { "type": "item", name: string, } | { "type": "choice", id: string, label: string, } | { "type": "verb", id: string, label: string, needsTarget: boolean, } | { "type": "target", verb: string, id: string, label: string, } | { "type": "dialogueOption", id: string, label: string, };
+
+export type StoryView = { viewRev: number, part: number, parts: number, turn: number, canUndo: boolean, items: Array<StoryItem>, };
+
+export type StoryLeftReason = "left" | "evicted";
+
+export type StoryLeft = { reason: StoryLeftReason, };
+
+export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal";
+
+export type StoryError = { code: StoryErrorCode, message: string, };

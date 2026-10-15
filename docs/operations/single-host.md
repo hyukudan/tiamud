@@ -81,6 +81,33 @@ The recommended environment uses `TIAMUD_DATABASE_URL=postgresql://...`.
 recommendation. Startup selects exactly one store and readiness reports its
 backend; Tiamud never dual-writes.
 
+## Story sessions
+
+Story sessions ([ADR 0029](../decisions/0029-story-session-instances-and-story-protocol.md),
+proposed, phase S2) are disabled unless `TIAMUD_STORY_DIR` names a directory
+of `*.story.json` StoryPacks. At startup, before any database or listener
+opens, every pack is parsed and validated with `tiamud-story-core`; an invalid
+pack, a duplicate story id, an empty directory, more than 64 packs or more
+than 1,024 directory entries stops the server.
+
+- `TIAMUD_STORY_MAX_INSTANCES` (`1..=4096`, default `256`) bounds live
+  instances; each account may hold one.
+- `TIAMUD_STORY_IDLE_SECONDS` (`60..=86400`, default `1800`) evicts an idle
+  instance. Eviction, leaving and restarts lose progress: there are no
+  persisted save slots before S3.
+- An optional `story-media.json` in the same directory,
+  `{"formatVersion":1,"assets":{"<asset-id>":"assets/<sha256>/audio-<name>.ogg"}}`,
+  maps authored cue asset ids to reviewed content-addressed audio already
+  served by the web build. Unmapped cues never play.
+
+Story metrics carry no story, node or account labels:
+`tiamud_story_catalog_stories`, `tiamud_story_instances`,
+`tiamud_story_instances_started_total`,
+`tiamud_story_instances_closed_total{reason}`,
+`tiamud_story_enter_rejected_total{reason}` and
+`tiamud_story_inputs_total{result}`. While a player is in a story the
+character stays connected and visible in its room.
+
 ## Rate limits and metrics
 
 The environment example configures bounded browser authentication and command

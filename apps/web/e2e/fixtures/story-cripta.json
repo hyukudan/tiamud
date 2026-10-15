@@ -1,0 +1,660 @@
+{
+  "steps": [
+    {
+      "input": {
+        "data": {
+          "id": "c910a2dec89025cc1",
+          "viewRev": 1
+        },
+        "type": "story.choose"
+      },
+      "label": "Tira un dado y suma 6 para fijar tu destreza",
+      "view": [
+        {
+          "canUndo": false,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "Te detienes ante la entrada de la cripta del nigromante. Antes de bajar, pon a prueba tu destreza.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "0"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "12"
+            },
+            {
+              "id": "c910a2dec89025cc1",
+              "label": "Tira un dado y suma 6 para fijar tu destreza",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 0,
+          "viewRev": 1
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "cbeeb8da1658eec67",
+          "viewRev": 2
+        },
+        "type": "story.choose"
+      },
+      "label": "Coger la antorcha",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Tirada 1d6+6: [3] → total 9",
+              "type": "block"
+            },
+            {
+              "kind": "event",
+              "text": "Destreza: 0 → 9",
+              "type": "block"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "12"
+            },
+            {
+              "id": "cbeeb8da1658eec67",
+              "label": "Coger la antorcha",
+              "type": "choice"
+            },
+            {
+              "id": "cf893a2eefb32555e",
+              "label": "Avanzar por el pasillo del norte",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 1,
+          "viewRev": 2
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c71c18690ee42c90b",
+          "viewRev": 3
+        },
+        "type": "story.choose"
+      },
+      "label": "Avanzar por el pasillo del norte",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Obtienes: Antorcha",
+              "type": "block"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "12"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "id": "c71c18690ee42c90b",
+              "label": "Avanzar por el pasillo del norte",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 2,
+          "viewRev": 3
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c71bb54d8d101b5b9",
+          "viewRev": 4
+        },
+        "type": "story.choose"
+      },
+      "label": "Un esqueleto armado se alza: luchar",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "12"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "id": "c71bb54d8d101b5b9",
+              "label": "Un esqueleto armado se alza: luchar",
+              "type": "choice"
+            },
+            {
+              "id": "cc34d0bff90150280",
+              "label": "Volver al vestíbulo",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 3,
+          "viewRev": 4
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "ce099ec6cd7363ca5",
+          "viewRev": 5
+        },
+        "type": "story.choose"
+      },
+      "label": "Atacar",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "12"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "id": "ce099ec6cd7363ca5",
+              "label": "Atacar",
+              "type": "choice"
+            },
+            {
+              "id": "c85e7bb0f12278575",
+              "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 4,
+          "viewRev": 5
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c491718de357e3da8",
+          "viewRev": 6
+        },
+        "type": "story.choose"
+      },
+      "label": "Atacar",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Tirada 2d6: [2, 1] → total 12",
+              "type": "block"
+            },
+            {
+              "kind": "event",
+              "text": "Resistencia: 12 → 10",
+              "type": "block"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "10"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "id": "c491718de357e3da8",
+              "label": "Atacar",
+              "type": "choice"
+            },
+            {
+              "id": "ccb435c8e74616796",
+              "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 5,
+          "viewRev": 6
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c6775dc7701564f61",
+          "viewRev": 7
+        },
+        "type": "story.choose"
+      },
+      "label": "Atacar",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Tirada 2d6: [2, 3] → total 14",
+              "type": "block"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "10"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "id": "c6775dc7701564f61",
+              "label": "Atacar",
+              "type": "choice"
+            },
+            {
+              "id": "c9afcd44d14cf8bfe",
+              "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 6,
+          "viewRev": 7
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c7476cf8a4baa5dc0",
+          "viewRev": 8
+        },
+        "type": "story.choose"
+      },
+      "label": "Atacar",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Tirada 2d6: [3, 4] → total 16",
+              "type": "block"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "10"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "id": "c7476cf8a4baa5dc0",
+              "label": "Atacar",
+              "type": "choice"
+            },
+            {
+              "id": "c87b341d690d7a28a",
+              "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 7,
+          "viewRev": 8
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c6f9b6dae6f4c57a8",
+          "viewRev": 9
+        },
+        "type": "story.choose"
+      },
+      "label": "Coger la llave y volver al pasillo",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 50,
+              "text": "El esqueleto se desmorona. Entre sus huesos brilla una llave de hierro.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Tirada 2d6: [3, 4] → total 16",
+              "type": "block"
+            },
+            {
+              "kind": "event",
+              "text": "Puntuación +50 (total 50)",
+              "type": "block"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "10"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "id": "c6f9b6dae6f4c57a8",
+              "label": "Coger la llave y volver al pasillo",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 8,
+          "viewRev": 9
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c2ac2ce17a5794a3b",
+          "viewRev": 10
+        },
+        "type": "story.choose"
+      },
+      "label": "Acercarte al foso",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 50,
+              "text": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Obtienes: Llave de hierro",
+              "type": "block"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "10"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "name": "Llave de hierro",
+              "type": "item"
+            },
+            {
+              "id": "c2ac2ce17a5794a3b",
+              "label": "Acercarte al foso",
+              "type": "choice"
+            },
+            {
+              "id": "ca534a6a6b7fd0b63",
+              "label": "Volver al vestíbulo",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 9,
+          "viewRev": 10
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "cd0bad0da572baaf1",
+          "viewRev": 11
+        },
+        "type": "story.choose"
+      },
+      "label": "Saltar el foso",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 50,
+              "text": "El foso es ancho y su fondo está erizado de estacas. Necesitas 12 o más (un dado más tu destreza) para saltarlo.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "10"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "name": "Llave de hierro",
+              "type": "item"
+            },
+            {
+              "id": "cd0bad0da572baaf1",
+              "label": "Saltar el foso",
+              "type": "choice"
+            },
+            {
+              "id": "cae84379630af89ee",
+              "label": "Retroceder al pasillo",
+              "type": "choice"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 10,
+          "viewRev": 11
+        }
+      ]
+    },
+    {
+      "input": null,
+      "label": null,
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": {
+                "kind": "neutral"
+              },
+              "score": 50,
+              "text": "Aterrizas al otro lado y descubres una salida secreta hacia la superficie. Escapas, aunque sin el tesoro.",
+              "title": "La cripta del nigromante",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Tirada 1d6: [4] → total 13 (éxito)",
+              "type": "block"
+            },
+            {
+              "label": "Destreza",
+              "type": "stat",
+              "value": "9"
+            },
+            {
+              "label": "Resistencia",
+              "type": "stat",
+              "value": "10"
+            },
+            {
+              "name": "Antorcha",
+              "type": "item"
+            },
+            {
+              "name": "Llave de hierro",
+              "type": "item"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 11,
+          "viewRev": 12
+        }
+      ]
+    }
+  ],
+  "storyId": "cripta-del-nigromante",
+  "title": "La cripta del nigromante"
+}
