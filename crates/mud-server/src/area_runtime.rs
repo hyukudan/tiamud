@@ -1760,6 +1760,15 @@ mod tests {
         world_loader::parse_pinned_world_content,
     };
 
+    /// Liveness bound for waits whose ordering is already fixed by an explicit
+    /// barrier (a test worker gate, the blocked generation commit or a state
+    /// predicate). It never decides an outcome: it only turns a genuine hang
+    /// into a failure. It is deliberately far above the work it covers
+    /// (staging, snapshot serialization and SQLite I/O on the real Lantern
+    /// Square catalog), which can take more than a second on a loaded host
+    /// running the whole workspace suite in parallel.
+    const TEST_HANG_GUARD: Duration = Duration::from_secs(30);
+
     struct PublishedRegistry {
         _temp: TempDir,
         registry: PathBuf,
@@ -2260,7 +2269,7 @@ mod tests {
                 .await
         });
         tokio::time::timeout(
-            Duration::from_secs(1),
+            TEST_HANG_GUARD,
             store.wait_for_blocked_area_generation_commit(),
         )
         .await
@@ -2285,7 +2294,7 @@ mod tests {
         );
 
         store.release_blocked_area_generation_commit();
-        tokio::time::timeout(Duration::from_secs(1), activation)
+        tokio::time::timeout(TEST_HANG_GUARD, activation)
             .await
             .unwrap()
             .unwrap()
@@ -2374,7 +2383,7 @@ mod tests {
         coordinator.configure_test_worker_gate(Duration::from_millis(50), Arc::clone(&gate));
         let first_coordinator = coordinator.clone();
         let first = tokio::spawn(async move { first_coordinator.prepare("square").await });
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(TEST_HANG_GUARD, async {
             while !gate.started.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
             }
@@ -2402,7 +2411,7 @@ mod tests {
         assert_eq!(coordinator.inner.active_permits.available_permits(), 1);
 
         gate.release();
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(TEST_HANG_GUARD, async {
             loop {
                 let done = {
                     let state = coordinator
@@ -2546,7 +2555,7 @@ mod tests {
         let second = coordinator.inner.active_permits.acquire().await.unwrap();
         let request_coordinator = coordinator.clone();
         let request = tokio::spawn(async move { request_coordinator.prepare("square").await });
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(TEST_HANG_GUARD, async {
             loop {
                 if coordinator
                     .inner
@@ -2568,7 +2577,7 @@ mod tests {
         let _ = request.await;
         drop(first);
         drop(second);
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(TEST_HANG_GUARD, async {
             loop {
                 if !coordinator
                     .inner

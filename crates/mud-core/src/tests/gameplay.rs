@@ -378,7 +378,7 @@ fn party_loop_enforces_leader_authority_and_projects_opaque_ids() {
         .unwrap()
         .unwrap();
     assert_eq!(view.kind, ViewEventKind::Adventure);
-    assert!(!view.actor_id.contains("101"));
+    assert_opaque_id(&view.actor_id);
     assert_ne!(view.target_id.unwrap(), "1");
 
     world

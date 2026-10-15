@@ -256,6 +256,11 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    /// Liveness bound for spin-waits on a state the test itself drives. It
+    /// only turns a genuine hang into a failure; a loaded host may need more
+    /// than a second to schedule the blocking password workers.
+    const TEST_HANG_GUARD: Duration = Duration::from_secs(30);
+
     struct BlockingBackend {
         active: AtomicUsize,
         maximum: AtomicUsize,
@@ -339,7 +344,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        timeout(Duration::from_secs(1), async {
+        timeout(TEST_HANG_GUARD, async {
             while backend.started.load(Ordering::SeqCst) < 2 {
                 tokio::task::yield_now().await;
             }
@@ -368,7 +373,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        timeout(Duration::from_secs(1), async {
+        timeout(TEST_HANG_GUARD, async {
             while service.pending.available_permits() != 0 {
                 tokio::task::yield_now().await;
             }

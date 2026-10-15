@@ -76,7 +76,7 @@ fn one_domain_event_projects_differently_by_perception() {
     assert_eq!(peer_view.text, "Tester takes the blue-glass lantern.");
     assert_ne!(actor_view.actor_id, peer_view.actor_id);
     assert_ne!(actor_view.item_id, peer_view.item_id);
-    assert!(!actor_view.actor_id.contains("101"));
+    assert_opaque_id(&actor_view.actor_id);
     assert!(!actor_view.item_id.as_deref().unwrap().contains("demo:"));
     assert!(world.project_event(distant, event).unwrap().is_none());
     assert_eq!(world.scene_for(actor).unwrap().revision, 2);
@@ -158,7 +158,7 @@ fn private_narration_uses_only_the_authorized_observers_opaque_identity() {
 
     assert_eq!(view.kind, ViewEventKind::Gameplay);
     assert_eq!(view.text, "Only you hear the archive whisper.");
-    assert!(!view.actor_id.contains("900"));
+    assert_opaque_id(&view.actor_id);
     assert!(view.target_id.is_none());
     assert!(view.item_id.is_none());
     assert!(matches!(
