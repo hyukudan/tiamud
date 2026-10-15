@@ -843,6 +843,14 @@ pub trait CharacterStore: Send + Sync {
         events: Vec<DomainEvent>,
         audit: StaffAuditRecord,
     ) -> Result<(), StoreError>;
+
+    /// Atomically persist only character aggregates in one transaction. The
+    /// caller guarantees the durable runtime snapshot is unchanged and that
+    /// no domain events need recording (ADR 0027).
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError>;
 }
 
 /// Adds bounded operational timing to every database transaction while
@@ -1347,6 +1355,14 @@ impl CharacterStore for MeasuredCharacterStore {
         )
         .await
     }
+
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        self.transaction(self.inner.commit_characters(characters))
+            .await
+    }
 }
 
 pub(super) enum Request {
@@ -1469,6 +1485,10 @@ pub(super) enum Request {
         runtime: WorldRuntimeSnapshot,
         events: Vec<DomainEvent>,
         audit: StaffAuditRecord,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    CommitCharacters {
+        characters: Vec<DurableCharacterSnapshot>,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     SocialProfile {
@@ -1719,6 +1739,10 @@ pub(super) trait PersistenceCommandHandler {
         runtime: WorldRuntimeSnapshot,
         events: Vec<DomainEvent>,
         audit: StaffAuditRecord,
+    ) -> Result<(), StoreError>;
+    fn commit_characters(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
     ) -> Result<(), StoreError>;
     fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError>;
     fn social_target(&mut self, name: String) -> Result<SocialProfile, StoreError>;
@@ -2005,6 +2029,9 @@ pub(super) fn dispatch_persistence_request<H: PersistenceCommandHandler>(
             reply,
         } => {
             let _ = reply.send(handler.commit_staff_action(characters, runtime, events, audit));
+        }
+        Request::CommitCharacters { characters, reply } => {
+            let _ = reply.send(handler.commit_characters(characters));
         }
         Request::SocialProfile {
             character_id,
@@ -2415,6 +2442,13 @@ impl PersistenceCommandHandler for SqliteCommandHandler {
             audit,
             unix_timestamp(),
         )
+    }
+
+    fn commit_characters(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        commit_characters_only(&mut self.connection, &characters)
     }
 
     fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
@@ -3756,6 +3790,15 @@ impl CharacterStore for SqliteCharacterStore {
             receive,
         )
         .await
+    }
+
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::CommitCharacters { characters, reply }, receive)
+            .await
     }
 }
 
@@ -7254,6 +7297,68 @@ fn commit_staff_action(
     )
 }
 
+/// Characters-only commit (ADR 0027): the same character rows that
+/// `commit_action_with_retention` writes, in one transaction, without
+/// touching the runtime snapshot, world adventure row or event ledger.
+fn commit_characters_only(
+    connection: &mut Connection,
+    characters: &[DurableCharacterSnapshot],
+) -> Result<(), StoreError> {
+    let rows = characters
+        .iter()
+        .map(|snapshot| {
+            Ok::<_, StoreError>((
+                snapshot,
+                bounded_json(
+                    &snapshot.gameplay,
+                    "character gameplay",
+                    MAX_CHARACTER_JSON_BYTES,
+                )?,
+                bounded_json(
+                    &serde_json::json!({
+                        "coins": snapshot.gameplay.coins,
+                        "commodities": snapshot.gameplay.commodities,
+                        "quests": snapshot.gameplay.quests,
+                    }),
+                    "character adventure",
+                    MAX_CHARACTER_JSON_BYTES,
+                )?,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let transaction = connection.transaction()?;
+    for (snapshot, gameplay_json, adventure_json) in rows {
+        save(&transaction, &snapshot.character)?;
+        let updated = transaction
+            .prepare_cached(
+                "UPDATE characters SET gameplay_json = ?1, updated_at = unixepoch()
+             WHERE id = ?2 AND account_id = ?3",
+            )?
+            .execute(params![
+                gameplay_json,
+                snapshot.character.id.0,
+                snapshot.character.account_id.0
+            ])?;
+        if updated == 0 {
+            return Err(StoreError::CharacterNotFound {
+                account_id: snapshot.character.account_id,
+                character_id: snapshot.character.id,
+            });
+        }
+        transaction
+            .prepare_cached(
+                "INSERT INTO character_adventure (character_id, state_json, updated_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(character_id) DO UPDATE SET
+                 state_json = excluded.state_json,
+                 updated_at = excluded.updated_at",
+            )?
+            .execute(params![snapshot.character.id.0, adventure_json])?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 fn commit_action_with_retention(
     connection: &mut Connection,
     characters: &[DurableCharacterSnapshot],
@@ -8614,6 +8719,78 @@ mod tests {
                 .strength,
             11
         );
+    }
+
+    #[tokio::test]
+    async fn characters_only_commit_is_atomic_and_leaves_runtime_and_events_alone() {
+        let store = SqliteCharacterStore::open(":memory:").await.unwrap();
+        let owner = account(&store, "Rows Owner").await;
+        let mut character = store
+            .load_or_create_character(owner.id, "Rows", "room:a")
+            .await
+            .unwrap();
+        let mut runtime = World::demo().runtime_snapshot();
+        runtime.logical_tick = 7;
+        let event = DomainEvent::CharacterMoved {
+            actor_id: character.id,
+            actor_name: character.name.clone(),
+            from_room_id: "room:a".into(),
+            to_room_id: "room:a".into(),
+            direction: Direction::North,
+        };
+        store
+            .commit_action(
+                vec![DurableCharacterSnapshot {
+                    character: character.clone(),
+                    gameplay: CharacterGameplaySnapshot::default(),
+                }],
+                runtime.clone(),
+                vec![event.clone()],
+            )
+            .await
+            .unwrap();
+
+        character.room_id = "room:b".into();
+        let changed = DurableCharacterSnapshot {
+            character: character.clone(),
+            gameplay: CharacterGameplaySnapshot {
+                coins: 4_321,
+                ..CharacterGameplaySnapshot::default()
+            },
+        };
+        let mut missing = changed.clone();
+        missing.character.id = CharacterId(9_999);
+        // One unknown row rolls back the whole characters-only transaction.
+        assert!(
+            store
+                .commit_characters(vec![changed.clone(), missing])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .load_character_gameplay(character.id)
+                .await
+                .unwrap()
+                .coins,
+            CharacterGameplaySnapshot::default().coins
+        );
+
+        store.commit_characters(vec![changed]).await.unwrap();
+        assert_eq!(
+            store.load_character(owner.id, character.id).await.unwrap(),
+            character
+        );
+        assert_eq!(
+            store
+                .load_character_gameplay(character.id)
+                .await
+                .unwrap()
+                .coins,
+            4_321
+        );
+        assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
+        assert_eq!(store.load_domain_events().await.unwrap(), vec![event]);
     }
 
     #[tokio::test]

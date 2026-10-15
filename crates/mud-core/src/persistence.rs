@@ -285,6 +285,7 @@ impl World {
         &mut self,
         mut snapshot: WorldRuntimeSnapshot,
     ) -> Result<(), WorldError> {
+        self.invalidate_durable_baseline();
         validate_world_runtime_snapshot_semantics(&snapshot)?;
         self.apply_runtime_area_residency_manifest(&snapshot.area_residency)?;
         let item_ids_match = snapshot.item_instances.iter().all(|(item_id, instance)| {

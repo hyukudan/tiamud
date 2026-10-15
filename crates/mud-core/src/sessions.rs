@@ -125,10 +125,7 @@ impl World {
             .ok_or(WorldError::InvalidEntity)?;
         let carried = self
             .item_instances
-            .values()
-            .filter(|instance| {
-                matches!(&instance.location, SharedItemLocation::Carried(owner) if *owner == character.id)
-            })
+            .ids_at(&SharedItemLocation::Carried(character.id))
             .count();
         Ok(format!(
             concat!(
@@ -240,14 +237,21 @@ impl World {
         };
         let mut events = vec![event];
         let mut released_npcs = Vec::new();
-        for npc in self.npcs.values_mut() {
-            if npc.engaged_character == Some(actor_id) {
-                npc.engaged_character = None;
-                released_npcs.push((
-                    npc.stable_id.clone(),
-                    npc.name.clone(),
-                    npc.spawn_room_id.clone(),
-                ));
+        // Copy-on-write: borrow NPCs mutably only when one is engaged.
+        if self
+            .npcs
+            .values()
+            .any(|npc| npc.engaged_character == Some(actor_id))
+        {
+            for npc in self.npcs.values_mut() {
+                if npc.engaged_character == Some(actor_id) {
+                    npc.engaged_character = None;
+                    released_npcs.push((
+                        npc.stable_id.clone(),
+                        npc.name.clone(),
+                        npc.spawn_room_id.clone(),
+                    ));
+                }
             }
         }
         for (npc_id, npc_name, room_id) in released_npcs {
@@ -305,10 +309,17 @@ impl World {
         gameplay.ability_global_ready_tick = self.logical_tick;
         gameplay.recovery_at_tick = None;
         let mut released_npcs = Vec::new();
-        for npc in self.npcs.values_mut() {
-            if npc.engaged_character == Some(character_id) {
-                npc.engaged_character = None;
-                released_npcs.push(npc.stable_id.clone());
+        // Copy-on-write: borrow NPCs mutably only when one is engaged.
+        if self
+            .npcs
+            .values()
+            .any(|npc| npc.engaged_character == Some(character_id))
+        {
+            for npc in self.npcs.values_mut() {
+                if npc.engaged_character == Some(character_id) {
+                    npc.engaged_character = None;
+                    released_npcs.push(npc.stable_id.clone());
+                }
             }
         }
         for npc_id in released_npcs {

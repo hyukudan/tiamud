@@ -387,6 +387,13 @@ impl PersistenceCommandHandler for PostgresCommandHandler {
         )
     }
 
+    fn commit_characters(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        commit_characters_only(&mut self.connection, &characters)
+    }
+
     fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
         social_profile(&mut self.connection, character_id, unix_timestamp())
     }
@@ -1508,6 +1515,15 @@ impl CharacterStore for PostgresCharacterStore {
         )
         .await
     }
+
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::CommitCharacters { characters, reply }, receive)
+            .await
+    }
 }
 
 fn normalise_name(name: &str, kind: &'static str) -> Result<String, StoreError> {
@@ -2483,6 +2499,77 @@ fn commit_staff_action(
         DOMAIN_EVENT_RETENTION,
         Some((audit, now)),
     )
+}
+
+/// Characters-only commit (ADR 0027): the same character rows that
+/// `commit_action_with_retention` writes, in one transaction, without
+/// touching the runtime snapshot, world adventure row or event ledger.
+fn commit_characters_only(
+    connection: &mut Client,
+    characters: &[DurableCharacterSnapshot],
+) -> Result<(), StoreError> {
+    let rows = characters
+        .iter()
+        .map(|snapshot| {
+            Ok::<_, StoreError>((
+                snapshot,
+                bounded_json(
+                    &snapshot.gameplay,
+                    "character gameplay",
+                    MAX_CHARACTER_JSON_BYTES,
+                )?,
+                bounded_json(
+                    &serde_json::json!({
+                        "coins": snapshot.gameplay.coins,
+                        "commodities": snapshot.gameplay.commodities,
+                        "quests": snapshot.gameplay.quests,
+                    }),
+                    "character adventure",
+                    MAX_CHARACTER_JSON_BYTES,
+                )?,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut transaction = connection.transaction()?;
+    if !rows.is_empty() {
+        let save_character = transaction.prepare(SAVE_CHARACTER_SQL)?;
+        let update_gameplay = transaction.prepare(
+            "UPDATE characters
+             SET gameplay_json = $1,
+                 updated_at = floor(extract(epoch FROM now()))::BIGINT
+             WHERE id = $2 AND account_id = $3",
+        )?;
+        let upsert_adventure = transaction.prepare(
+            "INSERT INTO character_adventure (character_id, state_json, updated_at)
+             VALUES ($1, $2, floor(extract(epoch FROM now()))::BIGINT)
+             ON CONFLICT(character_id) DO UPDATE SET
+                 state_json = excluded.state_json,
+                 updated_at = excluded.updated_at",
+        )?;
+        for (snapshot, gameplay_json, adventure_json) in rows {
+            save_with(&mut transaction, &save_character, &snapshot.character)?;
+            let updated = transaction.execute(
+                &update_gameplay,
+                &[
+                    &gameplay_json,
+                    &snapshot.character.id.0,
+                    &snapshot.character.account_id.0,
+                ],
+            )?;
+            if updated == 0 {
+                return Err(StoreError::CharacterNotFound {
+                    account_id: snapshot.character.account_id,
+                    character_id: snapshot.character.id,
+                });
+            }
+            transaction.execute(
+                &upsert_adventure,
+                &[&snapshot.character.id.0, &adventure_json],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn commit_action_with_retention(
@@ -5580,6 +5667,86 @@ mod tests {
         drop(first_store);
         drop(second_store);
         tokio::time::sleep(Duration::from_millis(25)).await;
+        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_characters_only_commit_is_atomic_and_leaves_runtime_alone() {
+        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("tiamud_rows_test_{}_{}", process::id(), nonce);
+        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
+        let store = PostgresCharacterStore::open(&scoped_url(&base_url, &schema))
+            .await
+            .unwrap();
+        let owner = store
+            .register_account("Rows Owner", "correct horse battery staple")
+            .await
+            .unwrap();
+        let mut character = store
+            .load_or_create_character(owner.account.id, "Rows", "room:a")
+            .await
+            .unwrap();
+        let mut runtime = tiamud_core::World::demo().runtime_snapshot();
+        runtime.logical_tick = 7;
+        store
+            .commit_action(
+                vec![tiamud_core::DurableCharacterSnapshot {
+                    character: character.clone(),
+                    gameplay: CharacterGameplaySnapshot::default(),
+                }],
+                runtime.clone(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        character.room_id = "room:b".into();
+        let changed = tiamud_core::DurableCharacterSnapshot {
+            character: character.clone(),
+            gameplay: CharacterGameplaySnapshot {
+                coins: 4_321,
+                ..CharacterGameplaySnapshot::default()
+            },
+        };
+        let mut missing = changed.clone();
+        missing.character.id = tiamud_core::CharacterId(999_999);
+        assert!(
+            store
+                .commit_characters(vec![changed.clone(), missing])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .load_character_gameplay(character.id)
+                .await
+                .unwrap()
+                .coins,
+            CharacterGameplaySnapshot::default().coins
+        );
+        store.commit_characters(vec![changed]).await.unwrap();
+        assert_eq!(
+            store
+                .load_character(owner.account.id, character.id)
+                .await
+                .unwrap(),
+            character
+        );
+        assert_eq!(
+            store
+                .load_character_gameplay(character.id)
+                .await
+                .unwrap()
+                .coins,
+            4_321
+        );
+        assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(runtime));
+        store.shutdown().await.unwrap();
         admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
     }
 

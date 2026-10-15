@@ -378,12 +378,21 @@ where
         staff_target_details(actor_name, &target.name),
     );
     if let Err(error) = store
-        .commit_staff_action(characters, world.runtime_snapshot(), events.clone(), audit)
+        .commit_staff_action(
+            characters.clone(),
+            world.runtime_snapshot(),
+            events.clone(),
+            audit,
+        )
         .await
     {
+        // A failed or ambiguous commit leaves the store state unknown.
+        world.invalidate_durable_baseline();
         world.restore_checkpoint(checkpoint);
         return Err(error.into());
     }
+    // Every connected character was written with its in-memory aggregate.
+    world.mark_durable_commit(true, characters, true);
     debug_assert!(world.connected_sessions().contains(&actor_session));
     Ok(AppliedStaff {
         output: bounded_output(output(&target)),

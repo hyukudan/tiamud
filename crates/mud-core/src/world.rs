@@ -55,6 +55,9 @@ pub struct World {
     /// runtime snapshot and may reset on process restart.
     pub(crate) last_trade_request_ticks: HashMap<CharacterId, u64>,
     pub(crate) tick_resolution_pending: bool,
+    /// What the backend last confirmed. Not part of any checkpoint: rolling
+    /// world state back never changes what the store holds.
+    pub(crate) durable: DurableBaseline,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -419,6 +422,7 @@ impl World {
             trades: BTreeMap::new().into(),
             last_trade_request_ticks: HashMap::new(),
             tick_resolution_pending: false,
+            durable: DurableBaseline::default(),
         })
     }
 
@@ -1306,6 +1310,9 @@ impl World {
     }
 
     pub fn restore_lifecycle_checkpoint(&mut self, checkpoint: WorldLifecycleCheckpoint) {
+        // Lifecycle rollbacks follow failed or ambiguous area commits whose
+        // durable outcome the caller reconciles separately.
+        self.invalidate_durable_baseline();
         self.restore_checkpoint(checkpoint.world);
         self.stable_rooms = checkpoint.stable_rooms;
         self.area_generation = checkpoint.area_generation;
@@ -1686,14 +1693,21 @@ impl World {
                 };
                 let mut events = vec![event];
                 let mut released_npcs = Vec::new();
-                for npc in self.npcs.values_mut() {
-                    if npc.engaged_character == Some(actor_id) {
-                        npc.engaged_character = None;
-                        released_npcs.push((
-                            npc.stable_id.clone(),
-                            npc.name.clone(),
-                            npc.spawn_room_id.clone(),
-                        ));
+                // Copy-on-write: borrow NPCs mutably only when one is engaged.
+                if self
+                    .npcs
+                    .values()
+                    .any(|npc| npc.engaged_character == Some(actor_id))
+                {
+                    for npc in self.npcs.values_mut() {
+                        if npc.engaged_character == Some(actor_id) {
+                            npc.engaged_character = None;
+                            released_npcs.push((
+                                npc.stable_id.clone(),
+                                npc.name.clone(),
+                                npc.spawn_room_id.clone(),
+                            ));
+                        }
                     }
                 }
                 for (npc_id, npc_name, room_id) in released_npcs {

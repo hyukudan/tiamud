@@ -120,10 +120,17 @@ impl World {
                 });
             }
         }
-        self.adventure
+        if self
+            .adventure
             .parties
-            .values_mut()
-            .for_each(|party| party.invitations.retain(|_, expiry| *expiry >= tick));
+            .values()
+            .any(|party| party.invitations.values().any(|expiry| *expiry < tick))
+        {
+            self.adventure
+                .parties
+                .values_mut()
+                .for_each(|party| party.invitations.retain(|_, expiry| *expiry >= tick));
+        }
         if tick >= self.adventure.next_weather_tick {
             let choices = [
                 WeatherKind::Clear,
@@ -168,6 +175,17 @@ impl World {
             let current_room_id = room_checked(&self.entities, character.location)?
                 .stable_id
                 .clone();
+            // A quiet character must not take a mutable borrow: copy-on-write
+            // state and durable dirty tracking treat every mutable access as
+            // a change. The predicate mirrors every mutation below exactly.
+            if self
+                .character_gameplay
+                .get(&character_id)
+                .ok_or(WorldError::InvalidEntity)
+                .map(|state| character_tick_is_noop(state, tick))?
+            {
+                continue;
+            }
             let resource_regeneration = self
                 .character_gameplay
                 .get(&character_id)
@@ -358,6 +376,13 @@ impl World {
     }
 
     pub(crate) fn resolve_npc_respawns(&mut self, tick: u64, events: &mut Vec<DomainEvent>) {
+        if !self
+            .npcs
+            .values()
+            .any(|npc| npc.respawn_at_tick.is_some_and(|respawn| respawn <= tick))
+        {
+            return;
+        }
         for npc in self.npcs.values_mut() {
             if npc.respawn_at_tick.is_some_and(|respawn| respawn <= tick) {
                 self.loot_encounters.remove(&npc.stable_id);
@@ -386,6 +411,9 @@ impl World {
         events: &mut Vec<DomainEvent>,
     ) -> Result<(), WorldError> {
         let mut defeated = Vec::new();
+        if self.npcs.values().all(|npc| npc_tick_is_noop(npc, tick)) {
+            return Ok(());
+        }
         for (npc_id, npc) in &mut self.npcs {
             if !npc.alive() {
                 continue;
@@ -499,12 +527,29 @@ impl World {
     }
 
     pub(crate) fn expire_processed_effects(&mut self) {
-        for state in self.character_gameplay.values_mut() {
-            state.effects.retain(|effect| effect.remaining_ticks > 0);
-            state.statuses.retain(|status| status.remaining_ticks > 0);
+        if self.character_gameplay.values().any(|state| {
+            state
+                .effects
+                .iter()
+                .any(|effect| effect.remaining_ticks == 0)
+                || state
+                    .statuses
+                    .iter()
+                    .any(|status| status.remaining_ticks == 0)
+        }) {
+            for state in self.character_gameplay.values_mut() {
+                state.effects.retain(|effect| effect.remaining_ticks > 0);
+                state.statuses.retain(|status| status.remaining_ticks > 0);
+            }
         }
-        for npc in self.npcs.values_mut() {
-            npc.statuses.retain(|status| status.remaining_ticks > 0);
+        if self.npcs.values().any(|npc| {
+            npc.statuses
+                .iter()
+                .any(|status| status.remaining_ticks == 0)
+        }) {
+            for npc in self.npcs.values_mut() {
+                npc.statuses.retain(|status| status.remaining_ticks > 0);
+            }
         }
     }
 
@@ -802,4 +847,49 @@ impl World {
         }
         Ok(())
     }
+}
+
+/// True when `resolve_character_tick` would leave this character unchanged
+/// and emit nothing. Must stay in lockstep with that function.
+fn character_tick_is_noop(state: &CharacterGameplaySnapshot, tick: u64) -> bool {
+    !state
+        .scheduled_script_flags
+        .iter()
+        .any(|scheduled| scheduled.due_tick <= tick)
+        && !state
+            .resource_regeneration
+            .iter()
+            .any(|(resource_id, amount)| {
+                state.resources.get(resource_id).is_some_and(|pool| {
+                    pool.current.saturating_add(*amount).min(pool.max) != pool.current
+                })
+            })
+        && !state
+            .ability_cooldowns
+            .values()
+            .any(|ready_tick| *ready_tick <= tick)
+        && state
+            .recovery_at_tick
+            .is_none_or(|recovery| recovery > tick)
+        && state.effects.is_empty()
+        && state.statuses.is_empty()
+        && !(state.vitals.health == 0 && state.recovery_at_tick.is_none())
+}
+
+/// True when `resolve_npc_statuses` would leave this NPC unchanged.
+fn npc_tick_is_noop(npc: &Npc, tick: u64) -> bool {
+    !npc.alive()
+        || (!npc
+            .resource_regeneration
+            .iter()
+            .any(|(resource_id, amount)| {
+                npc.resources.get(resource_id).is_some_and(|pool| {
+                    pool.current.saturating_add(*amount).min(pool.max) != pool.current
+                })
+            })
+            && !npc
+                .ability_cooldowns
+                .values()
+                .any(|ready_tick| *ready_tick <= tick)
+            && npc.statuses.is_empty())
 }
