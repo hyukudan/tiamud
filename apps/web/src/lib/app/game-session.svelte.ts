@@ -16,6 +16,7 @@ import type {
   SceneSnapshot,
   ServerNoticeData,
   StoryError,
+  StorySlotSummary,
   StoryView,
   SyncRecoveryData,
   TradeContentsData,
@@ -85,7 +86,8 @@ export type SessionConnection = Pick<
   'acquireTalent' | 'updateCapabilities'
 > & Partial<Pick<
   TiamudConnection,
-  'storyChoose' | 'storyDialogue' | 'storyMenu' | 'storyUndo' | 'storyLeave'
+  'storyChoose' | 'storyDialogue' | 'storyMenu' | 'storyUndo' | 'storyLeave' |
+  'storySave' | 'storyRestore' | 'storyDeleteSlot' | 'storySlots' | 'storyContinue'
 >>;
 
 export interface AudioSink {
@@ -143,6 +145,12 @@ export class GameSession {
   storyError = $state<StoryError>();
   /** True between sending a story input and its answer. */
   storyPending = $state(false);
+  /** Save slots of the current story; `undefined` until listed. */
+  storySlots = $state<StorySlotSummary[]>();
+  /** True after entering a fresh story that has a compatible autosave. */
+  storyOfferContinue = $state(false);
+  /** Short confirmation of the last slot operation. */
+  storyNotice = $state<string>();
 
   /** Scene entities that can carry an optional sprite. */
   readonly visualEntities = $derived.by((): VisualSceneEntity[] =>
@@ -192,6 +200,31 @@ export class GameSession {
       case 'story.entered':
         this.#storyParts.reset();
         this.storyError = undefined;
+        this.storySlots = undefined;
+        this.storyOfferContinue = false;
+        this.storyNotice = undefined;
+        return;
+      case 'story.slots':
+        this.storyPending = false;
+        this.storySlots = message.data.slots;
+        if (message.data.offerContinue) this.storyOfferContinue = true;
+        return;
+      case 'story.saved': {
+        this.storyPending = false;
+        const { slot, updatedAt } = message.data;
+        this.storySlots = [
+          ...(this.storySlots ?? []).filter((entry) => entry.slot !== slot),
+          { slot, updatedAt, compatible: true },
+        ].sort((a, b) => a.slot - b.slot);
+        this.storyNotice = `Saved to slot ${slot}.`;
+        return;
+      }
+      case 'story.restored':
+        // The restored view follows and clears the pending state.
+        this.storyOfferContinue = false;
+        this.storyNotice = message.data.slot === 0
+          ? 'Continued from the autosave.'
+          : `Loaded slot ${message.data.slot}.`;
         return;
       case 'story.view':
         this.#applyStoryPart(message.data);
@@ -210,7 +243,7 @@ export class GameSession {
             state: 'complete',
             response: message.data.reason === 'left'
               ? 'You leave the story and return to the world.'
-              : 'The story closed after inactivity; its progress was not saved.',
+              : 'The story closed after inactivity. Enter it again to continue from its autosave, if one was kept.',
           },
         ]);
         return;
@@ -422,6 +455,46 @@ export class GameSession {
     if (this.#connection?.storyLeave?.()) this.storyPending = true;
   };
 
+  /** Saves the current story to manual slot `1..=9`. */
+  saveStory = (slot: number): void => {
+    if (!this.story || this.storyPending || !Number.isInteger(slot) || slot < 1 || slot > 9) return;
+    this.#markSlotSent(this.#connection?.storySave?.(slot));
+  };
+
+  /** Loads slot `0..=9`; the current game is replaced by the saved one. */
+  restoreStory = (slot: number): void => {
+    if (!this.story || this.storyPending || !Number.isInteger(slot) || slot < 0 || slot > 9) return;
+    this.#markSlotSent(this.#connection?.storyRestore?.(slot));
+  };
+
+  deleteStorySlot = (slot: number): void => {
+    if (!this.story || this.storyPending || !Number.isInteger(slot) || slot < 0 || slot > 9) return;
+    this.#markSlotSent(this.#connection?.storyDeleteSlot?.(slot));
+  };
+
+  refreshStorySlots = (): void => {
+    if (!this.story || this.storyPending) return;
+    this.#markSlotSent(this.#connection?.storySlots?.());
+  };
+
+  /** Accepts the entry offer and restores the autosave. */
+  continueStory = (): void => {
+    if (!this.story || this.storyPending || !this.storyOfferContinue) return;
+    this.#markSlotSent(this.#connection?.storyContinue?.());
+  };
+
+  dismissStoryContinue = (): void => {
+    this.storyOfferContinue = false;
+  };
+
+  #markSlotSent(sent: boolean | undefined): void {
+    if (sent) {
+      this.storyPending = true;
+      this.storyError = undefined;
+      this.storyNotice = undefined;
+    }
+  }
+
   navigateCommandHistory = (event: KeyboardEvent): void => {
     if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
     if (this.rememberedCommands.length === 0) return;
@@ -570,6 +643,9 @@ export class GameSession {
     this.story = undefined;
     this.storyError = undefined;
     this.storyPending = false;
+    this.storySlots = undefined;
+    this.storyOfferContinue = false;
+    this.storyNotice = undefined;
   }
 
   #views(): WorldViews {

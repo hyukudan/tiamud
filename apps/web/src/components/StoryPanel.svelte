@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { StoryError } from '../lib/protocol';
+  import type { StorySlotSummary } from '../lib/generated/protocol';
   import { presentStory, type AssembledStoryView } from '../lib/story-protocol';
 
   interface Props {
@@ -15,6 +16,18 @@
     onmenu: (verb: string, target?: string) => void;
     onundo: () => void;
     onleave: () => void;
+    /** Save slots of this story (`undefined` until listed). */
+    slots?: StorySlotSummary[];
+    /** Offer to continue the autosave right after entering. */
+    offerContinue?: boolean;
+    /** Confirmation of the last slot operation. */
+    notice?: string;
+    onsave?: (slot: number) => void;
+    onrestore?: (slot: number) => void;
+    ondeleteslot?: (slot: number) => void;
+    onslots?: () => void;
+    oncontinue?: () => void;
+    ondismisscontinue?: () => void;
   }
 
   let {
@@ -28,7 +41,51 @@
     onmenu,
     onundo,
     onleave,
+    slots,
+    offerContinue = false,
+    notice,
+    onsave,
+    onrestore,
+    ondeleteslot,
+    onslots,
+    oncontinue,
+    ondismisscontinue,
   }: Props = $props();
+
+  /** Slot rows: the autosave (0) then the nine manual slots. */
+  const SLOT_NUMBERS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+  let savesOpen = $state(false);
+  let savesToggle = $state<HTMLButtonElement>();
+  let savesHeading = $state<HTMLHeadingElement>();
+  const slotsAvailable = $derived(Boolean(onsave && onrestore));
+  const autosave = $derived(slots?.find((slot) => slot.slot === 0));
+
+  /** Deterministic, locale-independent timestamp. */
+  function formatSaved(seconds: number): string {
+    return `${new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  }
+
+  function slotFor(slot: number): StorySlotSummary | undefined {
+    return slots?.find((entry) => entry.slot === slot);
+  }
+
+  function openSaves(): void {
+    savesOpen = true;
+    onslots?.();
+    void tick().then(() => savesHeading?.focus());
+  }
+
+  function closeSaves(): void {
+    savesOpen = false;
+    void tick().then(() => savesToggle?.focus());
+  }
+
+  function handleSavesKey(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeSaves();
+  }
 
   const story = $derived(presentStory(view));
   const disabled = $derived(!connected || pending);
@@ -64,7 +121,7 @@
   });
 
   function handleKey(event: KeyboardEvent): void {
-    if (event.altKey || event.ctrlKey || event.metaKey || disabled) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || disabled || savesOpen) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
     if (!/^[1-9]$/.test(event.key)) return;
@@ -80,6 +137,16 @@
 <section class="story-panel" aria-labelledby={headingId} bind:this={panel}>
   <p class="eyebrow">Story · turn {view.turn} · score {story.score}</p>
   <h1 id={headingId} tabindex="-1" bind:this={heading} {lang}>{story.title}</h1>
+
+  {#if offerContinue && autosave && oncontinue}
+    <div class="story-continue" role="group" aria-labelledby="story-continue-text">
+      <p id="story-continue-text">
+        You have an autosaved game from {formatSaved(autosave.updatedAt)}.
+      </p>
+      <button type="button" {disabled} onclick={oncontinue}>Continue saved game</button>
+      <button type="button" disabled={!connected} onclick={() => ondismisscontinue?.()}>Start over</button>
+    </div>
+  {/if}
 
   <div class="story-text" aria-live="polite" {lang}>
     {#if story.events.length > 0}
@@ -146,10 +213,74 @@
     </dl>
   {/if}
 
+  {#if notice}<p class="story-notice" role="status">{notice}</p>{/if}
+
   <div class="story-controls">
     <button type="button" disabled={disabled || !view.canUndo} onclick={onundo}>Undo</button>
+    {#if slotsAvailable}
+      <button
+        type="button"
+        bind:this={savesToggle}
+        aria-expanded={savesOpen}
+        aria-controls="story-saves"
+        disabled={!connected}
+        onclick={() => (savesOpen ? closeSaves() : openSaves())}
+      >Saved games</button>
+    {/if}
     <button type="button" disabled={!connected} onclick={onleave}>Leave story</button>
   </div>
+
+  {#if slotsAvailable && savesOpen}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <section
+      id="story-saves"
+      class="story-saves"
+      aria-labelledby="story-saves-title"
+      onkeydown={handleSavesKey}
+    >
+      <h2 id="story-saves-title" tabindex="-1" bind:this={savesHeading}>Saved games</h2>
+      <p class="story-saves-help">
+        Slot 0 is the autosave written when you leave. Loading replaces the current game; undo
+        history is not saved. Press Escape to close.
+      </p>
+      {#if slots === undefined}
+        <p>Loading saved games…</p>
+      {:else}
+        <ul class="story-slot-list" aria-label="Save slots">
+          {#each SLOT_NUMBERS as number (number)}
+            {@const entry = slotFor(number)}
+            {@const name = number === 0 ? 'Autosave' : `Slot ${number}`}
+            <li>
+              <span class="story-slot-name">{name}</span>
+              <span class="story-slot-state">
+                {#if entry}
+                  {formatSaved(entry.updatedAt)}{#if !entry.compatible} · older story version, cannot be loaded{/if}
+                {:else}
+                  Empty
+                {/if}
+              </span>
+              {#if number > 0}
+                <button type="button" {disabled} aria-label={`Save to ${name}`} onclick={() => onsave?.(number)}>Save</button>
+              {/if}
+              <button
+                type="button"
+                disabled={disabled || !entry?.compatible}
+                aria-label={`Load ${name}`}
+                onclick={() => onrestore?.(number)}
+              >Load</button>
+              <button
+                type="button"
+                disabled={disabled || !entry}
+                aria-label={`Delete ${name}`}
+                onclick={() => ondeleteslot?.(number)}
+              >Delete</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <button type="button" onclick={closeSaves}>Close saved games</button>
+    </section>
+  {/if}
   {#if actions.length > 0}
     <p class="story-hint">Press 1–{Math.min(9, actions.length)} to choose.</p>
   {/if}
@@ -229,6 +360,46 @@
     gap: 0.5rem;
   }
 
+  .story-continue,
+  .story-saves {
+    display: grid;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border: 1px solid #82744f;
+    border-radius: 0.2rem;
+  }
+
+  .story-continue p,
+  .story-saves p,
+  .story-saves h2 {
+    margin: 0;
+  }
+
+  .story-slot-list {
+    display: grid;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .story-slot-list li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .story-slot-name {
+    min-width: 5.5rem;
+    font-weight: 600;
+  }
+
+  .story-slot-state {
+    flex: 1 1 12rem;
+  }
+
+  .story-notice,
   .story-hint {
     margin: 0;
     font-size: 0.875rem;

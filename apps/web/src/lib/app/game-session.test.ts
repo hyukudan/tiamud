@@ -42,6 +42,11 @@ function harness() {
     storyMenu: vi.fn(() => true),
     storyUndo: vi.fn(() => true),
     storyLeave: vi.fn(() => true),
+    storySave: vi.fn(() => true),
+    storyRestore: vi.fn(() => true),
+    storyDeleteSlot: vi.fn(() => true),
+    storySlots: vi.fn(() => true),
+    storyContinue: vi.fn(() => true),
   } satisfies SessionConnection;
   const storage = new Map<string, string>();
   const historyView: HistoryView = {
@@ -271,5 +276,62 @@ describe('GameSession', () => {
     expect(session.story).toBeDefined();
     callbacks().onMessage(message('server.welcome', { serverName: 'Tiamud', motd: 'Hi' }, 1));
     expect(session.story).toBeUndefined();
+  });
+
+  it('offers to continue, saves, lists and restores story slots', () => {
+    const { session, connection, callbacks } = harness();
+    const scene = { type: 'scene', title: 'Cripta', text: 'Oscuro.', score: 0, ending: null };
+    const view = (viewRev: number, turn: number) => message('story.view', {
+      viewRev, part: 0, parts: 1, turn, canUndo: false, items: [scene],
+    }, 10 + viewRev);
+    callbacks().onMessage(message('story.entered', { storyId: 'cripta', title: 'Cripta' }, 4));
+    callbacks().onMessage(view(1, 0));
+    // Nothing is sent before the story exists or with invalid slots.
+    session.saveStory(0);
+    session.saveStory(10);
+    expect(connection.storySave).not.toHaveBeenCalled();
+    session.continueStory();
+    expect(connection.storyContinue).not.toHaveBeenCalled();
+
+    callbacks().onMessage(message('story.slots', {
+      slots: [{ slot: 0, updatedAt: 100, compatible: true }], offerContinue: true,
+    }, 5));
+    expect(session.storyOfferContinue).toBe(true);
+    expect(session.storySlots).toHaveLength(1);
+
+    session.saveStory(2);
+    expect(connection.storySave).toHaveBeenCalledWith(2);
+    expect(session.storyPending).toBe(true);
+    session.saveStory(3);
+    expect(connection.storySave).toHaveBeenCalledTimes(1);
+    callbacks().onMessage(message('story.saved', { slot: 2, updatedAt: 200 }, 6));
+    expect(session.storyPending).toBe(false);
+    expect(session.storyNotice).toBe('Saved to slot 2.');
+    expect(session.storySlots?.map((slot) => slot.slot)).toEqual([0, 2]);
+
+    session.continueStory();
+    expect(connection.storyContinue).toHaveBeenCalledTimes(1);
+    callbacks().onMessage(message('story.restored', { slot: 0 }, 7));
+    expect(session.storyOfferContinue).toBe(false);
+    expect(session.storyPending).toBe(true);
+    callbacks().onMessage(view(2, 3));
+    expect(session.storyPending).toBe(false);
+    expect(session.story?.turn).toBe(3);
+    expect(session.storyNotice).toBe('Continued from the autosave.');
+
+    session.refreshStorySlots();
+    expect(connection.storySlots).toHaveBeenCalledTimes(1);
+    callbacks().onMessage(message('story.error', { code: 'rate_limited', message: 'Espera.' }, 8));
+    expect(session.storyPending).toBe(false);
+    session.deleteStorySlot(2);
+    expect(connection.storyDeleteSlot).toHaveBeenCalledWith(2);
+    callbacks().onMessage(message('story.slots', { slots: [], offerContinue: false }, 9));
+    expect(session.storySlots).toEqual([]);
+    session.restoreStory(4);
+    expect(connection.storyRestore).toHaveBeenCalledWith(4);
+
+    callbacks().onMessage(message('story.left', { reason: 'evicted' }, 20));
+    expect(session.storySlots).toBeUndefined();
+    expect(session.history.at(-1)?.response).toContain('autosave');
   });
 });

@@ -6,6 +6,11 @@ import {
   createHeartbeatAck,
   createPromotionPerform,
   createStoryChoose,
+  createStoryContinue,
+  createStoryDeleteSlot,
+  createStoryListSlots,
+  createStoryRestore,
+  createStorySave,
   createStoryDialogue,
   createStoryLeave,
   createStoryMenu,
@@ -365,6 +370,36 @@ export class TiamudConnection {
   storyLeave(): boolean {
     if (this.#socket?.readyState !== WebSocket.OPEN) return false;
     this.#socket.send(JSON.stringify(createStoryLeave()));
+    return true;
+  }
+
+  storySave(slot: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStorySave(slot)));
+    return true;
+  }
+
+  storyRestore(slot: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryRestore(slot)));
+    return true;
+  }
+
+  storyDeleteSlot(slot: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryDeleteSlot(slot)));
+    return true;
+  }
+
+  storySlots(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryListSlots()));
+    return true;
+  }
+
+  storyContinue(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryContinue()));
     return true;
   }
 
