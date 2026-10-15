@@ -580,6 +580,7 @@ No existe LRU ni política automática de memoria.
 | `crates/persistence-postgres/` | PostgreSQL esquema v15, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
+| `crates/story-core/` | Ruleset narrativo puro StoryPack (prototipo S0, ADR 0025 propuesto; sin servidor ni persistencia) |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
 | `crates/telnet-codec/` | Parser Telnet de producción compartido con fuzzing |
 | `crates/cell-frame/` | Renderizado de celdas acotado |

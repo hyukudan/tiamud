@@ -436,6 +436,7 @@ crates/cell-frame/           bounded, consented cell graphics
 crates/persistence-*/        SQLite/PostgreSQL schemas and migration
 crates/world-pack/           authoring model, composition and CLI
 crates/scripting/            quota-bounded Lua capabilities
+crates/story-core/           pure narrative ruleset prototype (StoryPack, S0)
 crates/asset-pipeline/       deterministic, reviewed media pipeline
 crates/editorial-ai/         optional authoring-only AI
 crates/tiamud-admin/         operator integrity and recovery
