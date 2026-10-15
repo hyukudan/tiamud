@@ -1070,7 +1070,7 @@ advance its version.
 Invalid references, cycles, depth, capacity, counter, owner, binding,
 participant, reservation, cohort, or provenance are also rejected.
 
-SQLite and PostgreSQL use schema v15. `world_area_generation` stores only
+SQLite and PostgreSQL use schema v16. `world_area_generation` stores only
 `worldId`, active digest, previous digest, activation sequence, and timestamp;
 paths are derived from the configured registry. A 6C transition updates that row
 and the v8 snapshot in the same transaction via compare-and-swap. It is not
@@ -1094,7 +1094,7 @@ restart. Those temporary aggregates do not remain in the active world.
 The runtime allows up to 65,536 instances. Inherited raw v1-v5 snapshots keep the
 physical limit of 1 MiB; v6–v8 snapshots, as well as each new
 admission/commit, allow up to 2 MiB. The sum of inspected owner sheets remains
-limited to 1 MiB and each sheet to 64 KiB. SQLite and PostgreSQL schema v15 store
+limited to 1 MiB and each sheet to 64 KiB. SQLite and PostgreSQL schema v16 store
 the snapshot as opaque `TEXT` within the existing transaction. The v10→v11
 migration transactionally raises the runtime singleton's physical constraint to
 2 MiB and preserves version, JSON, covered sequence, and date; it does not

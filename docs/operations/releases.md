@@ -67,7 +67,7 @@ convierte en firma remota porque el CLI viaje dentro de un archivo atestado.
 
 Antes de actualizar el binario de una instalación en modo catálogo, conserva
 la raíz del registro, el catálogo activo y el anterior y una copia verificada
-del backend. SQL v15 referencia la generación por digest y puede contener
+del backend. SQL v15+ referencia la generación por digest y puede contener
 checkpoints de unidades, no una ruta
 incluida en el paquete: borrar esos blobs puede impedir el siguiente arranque o
 un rollback. `area-select` solo selecciona una generación local ya publicada;
@@ -89,7 +89,13 @@ remota siguen siendo pruebas distintas. Véase el
 [registro de aceptación PostgreSQL v14/PWA](../project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
 
 El candidato v15 debe conservar y verificar `world_area_checkpoints` en backup,
-restore y traslado. La aceptación v14 anterior no acredita esa tabla. 6D sigue
+restore y traslado. La aceptación v14 anterior no acredita esa tabla. El
+candidato v16 añade además `story_saves` (slots de historia,
+[ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md)): la migración
+v15→v16 debe probarse sobre una copia verificada del backend, el traslado debe
+copiar o rechazar cada slot de forma atómica y un rollback del binario a v15
+exige restaurar la copia previa, porque v15 rechaza una base v16. Ninguna
+aceptación PostgreSQL real acredita todavía v16. 6D sigue
 parcial: no hay LRU ni superficie de operador, y un release no debe anunciar
 descarga automática o ahorro RSS hasta que exista evidencia integral retenida.
 
