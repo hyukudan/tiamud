@@ -169,6 +169,10 @@ export class GameSession {
   storyDeadline = $state<number>();
   /** The latest invitation to a shared story, until joined or dismissed. */
   storyInvitation = $state<StoryInvitation>();
+  /** Language of the current story instance (`story.entered`). */
+  storyLocale = $state('es');
+  /** Languages the current story offers, default first. */
+  storyLocales = $state<string[]>(['es']);
 
   /** Scene entities that can carry an optional sprite. */
   readonly visualEntities = $derived.by((): VisualSceneEntity[] =>
@@ -217,6 +221,8 @@ export class GameSession {
         return;
       case 'story.entered':
         this.#storyParts.reset();
+        this.storyLocale = message.data.locale;
+        this.storyLocales = message.data.locales;
         this.storyError = undefined;
         this.storySlots = undefined;
         this.storyOfferContinue = false;

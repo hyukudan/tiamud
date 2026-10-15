@@ -103,7 +103,7 @@ export type StoryMenuData = { verb: string, target?: string, viewRev: number, };
 
 export type StoryEmptyData = Record<symbol, never>;
 
-export type StoryEntered = { storyId: string, title: string, };
+export type StoryEntered = { storyId: string, title: string, locale: string, locales: Array<string>, };
 
 export type StoryBlockKind = "event" | "line" | "command" | "reply";
 
@@ -115,7 +115,9 @@ export type StoryCueAction = "play" | "stop";
 
 export type StoryPrompt = { text: string, question: boolean, };
 
-export type StoryItem = { "type": "scene", title: string, text: string, score: number, ending: StoryEnding | null, prompt?: StoryPrompt, } | { "type": "cue", action: StoryCueAction, channel: MediaChannel, url?: string, loop: boolean, } | { "type": "portrait", name: string, } | { "type": "block", kind: StoryBlockKind, speaker?: string, text: string, } | { "type": "stat", label: string, value: string, } | { "type": "item", name: string, } | { "type": "choice", id: string, label: string, } | { "type": "verb", id: string, label: string, needsTarget: boolean, } | { "type": "target", verb: string, id: string, label: string, } | { "type": "dialogueOption", id: string, label: string, };
+export type StoryImage = { manifest: string, alt: string, };
+
+export type StoryItem = { "type": "scene", title: string, text: string, score: number, ending: StoryEnding | null, prompt?: StoryPrompt, background?: StoryImage, } | { "type": "cue", action: StoryCueAction, channel: MediaChannel, url?: string, loop: boolean, } | { "type": "portrait", name: string, image?: StoryImage, } | { "type": "block", kind: StoryBlockKind, speaker?: string, text: string, } | { "type": "stat", label: string, value: string, } | { "type": "item", name: string, } | { "type": "choice", id: string, label: string, } | { "type": "verb", id: string, label: string, needsTarget: boolean, } | { "type": "target", verb: string, id: string, label: string, } | { "type": "dialogueOption", id: string, label: string, };
 
 export type StoryView = { viewRev: number, part: number, parts: number, turn: number, canUndo: boolean, items: Array<StoryItem>, };
 
@@ -123,7 +125,7 @@ export type StoryLeftReason = "left" | "evicted" | "kicked" | "ended";
 
 export type StoryLeft = { reason: StoryLeftReason, };
 
-export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited" | "host_only" | "spectator" | "not_your_turn" | "unknown_code" | "seats_full" | "not_shared" | "unknown_member" | "invalid_setting" | "no_parser" | "invalid_command";
+export type StoryErrorCode = "disabled" | "unknown_story" | "already_in_story" | "capacity" | "not_in_story" | "stale_view" | "unknown_choice" | "ended" | "nothing_to_undo" | "busy" | "internal" | "slots_unavailable" | "invalid_slot" | "slot_empty" | "slot_corrupt" | "slot_incompatible" | "slot_capacity" | "rate_limited" | "host_only" | "spectator" | "not_your_turn" | "unknown_code" | "seats_full" | "not_shared" | "unknown_member" | "invalid_setting" | "no_parser" | "invalid_command" | "unknown_locale";
 
 export type StoryError = { code: StoryErrorCode, message: string, };
 

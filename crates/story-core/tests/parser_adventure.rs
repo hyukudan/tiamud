@@ -2,8 +2,9 @@
 //! free text, an English pack, compatibility with v1/v2 and bounds.
 
 use tiamud_story_core::{
-    EndingKind, Location, MAX_REPLIES, MAX_VIEW_BYTES, MetaRequest, Reply, StoryError, StoryInput,
-    StoryPack, StoryState, StoryView, step, step_command, view, view_pages,
+    EndingKind, Location, MAX_COMPATIBLE_REVISIONS, MAX_PROMPT_BYTES, MAX_REPLIES, MAX_VIEW_BYTES,
+    MetaRequest, PageItem, Reply, StoryError, StoryInput, StoryPack, StoryState, StoryView, step,
+    step_command, view, view_pages,
 };
 
 const FARO: &[u8] = include_bytes!("../fixtures/parser/faro-de-punta-gris.story.json");
@@ -546,4 +547,90 @@ fn english_lexicon_plays_the_same_library() {
     let (state, text) = say_en(&pack, &state, "drink wine");
     assert_eq!(text, "You drink the whole bottle and fall asleep.");
     assert_eq!(state.ended.as_ref().map(|e| e.id.as_str()), Some("tipsy"));
+}
+
+fn scene_prompt(pack: &StoryPack, state: &StoryState, locale: &str) -> Option<String> {
+    view_pages(pack, state, locale).unwrap()[0]
+        .items
+        .iter()
+        .find_map(|item| match item {
+            PageItem::Scene { prompt, .. } => prompt.clone(),
+            _ => None,
+        })
+}
+
+#[test]
+fn authored_prompt_is_localized_and_bounded() {
+    let pack = faro();
+    let state = StoryState::new(&pack, 0).unwrap();
+    // Without an authored prompt the parser shows `>`.
+    assert_eq!(scene_prompt(&pack, &state, "es").as_deref(), Some(">"));
+
+    let mut json: serde_json::Value = serde_json::from_slice(FARO).unwrap();
+    json["world"]["prompt"] = serde_json::json!({ "es": "¿Qué haces?", "en": "What now?" });
+    let pack = StoryPack::from_json_slice(&serde_json::to_vec(&json).unwrap()).unwrap();
+    pack.validate().unwrap();
+    assert_eq!(
+        scene_prompt(&pack, &state, "en").as_deref(),
+        Some("What now?")
+    );
+    assert_eq!(
+        scene_prompt(&pack, &state, "es").as_deref(),
+        Some("¿Qué haces?")
+    );
+
+    // Too long, multi-line or empty prompts fail validation.
+    for bad in [
+        serde_json::json!({ "es": "x".repeat(MAX_PROMPT_BYTES + 1) }),
+        serde_json::json!({ "es": "uno\ndos" }),
+        serde_json::json!({}),
+    ] {
+        json["world"]["prompt"] = bad;
+        let pack = StoryPack::from_json_slice(&serde_json::to_vec(&json).unwrap()).unwrap();
+        let errors = pack.validate().unwrap_err();
+        assert!(
+            errors
+                .errors
+                .iter()
+                .any(|issue| issue.path == "world.prompt")
+        );
+    }
+}
+
+#[test]
+fn compatible_revisions_are_bounded_unique_digests_of_format_v3() {
+    let digest = "ab".repeat(32);
+    let mut json: serde_json::Value = serde_json::from_slice(FARO).unwrap();
+    json["compatible_revisions"] = serde_json::json!([digest]);
+    let pack = StoryPack::from_json_slice(&serde_json::to_vec(&json).unwrap()).unwrap();
+    pack.validate().unwrap();
+    assert_eq!(pack.compatible_revisions, vec![digest.clone()]);
+
+    let reject = |value: serde_json::Value, version: u32| {
+        let mut json: serde_json::Value = serde_json::from_slice(CRIPTA).unwrap();
+        json["format_version"] = serde_json::json!(version);
+        json["compatible_revisions"] = value;
+        let pack = StoryPack::from_json_slice(&serde_json::to_vec(&json).unwrap()).unwrap();
+        let errors = pack.validate().unwrap_err();
+        assert!(
+            errors
+                .errors
+                .iter()
+                .any(|issue| issue.path.starts_with("compatible_revisions")),
+            "{errors:?}"
+        );
+    };
+    reject(serde_json::json!(["AB".repeat(32)]), 3);
+    reject(serde_json::json!(["ab".repeat(31)]), 3);
+    reject(serde_json::json!([digest, digest]), 3);
+    reject(
+        serde_json::json!(
+            (0..=MAX_COMPATIBLE_REVISIONS)
+                .map(|index| format!("{index:064x}"))
+                .collect::<Vec<_>>()
+        ),
+        3,
+    );
+    // A v1 document may not declare it.
+    reject(serde_json::json!([digest]), 1);
 }

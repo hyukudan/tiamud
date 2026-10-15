@@ -8,6 +8,7 @@
     StoryTally,
   } from '../lib/generated/protocol';
   import { presentStory, type AssembledStoryView } from '../lib/story-protocol';
+  import StoryImage from './StoryImage.svelte';
   import StoryLobby from './StoryLobby.svelte';
 
   interface Props {
@@ -16,8 +17,13 @@
     pending: boolean;
     error?: StoryError;
     headingId?: string;
-    /** Story text language (S2 resolves Spanish first). */
+    /** Story text language: the instance locale from `story.entered`. */
     lang?: string;
+    /**
+     * Download reviewed backgrounds and portraits. Off in reader mode, with
+     * Save-Data or multimedia off: the background's alt text is shown instead.
+     */
+    images?: boolean;
     onchoose: (id: string) => void;
     onmenu: (verb: string, target?: string) => void;
     onundo: () => void;
@@ -56,6 +62,7 @@
     error,
     headingId = 'story-title',
     lang = 'es',
+    images = false,
     onchoose,
     onmenu,
     onundo,
@@ -221,6 +228,16 @@
   <p class="eyebrow">Story · turn {view.turn} · score {story.score}</p>
   <h1 id={headingId} tabindex="-1" bind:this={heading} {lang}>{story.title}</h1>
 
+  {#if story.background}
+    {#if images}
+      {#key story.background.manifest}
+        <StoryImage image={story.background} kind="background" fallbackText {lang} />
+      {/key}
+    {:else}
+      <p class="story-image-text" {lang}>{story.background.alt}</p>
+    {/if}
+  {/if}
+
   {#if offerContinue && autosave && oncontinue}
     <div class="story-continue" role="group" aria-labelledby="story-continue-text">
       <p id="story-continue-text">
@@ -308,6 +325,19 @@
   {/if}
 
   {#if story.present.length > 0}
+    {#if images && story.portraits.some((portrait) => portrait.image)}
+      <ul class="story-portraits" aria-label="Portraits">
+        {#each story.portraits as portrait, index (index)}
+          {#if portrait.image}
+            <li>
+              {#key portrait.image.manifest}
+                <StoryImage image={portrait.image} kind="portrait" {lang} />
+              {/key}
+            </li>
+          {/if}
+        {/each}
+      </ul>
+    {/if}
     <p class="story-present" {lang}>Present: {story.present.join(', ')}</p>
   {/if}
 
@@ -451,6 +481,21 @@
   .story-text p {
     margin: 0 0 0.75rem;
     line-height: 1.6;
+  }
+
+  .story-image-text {
+    margin: 0;
+    font-size: 0.875rem;
+    font-style: italic;
+  }
+
+  .story-portraits {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
   }
 
   .story-events {

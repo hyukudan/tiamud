@@ -12,6 +12,7 @@ use tiamud_story_tools::{
 
 const ID_PATTERN: &str = "^[a-z0-9][a-z0-9._-]{0,63}$";
 const LOCALE_PATTERN: &str = "^[A-Za-z][A-Za-z0-9-]{1,34}$";
+const SHA256_PATTERN: &str = "^[0-9a-f]{64}$";
 
 fn matches_pattern(pattern: &str, text: &str) -> bool {
     let bytes = text.as_bytes();
@@ -29,6 +30,12 @@ fn matches_pattern(pattern: &str, text: &str) -> bool {
                 && bytes
                     .iter()
                     .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+        }
+        SHA256_PATTERN => {
+            bytes.len() == 64
+                && bytes
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
         }
         other => panic!("schema uses an unchecked pattern {other:?}"),
     }
@@ -552,4 +559,51 @@ fn scripted_packs_satisfy_the_schema_and_bad_script_shapes_do_not() {
         assert!(!valid(&root, &root, &document), "{document}");
         assert!(!loader_accepts(&document), "{document}");
     }
+}
+
+#[test]
+fn prompt_and_compatible_revisions_match_the_loader() {
+    use tiamud_story_core::{MAX_COMPATIBLE_REVISIONS, MAX_PROMPT_BYTES};
+    let root = schema();
+    assert_eq!(
+        root["properties"]["compatible_revisions"]["maxItems"],
+        MAX_COMPATIBLE_REVISIONS
+    );
+    assert_eq!(MAX_PROMPT_BYTES, 64);
+    let mut pack = faro();
+    pack["world"]["prompt"] = json!({ "es": "¿Qué haces?", "en": "What now?" });
+    pack["compatible_revisions"] = json!(["0123456789abcdef".repeat(4)]);
+    assert!(loader_accepts(&pack));
+    assert!(
+        StoryPack::from_json_slice(&serde_json::to_vec(&pack).unwrap())
+            .unwrap()
+            .validate()
+            .is_ok()
+    );
+    assert!(valid(&root, &root, &pack));
+    let canonical: Value = serde_json::from_slice(
+        &canonical_json(&StoryPack::from_json_slice(&serde_json::to_vec(&pack).unwrap()).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(valid(&root, &root, &canonical));
+    let v2: Value = serde_json::from_str(STORY_PACK_SCHEMA_V2).unwrap();
+    let mut older = fixture();
+    older["compatible_revisions"] = json!(["0123456789abcdef".repeat(4)]);
+    assert!(!valid(&v2, &v2, &older));
+
+    for bad in [
+        json!(["0123456789ABCDEF".repeat(4)]),
+        json!(["abc"]),
+        json!([7]),
+        json!("0123456789abcdef"),
+    ] {
+        let mut pack = faro();
+        pack["compatible_revisions"] = bad;
+        assert!(!valid(&root, &root, &pack));
+    }
+    let mut pack = faro();
+    pack["world"]["prompt"] = json!(">");
+    assert!(!loader_accepts(&pack));
+    assert!(!valid(&root, &root, &pack));
 }

@@ -239,6 +239,88 @@ test('the verb-menu adventure plays verbs, targets and dialogue to its ending', 
   await expectAccepted(page, story.steps.length - 1);
 });
 
+/** Plays the recorded menu adventure up to the club (six actions). */
+async function walkToTheClub(panel: ReturnType<Page['locator']>, story: StoryFixture): Promise<void> {
+  for (const step of story.steps.slice(0, 6)) {
+    const [verb, target] = (step.label ?? '').split(' → ');
+    await panel.getByRole('group', { name: verb }).getByRole('button', { name: target, exact: true }).click();
+  }
+}
+
+/** Alt text of the first background and portrait the server recorded. */
+function recordedAlt(story: StoryFixture): { office: string; club: string; lola: string } {
+  const items = (index: number) => story.steps[index].view
+    .flatMap((part) => (part as { items: Record<string, unknown>[] }).items);
+  const alt = (item: Record<string, unknown> | undefined, key: string) =>
+    ((item?.[key] as { alt?: string } | undefined)?.alt) ?? '';
+  return {
+    office: alt(items(0).find((item) => item.type === 'scene'), 'background'),
+    club: alt(items(6).find((item) => item.type === 'scene'), 'background'),
+    lola: alt(items(6).find((item) => item.type === 'portrait'), 'image'),
+  };
+}
+
+test('reviewed story backgrounds and portraits load with their alt text', async ({ page }) => {
+  const story = load('story-lluvia.json');
+  const alt = recordedAlt(story);
+  expect(alt.office).toContain('despacho');
+  const panel = await enterStory(page, story);
+
+  const office = panel.getByRole('img', { name: alt.office });
+  await expect(office).toBeVisible();
+  // The browser decoded a real pipeline variant, not a broken image.
+  await expect.poll(() => office.evaluate((image: HTMLImageElement) => image.naturalWidth))
+    .toBeGreaterThan(0);
+  expect(await office.evaluate((image: HTMLImageElement) => image.currentSrc))
+    .toMatch(/\/assets\/[a-f0-9]{64}\/scene-(640|1280)\.(avif|webp|jpg)$/);
+  await expectNoViolations(page);
+
+  await walkToTheClub(panel, story);
+  await expect(panel.getByRole('img', { name: alt.club })).toBeVisible();
+  const portraits = panel.getByRole('list', { name: 'Portraits' });
+  await expect(portraits.getByRole('img', { name: alt.lola })).toBeVisible();
+  await expect(panel.getByText('Present: Lola')).toBeVisible();
+  await expectNoViolations(page);
+  await expectAccepted(page, 6);
+});
+
+test('missing story images degrade to their alt text and play goes on', async ({ page }) => {
+  const story = load('story-lluvia.json');
+  const alt = recordedAlt(story);
+  let blocked = 0;
+  await page.route(/\/assets\/[a-f0-9]{64}\/manifest\.json$/, async (route) => {
+    blocked += 1;
+    await route.fulfill({ status: 404, body: '' });
+  });
+  const panel = await enterStory(page, story);
+  await expect(panel.getByText(alt.office)).toBeVisible();
+  await expect(panel.getByRole('img')).toHaveCount(0);
+  await walkToTheClub(panel, story);
+  await expect(panel.getByText(alt.club)).toBeVisible();
+  await expect(panel.getByRole('img')).toHaveCount(0);
+  await expect(panel.getByText('Present: Lola')).toBeVisible();
+  await expectAccepted(page, 6);
+  expect(blocked).toBeGreaterThan(0);
+});
+
+test('reader mode shows story alt text without downloading images', async ({ page }) => {
+  const story = load('story-lluvia.json');
+  const alt = recordedAlt(story);
+  const requested: string[] = [];
+  page.on('request', (request) => {
+    if (/\/assets\/[a-f0-9]{64}\//.test(request.url())) requested.push(request.url());
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem('tiamud.preferences.v1', JSON.stringify({ screenReader: true }));
+  });
+  const panel = await enterStory(page, story);
+  await expect(panel.getByText(alt.office)).toBeVisible();
+  await expect(panel.getByRole('img')).toHaveCount(0);
+  await walkToTheClub(panel, story);
+  await expect(panel.getByText(alt.club)).toBeVisible();
+  expect(requested).toEqual([]);
+});
+
 // Real server payloads of the save → leave → re-enter → continue scenario,
 // recorded by `browser_slot_fixture_is_current` in tiamud-server.
 interface SlotFixture {

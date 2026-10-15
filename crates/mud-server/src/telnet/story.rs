@@ -554,25 +554,30 @@ impl TelnetStory {
         match command {
             StoryCommand::List => write_line(output, input, &render_listing(&manager.listing()))?,
             StoryCommand::Leave => write_line(output, input, StoryFailure::NotInStory.message())?,
-            StoryCommand::Enter(story_id) => match manager.enter(self.account, &story_id) {
-                Ok(link) => {
-                    write_line(output, input, &format!("Entras en «{}».", link.title()))?;
-                    self.set_link(link.clone());
-                    let outcome = self.refresh(output, input).await?;
-                    if outcome == StoryLineOutcome::Handled
-                        && let Some(slots) = link.entry_slots().await
-                    {
-                        if let Some(offer) = render_continue_offer(&slots) {
-                            write_line(output, input, &offer)?;
+            StoryCommand::Enter(story_id, locale) => {
+                match manager.enter_in(self.account, &story_id, locale.as_deref()) {
+                    Ok(link) => {
+                        write_line(output, input, &format!("Entras en «{}».", link.title()))?;
+                        self.set_link(link.clone());
+                        let outcome = self.refresh(output, input).await?;
+                        if outcome == StoryLineOutcome::Handled
+                            && let Some(slots) = link.entry_slots().await
+                        {
+                            if let Some(offer) = render_continue_offer(&slots) {
+                                write_line(output, input, &offer)?;
+                            }
+                            self.slots_gmcp(output, input, &slots)?;
                         }
-                        self.slots_gmcp(output, input, &slots)?;
+                        return Ok(outcome);
                     }
-                    return Ok(outcome);
+                    Err(failure) => write_line(output, input, failure.message())?,
                 }
-                Err(failure) => write_line(output, input, failure.message())?,
-            },
-            StoryCommand::Host(story_id) => {
-                match manager.host(self.account, &self.name, &story_id).await {
+            }
+            StoryCommand::Host(story_id, locale) => {
+                match manager
+                    .host(self.account, &self.name, &story_id, locale.as_deref())
+                    .await
+                {
                     Ok(link) => {
                         write_line(output, input, &format!("Compartes «{}».", link.title()))?;
                         self.set_link(link);
@@ -807,7 +812,7 @@ impl TelnetSession {
                         stats.push(json!({"label": label, "value": value}));
                     }
                     StoryItem::Item { name } => inventory.push(name.as_str()),
-                    StoryItem::Portrait { name } => present.push(name.as_str()),
+                    StoryItem::Portrait { name, .. } => present.push(name.as_str()),
                     StoryItem::DialogueOption { .. } => dialogue = true,
                     _ => {}
                 }

@@ -240,7 +240,12 @@ describe('GameSession', () => {
     const OPTION = 'c3333333333333333';
     const url = `/assets/${'b'.repeat(64)}/audio-x.ogg`;
     const scene = { type: 'scene', title: 'Lluvia', text: 'Llueve.', score: 0, ending: null };
-    callbacks().onMessage(message('story.entered', { storyId: 'lluvia-de-neon', title: 'Lluvia' }, 4));
+    callbacks().onMessage(message('story.entered', {
+      storyId: 'lluvia-de-neon', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'],
+    }, 4));
+    // The panel renders story text in the instance language.
+    expect(session.storyLocale).toBe('en');
+    expect(session.storyLocales).toEqual(['es', 'en']);
     callbacks().onMessage(message('story.view', {
       viewRev: 1, part: 0, parts: 2, turn: 0, canUndo: false,
       items: [scene, { type: 'cue', action: 'play', channel: 'music', url, loop: true }],

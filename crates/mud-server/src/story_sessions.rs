@@ -67,8 +67,12 @@ use tiamud_story_core::{
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-/// Locale used to resolve story text in S2. Per-session locales are later work.
+/// Default locale of a story instance when the pack offers it (otherwise the
+/// pack's first locale). A session may pick another one of the pack's
+/// locales when it enters (`historia <id> <locale>`).
 pub const STORY_LOCALE: &str = "es";
+/// Maximum bytes of a requested story locale tag.
+const MAX_LOCALE_BYTES: usize = 35;
 /// Maximum StoryPacks in one catalog directory.
 pub const MAX_CATALOG_STORIES: usize = 64;
 /// Maximum directory entries scanned while loading a catalog.
@@ -92,6 +96,10 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STORY_MEDIA_FILE: &str = "story-media.json";
 const MAX_MEDIA_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_MEDIA_ASSETS: usize = 256;
+/// Maximum reviewed images (backgrounds and portraits) of the media map.
+const MAX_MEDIA_IMAGES: usize = 256;
+/// Maximum locales of one image's alternative text.
+const MAX_IMAGE_ALT_LOCALES: usize = 16;
 /// Every WebSocket frame stays within the 16 KiB protocol limit.
 #[cfg(test)]
 pub const MAX_STORY_FRAME_BYTES: usize = 16 * 1024;
@@ -323,9 +331,15 @@ pub struct CatalogStory {
     /// Lowercase hexadecimal SHA-256 of the exact pack bytes; the revision a
     /// save slot is bound to (ADR 0030).
     pack_sha256: String,
-    /// Language of the instance: the parser lexicon (`es` when the pack has
-    /// one, else its first lexicon) and the locale its views resolve.
+    /// Default language of an instance: the parser lexicon (`es` when the
+    /// pack has one, else its first lexicon) and the locale its views resolve.
     language: String,
+    /// Every language an instance may play in, default first: the parser
+    /// lexicons of a v3 world, else the locales of the pack title.
+    locales: Vec<String>,
+    /// Earlier revisions (SHA-256) whose save slots still load after
+    /// re-validation, as declared by the pack (StoryPack v3).
+    compatible: BTreeSet<String>,
 }
 
 impl CatalogStory {
@@ -334,17 +348,91 @@ impl CatalogStory {
         self.pack.world.is_some()
     }
 
-    /// The instance language (`es` unless the pack only declares others).
+    /// The default instance language (`es` unless the pack only declares others).
+    #[cfg(test)]
     pub fn language(&self) -> &str {
         &self.language
     }
+
+    /// Every language an instance may play in, default first.
+    pub fn locales(&self) -> &[String] {
+        &self.locales
+    }
+
+    /// The pack title in `locale`.
+    pub fn title_in(&self, locale: &str) -> String {
+        self.pack
+            .title
+            .resolve(locale)
+            .unwrap_or(self.id.as_str())
+            .to_owned()
+    }
+
+    /// The language a new instance plays in: the default without a request,
+    /// else the requested locale (or its language part, `en-GB` → `en`) when
+    /// the pack offers it. Anything else is [`StoryFailure::UnknownLocale`].
+    pub fn resolve_locale(&self, requested: Option<&str>) -> Result<String, StoryFailure> {
+        let Some(requested) = requested else {
+            return Ok(self.language.clone());
+        };
+        if requested.is_empty() || requested.len() > MAX_LOCALE_BYTES {
+            return Err(StoryFailure::UnknownLocale);
+        }
+        let wanted = requested.to_ascii_lowercase();
+        let language = wanted
+            .split_once('-')
+            .map_or(wanted.as_str(), |(head, _)| head);
+        self.locales
+            .iter()
+            .find(|locale| **locale == wanted)
+            .or_else(|| self.locales.iter().find(|locale| **locale == language))
+            .cloned()
+            .ok_or(StoryFailure::UnknownLocale)
+    }
 }
 
-/// The language an instance of `pack` plays in: Spanish when the parser
-/// world has a Spanish lexicon (or there is no parser), else its first one.
+/// Every language of `pack`, `default` first and without duplicates: its
+/// parser lexicons, or the locales of its title when it has no parser.
+fn pack_locales(pack: &StoryPack, default: &str) -> Vec<String> {
+    let declared: Vec<String> = match &pack.world {
+        Some(world) => world
+            .lexicons
+            .iter()
+            .map(|lexicon| lexicon.id.to_ascii_lowercase())
+            .collect(),
+        None => pack
+            .title
+            .0
+            .keys()
+            .map(|locale| locale.to_ascii_lowercase())
+            .collect(),
+    };
+    let mut locales = vec![default.to_owned()];
+    for locale in declared {
+        if !locales.contains(&locale) {
+            locales.push(locale);
+        }
+    }
+    locales
+}
+
+/// The default language of an instance of `pack`: Spanish when the parser
+/// world has a Spanish lexicon (or, without a parser, when the title has a
+/// Spanish text or no locale at all), else its first lexicon or title locale.
 fn pack_language(pack: &StoryPack) -> String {
     let Some(world) = &pack.world else {
-        return STORY_LOCALE.to_owned();
+        if pack
+            .title
+            .0
+            .keys()
+            .any(|locale| locale.eq_ignore_ascii_case(STORY_LOCALE))
+        {
+            return STORY_LOCALE.to_owned();
+        }
+        return pack.title.0.keys().next().map_or_else(
+            || STORY_LOCALE.to_owned(),
+            |locale| locale.to_ascii_lowercase(),
+        );
     };
     if world
         .lexicons
@@ -359,12 +447,50 @@ fn pack_language(pack: &StoryPack) -> String {
         .map_or_else(|| STORY_LOCALE.to_owned(), |lexicon| lexicon.id.clone())
 }
 
-/// Validated StoryPacks plus the reviewed media map for their cues.
+/// A reviewed story image of the media map: the content-addressed pipeline
+/// manifest (`/assets/<sha256>/manifest.json`) and its localized alt text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoryImageAsset {
+    manifest: String,
+    alt: tiamud_story_core::LocalizedText,
+}
+
+/// The reviewed story media map (`story-media.json`): audio cues and, from
+/// format 2, background and portrait images. An id that is not listed never
+/// produces media; the text of the view still carries every playable fact.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StoryMedia {
+    /// Authored asset id → content-addressed `/assets/<sha256>/audio-*` URL.
+    audio: BTreeMap<String, String>,
+    /// Authored image id → reviewed manifest and alt text.
+    images: BTreeMap<String, StoryImageAsset>,
+}
+
+impl From<BTreeMap<String, String>> for StoryMedia {
+    fn from(audio: BTreeMap<String, String>) -> Self {
+        Self {
+            audio,
+            images: BTreeMap::new(),
+        }
+    }
+}
+
+impl StoryMedia {
+    /// The wire image of `id` with its alt text in `locale`, when reviewed.
+    pub fn image(&self, id: &str, locale: &str) -> Option<protocol::StoryImage> {
+        let asset = self.images.get(id)?;
+        Some(protocol::StoryImage {
+            manifest: asset.manifest.clone(),
+            alt: asset.alt.resolve(locale)?.to_owned(),
+        })
+    }
+}
+
+/// Validated StoryPacks plus the reviewed media map for their cues and images.
 #[derive(Debug, Default)]
 pub struct StoryCatalog {
     stories: BTreeMap<String, Arc<CatalogStory>>,
-    /// Authored asset id → content-addressed `/assets/<sha256>/audio-*` URL.
-    media: BTreeMap<String, String>,
+    media: StoryMedia,
 }
 
 #[derive(Debug, Error)]
@@ -391,7 +517,20 @@ pub enum StoryCatalogError {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct StoryMediaManifest {
     format_version: u32,
+    #[serde(default)]
     assets: BTreeMap<String, String>,
+    /// Format 2: reviewed background and portrait images.
+    #[serde(default)]
+    images: BTreeMap<String, StoryMediaImage>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoryMediaImage {
+    /// `assets/<sha256>/manifest.json`, published by the asset pipeline.
+    manifest: String,
+    /// Locale → alternative text (1..=16 locales, 1..=512 bytes each).
+    alt: BTreeMap<String, String>,
 }
 
 impl StoryCatalog {
@@ -437,7 +576,7 @@ impl StoryCatalog {
         }
         names.sort();
         let mut packs = Vec::new();
-        let mut media = BTreeMap::new();
+        let mut media = StoryMedia::default();
         for (relative, depth) in names {
             let path = directory.join(&relative);
             let name = relative.to_string_lossy().into_owned();
@@ -469,8 +608,9 @@ impl StoryCatalog {
     #[cfg(test)]
     pub fn from_packs(
         packs: Vec<StoryPack>,
-        media: BTreeMap<String, String>,
+        media: impl Into<StoryMedia>,
     ) -> Result<Self, StoryCatalogError> {
+        let media = media.into();
         let named = packs
             .into_iter()
             .map(|pack| {
@@ -485,7 +625,7 @@ impl StoryCatalog {
 
     fn from_named_packs(
         packs: Vec<(String, StoryPack, String)>,
-        media: BTreeMap<String, String>,
+        media: StoryMedia,
     ) -> Result<Self, StoryCatalogError> {
         if packs.len() > MAX_CATALOG_STORIES {
             return Err(StoryCatalogError::TooManyStories);
@@ -509,6 +649,8 @@ impl StoryCatalog {
                 .to_owned();
             let id = pack.id.clone();
             let language = pack_language(&pack);
+            let locales = pack_locales(&pack, &language);
+            let compatible = pack.compatible_revisions.iter().cloned().collect();
             if stories
                 .insert(
                     id.clone(),
@@ -518,6 +660,8 @@ impl StoryCatalog {
                         pack,
                         pack_sha256,
                         language,
+                        locales,
+                        compatible,
                     }),
                 )
                 .is_some()
@@ -577,13 +721,23 @@ fn read_bounded(path: &Path, limit: u64, name: &str) -> Result<Vec<u8>, StoryCat
     Ok(bytes)
 }
 
-fn parse_media_manifest(bytes: &[u8]) -> Result<BTreeMap<String, String>, StoryCatalogError> {
+fn parse_media_manifest(bytes: &[u8]) -> Result<StoryMedia, StoryCatalogError> {
     let manifest: StoryMediaManifest = serde_json::from_slice(bytes)
         .map_err(|_| StoryCatalogError::Media("malformed JSON document".to_owned()))?;
-    if manifest.format_version != 1 {
+    if !(1..=2).contains(&manifest.format_version) {
         return Err(StoryCatalogError::Media(
-            "formatVersion must be 1".to_owned(),
+            "formatVersion must be 1 or 2".to_owned(),
         ));
+    }
+    if manifest.format_version < 2 && !manifest.images.is_empty() {
+        return Err(StoryCatalogError::Media(
+            "images need formatVersion 2".to_owned(),
+        ));
+    }
+    if manifest.images.len() > MAX_MEDIA_IMAGES {
+        return Err(StoryCatalogError::Media(format!(
+            "at most {MAX_MEDIA_IMAGES} images are allowed"
+        )));
     }
     if manifest.assets.len() > MAX_MEDIA_ASSETS {
         return Err(StoryCatalogError::Media(format!(
@@ -600,7 +754,61 @@ fn parse_media_manifest(bytes: &[u8]) -> Result<BTreeMap<String, String>, StoryC
         }
         media.insert(asset, url);
     }
-    Ok(media)
+    let mut images = BTreeMap::new();
+    for (id, image) in manifest.images {
+        if !valid_asset_id(&id) || !safe_image_manifest_path(&image.manifest) {
+            return Err(StoryCatalogError::Media(format!(
+                "image {id:?} must map to assets/<sha256>/manifest.json"
+            )));
+        }
+        if !valid_image_alt(&image.alt) {
+            return Err(StoryCatalogError::Media(format!(
+                "image {id:?} needs alt text: 1..={MAX_IMAGE_ALT_LOCALES} locales of 1..={} bytes without control characters",
+                protocol::MAX_STORY_IMAGE_ALT_BYTES
+            )));
+        }
+        images.insert(
+            id,
+            StoryImageAsset {
+                manifest: format!("/{}", image.manifest),
+                alt: tiamud_story_core::LocalizedText(image.alt),
+            },
+        );
+    }
+    Ok(StoryMedia {
+        audio: media,
+        images,
+    })
+}
+
+/// `assets/<64 lowercase hex>/manifest.json`: a pipeline-published bundle.
+fn safe_image_manifest_path(path: &str) -> bool {
+    path.strip_prefix("assets/")
+        .and_then(|rest| rest.strip_suffix("/manifest.json"))
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn valid_image_alt(alt: &BTreeMap<String, String>) -> bool {
+    let mut seen = BTreeSet::new();
+    !alt.is_empty()
+        && alt.len() <= MAX_IMAGE_ALT_LOCALES
+        && alt.iter().all(|(locale, text)| {
+            let bytes = locale.as_bytes();
+            (2..=MAX_LOCALE_BYTES).contains(&bytes.len())
+                && bytes[0].is_ascii_alphabetic()
+                && bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+                && seen.insert(locale.to_ascii_lowercase())
+                && !text.trim().is_empty()
+                && text.len() <= protocol::MAX_STORY_IMAGE_ALT_BYTES
+                && !text.chars().any(char::is_control)
+        })
 }
 
 fn valid_asset_id(id: &str) -> bool {
@@ -664,6 +872,8 @@ pub enum StoryFailure {
     InvalidSetting,
     /// `story.command` in a story without a parser world.
     NoParser,
+    /// The story is not offered in the requested language.
+    UnknownLocale,
     /// A command line that is too long, or free text while no prompt is
     /// shown (an active dialogue).
     InvalidCommand,
@@ -702,6 +912,7 @@ impl StoryFailure {
             Self::InvalidSetting => StoryErrorCode::InvalidSetting,
             Self::NoParser => StoryErrorCode::NoParser,
             Self::InvalidCommand => StoryErrorCode::InvalidCommand,
+            Self::UnknownLocale => StoryErrorCode::UnknownLocale,
             Self::CommandsRateLimited => StoryErrorCode::RateLimited,
         }
     }
@@ -763,6 +974,9 @@ impl StoryFailure {
             }
             Self::InvalidCommand => {
                 "Escribe una orden de hasta 256 bytes mientras la historia muestre el indicador «>»."
+            }
+            Self::UnknownLocale => {
+                "Esta historia no está disponible en ese idioma. Escribe «historia <id>» para jugarla en su idioma predeterminado."
             }
             Self::CommandsRateLimited => "Demasiadas órdenes seguidas. Espera un momento.",
         }
@@ -1125,9 +1339,16 @@ pub fn render_text(projection: &StoryProjection) -> String {
     for item in &projection.items {
         match item {
             StoryItem::Scene {
-                title, text: prose, ..
+                title,
+                text: prose,
+                background,
+                ..
             } => {
                 let _ = write!(text, "\r\n== {title} ==\r\n");
+                // The image itself is web-only; its alt text is the equivalent.
+                if let Some(image) = background {
+                    let _ = write!(text, "[{}]\r\n", image.alt);
+                }
                 for line in prose.split('\n').filter(|line| !line.trim().is_empty()) {
                     let _ = write!(text, "{line}\r\n");
                 }
@@ -1167,7 +1388,7 @@ pub fn render_text(projection: &StoryProjection) -> String {
                     let _ = write!(text, "{line}\r\n");
                 }
             },
-            StoryItem::Portrait { name } => present.push(name.as_str()),
+            StoryItem::Portrait { name, .. } => present.push(name.as_str()),
             StoryItem::Stat { label, value } => stats.push(format!("{label}: {value}")),
             StoryItem::Item { name } => inventory.push(name.as_str()),
             _ => {}
@@ -1240,10 +1461,12 @@ pub const fn ending_label(kind: StoryEndingKind) -> &'static str {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoryCommand {
     List,
-    Enter(String),
+    /// `historia <id> [idioma]`/`story <id> [locale]`.
+    Enter(String, Option<String>),
     Leave,
-    /// `historia compartir <id>`/`story host <id>`: enter and share.
-    Host(String),
+    /// `historia compartir <id> [idioma]`/`story host <id> [locale]`: enter
+    /// and share.
+    Host(String, Option<String>),
     /// `historia unirse <código>`/`story join <code>` (seated) or
     /// `historia mirar <código>`/`story watch <code>` (spectator).
     Join {
@@ -1286,8 +1509,9 @@ pub enum StoryInputCommand {
     Other,
 }
 
-/// Parses `historias`/`stories`, `historia <id>`/`story <id>` and
-/// `salir historia`/`story leave`. Everything else stays a world command.
+/// Parses `historias`/`stories`, `historia <id> [idioma]`/`story <id>
+/// [locale]` and `salir historia`/`story leave`. Everything else stays a
+/// world command.
 pub fn parse_story_command(input: &str) -> Option<StoryCommand> {
     let lower = input
         .split_whitespace()
@@ -1304,8 +1528,11 @@ pub fn parse_story_command(input: &str) -> Option<StoryCommand> {
         }
         ["salir", "historia"] | ["story", "leave"] => Some(StoryCommand::Leave),
         ["historia", "compartir", id] | ["story", "host", id] => {
-            Some(StoryCommand::Host((*id).to_owned()))
+            Some(StoryCommand::Host((*id).to_owned(), None))
         }
+        ["historia", "compartir", id, locale] | ["story", "host", id, locale] => Some(
+            StoryCommand::Host((*id).to_owned(), Some((*locale).to_owned())),
+        ),
         ["historia", "unirse", code] | ["story", "join", code] => Some(StoryCommand::Join {
             code: (*code).to_owned(),
             spectate: false,
@@ -1314,7 +1541,11 @@ pub fn parse_story_command(input: &str) -> Option<StoryCommand> {
             code: (*code).to_owned(),
             spectate: true,
         }),
-        ["historia", id] | ["story", id] => Some(StoryCommand::Enter((*id).to_owned())),
+        ["historia", id] | ["story", id] => Some(StoryCommand::Enter((*id).to_owned(), None)),
+        ["historia", id, locale] | ["story", id, locale] => Some(StoryCommand::Enter(
+            (*id).to_owned(),
+            Some((*locale).to_owned()),
+        )),
         _ => None,
     }
 }
@@ -1792,6 +2023,8 @@ struct LiveEntry {
 struct Route {
     sender: mpsc::Sender<Command>,
     story: Arc<CatalogStory>,
+    /// Language the instance plays in, fixed when it starts.
+    locale: String,
     /// The account that started the instance.
     owner: AccountId,
     /// Present once the instance is shared.
@@ -2028,7 +2261,8 @@ impl ManagerInner {
                 slot: summary.slot.get(),
                 updated_at: summary.updated_at,
                 compatible: summary.pack_id == story.pack.id
-                    && summary.pack_sha256 == story.pack_sha256,
+                    && (summary.pack_sha256 == story.pack_sha256
+                        || story.compatible.contains(&summary.pack_sha256)),
             })
             .collect())
     }
@@ -2053,6 +2287,9 @@ pub struct StoryManager {
 pub struct StoryLink {
     account: AccountId,
     story: Arc<CatalogStory>,
+    /// Language of the instance and the title in it.
+    locale: String,
+    title: String,
     /// True when the link joined an instance that already existed (resume,
     /// re-entry or joining a shared instance); only a fresh instance offers
     /// to continue the autosave.
@@ -2218,6 +2455,8 @@ impl StoryManager {
         StoryLink {
             account,
             story: route.story.clone(),
+            locale: route.locale.clone(),
+            title: route.story.title_in(&route.locale),
             resumed,
             sender: route.sender.clone(),
             inner: self.inner.clone(),
@@ -2226,19 +2465,44 @@ impl StoryManager {
         }
     }
 
-    /// Starts (or resumes, for the same story) the account's instance.
+    /// Starts (or resumes, for the same story) the account's instance in the
+    /// story's default language.
+    #[cfg(test)]
     pub fn enter(&self, account: AccountId, story_id: &str) -> Result<StoryLink, StoryFailure> {
+        self.enter_in(account, story_id, None)
+    }
+
+    /// Starts (or resumes) the account's instance. A new instance plays in
+    /// `locale` when the pack offers it; a resumed one keeps its language.
+    pub fn enter_in(
+        &self,
+        account: AccountId,
+        story_id: &str,
+        locale: Option<&str>,
+    ) -> Result<StoryLink, StoryFailure> {
         // The seed comes from the server's secure RNG and is recorded in the
         // instance; story-core is deterministic from that point on.
-        self.enter_seeded(account, story_id, OsRng.next_u64(), None)
+        self.enter_seeded_in(account, story_id, locale, OsRng.next_u64(), None)
     }
 
     /// Enters with an explicit story seed and, for reproducible fixtures only,
     /// a deterministic id sequence instead of the secure RNG.
+    #[cfg(test)]
     pub(crate) fn enter_seeded(
         &self,
         account: AccountId,
         story_id: &str,
+        seed: u64,
+        id_seed: Option<u64>,
+    ) -> Result<StoryLink, StoryFailure> {
+        self.enter_seeded_in(account, story_id, None, seed, id_seed)
+    }
+
+    pub(crate) fn enter_seeded_in(
+        &self,
+        account: AccountId,
+        story_id: &str,
+        locale: Option<&str>,
         seed: u64,
         id_seed: Option<u64>,
     ) -> Result<StoryLink, StoryFailure> {
@@ -2249,6 +2513,7 @@ impl StoryManager {
                 .fetch_add(1, Ordering::Relaxed);
             return Err(StoryFailure::UnknownStory);
         };
+        let locale = story.resolve_locale(locale)?;
         let mut registry = self.inner.registry();
         let Registry {
             accounts, routes, ..
@@ -2277,13 +2542,20 @@ impl StoryManager {
                 .fetch_add(1, Ordering::Relaxed);
             return Err(StoryFailure::Capacity);
         }
-        let instance = Instance::new(story.clone(), seed, id_seed, &self.inner.catalog.media)
-            .map_err(|_| StoryFailure::Internal)?;
+        let instance = Instance::new(
+            story.clone(),
+            locale.clone(),
+            seed,
+            id_seed,
+            &self.inner.catalog.media,
+        )
+        .map_err(|_| StoryFailure::Internal)?;
         let instance_id = self.inner.next_instance.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel(INSTANCE_MAILBOX);
         let route = Route {
             sender,
             story,
+            locale,
             owner: account,
             frames: None,
             code: None,
@@ -2311,15 +2583,17 @@ impl StoryManager {
         Ok(link)
     }
 
-    /// `historia compartir <id>`/`story host <id>`: enters (or resumes) the
-    /// story and shares it, hosted by `account`.
+    /// `historia compartir <id> [idioma]`/`story host <id> [locale]`: enters
+    /// (or resumes) the story and shares it, hosted by `account`. Joiners
+    /// play in the host's language.
     pub async fn host(
         &self,
         account: AccountId,
         name: &str,
         story_id: &str,
+        locale: Option<&str>,
     ) -> Result<StoryLink, StoryFailure> {
-        self.enter(account, story_id)?.share(name).await
+        self.enter_in(account, story_id, locale)?.share(name).await
     }
 
     /// `historia unirse <código>`/`story join <code>` (or, spectating,
@@ -2454,8 +2728,19 @@ impl StoryLink {
         &self.story.id
     }
 
+    /// The story title in the instance language.
     pub fn title(&self) -> &str {
-        &self.story.title
+        &self.title
+    }
+
+    /// The language the instance plays in.
+    pub fn locale(&self) -> &str {
+        &self.locale
+    }
+
+    /// Every language the story can be played in, default first.
+    pub fn locales(&self) -> &[String] {
+        self.story.locales()
     }
 
     /// The shared frames this link follows; `None` for a solo instance.
@@ -2699,7 +2984,7 @@ impl StoryLink {
                 &protocol::StoryInvitation {
                     host,
                     story_id: self.story.id.clone(),
-                    title: self.story.title.clone(),
+                    title: self.title.clone(),
                     code,
                 },
             );
@@ -2735,8 +3020,11 @@ impl StoryLink {
     }
 
     /// `story.restore` (and `story.continue` for slot 0): loads the slot of
-    /// the exact current pack revision, re-validates it against the pack and
-    /// replaces the instance state. The undo history starts empty.
+    /// the exact current pack revision, or of a revision the pack declares
+    /// compatible (`compatible_revisions`), re-validates it against the
+    /// current pack and replaces the instance state. A slot of a compatible
+    /// revision that fails re-validation is `slot_incompatible`; one of the
+    /// exact revision is `slot_corrupt`. The undo history starts empty.
     pub async fn restore(&self, slot: u8) -> Result<StoryProjection, StoryFailure> {
         let result = self.restore_inner(slot).await;
         self.inner.metrics.restore(result.is_ok());
@@ -2751,19 +3039,23 @@ impl StoryLink {
         let compatibility = StoryPackCompatibility {
             pack_id: self.story.pack.id.clone(),
             pack_sha256: self.story.pack_sha256.clone(),
-            // StoryPack declares no compatible revisions yet (ADR 0030).
-            compatible_pack_sha256: BTreeSet::new(),
+            compatible_pack_sha256: self.story.compatible.clone(),
         };
         let record = self
             .inner
             .call(store.load_story_slot(self.account, &self.story.id, slot, compatibility))
             .await?
             .ok_or(StoryFailure::SlotEmpty)?;
+        let exact = record.summary.pack_sha256 == self.story.pack_sha256;
         let state = StoryState::from_json_slice(record.state_json.as_bytes(), &self.story.pack)
             .map_err(|error| {
                 // The reason may name authored ids; it stays in the server log.
-                warn!(%error, "stored story state failed validation against its pack");
-                StoryFailure::SlotCorrupt
+                warn!(%error, exact, "stored story state failed validation against its pack");
+                if exact {
+                    StoryFailure::SlotCorrupt
+                } else {
+                    StoryFailure::SlotIncompatible
+                }
             })?;
         let from = self.account;
         self.request(|reply| Command::Restore {
@@ -3333,6 +3625,8 @@ enum Mapped {
 /// Single-writer state of one story instance.
 struct Instance {
     story: Arc<CatalogStory>,
+    /// Language of the views and of the parser lexicon.
+    locale: String,
     /// Recorded seed of this playthrough (diagnostics and future save slots).
     #[allow(dead_code)]
     seed: u64,
@@ -3367,9 +3661,10 @@ const QUIT_NOTE: &str = "Sales de la historia.";
 impl Instance {
     fn new(
         story: Arc<CatalogStory>,
+        locale: String,
         seed: u64,
         id_state: Option<u64>,
-        media: &BTreeMap<String, String>,
+        media: &StoryMedia,
     ) -> Result<Self, tiamud_story_core::StoryError> {
         let state = StoryState::new(&story.pack, seed)?;
         let undo = UndoRing::new(UNDO_CAPACITY)?;
@@ -3381,7 +3676,7 @@ impl Instance {
             .collect::<Vec<_>>();
         let current = StoryProjection {
             story_id: story.id.clone(),
-            title: story.title.clone(),
+            title: story.title_in(&locale),
             view_rev: 0,
             turn: 0,
             score: 0,
@@ -3391,6 +3686,7 @@ impl Instance {
         };
         let mut instance = Self {
             story,
+            locale,
             seed,
             state,
             undo,
@@ -3444,7 +3740,7 @@ impl Instance {
         &mut self,
         request: &StoryRequest,
         view_rev: u32,
-        media: &BTreeMap<String, String>,
+        media: &StoryMedia,
     ) -> Result<StoryProjection, StoryFailure> {
         // Shape first, then staleness, then whether the id was published.
         let shaped = match request {
@@ -3541,7 +3837,7 @@ impl Instance {
         &mut self,
         text: &str,
         view_rev: u32,
-        media: &BTreeMap<String, String>,
+        media: &StoryMedia,
         manage: bool,
     ) -> Result<CommandReply, StoryFailure> {
         if text.len() > MAX_COMMAND_BYTES {
@@ -3559,7 +3855,7 @@ impl Instance {
             &self.story.pack,
             &self.state,
             text,
-            Some(self.story.language()),
+            Some(self.locale.as_str()),
         )
         .map_err(|error| {
             use tiamud_story_core::StoryError as Core;
@@ -3641,7 +3937,7 @@ impl Instance {
         events: &[StoryEvent],
         echo: Option<String>,
         notes: Vec<&'static str>,
-        media: &BTreeMap<String, String>,
+        media: &StoryMedia,
     ) -> Result<StoryProjection, StoryFailure> {
         let advanced = next.turn != self.state.turn;
         let previous = std::mem::replace(&mut self.state, next);
@@ -3669,7 +3965,7 @@ impl Instance {
     fn restart(
         &mut self,
         echo: Option<String>,
-        media: &BTreeMap<String, String>,
+        media: &StoryMedia,
     ) -> Result<StoryProjection, StoryFailure> {
         let seed = next_id_word(&mut self.id_state);
         let fresh = StoryState::new(&self.story.pack, seed).map_err(|_| StoryFailure::Internal)?;
@@ -3755,7 +4051,7 @@ impl Instance {
     fn restore(
         &mut self,
         state: StoryState,
-        media: &BTreeMap<String, String>,
+        media: &StoryMedia,
     ) -> Result<StoryProjection, StoryFailure> {
         let scene_cues = core_view(&self.story.pack, &state)
             .map_err(|_| StoryFailure::SlotCorrupt)?
@@ -3778,7 +4074,7 @@ impl Instance {
         Ok(self.current.clone())
     }
 
-    fn undo(&mut self, media: &BTreeMap<String, String>) -> Result<StoryProjection, StoryFailure> {
+    fn undo(&mut self, media: &StoryMedia) -> Result<StoryProjection, StoryFailure> {
         let Some(previous) = self.undo.pop() else {
             return Err(StoryFailure::NothingToUndo);
         };
@@ -3805,19 +4101,20 @@ impl Instance {
     fn project(
         &mut self,
         events: &[StoryEvent],
-        media: &BTreeMap<String, String>,
+        media: &StoryMedia,
     ) -> Result<(), tiamud_story_core::StoryError> {
         let story = self.story.clone();
         let pack = &story.pack;
+        let locale = self.locale.clone();
         // Any new view cancels a pending restart confirmation; the command
         // that shows the confirmation arms it again after projecting.
         self.restart_armed = None;
         let echo = self.echo.take();
         let notes = std::mem::take(&mut self.notes);
-        let pages = view_pages(pack, &self.state, story.language())?;
+        let pages = view_pages(pack, &self.state, &locale)?;
         let event_items = events
             .iter()
-            .filter_map(|event| render_event(pack, event))
+            .filter_map(|event| render_event(pack, event, &locale))
             .map(|text| StoryItem::Block {
                 kind: StoryBlockKind::Event,
                 speaker: None,
@@ -3835,7 +4132,7 @@ impl Instance {
         let mut ids: Vec<(String, Mapped)> = Vec::new();
         let mut verb_ids: Vec<(String, String)> = Vec::new();
         let mut items = Vec::new();
-        let mut title = story.title.clone();
+        let mut title = story.title_in(&locale);
         let mut score = self.state.score;
         let mut ending = None;
         let mut turn = self.state.turn;
@@ -3851,7 +4148,7 @@ impl Instance {
                         ending: scene_ending,
                         prompt,
                         question,
-                        ..
+                        background,
                     } => {
                         title = scene_title.clone();
                         score = scene_score;
@@ -3866,6 +4163,7 @@ impl Instance {
                             score: scene_score,
                             ending: ending.map(|kind| StoryEnding { kind }),
                             prompt: prompt.map(|text| protocol::StoryPrompt { text, question }),
+                            background: background.and_then(|id| media.image(&id, &locale)),
                         });
                         if let Some(echo) = &echo {
                             items.push(StoryItem::Block {
@@ -3882,7 +4180,10 @@ impl Instance {
                     // Scene cues are emitted as events on entry; resending
                     // them with every view would restart music.
                     PageItem::Cue(_) => {}
-                    PageItem::Portrait { name, .. } => items.push(StoryItem::Portrait { name }),
+                    PageItem::Portrait { name, asset } => items.push(StoryItem::Portrait {
+                        name,
+                        image: asset.and_then(|id| media.image(&id, &locale)),
+                    }),
                     PageItem::Block { speaker, text, .. } => items.push(StoryItem::Block {
                         kind: StoryBlockKind::Line,
                         speaker,
@@ -4005,9 +4306,9 @@ impl Instance {
         Ok(())
     }
 
-    fn resolve_cue(&mut self, cue: &Cue, media: &BTreeMap<String, String>) -> Option<StoryItem> {
+    fn resolve_cue(&mut self, cue: &Cue, media: &StoryMedia) -> Option<StoryItem> {
         match cue {
-            Cue::Music { asset } => match media.get(asset) {
+            Cue::Music { asset } => match media.audio.get(asset) {
                 Some(url) => {
                     self.music = Some(url.clone());
                     Some(StoryItem::Cue {
@@ -4020,7 +4321,7 @@ impl Instance {
                 // An unreviewed track never plays; the previous one stops.
                 None => self.stop_music(),
             },
-            Cue::Sfx { asset } => media.get(asset).map(|url| StoryItem::Cue {
+            Cue::Sfx { asset } => media.audio.get(asset).map(|url| StoryItem::Cue {
                 action: StoryCueAction::Play,
                 channel: MediaChannel::Effects,
                 url: Some(url.clone()),
@@ -4062,8 +4363,8 @@ fn valid_choice_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn resolve(text: &tiamud_story_core::LocalizedText) -> String {
-    text.resolve(STORY_LOCALE).unwrap_or_default().to_owned()
+fn resolve(text: &tiamud_story_core::LocalizedText, locale: &str) -> String {
+    text.resolve(locale).unwrap_or_default().to_owned()
 }
 
 fn render_value(value: Value) -> String {
@@ -4103,7 +4404,7 @@ fn echo_text(text: &str) -> Option<String> {
 /// Renders the player-visible part of one event. Hidden variables, node
 /// entries, menu bookkeeping and media cues produce no text (menu responses
 /// and dialogue lines arrive as `line` blocks of the view itself).
-fn render_event(pack: &StoryPack, event: &StoryEvent) -> Option<String> {
+fn render_event(pack: &StoryPack, event: &StoryEvent, locale: &str) -> Option<String> {
     match event {
         StoryEvent::VariableChanged { var, from, to, .. } => {
             let decl = pack
@@ -4113,7 +4414,7 @@ fn render_event(pack: &StoryPack, event: &StoryEvent) -> Option<String> {
             let label = decl
                 .label
                 .as_ref()
-                .map(resolve)
+                .map(|label| resolve(label, locale))
                 .unwrap_or_else(|| decl.id.clone());
             Some(format!(
                 "{label}: {} → {}",
@@ -4125,12 +4426,12 @@ fn render_event(pack: &StoryPack, event: &StoryEvent) -> Option<String> {
             .items
             .iter()
             .find(|decl| &decl.id == item)
-            .map(|decl| format!("Obtienes: {}", resolve(&decl.name))),
+            .map(|decl| format!("Obtienes: {}", resolve(&decl.name, locale))),
         StoryEvent::ItemLost { item } => pack
             .items
             .iter()
             .find(|decl| &decl.id == item)
-            .map(|decl| format!("Pierdes: {}", resolve(&decl.name))),
+            .map(|decl| format!("Pierdes: {}", resolve(&decl.name, locale))),
         StoryEvent::DiceRolled {
             count,
             sides,
@@ -4177,3 +4478,6 @@ mod shared_tests;
 
 #[cfg(test)]
 mod parser_tests;
+
+#[cfg(test)]
+mod media_tests;

@@ -330,6 +330,8 @@
           pending={session.storyPending}
           error={session.storyError}
           headingId="scene-title"
+          lang={session.storyLocale}
+          images={showMultimedia}
           onchoose={session.chooseStory}
           onmenu={session.storyMenu}
           onundo={session.undoStory}

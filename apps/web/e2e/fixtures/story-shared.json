@@ -15,6 +15,10 @@
           },
           {
             "data": {
+              "locale": "es",
+              "locales": [
+                "es"
+              ],
               "storyId": "cripta-del-nigromante",
               "title": "La cripta del nigromante"
             },
@@ -147,6 +151,10 @@
           },
           {
             "data": {
+              "locale": "es",
+              "locales": [
+                "es"
+              ],
               "storyId": "cripta-del-nigromante",
               "title": "La cripta del nigromante"
             },

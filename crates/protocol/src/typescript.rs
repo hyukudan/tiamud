@@ -88,6 +88,7 @@ fn declarations(config: &Config) -> Vec<String> {
         StoryEnding::decl(config),
         StoryCueAction::decl(config),
         StoryPrompt::decl(config),
+        StoryImage::decl(config),
         StoryItem::decl(config),
         StoryView::decl(config),
         StoryLeftReason::decl(config),

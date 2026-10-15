@@ -591,9 +591,12 @@ fn shared_commands_parse_in_both_languages() {
     for (line, expected) in [
         (
             "historia compartir cripta",
-            StoryCommand::Host("cripta".into()),
+            StoryCommand::Host("cripta".into(), None),
         ),
-        ("story host cripta", StoryCommand::Host("cripta".into())),
+        (
+            "story host cripta",
+            StoryCommand::Host("cripta".into(), None),
+        ),
         (
             "historia unirse abcd2345",
             StoryCommand::Join {

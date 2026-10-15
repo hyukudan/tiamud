@@ -511,8 +511,11 @@ fn story_payloads_have_their_documented_shape() {
         StoryEntered {
             story_id: "cripta-del-nigromante".into(),
             title: "La cripta".into(),
+            locale: "es".into(),
+            locales: vec!["es".into(), "en".into()],
         },
-        json!({"storyId": "cripta-del-nigromante", "title": "La cripta"}),
+        json!({"storyId": "cripta-del-nigromante", "title": "La cripta",
+               "locale": "es", "locales": ["es", "en"]}),
     );
     assert_wire(
         StoryView {
@@ -528,6 +531,10 @@ fn story_payloads_have_their_documented_shape() {
                     score: -3,
                     ending: None,
                     prompt: None,
+                    background: Some(StoryImage {
+                        manifest: format!("/assets/{}/manifest.json", "a".repeat(64)),
+                        alt: "Una oficina bajo la lluvia.".into(),
+                    }),
                 },
                 StoryItem::Cue {
                     action: StoryCueAction::Stop,
@@ -543,6 +550,14 @@ fn story_payloads_have_their_documented_shape() {
                 },
                 StoryItem::Portrait {
                     name: "Lola".into(),
+                    image: None,
+                },
+                StoryItem::Portrait {
+                    name: "Dámaso".into(),
+                    image: Some(StoryImage {
+                        manifest: format!("/assets/{}/manifest.json", "b".repeat(64)),
+                        alt: "Retrato de Dámaso.".into(),
+                    }),
                 },
                 StoryItem::Block {
                     kind: StoryBlockKind::Event,
@@ -584,10 +599,15 @@ fn story_payloads_have_their_documented_shape() {
         json!({
             "viewRev": 2, "part": 0, "parts": 1, "turn": 1, "canUndo": true,
             "items": [
-                {"type": "scene", "title": "La cripta", "text": "Un pasillo.", "score": -3, "ending": null},
+                {"type": "scene", "title": "La cripta", "text": "Un pasillo.", "score": -3, "ending": null,
+                 "background": {"manifest": format!("/assets/{}/manifest.json", "a".repeat(64)),
+                                "alt": "Una oficina bajo la lluvia."}},
                 {"type": "cue", "action": "stop", "channel": "music", "loop": false},
                 {"type": "cue", "action": "play", "channel": "effects", "url": "/assets/x/audio-a.ogg", "loop": false},
                 {"type": "portrait", "name": "Lola"},
+                {"type": "portrait", "name": "Dámaso",
+                 "image": {"manifest": format!("/assets/{}/manifest.json", "b".repeat(64)),
+                           "alt": "Retrato de Dámaso."}},
                 {"type": "block", "kind": "event", "text": "Tirada 2d6"},
                 {"type": "block", "kind": "line", "speaker": "Lola", "text": "Hola."},
                 {"type": "stat", "label": "Vida", "value": "12"},
@@ -879,6 +899,7 @@ fn parser_story_payloads_have_their_documented_shape() {
                         text: ">".into(),
                         question: true,
                     }),
+                    background: None,
                 },
                 StoryItem::Block {
                     kind: StoryBlockKind::Command,
@@ -905,6 +926,7 @@ fn parser_story_payloads_have_their_documented_shape() {
     for (code, wire) in [
         (StoryErrorCode::NoParser, "no_parser"),
         (StoryErrorCode::InvalidCommand, "invalid_command"),
+        (StoryErrorCode::UnknownLocale, "unknown_locale"),
     ] {
         assert_eq!(serde_json::to_value(code).unwrap(), json!(wire));
     }

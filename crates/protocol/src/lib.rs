@@ -898,6 +898,11 @@ pub struct StoryEmptyData {}
 pub struct StoryEntered {
     pub story_id: String,
     pub title: String,
+    // Language the instance plays in (text, parser lexicon and alt text).
+    pub locale: String,
+    // Languages this story can be played in; `historia <id> <locale>`
+    // starts a new instance in one of them.
+    pub locales: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -940,16 +945,32 @@ pub enum StoryCueAction {
     Stop,
 }
 
+/// A reviewed story image: the content-addressed pipeline manifest of an
+/// opaque AVIF/WebP/JPEG image (`/assets/<sha256>/manifest.json`, the same
+/// schema as world scenes) and its alternative text in the instance locale.
+/// Only ids listed in the reviewed story media map produce one; losing it
+/// never loses a playable fact.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+pub struct StoryImage {
+    pub manifest: String,
+    pub alt: String,
+}
+
+/// Maximum UTF-8 bytes of the alternative text of one story image.
+pub const MAX_STORY_IMAGE_ALT_BYTES: usize = 512;
+
 /// One self-contained piece of a story view, in display order. Ids are
 /// opaque per view; authored ids, use counters and RNG state never appear.
-/// Presentation-only items (`cue`, `portrait`) may be ignored without losing
-/// any playable fact.
+/// Presentation-only items (`cue`, `portrait`) and image fields may be
+/// ignored without losing any playable fact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[cfg_attr(test, derive(TS))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum StoryItem {
     /// Title, node prose, score and ending of the current scene. `prompt`
-    /// is present while the story accepts free text (`story.command`).
+    /// is present while the story accepts free text (`story.command`);
+    /// `background` when the scene's background id is in the reviewed media map.
     Scene {
         title: String,
         text: String,
@@ -958,6 +979,9 @@ pub enum StoryItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(test, ts(optional))]
         prompt: Option<StoryPrompt>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        background: Option<StoryImage>,
     },
     /// Media cue. `url` is present only for `play` and only when the
     /// authored asset id resolved through the reviewed story media map to a
@@ -971,9 +995,14 @@ pub enum StoryItem {
         #[serde(rename = "loop")]
         looped: bool,
     },
-    /// A character present in the scene (portrait images are not delivered
-    /// in S2; the name is the text equivalent).
-    Portrait { name: String },
+    /// A character present in the scene. The name is the text equivalent;
+    /// `image` is present only when the portrait id is in the reviewed media map.
+    Portrait {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        image: Option<StoryImage>,
+    },
     Block {
         kind: StoryBlockKind,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1115,6 +1144,8 @@ pub enum StoryErrorCode {
     NoParser,
     /// The command line is empty or longer than 256 bytes.
     InvalidCommand,
+    /// The story cannot be played in the requested language.
+    UnknownLocale,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

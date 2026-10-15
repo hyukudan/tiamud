@@ -204,14 +204,14 @@ fn media_map_accepts_only_reviewed_content_addressed_audio() {
     );
     let media = parse_media_manifest(valid.as_bytes()).unwrap();
     assert_eq!(
-        media.get("musica-combate").map(String::as_str),
+        media.audio.get("musica-combate").map(String::as_str),
         Some(format!("/assets/{digest}/audio-combate.ogg").as_str())
     );
     for invalid in [
         r#"{"formatVersion":1,"assets":{"x":"https://example.test/a.ogg"}}"#.to_owned(),
         format!(r#"{{"formatVersion":1,"assets":{{"x":"assets/{digest}/image.png"}}}}"#),
         format!(r#"{{"formatVersion":1,"assets":{{"Bad Id":"assets/{digest}/audio-a.ogg"}}}}"#),
-        format!(r#"{{"formatVersion":2,"assets":{{"x":"assets/{digest}/audio-a.ogg"}}}}"#),
+        format!(r#"{{"formatVersion":3,"assets":{{"x":"assets/{digest}/audio-a.ogg"}}}}"#),
         r#"{"formatVersion":1,"assets":{},"extra":true}"#.to_owned(),
     ] {
         assert!(
@@ -227,11 +227,19 @@ fn story_commands_parse_in_both_languages() {
     assert_eq!(parse_story_command("Stories"), Some(StoryCommand::List));
     assert_eq!(
         parse_story_command("historia Cripta-del-Nigromante"),
-        Some(StoryCommand::Enter(CRIPTA.into()))
+        Some(StoryCommand::Enter(CRIPTA.into(), None))
     );
     assert_eq!(
         parse_story_command("story cripta-del-nigromante"),
-        Some(StoryCommand::Enter(CRIPTA.into()))
+        Some(StoryCommand::Enter(CRIPTA.into(), None))
+    );
+    assert_eq!(
+        parse_story_command("historia lluvia-de-neon EN"),
+        Some(StoryCommand::Enter(LLUVIA.into(), Some("en".into())))
+    );
+    assert_eq!(
+        parse_story_command("story host lluvia-de-neon en"),
+        Some(StoryCommand::Host(LLUVIA.into(), Some("en".into())))
     );
     assert_eq!(
         parse_story_command("salir historia"),
@@ -802,8 +810,13 @@ async fn record(
 #[tokio::test]
 async fn browser_e2e_fixtures_are_current() {
     const UPDATE: &str = "TIAMUD_UPDATE_STORY_E2E_FIXTURE";
-    let stories = manager(
-        vec![fixture_pack(), fixture(LLUVIA)],
+    // With the reviewed sample media map, so the browser sees real images.
+    let stories = StoryManager::new(
+        StoryCatalog::from_packs(
+            vec![fixture_pack(), fixture(LLUVIA)],
+            super::media_tests::fixture_media(),
+        )
+        .unwrap(),
         StoryLimits::default(),
     );
     let cripta_length = play_first_actions(

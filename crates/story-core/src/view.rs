@@ -231,10 +231,17 @@ fn view_in(
             text: crate::messages::render(pack, reply),
         });
     }
-    let prompt = (open && dialogue.is_none() && pack.world.is_some()).then(|| ViewPrompt {
-        text: LocalizedText::single("es", ">"),
-        question: state.pending.is_some(),
-    });
+    let prompt = pack
+        .world
+        .as_ref()
+        .filter(|_| open && dialogue.is_none())
+        .map(|world| ViewPrompt {
+            text: world
+                .prompt
+                .clone()
+                .unwrap_or_else(|| LocalizedText::single("es", ">")),
+            question: state.pending.is_some(),
+        });
     // A room's scene text is its name (or darkness); its description arrives
     // in the transcript when looked at or entered.
     let text = match &node.room {
