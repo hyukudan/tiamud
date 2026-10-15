@@ -2,7 +2,9 @@
 
 - Estado: propuesta. La fase S0 (crate puro `crates/story-core`, sin servidor,
   protocolo, persistencia ni cliente) está implementada como prototipo de
-  biblioteca; ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  biblioteca, y la parte de herramientas de S1 (CLI offline `tiamud-story` en
+  `crates/story-tools` y esquema JSON publicado) también existe; ver
+  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
   Nada de este ADR modifica decisiones aceptadas hasta que se acepte.
 - Fecha: 2026-10-15
 - Alcance: nuevo runtime narrativo hermano de `tiamud-core`

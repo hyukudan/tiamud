@@ -1,0 +1,8 @@
+{
+  "format_version": 1,
+  "seed": 3,
+  "steps": [
+    { "choose": 1 },
+    { "expect": { "node": "pasillo", "vars": { "destreza": 12 } } }
+  ]
+}

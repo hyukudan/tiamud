@@ -1,0 +1,274 @@
+//! Keeps the published StoryPack JSON Schema aligned with the typed loader.
+//!
+//! No JSON Schema dependency is added: this file implements exactly the
+//! keyword subset the schema uses and fails on any other keyword or pattern,
+//! so the schema cannot silently grow beyond what is checked here.
+
+use serde_json::{Value, json};
+use tiamud_story_core::StoryPack;
+use tiamud_story_tools::{STORY_PACK_SCHEMA, format::canonical_json};
+
+const ID_PATTERN: &str = "^[a-z0-9][a-z0-9._-]{0,63}$";
+const LOCALE_PATTERN: &str = "^[A-Za-z][A-Za-z0-9-]{1,34}$";
+
+fn matches_pattern(pattern: &str, text: &str) -> bool {
+    let bytes = text.as_bytes();
+    match pattern {
+        ID_PATTERN => {
+            (1..=64).contains(&bytes.len())
+                && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+                && bytes.iter().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+                })
+        }
+        LOCALE_PATTERN => {
+            (2..=35).contains(&bytes.len())
+                && bytes[0].is_ascii_alphabetic()
+                && bytes
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+        }
+        other => panic!("schema uses an unchecked pattern {other:?}"),
+    }
+}
+
+fn resolve<'a>(root: &'a Value, reference: &str) -> &'a Value {
+    let name = reference
+        .strip_prefix("#/$defs/")
+        .unwrap_or_else(|| panic!("unsupported $ref {reference:?}"));
+    &root["$defs"][name]
+}
+
+fn type_matches(kind: &str, value: &Value) -> bool {
+    match kind {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "null" => value.is_null(),
+        other => panic!("unsupported type {other:?}"),
+    }
+}
+
+fn valid(root: &Value, schema: &Value, value: &Value) -> bool {
+    let schema = schema.as_object().expect("schema must be an object");
+    for (keyword, rule) in schema {
+        let ok = match keyword.as_str() {
+            "$schema" | "$id" | "$defs" | "title" | "description" => true,
+            "$ref" => valid(root, resolve(root, rule.as_str().unwrap()), value),
+            "type" => type_matches(rule.as_str().unwrap(), value),
+            "const" => value == rule,
+            "enum" => rule.as_array().unwrap().contains(value),
+            "oneOf" => {
+                rule.as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|branch| valid(root, branch, value))
+                    .count()
+                    == 1
+            }
+            "pattern" => value
+                .as_str()
+                .is_none_or(|text| matches_pattern(rule.as_str().unwrap(), text)),
+            "minLength" => value
+                .as_str()
+                .is_none_or(|text| text.chars().count() as u64 >= rule.as_u64().unwrap()),
+            "minimum" => value
+                .as_i64()
+                .is_none_or(|number| number >= rule.as_i64().unwrap()),
+            "maximum" => value
+                .as_i64()
+                .is_none_or(|number| number <= rule.as_i64().unwrap()),
+            "minItems" => value
+                .as_array()
+                .is_none_or(|items| items.len() as u64 >= rule.as_u64().unwrap()),
+            "maxItems" => value
+                .as_array()
+                .is_none_or(|items| items.len() as u64 <= rule.as_u64().unwrap()),
+            "items" => value
+                .as_array()
+                .is_none_or(|items| items.iter().all(|item| valid(root, rule, item))),
+            "minProperties" => value
+                .as_object()
+                .is_none_or(|map| map.len() as u64 >= rule.as_u64().unwrap()),
+            "maxProperties" => value
+                .as_object()
+                .is_none_or(|map| map.len() as u64 <= rule.as_u64().unwrap()),
+            "required" => value.as_object().is_none_or(|map| {
+                rule.as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|name| map.contains_key(name.as_str().unwrap()))
+            }),
+            "properties" => value.as_object().is_none_or(|map| {
+                rule.as_object().unwrap().iter().all(|(name, property)| {
+                    map.get(name)
+                        .is_none_or(|member| valid(root, property, member))
+                })
+            }),
+            "propertyNames" => value.as_object().is_none_or(|map| {
+                map.keys()
+                    .all(|name| valid(root, rule, &Value::String(name.clone())))
+            }),
+            "additionalProperties" => value.as_object().is_none_or(|map| {
+                let declared = schema.get("properties").and_then(Value::as_object);
+                map.iter()
+                    .filter(|(name, _)| declared.is_none_or(|known| !known.contains_key(*name)))
+                    .all(|(_, member)| match rule {
+                        Value::Bool(allowed) => *allowed,
+                        other => valid(root, other, member),
+                    })
+            }),
+            other => panic!("schema uses an unchecked keyword {other:?}"),
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+fn schema() -> Value {
+    serde_json::from_str(STORY_PACK_SCHEMA).unwrap()
+}
+
+fn fixture() -> Value {
+    serde_json::from_slice(include_bytes!(
+        "../../story-core/fixtures/cripta-del-nigromante.story.json"
+    ))
+    .unwrap()
+}
+
+fn loader_accepts(value: &Value) -> bool {
+    StoryPack::from_json_slice(&serde_json::to_vec(value).unwrap()).is_ok()
+}
+
+#[test]
+fn reviewed_fixtures_and_canonical_output_satisfy_the_schema() {
+    let root = schema();
+    let original = fixture();
+    assert!(valid(&root, &root, &original));
+    let pack = StoryPack::from_json_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+    let canonical: Value = serde_json::from_slice(&canonical_json(&pack).unwrap()).unwrap();
+    assert!(valid(&root, &root, &canonical));
+
+    let lints: Value = serde_json::from_slice(include_bytes!("fixtures/lints.story.json")).unwrap();
+    assert!(valid(&root, &root, &lints));
+}
+
+#[test]
+fn every_effect_and_condition_form_satisfies_the_schema_and_the_loader() {
+    let root = schema();
+    let mut pack = fixture();
+    pack["nodes"][0]["choices"][0]["when"] = json!({
+        "all": [
+            { "any": [{ "visited": "inicio" }, { "flag": "esqueleto_vencido" }] },
+            { "not": { "has_item": "antorcha" } },
+            { "var_cmp": { "var": "destreza", "op": "le", "value": 12 } }
+        ]
+    });
+    pack["nodes"][0]["choices"][0]["effects"] = json!([
+        { "set": { "var": "esqueleto_vencido", "value": false } },
+        { "set": { "var": "destreza", "value": 3 } },
+        { "add": { "var": "destreza", "delta": -1 } },
+        { "give": "antorcha" },
+        { "take": "antorcha" },
+        { "roll": { "dice": { "count": 2, "sides": 6, "modifier": -1 }, "modifier_var": "destreza", "store": "tirada", "test": { "at_least": 7, "success": "vestibulo", "failure": "vestibulo" } } },
+        { "if": { "when": { "flag": "esqueleto_vencido" }, "then": [{ "goto": "vestibulo" }], "otherwise": [{ "score": -5 }] } },
+        { "cue": { "music": { "asset": "musica-combate" } } },
+        { "cue": { "sfx": { "asset": "sfx-golpe" } } },
+        { "cue": "stop_music" },
+        { "score": 10 },
+        { "end": { "id": "atajo", "kind": "neutral" } }
+    ]);
+    assert!(loader_accepts(&pack));
+    assert!(valid(&root, &root, &pack));
+}
+
+#[test]
+fn shapes_the_loader_rejects_are_rejected_by_the_schema() {
+    let root = schema();
+    type Mutation = Box<dyn Fn(&mut Value)>;
+    let mutations: Vec<Mutation> = vec![
+        Box::new(|pack| pack["sorpresa"] = json!(1)),
+        Box::new(|pack| pack["format_version"] = json!(2)),
+        Box::new(|pack| {
+            pack.as_object_mut().unwrap().remove("start");
+        }),
+        Box::new(|pack| pack["variables"][0]["oculta"] = json!(true)),
+        Box::new(|pack| pack["variables"][0]["kind"] = json!({ "float": { "initial": 0 } })),
+        Box::new(|pack| pack["items"][0]["peso"] = json!(3)),
+        Box::new(|pack| pack["nodes"][0]["extra"] = json!("x")),
+        Box::new(|pack| pack["nodes"][0]["choices"][0]["peso"] = json!(1)),
+        Box::new(|pack| pack["nodes"][0]["choices"][0]["when"] = json!({ "xor": [] })),
+        Box::new(|pack| {
+            pack["nodes"][0]["choices"][0]["when"] =
+                json!({ "var_cmp": { "var": "destreza", "op": "approx", "value": 1 } })
+        }),
+        Box::new(|pack| pack["nodes"][0]["choices"][0]["effects"] = json!([{ "teleport": "x" }])),
+        Box::new(|pack| {
+            pack["nodes"][0]["choices"][0]["effects"] =
+                json!([{ "roll": { "dice": { "count": 1, "sides": 6, "faces": 2 } } }])
+        }),
+        Box::new(|pack| {
+            pack["nodes"][0]["choices"][0]["effects"] = json!([{ "cue": "play_music" }])
+        }),
+        Box::new(|pack| pack["nodes"][9]["ending"] = json!({ "id": "muerte", "kind": "tragedy" })),
+    ];
+    for (index, mutate) in mutations.iter().enumerate() {
+        let mut pack = fixture();
+        mutate(&mut pack);
+        assert!(
+            !loader_accepts(&pack),
+            "mutation {index} should be rejected by the loader"
+        );
+        assert!(
+            !valid(&root, &root, &pack),
+            "mutation {index} should be rejected by the schema"
+        );
+    }
+}
+
+#[test]
+fn schema_bounds_match_core_constants() {
+    let root = schema();
+    let defs = &root["$defs"];
+    assert_eq!(
+        root["properties"]["nodes"]["maxItems"],
+        tiamud_story_core::MAX_NODES
+    );
+    assert_eq!(
+        root["properties"]["variables"]["maxItems"],
+        tiamud_story_core::MAX_VARIABLES
+    );
+    assert_eq!(
+        root["properties"]["items"]["maxItems"],
+        tiamud_story_core::MAX_ITEMS
+    );
+    assert_eq!(
+        defs["node"]["properties"]["choices"]["maxItems"],
+        tiamud_story_core::MAX_CHOICES_PER_NODE
+    );
+    assert_eq!(
+        defs["choice"]["properties"]["effects"]["maxItems"],
+        tiamud_story_core::MAX_EFFECTS_PER_CHOICE
+    );
+    assert_eq!(
+        defs["localizedText"]["maxProperties"],
+        tiamud_story_core::MAX_LOCALES
+    );
+    assert_eq!(defs["varInt"]["maximum"], tiamud_story_core::MAX_VAR_ABS);
+    assert_eq!(
+        defs["dice"]["properties"]["count"]["maximum"],
+        tiamud_story_core::MAX_DICE_COUNT
+    );
+    assert_eq!(
+        defs["dice"]["properties"]["sides"]["maximum"],
+        tiamud_story_core::MAX_DICE_SIDES
+    );
+    assert_eq!(
+        defs["dice"]["properties"]["modifier"]["maximum"],
+        tiamud_story_core::MAX_DICE_MODIFIER
+    );
+}
