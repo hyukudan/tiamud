@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 use tiamud_story_core::StoryPack;
-use tiamud_story_tools::{STORY_PACK_SCHEMA, format::canonical_json};
+use tiamud_story_tools::{STORY_PACK_SCHEMA, STORY_PACK_SCHEMA_V1, format::canonical_json};
 
 const ID_PATTERN: &str = "^[a-z0-9][a-z0-9._-]{0,63}$";
 const LOCALE_PATTERN: &str = "^[A-Za-z][A-Za-z0-9-]{1,34}$";
@@ -155,6 +155,73 @@ fn reviewed_fixtures_and_canonical_output_satisfy_the_schema() {
 
     let lints: Value = serde_json::from_slice(include_bytes!("fixtures/lints.story.json")).unwrap();
     assert!(valid(&root, &root, &lints));
+
+    // The v2 menu sample and its canonical form.
+    let noir = noir();
+    assert!(valid(&root, &root, &noir));
+    let pack = StoryPack::from_json_slice(&serde_json::to_vec(&noir).unwrap()).unwrap();
+    let canonical: Value = serde_json::from_slice(&canonical_json(&pack).unwrap()).unwrap();
+    assert!(valid(&root, &root, &canonical));
+    let menu_lints: Value =
+        serde_json::from_slice(include_bytes!("fixtures/menu-lints.story.json")).unwrap();
+    assert!(valid(&root, &root, &menu_lints));
+
+    // The historical v1 schema still describes v1 documents and rejects v2.
+    let v1: Value = serde_json::from_str(STORY_PACK_SCHEMA_V1).unwrap();
+    assert!(valid(&v1, &v1, &original));
+    assert!(!valid(&v1, &v1, &noir));
+}
+
+fn noir() -> Value {
+    serde_json::from_slice(include_bytes!(
+        "../../story-core/fixtures/lluvia-de-neon.story.json"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn v2_shapes_the_loader_rejects_are_rejected_by_the_schema() {
+    let root = schema();
+    type Mutation = Box<dyn Fn(&mut Value)>;
+    let mutations: Vec<Mutation> = vec![
+        Box::new(|pack| pack["verbs"][0]["targets"] = json!("place")),
+        Box::new(|pack| pack["verbs"][0]["icono"] = json!("ojo")),
+        Box::new(|pack| {
+            pack["verbs"][0].as_object_mut().unwrap().remove("default");
+        }),
+        Box::new(|pack| pack["characters"][0]["portraits"] = json!(["retrato"])),
+        Box::new(|pack| pack["nodes"][0]["menu"]["entries"][0]["peso"] = json!(1)),
+        Box::new(|pack| pack["nodes"][0]["menu"]["verbs"][0] = json!("mirar")),
+        Box::new(|pack| pack["nodes"][0]["menu"]["entries"][0]["responses"][0]["once"] = json!(1)),
+        Box::new(|pack| pack["nodes"][0]["hotspots"][0]["x"] = json!(10)),
+        Box::new(|pack| {
+            pack["nodes"][1]["present"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("character");
+        }),
+        Box::new(|pack| pack["nodes"][0]["cues"] = json!(["play_music"])),
+        Box::new(|pack| pack["dialogues"][0]["nodes"][1]["options"][0]["next"] = json!("continue")),
+        Box::new(|pack| {
+            pack["dialogues"][0]["nodes"][0]["lines"][0]["mood"] = json!("triste");
+        }),
+        Box::new(|pack| {
+            pack["nodes"][0]["menu"]["entries"][2]["responses"][0]["when"] =
+                json!({ "uses": { "node": "oficina", "entry": "x", "op": "about", "value": 1 } })
+        }),
+    ];
+    for (index, mutate) in mutations.iter().enumerate() {
+        let mut pack = noir();
+        mutate(&mut pack);
+        assert!(
+            !loader_accepts(&pack),
+            "v2 mutation {index} should be rejected by the loader"
+        );
+        assert!(
+            !valid(&root, &root, &pack),
+            "v2 mutation {index} should be rejected by the schema"
+        );
+    }
 }
 
 #[test]
@@ -192,7 +259,7 @@ fn shapes_the_loader_rejects_are_rejected_by_the_schema() {
     type Mutation = Box<dyn Fn(&mut Value)>;
     let mutations: Vec<Mutation> = vec![
         Box::new(|pack| pack["sorpresa"] = json!(1)),
-        Box::new(|pack| pack["format_version"] = json!(2)),
+        Box::new(|pack| pack["format_version"] = json!(3)),
         Box::new(|pack| {
             pack.as_object_mut().unwrap().remove("start");
         }),
@@ -270,5 +337,47 @@ fn schema_bounds_match_core_constants() {
     assert_eq!(
         defs["dice"]["properties"]["modifier"]["maximum"],
         tiamud_story_core::MAX_DICE_MODIFIER
+    );
+    use tiamud_story_core::{
+        MAX_CHARACTERS, MAX_CUES_PER_NODE, MAX_DIALOGUE_NODES, MAX_DIALOGUE_OPTIONS, MAX_DIALOGUES,
+        MAX_EFFECTS_PER_CHOICE, MAX_EXPRESSIONS, MAX_HOTSPOTS_PER_NODE, MAX_MENU_ENTRIES_PER_NODE,
+        MAX_PRESENT_PER_NODE, MAX_RESPONSES_PER_ENTRY, MAX_TEXT_BLOCKS, MAX_VERBS,
+    };
+    let props = |def: &str, field: &str| defs[def]["properties"][field].clone();
+    assert_eq!(root["properties"]["verbs"]["maxItems"], MAX_VERBS);
+    assert_eq!(root["properties"]["characters"]["maxItems"], MAX_CHARACTERS);
+    assert_eq!(root["properties"]["dialogues"]["maxItems"], MAX_DIALOGUES);
+    assert_eq!(props("node", "cues")["maxItems"], MAX_CUES_PER_NODE);
+    assert_eq!(props("node", "hotspots")["maxItems"], MAX_HOTSPOTS_PER_NODE);
+    assert_eq!(props("node", "present")["maxItems"], MAX_PRESENT_PER_NODE);
+    assert_eq!(props("menu", "verbs")["maxItems"], MAX_VERBS);
+    assert_eq!(
+        props("menu", "entries")["maxItems"],
+        MAX_MENU_ENTRIES_PER_NODE
+    );
+    assert_eq!(
+        props("menuEntry", "responses")["maxItems"],
+        MAX_RESPONSES_PER_ENTRY
+    );
+    assert_eq!(defs["textBlocks"]["maxItems"], MAX_TEXT_BLOCKS);
+    assert_eq!(props("response", "blocks")["maxItems"], MAX_TEXT_BLOCKS);
+    assert_eq!(props("verb", "default")["maxItems"], MAX_TEXT_BLOCKS);
+    assert_eq!(props("dialogueNode", "lines")["maxItems"], MAX_TEXT_BLOCKS);
+    assert_eq!(
+        props("response", "effects")["maxItems"],
+        MAX_EFFECTS_PER_CHOICE
+    );
+    assert_eq!(
+        props("dialogueOption", "effects")["maxItems"],
+        MAX_EFFECTS_PER_CHOICE
+    );
+    assert_eq!(
+        props("character", "portraits")["maxProperties"],
+        MAX_EXPRESSIONS
+    );
+    assert_eq!(props("dialogue", "nodes")["maxItems"], MAX_DIALOGUE_NODES);
+    assert_eq!(
+        props("dialogueNode", "options")["maxItems"],
+        MAX_DIALOGUE_OPTIONS
     );
 }

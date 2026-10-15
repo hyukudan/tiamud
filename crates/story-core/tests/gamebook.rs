@@ -431,12 +431,14 @@ fn parsing_rejects_unknown_fields_versions_and_oversize() {
         StoryPack::from_json_slice(value.to_string().as_bytes()),
         Err(StoryError::Malformed(_))
     ));
-    let mut value = fixture_value();
-    value["format_version"] = json!(2);
-    assert_eq!(
-        StoryPack::from_json_slice(value.to_string().as_bytes()),
-        Err(StoryError::UnsupportedVersion { found: 2 })
-    );
+    for unsupported in [0, 3] {
+        let mut value = fixture_value();
+        value["format_version"] = json!(unsupported);
+        assert_eq!(
+            StoryPack::from_json_slice(value.to_string().as_bytes()),
+            Err(StoryError::UnsupportedVersion { found: unsupported })
+        );
+    }
     let huge = vec![b' '; tiamud_story_core::MAX_PACK_BYTES + 1];
     assert!(matches!(
         StoryPack::from_json_slice(&huge),

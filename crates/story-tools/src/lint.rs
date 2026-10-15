@@ -17,11 +17,21 @@
 //! A condition judged `Never` really can never hold; one judged `Always`
 //! really always holds. Anything uncertain is `Maybe` and produces no lint.
 //! The lints never read prose and only run on packs that already validated.
+//!
+//! Format v2 adds menu and dialogue lints on the same facts: verbs or menu
+//! entries that can never be offered (hidden hotspot, absent character,
+//! unobtainable item), responses that never hold or are shadowed by an
+//! earlier always-applying repeatable response, unreachable "nothing new"
+//! texts, dialogues never started, dialogue nodes unreachable from their
+//! start, options that can never be offered, and portraits that name an
+//! expression the character does not declare. Menu responses and dialogue
+//! exits also feed the reachability, ending and soft-lock analysis.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tiamud_story_core::{
-    CmpOp, Condition, Effect, MAX_REPORTED_ISSUES, StoryPack, Value, VariableKind,
+    CmpOp, Condition, DialogueNext, Effect, MAX_MENU_USES, MAX_REPORTED_ISSUES, Menu, MenuEntry,
+    Node, StoryPack, TargetKind, TextBlock, Value, VariableKind,
 };
 
 /// One authoring lint located by pack path and authored ids.
@@ -137,10 +147,8 @@ fn collect_mutations<'a>(effects: &'a [Effect], out: &mut Mutations<'a>) {
 impl<'a> Facts<'a> {
     fn new(pack: &'a StoryPack) -> Self {
         let mut mutations = Mutations::default();
-        for node in &pack.nodes {
-            for choice in &node.choices {
-                collect_mutations(&choice.effects, &mut mutations);
-            }
+        for effects in all_effect_lists(pack) {
+            collect_mutations(effects, &mut mutations);
         }
         let mut int_ranges = BTreeMap::new();
         let mut bool_values = BTreeMap::new();
@@ -244,11 +252,57 @@ impl<'a> Facts<'a> {
                 Some(&(can_false, can_true)) => Truth::from_possible(can_true, can_false),
                 None => Truth::Maybe,
             },
+            // Use counters change with play; only constant comparisons that
+            // no counter value in 0..=MAX_MENU_USES satisfies are decided.
+            Condition::Uses { op, value, .. } => {
+                compare_range(0, i64::from(MAX_MENU_USES), *op, *value)
+            }
         }
     }
 
     fn choice_open(&self, when: Option<&Condition>) -> Truth {
         when.map_or(Truth::Always, |condition| self.truth(condition))
+    }
+
+    /// Whether a menu entry can be selected: its verb must be offered and
+    /// its target listed.
+    fn entry_open(&self, node: &Node, entry: &MenuEntry) -> Truth {
+        let verb = node
+            .menu
+            .as_ref()
+            .and_then(|menu| menu.verbs.iter().find(|verb| verb.verb == entry.verb))
+            .map_or(Truth::Never, |verb| self.choice_open(verb.when.as_ref()));
+        let kind = self
+            .pack
+            .verbs
+            .iter()
+            .find(|decl| decl.id == entry.verb)
+            .map(|decl| decl.targets);
+        let target = match (kind, entry.target.as_deref()) {
+            (Some(TargetKind::Hotspot), Some(target)) => node
+                .hotspots
+                .iter()
+                .find(|hotspot| hotspot.id == target)
+                .map_or(Truth::Never, |hotspot| {
+                    self.choice_open(hotspot.when.as_ref())
+                }),
+            (Some(TargetKind::Character), Some(target)) => node
+                .present
+                .iter()
+                .find(|presence| presence.character == target)
+                .map_or(Truth::Never, |presence| {
+                    self.choice_open(presence.when.as_ref())
+                }),
+            (Some(TargetKind::Item), Some(target)) => {
+                self.truth(&Condition::HasItem(target.to_owned()))
+            }
+            _ => Truth::Always,
+        };
+        match (verb, target) {
+            (Truth::Never, _) | (_, Truth::Never) => Truth::Never,
+            (Truth::Always, Truth::Always) => Truth::Always,
+            _ => Truth::Maybe,
+        }
     }
 
     /// Inclusive range of a roll total.
@@ -310,27 +364,61 @@ impl Graph {
             .enumerate()
             .map(|(position, node)| (node.id.as_str(), position))
             .collect();
+        let closed = |when: Option<&Condition>| prune && facts.choice_open(when) == Truth::Never;
+        // Scene exits of every dialogue: `goto` and `end` effects of options
+        // that can be offered.
+        let mut dialogue_exits: BTreeMap<&str, (Vec<&str>, bool)> = BTreeMap::new();
+        for dialogue in &pack.dialogues {
+            let mut targets = Vec::new();
+            let mut can_end = false;
+            for option in dialogue.nodes.iter().flat_map(|node| &node.options) {
+                if !closed(option.when.as_ref()) {
+                    walk_targets(facts, prune, &option.effects, &mut targets, &mut can_end);
+                }
+            }
+            dialogue_exits.insert(dialogue.id.as_str(), (targets, can_end));
+        }
         let mut edges = vec![Vec::new(); pack.nodes.len()];
         let mut ends = vec![false; pack.nodes.len()];
         for (position, node) in pack.nodes.iter().enumerate() {
             if node.ending.is_some() {
                 ends[position] = true;
             }
+            let mut targets = Vec::new();
+            let mut can_end = false;
             for choice in &node.choices {
-                if prune && facts.choice_open(choice.when.as_ref()) == Truth::Never {
+                if closed(choice.when.as_ref()) {
                     continue;
                 }
-                let mut targets = Vec::new();
-                let mut can_end = false;
-                if let Some(target) = &choice.target {
-                    targets.push(target.as_str());
-                }
+                targets.extend(choice.target.as_deref());
                 walk_targets(facts, prune, &choice.effects, &mut targets, &mut can_end);
-                ends[position] |= can_end;
-                for target in targets {
-                    if let Some(next) = index.get(target) {
-                        edges[position].push(*next);
+            }
+            if let Some(menu) = &node.menu {
+                for entry in &menu.entries {
+                    if prune && facts.entry_open(node, entry) == Truth::Never {
+                        continue;
                     }
+                    for response in &entry.responses {
+                        if closed(response.when.as_ref()) {
+                            continue;
+                        }
+                        targets.extend(response.target.as_deref());
+                        walk_targets(facts, prune, &response.effects, &mut targets, &mut can_end);
+                        if let Some((exits, ends_dialogue)) = response
+                            .dialogue
+                            .as_deref()
+                            .and_then(|id| dialogue_exits.get(id))
+                        {
+                            targets.extend(exits.iter().copied());
+                            can_end |= *ends_dialogue;
+                        }
+                    }
+                }
+            }
+            ends[position] |= can_end;
+            for target in targets {
+                if let Some(next) = index.get(target) {
+                    edges[position].push(*next);
                 }
             }
         }
@@ -487,6 +575,253 @@ fn lint_effects(facts: &Facts<'_>, path: &str, effects: &[Effect], report: &mut 
     }
 }
 
+/// Every effect list of the pack: choices, menu responses and dialogue
+/// options.
+fn all_effect_lists(pack: &StoryPack) -> Vec<&[Effect]> {
+    let mut lists: Vec<&[Effect]> = Vec::new();
+    for node in &pack.nodes {
+        lists.extend(node.choices.iter().map(|choice| choice.effects.as_slice()));
+        if let Some(menu) = &node.menu {
+            lists.extend(
+                menu.entries
+                    .iter()
+                    .flat_map(|entry| &entry.responses)
+                    .map(|response| response.effects.as_slice()),
+            );
+        }
+    }
+    for dialogue in &pack.dialogues {
+        lists.extend(
+            dialogue
+                .nodes
+                .iter()
+                .flat_map(|node| &node.options)
+                .map(|option| option.effects.as_slice()),
+        );
+    }
+    lists
+}
+
+fn lint_menu(
+    facts: &Facts<'_>,
+    node_index: usize,
+    node: &Node,
+    menu: &Menu,
+    report: &mut LintReport,
+) {
+    for (verb_index, verb) in menu.verbs.iter().enumerate() {
+        if facts.choice_open(verb.when.as_ref()) == Truth::Never {
+            report.push(
+                format!(
+                    "nodes[{node_index}].menu.verbs[{verb_index}] ({}/{})",
+                    node.id, verb.verb
+                ),
+                "menu verb condition can never hold; the verb is never offered",
+            );
+        }
+    }
+    for (entry_index, entry) in menu.entries.iter().enumerate() {
+        let path = format!(
+            "nodes[{node_index}].menu.entries[{entry_index}] ({}/{})",
+            node.id, entry.id
+        );
+        if facts.entry_open(node, entry) == Truth::Never {
+            report.push(
+                path.clone(),
+                "menu entry can never be selected: its verb or target is never offered (missing or hidden hotspot, absent character or unobtainable item)",
+            );
+            continue;
+        }
+        let mut always_answered = false;
+        for (response_index, response) in entry.responses.iter().enumerate() {
+            let path = format!("{path}.responses[{response_index}] ({})", response.id);
+            let open = facts.choice_open(response.when.as_ref());
+            if always_answered {
+                report.push(
+                    path.clone(),
+                    "response is shadowed: an earlier response always applies",
+                );
+            } else if open == Truth::Never {
+                report.push(path.clone(), "response condition can never hold");
+            }
+            if open == Truth::Always && !response.once {
+                always_answered = true;
+            }
+            lint_effects(facts, &path, &response.effects, report);
+        }
+        if always_answered && !entry.exhausted.is_empty() {
+            report.push(
+                format!("{path}.exhausted"),
+                "\"nothing new\" text can never be shown: a repeatable response always applies",
+            );
+        }
+    }
+}
+
+fn lint_dialogues(facts: &Facts<'_>, report: &mut LintReport) {
+    let pack = facts.pack;
+    let started: BTreeSet<&str> = pack
+        .nodes
+        .iter()
+        .filter_map(|node| node.menu.as_ref())
+        .flat_map(|menu| &menu.entries)
+        .flat_map(|entry| &entry.responses)
+        .filter_map(|response| response.dialogue.as_deref())
+        .collect();
+    for (dialogue_index, dialogue) in pack.dialogues.iter().enumerate() {
+        let path = format!("dialogues[{dialogue_index}] ({})", dialogue.id);
+        if !started.contains(dialogue.id.as_str()) {
+            report.push(path.clone(), "dialogue is never started by any response");
+        }
+        // Reachability inside the tree from `start` over `goto` edges;
+        // `return` only leads back to `start`.
+        let mut reached: BTreeSet<&str> = BTreeSet::new();
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        reached.insert(dialogue.start.as_str());
+        queue.push_back(dialogue.start.as_str());
+        while let Some(current) = queue.pop_front() {
+            let Some(node) = dialogue.nodes.iter().find(|node| node.id == current) else {
+                continue;
+            };
+            for option in &node.options {
+                if facts.choice_open(option.when.as_ref()) == Truth::Never {
+                    continue;
+                }
+                if let DialogueNext::Goto(next) = &option.next
+                    && reached.insert(next.as_str())
+                {
+                    queue.push_back(next.as_str());
+                }
+            }
+        }
+        for (node_index, node) in dialogue.nodes.iter().enumerate() {
+            let node_path = format!("{path}.nodes[{node_index}] ({})", node.id);
+            if !reached.contains(node.id.as_str()) {
+                report.push(
+                    node_path.clone(),
+                    "dialogue node is unreachable from the dialogue start",
+                );
+            }
+            let mut all_closed = true;
+            for (option_index, option) in node.options.iter().enumerate() {
+                let option_path = format!("{node_path}.options[{option_index}] ({})", option.id);
+                if facts.choice_open(option.when.as_ref()) == Truth::Never {
+                    report.push(option_path.clone(), "option condition can never hold");
+                } else {
+                    all_closed = false;
+                }
+                lint_effects(facts, &option_path, &option.effects, report);
+            }
+            if all_closed {
+                report.push(
+                    node_path,
+                    "no option of this dialogue node can ever be offered; the scene menu takes over",
+                );
+            }
+        }
+    }
+}
+
+/// Portraits are presentation only, so a missing one is a lint, not an
+/// error: the view then simply carries no portrait asset.
+fn lint_portraits(pack: &StoryPack, report: &mut LintReport) {
+    let mut check = |path: String, speaker: &str, expression: Option<&str>| {
+        let Some(character) = pack.characters.iter().find(|c| c.id == speaker) else {
+            return;
+        };
+        match expression {
+            Some(expression) if !character.portraits.contains_key(expression) => report.push(
+                path,
+                format!(
+                    "expression {expression:?} is not declared in the portraits of {speaker:?}"
+                ),
+            ),
+            None if !character.portraits.is_empty() => {
+                let fallback = character.default_expression.as_deref().unwrap_or("neutral");
+                if !character.portraits.contains_key(fallback) {
+                    report.push(
+                        path,
+                        format!(
+                            "{speaker:?} has no portrait for its default expression {fallback:?}"
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    };
+    let blocks_of =
+        |blocks: &[TextBlock], path: String, check: &mut dyn FnMut(String, &str, Option<&str>)| {
+            for (index, block) in blocks.iter().enumerate() {
+                if let Some(speaker) = &block.speaker {
+                    check(
+                        format!("{path}[{index}]"),
+                        speaker,
+                        block.expression.as_deref(),
+                    );
+                }
+            }
+        };
+    for (index, verb) in pack.verbs.iter().enumerate() {
+        blocks_of(&verb.default, format!("verbs[{index}].default"), &mut check);
+    }
+    for (index, character) in pack.characters.iter().enumerate() {
+        if let Some(expression) = &character.default_expression
+            && !character.portraits.contains_key(expression)
+        {
+            check(
+                format!("characters[{index}].default_expression"),
+                &character.id,
+                Some(expression),
+            );
+        }
+    }
+    for (node_index, node) in pack.nodes.iter().enumerate() {
+        let path = format!("nodes[{node_index}]");
+        for (index, presence) in node.present.iter().enumerate() {
+            check(
+                format!("{path}.present[{index}]"),
+                &presence.character,
+                presence.expression.as_deref(),
+            );
+        }
+        let Some(menu) = &node.menu else {
+            continue;
+        };
+        for (entry_index, entry) in menu.entries.iter().enumerate() {
+            let entry_path = format!("{path}.menu.entries[{entry_index}]");
+            for (response_index, response) in entry.responses.iter().enumerate() {
+                blocks_of(
+                    &response.blocks,
+                    format!("{entry_path}.responses[{response_index}].blocks"),
+                    &mut check,
+                );
+            }
+            blocks_of(
+                &entry.exhausted,
+                format!("{entry_path}.exhausted"),
+                &mut check,
+            );
+        }
+        for (index, default) in menu.defaults.iter().enumerate() {
+            blocks_of(
+                &default.blocks,
+                format!("{path}.menu.defaults[{index}].blocks"),
+                &mut check,
+            );
+        }
+    }
+    for (dialogue_index, dialogue) in pack.dialogues.iter().enumerate() {
+        for (node_index, node) in dialogue.nodes.iter().enumerate() {
+            blocks_of(
+                &node.lines,
+                format!("dialogues[{dialogue_index}].nodes[{node_index}].lines"),
+                &mut check,
+            );
+        }
+    }
+}
+
 /// Runs every authoring lint on a pack that already passed
 /// [`StoryPack::validate`]. Output order is deterministic.
 pub fn lint(pack: &StoryPack) -> LintReport {
@@ -511,7 +846,12 @@ pub fn lint(pack: &StoryPack) -> LintReport {
             }
             lint_effects(&facts, &path, &choice.effects, &mut report);
         }
+        if let Some(menu) = &node.menu {
+            lint_menu(&facts, node_index, node, menu, &mut report);
+        }
     }
+    lint_dialogues(&facts, &mut report);
+    lint_portraits(pack, &mut report);
 
     let loose = Graph::build(&facts, false);
     let strict = Graph::build(&facts, true);
@@ -540,14 +880,20 @@ pub fn lint(pack: &StoryPack) -> LintReport {
             );
             continue;
         }
-        if !strict_reach[index] || node.ending.is_some() || node.choices.is_empty() {
+        if !strict_reach[index]
+            || node.ending.is_some()
+            || (node.choices.is_empty() && node.menu.is_none())
+        {
             // Unreachable and choice-less nodes are core validator warnings.
             continue;
         }
-        let all_closed = node
-            .choices
-            .iter()
-            .all(|choice| facts.choice_open(choice.when.as_ref()) == Truth::Never);
+        // A menu scene always offers its verbs and defaults, so it is never
+        // a dead end by itself; it can still be a soft-lock.
+        let all_closed = node.menu.is_none()
+            && node
+                .choices
+                .iter()
+                .all(|choice| facts.choice_open(choice.when.as_ref()) == Truth::Never);
         if all_closed {
             report.push(
                 path,

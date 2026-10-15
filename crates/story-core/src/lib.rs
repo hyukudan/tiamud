@@ -12,7 +12,9 @@
 //! instead of panicking or exceeding a bound.
 //!
 //! Phase S0 is a library prototype only: no server actor, protocol, persistence
-//! or client consumes it yet. See ADR 0025.
+//! or client consumes it yet. See ADR 0025. Format v2 adds the core model of
+//! menu-driven adventures (verb menus, speakers with portraits, dialogue trees
+//! and paginated views) proposed in ADR 0028; it is still library-only.
 
 #![forbid(unsafe_code)]
 
@@ -23,23 +25,36 @@ mod state;
 mod text;
 mod undo;
 mod validate;
+mod view;
 
 pub use engine::{
-    StoryEvent, StoryInput, StoryView, ViewChoice, ViewStat, resolve_choice, step, view,
+    MenuSelection, StoryEvent, StoryInput, resolve_choice, resolve_dialogue_option, resolve_menu,
+    step,
 };
 pub use pack::{
-    Choice, CmpOp, Condition, Cue, DiceSpec, Effect, Ending, EndingKind, ItemDecl, Node, RollTest,
-    StoryPack, Value, VariableDecl, VariableKind,
+    CharacterDecl, Choice, CmpOp, Condition, Cue, Dialogue, DialogueNext, DialogueNode,
+    DialogueOption, DiceSpec, Effect, Ending, EndingKind, Hotspot, ItemDecl, Menu, MenuDefault,
+    MenuEntry, MenuVerb, Node, Presence, Response, RollTest, StoryPack, TargetKind, TextBlock,
+    Value, VariableDecl, VariableKind, VerbDecl,
 };
-pub use state::StoryState;
+pub use state::{DialoguePosition, LastResponse, StoryState};
 pub use text::LocalizedText;
 pub use undo::UndoRing;
 pub use validate::{ValidationErrors, ValidationIssue, ValidationReport};
+pub use view::{
+    PageItem, StoryView, ViewBlock, ViewChoice, ViewDialogue, ViewMenu, ViewPage, ViewPortrait,
+    ViewStat, ViewTarget, ViewVerb, view, view_pages,
+};
 
-/// Version of the StoryPack JSON document accepted by this crate.
-pub const STORY_PACK_FORMAT_VERSION: u32 = 1;
-/// Version of the serialized [`StoryState`] document.
-pub const STORY_STATE_FORMAT_VERSION: u32 = 1;
+/// Current version of the StoryPack JSON document (v2 adds menus, speakers,
+/// portraits and dialogue trees).
+pub const STORY_PACK_FORMAT_VERSION: u32 = 2;
+/// Oldest StoryPack version still loaded. v1 documents are a strict subset of
+/// v2 and upgrade by rewriting `format_version` only.
+pub const STORY_PACK_MIN_FORMAT_VERSION: u32 = 1;
+/// Version of the serialized [`StoryState`] document. v1 states (without menu
+/// counters, spent responses or dialogue position) still load.
+pub const STORY_STATE_FORMAT_VERSION: u32 = 2;
 
 /// Maximum serialized StoryPack size accepted by [`StoryPack::from_json_slice`].
 pub const MAX_PACK_BYTES: usize = 2 * 1024 * 1024;
@@ -91,6 +106,42 @@ pub const MAX_TOKEN_BYTES: usize = 32;
 pub const MAX_REPORTED_ISSUES: usize = 128;
 /// Maximum capacity of an [`UndoRing`].
 pub const MAX_UNDO_CAPACITY: usize = 64;
+/// Maximum declared menu verbs per pack, and verbs offered by one menu.
+pub const MAX_VERBS: usize = 16;
+/// Maximum hotspots on one node.
+pub const MAX_HOTSPOTS_PER_NODE: usize = 32;
+/// Maximum characters present on one node.
+pub const MAX_PRESENT_PER_NODE: usize = 8;
+/// Maximum menu entries on one node.
+pub const MAX_MENU_ENTRIES_PER_NODE: usize = 128;
+/// Maximum menu entries across the whole pack.
+pub const MAX_TOTAL_MENU_ENTRIES: usize = 4096;
+/// Maximum responses of one menu entry.
+pub const MAX_RESPONSES_PER_ENTRY: usize = 8;
+/// Maximum text blocks of one response, default or dialogue node.
+pub const MAX_TEXT_BLOCKS: usize = 8;
+/// Maximum media cues on one node.
+pub const MAX_CUES_PER_NODE: usize = 4;
+/// Maximum declared characters.
+pub const MAX_CHARACTERS: usize = 64;
+/// Maximum portrait expressions of one character.
+pub const MAX_EXPRESSIONS: usize = 16;
+/// Maximum dialogue trees.
+pub const MAX_DIALOGUES: usize = 256;
+/// Maximum nodes of one dialogue tree.
+pub const MAX_DIALOGUE_NODES: usize = 128;
+/// Maximum dialogue nodes across the whole pack.
+pub const MAX_TOTAL_DIALOGUE_NODES: usize = 4096;
+/// Maximum options of one dialogue node.
+pub const MAX_DIALOGUE_OPTIONS: usize = 16;
+/// Saturation value of a menu entry use counter.
+pub const MAX_MENU_USES: u16 = 9999;
+/// Maximum serialized JSON bytes of one [`ViewPage`]. A later protocol frame
+/// wraps a page in an envelope and must stay under the 16 KiB frame limit, so
+/// 4 KiB are left for that envelope. Validated packs always fit: the largest
+/// single page item (one 4096-byte text block, escaped at most 2×, plus a
+/// 256-byte speaker name) is far below this bound.
+pub const MAX_VIEW_BYTES: usize = 12 * 1024;
 
 /// Errors returned by loading, validating against state, or stepping a story.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -119,6 +170,14 @@ pub enum StoryError {
     TurnLimit,
     #[error("undo capacity must be 1..={max}")]
     InvalidUndoCapacity { max: usize },
+    #[error("a dialogue is active; answer it first")]
+    InDialogue,
+    #[error("no dialogue is active")]
+    NotInDialogue,
+    #[error("menu target is missing, unexpected or does not belong to the verb")]
+    BadTarget,
+    #[error("a single view item exceeds {limit} bytes")]
+    ViewTooLarge { limit: usize },
 }
 
 /// Returns true for a bounded authored identifier: 1..=64 bytes, starting with

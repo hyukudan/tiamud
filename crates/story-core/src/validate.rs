@@ -4,11 +4,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use crate::{
-    Condition, Cue, Effect, Ending, MAX_CHOICES_PER_NODE, MAX_CONDITION_DEPTH, MAX_CONDITION_NODES,
-    MAX_DICE_COUNT, MAX_DICE_MODIFIER, MAX_DICE_SIDES, MAX_EFFECT_DEPTH, MAX_EFFECTS_PER_CHOICE,
-    MAX_ITEMS, MAX_LABEL_BYTES, MAX_NODES, MAX_REPORTED_ISSUES, MAX_SCORE_DELTA, MAX_TEXT_BYTES,
-    MAX_TOTAL_CHOICES, MAX_VAR_ABS, MAX_VARIABLES, STORY_PACK_FORMAT_VERSION, StoryPack, Value,
-    VariableKind, valid_id,
+    Condition, Cue, Dialogue, DialogueNext, Effect, Ending, MAX_CHARACTERS, MAX_CHOICES_PER_NODE,
+    MAX_CONDITION_DEPTH, MAX_CONDITION_NODES, MAX_CUES_PER_NODE, MAX_DIALOGUE_NODES,
+    MAX_DIALOGUE_OPTIONS, MAX_DIALOGUES, MAX_DICE_COUNT, MAX_DICE_MODIFIER, MAX_DICE_SIDES,
+    MAX_EFFECT_DEPTH, MAX_EFFECTS_PER_CHOICE, MAX_EXPRESSIONS, MAX_HOTSPOTS_PER_NODE, MAX_ITEMS,
+    MAX_LABEL_BYTES, MAX_MENU_ENTRIES_PER_NODE, MAX_NODES, MAX_PRESENT_PER_NODE,
+    MAX_REPORTED_ISSUES, MAX_RESPONSES_PER_ENTRY, MAX_SCORE_DELTA, MAX_TEXT_BLOCKS, MAX_TEXT_BYTES,
+    MAX_TOTAL_CHOICES, MAX_TOTAL_DIALOGUE_NODES, MAX_TOTAL_MENU_ENTRIES, MAX_VAR_ABS,
+    MAX_VARIABLES, MAX_VERBS, Node, STORY_PACK_FORMAT_VERSION, STORY_PACK_MIN_FORMAT_VERSION,
+    StoryPack, TargetKind, TextBlock, Value, VariableKind, valid_id,
 };
 
 /// One located validation finding.
@@ -88,6 +92,11 @@ struct Validator<'a> {
     nodes: BTreeMap<&'a str, usize>,
     vars: BTreeMap<&'a str, VarType>,
     items: BTreeSet<&'a str>,
+    verbs: BTreeMap<&'a str, TargetKind>,
+    characters: BTreeSet<&'a str>,
+    dialogues: BTreeSet<&'a str>,
+    /// `(node, entry)` pairs that a `uses` condition may name.
+    entries: BTreeSet<(&'a str, &'a str)>,
 }
 
 impl StoryPack {
@@ -102,6 +111,10 @@ impl StoryPack {
             nodes: BTreeMap::new(),
             vars: BTreeMap::new(),
             items: BTreeSet::new(),
+            verbs: BTreeMap::new(),
+            characters: BTreeSet::new(),
+            dialogues: BTreeSet::new(),
+            entries: BTreeSet::new(),
         };
         validator.run();
         if validator.errors.list.is_empty() {
@@ -125,7 +138,9 @@ impl<'a> Validator<'a> {
 
     fn run(&mut self) {
         let pack = self.pack;
-        if pack.format_version != STORY_PACK_FORMAT_VERSION {
+        if !(STORY_PACK_MIN_FORMAT_VERSION..=STORY_PACK_FORMAT_VERSION)
+            .contains(&pack.format_version)
+        {
             self.error("format_version", "unsupported format version");
         }
         if !valid_id(&pack.id) {
@@ -146,6 +161,18 @@ impl<'a> Validator<'a> {
             self.error("items", format!("at most {MAX_ITEMS} items"));
             return;
         }
+        if pack.verbs.len() > MAX_VERBS {
+            self.error("verbs", format!("at most {MAX_VERBS} verbs"));
+            return;
+        }
+        if pack.characters.len() > MAX_CHARACTERS {
+            self.error("characters", format!("at most {MAX_CHARACTERS} characters"));
+            return;
+        }
+        if pack.dialogues.len() > MAX_DIALOGUES {
+            self.error("dialogues", format!("at most {MAX_DIALOGUES} dialogues"));
+            return;
+        }
         let total_choices = pack
             .nodes
             .iter()
@@ -156,6 +183,29 @@ impl<'a> Validator<'a> {
                 format!("at most {MAX_TOTAL_CHOICES} choices in total"),
             );
             return;
+        }
+        let total_entries = pack.nodes.iter().fold(0usize, |sum, node| {
+            sum.saturating_add(node.menu.as_ref().map_or(0, |menu| menu.entries.len()))
+        });
+        if total_entries > MAX_TOTAL_MENU_ENTRIES {
+            self.error(
+                "nodes",
+                format!("at most {MAX_TOTAL_MENU_ENTRIES} menu entries in total"),
+            );
+            return;
+        }
+        let total_dialogue_nodes = pack.dialogues.iter().fold(0usize, |sum, dialogue| {
+            sum.saturating_add(dialogue.nodes.len())
+        });
+        if total_dialogue_nodes > MAX_TOTAL_DIALOGUE_NODES {
+            self.error(
+                "dialogues",
+                format!("at most {MAX_TOTAL_DIALOGUE_NODES} dialogue nodes in total"),
+            );
+            return;
+        }
+        if pack.format_version < 2 {
+            self.v1_compatibility();
         }
         self.declarations();
         if !self.nodes.contains_key(pack.start.as_str()) {
@@ -174,11 +224,46 @@ impl<'a> Validator<'a> {
                 }
             }
         }
+        for index in 0..pack.verbs.len() {
+            let verb = &pack.verbs[index];
+            self.blocks(&format!("verbs[{index}].default"), &verb.default, 1);
+        }
         for index in 0..pack.nodes.len() {
             self.node(index);
         }
+        for index in 0..pack.dialogues.len() {
+            self.dialogue(index);
+        }
         if self.errors.list.is_empty() {
             self.lints();
+        }
+    }
+
+    /// A document that still declares v1 may not use v2 features.
+    fn v1_compatibility(&mut self) {
+        let pack = self.pack;
+        let message =
+            "format v2 feature in a format_version 1 pack; run `tiamud-story fmt --upgrade`";
+        if !pack.verbs.is_empty() {
+            self.error("verbs", message);
+        }
+        if !pack.characters.is_empty() {
+            self.error("characters", message);
+        }
+        if !pack.dialogues.is_empty() {
+            self.error("dialogues", message);
+        }
+        for (index, node) in pack.nodes.iter().enumerate() {
+            if node.uses_v2() {
+                self.error(format!("nodes[{index}]"), message);
+            }
+            for (choice_index, choice) in node.choices.iter().enumerate() {
+                let uses = choice.when.as_ref().is_some_and(condition_uses_v2)
+                    || effects_use_v2(&choice.effects);
+                if uses {
+                    self.error(format!("nodes[{index}].choices[{choice_index}]"), message);
+                }
+            }
         }
     }
 
@@ -190,6 +275,11 @@ impl<'a> Validator<'a> {
                 self.error(path, "invalid identifier");
             } else if self.nodes.insert(node.id.as_str(), index).is_some() {
                 self.error(path, "duplicate node id");
+            }
+            if let Some(menu) = &node.menu {
+                for entry in &menu.entries {
+                    self.entries.insert((node.id.as_str(), entry.id.as_str()));
+                }
             }
         }
         for (index, decl) in pack.variables.iter().enumerate() {
@@ -236,6 +326,61 @@ impl<'a> Validator<'a> {
                 self.error(format!("{path}.name"), message);
             }
         }
+        for (index, verb) in pack.verbs.iter().enumerate() {
+            let path = format!("verbs[{index}]");
+            if !valid_id(&verb.id) {
+                self.error(format!("{path}.id"), "invalid identifier");
+            } else if self.verbs.insert(verb.id.as_str(), verb.targets).is_some() {
+                self.error(format!("{path}.id"), "duplicate verb id");
+            }
+            if let Err(message) = verb.label.check(MAX_LABEL_BYTES, false) {
+                self.error(format!("{path}.label"), message);
+            }
+        }
+        for (index, character) in pack.characters.iter().enumerate() {
+            let path = format!("characters[{index}]");
+            if !valid_id(&character.id) {
+                self.error(format!("{path}.id"), "invalid identifier");
+            } else if !self.characters.insert(character.id.as_str()) {
+                self.error(format!("{path}.id"), "duplicate character id");
+            }
+            if let Err(message) = character.name.check(MAX_LABEL_BYTES, false) {
+                self.error(format!("{path}.name"), message);
+            }
+            if character.portraits.len() > MAX_EXPRESSIONS {
+                self.error(
+                    format!("{path}.portraits"),
+                    format!("at most {MAX_EXPRESSIONS} expressions"),
+                );
+            }
+            for (expression, asset) in &character.portraits {
+                if !valid_id(expression) {
+                    self.error(format!("{path}.portraits"), "invalid expression id");
+                }
+                if !valid_id(asset) {
+                    self.error(
+                        format!("{path}.portraits.{expression}"),
+                        "portrait must be a reviewed asset id, not a URL",
+                    );
+                }
+            }
+            if let Some(expression) = &character.default_expression
+                && !valid_id(expression)
+            {
+                self.error(
+                    format!("{path}.default_expression"),
+                    "invalid expression id",
+                );
+            }
+        }
+        for (index, dialogue) in pack.dialogues.iter().enumerate() {
+            let path = format!("dialogues[{index}].id");
+            if !valid_id(&dialogue.id) {
+                self.error(path, "invalid identifier");
+            } else if !self.dialogues.insert(dialogue.id.as_str()) {
+                self.error(path, "duplicate dialogue id");
+            }
+        }
     }
 
     fn node(&mut self, index: usize) {
@@ -251,6 +396,9 @@ impl<'a> Validator<'a> {
                     format!("{path}.choices"),
                     "an ending node cannot offer choices",
                 );
+            }
+            if node.menu.is_some() {
+                self.error(format!("{path}.menu"), "an ending node cannot offer a menu");
             }
         }
         if node.choices.len() > MAX_CHOICES_PER_NODE {
@@ -271,22 +419,293 @@ impl<'a> Validator<'a> {
             if let Err(message) = choice.label.check(MAX_LABEL_BYTES, false) {
                 self.error(format!("{path}.label"), message);
             }
-            if let Some(condition) = &choice.when {
-                let mut budget = MAX_CONDITION_NODES;
-                self.condition(&format!("{path}.when"), condition, 0, &mut budget);
-            }
+            self.optional_condition(&format!("{path}.when"), choice.when.as_ref());
             if let Some(target) = &choice.target {
                 self.node_ref(&format!("{path}.target"), target);
             }
-            let total = count_effects(&choice.effects, 0);
-            if total > MAX_EFFECTS_PER_CHOICE {
-                self.error(
-                    format!("{path}.effects"),
-                    format!("at most {MAX_EFFECTS_PER_CHOICE} effects including nested ones"),
-                );
-            } else {
-                self.effects(&format!("{path}.effects"), &choice.effects, 0);
+            self.effect_list(&format!("{path}.effects"), &choice.effects);
+        }
+        self.scene(&path, node);
+    }
+
+    /// Format v2 scene fields: background, cues, hotspots, presence, menu.
+    fn scene(&mut self, path: &str, node: &'a Node) {
+        if let Some(background) = &node.background
+            && !valid_id(background)
+        {
+            self.error(
+                format!("{path}.background"),
+                "background must be a reviewed asset id, not a URL",
+            );
+        }
+        if node.cues.len() > MAX_CUES_PER_NODE {
+            self.error(
+                format!("{path}.cues"),
+                format!("at most {MAX_CUES_PER_NODE} cues"),
+            );
+        }
+        for (index, cue) in node.cues.iter().enumerate() {
+            self.cue(&format!("{path}.cues[{index}]"), cue);
+        }
+        if node.hotspots.len() > MAX_HOTSPOTS_PER_NODE {
+            self.error(
+                format!("{path}.hotspots"),
+                format!("at most {MAX_HOTSPOTS_PER_NODE} hotspots"),
+            );
+            return;
+        }
+        let mut hotspots = BTreeSet::new();
+        for (index, hotspot) in node.hotspots.iter().enumerate() {
+            let path = format!("{path}.hotspots[{index}]");
+            if !valid_id(&hotspot.id) {
+                self.error(format!("{path}.id"), "invalid identifier");
+            } else if !hotspots.insert(hotspot.id.as_str()) {
+                self.error(format!("{path}.id"), "duplicate hotspot id within node");
             }
+            if let Err(message) = hotspot.label.check(MAX_LABEL_BYTES, false) {
+                self.error(format!("{path}.label"), message);
+            }
+            self.optional_condition(&format!("{path}.when"), hotspot.when.as_ref());
+        }
+        if node.present.len() > MAX_PRESENT_PER_NODE {
+            self.error(
+                format!("{path}.present"),
+                format!("at most {MAX_PRESENT_PER_NODE} characters"),
+            );
+            return;
+        }
+        let mut present = BTreeSet::new();
+        for (index, presence) in node.present.iter().enumerate() {
+            let path = format!("{path}.present[{index}]");
+            if !self.characters.contains(presence.character.as_str()) {
+                self.error(format!("{path}.character"), "undeclared character");
+            } else if !present.insert(presence.character.as_str()) {
+                self.error(format!("{path}.character"), "character is already present");
+            }
+            if let Some(expression) = &presence.expression
+                && !valid_id(expression)
+            {
+                self.error(format!("{path}.expression"), "invalid expression id");
+            }
+            self.optional_condition(&format!("{path}.when"), presence.when.as_ref());
+        }
+        let Some(menu) = &node.menu else {
+            return;
+        };
+        let path = format!("{path}.menu");
+        if menu.verbs.is_empty() || menu.verbs.len() > MAX_VERBS {
+            self.error(
+                format!("{path}.verbs"),
+                format!("expected 1..={MAX_VERBS} verbs"),
+            );
+            return;
+        }
+        if menu.entries.len() > MAX_MENU_ENTRIES_PER_NODE {
+            self.error(
+                format!("{path}.entries"),
+                format!("at most {MAX_MENU_ENTRIES_PER_NODE} entries"),
+            );
+            return;
+        }
+        let mut offered = BTreeSet::new();
+        for (index, menu_verb) in menu.verbs.iter().enumerate() {
+            let path = format!("{path}.verbs[{index}]");
+            if !self.verbs.contains_key(menu_verb.verb.as_str()) {
+                self.error(format!("{path}.verb"), "undeclared verb");
+            } else if !offered.insert(menu_verb.verb.as_str()) {
+                self.error(format!("{path}.verb"), "verb is offered twice");
+            }
+            self.optional_condition(&format!("{path}.when"), menu_verb.when.as_ref());
+        }
+        let mut entry_ids = BTreeSet::new();
+        let mut pairs = BTreeSet::new();
+        for (index, entry) in menu.entries.iter().enumerate() {
+            let path = format!("{path}.entries[{index}]");
+            if !valid_id(&entry.id) {
+                self.error(format!("{path}.id"), "invalid identifier");
+            } else if !entry_ids.insert(entry.id.as_str()) {
+                self.error(format!("{path}.id"), "duplicate entry id within node");
+            }
+            if !offered.contains(entry.verb.as_str()) {
+                self.error(format!("{path}.verb"), "verb is not offered by this menu");
+            }
+            if !pairs.insert((entry.verb.as_str(), entry.target.as_deref())) {
+                self.error(
+                    path.clone(),
+                    "another entry already answers this verb and target",
+                );
+            }
+            let kind = self.verbs.get(entry.verb.as_str()).copied();
+            match (kind, entry.target.as_deref()) {
+                (None, _) | (Some(TargetKind::None), None) => {}
+                (Some(TargetKind::None), Some(_)) => {
+                    self.error(format!("{path}.target"), "this verb takes no target");
+                }
+                (Some(_), None) => self.error(format!("{path}.target"), "this verb needs a target"),
+                (Some(TargetKind::Hotspot), Some(target)) => {
+                    if node.hotspot(target).is_none() {
+                        self.error(
+                            format!("{path}.target"),
+                            "target is not a hotspot of this node",
+                        );
+                    }
+                }
+                (Some(TargetKind::Character), Some(target)) => {
+                    if node.presence(target).is_none() {
+                        self.error(
+                            format!("{path}.target"),
+                            "target is not a character present on this node",
+                        );
+                    }
+                }
+                (Some(TargetKind::Item), Some(target)) => {
+                    self.item_ref(&format!("{path}.target"), target)
+                }
+            }
+            if entry.responses.is_empty() || entry.responses.len() > MAX_RESPONSES_PER_ENTRY {
+                self.error(
+                    format!("{path}.responses"),
+                    format!("expected 1..={MAX_RESPONSES_PER_ENTRY} responses"),
+                );
+                continue;
+            }
+            self.blocks(&format!("{path}.exhausted"), &entry.exhausted, 0);
+            let mut response_ids = BTreeSet::new();
+            for (response_index, response) in entry.responses.iter().enumerate() {
+                let path = format!("{path}.responses[{response_index}]");
+                if !valid_id(&response.id) {
+                    self.error(format!("{path}.id"), "invalid identifier");
+                } else if !response_ids.insert(response.id.as_str()) {
+                    self.error(format!("{path}.id"), "duplicate response id within entry");
+                }
+                self.optional_condition(&format!("{path}.when"), response.when.as_ref());
+                self.blocks(&format!("{path}.blocks"), &response.blocks, 1);
+                self.effect_list(&format!("{path}.effects"), &response.effects);
+                if let Some(target) = &response.target {
+                    self.node_ref(&format!("{path}.target"), target);
+                }
+                if let Some(dialogue) = &response.dialogue
+                    && !self.dialogues.contains(dialogue.as_str())
+                {
+                    self.error(format!("{path}.dialogue"), "unknown dialogue");
+                }
+            }
+        }
+        let mut defaults = BTreeSet::new();
+        for (index, default) in menu.defaults.iter().enumerate() {
+            let path = format!("{path}.defaults[{index}]");
+            if !offered.contains(default.verb.as_str()) {
+                self.error(format!("{path}.verb"), "verb is not offered by this menu");
+            } else if !defaults.insert(default.verb.as_str()) {
+                self.error(format!("{path}.verb"), "duplicate default for this verb");
+            }
+            self.blocks(&format!("{path}.blocks"), &default.blocks, 1);
+        }
+    }
+
+    fn dialogue(&mut self, index: usize) {
+        let dialogue: &'a Dialogue = &self.pack.dialogues[index];
+        let path = format!("dialogues[{index}]");
+        if dialogue.nodes.is_empty() || dialogue.nodes.len() > MAX_DIALOGUE_NODES {
+            self.error(
+                format!("{path}.nodes"),
+                format!("expected 1..={MAX_DIALOGUE_NODES} nodes"),
+            );
+            return;
+        }
+        let mut ids = BTreeSet::new();
+        for (node_index, node) in dialogue.nodes.iter().enumerate() {
+            let path = format!("{path}.nodes[{node_index}].id");
+            if !valid_id(&node.id) {
+                self.error(path, "invalid identifier");
+            } else if !ids.insert(node.id.as_str()) {
+                self.error(path, "duplicate dialogue node id");
+            }
+        }
+        if !ids.contains(dialogue.start.as_str()) {
+            self.error(format!("{path}.start"), "unknown dialogue node");
+        }
+        for (node_index, node) in dialogue.nodes.iter().enumerate() {
+            let path = format!("{path}.nodes[{node_index}]");
+            self.blocks(&format!("{path}.lines"), &node.lines, 1);
+            if node.options.is_empty() || node.options.len() > MAX_DIALOGUE_OPTIONS {
+                self.error(
+                    format!("{path}.options"),
+                    format!("expected 1..={MAX_DIALOGUE_OPTIONS} options"),
+                );
+                continue;
+            }
+            let mut option_ids = BTreeSet::new();
+            for (option_index, option) in node.options.iter().enumerate() {
+                let path = format!("{path}.options[{option_index}]");
+                if !valid_id(&option.id) {
+                    self.error(format!("{path}.id"), "invalid identifier");
+                } else if !option_ids.insert(option.id.as_str()) {
+                    self.error(format!("{path}.id"), "duplicate option id within node");
+                }
+                if let Err(message) = option.label.check(MAX_LABEL_BYTES, false) {
+                    self.error(format!("{path}.label"), message);
+                }
+                self.optional_condition(&format!("{path}.when"), option.when.as_ref());
+                self.effect_list(&format!("{path}.effects"), &option.effects);
+                if let DialogueNext::Goto(next) = &option.next
+                    && !ids.contains(next.as_str())
+                {
+                    self.error(format!("{path}.next"), "unknown dialogue node");
+                }
+            }
+        }
+    }
+
+    /// `min..=MAX_TEXT_BLOCKS` blocks with declared speakers.
+    fn blocks(&mut self, path: &str, blocks: &[TextBlock], min: usize) {
+        if blocks.len() < min || blocks.len() > MAX_TEXT_BLOCKS {
+            self.error(
+                path,
+                format!("expected {min}..={MAX_TEXT_BLOCKS} text blocks"),
+            );
+            return;
+        }
+        for (index, block) in blocks.iter().enumerate() {
+            let path = format!("{path}[{index}]");
+            if let Err(message) = block.text.check(MAX_TEXT_BYTES, true) {
+                self.error(format!("{path}.text"), message);
+            }
+            if let Some(speaker) = &block.speaker
+                && !self.characters.contains(speaker.as_str())
+            {
+                self.error(format!("{path}.speaker"), "undeclared character");
+            }
+            if let Some(expression) = &block.expression {
+                if !valid_id(expression) {
+                    self.error(format!("{path}.expression"), "invalid expression id");
+                }
+                if block.speaker.is_none() {
+                    self.error(
+                        format!("{path}.expression"),
+                        "an expression needs a speaker",
+                    );
+                }
+            }
+        }
+    }
+
+    fn optional_condition(&mut self, path: &str, condition: Option<&Condition>) {
+        if let Some(condition) = condition {
+            let mut budget = MAX_CONDITION_NODES;
+            self.condition(path, condition, 0, &mut budget);
+        }
+    }
+
+    fn effect_list(&mut self, path: &str, effects: &[Effect]) {
+        let total = count_effects(effects, 0);
+        if total > MAX_EFFECTS_PER_CHOICE {
+            self.error(
+                path,
+                format!("at most {MAX_EFFECTS_PER_CHOICE} effects including nested ones"),
+            );
+        } else {
+            self.effects(path, effects, 0);
         }
     }
 
@@ -319,6 +738,14 @@ impl<'a> Validator<'a> {
     fn item_ref(&mut self, path: &str, item: &str) {
         if !self.items.contains(item) {
             self.error(path, "undeclared item");
+        }
+    }
+
+    fn cue(&mut self, path: &str, cue: &Cue) {
+        if let Cue::Music { asset } | Cue::Sfx { asset } = cue
+            && !valid_id(asset)
+        {
+            self.error(path, "cue asset must be a reviewed asset id, not a URL");
         }
     }
 
@@ -366,6 +793,19 @@ impl<'a> Validator<'a> {
                 Some(VarType::Int { .. }) => self.error(path, "flag needs a boolean variable"),
                 None => self.error(path, "unknown variable"),
             },
+            Condition::Uses {
+                node, entry, value, ..
+            } => {
+                if !self.entries.contains(&(node.as_str(), entry.as_str())) {
+                    self.error(path, "unknown menu entry");
+                }
+                if value.unsigned_abs() > MAX_VAR_ABS.unsigned_abs() {
+                    self.error(
+                        format!("{path}.value"),
+                        "comparison constant is out of range",
+                    );
+                }
+            }
         }
     }
 
@@ -454,12 +894,7 @@ impl<'a> Validator<'a> {
                 self.effects(&format!("{path}.then"), then, depth + 1);
                 self.effects(&format!("{path}.otherwise"), otherwise, depth + 1);
             }
-            Effect::Cue(Cue::Music { asset } | Cue::Sfx { asset }) => {
-                if !valid_id(asset) {
-                    self.error(path, "cue asset must be a reviewed asset id, not a URL");
-                }
-            }
-            Effect::Cue(Cue::StopMusic) => {}
+            Effect::Cue(cue) => self.cue(path, cue),
             Effect::Score(delta) => {
                 if delta.unsigned_abs() > MAX_SCORE_DELTA.unsigned_abs() {
                     self.error(path, "score delta is out of range");
@@ -470,20 +905,47 @@ impl<'a> Validator<'a> {
     }
 
     /// Reachability (ignoring conditions), dead ends and missing endings.
+    /// Menu responses, and the dialogues they start, count as scene exits.
     fn lints(&mut self) {
         let pack = self.pack;
         let mut edges: Vec<Vec<usize>> = vec![Vec::new(); pack.nodes.len()];
+        let mut ends = vec![false; pack.nodes.len()];
+        // Scene exits of each dialogue, computed once.
+        let mut dialogue_exits: BTreeMap<&str, (Vec<&str>, bool)> = BTreeMap::new();
+        for dialogue in &pack.dialogues {
+            let mut targets = Vec::new();
+            let mut can_end = false;
+            for option in dialogue.nodes.iter().flat_map(|node| &node.options) {
+                collect_targets(&option.effects, &mut targets);
+                can_end |= any_end(&option.effects);
+            }
+            dialogue_exits.insert(dialogue.id.as_str(), (targets, can_end));
+        }
         for (index, node) in pack.nodes.iter().enumerate() {
+            let mut targets = Vec::new();
             for choice in &node.choices {
-                let mut targets = Vec::new();
-                if let Some(target) = &choice.target {
-                    targets.push(target.as_str());
-                }
+                targets.extend(choice.target.as_deref());
                 collect_targets(&choice.effects, &mut targets);
-                for target in targets {
-                    if let Some(next) = self.nodes.get(target) {
-                        edges[index].push(*next);
+                ends[index] |= any_end(&choice.effects);
+            }
+            if let Some(menu) = &node.menu {
+                for response in menu.entries.iter().flat_map(|entry| &entry.responses) {
+                    targets.extend(response.target.as_deref());
+                    collect_targets(&response.effects, &mut targets);
+                    ends[index] |= any_end(&response.effects);
+                    if let Some((exits, can_end)) = response
+                        .dialogue
+                        .as_deref()
+                        .and_then(|id| dialogue_exits.get(id))
+                    {
+                        targets.extend(exits.iter().copied());
+                        ends[index] |= *can_end;
                     }
+                }
+            }
+            for target in targets {
+                if let Some(next) = self.nodes.get(target) {
+                    edges[index].push(*next);
                 }
             }
         }
@@ -512,8 +974,11 @@ impl<'a> Validator<'a> {
                 ending_reachable |= reachable[index];
                 continue;
             }
-            if reachable[index] && pack.nodes[index].choices.iter().any(has_end_effect) {
+            if reachable[index] && ends[index] {
                 ending_reachable = true;
+            }
+            if node.menu.is_some() {
+                continue;
             }
             if node.choices.is_empty() {
                 self.warnings
@@ -568,15 +1033,48 @@ fn collect_targets<'a>(effects: &'a [Effect], out: &mut Vec<&'a str>) {
     }
 }
 
-fn has_end_effect(choice: &crate::Choice) -> bool {
-    fn any_end(effects: &[Effect]) -> bool {
+fn any_end(effects: &[Effect]) -> bool {
+    effects.iter().any(|effect| match effect {
+        Effect::End(_) => true,
+        Effect::If {
+            then, otherwise, ..
+        } => any_end(then) || any_end(otherwise),
+        _ => false,
+    })
+}
+
+/// Bounded by the parser's nesting; called before depth validation only on
+/// v1 documents, so it stops at the documented limits.
+fn condition_uses_v2(condition: &Condition) -> bool {
+    fn walk(condition: &Condition, depth: usize) -> bool {
+        if depth > MAX_CONDITION_DEPTH {
+            return false;
+        }
+        match condition {
+            Condition::Uses { .. } => true,
+            Condition::All(children) | Condition::Any(children) => {
+                children.iter().any(|child| walk(child, depth + 1))
+            }
+            Condition::Not(child) => walk(child, depth + 1),
+            _ => false,
+        }
+    }
+    walk(condition, 0)
+}
+
+fn effects_use_v2(effects: &[Effect]) -> bool {
+    fn walk(effects: &[Effect], depth: usize) -> bool {
+        if depth > MAX_EFFECT_DEPTH {
+            return false;
+        }
         effects.iter().any(|effect| match effect {
-            Effect::End(_) => true,
             Effect::If {
-                then, otherwise, ..
-            } => any_end(then) || any_end(otherwise),
+                when,
+                then,
+                otherwise,
+            } => condition_uses_v2(when) || walk(then, depth + 1) || walk(otherwise, depth + 1),
             _ => false,
         })
     }
-    any_end(&choice.effects)
+    walk(effects, 0)
 }

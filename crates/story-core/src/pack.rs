@@ -1,10 +1,19 @@
 //! StoryPack content model. Every struct rejects unknown fields so a typo in
 //! authored JSON fails loudly instead of being ignored.
+//!
+//! Format v2 adds menu-driven scenes (verbs × targets → responses), speakers
+//! with portraits, dialogue trees, backgrounds and per-node cues. Every v2
+//! field is optional and omitted when empty, so a v1 document is a valid v2
+//! document; the validator rejects v2 features in a document that still
+//! declares `format_version: 1`.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    LocalizedText, MAX_PACK_BYTES, STORY_PACK_FORMAT_VERSION, StoryError, bounded_message,
+    LocalizedText, MAX_PACK_BYTES, STORY_PACK_FORMAT_VERSION, STORY_PACK_MIN_FORMAT_VERSION,
+    StoryError, bounded_message,
 };
 
 /// A complete, self-contained narrative: nodes, choices, typed variables and
@@ -24,11 +33,21 @@ pub struct StoryPack {
     #[serde(default)]
     pub initial_inventory: Vec<String>,
     pub nodes: Vec<Node>,
+    /// Menu verbs (format v2). Their order is the order menus offer them in
+    /// only through each node's own `menu.verbs` list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verbs: Vec<VerbDecl>,
+    /// Speakers with portraits (format v2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub characters: Vec<CharacterDecl>,
+    /// Dialogue trees (format v2), entered from a menu response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogues: Vec<Dialogue>,
 }
 
 impl StoryPack {
     /// Parses a bounded JSON document. This only checks size, syntax, shape
-    /// and format version; call [`StoryPack::validate`] before use.
+    /// and format version (v1 or v2); call [`StoryPack::validate`] before use.
     pub fn from_json_slice(bytes: &[u8]) -> Result<Self, StoryError> {
         if bytes.len() > MAX_PACK_BYTES {
             return Err(StoryError::TooLarge {
@@ -37,12 +56,26 @@ impl StoryPack {
         }
         let pack: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoryError::Malformed(bounded_message(error.to_string())))?;
-        if pack.format_version != STORY_PACK_FORMAT_VERSION {
+        if !(STORY_PACK_MIN_FORMAT_VERSION..=STORY_PACK_FORMAT_VERSION)
+            .contains(&pack.format_version)
+        {
             return Err(StoryError::UnsupportedVersion {
                 found: pack.format_version,
             });
         }
         Ok(pack)
+    }
+
+    /// Upgrades a v1 pack to the current format in place. Format v2 is a
+    /// strict superset of v1, so the upgrade only rewrites `format_version`;
+    /// no id, text or rule changes. Returns true when the version changed.
+    pub fn upgrade(&mut self) -> bool {
+        if self.format_version < STORY_PACK_FORMAT_VERSION {
+            self.format_version = STORY_PACK_FORMAT_VERSION;
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn node(&self, id: &str) -> Option<&Node> {
@@ -55,6 +88,18 @@ impl StoryPack {
 
     pub(crate) fn item(&self, id: &str) -> Option<&ItemDecl> {
         self.items.iter().find(|item| item.id == id)
+    }
+
+    pub(crate) fn verb(&self, id: &str) -> Option<&VerbDecl> {
+        self.verbs.iter().find(|verb| verb.id == id)
+    }
+
+    pub(crate) fn character(&self, id: &str) -> Option<&CharacterDecl> {
+        self.characters.iter().find(|character| character.id == id)
+    }
+
+    pub(crate) fn dialogue(&self, id: &str) -> Option<&Dialogue> {
+        self.dialogues.iter().find(|dialogue| dialogue.id == id)
     }
 }
 
@@ -103,6 +148,43 @@ pub struct Node {
     /// Entering a node with an ending ends the story.
     #[serde(default)]
     pub ending: Option<Ending>,
+    /// Reviewed background image asset id (format v2). Presentation only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    /// Media cues emitted on every entry into the node (format v2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cues: Vec<Cue>,
+    /// Things a hotspot verb can target in this scene (format v2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hotspots: Vec<Hotspot>,
+    /// Characters present in this scene (format v2); character verbs target
+    /// them and the view shows their portraits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub present: Vec<Presence>,
+    /// Verb menu of this scene (format v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu: Option<Menu>,
+}
+
+impl Node {
+    pub(crate) fn hotspot(&self, id: &str) -> Option<&Hotspot> {
+        self.hotspots.iter().find(|hotspot| hotspot.id == id)
+    }
+
+    pub(crate) fn presence(&self, character: &str) -> Option<&Presence> {
+        self.present
+            .iter()
+            .find(|presence| presence.character == character)
+    }
+
+    /// True when the node uses any format v2 feature.
+    pub(crate) fn uses_v2(&self) -> bool {
+        self.background.is_some()
+            || !self.cues.is_empty()
+            || !self.hotspots.is_empty()
+            || !self.present.is_empty()
+            || self.menu.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +244,14 @@ pub enum Condition {
     Visited(String),
     /// True when a boolean variable is true.
     Flag(String),
+    /// Compares how many times a menu entry has been used (format v2). The
+    /// counter saturates at [`crate::MAX_MENU_USES`].
+    Uses {
+        node: String,
+        entry: String,
+        op: CmpOp,
+        value: i64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,4 +352,238 @@ pub enum Cue {
     Music { asset: String },
     Sfx { asset: String },
     StopMusic,
+}
+
+/// What a menu verb is applied to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetKind {
+    /// The verb acts on the scene itself and takes no target.
+    None,
+    /// A hotspot declared on the current node.
+    Hotspot,
+    /// A character present on the current node.
+    Character,
+    /// An item currently held.
+    Item,
+}
+
+/// A menu verb such as MIRAR or HABLAR. Ids are authored and durable; labels
+/// are display text only and never parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerbDecl {
+    pub id: String,
+    pub label: LocalizedText,
+    pub targets: TargetKind,
+    /// Response when neither an entry nor a scene default applies.
+    pub default: Vec<TextBlock>,
+}
+
+/// A speaker with an expression → reviewed portrait asset id map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterDecl {
+    pub id: String,
+    pub name: LocalizedText,
+    /// Expression id (for example `neutral`, `enfadado`) → portrait asset id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub portraits: BTreeMap<String, String>,
+    /// Expression used when a block or presence names none. Defaults to
+    /// `neutral`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_expression: Option<String>,
+}
+
+impl CharacterDecl {
+    /// Portrait asset for `expression` (or the default one). A missing
+    /// portrait only loses media, never play.
+    pub(crate) fn portrait(&self, expression: Option<&str>) -> Option<&String> {
+        let expression = expression
+            .or(self.default_expression.as_deref())
+            .unwrap_or("neutral");
+        self.portraits.get(expression)
+    }
+}
+
+/// One paragraph of displayed text, optionally spoken by a character with an
+/// expression. Text is presentation only; no rule reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextBlock {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    pub text: LocalizedText,
+}
+
+/// Something in a scene that hotspot verbs may target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hotspot {
+    pub id: String,
+    pub label: LocalizedText,
+    /// Visibility gate; a hidden hotspot is not offered as a target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Condition>,
+}
+
+/// A character standing in a scene.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Presence {
+    pub character: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Condition>,
+}
+
+/// Verb menu of one scene.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Menu {
+    /// Offered verbs, in display order.
+    pub verbs: Vec<MenuVerb>,
+    /// Authored responses per (verb, target).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<MenuEntry>,
+    /// Scene-specific fallbacks per verb, used before the verb's own default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub defaults: Vec<MenuDefault>,
+}
+
+impl Menu {
+    pub(crate) fn entry(&self, id: &str) -> Option<&MenuEntry> {
+        self.entries.iter().find(|entry| entry.id == id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MenuVerb {
+    pub verb: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Condition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MenuDefault {
+    pub verb: String,
+    pub blocks: Vec<TextBlock>,
+}
+
+/// Responses to one verb applied to one target in one scene.
+///
+/// Every use increments a bounded per-entry counter (see
+/// [`Condition::Uses`]). The first response whose `when` holds and that is
+/// not a spent `once` response is given; when none applies, `exhausted`
+/// ("nothing new") is shown, then the scene default, then the verb default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MenuEntry {
+    /// Authored id, unique within its node. Never sent to players.
+    pub id: String,
+    pub verb: String,
+    /// Hotspot, character or item id, as the verb's [`TargetKind`] requires;
+    /// absent for verbs without targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub responses: Vec<Response>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exhausted: Vec<TextBlock>,
+}
+
+impl MenuEntry {
+    pub(crate) fn response(&self, id: &str) -> Option<&Response> {
+        self.responses.iter().find(|response| response.id == id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Response {
+    /// Authored id, unique within its entry. Never sent to players.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Condition>,
+    /// A spent `once` response is never given again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub once: bool,
+    pub blocks: Vec<TextBlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Effect>,
+    /// Scene to move to; a `goto` effect overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Dialogue to start when the response neither moves nor ends the story.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialogue: Option<String>,
+}
+
+/// A bounded dialogue tree. There is no call stack: at most one dialogue is
+/// active and `return` only goes back to its `start` node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dialogue {
+    pub id: String,
+    pub start: String,
+    pub nodes: Vec<DialogueNode>,
+}
+
+impl Dialogue {
+    pub(crate) fn node(&self, id: &str) -> Option<&DialogueNode> {
+        self.nodes.iter().find(|node| node.id == id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DialogueNode {
+    pub id: String,
+    pub lines: Vec<TextBlock>,
+    pub options: Vec<DialogueOption>,
+}
+
+impl DialogueNode {
+    pub(crate) fn option(&self, id: &str) -> Option<&DialogueOption> {
+        self.options.iter().find(|option| option.id == id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DialogueOption {
+    /// Authored id, unique within its dialogue node. Never sent to players.
+    pub id: String,
+    pub label: LocalizedText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Condition>,
+    /// A taken `once` option is never offered again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub once: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Effect>,
+    /// Where the conversation continues. A `goto` or `end` effect always
+    /// leaves the dialogue.
+    #[serde(default)]
+    pub next: DialogueNext,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DialogueNext {
+    /// Continue at another node of the same dialogue.
+    Goto(String),
+    /// Go back to the dialogue's start node.
+    Return,
+    /// Leave the dialogue and return to the scene menu.
+    #[default]
+    Exit,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
