@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WEBSOCKET_SUBPROTOCOL } from './brand';
 import {
+  RECONNECT_MAX_DELAY_MS,
   SERVER_SILENCE_TIMEOUT_MS,
   SYNC_RESPONSE_TIMEOUT_MS,
   TiamudConnection,
+  WAKE_STALE_AFTER_MS,
+  reconnectDelay,
+  type ConnectionLifecycle,
+  type ReconnectTimers,
 } from './socket';
 import type { ConnectionState, ServerMessage, SyncRecoveryData } from './protocol';
 
@@ -739,5 +744,214 @@ describe('TiamudConnection', () => {
 
     expect(rejections).toEqual(['Your session has expired. Sign in again.']);
     expect(TestWebSocket.instances).toHaveLength(1);
+  });
+});
+
+class FakeLifecycleTarget {
+  visibilityState = 'visible';
+  readonly listeners = new Map<string, Set<() => void>>();
+
+  addEventListener(type: string, listener: () => void): void {
+    const set = this.listeners.get(type) ?? new Set<() => void>();
+    set.add(listener);
+    this.listeners.set(type, set);
+  }
+
+  removeEventListener(type: string, listener: () => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  dispatch(type: string): void {
+    for (const listener of [...(this.listeners.get(type) ?? [])]) listener();
+  }
+
+  count(type: string): number {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+}
+
+function recordingTimers(): ReconnectTimers & { delays: number[]; run(): void; pending(): number } {
+  const scheduled = new Map<number, () => void>();
+  const delays: number[] = [];
+  let next = 1;
+  return {
+    delays,
+    setTimeout(callback, delay) {
+      delays.push(delay);
+      const id = next++;
+      scheduled.set(id, callback);
+      return id as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimeout(handle) {
+      scheduled.delete(handle as unknown as number);
+    },
+    run() {
+      const callbacks = [...scheduled.values()];
+      scheduled.clear();
+      for (const callback of callbacks) callback();
+    },
+    pending: () => scheduled.size,
+  };
+}
+
+describe('reconnect backoff', () => {
+  it('draws a full-jitter delay from the capped exponential window', () => {
+    expect(reconnectDelay(1, () => 0)).toBe(0);
+    expect(reconnectDelay(1, () => 0.999_999)).toBe(499);
+    expect(reconnectDelay(2, () => 0.5)).toBe(500);
+    expect(reconnectDelay(4, () => 0.5)).toBe(2_000);
+    expect(reconnectDelay(6, () => 0.999_999)).toBe(RECONNECT_MAX_DELAY_MS - 1);
+    expect(reconnectDelay(10_000, () => 0.999_999)).toBe(RECONNECT_MAX_DELAY_MS - 1);
+  });
+
+  it('clamps hostile random sources and attempts into the window', () => {
+    expect(reconnectDelay(3, () => -4)).toBe(0);
+    expect(reconnectDelay(3, () => 7)).toBe(2_000);
+    expect(reconnectDelay(3, () => Number.NaN)).toBe(2_000);
+    expect(reconnectDelay(0, () => 0.5)).toBe(250);
+    expect(reconnectDelay(Number.MAX_SAFE_INTEGER, () => 1)).toBe(RECONNECT_MAX_DELAY_MS);
+  });
+
+  it('schedules each reconnect with the injected random source and timers', () => {
+    const timers = recordingTimers();
+    const samples = [0.25, 0.5, 0.75];
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'secret', characterId: 42 },
+      { onMessage: () => undefined, onStateChange: () => undefined },
+      undefined,
+      { random: () => samples.shift() ?? 0, timers, lifecycle: null },
+    );
+    connection.connect();
+    TestWebSocket.instances[0]!.close();
+    timers.run();
+    TestWebSocket.instances[1]!.close();
+    timers.run();
+    TestWebSocket.instances[2]!.close();
+
+    expect(timers.delays).toEqual([125, 500, 1_500]);
+    expect(TestWebSocket.instances).toHaveLength(3);
+    connection.close();
+    expect(timers.pending()).toBe(0);
+  });
+});
+
+describe('lifecycle wake-ups', () => {
+  function lifecycleConnection(states: ConnectionState[] = []) {
+    const timers = recordingTimers();
+    const windowTarget = new FakeLifecycleTarget();
+    const documentTarget = new FakeLifecycleTarget();
+    const lifecycle: ConnectionLifecycle = { window: windowTarget, document: documentTarget };
+    const connection = new TiamudConnection(
+      'wss://tiamud.test/ws',
+      { token: 'secret', characterId: 42 },
+      { onMessage: () => undefined, onStateChange: (state) => states.push(state) },
+      undefined,
+      { random: () => 0.5, timers, lifecycle },
+    );
+    return { connection, timers, windowTarget, documentTarget };
+  }
+
+  it('reconnects at once when the network returns while backing off', () => {
+    const { connection, timers, windowTarget } = lifecycleConnection();
+    connection.connect();
+    TestWebSocket.instances[0]!.close();
+    expect(timers.pending()).toBe(1);
+
+    windowTarget.dispatch('online');
+
+    expect(timers.pending()).toBe(0);
+    expect(TestWebSocket.instances).toHaveLength(2);
+    connection.close();
+  });
+
+  it('reconnects when the page becomes visible but ignores hiding', () => {
+    const { connection, timers, documentTarget } = lifecycleConnection();
+    connection.connect();
+    TestWebSocket.instances[0]!.close();
+
+    documentTarget.visibilityState = 'hidden';
+    documentTarget.dispatch('visibilitychange');
+    expect(TestWebSocket.instances).toHaveLength(1);
+    expect(timers.pending()).toBe(1);
+
+    documentTarget.visibilityState = 'visible';
+    documentTarget.dispatch('visibilitychange');
+    expect(TestWebSocket.instances).toHaveLength(2);
+    expect(timers.pending()).toBe(0);
+    connection.close();
+  });
+
+  it('leaves a healthy or connecting socket alone so repeated signals cannot storm', () => {
+    vi.useFakeTimers();
+    const { connection, windowTarget, documentTarget } = lifecycleConnection();
+    connection.connect();
+    windowTarget.dispatch('online');
+    expect(TestWebSocket.instances).toHaveLength(1);
+
+    TestWebSocket.instances[0]!.open();
+    vi.advanceTimersByTime(WAKE_STALE_AFTER_MS - 1);
+    for (let index = 0; index < 5; index += 1) {
+      windowTarget.dispatch('online');
+      documentTarget.dispatch('visibilitychange');
+    }
+    expect(TestWebSocket.instances).toHaveLength(1);
+    expect(TestWebSocket.instances[0]!.closeCalls).toEqual([]);
+    connection.close();
+  });
+
+  it('replaces a stale open socket immediately without waiting for backoff', () => {
+    vi.useFakeTimers();
+    const states: ConnectionState[] = [];
+    const { connection, timers, documentTarget } = lifecycleConnection(states);
+    connection.connect();
+    const socket = TestWebSocket.instances[0]!;
+    socket.open();
+    vi.advanceTimersByTime(WAKE_STALE_AFTER_MS);
+
+    documentTarget.dispatch('visibilitychange');
+
+    expect(socket.closeCalls).toContainEqual({ code: 4000, reason: 'Server heartbeat timeout' });
+    expect(TestWebSocket.instances).toHaveLength(2);
+    expect(timers.delays).toEqual([]);
+    expect(states).toEqual(['connecting', 'connected', 'disconnected', 'connecting']);
+    connection.close();
+  });
+
+  it('removes its listeners on close and after access rejection', () => {
+    const { connection, windowTarget, documentTarget } = lifecycleConnection();
+    connection.connect();
+    expect(windowTarget.count('online')).toBe(1);
+    expect(documentTarget.count('visibilitychange')).toBe(1);
+    connection.close();
+    expect(windowTarget.count('online')).toBe(0);
+    expect(documentTarget.count('visibilitychange')).toBe(0);
+    expect(connection.wake()).toBe(false);
+    expect(TestWebSocket.instances).toHaveLength(1);
+
+    const rejected = lifecycleConnection();
+    rejected.connection.connect();
+    const socket = TestWebSocket.instances[1]!;
+    socket.open();
+    socket.receive(JSON.stringify({
+      v: 1,
+      type: 'server.notice',
+      seq: 1,
+      data: { level: 'error', message: 'Denied.', code: 'access.denied' },
+    }));
+    expect(rejected.windowTarget.count('online')).toBe(0);
+    rejected.windowTarget.dispatch('online');
+    expect(TestWebSocket.instances).toHaveLength(2);
+  });
+
+  it('binds listeners once across reconnects', () => {
+    const { connection, timers, windowTarget } = lifecycleConnection();
+    connection.connect();
+    TestWebSocket.instances[0]!.close();
+    timers.run();
+    TestWebSocket.instances[1]!.close();
+    timers.run();
+    expect(windowTarget.count('online')).toBe(1);
+    connection.close();
   });
 });

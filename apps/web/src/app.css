@@ -523,7 +523,8 @@ main {
 .scene,
 .console,
 .character-card,
-.dashboard-panel {
+.dashboard-panel,
+.dashboard-loading {
   overflow: hidden;
   border: 1px solid #30352a;
   border-radius: 0.7rem;
@@ -1581,6 +1582,15 @@ kbd {
   opacity: 0.45;
 }
 
+.dashboard-loading {
+  padding: 1rem;
+  color: #b9b8ae;
+}
+
+.dashboard-loading p {
+  margin: 0 0 0.6rem;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1689,7 +1699,8 @@ kbd {
   .command-form {
     position: fixed;
     right: 0;
-    bottom: 0;
+    /* Lifted above an overlaying on-screen keyboard (lib/app/visual-viewport.ts). */
+    bottom: var(--keyboard-inset, 0px);
     left: 0;
     z-index: 30;
     padding: 0.65rem max(1rem, env(safe-area-inset-right)) max(0.65rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
@@ -1704,6 +1715,42 @@ kbd {
 
   .session-controls .character-name {
     display: none;
+  }
+}
+
+/*
+ * Touch targets: every interactive control is at least 44x44 CSS pixels on
+ * narrow or touch-first screens (WCAG 2.5.5). Text-styled controls keep their
+ * look but gain a tall hit area. Verified by the mobile touch-target e2e test.
+ */
+@media (max-width: 45rem), (pointer: coarse) {
+  button,
+  select,
+  input:not([type="checkbox"], [type="radio"], [type="range"]),
+  summary,
+  .preferences-panel label:has(input[type="checkbox"]) {
+    min-height: 2.75rem;
+  }
+
+  button {
+    min-width: 2.75rem;
+  }
+
+  .brand {
+    min-height: 2.75rem;
+  }
+
+  .text-button,
+  .brand,
+  .preferences-panel summary {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .preferences-panel label:has(input[type="checkbox"]) {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
   }
 }
 
