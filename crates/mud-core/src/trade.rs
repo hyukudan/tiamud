@@ -1177,7 +1177,7 @@ impl World {
         &mut self,
         reason: TradeCancellationReason,
     ) -> Result<Vec<DomainEvent>, WorldError> {
-        let trades = std::mem::take(&mut self.trades);
+        let trades = std::mem::take(&mut *self.trades);
         if trades.is_empty() {
             return Ok(Vec::new());
         }

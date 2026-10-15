@@ -80,15 +80,15 @@ impl World {
                     )
                 })
                 .collect(),
-            adventure: self.adventure.clone(),
-            progression_flags: self.world_progression_flags.clone(),
+            adventure: (*self.adventure).clone(),
+            progression_flags: (*self.world_progression_flags).clone(),
             next_trade_id: self.next_trade_id,
-            trades: self.trades.clone(),
+            trades: (*self.trades).clone(),
             next_loot_drop_id: self.next_loot_drop_id,
-            item_provenance: self.item_provenance.clone(),
-            loot_encounters: self.loot_encounters.clone(),
-            ground_loot: self.ground_loot.clone(),
-            party_loot_cursors: self.party_loot_cursors.clone(),
+            item_provenance: (*self.item_provenance).clone(),
+            loot_encounters: (*self.loot_encounters).clone(),
+            ground_loot: (*self.ground_loot).clone(),
+            party_loot_cursors: (*self.party_loot_cursors).clone(),
             next_reward_open_id: self.next_reward_open_id,
             area_residency: self
                 .active_areas
@@ -520,8 +520,8 @@ impl World {
             state: snapshot.rng_state,
         };
         self.npcs = npcs;
-        self.item_instances = item_instances;
-        self.item_provenance = item_provenance;
+        self.item_instances = item_instances.into();
+        self.item_provenance = item_provenance.into();
         self.next_item_instance_sequence = snapshot
             .next_item_instance_sequence
             .max(self.next_item_instance_sequence);
@@ -529,14 +529,14 @@ impl World {
             .adventure
             .next_weather_tick
             .max(snapshot.logical_tick.saturating_add(1));
-        self.adventure = snapshot.adventure;
-        self.world_progression_flags = snapshot.progression_flags;
+        self.adventure = snapshot.adventure.into();
+        self.world_progression_flags = snapshot.progression_flags.into();
         self.next_trade_id = snapshot.next_trade_id;
-        self.trades = snapshot.trades;
+        self.trades = snapshot.trades.into();
         self.next_loot_drop_id = snapshot.next_loot_drop_id;
-        self.loot_encounters = snapshot.loot_encounters;
-        self.ground_loot = snapshot.ground_loot;
-        self.party_loot_cursors = snapshot.party_loot_cursors;
+        self.loot_encounters = snapshot.loot_encounters.into();
+        self.ground_loot = snapshot.ground_loot.into();
+        self.party_loot_cursors = snapshot.party_loot_cursors.into();
         self.next_reward_open_id = snapshot.next_reward_open_id;
         self.tick_resolution_pending = false;
         self.last_view_bump = None;

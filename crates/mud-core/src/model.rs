@@ -98,7 +98,7 @@ pub(crate) struct Character {
     pub(crate) location: EntityId,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SharedItemLocation {
     Staged,
     Carried(CharacterId),
@@ -251,7 +251,7 @@ pub(crate) struct ObserverView {
 
 #[derive(Clone, Debug)]
 pub(crate) enum Entity {
-    Room(Box<Room>),
+    Room(Shared<Room>),
     Character(Character),
 }
 

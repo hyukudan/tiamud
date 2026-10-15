@@ -3612,6 +3612,8 @@ mod tests {
     };
     use tiamud_scripting::{ScriptCapability, ScriptLimits};
 
+    mod hot_path_bench;
+
     #[derive(Default)]
     struct MemoryState {
         next_account: i64,
@@ -3769,8 +3771,39 @@ mod tests {
         fail_saves: AtomicBool,
         fail_social_reads: AtomicBool,
         successful_commits: AtomicUsize,
+        /// Serialized JSON bytes a SQL adapter would write for committed
+        /// character aggregates, runtime snapshots and events.
+        bytes_written: AtomicUsize,
+        characters_written: AtomicUsize,
+        runtime_snapshots_written: AtomicUsize,
         purge_mail_calls: AtomicUsize,
         purge_board_calls: AtomicUsize,
+    }
+
+    impl MemoryStore {
+        fn record_written(
+            &self,
+            characters: &[tiamud_core::DurableCharacterSnapshot],
+            runtime: Option<&WorldRuntimeSnapshot>,
+            events: &[tiamud_core::DomainEvent],
+        ) {
+            let mut bytes = 0_usize;
+            for snapshot in characters {
+                bytes += serde_json::to_vec(&snapshot.gameplay).unwrap().len();
+                bytes += serde_json::to_vec(&snapshot.character).unwrap().len();
+            }
+            if let Some(runtime) = runtime {
+                bytes += serde_json::to_vec(runtime).unwrap().len();
+                self.runtime_snapshots_written
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            for event in events {
+                bytes += serde_json::to_vec(event).unwrap().len();
+            }
+            self.bytes_written.fetch_add(bytes, Ordering::SeqCst);
+            self.characters_written
+                .fetch_add(characters.len(), Ordering::SeqCst);
+        }
     }
 
     fn durable_gameplay_world() -> World {
@@ -5153,6 +5186,7 @@ mod tests {
                     });
                 }
             }
+            self.record_written(&characters, Some(&runtime), &events);
             for snapshot in characters {
                 state
                     .gameplay
