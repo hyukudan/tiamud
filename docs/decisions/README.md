@@ -40,7 +40,7 @@ implementación por fase vive en
 | [0032](0032-worldpack-v10-quests-and-shops.md) | WorldPack v10 quests, commodities and shops | Aceptado (implementación parcial: implementado en el MUD) | Contenido MUD (S8 lado MUD) |
 | [0033](0033-shared-story-instances-and-voting.md) | Shared story instances, seats and voting | Aceptado (implementación parcial S7) | Narrativa S7 |
 | [0034](0034-lua-scripts-in-storypacks.md) | Optional Lua scripts in StoryPacks | Aceptado (implementación parcial: biblioteca, herramientas y sesiones del servidor tras `TIAMUD_STORY_SCRIPTS=1`) | Narrativa S6 |
-| [0035](0035-sectioned-runtime-snapshot-storage-schema-v17.md) | Sectioned runtime snapshot storage (schema v17) | Aceptado (implementado en SQLite y PostgreSQL, esquema v17; PostgreSQL real sin ejecutar) | Actor de mundo / persistencia |
+| [0035](0035-sectioned-runtime-snapshot-storage-schema-v17.md) | Sectioned runtime snapshot storage (schema v17) | Aceptado (implementado en SQLite y PostgreSQL, esquema v17; pruebas PostgreSQL 18.6 locales verdes 2026-10-16, sin CI) | Actor de mundo / persistencia |
 
 El estado de fase (`Complete`/`Partial`) es autoridad de
 [`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).

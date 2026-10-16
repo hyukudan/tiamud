@@ -94,15 +94,18 @@ candidato v16 añade además `story_saves` (slots de historia,
 [ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md)): la migración
 v15→v16 debe probarse sobre una copia verificada del backend, el traslado debe
 copiar o rechazar cada slot de forma atómica y un rollback del binario a v15
-exige restaurar la copia previa, porque v15 rechaza una base v16. Ninguna
-aceptación PostgreSQL real acredita todavía v16. El candidato v17 guarda el
+exige restaurar la copia previa, porque v15 rechaza una base v16. Las suites
+automatizadas PostgreSQL v16 pasan en local sobre PostgreSQL 18.6 desechable,
+pero ninguna aceptación integral (humo) acredita todavía v16. El candidato v17 guarda el
 snapshot de runtime seccionado
 ([ADR 0035](../decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md)):
 la migración v16→v17 debe probarse sobre una copia verificada, backup y
 restore deben conservar juntas `world_runtime` y `world_runtime_sections`, el
 traslado debe verificar el ensamblado y copiar las filas byte a byte, y un
-rollback del binario a v16 exige restaurar la copia previa. Ninguna aceptación
-PostgreSQL real acredita v17. 6D sigue
+rollback del binario a v16 exige restaurar la copia previa. Las suites
+automatizadas PostgreSQL v17 pasan en local
+([registro](../project/log/2026-10-16-postgresql-local-evidence.md)), pero
+ninguna aceptación integral PostgreSQL acredita v17. 6D sigue
 parcial: no hay LRU ni superficie de operador, y un release no debe anunciar
 descarga automática o ahorro RSS hasta que exista evidencia integral retenida.
 
