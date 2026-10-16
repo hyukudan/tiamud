@@ -111,15 +111,30 @@ fn configuration_is_disabled_by_default_and_fails_closed() {
 fn catalog_loads_the_fixture_directory_and_rejects_bad_content() {
     // The parser adventure lives in `parser/`, one level down.
     let catalog = StoryCatalog::load_dir(&fixture_dir()).unwrap();
+    let listed = catalog
+        .listing()
+        .into_iter()
+        .map(|story| (story.id, story.title, story.locales))
+        .collect::<Vec<_>>();
+    let owned = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
     assert_eq!(
-        catalog.listing(),
+        listed,
         vec![
-            (CRIPTA.to_owned(), "La cripta del nigromante".to_owned()),
+            (
+                CRIPTA.to_owned(),
+                "La cripta del nigromante".to_owned(),
+                owned(&["es"])
+            ),
             (
                 "faro-de-punta-gris".to_owned(),
-                "El faro de Punta Gris".to_owned()
+                "El faro de Punta Gris".to_owned(),
+                owned(&["es"])
             ),
-            (LLUVIA.to_owned(), "Lluvia de neón".to_owned()),
+            (
+                LLUVIA.to_owned(),
+                "Lluvia de neón".to_owned(),
+                owned(&["es", "en"])
+            ),
         ]
     );
     assert!(catalog.get("faro-de-punta-gris").unwrap().is_parser());
@@ -157,7 +172,7 @@ fn catalog_loads_the_fixture_directory_and_rejects_bad_content() {
         .unwrap()
         .listing()
         .into_iter()
-        .map(|(id, _)| id)
+        .map(|story| story.id)
         .collect::<Vec<_>>();
     assert_eq!(ids, ["arriba", "uno"]);
     // A broken pack one level down still fails the whole load.
@@ -827,7 +842,25 @@ async fn browser_e2e_fixtures_are_current() {
     .await
     .len()
         - 1;
+    // The language picker: the typed catalog and the English entry of the
+    // bilingual menu adventure.
+    let english = stories
+        .enter_seeded_in(AccountId(3), LLUVIA, Some("en"), 7, Some(1))
+        .unwrap();
+    let english_view = english.view().await.unwrap();
+    let catalog = json!({
+        "catalog": catalog_parts(&stories.listing()),
+        "entered": protocol::StoryEntered {
+            story_id: english.story_id().to_owned(),
+            title: english.title().to_owned(),
+            locale: english.locale().to_owned(),
+            locales: english.locales().to_vec(),
+        },
+        "view": english_view.web_parts(false),
+    });
+    english.leave().await.unwrap();
     let fixtures = [
+        ("story-catalog.json", catalog),
         (
             "story-cripta.json",
             record(&stories, CRIPTA, &vec![None; cripta_length]).await,

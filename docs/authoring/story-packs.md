@@ -609,12 +609,22 @@ turns an id into an image only through the reviewed story media map,
 - An id that is missing from the map simply has no image: the scene text
   and the character names already carry everything. Unreviewed paths,
   remote URLs, missing alt text or unknown fields fail the server start.
+- **Dialogue portraits.** A text block with a `speaker` (menu responses and
+  dialogue lines) resolves the speaker's portrait for the block's
+  `expression` (or the character's default) through the same map. Map every
+  expression you want shown beside a line, with alt text that describes the
+  expression ("Lola, nervous, glancing at the door"); an unmapped expression
+  only shows the line without a picture.
 
 The browser downloads the image only when multimedia is allowed (not in
 reader mode, with Save-Data or with images off); otherwise, and when the
 manifest or the picture cannot be loaded, it shows the background's alt text
-instead. Telnet prints the background's alt text as `[…]` under the scene
-title; portraits stay as the "Presentes" names. The sample art of
+instead. A dialogue portrait appears beside its line only when images are
+allowed and load; otherwise the line keeps the speaker's name and nothing
+else is shown. Telnet prints the background's alt text as `[…]` under the
+scene title; portraits stay as the "Presentes" names and dialogue lines as
+`Name: «text»` (the alt text of a line portrait is not repeated on every
+line). The sample art of
 `lluvia-de-neon` (office and club backgrounds, Lola's and Dámaso's neutral
 portraits) is mapped in
 [`crates/story-core/fixtures/story-media.json`](../../crates/story-core/fixtures/story-media.json);
@@ -628,15 +638,21 @@ A story can be played in each of its languages: the lexicons of a parser
 world (`world.lexicons`), or the locales of the pack title for packs without
 a parser. Spanish is the default when offered, else the first one. Players
 choose when they enter: `historia <id> en` (`story <id> en`, also
-`historia compartir <id> en`); `en-GB` selects `en`. A language the story
+`historia compartir <id> en`); `en-GB` selects `en`. `historias` lists each
+story with its languages (`id — title [es, en]`), and the browser's
+**Stories** picker shows a language select per story, preselecting the
+reader's browser language when the story offers it, else Spanish, else the
+story's default. A language the story
 does not offer is refused with `unknown_locale`. Every text of the view —
 title, scene, labels, events, parser replies, image alt text — and the parser
 lexicon follow the session language; untranslated text falls back as
 described under *Localized text*. The language is fixed when the instance
 starts: re-entering a live instance keeps it, and people joining a shared
-story play in the host's language. Server interface lines (help, hints,
-errors) stay Spanish. Translate the title of a v1/v2 pack into every
-language you want to offer.
+story play in the host's language. The server's own lines in the session
+(confirmations, help, errors, slot and lobby listings, dice and item event
+lines, Telnet labels) are English in an English session and Spanish in any
+other language. Translate the title of a v1/v2 pack into every language you
+want to offer.
 
 ### Compatible revisions
 

@@ -306,6 +306,159 @@ async fn an_unreviewed_background_or_expression_only_loses_the_image() {
     assert!(text.contains("Presentes: Dámaso"));
 }
 
+/// `(speaker, portrait)` of every dialogue line of a view.
+fn line_portraits(view: &StoryProjection) -> Vec<(Option<String>, Option<protocol::StoryImage>)> {
+    view.items
+        .iter()
+        .filter_map(|item| match item {
+            StoryItem::Block {
+                kind: StoryBlockKind::Line,
+                speaker,
+                portrait,
+                ..
+            } => Some((speaker.clone(), portrait.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn dialogue_lines_carry_the_reviewed_portrait_of_their_expression() {
+    let stories = catalog_stories(vec![fixture(LLUVIA)], fixture_media());
+    let spanish = stories
+        .enter_seeded(AccountId(1), LLUVIA, 7, Some(1))
+        .unwrap();
+    let english = stories
+        .enter_seeded_in(AccountId(2), LLUVIA, Some("en"), 7, Some(1))
+        .unwrap();
+    let mut es = spanish.view().await.unwrap();
+    let mut en = english.view().await.unwrap();
+    // Walk both instances in step: action order never depends on the locale.
+    let step = async |label: &str, es: &mut StoryProjection, en: &mut StoryProjection| {
+        let index = es
+            .actions()
+            .iter()
+            .position(|action| action.label() == label)
+            .unwrap_or_else(|| panic!("no action {label:?}"));
+        let action = en.actions()[index].clone();
+        *es = act(&spanish, es, label).await;
+        *en = english.input(action.request(), en.view_rev).await.unwrap();
+    };
+    for label in [
+        "INVESTIGAR → Ventana",
+        "INVESTIGAR → Ventana",
+        "INVESTIGAR → Ventana",
+        "INVESTIGAR → Escritorio",
+        "USAR → Tarjeta de memoria",
+        "MOVERSE → Puerta",
+    ] {
+        step(label, &mut es, &mut en).await;
+    }
+    // No dialogue yet: no line carries a portrait.
+    assert!(line_portraits(&es).iter().all(|(_, image)| image.is_none()));
+
+    // The menu response and the first dialogue line use Lola's default
+    // (neutral) expression, which the reviewed map lists, with the alt text
+    // in each session's locale.
+    step("HABLAR → Lola", &mut es, &mut en).await;
+    let lines = line_portraits(&es);
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines
+            .iter()
+            .all(|(speaker, _)| speaker.as_deref() == Some("Lola"))
+    );
+    let portrait = lines[0]
+        .1
+        .clone()
+        .expect("the neutral portrait is reviewed");
+    assert_eq!(lines[1].1.as_ref(), Some(&portrait));
+    assert!(portrait.manifest.starts_with("/assets/1397e02d"));
+    assert!(portrait.alt.starts_with("Silueta de Lola"));
+    let english_lines = line_portraits(&en);
+    assert_eq!(english_lines.len(), 2);
+    let english_portrait = english_lines[1].1.clone().unwrap();
+    assert_eq!(english_portrait.manifest, portrait.manifest);
+    assert!(
+        english_portrait
+            .alt
+            .starts_with("Portrait silhouette of Lola")
+    );
+    // The browser receives it; Telnet keeps the speaker name only.
+    let wire = serde_json::to_value(es.web_parts(false)).unwrap();
+    assert!(wire.to_string().contains("\"portrait\":{"));
+    let text = render_text(&es);
+    assert!(text.contains("Lola: «"));
+    assert!(!text.contains("Silueta de Lola"));
+
+    // `nerviosa` has no reviewed image: the line keeps its text and speaker
+    // and only loses the picture.
+    step("Pedir un café solo", &mut es, &mut en).await;
+    let lines = line_portraits(&es);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], (Some("Lola".to_owned()), None));
+    assert_eq!(lines[1].1.as_ref(), Some(&portrait));
+
+    // Without a media map no line has a portrait at all.
+    let plain = stories_without_media();
+    let link = plain
+        .enter_seeded(AccountId(3), LLUVIA, 7, Some(1))
+        .unwrap();
+    let mut view = link.view().await.unwrap();
+    for label in [
+        "INVESTIGAR → Ventana",
+        "INVESTIGAR → Ventana",
+        "INVESTIGAR → Ventana",
+        "INVESTIGAR → Escritorio",
+        "USAR → Tarjeta de memoria",
+        "MOVERSE → Puerta",
+        "HABLAR → Lola",
+    ] {
+        view = act(&link, &view, label).await;
+    }
+    let lines = line_portraits(&view);
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines
+            .iter()
+            .all(|line| *line == (Some("Lola".to_owned()), None))
+    );
+}
+
+#[test]
+fn line_portraits_stay_inside_the_frame_budget() {
+    // Sixteen lines with the longest alt text still split into valid parts.
+    let image = protocol::StoryImage {
+        manifest: format!("/assets/{}/manifest.json", "a".repeat(64)),
+        alt: "é".repeat(protocol::MAX_STORY_IMAGE_ALT_BYTES / 2),
+    };
+    let view = StoryProjection {
+        story_id: LLUVIA.into(),
+        title: "t".into(),
+        locale: "es".into(),
+        view_rev: 1,
+        turn: 0,
+        score: 0,
+        ending: None,
+        can_undo: false,
+        items: (0..16)
+            .map(|_| StoryItem::Block {
+                kind: StoryBlockKind::Line,
+                speaker: Some("Lola".into()),
+                portrait: Some(image.clone()),
+                text: "x".repeat(MAX_STORY_BLOCK_BYTES),
+            })
+            .collect(),
+    };
+    let parts = view.web_parts(false);
+    assert!(parts.len() > 1);
+    for part in &parts {
+        let frame = protocol::ServerEnvelope::new(ServerMessageType::StoryView, u64::MAX, part);
+        assert!(serde_json::to_vec(&frame).unwrap().len() <= MAX_STORY_FRAME_BYTES);
+    }
+    assert_eq!(parts.iter().map(|part| part.items.len()).sum::<usize>(), 16);
+}
+
 #[tokio::test]
 async fn sessions_choose_their_locale_among_the_pack_locales() {
     let stories = catalog_stories(vec![fixture(LLUVIA), fixture(CRIPTA)], fixture_media());
@@ -494,4 +647,127 @@ fn entered_payload_names_the_locale_and_its_alternatives() {
             json!({"storyId": LLUVIA, "title": "Neon Rain", "locale": "en", "locales": ["es", "en"]})
         );
     });
+}
+
+const EVERY_FAILURE: [StoryFailure; 33] = [
+    StoryFailure::Disabled,
+    StoryFailure::UnknownStory,
+    StoryFailure::AlreadyInStory,
+    StoryFailure::Capacity,
+    StoryFailure::NotInStory,
+    StoryFailure::StaleView,
+    StoryFailure::UnknownChoice,
+    StoryFailure::Ended,
+    StoryFailure::NothingToUndo,
+    StoryFailure::Busy,
+    StoryFailure::Gone,
+    StoryFailure::Internal,
+    StoryFailure::SlotsUnavailable,
+    StoryFailure::InvalidSlot,
+    StoryFailure::SlotEmpty,
+    StoryFailure::SlotCorrupt,
+    StoryFailure::SlotIncompatible,
+    StoryFailure::SlotCapacity,
+    StoryFailure::RateLimited,
+    StoryFailure::SlotStore,
+    StoryFailure::HostOnly,
+    StoryFailure::Spectator,
+    StoryFailure::NotYourTurn,
+    StoryFailure::UnknownCode,
+    StoryFailure::SeatsFull,
+    StoryFailure::NotShared,
+    StoryFailure::UnknownMember,
+    StoryFailure::InvalidSetting,
+    StoryFailure::NoParser,
+    StoryFailure::UnknownLocale,
+    StoryFailure::InvalidCommand,
+    StoryFailure::CommandsRateLimited,
+    StoryFailure::Script,
+];
+
+#[test]
+fn failures_speak_the_session_locale_and_default_to_spanish() {
+    for failure in EVERY_FAILURE {
+        let spanish = failure.message();
+        let english = failure.message_in("en");
+        assert_ne!(spanish, english, "{failure:?} has no English text");
+        assert_eq!(failure.message_in("en-US"), english);
+        // Any other locale keeps the server's Spanish.
+        assert_eq!(failure.message_in("es"), spanish);
+        assert_eq!(failure.message_in("fr"), spanish);
+        assert_eq!(failure.protocol_error_in("en").message, english);
+        // Same budget as the browser parser (512 bytes) in both languages.
+        assert!(spanish.len() <= 512 && english.len() <= 512);
+    }
+}
+
+#[tokio::test]
+async fn an_english_session_reads_the_server_text_in_english() {
+    let stories = catalog_stories(vec![fixture(LLUVIA), fixture(CRIPTA)], fixture_media());
+    let english = stories
+        .enter_seeded_in(AccountId(1), LLUVIA, Some("en"), 7, Some(1))
+        .unwrap();
+    let view = english.view().await.unwrap();
+    assert_eq!(view.locale, "en");
+    let text = render_text(&view);
+    assert!(text.contains("[Turn 0 · Score 0]"), "{text}");
+    assert!(text.contains("Inventory: (empty)"));
+    assert!(text.contains("Type a number to choose"));
+    assert!(!text.contains("Escribe"));
+    let spanish = stories
+        .enter_seeded(AccountId(2), LLUVIA, 7, Some(1))
+        .unwrap();
+    let text = render_text(&spanish.view().await.unwrap());
+    assert!(text.contains("[Turno 0 · Puntuación 0]"));
+    assert!(text.contains("Inventario: (vacío)"));
+
+    // The listing names every story's languages, default first.
+    let listing = render_listing(&stories.listing(), "es");
+    assert!(listing.contains("cripta-del-nigromante — La cripta del nigromante [es]"));
+    assert!(listing.contains("lluvia-de-neon — Lluvia de neón [es, en]"));
+    assert!(listing.contains("«historia <id> <idioma>»"));
+    assert!(render_listing(&stories.listing(), "en").starts_with("Available stories:"));
+}
+
+#[test]
+fn the_catalog_splits_into_bounded_parts_without_losing_entries() {
+    let stories = catalog_stories(vec![fixture(LLUVIA), fixture(CRIPTA)], fixture_media());
+    let parts = catalog_parts(&stories.listing());
+    assert_eq!(parts.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&parts[0]).unwrap(),
+        json!({"part": 0, "parts": 1, "stories": [
+            {"storyId": CRIPTA, "title": "La cripta del nigromante", "locales": ["es"]},
+            {"storyId": LLUVIA, "title": "Lluvia de neón", "locales": ["es", "en"]}
+        ]})
+    );
+    assert_eq!(catalog_parts(&[]).len(), 1);
+
+    // The worst case: 64 stories with the longest ids, titles and 16 locales.
+    let listing = (0..MAX_CATALOG_STORIES)
+        .map(|index| StoryListing {
+            id: format!("{index:02}{}", "x".repeat(62)),
+            title: "ñ".repeat(tiamud_story_core::MAX_LABEL_BYTES / 2),
+            locales: (0..protocol::MAX_STORY_LOCALES)
+                .map(|locale| format!("l{locale:02}-{}", "a".repeat(31)))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let parts = catalog_parts(&listing);
+    assert!(parts.len() > 1);
+    let mut seen = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        assert_eq!(usize::from(part.part), index);
+        assert_eq!(usize::from(part.parts), parts.len());
+        let frame = protocol::ServerEnvelope::new(ServerMessageType::StoryCatalog, u64::MAX, part);
+        assert!(serde_json::to_vec(&frame).unwrap().len() <= MAX_STORY_FRAME_BYTES);
+        seen.extend(part.stories.iter().map(|story| story.story_id.clone()));
+    }
+    assert_eq!(
+        seen,
+        listing
+            .iter()
+            .map(|story| story.id.clone())
+            .collect::<Vec<_>>()
+    );
 }

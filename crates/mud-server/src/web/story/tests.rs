@@ -208,6 +208,105 @@ async fn audio_clients_stop_story_music_on_leave_and_disabled_servers_answer() {
     );
 }
 
+fn bilingual_stories() -> StoryManager {
+    let pack = |name: &str| {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../story-core/fixtures/{name}.story.json")),
+        )
+        .unwrap();
+        StoryPack::from_json_slice(&bytes).unwrap()
+    };
+    StoryManager::new(
+        StoryCatalog::from_packs(vec![pack(CRIPTA), pack("lluvia-de-neon")], BTreeMap::new())
+            .unwrap(),
+        StoryLimits::default(),
+    )
+}
+
+#[tokio::test]
+async fn browsers_list_story_languages_and_enter_in_the_chosen_one() {
+    let out = outbound();
+    let mut seq = 1;
+    let mut session = WebStorySession::new(Some(bilingual_stories()), AccountId(4), false);
+    // `story.catalog {}` answers with the typed catalog only.
+    assert!(session.catalog(&out, &mut seq));
+    let listed = frames(&out);
+    assert_eq!(types(&listed), ["story.catalog"]);
+    assert_eq!(
+        listed[0]["data"],
+        serde_json::json!({"part": 0, "parts": 1, "stories": [
+            {"storyId": CRIPTA, "title": "La cripta del nigromante", "locales": ["es"]},
+            {"storyId": "lluvia-de-neon", "title": "Lluvia de neón", "locales": ["es", "en"]}
+        ]})
+    );
+    // The typed command answers in text and also sends the catalog.
+    session
+        .text_command(&out, &mut seq, "r1", "historias")
+        .await;
+    let answered = frames(&out);
+    assert_eq!(types(&answered), ["action.result", "story.catalog"]);
+    assert!(
+        answered[0]["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("lluvia-de-neon — Lluvia de neón [es, en]")
+    );
+
+    // Entering in English: confirmation, help and errors follow the locale.
+    session
+        .text_command(&out, &mut seq, "r2", "historia lluvia-de-neon en")
+        .await;
+    let entered = frames(&out);
+    assert_eq!(entered[0]["data"]["message"], "You enter «Neon Rain».");
+    assert_eq!(entered[1]["type"], "story.entered");
+    assert_eq!(entered[1]["data"]["locale"], "en");
+    session.text_command(&out, &mut seq, "r3", "dance").await;
+    let help = frames(&out);
+    assert!(
+        help[0]["data"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("You are absorbed in a story")
+    );
+    session.text_command(&out, &mut seq, "r4", "99").await;
+    assert_eq!(
+        frames(&out)[0]["data"]["message"],
+        "That option is not available."
+    );
+    session.undo(&out, &mut seq).await;
+    let undo = frames(&out);
+    assert_eq!(undo[0]["type"], "story.error");
+    assert_eq!(undo[0]["data"]["message"], "There is nothing left to undo.");
+    assert_eq!(session.locale(), "en");
+
+    // Without stories the typed request is a `disabled` error.
+    let disabled = WebStorySession::new(None, AccountId(5), false);
+    assert!(disabled.catalog(&out, &mut seq));
+    let refused = frames(&out);
+    assert_eq!(types(&refused), ["story.error"]);
+    assert_eq!(refused[0]["data"]["code"], "disabled");
+}
+
+#[test]
+fn story_catalog_requests_are_exactly_empty() {
+    assert!(matches!(
+        parse_client_message(r#"{"v":1,"type":"story.catalog","data":{}}"#),
+        Ok(ClientMessage::StoryCatalog)
+    ));
+    for invalid in [
+        r#"{"v":1,"type":"story.catalog","data":{"x":1}}"#,
+        r#"{"v":1,"type":"story.catalog","data":[]}"#,
+        r#"{"v":1,"type":"story.catalog","data":null}"#,
+    ] {
+        assert_eq!(
+            parse_client_message(invalid).err(),
+            Some(ClientMessageError::InvalidEnvelope),
+            "{invalid}"
+        );
+    }
+}
+
 #[test]
 fn story_client_messages_parse_strictly() {
     assert!(matches!(

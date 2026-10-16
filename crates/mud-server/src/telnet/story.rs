@@ -15,18 +15,17 @@ use super::{
     bounded_utf8_prefix, escape_negotiated_mxp_text,
 };
 use crate::story_sessions::{
-    CommandFollowUp, InvitationInbox, PARSER_STORY_HELP, SHARED_STORY_HELP, STORY_INPUT_HELP,
-    STORY_LOCALE, SharedFrame, StoryCommand, StoryFailure, StoryInputCommand, StoryLink,
-    StoryManager, StoryProjection, mode_label, parse_parser_story_input, parse_story_command,
-    parse_story_input, render_continue_offer, render_listing, render_lobby, render_slots,
-    render_tally, render_text,
+    CommandFollowUp, InvitationInbox, STORY_LOCALE, SharedFrame, StoryCommand, StoryFailure,
+    StoryInputCommand, StoryLink, StoryManager, StoryProjection, messages,
+    parse_parser_story_input, parse_story_command, parse_story_input, render_continue_offer,
+    render_listing, render_lobby, render_slots, render_tally, render_text,
 };
 use serde_json::json;
 use std::io;
 use tiamud_core::AccountId;
 use tiamud_protocol::{
     self as protocol, MediaChannel, StoryCueAction, StoryDecisionMode, StoryEndingKind, StoryItem,
-    StoryLeftReason, StorySeatRole, StorySlotSummary, StorySlots,
+    StoryLeftReason, StorySlotSummary, StorySlots,
 };
 use tokio::sync::watch;
 
@@ -93,6 +92,14 @@ impl TelnetStory {
 
     pub(super) fn active(&self) -> bool {
         self.link.is_some()
+    }
+
+    /// Language of the current story instance (Spanish outside a story).
+    fn locale(&self) -> String {
+        self.link
+            .as_ref()
+            .map_or(STORY_LOCALE, StoryLink::locale)
+            .to_owned()
     }
 
     fn set_link(&mut self, link: StoryLink) {
@@ -191,18 +198,13 @@ impl TelnetStory {
         input: &mut TelnetInput,
         reason: StoryLeftReason,
     ) -> io::Result<StoryLineOutcome> {
-        let (code, message) = match reason {
-            StoryLeftReason::Kicked => (
-                "kicked",
-                "El anfitrión te ha retirado de la historia compartida. Vuelves al mundo.",
-            ),
-            StoryLeftReason::Ended => (
-                "ended",
-                "La historia compartida ha terminado: no queda nadie sentado. Vuelves al mundo.",
-            ),
-            StoryLeftReason::Left => ("left", "Sales de la historia y vuelves al mundo."),
-            StoryLeftReason::Evicted => ("evicted", StoryFailure::Gone.message()),
+        let code = match reason {
+            StoryLeftReason::Kicked => "kicked",
+            StoryLeftReason::Ended => "ended",
+            StoryLeftReason::Left => "left",
+            StoryLeftReason::Evicted => "evicted",
         };
+        let message = messages::removed(&self.locale(), reason);
         self.leave_locally(output, input, code)?;
         write_line(output, input, message)?;
         Ok(StoryLineOutcome::Left)
@@ -219,7 +221,7 @@ impl TelnetStory {
         if force || frame.table.lobby_rev != self.sent_lobby_rev {
             self.sent_lobby_rev = frame.table.lobby_rev;
             let lobby = frame.lobby(self.account);
-            write_line(output, input, &render_lobby(&lobby))?;
+            write_line(output, input, &render_lobby(&lobby, &self.locale()))?;
             let gmcp = input.negotiation.story_lobby_gmcp(&lobby);
             if !gmcp.is_empty() {
                 output.bytes(OutputPriority::Interactive, gmcp)?;
@@ -251,10 +253,7 @@ impl TelnetStory {
             && let Some(name) = frame.table.turn_name()
             && frame.view.ending.is_none()
         {
-            let mut line = format!("Turno de {name}");
-            if let Some(seconds) = tally.remaining_seconds {
-                line.push_str(&format!(" · cede el turno en {seconds} s"));
-            }
+            let line = messages::turn_of(&view.locale, name, tally.remaining_seconds);
             write_line(output, input, &line)?;
         }
         let gmcp = input.negotiation.story_tally_gmcp(&tally, view);
@@ -280,7 +279,7 @@ impl TelnetStory {
         write_line(
             output,
             input,
-            &format!("Continúas la historia «{}».", link.title()),
+            &messages::resumed(link.locale(), link.title()),
         )?;
         self.set_link(link);
         self.refresh(output, input).await.map(|_| ())
@@ -327,6 +326,8 @@ impl TelnetStory {
         let Some(link) = self.link.clone() else {
             return self.outside(output, input, line).await;
         };
+        let locale = link.locale().to_owned();
+        let locale = locale.as_str();
         let parsed = if link.is_parser() {
             parse_parser_story_input(line)
         } else {
@@ -361,7 +362,7 @@ impl TelnetStory {
                 match target {
                     Some((leaf, view_rev)) => link.vote(leaf, view_rev).await,
                     None => {
-                        write_line(output, input, SHARED_STORY_HELP)?;
+                        write_line(output, input, messages::shared_help(locale))?;
                         return Ok(StoryLineOutcome::Handled);
                     }
                 }
@@ -373,13 +374,13 @@ impl TelnetStory {
                 match self.frame() {
                     Some(frame) => {
                         let lobby = frame.lobby(self.account);
-                        write_line(output, input, &render_lobby(&lobby))?;
+                        write_line(output, input, &render_lobby(&lobby, locale))?;
                         let gmcp = input.negotiation.story_lobby_gmcp(&lobby);
                         if !gmcp.is_empty() {
                             output.bytes(OutputPriority::Interactive, gmcp)?;
                         }
                     }
-                    None => write_line(output, input, StoryFailure::NotShared.message())?,
+                    None => write_line(output, input, StoryFailure::NotShared.message_in(locale))?,
                 }
                 return Ok(StoryLineOutcome::Handled);
             }
@@ -392,48 +393,36 @@ impl TelnetStory {
             },
             StoryInputCommand::Invite(name) => {
                 match link.invite(&name).await {
-                    Ok(()) => write_line(
-                        output,
-                        input,
-                        &format!("Invitación enviada a {name}, si está conectado."),
-                    )?,
+                    Ok(()) => write_line(output, input, &messages::invited(locale, &name))?,
                     Err(failure) => return self.show(output, input, Err(failure)).await,
                 }
                 return Ok(StoryLineOutcome::Handled);
             }
             StoryInputCommand::Kick(name) => {
                 match link.kick(&name).await {
-                    Ok(()) => write_line(
-                        output,
-                        input,
-                        &format!("{name} ya no participa en la historia."),
-                    )?,
+                    Ok(()) => write_line(output, input, &messages::kicked(locale, &name))?,
                     Err(failure) => return self.show(output, input, Err(failure)).await,
                 }
                 return Ok(StoryLineOutcome::Handled);
             }
             StoryInputCommand::Mode(Some((mode, seconds))) => {
                 match link.set_mode(mode, seconds).await {
-                    Ok(()) => write_line(
-                        output,
-                        input,
-                        &format!("Modo de decisión: {}.", mode_label(mode)),
-                    )?,
+                    Ok(()) => write_line(output, input, &messages::mode_set(locale, mode))?,
                     Err(failure) => return self.show(output, input, Err(failure)).await,
                 }
                 return Ok(StoryLineOutcome::Handled);
             }
             StoryInputCommand::Mode(None) => {
-                write_line(output, input, StoryFailure::InvalidSetting.message())?;
+                write_line(
+                    output,
+                    input,
+                    StoryFailure::InvalidSetting.message_in(locale),
+                )?;
                 return Ok(StoryLineOutcome::Handled);
             }
             StoryInputCommand::Save(slot) => {
                 match link.save(slot.unwrap_or(u8::MAX)).await {
-                    Ok(saved) => write_line(
-                        output,
-                        input,
-                        &format!("Partida guardada en la ranura {}.", saved.slot),
-                    )?,
+                    Ok(saved) => write_line(output, input, &messages::saved(locale, saved.slot))?,
                     Err(failure) => return self.show(output, input, Err(failure)).await,
                 }
                 return Ok(StoryLineOutcome::Handled);
@@ -455,11 +444,7 @@ impl TelnetStory {
                 let slot = slot.unwrap_or(u8::MAX);
                 match link.delete_slot(slot).await {
                     Ok(slots) => {
-                        write_line(
-                            output,
-                            input,
-                            &format!("Partida de la ranura {slot} borrada."),
-                        )?;
+                        write_line(output, input, &messages::deleted(locale, slot))?;
                         self.slots(output, input, slots, false)?;
                     }
                     Err(failure) => return self.show(output, input, Err(failure)).await,
@@ -470,18 +455,18 @@ impl TelnetStory {
                 let listing = self
                     .manager
                     .as_ref()
-                    .map(|manager| render_listing(&manager.listing()))
+                    .map(|manager| render_listing(&manager.listing(), locale))
                     .unwrap_or_default();
                 write_line(output, input, &listing)?;
                 return Ok(StoryLineOutcome::Handled);
             }
             StoryInputCommand::Other => {
                 let help = if link.is_shared() {
-                    SHARED_STORY_HELP
+                    messages::shared_help(locale)
                 } else if link.is_parser() {
-                    PARSER_STORY_HELP
+                    messages::parser_help(locale)
                 } else {
-                    STORY_INPUT_HELP
+                    messages::input_help(locale)
                 };
                 write_line(output, input, help)?;
                 return Ok(StoryLineOutcome::Handled);
@@ -499,11 +484,10 @@ impl TelnetStory {
     ) -> io::Result<StoryLineOutcome> {
         let outcome = link.leave().await;
         self.leave_locally(output, input, "left")?;
-        let message = if outcome.is_ok_and(|outcome| outcome.autosaved) {
-            "Sales de la historia y vuelves al mundo. Tu progreso quedó en el autoguardado."
-        } else {
-            "Sales de la historia y vuelves al mundo."
-        };
+        let message = messages::left_world(
+            link.locale(),
+            outcome.is_ok_and(|outcome| outcome.autosaved),
+        );
         write_line(output, input, message)?;
         Ok(StoryLineOutcome::Left)
     }
@@ -531,7 +515,7 @@ impl TelnetStory {
             Some(CommandFollowUp::Slots) => {
                 match link.slots().await {
                     Ok(slots) => self.slots(output, input, slots, false)?,
-                    Err(failure) => write_line(output, input, failure.message())?,
+                    Err(failure) => write_line(output, input, failure.message_in(link.locale()))?,
                 }
                 Ok(outcome)
             }
@@ -553,18 +537,26 @@ impl TelnetStory {
             return Ok(StoryLineOutcome::Handled);
         };
         match command {
-            StoryCommand::List => write_line(output, input, &render_listing(&manager.listing()))?,
+            StoryCommand::List => write_line(
+                output,
+                input,
+                &render_listing(&manager.listing(), STORY_LOCALE),
+            )?,
             StoryCommand::Leave => write_line(output, input, StoryFailure::NotInStory.message())?,
             StoryCommand::Enter(story_id, locale) => {
                 match manager.enter_in(self.account, &story_id, locale.as_deref()) {
                     Ok(link) => {
-                        write_line(output, input, &format!("Entras en «{}».", link.title()))?;
+                        write_line(
+                            output,
+                            input,
+                            &messages::entered(link.locale(), link.title()),
+                        )?;
                         self.set_link(link.clone());
                         let outcome = self.refresh(output, input).await?;
                         if outcome == StoryLineOutcome::Handled
                             && let Some(slots) = link.entry_slots().await
                         {
-                            if let Some(offer) = render_continue_offer(&slots) {
+                            if let Some(offer) = render_continue_offer(&slots, link.locale()) {
                                 write_line(output, input, &offer)?;
                             }
                             self.slots_gmcp(output, input, &slots)?;
@@ -580,7 +572,11 @@ impl TelnetStory {
                     .await
                 {
                     Ok(link) => {
-                        write_line(output, input, &format!("Compartes «{}».", link.title()))?;
+                        write_line(
+                            output,
+                            input,
+                            &messages::hosting(link.locale(), link.title()),
+                        )?;
                         self.set_link(link);
                         return self.refresh(output, input).await;
                     }
@@ -593,11 +589,7 @@ impl TelnetStory {
                     .await
                 {
                     Ok(link) => {
-                        let message = if spectate {
-                            format!("Miras «{}» como espectador.", link.title())
-                        } else {
-                            format!("Te unes a «{}».", link.title())
-                        };
+                        let message = messages::joined(link.locale(), link.title(), spectate);
                         write_line(output, input, &message)?;
                         self.set_link(link);
                         return self.refresh(output, input).await;
@@ -626,15 +618,8 @@ impl TelnetStory {
         if let Some(frame) = self.frame()
             && view.ending.is_none()
         {
-            let hint = match (frame.table.mode(), frame.role(self.account)) {
-                (_, Some(StorySeatRole::Spectator)) => "Miras como espectador.",
-                (StoryDecisionMode::Vote, _) => "Historia compartida: tu número cuenta como voto.",
-                (StoryDecisionMode::Host, Some(StorySeatRole::Host)) => "Decides tú (anfitrión).",
-                (StoryDecisionMode::Host, _) => {
-                    "Decide el anfitrión; «votar N» (vote N) deja un voto orientativo."
-                }
-                (StoryDecisionMode::Turns, _) => "Turnos rotatorios: decide quien tenga el turno.",
-            };
+            let hint =
+                messages::shared_hint(&view.locale, frame.table.mode(), frame.role(self.account));
             text.push_str(hint);
             text.push_str("\r\n");
         }
@@ -679,17 +664,21 @@ impl TelnetStory {
                 Ok(StoryLineOutcome::Handled)
             }
             Err(StoryFailure::Gone) => {
+                let locale = self.locale();
                 self.leave_locally(output, input, "evicted")?;
-                write_line(output, input, StoryFailure::Gone.message())?;
+                write_line(output, input, StoryFailure::Gone.message_in(&locale))?;
                 Ok(StoryLineOutcome::Left)
             }
             Err(StoryFailure::StaleView) => {
-                write_line(output, input, StoryFailure::StaleView.message())?;
+                write_line(
+                    output,
+                    input,
+                    StoryFailure::StaleView.message_in(&self.locale()),
+                )?;
                 Box::pin(self.refresh(output, input)).await
             }
             Err(failure) => {
-                let locale = self.link.as_ref().map_or(STORY_LOCALE, StoryLink::locale);
-                write_line(output, input, failure.message_in(locale))?;
+                write_line(output, input, failure.message_in(&self.locale()))?;
                 Ok(StoryLineOutcome::Handled)
             }
         }
@@ -704,12 +693,7 @@ impl TelnetStory {
     ) -> io::Result<StoryLineOutcome> {
         let result = link.restore(slot).await;
         if result.is_ok() {
-            let message = if slot == 0 {
-                "Continúas la partida autoguardada.".to_owned()
-            } else {
-                format!("Cargas la partida de la ranura {slot}.")
-            };
-            write_line(output, input, &message)?;
+            write_line(output, input, &messages::restored(link.locale(), slot))?;
         }
         self.show(output, input, result).await
     }
@@ -722,7 +706,7 @@ impl TelnetStory {
         slots: Vec<StorySlotSummary>,
         offer_continue: bool,
     ) -> io::Result<()> {
-        write_line(output, input, &render_slots(&slots))?;
+        write_line(output, input, &render_slots(&slots, &self.locale()))?;
         self.slots_gmcp(
             output,
             input,

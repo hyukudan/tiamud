@@ -29,6 +29,7 @@ import type {
   ServerMessageType,
   ServerNotice,
   ServerWelcome,
+  StoryCatalog,
   StoryChooseData,
   StoryDecisionMode,
   StoryEmptyData,
@@ -65,6 +66,7 @@ import {
   STORY_CHOICE_ID,
   STORY_JOIN_CODE,
   MAX_STORY_COMMAND_BYTES,
+  parseStoryCatalog,
   parseStoryEntered,
   parseStoryError,
   parseStoryInvitation,
@@ -386,7 +388,8 @@ export type ServerMessage =
   | Envelope<'story.restored', StoryRestored>
   | Envelope<'story.lobby', StoryLobby>
   | Envelope<'story.tally', StoryTally>
-  | Envelope<'story.invitation', StoryInvitation>;
+  | Envelope<'story.invitation', StoryInvitation>
+  | Envelope<'story.catalog', StoryCatalog>;
 
 export type LiveServerMessage = Exclude<
   ServerMessage,
@@ -443,6 +446,8 @@ export type StoryMode = Envelope<'story.mode', StoryModeData>;
 export type StoryVote = Envelope<'story.vote', StoryVoteData>;
 
 export type StoryCommand = Envelope<'story.command', StoryCommandData>;
+
+export type StoryListCatalog = Envelope<'story.catalog', StoryEmptyData>;
 
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -2397,6 +2402,10 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       const data = parseStoryInvitation(candidate.data);
       return data ? { ...base, type: candidate.type, data } : undefined;
     }
+    case 'story.catalog': {
+      const data = parseStoryCatalog(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
     case 'server.heartbeat': {
       const nonce = positiveIntegerOrUndefined(candidate.data.nonce);
       const timeoutMs = positiveIntegerOrUndefined(candidate.data.timeoutMs);
@@ -2860,6 +2869,11 @@ export function createStoryListSlots(): StoryListSlots {
 /** `story.continue`: restores the autosave offered on entry. */
 export function createStoryContinue(): StoryContinue {
   return { v: PROTOCOL_VERSION, type: 'story.continue', data: {} };
+}
+
+/** `story.catalog`: asks for the stories and the languages each one offers. */
+export function createStoryCatalog(): StoryListCatalog {
+  return { v: PROTOCOL_VERSION, type: 'story.catalog', data: {} };
 }
 
 // --- Shared story instances (ADR 0033) -------------------------------------

@@ -1277,9 +1277,13 @@ when the server is started with `TIAMUD_STORY_DIR`; otherwise every story
 command answers that stories are unavailable.
 
 Entering and listing reuse `command.submit`: `historias`/`stories` returns the
-catalog in `action.result.message`; `historia <id> [locale]`/`story <id>
-[locale]` answers with a correlated `action.result`, then `story.entered` and
-the current `story.view`. The optional locale picks one of the story's
+catalog in `action.result.message` (each story with its languages, default
+first: `id — title [es, en]`) followed by the typed `story.catalog`; a client
+may also ask for `story.catalog` alone with `story.catalog {}`. `historia <id>
+[locale]`/`story <id> [locale]` answers with a correlated `action.result`, then
+`story.entered` and the current `story.view`. The browser's story picker
+enters with exactly this command (`historia <id> <locale>`), so browser and
+Telnet stay equivalent. The optional locale picks one of the story's
 languages for a **new** instance (`en`, or `en-GB` for `en`); without it the
 story's default (Spanish when offered) is used, a language the story does not
 offer answers `unknown_locale`, and a live instance keeps its language. While a session is in a story, other `command.submit` lines and
@@ -1297,9 +1301,19 @@ Server messages:
   public catalog id; `title` is in the instance language `locale`; `locales`
   (1–16 lowercase tags, default first, containing `locale`) lists the
   languages the story can be played in. Every text of the views, including
-  image alt text, is in `locale`; server hints and error messages stay
+  image alt text, is in `locale`. The server's own text in the session
+  (`action.result` confirmations and help, `story.error.message`, Telnet
+  labels, slot and lobby listings, event lines such as dice rolls) is English
+  when `locale` is `en`/`en-*` and Spanish otherwise; outside a story it is
   Spanish. Clients written before this field treat a missing `locale` as
   `es`.
+- `story.catalog`: `{part, parts, stories: [{storyId, title, locales}]}`. The
+  stories in id order (at most 64), each with its title in its default
+  language and `locales` (1–16 lowercase tags, default first). A catalog
+  whose sequenced frame would exceed 15 KiB is split into consecutive
+  `parts` frames; the client concatenates `stories` of parts `0..parts` in
+  order and discards an out-of-order part. Without stories the request is
+  answered with `story.error {code: disabled}`.
 - `story.view`: `{viewRev, part, parts, turn, canUndo, items}`. A view whose
   sequenced frame would exceed 15 KiB is split into `parts` frames that share
   `viewRev`; the client applies the view only when parts `0..parts` arrived
@@ -1308,7 +1322,9 @@ Server messages:
   prompt?: {text, question}, background?: image}` (exactly one per view;
   `prompt` only in parser stories, see [Parser stories](#parser-stories)),
   `cue {action: play|stop, channel, url?, loop}`,
-  `portrait {name, image?}`, `block {kind: event|line|command|reply, speaker?, text}`,
+  `portrait {name, image?}`, `block {kind: event|line|command|reply, speaker?,
+  portrait?, text}` (`portrait` is an image, only on a `line` with a
+  `speaker`: the speaker's expression portrait),
   `stat {label, value}`, `item {name}`, `choice {id, label}`,
   `verb {id, label, needsTarget}`, `target {verb, id, label}` (where `verb` is
   the id of a verb of the same view) and `dialogueOption {id, label}`. Every
@@ -1323,9 +1339,11 @@ Server messages:
   world scene images) that the client fetches, validates and renders only
   when multimedia is allowed; `alt` is 1–512 bytes of plain one-line text in
   the instance language. It is present only when the authored background or
-  portrait id is listed in the reviewed story media map; an unlisted id sends
-  no image and loses nothing playable (the scene text and `portrait.name`
-  remain). Images are sent regardless of the audio opt-in.
+  portrait id (for a dialogue line, the portrait of the speaker's
+  expression) is listed in the reviewed story media map; an unlisted id sends
+  no image and loses nothing playable (the scene text, `portrait.name` and
+  the line's `speaker` remain). Images are sent regardless of the audio
+  opt-in.
 - `story.left`: `{reason: left|evicted|kicked|ended}`. `evicted` also covers
   an instance closed by another session of the same account (or a lapsed
   shared seat); `kicked` and `ended` belong to shared instances.
@@ -1338,8 +1356,9 @@ Server messages:
   `unknown_code`, `seats_full`, `not_shared`, `unknown_member`,
   `invalid_setting`, for parser stories `no_parser` and
   `invalid_command`, and `unknown_locale` when entering in a language the
-  story does not offer. `stale_view` is followed by the current view. `message` is Spanish
-  player-facing text and never names authored ids, digests or store details.
+  story does not offer. `stale_view` is followed by the current view. `message` is
+  player-facing text in the session's language (English for `en`, otherwise
+  Spanish) and never names authored ids, digests or store details.
 - `story.slots`: `{slots: [{slot, updatedAt, compatible}], offerContinue}`.
   At most ten entries in ascending, unique `slot` order (`0..=9`; `0` is the
   autosave). `updatedAt` is Unix seconds of the last write; `compatible` is
@@ -1371,6 +1390,8 @@ Client messages (all strict, unknown fields rejected):
   `story.slots` or `slot_empty`.
 - `story.slots {}` and `story.continue {}` (restore of slot `0`): exactly an
   empty object.
+- `story.catalog {}`: exactly an empty object; answered by `story.catalog`
+  (inside or outside a story) or `story.error {code: disabled}`.
 
 A `slot` above 9 or of another JSON type is an invalid envelope. Slot
 operations require being inside the story; per account, `save`/`deleteSlot`
@@ -1391,7 +1412,9 @@ implements slots.
 
 Telnet renders the same view as text: title, the background's alt text as
 `[…]` when the view carries a background image, prose, events, speaker
-lines, present characters, stats and inventory, then every action numbered
+lines (`Name: «text»`; the alt text of a line portrait is not printed, the
+speaker name is its text equivalent), present characters, stats and
+inventory, then every action numbered
 `1) …` in the browser's order (choices, dialogue options, verbs or
 `VERB → target` pairs). GMCP clients that negotiated `Tiamud.Story 1` receive
 `Tiamud.Story.View` (`viewRev`, `title`, `turn`, `score`, `ending`,
