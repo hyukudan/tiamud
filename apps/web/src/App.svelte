@@ -38,6 +38,7 @@
     type ActiveScenePresentationCue,
   } from './lib/scene-presentation';
   import { capabilitiesFor } from './lib/app/capabilities';
+  import { isSubmitEnter } from './lib/app/command-keys';
   import { connectionLabelFor, itemActionName } from './lib/app/history-format';
   import { directVisualSource, visualSourceUrl } from './lib/app/visual-source';
   import { computeCommandSuggestions } from './lib/app/command-suggestions';
@@ -253,6 +254,15 @@
         dashboardLoadFailed = true;
       },
     );
+  }
+
+  function handleCommandKey(event: KeyboardEvent): void {
+    session.navigateCommandHistory(event);
+    // Send on keydown rather than through implicit form submission, which
+    // WebKit's datalist suggestion handling can swallow (see command-keys.ts).
+    if (!isSubmitEnter(event)) return;
+    event.preventDefault();
+    session.submitCommand();
   }
 
   function enterWorld(selection: CharacterSelection): void {
@@ -688,7 +698,7 @@
             enterkeyhint="send"
             list="command-suggestions"
             placeholder="look, north, take lantern…"
-            onkeydown={session.navigateCommandHistory}
+            onkeydown={handleCommandKey}
             oninput={session.resetHistoryCursor}
           />
           <datalist id="command-suggestions">

@@ -14,7 +14,19 @@ export default defineConfig({
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
     { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+    {
+      name: 'webkit',
+      use: {
+        ...devices['Desktop Safari'],
+        // The production build registers /sw.js, which claims the page. Once a
+        // service worker controls it, Playwright's WebKit build no longer sends
+        // that page's fetches (even the /api/ and asset requests the worker
+        // deliberately passes through) to `page.route`, so mocked endpoints
+        // reach the static preview server instead. The worker is covered by
+        // unit tests and does not answer any mocked path, so block it here.
+        serviceWorkers: 'block',
+      },
+    },
   ],
   webServer: {
     command: 'pnpm build && pnpm exec vite preview --host 127.0.0.1 --port 4173',
