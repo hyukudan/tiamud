@@ -488,12 +488,12 @@ What the evidence does and does not show:
 - The latest recorded local gate (story language picker, 2026-10-16): 1,194 Rust workspace tests passed
   (1 ignored), strict clippy and fmt, 306 Vitest tests, svelte-check 0/0 and
   76/76 Playwright runs on Chromium and Firefox. This is **local** evidence.
-- **Hosted CI runs** on GitHub Actions, but there is no fully green `verify`
-  run yet. On the 2026-10-16 WebKit fix branch the license, web, Playwright,
-  Rust fmt/test/clippy, harness and transport-smoke steps passed; the bounded
-  headless load profile then failed its RSS guard (107.79 MiB growth against a
-  96 MiB limit), so later soak steps did not run.
-- **WebKit**: that same hosted run passed every Playwright scenario in
+- **Hosted CI runs** on GitHub Actions. On the 2026-10-16 WebKit fix branch
+  a full `verify` run passed, including Playwright and the short soak. The
+  bounded headless load profile's RSS guard has little headroom, though: one
+  run grew 88.8 MiB and an earlier run of the same code grew 107.79 MiB,
+  failing the 96 MiB limit. Treat it as near-flaky until it is diagnosed.
+- **WebKit**: that hosted run passed every Playwright scenario in
   Playwright's WebKit build. That is CI evidence for an engine build, not a
   Safari or real-device pass; the current local host still lacks the native
   WebKit libraries. A manual screen-reader audit is pending.
