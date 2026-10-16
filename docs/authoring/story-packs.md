@@ -21,8 +21,10 @@ packs through `story.*` (parser worlds through `story.command`), with
 reviewed background and portrait images, a per-session language and
 declared save-compatible revisions (see
 [Presentation, languages and save compatibility](#presentation-languages-and-save-compatibility)). Optional
-[Lua scripts](#lua-scripts-format-v3-optional) (ADR 0034, accepted) run
-only in the offline tools; the server rejects packs that declare them.
+[Lua scripts](#lua-scripts-format-v3-optional) (ADR 0034, accepted) run in
+the offline tools and, when the server is started with
+`TIAMUD_STORY_SCRIPTS=1`, in server story sessions (with a per-input time
+budget); with the flag off the server rejects packs that declare them.
 
 The Rust types and validator in `crates/story-core` are the exact authority.
 The published [JSON Schema](../../crates/story-tools/schema/story-pack.v3.schema.json)
