@@ -1604,7 +1604,7 @@ mod tests {
         let temporary = TempDir::new().unwrap();
         let path = temporary.path().join("state.sqlite3");
         let connection = current_source(&path);
-        let state = r#"{"format_version":2,"pack_id":"cripta-del-nigromante","node":"inicio"}"#;
+        let state = r#"{"format_version":2,"pack_id":"crypt-of-the-necromancer","node":"inicio"}"#;
         let digest = tiamud_persistence_sqlite::story_saves::story_state_sha256(state);
         connection
             .execute("INSERT INTO accounts (id, name) VALUES (1, 'Reader')", [])
@@ -1615,7 +1615,7 @@ mod tests {
                      (account_id, story_id, slot, pack_id, pack_sha256,
                       state_format_version, state_json, state_sha256,
                       created_at, updated_at)
-                 VALUES (1, 'cripta-del-nigromante', 3, 'cripta-del-nigromante',
+                 VALUES (1, 'crypt-of-the-necromancer', 3, 'crypt-of-the-necromancer',
                          ?1, 2, ?2, ?3, 100, 120)",
                 params!["a".repeat(64), state, digest],
             )

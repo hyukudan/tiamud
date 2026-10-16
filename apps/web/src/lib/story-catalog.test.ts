@@ -1,7 +1,7 @@
 import { render } from 'svelte/server';
 import { describe, expect, it } from 'vitest';
 import catalogFixture from '../../e2e/fixtures/story-catalog.json';
-import lluvia from '../../e2e/fixtures/story-lluvia.json';
+import lluvia from '../../e2e/fixtures/story-neon-rain.json';
 import StoryPanel from '../components/StoryPanel.svelte';
 import StoryPicker from '../components/StoryPicker.svelte';
 import { createStoryCatalog, parseServerMessage } from './protocol';
@@ -22,15 +22,16 @@ const PORTRAIT = { manifest: `/assets/${'b'.repeat(64)}/manifest.json`, alt: 'Si
 const entry = (storyId: string, locales: string[] = ['es']) => ({ storyId, title: storyId, locales });
 
 describe('story catalog with languages', () => {
-  it('parses the recorded server catalog and its English entry', () => {
+  it('parses the recorded server catalog and its Spanish entry', () => {
     const [part] = catalogFixture.catalog;
     const parsed = parseStoryCatalog(part as Record<string, unknown>);
     expect(parsed?.stories.map((story) => [story.storyId, story.locales])).toEqual([
-      ['cripta-del-nigromante', ['es']],
-      ['lluvia-de-neon', ['es', 'en']],
+      ['breve', ['es']],
+      ['crypt-of-the-necromancer', ['en', 'es']],
+      ['neon-rain', ['en', 'es']],
     ]);
     expect(parseStoryEntered(catalogFixture.entered as Record<string, unknown>))
-      .toMatchObject({ storyId: 'lluvia-de-neon', title: 'Neon Rain', locale: 'en' });
+      .toMatchObject({ storyId: 'neon-rain', title: 'Lluvia de neón', locale: 'es' });
     const envelope = parseServerMessage(JSON.stringify({ v: 1, type: 'story.catalog', seq: 3, data: part }));
     expect(envelope?.type).toBe('story.catalog');
     expect(createStoryCatalog()).toEqual({ v: 1, type: 'story.catalog', data: {} });
@@ -67,11 +68,12 @@ describe('story catalog with languages', () => {
     expect(assembler.push({ part: 0, parts: 1, stories: [] })).toEqual([]);
   });
 
-  it('preselects the reader preference when offered, else Spanish, else the default', () => {
+  it('preselects the reader preference when offered, else the story default', () => {
     expect(preferredStoryLocale(['es', 'en'], ['en-US', 'es'])).toBe('en');
     expect(preferredStoryLocale(['es', 'en'], ['EN'])).toBe('en');
     expect(preferredStoryLocale(['es', 'en'], ['fr-FR', 'de'])).toBe('es');
-    expect(preferredStoryLocale(['en', 'es'], [])).toBe('es');
+    expect(preferredStoryLocale(['en', 'es'], [])).toBe('en');
+    expect(preferredStoryLocale(['en', 'es'], ['es-ES'])).toBe('es');
     expect(preferredStoryLocale(['en', 'ca'], ['fr'])).toBe('en');
     expect(preferredStoryLocale(['es'], ['en'])).toBe('es');
     expect(preferredStoryLocale(['es', 'en'], [42, 'x'.repeat(64), 'en'])).toBe('en');

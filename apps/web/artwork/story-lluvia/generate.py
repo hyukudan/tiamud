@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Deterministic generator of the original sample art of `lluvia-de-neon`.
+"""Deterministic generator of the original sample art of `neon-rain`
+(published while the pack was still named `lluvia-de-neon`).
 
 The four sources are drawn only from code: gradients, rectangles, ellipses
 and polygons, with no external image, font, photograph or model. Running it

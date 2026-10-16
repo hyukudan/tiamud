@@ -10,8 +10,8 @@ use tiamud_story_core::{
     VariableDecl, VariableKind, VerbDecl, step, view, view_pages,
 };
 
-const FIXTURE: &[u8] = include_bytes!("../fixtures/cripta-del-nigromante.story.json");
-const NOIR: &[u8] = include_bytes!("../fixtures/lluvia-de-neon.story.json");
+const FIXTURE: &[u8] = include_bytes!("../fixtures/crypt-of-the-necromancer.story.json");
+const NOIR: &[u8] = include_bytes!("../fixtures/neon-rain.story.json");
 
 struct Gen(u64);
 
@@ -95,8 +95,8 @@ fn actions(current: &StoryView) -> Vec<StoryInput> {
 }
 
 fn assert_pages_bounded(pack: &StoryPack, state: &StoryState) {
-    // Locales only change which text is measured; one exercises the path.
-    for locale in ["es"] {
+    // Locales only change which text is measured; both shipped ones are.
+    for locale in ["en", "es"] {
         let pages = view_pages(pack, state, locale).expect("validated packs paginate");
         assert!(!pages.is_empty());
         for page in &pages {
@@ -831,7 +831,7 @@ fn generated_packs_validate_soundly() {
     );
 }
 
-const FARO: &[u8] = include_bytes!("../fixtures/parser/faro-de-punta-gris.story.json");
+const FARO: &[u8] = include_bytes!("../fixtures/parser/grey-point-lighthouse.story.json");
 
 /// Words, fragments and junk a player (or an attacker) may type.
 const TEXT_POOL: &[&str] = &[
@@ -931,20 +931,21 @@ fn random_text_commands_stay_bounded_and_deterministic() {
                 line = line.repeat(40);
             }
             let language = match rng.below(10) {
-                0 => Some("en".to_owned()),
-                1 => Some("xx-YY".to_owned()),
+                0..=2 => Some("es".to_owned()),
+                3 => Some("en".to_owned()),
+                4 => Some("xx-YY".to_owned()),
                 _ => None,
             };
             let input = StoryInput::Command {
                 text: line.clone(),
-                language,
+                language: language.clone(),
             };
             match step(&pack, &state, input) {
                 Ok((next, _)) => {
                     accepted += 1;
                     assert_bounded(&pack, &next);
                     assert_pages_bounded(&pack, &next);
-                    lines.push(line);
+                    lines.push((line, language));
                     state = next;
                 }
                 Err(StoryError::Ended) => {
@@ -954,13 +955,12 @@ fn random_text_commands_stay_bounded_and_deterministic() {
                 Err(error) => panic!("{line:?} on a validated pack: {error}"),
             }
         }
-        // The pack has only a Spanish lexicon, so every language above
-        // resolves to it and replaying without one reproduces the state.
+        // Replaying the same lines in the same languages reproduces the state.
         let mut replay = StoryState::new(&pack, seed).unwrap();
-        for line in &lines {
+        for (line, language) in &lines {
             let input = StoryInput::Command {
                 text: line.clone(),
-                language: None,
+                language: language.clone(),
             };
             replay = step(&pack, &replay, input).expect("replay").0;
         }

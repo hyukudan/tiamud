@@ -101,6 +101,27 @@ impl StoryPack {
         }
     }
 
+    /// The language a pack is played in when nobody asks for another one
+    /// (lowercase): the first parser lexicon of a v3 world, in pack order;
+    /// without a parser, English when the title offers it, else the title's
+    /// first locale; `en` for a pack without any title locale.
+    pub fn default_locale(&self) -> String {
+        if let Some(lexicon) = self.world.as_ref().and_then(|world| world.lexicons.first()) {
+            return lexicon.id.to_ascii_lowercase();
+        }
+        let locales = &self.title.0;
+        if locales
+            .keys()
+            .any(|locale| locale.eq_ignore_ascii_case("en"))
+        {
+            return "en".to_owned();
+        }
+        locales
+            .keys()
+            .next()
+            .map_or_else(|| "en".to_owned(), |locale| locale.to_ascii_lowercase())
+    }
+
     pub(crate) fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|node| node.id == id)
     }

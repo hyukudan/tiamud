@@ -130,11 +130,14 @@ than 1,024 directory entries stops the server.
   it is missing, so a forgotten bundle loses the picture, never play. Unmapped
   cues never play and unmapped images are never shown. The reviewed fixtures
   directory `crates/story-core/fixtures` ships such a map for the
-  `lluvia-de-neon` sample art in `apps/web/public/assets/`.
-- Players choose a story language on entry (`historia <id> en`, or the
+  `neon-rain` sample art in `apps/web/public/assets/`.
+- Players choose a story language on entry (`historia <id> es`, or the
   browser's **Stories** picker, which preselects the browser language when
   the pack offers it) among the pack's lexicons (parser stories) or title
-  locales; Spanish is the default when offered. The server's own story text
+  locales; the default is the pack's first lexicon, else English when the
+  title offers it (the bundled samples default to English and also ship
+  Spanish). Renaming a pack id (as the samples were renamed on 2026-10-16)
+  orphans the save slots stored under the old id. The server's own story text
   follows the session language (English for `en`, Spanish otherwise). No
   setting is needed.
 

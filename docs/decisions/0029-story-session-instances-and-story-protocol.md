@@ -234,3 +234,29 @@ el listado y sobre los mensajes del servidor en castellano:
   confirmaciones, etiquetas Telnet, listados y líneas de evento) sigue el
   locale de la sesión: inglés para `en`/`en-*`, castellano en otro caso y
   fuera de una historia.
+
+## Enmienda (2026-10-16): locale predeterminado del pack e historias de muestra en inglés
+
+Por decisión del propietario, cambia el locale predeterminado fijado arriba
+(«por defecto `es` si existe») y la preselección del selector web («si no
+`es`»); el resto de la decisión, el protocolo y los límites no cambian:
+
+- Una instancia sin locale pedido juega en el predeterminado del pack
+  (`StoryPack::default_locale` de `story-core`): el primer léxico del mundo
+  parser en el orden del pack; sin parser, `en` si el título lo ofrece y si
+  no el primer locale del título. `tiamud-story preview/play` y los guiones
+  sin `language` usan el mismo predeterminado. `historia <id> es` (y
+  `story`, `historia compartir`) sigue eligiendo otro idioma del pack.
+- El selector del navegador preselecciona el idioma del navegador si el
+  pack lo ofrece y, si no, el predeterminado de la historia (el primero de
+  `locales`), sin preferir `es`.
+- El texto propio del servidor fuera de una sesión sigue en castellano y,
+  dentro, sigue el locale de la sesión; los alias `historia`/`historias`
+  conviven con `story`/`stories`.
+- Las cuatro historias de muestra pasan a inglés como idioma predeterminado
+  con traducción completa al castellano y se renombran con ids ingleses
+  (`crypt-of-the-necromancer`, `neon-rain`, `grey-point-lighthouse`,
+  `duel-at-the-pass`). Son fixtures de muestra: los slots guardados con los
+  ids anteriores (`cripta-del-nigromante`, `lluvia-de-neon`,
+  `faro-de-punta-gris`, `duelo-en-el-paso`) no se trasladan. Los ids
+  internos de nodos, variables, objetos y verbos no cambian.

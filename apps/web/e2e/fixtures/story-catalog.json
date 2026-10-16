@@ -8,28 +8,36 @@
           "locales": [
             "es"
           ],
-          "storyId": "cripta-del-nigromante",
-          "title": "La cripta del nigromante"
+          "storyId": "breve",
+          "title": "Breve"
         },
         {
           "locales": [
-            "es",
-            "en"
+            "en",
+            "es"
           ],
-          "storyId": "lluvia-de-neon",
-          "title": "Lluvia de neón"
+          "storyId": "crypt-of-the-necromancer",
+          "title": "Crypt of the Necromancer"
+        },
+        {
+          "locales": [
+            "en",
+            "es"
+          ],
+          "storyId": "neon-rain",
+          "title": "Neon Rain"
         }
       ]
     }
   ],
   "entered": {
-    "locale": "en",
+    "locale": "es",
     "locales": [
-      "es",
-      "en"
+      "en",
+      "es"
     ],
-    "storyId": "lluvia-de-neon",
-    "title": "Neon Rain"
+    "storyId": "neon-rain",
+    "title": "Lluvia de neón"
   },
   "view": [
     {
@@ -37,30 +45,30 @@
       "items": [
         {
           "background": {
-            "alt": "A detective's office at night: a wide rain-streaked window over dark towers, a pink neon sign across the street and a desk lamp glowing on the desk.",
+            "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
             "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
           },
           "ending": null,
           "score": 0,
-          "text": "Your office on the fortieth floor. Acid rain streaks the glass and the neon across the street dyes the files pink. Iker Soto, a memory dealer, turned up dead last night. The case is yours.",
-          "title": "Neon Rain",
+          "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
+          "title": "Lluvia de neón",
           "type": "scene"
         },
         {
           "id": "c910a2dec89025cc1",
-          "label": "LOOK",
+          "label": "MIRAR",
           "needsTarget": true,
           "type": "verb"
         },
         {
           "id": "cbeeb8da1658eec67",
-          "label": "Desk",
+          "label": "Escritorio",
           "type": "target",
           "verb": "c910a2dec89025cc1"
         },
         {
           "id": "cf893a2eefb32555e",
-          "label": "Window",
+          "label": "Ventana",
           "type": "target",
           "verb": "c910a2dec89025cc1"
         },
@@ -72,25 +80,25 @@
         },
         {
           "id": "c71bb54d8d101b5b9",
-          "label": "Door",
+          "label": "Puerta",
           "type": "target",
           "verb": "c910a2dec89025cc1"
         },
         {
           "id": "cc34d0bff90150280",
-          "label": "INVESTIGATE",
+          "label": "INVESTIGAR",
           "needsTarget": true,
           "type": "verb"
         },
         {
           "id": "ce099ec6cd7363ca5",
-          "label": "Desk",
+          "label": "Escritorio",
           "type": "target",
           "verb": "cc34d0bff90150280"
         },
         {
           "id": "c85e7bb0f12278575",
-          "label": "Window",
+          "label": "Ventana",
           "type": "target",
           "verb": "cc34d0bff90150280"
         },
@@ -102,31 +110,31 @@
         },
         {
           "id": "ccb435c8e74616796",
-          "label": "Door",
+          "label": "Puerta",
           "type": "target",
           "verb": "cc34d0bff90150280"
         },
         {
           "id": "c6775dc7701564f61",
-          "label": "USE",
+          "label": "USAR",
           "needsTarget": true,
           "type": "verb"
         },
         {
           "id": "c9afcd44d14cf8bfe",
-          "label": "MOVE",
+          "label": "MOVERSE",
           "needsTarget": true,
           "type": "verb"
         },
         {
           "id": "c7476cf8a4baa5dc0",
-          "label": "Desk",
+          "label": "Escritorio",
           "type": "target",
           "verb": "c9afcd44d14cf8bfe"
         },
         {
           "id": "c87b341d690d7a28a",
-          "label": "Window",
+          "label": "Ventana",
           "type": "target",
           "verb": "c9afcd44d14cf8bfe"
         },
@@ -138,7 +146,7 @@
         },
         {
           "id": "c2ac2ce17a5794a3b",
-          "label": "Door",
+          "label": "Puerta",
           "type": "target",
           "verb": "c9afcd44d14cf8bfe"
         }

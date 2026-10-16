@@ -7,33 +7,34 @@ use super::*;
 use serde_json::json;
 use std::path::PathBuf;
 
-const FARO: &str = "faro-de-punta-gris";
-const CRIPTA: &str = "cripta-del-nigromante";
+const FARO: &str = "grey-point-lighthouse";
+const CRIPTA: &str = "crypt-of-the-necromancer";
 const HOST: AccountId = AccountId(1);
 const BRUNO: AccountId = AccountId(2);
 const CARLA: AccountId = AccountId(3);
 
-/// The reviewed walkthrough of the fixture, ending with the lantern's
-/// question and its answer instead of «enciende el fanal».
+/// The reviewed walkthrough of the fixture in its default language
+/// (English), ending with the lamp's question and its answer instead of
+/// "light the great lamp".
 const SCRIPT: &[&str] = &[
-    "examina la barca",
-    "coge la medalla",
+    "examine the boat",
+    "take the medal",
     "n",
-    "habla con remedios",
-    "dale la medalla a remedios",
+    "talk to remedios",
+    "give the medal to remedios",
     "e",
-    "abre el cofre",
-    "coge la lámpara y enciéndela",
-    "o",
-    "abre la puerta con la llave",
-    "abre la puerta. n",
-    "lee el cuaderno",
-    "sube",
-    "coge la aceitera",
-    "sube",
-    "llena el depósito con la aceitera",
-    "enciende la lampara",
-    "el fanal",
+    "open the chest",
+    "take the lamp and light it",
+    "w",
+    "unlock the door with the key",
+    "open the door. n",
+    "read the logbook",
+    "up",
+    "take the oil can",
+    "up",
+    "fill the tank with the oil can",
+    "light the lamp",
+    "the great lamp",
 ];
 
 fn fixture(path: &str) -> StoryPack {
@@ -47,13 +48,13 @@ fn fixture(path: &str) -> StoryPack {
 }
 
 fn faro() -> StoryPack {
-    fixture("parser/faro-de-punta-gris.story.json")
+    fixture("parser/grey-point-lighthouse.story.json")
 }
 
 fn stories() -> StoryManager {
     StoryManager::new(
         StoryCatalog::from_packs(
-            vec![faro(), fixture("cripta-del-nigromante.story.json")],
+            vec![faro(), fixture("crypt-of-the-necromancer.story.json")],
             BTreeMap::new(),
         )
         .unwrap(),
@@ -107,12 +108,12 @@ async fn the_parser_adventure_plays_to_its_ending_through_commands() {
             question: false
         })
     );
-    assert!(replies(&view).starts_with("La tormenta te sorprendió"));
+    assert!(replies(&view).starts_with("The storm caught you"));
     assert!(view.actions().is_empty());
     assert!(blocks(&view, StoryBlockKind::Command).is_empty());
     let text = render_text(&view);
-    assert!(text.contains("Playa de guijarros\r\n"));
-    assert!(text.contains("Escribe una orden"));
+    assert!(text.contains("Shingle Beach\r\n"));
+    assert!(text.contains("Type a command"));
 
     for line in &SCRIPT[..SCRIPT.len() - 2] {
         let reply = say(&link, &view, line).await;
@@ -123,16 +124,16 @@ async fn the_parser_adventure_plays_to_its_ending_through_commands() {
     // The ambiguous lamp asks; the prompt says a question is pending and
     // the question does not take a turn.
     let turn = view.turn;
-    view = say(&link, &view, "enciende la lampara").await.view;
+    view = say(&link, &view, "light the lamp").await.view;
     assert_eq!(
         replies(&view),
-        "¿Cuál quieres decir: la lámpara de aceite o el fanal?"
+        "Which do you mean, the oil lamp or the great lamp?"
     );
     assert!(view.prompt().unwrap().question);
     assert_eq!(view.turn, turn);
-    assert!(render_text(&view).contains("Responde a la pregunta"));
+    assert!(render_text(&view).contains("Answer the question"));
     // Answering finishes the story with a victory and full score.
-    view = say(&link, &view, "el fanal").await.view;
+    view = say(&link, &view, "the great lamp").await.view;
     assert_eq!(view.ending, Some(StoryEndingKind::Victory));
     assert_eq!(view.score, 30);
     assert_eq!(view.prompt(), None);
@@ -145,7 +146,10 @@ async fn the_parser_adventure_plays_to_its_ending_through_commands() {
 #[tokio::test]
 async fn meta_commands_map_to_session_operations() {
     let stories = stories();
-    let link = stories.enter_seeded(HOST, FARO, 7, Some(1)).unwrap();
+    // The Spanish lexicon's meta words, in a session that chose Spanish.
+    let link = stories
+        .enter_seeded_in(HOST, FARO, Some("es"), 7, Some(1))
+        .unwrap();
     let start = link.view().await.unwrap();
 
     // Score and help answer in the view without taking a turn.
@@ -203,7 +207,9 @@ async fn meta_commands_map_to_session_operations() {
 #[tokio::test]
 async fn commands_are_bounded_checked_and_rate_limited() {
     let stories = stories();
-    let link = stories.enter_seeded(HOST, FARO, 7, Some(1)).unwrap();
+    let link = stories
+        .enter_seeded_in(HOST, FARO, Some("es"), 7, Some(1))
+        .unwrap();
     let view = link.view().await.unwrap();
     let long = "a".repeat(MAX_COMMAND_BYTES + 1);
     assert_eq!(
@@ -281,7 +287,7 @@ async fn shared_parser_stories_never_vote_on_free_text() {
         Err(StoryFailure::Spectator)
     );
     let moved = say(&host, &view, "n").await.view;
-    assert_eq!(scene_text(&moved), "Explanada del faro");
+    assert_eq!(scene_text(&moved), "Lighthouse Headland");
     // Every participant follows the same view through the shared frame.
     let seen = bruno.frames().unwrap().borrow().view.clone();
     assert_eq!(seen.view_rev, moved.view_rev);
@@ -295,6 +301,7 @@ async fn shared_parser_stories_never_vote_on_free_text() {
         Err(StoryFailure::NotYourTurn)
     );
     let unknown = say(&host, &moved, "xyzzy").await.view;
+    assert!(replies(&unknown).contains("I don't know the word"));
     assert_eq!(unknown.turn, moved.turn);
     let mut current = say(&host, &unknown, "s").await.view;
     assert_eq!(
@@ -303,17 +310,17 @@ async fn shared_parser_stories_never_vote_on_free_text() {
     );
     // Undo and restart replace the game for everyone: host only.
     assert_eq!(
-        bruno.command("deshacer", current.view_rev).await,
+        bruno.command("undo", current.view_rev).await,
         Err(StoryFailure::HostOnly)
     );
     assert_eq!(
-        bruno.command("reiniciar", current.view_rev).await,
+        bruno.command("restart", current.view_rev).await,
         Err(StoryFailure::HostOnly)
     );
     current = say(&bruno, &current, "n").await.view;
-    assert_eq!(scene_text(&current), "Explanada del faro");
+    assert_eq!(scene_text(&current), "Lighthouse Headland");
     // The turn came back to the host.
-    say(&host, &current, "mira").await;
+    say(&host, &current, "look").await;
 }
 
 #[test]
@@ -376,7 +383,7 @@ async fn browser_parser_fixture_is_current() {
     let document = json!({"storyId": FARO, "title": link.title(), "steps": steps});
     let rendered = format!("{}\n", serde_json::to_string_pretty(&document).unwrap());
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/web/e2e/fixtures/story-faro.json");
+        .join("../../apps/web/e2e/fixtures/story-lighthouse.json");
     if std::env::var_os(UPDATE).is_some_and(|value| value == "1") {
         std::fs::write(&path, &rendered).unwrap();
         return;

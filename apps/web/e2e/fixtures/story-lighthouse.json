@@ -3,12 +3,12 @@
     {
       "input": {
         "data": {
-          "text": "examina la barca",
+          "text": "examine the boat",
           "viewRev": 1
         },
         "type": "story.command"
       },
-      "label": "examina la barca",
+      "label": "examine the boat",
       "view": [
         {
           "canUndo": false,
@@ -20,23 +20,23 @@
                 "text": ">"
               },
               "score": 0,
-              "text": "Playa de guijarros",
-              "title": "El faro de Punta Gris",
+              "text": "Shingle Beach",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "reply",
-              "text": "La tormenta te sorprendió remando de vuelta a casa y el mar te ha escupido en la cala de Punta Gris. Esta noche el faro está apagado, y ahí fuera hay barcos que lo necesitan.\nEscribe «ayuda» si no sabes por dónde empezar.",
+              "text": "The storm caught you rowing home and the sea has spat you out in the cove at Grey Point. Tonight the lighthouse is dark, and there are boats out there that need it.\nType “help” if you don't know where to start.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Playa de guijarros",
+              "text": "Shingle Beach",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Una cala de guijarros negros encajada entre dos espolones de roca. El mar, del color del plomo, rompe sin ganas contra una barca varada. Hacia el norte, un sendero sube hasta la explanada del faro.",
+              "text": "A cove of black shingle wedged between two spurs of rock. The lead-grey sea breaks half-heartedly against a beached boat. To the north, a path climbs to the lighthouse headland.",
               "type": "block"
             }
           ],
@@ -50,12 +50,12 @@
     {
       "input": {
         "data": {
-          "text": "coge la medalla",
+          "text": "take the medal",
           "viewRev": 2
         },
         "type": "story.command"
       },
-      "label": "coge la medalla",
+      "label": "take the medal",
       "view": [
         {
           "canUndo": true,
@@ -67,23 +67,23 @@
                 "text": ">"
               },
               "score": 0,
-              "text": "Playa de guijarros",
-              "title": "El faro de Punta Gris",
+              "text": "Shingle Beach",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "examina la barca",
+              "text": "examine the boat",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Una barca de remos medio hundida en los guijarros, con el casco cubierto de algas. Alguien la usa para guardar cosas.",
+              "text": "A rowing boat half sunk in the shingle, its hull furred with weed. Someone uses it to keep things in.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Dentro de la barca varada ves una medalla de plata.",
+              "text": "In the beached boat you see a silver medal.",
               "type": "block"
             }
           ],
@@ -114,18 +114,18 @@
                 "text": ">"
               },
               "score": 0,
-              "text": "Playa de guijarros",
-              "title": "El faro de Punta Gris",
+              "text": "Shingle Beach",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "coge la medalla",
+              "text": "take the medal",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Coges la medalla de plata.",
+              "text": "You take the silver medal.",
               "type": "block"
             }
           ],
@@ -139,12 +139,12 @@
     {
       "input": {
         "data": {
-          "text": "habla con remedios",
+          "text": "talk to remedios",
           "viewRev": 4
         },
         "type": "story.command"
       },
-      "label": "habla con remedios",
+      "label": "talk to remedios",
       "view": [
         {
           "canUndo": true,
@@ -156,8 +156,8 @@
                 "text": ">"
               },
               "score": 0,
-              "text": "Explanada del faro",
-              "title": "El faro de Punta Gris",
+              "text": "Lighthouse Headland",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
@@ -167,17 +167,17 @@
             },
             {
               "kind": "reply",
-              "text": "Explanada del faro",
+              "text": "Lighthouse Headland",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Una explanada de hierba rala azotada por el viento. Al norte se alza la torre blanca del faro, con su puerta verde; al este, una caseta de tablas; al sur, el sendero baja a la playa.",
+              "text": "A windswept stretch of thin grass. To the north rises the white tower of the lighthouse, with its green door; to the east stands a plank shed; to the south, the path drops back down to the beach.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Puedes ver Remedios.",
+              "text": "You can see Remedios.",
               "type": "block"
             }
           ],
@@ -191,12 +191,12 @@
     {
       "input": {
         "data": {
-          "text": "dale la medalla a remedios",
+          "text": "give the medal to remedios",
           "viewRev": 5
         },
         "type": "story.command"
       },
-      "label": "dale la medalla a remedios",
+      "label": "give the medal to remedios",
       "view": [
         {
           "canUndo": true,
@@ -208,18 +208,18 @@
                 "text": ">"
               },
               "score": 0,
-              "text": "Explanada del faro",
-              "title": "El faro de Punta Gris",
+              "text": "Lighthouse Headland",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "habla con remedios",
+              "text": "talk to remedios",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "—El faro lleva tres noches apagado desde que se llevaron al farero al hospital —dice Remedios sin levantar la vista de la red—. Yo tengo la llave, pero esta mañana perdí la medalla de mi Andrés en la playa y no me muevo de aquí hasta encontrarla.",
+              "text": "“The light's been out three nights now, ever since they took the keeper off to hospital,” says Remedios without looking up from her net. “I've got the key, but this morning I lost my Andrés's medal down on the beach, and I'm not budging from here until I find it.”",
               "type": "block"
             }
           ],
@@ -250,23 +250,23 @@
                 "text": ">"
               },
               "score": 5,
-              "text": "Explanada del faro",
-              "title": "El faro de Punta Gris",
+              "text": "Lighthouse Headland",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "dale la medalla a remedios",
+              "text": "give the medal to remedios",
               "type": "block"
             },
             {
               "kind": "event",
-              "text": "Puntuación +5 (total 5)",
+              "text": "Score +5 (total 5)",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Remedios coge la medalla con las dos manos y se la lleva a los labios. Luego rebusca en el delantal y te pone en la mano una llave de hierro. —La del faro. Date prisa.",
+              "text": "Remedios takes the medal in both hands and raises it to her lips. Then she rummages in her apron and presses an iron key into your palm. “The lighthouse key. Hurry.”",
               "type": "block"
             }
           ],
@@ -280,12 +280,12 @@
     {
       "input": {
         "data": {
-          "text": "abre el cofre",
+          "text": "open the chest",
           "viewRev": 7
         },
         "type": "story.command"
       },
-      "label": "abre el cofre",
+      "label": "open the chest",
       "view": [
         {
           "canUndo": true,
@@ -297,8 +297,8 @@
                 "text": ">"
               },
               "score": 5,
-              "text": "Caseta de los aparejos",
-              "title": "El faro de Punta Gris",
+              "text": "Tackle Shed",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
@@ -308,17 +308,17 @@
             },
             {
               "kind": "reply",
-              "text": "Caseta de los aparejos",
+              "text": "Tackle Shed",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Una caseta que huele a brea y a sal. De las paredes cuelgan redes remendadas mil veces. La única salida está al oeste.",
+              "text": "A shed that smells of tar and salt. Nets mended a thousand times hang from the walls. The only way out is to the west.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Puedes ver un cofre de marinero.",
+              "text": "You can see a sea chest.",
               "type": "block"
             }
           ],
@@ -332,12 +332,12 @@
     {
       "input": {
         "data": {
-          "text": "coge la lámpara y enciéndela",
+          "text": "take the lamp and light it",
           "viewRev": 8
         },
         "type": "story.command"
       },
-      "label": "coge la lámpara y enciéndela",
+      "label": "take the lamp and light it",
       "view": [
         {
           "canUndo": true,
@@ -349,23 +349,23 @@
                 "text": ">"
               },
               "score": 5,
-              "text": "Caseta de los aparejos",
-              "title": "El faro de Punta Gris",
+              "text": "Tackle Shed",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "abre el cofre",
+              "text": "open the chest",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Abres el cofre de marinero.",
+              "text": "You open the sea chest.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Dentro del cofre de marinero ves una lámpara de aceite.",
+              "text": "In the sea chest you see an oil lamp.",
               "type": "block"
             }
           ],
@@ -379,12 +379,12 @@
     {
       "input": {
         "data": {
-          "text": "o",
+          "text": "w",
           "viewRev": 9
         },
         "type": "story.command"
       },
-      "label": "o",
+      "label": "w",
       "view": [
         {
           "canUndo": true,
@@ -396,23 +396,23 @@
                 "text": ">"
               },
               "score": 5,
-              "text": "Caseta de los aparejos",
-              "title": "El faro de Punta Gris",
+              "text": "Tackle Shed",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "coge la lámpara y enciéndela",
+              "text": "take the lamp and light it",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Coges la lámpara de aceite.",
+              "text": "You take the oil lamp.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Enciendes la lámpara de aceite.",
+              "text": "You light the oil lamp.",
               "type": "block"
             }
           ],
@@ -426,12 +426,12 @@
     {
       "input": {
         "data": {
-          "text": "abre la puerta con la llave",
+          "text": "unlock the door with the key",
           "viewRev": 10
         },
         "type": "story.command"
       },
-      "label": "abre la puerta con la llave",
+      "label": "unlock the door with the key",
       "view": [
         {
           "canUndo": true,
@@ -443,28 +443,28 @@
                 "text": ">"
               },
               "score": 5,
-              "text": "Explanada del faro",
-              "title": "El faro de Punta Gris",
+              "text": "Lighthouse Headland",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "o",
+              "text": "w",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Explanada del faro",
+              "text": "Lighthouse Headland",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Una explanada de hierba rala azotada por el viento. Al norte se alza la torre blanca del faro, con su puerta verde; al este, una caseta de tablas; al sur, el sendero baja a la playa.",
+              "text": "A windswept stretch of thin grass. To the north rises the white tower of the lighthouse, with its green door; to the east stands a plank shed; to the south, the path drops back down to the beach.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Puedes ver Remedios.",
+              "text": "You can see Remedios.",
               "type": "block"
             }
           ],
@@ -478,12 +478,12 @@
     {
       "input": {
         "data": {
-          "text": "abre la puerta. n",
+          "text": "open the door. n",
           "viewRev": 11
         },
         "type": "story.command"
       },
-      "label": "abre la puerta. n",
+      "label": "open the door. n",
       "view": [
         {
           "canUndo": true,
@@ -495,28 +495,28 @@
                 "text": ">"
               },
               "score": 10,
-              "text": "Explanada del faro",
-              "title": "El faro de Punta Gris",
+              "text": "Lighthouse Headland",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "abre la puerta con la llave",
+              "text": "unlock the door with the key",
               "type": "block"
             },
             {
               "kind": "event",
-              "text": "Puntuación +5 (total 10)",
+              "text": "Score +5 (total 10)",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Abres la cerradura de la puerta del faro con la llave de hierro.",
+              "text": "You unlock the lighthouse door with the iron key.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "La cerradura cede con un quejido de hierro viejo.",
+              "text": "The lock gives with a groan of old iron.",
               "type": "block"
             }
           ],
@@ -530,12 +530,12 @@
     {
       "input": {
         "data": {
-          "text": "lee el cuaderno",
+          "text": "read the logbook",
           "viewRev": 12
         },
         "type": "story.command"
       },
-      "label": "lee el cuaderno",
+      "label": "read the logbook",
       "view": [
         {
           "canUndo": true,
@@ -547,33 +547,33 @@
                 "text": ">"
               },
               "score": 10,
-              "text": "Vestíbulo del faro",
-              "title": "El faro de Punta Gris",
+              "text": "Lighthouse Entrance",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "abre la puerta. n",
+              "text": "open the door. n",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Abres la puerta del faro.",
+              "text": "You open the lighthouse door.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Vestíbulo del faro",
+              "text": "Lighthouse Entrance",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "La planta baja del faro: un cuarto redondo y encalado con una mesa de pino bajo la ventana. Una escalera de caracol sube hacia la oscuridad; la puerta da al sur.",
+              "text": "The ground floor of the lighthouse: a round, whitewashed room with a pine table under the window. A spiral staircase climbs into the darkness; the door leads south.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Puedes ver un cuaderno de bitácora.",
+              "text": "You can see a logbook.",
               "type": "block"
             }
           ],
@@ -587,12 +587,12 @@
     {
       "input": {
         "data": {
-          "text": "sube",
+          "text": "up",
           "viewRev": 13
         },
         "type": "story.command"
       },
-      "label": "sube",
+      "label": "up",
       "view": [
         {
           "canUndo": true,
@@ -604,18 +604,18 @@
                 "text": ">"
               },
               "score": 10,
-              "text": "Vestíbulo del faro",
-              "title": "El faro de Punta Gris",
+              "text": "Lighthouse Entrance",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "lee el cuaderno",
+              "text": "read the logbook",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "La última anotación, con letra temblorosa: «El fanal está seco. Antes de prenderlo hay que llenar el depósito con la aceitera que dejé en la escalera. Sin aceite, la mecha solo da humo».",
+              "text": "The last entry, in a shaky hand: “The lamp is dry. Before lighting it, fill the tank with the oil can I left on the stairs. Without oil, the wick only smokes.”",
               "type": "block"
             }
           ],
@@ -629,12 +629,12 @@
     {
       "input": {
         "data": {
-          "text": "coge la aceitera",
+          "text": "take the oil can",
           "viewRev": 14
         },
         "type": "story.command"
       },
-      "label": "coge la aceitera",
+      "label": "take the oil can",
       "view": [
         {
           "canUndo": true,
@@ -646,28 +646,28 @@
                 "text": ">"
               },
               "score": 10,
-              "text": "Escalera de caracol",
-              "title": "El faro de Punta Gris",
+              "text": "Spiral Staircase",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "sube",
+              "text": "up",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Escalera de caracol",
+              "text": "Spiral Staircase",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Los peldaños de hierro giran y giran pegados al muro. Huele a aceite rancio. Arriba se adivina la sala de la linterna; abajo, el vestíbulo.",
+              "text": "The iron steps wind round and round against the wall. There is a smell of stale oil. Above, you can just make out the lantern room; below lies the entrance.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Puedes ver una aceitera de latón.",
+              "text": "You can see a brass oil can.",
               "type": "block"
             }
           ],
@@ -681,12 +681,12 @@
     {
       "input": {
         "data": {
-          "text": "sube",
+          "text": "up",
           "viewRev": 15
         },
         "type": "story.command"
       },
-      "label": "sube",
+      "label": "up",
       "view": [
         {
           "canUndo": true,
@@ -698,23 +698,23 @@
                 "text": ">"
               },
               "score": 10,
-              "text": "Escalera de caracol",
-              "title": "El faro de Punta Gris",
+              "text": "Spiral Staircase",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "coge la aceitera",
+              "text": "take the oil can",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "La aceitera está pegajosa de grasa.",
+              "text": "The oil can is sticky with grease.",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Coges la aceitera de latón.",
+              "text": "You take the brass oil can.",
               "type": "block"
             }
           ],
@@ -728,12 +728,12 @@
     {
       "input": {
         "data": {
-          "text": "llena el depósito con la aceitera",
+          "text": "fill the tank with the oil can",
           "viewRev": 16
         },
         "type": "story.command"
       },
-      "label": "llena el depósito con la aceitera",
+      "label": "fill the tank with the oil can",
       "view": [
         {
           "canUndo": true,
@@ -745,23 +745,23 @@
                 "text": ">"
               },
               "score": 10,
-              "text": "Sala de la linterna",
-              "title": "El faro de Punta Gris",
+              "text": "Lantern Room",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "sube",
+              "text": "up",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Sala de la linterna",
+              "text": "Lantern Room",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "La sala de la linterna, en lo alto de la torre. En el centro reposa el gran fanal, rodeado por una lente de cristal tallado; a su lado, un depósito de latón. Por los ventanales se ve llegar la tormenta.",
+              "text": "The lantern room, at the top of the tower. In the middle stands the great lamp, ringed by a lens of cut glass; beside it sits a brass tank. Through the windows you can see the storm rolling in.",
               "type": "block"
             }
           ],
@@ -775,12 +775,12 @@
     {
       "input": {
         "data": {
-          "text": "enciende la lampara",
+          "text": "light the lamp",
           "viewRev": 17
         },
         "type": "story.command"
       },
-      "label": "enciende la lampara",
+      "label": "light the lamp",
       "view": [
         {
           "canUndo": true,
@@ -792,23 +792,23 @@
                 "text": ">"
               },
               "score": 20,
-              "text": "Sala de la linterna",
-              "title": "El faro de Punta Gris",
+              "text": "Lantern Room",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "llena el depósito con la aceitera",
+              "text": "fill the tank with the oil can",
               "type": "block"
             },
             {
               "kind": "event",
-              "text": "Puntuación +10 (total 20)",
+              "text": "Score +10 (total 20)",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Vacías la aceitera en el depósito hasta que el aceite asoma por el borde. Dejas la lata vacía en un rincón.",
+              "text": "You empty the oil can into the tank until the oil brims at the edge. You leave the empty can in a corner.",
               "type": "block"
             }
           ],
@@ -822,12 +822,12 @@
     {
       "input": {
         "data": {
-          "text": "el fanal",
+          "text": "the great lamp",
           "viewRev": 18
         },
         "type": "story.command"
       },
-      "label": "el fanal",
+      "label": "the great lamp",
       "view": [
         {
           "canUndo": true,
@@ -839,18 +839,18 @@
                 "text": ">"
               },
               "score": 20,
-              "text": "Sala de la linterna",
-              "title": "El faro de Punta Gris",
+              "text": "Lantern Room",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "enciende la lampara",
+              "text": "light the lamp",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "¿Cuál quieres decir: la lámpara de aceite o el fanal?",
+              "text": "Which do you mean, the oil lamp or the great lamp?",
               "type": "block"
             }
           ],
@@ -873,23 +873,23 @@
                 "kind": "victory"
               },
               "score": 30,
-              "text": "La mecha prende con un chasquido y la lente multiplica la llama hasta convertirla en un haz que barre el mar. Allá abajo, entre las olas, las luces de los pesqueros viran hacia el puerto. Cuando amanece, Remedios sube con dos tazas de café y se sienta a tu lado sin decir nada.",
-              "title": "El faro de Punta Gris",
+              "text": "The wick catches with a crackle and the lens multiplies the flame into a beam that sweeps the sea. Far below, among the waves, the lights of the fishing boats turn for harbour. At dawn, Remedios climbs the stairs with two cups of coffee and sits down beside you without a word.",
+              "title": "The Lighthouse at Grey Point",
               "type": "scene"
             },
             {
               "kind": "command",
-              "text": "el fanal",
+              "text": "the great lamp",
               "type": "block"
             },
             {
               "kind": "event",
-              "text": "Puntuación +10 (total 30)",
+              "text": "Score +10 (total 30)",
               "type": "block"
             },
             {
               "kind": "reply",
-              "text": "Abres el globo de cristal y acercas la llama de tu lámpara a la mecha empapada.",
+              "text": "You open the glass globe and touch the flame of your lamp to the oil-soaked wick.",
               "type": "block"
             }
           ],
@@ -901,6 +901,6 @@
       ]
     }
   ],
-  "storyId": "faro-de-punta-gris",
-  "title": "El faro de Punta Gris"
+  "storyId": "grey-point-lighthouse",
+  "title": "The Lighthouse at Grey Point"
 }

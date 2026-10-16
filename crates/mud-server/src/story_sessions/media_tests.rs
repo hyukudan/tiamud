@@ -6,8 +6,8 @@ use super::*;
 use serde_json::json;
 use std::path::PathBuf;
 
-const LLUVIA: &str = "lluvia-de-neon";
-const CRIPTA: &str = "cripta-del-nigromante";
+const LLUVIA: &str = "neon-rain";
+const CRIPTA: &str = "crypt-of-the-necromancer";
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../story-core/fixtures")
@@ -198,18 +198,18 @@ async fn reviewed_images_resolve_in_the_view_and_unknown_ids_degrade_to_text() {
     let office = link.view().await.unwrap();
     let image = background(&office).expect("the office background is reviewed");
     assert!(image.manifest.starts_with("/assets/fb9c51c7"));
-    assert!(image.alt.starts_with("Un despacho de detective"));
+    assert!(image.alt.starts_with("A detective's office"));
     // Telnet shows the alt text in place of the image.
     assert!(render_text(&office).contains(&format!("[{}]\r\n", image.alt)));
 
     let mut view = office;
     for label in [
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Escritorio",
-        "USAR → Tarjeta de memoria",
-        "MOVERSE → Puerta",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Desk",
+        "USE → Memory card",
+        "MOVE → Door",
     ] {
         view = act(&link, &view, label).await;
     }
@@ -224,7 +224,7 @@ async fn reviewed_images_resolve_in_the_view_and_unknown_ids_degrade_to_text() {
             .as_ref()
             .unwrap()
             .alt
-            .starts_with("Silueta de Lola")
+            .starts_with("Portrait silhouette of Lola")
     );
     // A web part carries the image item even with audio off.
     assert!(
@@ -247,7 +247,7 @@ async fn reviewed_images_resolve_in_the_view_and_unknown_ids_degrade_to_text() {
     let bare = link.view().await.unwrap();
     assert_eq!(background(&bare), None);
     assert!(
-        !render_text(&bare).contains("[Un despacho"),
+        !render_text(&bare).contains("[A detective's office"),
         "no alt line without a reviewed image"
     );
     let strip = |view: &StoryProjection| {
@@ -281,19 +281,19 @@ async fn an_unreviewed_background_or_expression_only_loses_the_image() {
         .unwrap();
     let mut view = link.view().await.unwrap();
     for label in [
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Escritorio",
-        "USAR → Tarjeta de memoria",
-        "MOVERSE → Puerta",
-        "HABLAR → Lola",
-        "Pedir un café solo",
-        "Seguir hablando",
-        "Despedirte",
-        "MOSTRAR → Tarjeta de memoria",
-        "INVESTIGAR → Reservado",
-        "MOVERSE → Callejón trasero",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Desk",
+        "USE → Memory card",
+        "MOVE → Door",
+        "TALK → Lola",
+        "Order a black coffee",
+        "Keep talking",
+        "Say goodbye",
+        "SHOW → Memory card",
+        "INVESTIGATE → Booth",
+        "MOVE → Back alley",
     ] {
         view = act(&link, &view, label).await;
     }
@@ -303,7 +303,7 @@ async fn an_unreviewed_background_or_expression_only_loses_the_image() {
     assert!(present[0].1.as_ref().unwrap().alt.contains("Dámaso"));
     // The scene text is all a text client needs.
     let text = render_text(&view);
-    assert!(text.contains("Presentes: Dámaso"));
+    assert!(text.contains("Present: Dámaso"));
 }
 
 /// `(speaker, portrait)` of every dialogue line of a view.
@@ -326,10 +326,10 @@ fn line_portraits(view: &StoryProjection) -> Vec<(Option<String>, Option<protoco
 async fn dialogue_lines_carry_the_reviewed_portrait_of_their_expression() {
     let stories = catalog_stories(vec![fixture(LLUVIA)], fixture_media());
     let spanish = stories
-        .enter_seeded(AccountId(1), LLUVIA, 7, Some(1))
+        .enter_seeded_in(AccountId(1), LLUVIA, Some("es"), 7, Some(1))
         .unwrap();
     let english = stories
-        .enter_seeded_in(AccountId(2), LLUVIA, Some("en"), 7, Some(1))
+        .enter_seeded(AccountId(2), LLUVIA, 7, Some(1))
         .unwrap();
     let mut es = spanish.view().await.unwrap();
     let mut en = english.view().await.unwrap();
@@ -406,13 +406,13 @@ async fn dialogue_lines_carry_the_reviewed_portrait_of_their_expression() {
         .unwrap();
     let mut view = link.view().await.unwrap();
     for label in [
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Escritorio",
-        "USAR → Tarjeta de memoria",
-        "MOVERSE → Puerta",
-        "HABLAR → Lola",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Desk",
+        "USE → Memory card",
+        "MOVE → Door",
+        "TALK → Lola",
     ] {
         view = act(&link, &view, label).await;
     }
@@ -463,8 +463,11 @@ fn line_portraits_stay_inside_the_frame_budget() {
 async fn sessions_choose_their_locale_among_the_pack_locales() {
     let stories = catalog_stories(vec![fixture(LLUVIA), fixture(CRIPTA)], fixture_media());
     let catalog = stories.inner.catalog.get(LLUVIA).unwrap().clone();
-    assert_eq!(catalog.locales(), ["es", "en"]);
-    assert_eq!(stories.inner.catalog.get(CRIPTA).unwrap().locales(), ["es"]);
+    assert_eq!(catalog.locales(), ["en", "es"]);
+    assert_eq!(
+        stories.inner.catalog.get(CRIPTA).unwrap().locales(),
+        ["en", "es"]
+    );
     // Unknown, empty or oversized requests are refused before any instance.
     for bad in ["fr", "", "x".repeat(64).as_str()] {
         assert_eq!(
@@ -473,7 +476,7 @@ async fn sessions_choose_their_locale_among_the_pack_locales() {
         );
     }
     assert_eq!(
-        stories.enter_in(AccountId(1), CRIPTA, Some("en")).err(),
+        stories.enter_in(AccountId(1), CRIPTA, Some("de")).err(),
         Some(StoryFailure::UnknownLocale)
     );
     assert_eq!(stories.live_instances(), 0);
@@ -482,9 +485,28 @@ async fn sessions_choose_their_locale_among_the_pack_locales() {
         StoryErrorCode::UnknownLocale
     );
 
-    // `en-GB` resolves to the pack's `en`; title, text and alt follow it.
+    // `es-ES` resolves to the pack's `es`; title, text and alt follow it.
+    let spanish = stories
+        .enter_seeded_in(AccountId(1), LLUVIA, Some("es-ES"), 7, Some(1))
+        .unwrap();
+    assert_eq!(spanish.locale(), "es");
+    assert_eq!(spanish.title(), "Lluvia de neón");
+    let view = spanish.view().await.unwrap();
+    assert_eq!(view.title, "Lluvia de neón");
+    assert!(
+        background(&view)
+            .unwrap()
+            .alt
+            .starts_with("Un despacho de detective")
+    );
+    let spanish_labels = view
+        .actions()
+        .iter()
+        .map(|action| action.label().to_owned())
+        .collect::<Vec<_>>();
+    // Without a request the instance plays in the pack's default: English.
     let english = stories
-        .enter_seeded_in(AccountId(1), LLUVIA, Some("en-GB"), 7, Some(1))
+        .enter_seeded(AccountId(2), LLUVIA, 7, Some(1))
         .unwrap();
     assert_eq!(english.locale(), "en");
     assert_eq!(english.title(), "Neon Rain");
@@ -501,25 +523,12 @@ async fn sessions_choose_their_locale_among_the_pack_locales() {
         .iter()
         .map(|action| action.label().to_owned())
         .collect::<Vec<_>>();
-    let spanish = stories
-        .enter_seeded(AccountId(2), LLUVIA, 7, Some(1))
-        .unwrap();
-    assert_eq!(spanish.locale(), "es");
-    assert_eq!(spanish.title(), "Lluvia de neón");
-    let spanish_labels = spanish
-        .view()
-        .await
-        .unwrap()
-        .actions()
-        .iter()
-        .map(|action| action.label().to_owned())
-        .collect::<Vec<_>>();
     assert_eq!(labels.len(), spanish_labels.len());
     assert_ne!(labels, spanish_labels, "menu labels are translated");
 
     // Re-entering a live instance keeps its language.
-    let again = stories.enter_in(AccountId(1), LLUVIA, Some("es")).unwrap();
-    assert_eq!(again.locale(), "en");
+    let again = stories.enter_in(AccountId(1), LLUVIA, Some("en")).unwrap();
+    assert_eq!(again.locale(), "es");
 }
 
 fn bilingual_parser_pack(prompt: Option<serde_json::Value>) -> StoryPack {
@@ -644,7 +653,7 @@ fn entered_payload_names_the_locale_and_its_alternatives() {
         };
         assert_eq!(
             serde_json::to_value(entered).unwrap(),
-            json!({"storyId": LLUVIA, "title": "Neon Rain", "locale": "en", "locales": ["es", "en"]})
+            json!({"storyId": LLUVIA, "title": "Neon Rain", "locale": "en", "locales": ["en", "es"]})
         );
     });
 }
@@ -705,17 +714,17 @@ fn failures_speak_the_session_locale_and_default_to_spanish() {
 async fn an_english_session_reads_the_server_text_in_english() {
     let stories = catalog_stories(vec![fixture(LLUVIA), fixture(CRIPTA)], fixture_media());
     let english = stories
-        .enter_seeded_in(AccountId(1), LLUVIA, Some("en"), 7, Some(1))
+        .enter_seeded(AccountId(1), LLUVIA, 7, Some(1))
         .unwrap();
     let view = english.view().await.unwrap();
-    assert_eq!(view.locale, "en");
+    assert_eq!(view.locale, "en", "English is the pack's default");
     let text = render_text(&view);
     assert!(text.contains("[Turn 0 · Score 0]"), "{text}");
     assert!(text.contains("Inventory: (empty)"));
     assert!(text.contains("Type a number to choose"));
     assert!(!text.contains("Escribe"));
     let spanish = stories
-        .enter_seeded(AccountId(2), LLUVIA, 7, Some(1))
+        .enter_seeded_in(AccountId(2), LLUVIA, Some("es"), 7, Some(1))
         .unwrap();
     let text = render_text(&spanish.view().await.unwrap());
     assert!(text.contains("[Turno 0 · Puntuación 0]"));
@@ -723,8 +732,8 @@ async fn an_english_session_reads_the_server_text_in_english() {
 
     // The listing names every story's languages, default first.
     let listing = render_listing(&stories.listing(), "es");
-    assert!(listing.contains("cripta-del-nigromante — La cripta del nigromante [es]"));
-    assert!(listing.contains("lluvia-de-neon — Lluvia de neón [es, en]"));
+    assert!(listing.contains("crypt-of-the-necromancer — Crypt of the Necromancer [en, es]"));
+    assert!(listing.contains("neon-rain — Neon Rain [en, es]"));
     assert!(listing.contains("«historia <id> <idioma>»"));
     assert!(render_listing(&stories.listing(), "en").starts_with("Available stories:"));
 }
@@ -737,8 +746,8 @@ fn the_catalog_splits_into_bounded_parts_without_losing_entries() {
     assert_eq!(
         serde_json::to_value(&parts[0]).unwrap(),
         json!({"part": 0, "parts": 1, "stories": [
-            {"storyId": CRIPTA, "title": "La cripta del nigromante", "locales": ["es"]},
-            {"storyId": LLUVIA, "title": "Lluvia de neón", "locales": ["es", "en"]}
+            {"storyId": CRIPTA, "title": "Crypt of the Necromancer", "locales": ["en", "es"]},
+            {"storyId": LLUVIA, "title": "Neon Rain", "locales": ["en", "es"]}
         ]})
     );
     assert_eq!(catalog_parts(&[]).len(), 1);

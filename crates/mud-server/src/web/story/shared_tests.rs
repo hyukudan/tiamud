@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tiamud_story_core::StoryPack;
 
-const CRIPTA: &str = "cripta-del-nigromante";
+const CRIPTA: &str = "crypt-of-the-necromancer";
 const ARIA: AccountId = AccountId(1);
 const BRUNO: AccountId = AccountId(2);
 /// Placeholder that replaces the random join code in the recorded fixture.
@@ -20,7 +20,7 @@ const FIXTURE_CODE: &str = "ABCD2345";
 fn stories() -> StoryManager {
     let bytes = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-core/fixtures/cripta-del-nigromante.story.json"),
+            .join("../story-core/fixtures/crypt-of-the-necromancer.story.json"),
     )
     .unwrap();
     StoryManager::new(
@@ -181,7 +181,7 @@ async fn two_browsers_share_vote_and_recover() {
     let voted = aria.take();
     assert_eq!(
         find(&voted, "action.result")["message"],
-        format!("Votas por: {}", first_choice(&view).1)
+        format!("You vote for: {}", first_choice(&view).1)
     );
     // The reply itself carries the tally (an acknowledgement).
     assert_eq!(types(&voted), ["action.result", "story.tally"]);
@@ -320,7 +320,7 @@ async fn spectators_watch_without_acting_and_see_the_end() {
         find(&seats, "action.result")["message"]
             .as_str()
             .unwrap()
-            .contains("Espectadores: 1/32")
+            .contains("Spectators: 1/32")
     );
     // The only seat leaves: the spectator's story ends.
     assert!(aria.session.leave(&aria.out, &mut aria.seq).await);

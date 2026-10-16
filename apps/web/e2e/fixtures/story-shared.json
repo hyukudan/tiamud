@@ -7,7 +7,7 @@
         "A": [
           {
             "data": {
-              "message": "Compartes «La cripta del nigromante». Historia compartida · votación por mayoría · plazo 60 s\nCódigo para unirse: ABCD2345 (historia unirse ABCD2345 / story join ABCD2345)\nAsientos (1/8):\n  1. Aria (anfitrión)\nEspectadores: 0/32. Tú: anfitrión.",
+              "message": "You share «Crypt of the Necromancer». Shared story · majority vote · window 60 s\nJoin code: ABCD2345 (historia unirse ABCD2345 / story join ABCD2345)\nSeats (1/8):\n  1. Aria (host)\nSpectators: 0/32. You: host.",
               "ok": true,
               "requestId": "REQUEST"
             },
@@ -15,12 +15,13 @@
           },
           {
             "data": {
-              "locale": "es",
+              "locale": "en",
               "locales": [
+                "en",
                 "es"
               ],
-              "storyId": "cripta-del-nigromante",
-              "title": "La cripta del nigromante"
+              "storyId": "crypt-of-the-necromancer",
+              "title": "Crypt of the Necromancer"
             },
             "type": "story.entered"
           },
@@ -51,23 +52,23 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "Te detienes ante la entrada de la cripta del nigromante. Antes de bajar, pon a prueba tu destreza.",
-                  "title": "La cripta del nigromante",
+                  "text": "You stop at the entrance to the necromancer's crypt. Before you go down, put your skill to the test.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "0"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
                   "id": "c910a2dec89025cc1",
-                  "label": "Tira un dado y suma 6 para fijar tu destreza",
+                  "label": "Roll one die and add 6 to set your skill",
                   "type": "choice"
                 }
               ],
@@ -93,7 +94,7 @@
       },
       "input": {
         "data": {
-          "command": "historia compartir cripta-del-nigromante"
+          "command": "historia compartir crypt-of-the-necromancer"
         },
         "type": "command.submit"
       },
@@ -143,7 +144,7 @@
         "B": [
           {
             "data": {
-              "message": "Te unes a «La cripta del nigromante».",
+              "message": "You join «Crypt of the Necromancer».",
               "ok": true,
               "requestId": "REQUEST"
             },
@@ -151,12 +152,13 @@
           },
           {
             "data": {
-              "locale": "es",
+              "locale": "en",
               "locales": [
+                "en",
                 "es"
               ],
-              "storyId": "cripta-del-nigromante",
-              "title": "La cripta del nigromante"
+              "storyId": "crypt-of-the-necromancer",
+              "title": "Crypt of the Necromancer"
             },
             "type": "story.entered"
           },
@@ -192,23 +194,23 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "Te detienes ante la entrada de la cripta del nigromante. Antes de bajar, pon a prueba tu destreza.",
-                  "title": "La cripta del nigromante",
+                  "text": "You stop at the entrance to the necromancer's crypt. Before you go down, put your skill to the test.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "0"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
                   "id": "c910a2dec89025cc1",
-                  "label": "Tira un dado y suma 6 para fijar tu destreza",
+                  "label": "Roll one die and add 6 to set your skill",
                   "type": "choice"
                 }
               ],
@@ -287,7 +289,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Tira un dado y suma 6 para fijar tu destreza"
+      "label": "Roll one die and add 6 to set your skill"
     },
     {
       "actor": "B",
@@ -300,38 +302,38 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad.",
-                  "title": "La cripta del nigromante",
+                  "text": "A torch burns beside a locked iron door.\nTo the north, a passage fades into the darkness.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 1d6+6: [3] → total 9",
+                  "text": "Roll 1d6+6: [3] → total 9",
                   "type": "block"
                 },
                 {
                   "kind": "event",
-                  "text": "Destreza: 0 → 9",
+                  "text": "Skill: 0 → 9",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
                   "id": "cbeeb8da1658eec67",
-                  "label": "Coger la antorcha",
+                  "label": "Take the torch",
                   "type": "choice"
                 },
                 {
                   "id": "cf893a2eefb32555e",
-                  "label": "Avanzar por el pasillo del norte",
+                  "label": "Follow the passage north",
                   "type": "choice"
                 }
               ],
@@ -361,38 +363,38 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad.",
-                  "title": "La cripta del nigromante",
+                  "text": "A torch burns beside a locked iron door.\nTo the north, a passage fades into the darkness.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 1d6+6: [3] → total 9",
+                  "text": "Roll 1d6+6: [3] → total 9",
                   "type": "block"
                 },
                 {
                   "kind": "event",
-                  "text": "Destreza: 0 → 9",
+                  "text": "Skill: 0 → 9",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
                   "id": "cbeeb8da1658eec67",
-                  "label": "Coger la antorcha",
+                  "label": "Take the torch",
                   "type": "choice"
                 },
                 {
                   "id": "cf893a2eefb32555e",
-                  "label": "Avanzar por el pasillo del norte",
+                  "label": "Follow the passage north",
                   "type": "choice"
                 }
               ],
@@ -422,7 +424,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Tira un dado y suma 6 para fijar tu destreza"
+      "label": "Roll one die and add 6 to set your skill"
     },
     {
       "actor": "A",
@@ -472,7 +474,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Coger la antorcha"
+      "label": "Take the torch"
     },
     {
       "actor": "B",
@@ -485,32 +487,32 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad.",
-                  "title": "La cripta del nigromante",
+                  "text": "A torch burns beside a locked iron door.\nTo the north, a passage fades into the darkness.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Obtienes: Antorcha",
+                  "text": "You get: Torch",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c71c18690ee42c90b",
-                  "label": "Avanzar por el pasillo del norte",
+                  "label": "Follow the passage north",
                   "type": "choice"
                 }
               ],
@@ -540,32 +542,32 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad.",
-                  "title": "La cripta del nigromante",
+                  "text": "A torch burns beside a locked iron door.\nTo the north, a passage fades into the darkness.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Obtienes: Antorcha",
+                  "text": "You get: Torch",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c71c18690ee42c90b",
-                  "label": "Avanzar por el pasillo del norte",
+                  "label": "Follow the passage north",
                   "type": "choice"
                 }
               ],
@@ -595,7 +597,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Coger la antorcha"
+      "label": "Take the torch"
     },
     {
       "actor": "A",
@@ -645,7 +647,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Avanzar por el pasillo del norte"
+      "label": "Follow the passage north"
     },
     {
       "actor": "B",
@@ -658,32 +660,32 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso.",
-                  "title": "La cripta del nigromante",
+                  "text": "The passage opens onto a chamber of bones. Beyond it, a pit cuts across the way.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c71bb54d8d101b5b9",
-                  "label": "Un esqueleto armado se alza: luchar",
+                  "label": "An armed skeleton rises: fight",
                   "type": "choice"
                 },
                 {
                   "id": "cc34d0bff90150280",
-                  "label": "Volver al vestíbulo",
+                  "label": "Go back to the entrance hall",
                   "type": "choice"
                 }
               ],
@@ -713,32 +715,32 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso.",
-                  "title": "La cripta del nigromante",
+                  "text": "The passage opens onto a chamber of bones. Beyond it, a pit cuts across the way.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c71bb54d8d101b5b9",
-                  "label": "Un esqueleto armado se alza: luchar",
+                  "label": "An armed skeleton rises: fight",
                   "type": "choice"
                 },
                 {
                   "id": "cc34d0bff90150280",
-                  "label": "Volver al vestíbulo",
+                  "label": "Go back to the entrance hall",
                   "type": "choice"
                 }
               ],
@@ -768,7 +770,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Avanzar por el pasillo del norte"
+      "label": "Follow the passage north"
     },
     {
       "actor": "A",
@@ -818,7 +820,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Un esqueleto armado se alza: luchar"
+      "label": "An armed skeleton rises: fight"
     },
     {
       "actor": "B",
@@ -831,32 +833,32 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "ce099ec6cd7363ca5",
-                  "label": "Atacar",
+                  "label": "Attack",
                   "type": "choice"
                 },
                 {
                   "id": "c85e7bb0f12278575",
-                  "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+                  "label": "Flee to the entrance hall (lose 2 stamina)",
                   "type": "choice"
                 }
               ],
@@ -886,32 +888,32 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "12"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "ce099ec6cd7363ca5",
-                  "label": "Atacar",
+                  "label": "Attack",
                   "type": "choice"
                 },
                 {
                   "id": "c85e7bb0f12278575",
-                  "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+                  "label": "Flee to the entrance hall (lose 2 stamina)",
                   "type": "choice"
                 }
               ],
@@ -941,7 +943,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Un esqueleto armado se alza: luchar"
+      "label": "An armed skeleton rises: fight"
     },
     {
       "actor": "A",
@@ -991,7 +993,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Atacar"
+      "label": "Attack"
     },
     {
       "actor": "B",
@@ -1004,42 +1006,42 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 2d6: [2, 1] → total 12",
+                  "text": "Roll 2d6: [2, 1] → total 12",
                   "type": "block"
                 },
                 {
                   "kind": "event",
-                  "text": "Resistencia: 12 → 10",
+                  "text": "Stamina: 12 → 10",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c491718de357e3da8",
-                  "label": "Atacar",
+                  "label": "Attack",
                   "type": "choice"
                 },
                 {
                   "id": "ccb435c8e74616796",
-                  "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+                  "label": "Flee to the entrance hall (lose 2 stamina)",
                   "type": "choice"
                 }
               ],
@@ -1069,42 +1071,42 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 2d6: [2, 1] → total 12",
+                  "text": "Roll 2d6: [2, 1] → total 12",
                   "type": "block"
                 },
                 {
                   "kind": "event",
-                  "text": "Resistencia: 12 → 10",
+                  "text": "Stamina: 12 → 10",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c491718de357e3da8",
-                  "label": "Atacar",
+                  "label": "Attack",
                   "type": "choice"
                 },
                 {
                   "id": "ccb435c8e74616796",
-                  "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+                  "label": "Flee to the entrance hall (lose 2 stamina)",
                   "type": "choice"
                 }
               ],
@@ -1134,7 +1136,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Atacar"
+      "label": "Attack"
     },
     {
       "actor": "A",
@@ -1184,7 +1186,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Atacar"
+      "label": "Attack"
     },
     {
       "actor": "B",
@@ -1197,37 +1199,37 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 2d6: [2, 3] → total 14",
+                  "text": "Roll 2d6: [2, 3] → total 14",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c6775dc7701564f61",
-                  "label": "Atacar",
+                  "label": "Attack",
                   "type": "choice"
                 },
                 {
                   "id": "c9afcd44d14cf8bfe",
-                  "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+                  "label": "Flee to the entrance hall (lose 2 stamina)",
                   "type": "choice"
                 }
               ],
@@ -1257,37 +1259,37 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 2d6: [2, 3] → total 14",
+                  "text": "Roll 2d6: [2, 3] → total 14",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c6775dc7701564f61",
-                  "label": "Atacar",
+                  "label": "Attack",
                   "type": "choice"
                 },
                 {
                   "id": "c9afcd44d14cf8bfe",
-                  "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+                  "label": "Flee to the entrance hall (lose 2 stamina)",
                   "type": "choice"
                 }
               ],
@@ -1317,7 +1319,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Atacar"
+      "label": "Attack"
     },
     {
       "actor": "A",
@@ -1367,7 +1369,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Atacar"
+      "label": "Attack"
     },
     {
       "actor": "B",
@@ -1380,37 +1382,37 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 2d6: [3, 4] → total 16",
+                  "text": "Roll 2d6: [3, 4] → total 16",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c7476cf8a4baa5dc0",
-                  "label": "Atacar",
+                  "label": "Attack",
                   "type": "choice"
                 },
                 {
                   "id": "c87b341d690d7a28a",
-                  "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+                  "label": "Flee to the entrance hall (lose 2 stamina)",
                   "type": "choice"
                 }
               ],
@@ -1440,37 +1442,37 @@
                 {
                   "ending": null,
                   "score": 0,
-                  "text": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 2d6: [3, 4] → total 16",
+                  "text": "Roll 2d6: [3, 4] → total 16",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c7476cf8a4baa5dc0",
-                  "label": "Atacar",
+                  "label": "Attack",
                   "type": "choice"
                 },
                 {
                   "id": "c87b341d690d7a28a",
-                  "label": "Huir hacia el vestíbulo (pierdes 2 de resistencia)",
+                  "label": "Flee to the entrance hall (lose 2 stamina)",
                   "type": "choice"
                 }
               ],
@@ -1500,7 +1502,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Atacar"
+      "label": "Attack"
     },
     {
       "actor": "A",
@@ -1550,7 +1552,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Atacar"
+      "label": "Attack"
     },
     {
       "actor": "B",
@@ -1563,37 +1565,37 @@
                 {
                   "ending": null,
                   "score": 50,
-                  "text": "El esqueleto se desmorona. Entre sus huesos brilla una llave de hierro.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton crumbles. Among its bones, an iron key glints.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 2d6: [3, 4] → total 16",
+                  "text": "Roll 2d6: [3, 4] → total 16",
                   "type": "block"
                 },
                 {
                   "kind": "event",
-                  "text": "Puntuación +50 (total 50)",
+                  "text": "Score +50 (total 50)",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c6f9b6dae6f4c57a8",
-                  "label": "Coger la llave y volver al pasillo",
+                  "label": "Take the key and return to the passage",
                   "type": "choice"
                 }
               ],
@@ -1623,37 +1625,37 @@
                 {
                   "ending": null,
                   "score": 50,
-                  "text": "El esqueleto se desmorona. Entre sus huesos brilla una llave de hierro.",
-                  "title": "La cripta del nigromante",
+                  "text": "The skeleton crumbles. Among its bones, an iron key glints.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 2d6: [3, 4] → total 16",
+                  "text": "Roll 2d6: [3, 4] → total 16",
                   "type": "block"
                 },
                 {
                   "kind": "event",
-                  "text": "Puntuación +50 (total 50)",
+                  "text": "Score +50 (total 50)",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
                   "id": "c6f9b6dae6f4c57a8",
-                  "label": "Coger la llave y volver al pasillo",
+                  "label": "Take the key and return to the passage",
                   "type": "choice"
                 }
               ],
@@ -1683,7 +1685,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Atacar"
+      "label": "Attack"
     },
     {
       "actor": "A",
@@ -1733,7 +1735,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Coger la llave y volver al pasillo"
+      "label": "Take the key and return to the passage"
     },
     {
       "actor": "B",
@@ -1746,41 +1748,41 @@
                 {
                   "ending": null,
                   "score": 50,
-                  "text": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso.",
-                  "title": "La cripta del nigromante",
+                  "text": "The passage opens onto a chamber of bones. Beyond it, a pit cuts across the way.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Obtienes: Llave de hierro",
+                  "text": "You get: Iron key",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
-                  "name": "Llave de hierro",
+                  "name": "Iron key",
                   "type": "item"
                 },
                 {
                   "id": "c2ac2ce17a5794a3b",
-                  "label": "Acercarte al foso",
+                  "label": "Approach the pit",
                   "type": "choice"
                 },
                 {
                   "id": "ca534a6a6b7fd0b63",
-                  "label": "Volver al vestíbulo",
+                  "label": "Go back to the entrance hall",
                   "type": "choice"
                 }
               ],
@@ -1810,41 +1812,41 @@
                 {
                   "ending": null,
                   "score": 50,
-                  "text": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso.",
-                  "title": "La cripta del nigromante",
+                  "text": "The passage opens onto a chamber of bones. Beyond it, a pit cuts across the way.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Obtienes: Llave de hierro",
+                  "text": "You get: Iron key",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
-                  "name": "Llave de hierro",
+                  "name": "Iron key",
                   "type": "item"
                 },
                 {
                   "id": "c2ac2ce17a5794a3b",
-                  "label": "Acercarte al foso",
+                  "label": "Approach the pit",
                   "type": "choice"
                 },
                 {
                   "id": "ca534a6a6b7fd0b63",
-                  "label": "Volver al vestíbulo",
+                  "label": "Go back to the entrance hall",
                   "type": "choice"
                 }
               ],
@@ -1874,7 +1876,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Coger la llave y volver al pasillo"
+      "label": "Take the key and return to the passage"
     },
     {
       "actor": "A",
@@ -1924,7 +1926,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Acercarte al foso"
+      "label": "Approach the pit"
     },
     {
       "actor": "B",
@@ -1937,36 +1939,36 @@
                 {
                   "ending": null,
                   "score": 50,
-                  "text": "El foso es ancho y su fondo está erizado de estacas. Necesitas 12 o más (un dado más tu destreza) para saltarlo.",
-                  "title": "La cripta del nigromante",
+                  "text": "The pit is wide and its floor bristles with stakes. You need 12 or more (one die plus your skill) to jump it.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
-                  "name": "Llave de hierro",
+                  "name": "Iron key",
                   "type": "item"
                 },
                 {
                   "id": "cd0bad0da572baaf1",
-                  "label": "Saltar el foso",
+                  "label": "Jump the pit",
                   "type": "choice"
                 },
                 {
                   "id": "cae84379630af89ee",
-                  "label": "Retroceder al pasillo",
+                  "label": "Back away to the passage",
                   "type": "choice"
                 }
               ],
@@ -1996,36 +1998,36 @@
                 {
                   "ending": null,
                   "score": 50,
-                  "text": "El foso es ancho y su fondo está erizado de estacas. Necesitas 12 o más (un dado más tu destreza) para saltarlo.",
-                  "title": "La cripta del nigromante",
+                  "text": "The pit is wide and its floor bristles with stakes. You need 12 or more (one die plus your skill) to jump it.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
-                  "name": "Llave de hierro",
+                  "name": "Iron key",
                   "type": "item"
                 },
                 {
                   "id": "cd0bad0da572baaf1",
-                  "label": "Saltar el foso",
+                  "label": "Jump the pit",
                   "type": "choice"
                 },
                 {
                   "id": "cae84379630af89ee",
-                  "label": "Retroceder al pasillo",
+                  "label": "Back away to the passage",
                   "type": "choice"
                 }
               ],
@@ -2055,7 +2057,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Acercarte al foso"
+      "label": "Approach the pit"
     },
     {
       "actor": "A",
@@ -2105,7 +2107,7 @@
         },
         "type": "story.vote"
       },
-      "label": "Saltar el foso"
+      "label": "Jump the pit"
     },
     {
       "actor": "B",
@@ -2120,31 +2122,31 @@
                     "kind": "neutral"
                   },
                   "score": 50,
-                  "text": "Aterrizas al otro lado y descubres una salida secreta hacia la superficie. Escapas, aunque sin el tesoro.",
-                  "title": "La cripta del nigromante",
+                  "text": "You land on the far side and find a secret way up to the surface. You escape, though without the treasure.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 1d6: [4] → total 13 (éxito)",
+                  "text": "Roll 1d6: [4] → total 13 (success)",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
-                  "name": "Llave de hierro",
+                  "name": "Iron key",
                   "type": "item"
                 }
               ],
@@ -2176,31 +2178,31 @@
                     "kind": "neutral"
                   },
                   "score": 50,
-                  "text": "Aterrizas al otro lado y descubres una salida secreta hacia la superficie. Escapas, aunque sin el tesoro.",
-                  "title": "La cripta del nigromante",
+                  "text": "You land on the far side and find a secret way up to the surface. You escape, though without the treasure.",
+                  "title": "Crypt of the Necromancer",
                   "type": "scene"
                 },
                 {
                   "kind": "event",
-                  "text": "Tirada 1d6: [4] → total 13 (éxito)",
+                  "text": "Roll 1d6: [4] → total 13 (success)",
                   "type": "block"
                 },
                 {
-                  "label": "Destreza",
+                  "label": "Skill",
                   "type": "stat",
                   "value": "9"
                 },
                 {
-                  "label": "Resistencia",
+                  "label": "Stamina",
                   "type": "stat",
                   "value": "10"
                 },
                 {
-                  "name": "Antorcha",
+                  "name": "Torch",
                   "type": "item"
                 },
                 {
-                  "name": "Llave de hierro",
+                  "name": "Iron key",
                   "type": "item"
                 }
               ],
@@ -2230,9 +2232,9 @@
         },
         "type": "story.vote"
       },
-      "label": "Saltar el foso"
+      "label": "Jump the pit"
     }
   ],
-  "storyId": "cripta-del-nigromante",
-  "title": "La cripta del nigromante"
+  "storyId": "crypt-of-the-necromancer",
+  "title": "Crypt of the Necromancer"
 }

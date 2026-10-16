@@ -1,18 +1,18 @@
 {
   "format_version": 1,
-  "id": "cripta-del-nigromante",
-  "title": { "es": "La cripta del nigromante" },
+  "id": "crypt-of-the-necromancer",
+  "title": { "en": "Crypt of the Necromancer", "es": "La cripta del nigromante" },
   "start": "inicio",
   "variables": [
     {
       "id": "destreza",
-      "label": { "es": "Destreza" },
+      "label": { "en": "Skill", "es": "Destreza" },
       "visible": true,
       "kind": { "int": { "min": 0, "max": 12, "initial": 0 } }
     },
     {
       "id": "resistencia",
-      "label": { "es": "Resistencia" },
+      "label": { "en": "Stamina", "es": "Resistencia" },
       "visible": true,
       "kind": { "int": { "min": 0, "max": 20, "initial": 12 } }
     },
@@ -30,17 +30,20 @@
     }
   ],
   "items": [
-    { "id": "antorcha", "name": { "es": "Antorcha" } },
-    { "id": "llave-de-hierro", "name": { "es": "Llave de hierro" } }
+    { "id": "antorcha", "name": { "en": "Torch", "es": "Antorcha" } },
+    { "id": "llave-de-hierro", "name": { "en": "Iron key", "es": "Llave de hierro" } }
   ],
   "nodes": [
     {
       "id": "inicio",
-      "text": { "es": "Te detienes ante la entrada de la cripta del nigromante. Antes de bajar, pon a prueba tu destreza." },
+      "text": {
+        "en": "You stop at the entrance to the necromancer's crypt. Before you go down, put your skill to the test.",
+        "es": "Te detienes ante la entrada de la cripta del nigromante. Antes de bajar, pon a prueba tu destreza."
+      },
       "choices": [
         {
           "id": "tirar-destreza",
-          "label": { "es": "Tira un dado y suma 6 para fijar tu destreza" },
+          "label": { "en": "Roll one die and add 6 to set your skill", "es": "Tira un dado y suma 6 para fijar tu destreza" },
           "effects": [
             { "roll": { "dice": { "count": 1, "sides": 6, "modifier": 6 }, "store": "destreza" } }
           ],
@@ -50,60 +53,69 @@
     },
     {
       "id": "vestibulo",
-      "text": { "es": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad." },
+      "text": {
+        "en": "A torch burns beside a locked iron door.\nTo the north, a passage fades into the darkness.",
+        "es": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad."
+      },
       "choices": [
         {
           "id": "coger-antorcha",
-          "label": { "es": "Coger la antorcha" },
+          "label": { "en": "Take the torch", "es": "Coger la antorcha" },
           "when": { "not": { "has_item": "antorcha" } },
           "effects": [{ "give": "antorcha" }],
           "target": "vestibulo"
         },
         {
           "id": "abrir-puerta",
-          "label": { "es": "Abrir la puerta de hierro con la llave" },
+          "label": { "en": "Open the iron door with the key", "es": "Abrir la puerta de hierro con la llave" },
           "when": { "has_item": "llave-de-hierro" },
           "effects": [{ "take": "llave-de-hierro" }, { "score": 100 }],
           "target": "camara-del-tesoro"
         },
         {
           "id": "ir-norte",
-          "label": { "es": "Avanzar por el pasillo del norte" },
+          "label": { "en": "Follow the passage north", "es": "Avanzar por el pasillo del norte" },
           "target": "pasillo"
         }
       ]
     },
     {
       "id": "pasillo",
-      "text": { "es": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso." },
+      "text": {
+        "en": "The passage opens onto a chamber of bones. Beyond it, a pit cuts across the way.",
+        "es": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso."
+      },
       "choices": [
         {
           "id": "luchar",
-          "label": { "es": "Un esqueleto armado se alza: luchar" },
+          "label": { "en": "An armed skeleton rises: fight", "es": "Un esqueleto armado se alza: luchar" },
           "when": { "not": { "flag": "esqueleto_vencido" } },
           "effects": [{ "cue": { "music": { "asset": "musica-combate" } } }],
           "target": "combate"
         },
         {
           "id": "ir-al-foso",
-          "label": { "es": "Acercarte al foso" },
+          "label": { "en": "Approach the pit", "es": "Acercarte al foso" },
           "when": { "flag": "esqueleto_vencido" },
           "target": "foso"
         },
         {
           "id": "volver",
-          "label": { "es": "Volver al vestíbulo" },
+          "label": { "en": "Go back to the entrance hall", "es": "Volver al vestíbulo" },
           "target": "vestibulo"
         }
       ]
     },
     {
       "id": "combate",
-      "text": { "es": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia." },
+      "text": {
+        "en": "The skeleton attacks. Roll two dice and add your skill: on 14 or more you wound it; otherwise you lose 2 stamina.",
+        "es": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia."
+      },
       "choices": [
         {
           "id": "atacar",
-          "label": { "es": "Atacar" },
+          "label": { "en": "Attack", "es": "Atacar" },
           "effects": [
             { "roll": { "dice": { "count": 2, "sides": 6 }, "modifier_var": "destreza", "store": "tirada" } },
             {
@@ -138,7 +150,7 @@
         },
         {
           "id": "huir",
-          "label": { "es": "Huir hacia el vestíbulo (pierdes 2 de resistencia)" },
+          "label": { "en": "Flee to the entrance hall (lose 2 stamina)", "es": "Huir hacia el vestíbulo (pierdes 2 de resistencia)" },
           "effects": [
             { "add": { "var": "resistencia", "delta": -2 } },
             { "cue": "stop_music" },
@@ -155,11 +167,14 @@
     },
     {
       "id": "victoria-esqueleto",
-      "text": { "es": "El esqueleto se desmorona. Entre sus huesos brilla una llave de hierro." },
+      "text": {
+        "en": "The skeleton crumbles. Among its bones, an iron key glints.",
+        "es": "El esqueleto se desmorona. Entre sus huesos brilla una llave de hierro."
+      },
       "choices": [
         {
           "id": "coger-llave",
-          "label": { "es": "Coger la llave y volver al pasillo" },
+          "label": { "en": "Take the key and return to the passage", "es": "Coger la llave y volver al pasillo" },
           "effects": [{ "give": "llave-de-hierro" }],
           "target": "pasillo"
         }
@@ -167,11 +182,14 @@
     },
     {
       "id": "foso",
-      "text": { "es": "El foso es ancho y su fondo está erizado de estacas. Necesitas 12 o más (un dado más tu destreza) para saltarlo." },
+      "text": {
+        "en": "The pit is wide and its floor bristles with stakes. You need 12 or more (one die plus your skill) to jump it.",
+        "es": "El foso es ancho y su fondo está erizado de estacas. Necesitas 12 o más (un dado más tu destreza) para saltarlo."
+      },
       "choices": [
         {
           "id": "saltar",
-          "label": { "es": "Saltar el foso" },
+          "label": { "en": "Jump the pit", "es": "Saltar el foso" },
           "effects": [
             {
               "roll": {
@@ -184,18 +202,21 @@
         },
         {
           "id": "retroceder",
-          "label": { "es": "Retroceder al pasillo" },
+          "label": { "en": "Back away to the passage", "es": "Retroceder al pasillo" },
           "target": "pasillo"
         }
       ]
     },
     {
       "id": "caida",
-      "text": { "es": "Resbalas y caes al fondo del foso. Las estacas te hieren." },
+      "text": {
+        "en": "You slip and fall to the bottom of the pit. The stakes cut into you.",
+        "es": "Resbalas y caes al fondo del foso. Las estacas te hieren."
+      },
       "choices": [
         {
           "id": "trepar",
-          "label": { "es": "Trepar de vuelta al pasillo (pierdes 3 de resistencia)" },
+          "label": { "en": "Climb back up to the passage (lose 3 stamina)", "es": "Trepar de vuelta al pasillo (pierdes 3 de resistencia)" },
           "effects": [
             { "add": { "var": "resistencia", "delta": -3 } },
             {
@@ -211,17 +232,26 @@
     },
     {
       "id": "otra-orilla",
-      "text": { "es": "Aterrizas al otro lado y descubres una salida secreta hacia la superficie. Escapas, aunque sin el tesoro." },
+      "text": {
+        "en": "You land on the far side and find a secret way up to the surface. You escape, though without the treasure.",
+        "es": "Aterrizas al otro lado y descubres una salida secreta hacia la superficie. Escapas, aunque sin el tesoro."
+      },
       "ending": { "id": "huida", "kind": "neutral" }
     },
     {
       "id": "camara-del-tesoro",
-      "text": { "es": "La puerta cede. El tesoro del nigromante es tuyo." },
+      "text": {
+        "en": "The door gives way. The necromancer's treasure is yours.",
+        "es": "La puerta cede. El tesoro del nigromante es tuyo."
+      },
       "ending": { "id": "tesoro", "kind": "victory" }
     },
     {
       "id": "muerte",
-      "text": { "es": "Tus fuerzas se agotan. Tu aventura termina en la cripta." },
+      "text": {
+        "en": "Your strength fails you. Your adventure ends in the crypt.",
+        "es": "Tus fuerzas se agotan. Tu aventura termina en la cripta."
+      },
       "ending": { "id": "muerte", "kind": "defeat" }
     }
   ]

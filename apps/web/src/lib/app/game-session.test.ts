@@ -242,7 +242,7 @@ describe('GameSession', () => {
     const url = `/assets/${'b'.repeat(64)}/audio-x.ogg`;
     const scene = { type: 'scene', title: 'Lluvia', text: 'Llueve.', score: 0, ending: null };
     callbacks().onMessage(message('story.entered', {
-      storyId: 'lluvia-de-neon', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'],
+      storyId: 'neon-rain', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'],
     }, 4));
     // The panel renders story text in the instance language.
     expect(session.storyLocale).toBe('en');
@@ -299,23 +299,23 @@ describe('GameSession', () => {
     // A second request waits for the first answer.
     session.openStoryCatalog();
     expect(connection.storyCatalog).toHaveBeenCalledOnce();
-    const lluvia = { storyId: 'lluvia-de-neon', title: 'Lluvia de neón', locales: ['es', 'en'] };
+    const lluvia = { storyId: 'neon-rain', title: 'Lluvia de neón', locales: ['es', 'en'] };
     callbacks().onMessage(message('story.catalog', {
       part: 0, parts: 2, stories: [{ storyId: 'cripta', title: 'Cripta', locales: ['es'] }],
     }, 2));
     expect(session.storyCatalog).toBeUndefined();
     callbacks().onMessage(message('story.catalog', { part: 1, parts: 2, stories: [lluvia] }, 3));
     expect(session.storyCatalogPending).toBe(false);
-    expect(session.storyCatalog?.map((story) => story.storyId)).toEqual(['cripta', 'lluvia-de-neon']);
+    expect(session.storyCatalog?.map((story) => story.storyId)).toEqual(['cripta', 'neon-rain']);
 
     // Only an offered language is sent, through the shared text command.
-    session.enterStory('lluvia-de-neon', 'fr');
+    session.enterStory('neon-rain', 'fr');
     session.enterStory('desconocida', 'es');
     expect(connection.submit).not.toHaveBeenCalled();
-    session.enterStory('lluvia-de-neon', 'en');
-    expect(connection.submit).toHaveBeenCalledWith('historia lluvia-de-neon en', expect.any(String));
+    session.enterStory('neon-rain', 'en');
+    expect(connection.submit).toHaveBeenCalledWith('historia neon-rain en', expect.any(String));
     callbacks().onMessage(message('story.entered', {
-      storyId: 'lluvia-de-neon', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'],
+      storyId: 'neon-rain', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'],
     }, 4));
     expect(session.storyCatalog).toBeUndefined();
     expect(session.storyLocale).toBe('en');
@@ -337,7 +337,7 @@ describe('GameSession', () => {
   it('sends parser commands only while the view shows a prompt', () => {
     const { session, connection, callbacks } = harness();
     const scene = { type: 'scene', title: 'Faro', text: 'Playa', score: 0, ending: null };
-    callbacks().onMessage(message('story.entered', { storyId: 'faro-de-punta-gris', title: 'Faro' }, 2));
+    callbacks().onMessage(message('story.entered', { storyId: 'grey-point-lighthouse', title: 'Faro' }, 2));
     callbacks().onMessage(message('story.view', {
       viewRev: 1, part: 0, parts: 1, turn: 0, canUndo: false, items: [scene],
     }, 3));

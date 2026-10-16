@@ -9,8 +9,8 @@ use tiamud_story_core::{
     StoryView, Value, resolve_dialogue_option, resolve_menu, step, view, view_pages,
 };
 
-const NOIR: &[u8] = include_bytes!("../fixtures/lluvia-de-neon.story.json");
-const CRIPTA: &[u8] = include_bytes!("../fixtures/cripta-del-nigromante.story.json");
+const NOIR: &[u8] = include_bytes!("../fixtures/neon-rain.story.json");
+const CRIPTA: &[u8] = include_bytes!("../fixtures/crypt-of-the-necromancer.story.json");
 
 fn pack() -> StoryPack {
     let pack = StoryPack::from_json_slice(NOIR).expect("fixture parses");

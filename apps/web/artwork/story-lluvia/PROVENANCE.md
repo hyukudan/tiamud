@@ -1,8 +1,15 @@
-# Arte de muestra de `lluvia-de-neon`
+# Arte de muestra de `neon-rain`
 
 Estado: **publicado en `apps/web/public/assets/` como placeholder original**,
 mapeado en el mapa revisado de medios de historia
 [`crates/story-core/fixtures/story-media.json`](../../../../crates/story-core/fixtures/story-media.json).
+
+El pack se publicó como `lluvia-de-neon` y el 2026-10-16 pasó a llamarse
+`neon-rain` (*Neon Rain*, inglés por defecto con traducción al castellano).
+Los manifiestos publicados, el texto `--provenance` de
+[`build.sh`](build.sh) y este directorio conservan el nombre anterior a
+propósito: cambiarlos alteraría bytes revisados sin cambiar ninguna imagen.
+Los ids de imagen (`fondo-oficina`, …) no cambian.
 
 ## Procedencia
 

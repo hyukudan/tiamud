@@ -6,7 +6,7 @@ use tiamud_story_core::{
     UndoRing, Value, resolve_choice, step, view,
 };
 
-const FIXTURE: &[u8] = include_bytes!("../fixtures/cripta-del-nigromante.story.json");
+const FIXTURE: &[u8] = include_bytes!("../fixtures/crypt-of-the-necromancer.story.json");
 
 fn pack() -> StoryPack {
     let pack = StoryPack::from_json_slice(FIXTURE).expect("fixture parses");

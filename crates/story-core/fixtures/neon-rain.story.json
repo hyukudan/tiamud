@@ -1,0 +1,468 @@
+{
+  "format_version": 2,
+  "id": "neon-rain",
+  "title": { "en": "Neon Rain", "es": "Lluvia de neón" },
+  "start": "oficina",
+  "variables": [
+    { "id": "pista_tarjeta", "kind": { "bool": { "initial": false } } },
+    { "id": "vio_video", "kind": { "bool": { "initial": false } } },
+    { "id": "dron_visto", "kind": { "bool": { "initial": false } } },
+    { "id": "lola_confia", "kind": { "bool": { "initial": false } } },
+    { "id": "sabe_damaso", "kind": { "bool": { "initial": false } } }
+  ],
+  "items": [
+    { "id": "tarjeta", "name": { "en": "Memory card", "es": "Tarjeta de memoria" } },
+    { "id": "mechero", "name": { "en": "Engraved lighter", "es": "Mechero grabado" } }
+  ],
+  "verbs": [
+    {
+      "id": "mirar",
+      "label": { "en": "LOOK", "es": "MIRAR" },
+      "targets": "hotspot",
+      "default": [{ "text": { "en": "Nothing catches your eye.", "es": "No ves nada que te llame la atención." } }]
+    },
+    {
+      "id": "hablar",
+      "label": { "en": "TALK", "es": "HABLAR" },
+      "targets": "character",
+      "default": [{ "text": { "en": "They don't feel like talking.", "es": "No parece tener ganas de charla." } }]
+    },
+    {
+      "id": "investigar",
+      "label": { "en": "INVESTIGATE", "es": "INVESTIGAR" },
+      "targets": "hotspot",
+      "default": [{ "text": { "en": "You search carefully, but there is nothing.", "es": "Buscas a conciencia, pero no hay nada." } }]
+    },
+    {
+      "id": "mostrar",
+      "label": { "en": "SHOW", "es": "MOSTRAR" },
+      "targets": "item",
+      "default": [{ "text": { "en": "Nobody here reacts to that.", "es": "Nadie aquí reacciona a eso." } }]
+    },
+    {
+      "id": "usar",
+      "label": { "en": "USE", "es": "USAR" },
+      "targets": "item",
+      "default": [{ "text": { "en": "It is useless here.", "es": "Aquí no sirve de nada." } }]
+    },
+    {
+      "id": "moverse",
+      "label": { "en": "MOVE", "es": "MOVERSE" },
+      "targets": "hotspot",
+      "default": [{ "text": { "en": "That leads nowhere.", "es": "Por ahí no se va a ninguna parte." } }]
+    }
+  ],
+  "characters": [
+    {
+      "id": "lola",
+      "name": { "en": "Lola", "es": "Lola" },
+      "portraits": {
+        "neutral": "retrato-lola-neutral",
+        "nerviosa": "retrato-lola-nerviosa",
+        "sonriente": "retrato-lola-sonriente"
+      }
+    },
+    {
+      "id": "damaso",
+      "name": { "en": "Dámaso", "es": "Dámaso" },
+      "portraits": {
+        "neutral": "retrato-damaso-neutral",
+        "enfadado": "retrato-damaso-enfadado"
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "oficina",
+      "text": {
+        "en": "Your office on the fortieth floor. Acid rain streaks the glass and the neon across the street dyes the files pink. Iker Soto, a memory dealer, turned up dead last night. The case is yours.",
+        "es": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo."
+      },
+      "background": "fondo-oficina",
+      "cues": [{ "music": { "asset": "musica-lluvia" } }],
+      "hotspots": [
+        { "id": "mesa", "label": { "en": "Desk", "es": "Escritorio" } },
+        { "id": "ventana", "label": { "en": "Window", "es": "Ventana" } },
+        { "id": "terminal", "label": { "en": "Terminal", "es": "Terminal" } },
+        { "id": "puerta", "label": { "en": "Door", "es": "Puerta" } }
+      ],
+      "menu": {
+        "verbs": [
+          { "verb": "mirar" },
+          { "verb": "investigar" },
+          { "verb": "usar" },
+          { "verb": "moverse" }
+        ],
+        "entries": [
+          {
+            "id": "mirar-ventana",
+            "verb": "mirar",
+            "target": "ventana",
+            "responses": [
+              {
+                "id": "lluvia",
+                "blocks": [{ "text": { "en": "Below, the city boils with adverts. It has rained every night for ten years.", "es": "Abajo, la ciudad hierve de anuncios. Llueve como cada noche desde hace diez años." } }]
+              }
+            ]
+          },
+          {
+            "id": "investigar-mesa",
+            "verb": "investigar",
+            "target": "mesa",
+            "responses": [
+              {
+                "id": "tarjeta",
+                "once": true,
+                "blocks": [{ "text": { "en": "Among unpaid bills you find a memory card bearing a club logo: \"The Blue Lighthouse\".", "es": "Entre facturas sin pagar encuentras una tarjeta de memoria con el logotipo de un club: «El Faro Azul»." } }],
+                "effects": [
+                  { "give": "tarjeta" },
+                  { "set": { "var": "pista_tarjeta", "value": true } },
+                  { "cue": { "sfx": { "asset": "sfx-pista" } } }
+                ]
+              }
+            ],
+            "exhausted": [{ "text": { "en": "You already went through the desk. Nothing new.", "es": "Ya has revuelto el escritorio. No hay nada nuevo." } }]
+          },
+          {
+            "id": "investigar-ventana",
+            "verb": "investigar",
+            "target": "ventana",
+            "responses": [
+              {
+                "id": "primera",
+                "when": { "uses": { "node": "oficina", "entry": "investigar-ventana", "op": "eq", "value": 0 } },
+                "blocks": [{ "text": { "en": "The glass is grimy with soot. You think you see a glint across the street.", "es": "El cristal está sucio de hollín. Te parece ver un destello al otro lado de la calle." } }]
+              },
+              {
+                "id": "dron",
+                "once": true,
+                "blocks": [{ "text": { "en": "You look closer: a surveillance drone has been hovering outside your window for hours.", "es": "Te fijas mejor: un dron de vigilancia lleva horas apostado frente a tu ventana." } }],
+                "effects": [{ "set": { "var": "dron_visto", "value": true } }]
+              }
+            ],
+            "exhausted": [{ "text": { "en": "The drone is still there. Nothing new.", "es": "El dron sigue ahí. Nada nuevo." } }]
+          },
+          {
+            "id": "investigar-terminal",
+            "verb": "investigar",
+            "target": "terminal",
+            "responses": [
+              {
+                "id": "sin-soporte",
+                "when": { "not": { "flag": "vio_video" } },
+                "blocks": [{ "text": { "en": "The terminal is waiting for media to analyse.", "es": "La terminal espera un soporte que analizar." } }]
+              }
+            ],
+            "exhausted": [{ "text": { "en": "The terminal has nothing more to tell you.", "es": "La terminal ya no tiene nada más que decirte." } }]
+          },
+          {
+            "id": "usar-tarjeta",
+            "verb": "usar",
+            "target": "tarjeta",
+            "responses": [
+              {
+                "id": "video",
+                "once": true,
+                "blocks": [
+                  { "text": { "en": "You insert the card. A grainy video: Iker Soto arguing in a booth with a man in a long coat who toys with a lighter.", "es": "Insertas la tarjeta. Un vídeo granuloso: Iker Soto discute en un reservado con un hombre de abrigo largo que juega con un mechero." } },
+                  { "text": { "en": "The recording ends in a flash.", "es": "La grabación se corta con un fogonazo." } }
+                ],
+                "effects": [{ "set": { "var": "vio_video", "value": true } }]
+              }
+            ],
+            "exhausted": [{ "text": { "en": "You have watched the video three times. Nothing new.", "es": "Ya has visto el vídeo tres veces. Nada nuevo." } }]
+          },
+          {
+            "id": "salir",
+            "verb": "moverse",
+            "target": "puerta",
+            "responses": [
+              {
+                "id": "al-club",
+                "when": { "flag": "pista_tarjeta" },
+                "blocks": [{ "text": { "en": "You put on your trench coat and head down to the Blue Lighthouse.", "es": "Te pones la gabardina y bajas a la calle rumbo al Faro Azul." } }],
+                "target": "club"
+              },
+              {
+                "id": "sin-rumbo",
+                "blocks": [{ "text": { "en": "You don't know where to go yet. Maybe the office hides something.", "es": "No sabes adónde ir todavía. Quizá el despacho esconda algo." } }]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "club",
+      "text": {
+        "en": "The Blue Lighthouse smells of ozone and synthetic gin. Behind the bar, Lola dries glasses without taking her eyes off you.",
+        "es": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima."
+      },
+      "background": "fondo-club",
+      "cues": [{ "music": { "asset": "musica-club" } }],
+      "hotspots": [
+        { "id": "barra", "label": { "en": "Bar", "es": "Barra" } },
+        { "id": "reservado", "label": { "en": "Booth", "es": "Reservado" } },
+        { "id": "salida", "label": { "en": "Exit", "es": "Salida" } },
+        {
+          "id": "callejon",
+          "label": { "en": "Back alley", "es": "Callejón trasero" },
+          "when": { "flag": "sabe_damaso" }
+        }
+      ],
+      "present": [{ "character": "lola" }],
+      "menu": {
+        "verbs": [
+          { "verb": "mirar" },
+          { "verb": "hablar" },
+          { "verb": "investigar" },
+          { "verb": "mostrar" },
+          { "verb": "moverse" }
+        ],
+        "entries": [
+          {
+            "id": "mirar-barra",
+            "verb": "mirar",
+            "target": "barra",
+            "responses": [
+              {
+                "id": "botellas",
+                "blocks": [{ "text": { "en": "Unlabelled bottles and a sign: \"No memory dealing\".", "es": "Botellas sin etiqueta y un cartel: «Prohibido vender recuerdos»." } }]
+              }
+            ]
+          },
+          {
+            "id": "hablar-lola",
+            "verb": "hablar",
+            "target": "lola",
+            "responses": [
+              {
+                "id": "charla",
+                "blocks": [{ "speaker": "lola", "text": { "en": "Cops again.", "es": "—Otra vez la pasma." } }],
+                "dialogue": "charla-lola"
+              }
+            ]
+          },
+          {
+            "id": "mostrar-tarjeta",
+            "verb": "mostrar",
+            "target": "tarjeta",
+            "responses": [
+              {
+                "id": "confia",
+                "once": true,
+                "when": { "flag": "lola_confia" },
+                "blocks": [
+                  { "speaker": "lola", "expression": "nerviosa", "text": { "en": "That card was Iker's. He was selling it to Dámaso, out in the back alley.", "es": "—Esa tarjeta era de Iker. Se la iba a vender a Dámaso, el del callejón de atrás." } }
+                ],
+                "effects": [{ "set": { "var": "sabe_damaso", "value": true } }]
+              },
+              {
+                "id": "recelo",
+                "when": { "not": { "flag": "lola_confia" } },
+                "blocks": [{ "speaker": "lola", "text": { "en": "Not here, detective. Have a drink first.", "es": "—Aquí no, detective. Primero tómate algo." } }]
+              }
+            ],
+            "exhausted": [{ "speaker": "lola", "text": { "en": "I already told you what I know.", "es": "—Ya te he dicho lo que sé." } }]
+          },
+          {
+            "id": "investigar-reservado",
+            "verb": "investigar",
+            "target": "reservado",
+            "responses": [
+              {
+                "id": "mechero",
+                "once": true,
+                "when": { "flag": "sabe_damaso" },
+                "blocks": [{ "text": { "en": "Under the booth seat lies a lighter engraved with the initials D. R.", "es": "Bajo el asiento del reservado aparece un mechero grabado con las iniciales D. R." } }],
+                "effects": [{ "give": "mechero" }, { "cue": { "sfx": { "asset": "sfx-pista" } } }]
+              },
+              {
+                "id": "humo",
+                "when": { "not": { "flag": "sabe_damaso" } },
+                "blocks": [{ "text": { "en": "Only smoke and empty glasses. You need to know what to look for.", "es": "Solo humo y vasos vacíos. Necesitas saber qué buscar." } }]
+              }
+            ],
+            "exhausted": [{ "text": { "en": "The booth hides nothing new.", "es": "El reservado ya no esconde nada nuevo." } }]
+          },
+          {
+            "id": "volver",
+            "verb": "moverse",
+            "target": "salida",
+            "responses": [
+              {
+                "id": "a-la-oficina",
+                "blocks": [{ "text": { "en": "You walk back to the office in the rain.", "es": "Vuelves al despacho bajo la lluvia." } }],
+                "target": "oficina"
+              }
+            ]
+          },
+          {
+            "id": "ir-callejon",
+            "verb": "moverse",
+            "target": "callejon",
+            "responses": [
+              {
+                "id": "al-callejon",
+                "blocks": [{ "text": { "en": "You slip out through the service door.", "es": "Sales por la puerta de servicio." } }],
+                "target": "callejon"
+              }
+            ]
+          }
+        ],
+        "defaults": [
+          {
+            "verb": "mostrar",
+            "blocks": [{ "speaker": "lola", "text": { "en": "And what's that got to do with me?", "es": "—¿Y eso qué tiene que ver conmigo?" } }]
+          }
+        ]
+      }
+    },
+    {
+      "id": "callejon",
+      "text": {
+        "en": "A flooded alley behind the club. Dámaso smokes against a dumpster, his long coat soaked through.",
+        "es": "Un callejón encharcado detrás del club. Dámaso fuma apoyado en un contenedor, con el abrigo largo empapado."
+      },
+      "background": "fondo-callejon",
+      "cues": [{ "music": { "asset": "musica-tension" } }],
+      "hotspots": [{ "id": "club", "label": { "en": "Club door", "es": "Puerta del club" } }],
+      "present": [{ "character": "damaso", "expression": "neutral" }],
+      "menu": {
+        "verbs": [{ "verb": "hablar" }, { "verb": "moverse" }],
+        "entries": [
+          {
+            "id": "hablar-damaso",
+            "verb": "hablar",
+            "target": "damaso",
+            "responses": [
+              {
+                "id": "careo",
+                "blocks": [{ "text": { "en": "You plant yourself in front of him.", "es": "Te plantas delante de él." } }],
+                "dialogue": "careo-damaso"
+              }
+            ]
+          },
+          {
+            "id": "volver-club",
+            "verb": "moverse",
+            "target": "club",
+            "responses": [
+              {
+                "id": "dentro",
+                "blocks": [{ "text": { "en": "You head back into the warm club.", "es": "Vuelves al calor del club." } }],
+                "target": "club"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "caso-cerrado",
+      "text": {
+        "en": "The cuffs click shut. As the patrol car takes Dámaso away, the rain finally eases. Case closed.",
+        "es": "Las esposas se cierran con un chasquido. Mientras la patrulla se lleva a Dámaso, la lluvia por fin amaina. Caso cerrado."
+      },
+      "background": "fondo-amanecer",
+      "cues": [{ "music": { "asset": "musica-final" } }],
+      "ending": { "id": "caso-cerrado", "kind": "victory" }
+    },
+    {
+      "id": "caso-perdido",
+      "text": {
+        "en": "Dámaso laughs and vanishes into the steam. Without evidence, the case is shelved and the city forgets Iker Soto.",
+        "es": "Dámaso se ríe y desaparece entre el vapor. Sin pruebas, el caso se archiva y la ciudad olvida a Iker Soto."
+      },
+      "cues": ["stop_music"],
+      "ending": { "id": "caso-perdido", "kind": "defeat" }
+    }
+  ],
+  "dialogues": [
+    {
+      "id": "charla-lola",
+      "start": "saludo",
+      "nodes": [
+        {
+          "id": "saludo",
+          "lines": [{ "speaker": "lola", "text": { "en": "What'll it be, detective?", "es": "—¿Qué te pongo, detective?" } }],
+          "options": [
+            {
+              "id": "preguntar-iker",
+              "label": { "en": "Ask about Iker Soto", "es": "Preguntar por Iker Soto" },
+              "once": true,
+              "next": { "goto": "iker" }
+            },
+            {
+              "id": "pedir-cafe",
+              "label": { "en": "Order a black coffee", "es": "Pedir un café solo" },
+              "when": { "not": { "flag": "lola_confia" } },
+              "effects": [{ "set": { "var": "lola_confia", "value": true } }],
+              "next": { "goto": "cafe" }
+            },
+            {
+              "id": "despedirse",
+              "label": { "en": "Say goodbye", "es": "Despedirte" }
+            }
+          ]
+        },
+        {
+          "id": "iker",
+          "lines": [{ "speaker": "lola", "expression": "nerviosa", "text": { "en": "I don't know any Iker. And keep your voice down.", "es": "—No conozco a ningún Iker. Y baja la voz." } }],
+          "options": [{ "id": "volver", "label": { "en": "Change the subject", "es": "Cambiar de tema" }, "next": "return" }]
+        },
+        {
+          "id": "cafe",
+          "lines": [
+            { "speaker": "lola", "expression": "sonriente", "text": { "en": "Finally, someone who doesn't order synthetics.", "es": "—Por fin alguien que no pide sintéticos." } },
+            { "speaker": "lola", "text": { "en": "If you've got something to show me, I'm listening now.", "es": "—Si tienes algo que enseñarme, ahora te escucho." } }
+          ],
+          "options": [{ "id": "seguir", "label": { "en": "Keep talking", "es": "Seguir hablando" }, "next": "return" }]
+        }
+      ]
+    },
+    {
+      "id": "careo-damaso",
+      "start": "inicio",
+      "nodes": [
+        {
+          "id": "inicio",
+          "lines": [{ "speaker": "damaso", "text": { "en": "This alley is mine, cop. What do you want?", "es": "—Este callejón es mío, poli. ¿Qué quieres?" } }],
+          "options": [
+            {
+              "id": "preguntar",
+              "label": { "en": "Ask what he was doing with Iker", "es": "Preguntar qué hacía con Iker" },
+              "once": true,
+              "next": { "goto": "coartada" }
+            },
+            {
+              "id": "acusar",
+              "label": { "en": "Accuse him with the video and the lighter", "es": "Acusarle con el vídeo y el mechero" },
+              "when": { "all": [{ "flag": "vio_video" }, { "has_item": "mechero" }] },
+              "effects": [
+                { "cue": { "sfx": { "asset": "sfx-esposas" } } },
+                { "score": 100 },
+                { "goto": "caso-cerrado" }
+              ]
+            },
+            {
+              "id": "farol",
+              "label": { "en": "Accuse him without evidence", "es": "Acusarle sin pruebas" },
+              "when": { "not": { "all": [{ "flag": "vio_video" }, { "has_item": "mechero" }] } },
+              "effects": [{ "goto": "caso-perdido" }]
+            },
+            {
+              "id": "marcharse",
+              "label": { "en": "Leave", "es": "Marcharte" }
+            }
+          ]
+        },
+        {
+          "id": "coartada",
+          "lines": [{ "speaker": "damaso", "expression": "enfadado", "text": { "en": "Business. And business is none of yours.", "es": "—Negocios. Y los negocios no son asunto tuyo." } }],
+          "options": [{ "id": "insistir", "label": { "en": "Press him", "es": "Insistir" }, "next": "return" }]
+        }
+      ]
+    }
+  ]
+}

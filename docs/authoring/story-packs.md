@@ -34,12 +34,13 @@ historical [v1](../../crates/story-tools/schema/story-pack.v1.schema.json) and
 [v2](../../crates/story-tools/schema/story-pack.v2.schema.json) schemas are
 kept unchanged.
 
-The reviewed Spanish examples are the gamebook
-[`cripta-del-nigromante.story.json`](../../crates/story-core/fixtures/cripta-del-nigromante.story.json)
+The reviewed examples, written in English with a full Spanish translation,
+are the gamebook
+[`crypt-of-the-necromancer.story.json`](../../crates/story-core/fixtures/crypt-of-the-necromancer.story.json)
 (format v1) and the noir menu adventure
-[`lluvia-de-neon.story.json`](../../crates/story-core/fixtures/lluvia-de-neon.story.json)
+[`neon-rain.story.json`](../../crates/story-core/fixtures/neon-rain.story.json)
 (format v2), and the lighthouse text adventure
-[`parser/faro-de-punta-gris.story.json`](../../crates/story-core/fixtures/parser/faro-de-punta-gris.story.json)
+[`parser/grey-point-lighthouse.story.json`](../../crates/story-core/fixtures/parser/grey-point-lighthouse.story.json)
 (format v3). The v3 fixture lives in the `parser/` subdirectory; the server
 catalog scans `TIAMUD_STORY_DIR` and its direct subdirectories, so the whole
 `fixtures/` directory, with its reviewed `story-media.json`, is a playable
@@ -50,8 +51,8 @@ catalog.
 ```json
 {
   "format_version": 1,
-  "id": "cripta-del-nigromante",
-  "title": { "es": "La cripta del nigromante" },
+  "id": "crypt-of-the-necromancer",
+  "title": { "en": "Crypt of the Necromancer", "es": "La cripta del nigromante" },
   "start": "inicio",
   "variables": [ ... ],
   "items": [ ... ],
@@ -350,9 +351,11 @@ InformATE): the player types `coge la lámpara y enciéndela`, the
 a default library answer them. It is accepted in
 [ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md).
 The reviewed example is
-[`parser/faro-de-punta-gris.story.json`](../../crates/story-core/fixtures/parser/faro-de-punta-gris.story.json),
-with its walkthrough
-[`faro-victoria.script.json`](../../crates/story-tools/tests/fixtures/faro-victoria.script.json).
+[`parser/grey-point-lighthouse.story.json`](../../crates/story-core/fixtures/parser/grey-point-lighthouse.story.json),
+with its English walkthrough
+[`lighthouse-victory.script.json`](../../crates/story-tools/tests/fixtures/lighthouse-victory.script.json)
+and the same playthrough typed in Spanish,
+[`lighthouse-victory-es.script.json`](../../crates/story-tools/tests/fixtures/lighthouse-victory-es.script.json).
 
 ### The world section
 
@@ -533,10 +536,12 @@ Put the pack in `TIAMUD_STORY_DIR` or in one of its direct subdirectories
 pack. Players enter with `historia <id>` and then type commands: the browser
 shows a command field with the prompt (`world.prompt`, else `>`), Up/Down
 history and the replies; Telnet treats every line that is not a reserved
-story word as a command. By default the instance plays in Spanish when the
-pack has an `es` lexicon, otherwise in its first lexicon; `historia <id> en`
-picks another lexicon of the pack (see [Languages](#languages-and-the-session-locale)).
-On the server the meta commands do this: `deshacer` undoes
+story word as a command. By default the instance plays in the pack's first
+lexicon (English in the sample); `historia <id> es` picks another lexicon of
+the pack (see [Languages](#languages-and-the-session-locale)).
+On the server the meta commands (shown here with their Spanish words; the
+English lexicon has `undo`, `restart`, `save`, `restore`/`load`, `quit`,
+`score` and `help`) do this: `deshacer` undoes
 the last input, `reiniciar` asks for confirmation and restarts when typed
 again (and can itself be undone), `guardar`/`cargar` without a number point
 to the save slots (`guardar 3`, `cargar 0` or the saved-games panel),
@@ -627,7 +632,7 @@ else is shown. Telnet prints the background's alt text as `[…]` under the
 scene title; portraits stay as the "Presentes" names and dialogue lines as
 `Name: «text»` (the alt text of a line portrait is not repeated on every
 line). The sample art of
-`lluvia-de-neon` (office and club backgrounds, Lola's and Dámaso's neutral
+`neon-rain` (office and club backgrounds, Lola's and Dámaso's neutral
 portraits) is mapped in
 [`crates/story-core/fixtures/story-media.json`](../../crates/story-core/fixtures/story-media.json);
 the alley and dawn backgrounds and the other expressions are deliberately
@@ -638,13 +643,15 @@ unmapped. Its sources and provenance are in
 
 A story can be played in each of its languages: the lexicons of a parser
 world (`world.lexicons`), or the locales of the pack title for packs without
-a parser. Spanish is the default when offered, else the first one. Players
-choose when they enter: `historia <id> en` (`story <id> en`, also
-`historia compartir <id> en`); `en-GB` selects `en`. `historias` lists each
-story with its languages (`id — title [es, en]`), and the browser's
-**Stories** picker shows a language select per story, preselecting the
-reader's browser language when the story offers it, else Spanish, else the
-story's default. A language the story
+a parser. The default is the first lexicon of a parser world; without a
+parser it is English when the title offers it, else the title's first locale
+(`StoryPack::default_locale`, also the `tiamud-story` default). Players
+choose when they enter: `historia <id> es` (`story <id> es`, also
+`historia compartir <id> es`); `es-ES` selects `es`. `historias` lists each
+story with its languages, default first (`id — title [en, es]`), and the
+browser's **Stories** picker shows a language select per story, preselecting
+the reader's browser language when the story offers it, else the story's
+default. A language the story
 does not offer is refused with `unknown_locale`. Every text of the view —
 title, scene, labels, events, parser replies, image alt text — and the parser
 lexicon follow the session language; untranslated text falls back as
@@ -689,7 +696,7 @@ autosaving its last good state. See
 [`single-host.md`](../operations/single-host.md#story-sessions). Prefer the
 closed DSL; reach for a script only for a rule the DSL cannot express, such
 as the custom combat round of the sample
-[`duelo-en-el-paso.story.json`](../../crates/story-script/fixtures/duelo-en-el-paso.story.json).
+[`duel-at-the-pass.story.json`](../../crates/story-script/fixtures/duel-at-the-pass.story.json).
 
 A script is a **pure function**. It reads a copy of the state and either
 answers a yes/no question or *emits intents*; it never changes the story
@@ -869,7 +876,7 @@ The summary line states the format version and, for v2 packs, the number of
 verbs, menu entries, characters and dialogues; for v3 packs, rooms, objects,
 rules and lexicons.
 
-### `preview <pack> [--node id] [--dialogue id[/node]] [--locale es] [--seed N]`
+### `preview <pack> [--node id] [--dialogue id[/node]] [--locale xx] [--seed N]`
 
 Renders one node as a player would see it in plain text: title, text, turn,
 score, visible stats, inventory and numbered available choices (or the ending
@@ -878,7 +885,9 @@ notes how many authored choices that state hides. Authored ids and hidden
 variables are never printed. Menu scenes also show `[fondo: …]`, present
 characters with portrait ids, and `Acciones:` with numbered verbs and
 targets (`(nada)` when a verb has nothing to apply to); `--dialogue` renders a
-dialogue node over the scene with its lines and numbered `Respuestas:`.
+dialogue node over the scene with its lines and numbered `Respuestas:`
+(the English interface says `[background: …]`, `Actions:` and `Answers:`).
+Without `--locale` the pack's default language is shown.
 
 ### `test <pack> --script <file>`
 
@@ -917,7 +926,7 @@ Script `format_version: 2` adds steps for menu scenes:
   (`{ "node/entry": count }`).
 
 See the reviewed
-[`lluvia-victoria.script.json`](../../crates/story-tools/tests/fixtures/lluvia-victoria.script.json).
+[`neon-rain-victory.script.json`](../../crates/story-tools/tests/fixtures/neon-rain-victory.script.json).
 
 Script `format_version: 3` drives parser worlds:
 
@@ -930,7 +939,10 @@ Script `format_version: 3` drives parser worlds:
   `question` (a parser question awaits).
 
 See the reviewed
-[`faro-victoria.script.json`](../../crates/story-tools/tests/fixtures/faro-victoria.script.json).
+[`lighthouse-victory.script.json`](../../crates/story-tools/tests/fixtures/lighthouse-victory.script.json)
+and its Spanish twin
+[`lighthouse-victory-es.script.json`](../../crates/story-tools/tests/fixtures/lighthouse-victory-es.script.json)
+(`"language": "es"`).
 
 Unknown fields, unknown node/variable/item/verb/menu-entry names, numbers
 equal to 0, v2 steps in a v1 script, v3 steps in an older script and v3
@@ -938,14 +950,15 @@ steps against a pack without a parser world are script errors. The first failed 
 mismatch; the command then exits with failure. See the reviewed scripts in
 [`crates/story-tools/tests/fixtures/`](../../crates/story-tools/tests/fixtures/).
 
-### `play <pack> [--seed N] [--locale es]`
+### `play <pack> [--seed N] [--locale xx]`
 
 An interactive player on standard input and output for authors. Type a choice
 number, or `deshacer`/`undo`, `estado`/`state` (full author state including
 hidden variables and the seed), `mirar`/`look`, `ayuda`/`help` and
 `salir`/`quit`. End of input also quits. Dice rolls, items, score changes and
-media cues are shown as bracketed notes. Interface words are Spanish unless the
-locale is English. Nothing is saved.
+media cues are shown as bracketed notes. Without `--locale` the pack's default
+language is used; interface words are Spanish unless the locale is English.
+Nothing is saved.
 
 In menu scenes type `N` (verb without target), `N M` (verb *N* on target *M*),
 `cN` (gamebook choice *N*), or the displayed words, such as `mirar mesa` or

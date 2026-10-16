@@ -1,5 +1,5 @@
-//! Format v3 parser adventures: the reviewed Spanish fixture played through
-//! free text, an English pack, compatibility with v1/v2 and bounds.
+//! Format v3 parser adventures: the reviewed fixture played through Spanish
+//! and English free text, compatibility with v1/v2 and bounds.
 
 use tiamud_story_core::{
     EndingKind, Location, MAX_COMPATIBLE_REVISIONS, MAX_PROMPT_BYTES, MAX_REPLIES, MAX_VIEW_BYTES,
@@ -7,9 +7,9 @@ use tiamud_story_core::{
     step_command, view, view_pages,
 };
 
-const FARO: &[u8] = include_bytes!("../fixtures/parser/faro-de-punta-gris.story.json");
-const CRIPTA: &[u8] = include_bytes!("../fixtures/cripta-del-nigromante.story.json");
-const NOIR: &[u8] = include_bytes!("../fixtures/lluvia-de-neon.story.json");
+const FARO: &[u8] = include_bytes!("../fixtures/parser/grey-point-lighthouse.story.json");
+const CRIPTA: &[u8] = include_bytes!("../fixtures/crypt-of-the-necromancer.story.json");
+const NOIR: &[u8] = include_bytes!("../fixtures/neon-rain.story.json");
 
 /// The reviewed walkthrough of the fixture, one line per input.
 const WALKTHROUGH: &[&str] = &[
@@ -51,7 +51,7 @@ fn blocks(current: &StoryView, locale: &str) -> String {
 fn command(text: &str) -> StoryInput {
     StoryInput::Command {
         text: text.to_owned(),
-        language: None,
+        language: Some("es".to_owned()),
     }
 }
 
@@ -107,6 +107,88 @@ fn walkthrough_lights_the_lighthouse_with_full_score() {
             .starts_with("La mecha prende")
     );
     assert_eq!(step(&pack, &state, command("mira")), Err(StoryError::Ended));
+}
+
+/// The same walkthrough typed in English, the pack's default language.
+const ENGLISH_WALKTHROUGH: &[&str] = &[
+    "examine the boat",
+    "take the medal",
+    "n",
+    "talk to remedios",
+    "give the medal to remedios",
+    "e",
+    "open the chest",
+    "take the lamp and light it",
+    "w",
+    "unlock the door with the key",
+    "open the door. n",
+    "read the logbook",
+    "up",
+    "take the oil can",
+    "up",
+    "fill the tank with the oil can",
+    "light the great lamp",
+];
+
+#[test]
+fn english_is_the_default_language_and_lights_the_lighthouse_too() {
+    let pack = faro();
+    assert_eq!(pack.world.as_ref().unwrap().languages(), ["en", "es"]);
+    assert_eq!(pack.default_locale(), "en");
+    let start = StoryState::new(&pack, 7).unwrap();
+    let opening = view(&pack, &start).unwrap();
+    assert_eq!(opening.text.resolve("en"), Some("Shingle Beach"));
+    assert!(blocks(&opening, "en").starts_with("The storm caught you"));
+
+    let mut state = start;
+    let mut transcript = String::new();
+    for line in ENGLISH_WALKTHROUGH {
+        let input = StoryInput::Command {
+            text: (*line).to_owned(),
+            language: None,
+        };
+        state = step(&pack, &state, input)
+            .unwrap_or_else(|error| panic!("{line:?}: {error}"))
+            .0;
+        transcript.push_str(&blocks(&view(&pack, &state).unwrap(), "en"));
+    }
+    assert!(transcript.contains("In the beached boat you see a silver medal."));
+    assert!(transcript.contains("The lock gives with a groan of old iron."));
+    assert_eq!(
+        state.ended.as_ref().map(|end| end.id.as_str()),
+        Some("faro-encendido")
+    );
+    assert_eq!(state.score, 30);
+    assert!(
+        view(&pack, &state)
+            .unwrap()
+            .text
+            .resolve("en")
+            .unwrap()
+            .starts_with("The wick catches")
+    );
+}
+
+#[test]
+fn shipped_packs_default_to_english() {
+    for bytes in [FARO, CRIPTA, NOIR] {
+        let pack = StoryPack::from_json_slice(bytes).unwrap();
+        assert_eq!(pack.default_locale(), "en", "{}", pack.id);
+        assert!(pack.title.0.contains_key("es"), "{} keeps Spanish", pack.id);
+    }
+    let mut spanish_only: serde_json::Value = serde_json::from_slice(CRIPTA).unwrap();
+    spanish_only["title"] = serde_json::json!({ "es": "La cripta", "fr": "La crypte" });
+    let pack = StoryPack::from_json_slice(&serde_json::to_vec(&spanish_only).unwrap()).unwrap();
+    assert_eq!(
+        pack.default_locale(),
+        "es",
+        "first title locale without English"
+    );
+    let mut spanish_first: serde_json::Value = serde_json::from_slice(FARO).unwrap();
+    let lexicons = spanish_first["world"]["lexicons"].as_array_mut().unwrap();
+    lexicons.reverse();
+    let pack = StoryPack::from_json_slice(&serde_json::to_vec(&spanish_first).unwrap()).unwrap();
+    assert_eq!(pack.default_locale(), "es", "the first lexicon wins");
 }
 
 #[test]
@@ -257,7 +339,7 @@ fn lines_stop_at_the_first_failure_and_use_fresh_scope() {
 fn meta_commands_are_reported_to_the_host() {
     let pack = faro();
     let state = play(&pack, &["coge la medalla", "examina la barca"]);
-    let stepped = step_command(&pack, &state, "puntos", None).unwrap();
+    let stepped = step_command(&pack, &state, "puntos", Some("es")).unwrap();
     assert_eq!(
         stepped.meta,
         vec![MetaRequest {
@@ -277,13 +359,13 @@ fn meta_commands_are_reported_to_the_host() {
         ("reiniciar", "restart"),
         ("ayuda", "help"),
     ] {
-        let stepped = step_command(&pack, &state, line, None).unwrap();
+        let stepped = step_command(&pack, &state, line, Some("es")).unwrap();
         assert_eq!(stepped.meta.len(), 1, "{line}");
         assert_eq!(stepped.meta[0].action, action, "{line}");
         assert_eq!(stepped.state.turn, state.turn, "{line}");
     }
     // A meta command ends the line; earlier commands still ran.
-    let stepped = step_command(&pack, &state, "mira. deshacer. n", None).unwrap();
+    let stepped = step_command(&pack, &state, "mira. deshacer. n", Some("es")).unwrap();
     assert_eq!(stepped.meta[0].action, "undo");
     assert_eq!(stepped.state.node, "playa");
     assert_eq!(stepped.state.turn, state.turn + 1);

@@ -598,14 +598,8 @@ fn check(
         });
     }
     if !expect.transcript.is_empty() {
-        let locale = language
-            .or_else(|| {
-                pack.world
-                    .as_ref()
-                    .and_then(|world| world.lexicons.first())
-                    .map(|lexicon| lexicon.id.as_str())
-            })
-            .unwrap_or("es");
+        let default = pack.default_locale();
+        let locale = language.unwrap_or(&default);
         let current = view(pack, state).map_err(|error| error.to_string())?;
         let shown: Vec<&str> = current
             .blocks

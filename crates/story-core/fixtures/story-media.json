@@ -5,29 +5,29 @@
     "fondo-oficina": {
       "manifest": "assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json",
       "alt": {
-        "es": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
-        "en": "A detective's office at night: a wide rain-streaked window over dark towers, a pink neon sign across the street and a desk lamp glowing on the desk."
+        "en": "A detective's office at night: a wide rain-streaked window over dark towers, a pink neon sign across the street and a desk lamp glowing on the desk.",
+        "es": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio."
       }
     },
     "fondo-club": {
       "manifest": "assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json",
       "alt": {
-        "es": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
-        "en": "A dim nightclub bar: shelves of bottles in purple light, a cyan neon sign and empty stools along the counter."
+        "en": "A dim nightclub bar: shelves of bottles in purple light, a cyan neon sign and empty stools along the counter.",
+        "es": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador."
       }
     },
     "retrato-lola-neutral": {
       "manifest": "assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json",
       "alt": {
-        "es": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
-        "en": "Portrait silhouette of Lola, a woman with a bob haircut, backlit by pink neon against a teal night."
+        "en": "Portrait silhouette of Lola, a woman with a bob haircut, backlit by pink neon against a teal night.",
+        "es": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada."
       }
     },
     "retrato-damaso-neutral": {
       "manifest": "assets/8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/manifest.json",
       "alt": {
-        "es": "Silueta de Dámaso, un hombre corpulento con sombrero de ala ancha, recortada contra una luz ámbar.",
-        "en": "Portrait silhouette of Dámaso, a broad man in a wide-brimmed hat, backlit by amber light."
+        "en": "Portrait silhouette of Dámaso, a broad man in a wide-brimmed hat, backlit by amber light.",
+        "es": "Silueta de Dámaso, un hombre corpulento con sombrero de ala ancha, recortada contra una luz ámbar."
       }
     }
   }

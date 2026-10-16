@@ -1,0 +1,129 @@
+{
+  "format_version": 3,
+  "id": "duel-at-the-pass",
+  "title": { "en": "Duel at the Pass", "es": "Duelo en el paso" },
+  "start": "inicio",
+  "variables": [
+    {
+      "id": "destreza",
+      "label": { "en": "Skill", "es": "Destreza" },
+      "visible": true,
+      "kind": { "int": { "min": 0, "max": 12, "initial": 0 } }
+    },
+    {
+      "id": "vigor",
+      "label": { "en": "Vigor", "es": "Vigor" },
+      "visible": true,
+      "kind": { "int": { "min": 0, "max": 14, "initial": 12 } }
+    },
+    {
+      "id": "vigor_bandido",
+      "label": { "en": "Bandit's vigor", "es": "Vigor del bandido" },
+      "visible": true,
+      "kind": { "int": { "min": 0, "max": 12, "initial": 10 } }
+    },
+    {
+      "id": "ronda",
+      "kind": { "int": { "min": 0, "max": 99, "initial": 0 } }
+    },
+    {
+      "id": "ultimo_golpe",
+      "kind": { "int": { "min": -20, "max": 20, "initial": 0 } }
+    }
+  ],
+  "items": [{ "id": "pocion", "name": { "en": "Vigor potion", "es": "Poción de vigor" } }],
+  "initial_inventory": ["pocion"],
+  "scripts": [
+    {
+      "id": "asalto",
+      "kind": "effect",
+      "source": "-- One round: 2d6 + skill against 2d6 + 7. Winning by 5 or more is a\n-- critical hit that doubles the damage; a tie wounds nobody.\nfunction run(story, args)\n  local v = story.vars\n  local hero = dice(2, 6) + v.destreza\n  local bandit = dice(2, 6) + 7\n  fx.add(\"ronda\", 1)\n  if hero > bandit then\n    local damage = 2 + (args.arma or 0)\n    if hero - bandit >= 5 then damage = damage * 2 end\n    fx.add(\"vigor_bandido\", -damage)\n    fx.set(\"ultimo_golpe\", damage)\n    if v.vigor_bandido - damage <= 0 then\n      fx.score(50)\n      fx.go(\"victoria\")\n    end\n  elseif bandit > hero then\n    fx.add(\"vigor\", -3)\n    fx.set(\"ultimo_golpe\", -3)\n    if v.vigor - 3 <= 0 then fx.go(\"derrota\") end\n  else\n    fx.set(\"ultimo_golpe\", 0)\n  end\nend\n",
+      "writes": ["vigor", "vigor_bandido", "ronda", "ultimo_golpe"],
+      "goto": ["victoria", "derrota"],
+      "score": true
+    },
+    {
+      "id": "puede_huir",
+      "kind": "condition",
+      "source": "-- You can only flee after holding out for a few rounds and with strength left to run.\nfunction check(story, args)\n  return story.vars.ronda >= (args.rondas or 2) and story.vars.vigor >= 4\nend\n"
+    },
+    {
+      "id": "beber",
+      "kind": "effect",
+      "source": "function run(story, args)\n  if story.items.pocion then\n    fx.take(\"pocion\")\n    fx.add(\"vigor\", 4 + dice(1, 4))\n  end\nend\n",
+      "writes": ["vigor"],
+      "items": ["pocion"]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "inicio",
+      "text": {
+        "en": "A bandit blocks your way through the gorge. Before you fight, take the measure of your skill.",
+        "es": "Un bandido te cierra el paso en el desfiladero. Antes de luchar, mide tu destreza."
+      },
+      "choices": [
+        {
+          "id": "desenvainar",
+          "label": { "en": "Draw your sword (roll one die and add 6)", "es": "Desenvainar (tira un dado y suma 6)" },
+          "effects": [
+            { "roll": { "dice": { "count": 1, "sides": 6, "modifier": 6 }, "store": "destreza" } }
+          ],
+          "target": "combate"
+        }
+      ]
+    },
+    {
+      "id": "combate",
+      "text": {
+        "en": "The bandit swings his scimitar. Each round pits 2d6 plus your skill against 2d6 plus 7.",
+        "es": "El bandido gira su cimitarra. Cada asalto enfrenta 2d6 más tu destreza contra 2d6 más 7."
+      },
+      "choices": [
+        {
+          "id": "atacar",
+          "label": { "en": "Attack with your sword", "es": "Atacar con la espada" },
+          "effects": [{ "script": { "id": "asalto", "args": { "arma": 1 } } }],
+          "target": "combate"
+        },
+        {
+          "id": "beber",
+          "label": { "en": "Drink the vigor potion", "es": "Beber la poción de vigor" },
+          "when": { "has_item": "pocion" },
+          "effects": [{ "script": { "id": "beber" } }],
+          "target": "combate"
+        },
+        {
+          "id": "huir",
+          "label": { "en": "Flee down the slope", "es": "Huir por la ladera" },
+          "when": { "script": { "id": "puede_huir", "args": { "rondas": 2 } } },
+          "target": "huida"
+        }
+      ]
+    },
+    {
+      "id": "victoria",
+      "text": {
+        "en": "The bandit falls and the pass lies open.",
+        "es": "El bandido cae y el paso queda libre."
+      },
+      "ending": { "id": "paso-libre", "kind": "victory" }
+    },
+    {
+      "id": "derrota",
+      "text": {
+        "en": "You sink to your knees. The bandit makes off with your purse.",
+        "es": "Caes de rodillas. El bandido se queda con tu bolsa."
+      },
+      "ending": { "id": "sin-bolsa", "kind": "defeat" }
+    },
+    {
+      "id": "huida",
+      "text": {
+        "en": "You slide down the slope and get away, bruised but alive.",
+        "es": "Te deslizas ladera abajo y escapas, magullado pero vivo."
+      },
+      "ending": { "id": "huida", "kind": "neutral" }
+    }
+  ]
+}

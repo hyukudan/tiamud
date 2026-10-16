@@ -12,8 +12,8 @@ use tiamud_persistence_sqlite::story_saves::{
 use tiamud_story_core::{StoryInput, StoryPack, StoryState, step, view};
 
 const CRYPT: &[u8] =
-    include_bytes!("../../../story-core/fixtures/cripta-del-nigromante.story.json");
-const NEON: &[u8] = include_bytes!("../../../story-core/fixtures/lluvia-de-neon.story.json");
+    include_bytes!("../../../story-core/fixtures/crypt-of-the-necromancer.story.json");
+const NEON: &[u8] = include_bytes!("../../../story-core/fixtures/neon-rain.story.json");
 
 fn slot(value: u8) -> StorySlot {
     StorySlot::new(value).unwrap()

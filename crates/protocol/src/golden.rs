@@ -509,13 +509,13 @@ fn client_payloads_keep_their_strict_shapes() {
 fn story_payloads_have_their_documented_shape() {
     assert_wire(
         StoryEntered {
-            story_id: "cripta-del-nigromante".into(),
-            title: "La cripta".into(),
+            story_id: "crypt-of-the-necromancer".into(),
+            title: "La cripta del nigromante".into(),
             locale: "es".into(),
-            locales: vec!["es".into(), "en".into()],
+            locales: vec!["en".into(), "es".into()],
         },
-        json!({"storyId": "cripta-del-nigromante", "title": "La cripta",
-               "locale": "es", "locales": ["es", "en"]}),
+        json!({"storyId": "crypt-of-the-necromancer", "title": "La cripta del nigromante",
+               "locale": "es", "locales": ["en", "es"]}),
     );
     assert_wire(
         StoryView {
@@ -890,21 +890,21 @@ fn story_catalog_and_line_portraits_have_their_documented_shape() {
             parts: 1,
             stories: vec![
                 StoryCatalogEntry {
-                    story_id: "cripta-del-nigromante".into(),
-                    title: "La cripta del nigromante".into(),
-                    locales: vec!["es".into()],
+                    story_id: "crypt-of-the-necromancer".into(),
+                    title: "Crypt of the Necromancer".into(),
+                    locales: vec!["en".into(), "es".into()],
                 },
                 StoryCatalogEntry {
-                    story_id: "lluvia-de-neon".into(),
-                    title: "Lluvia de neón".into(),
-                    locales: vec!["es".into(), "en".into()],
+                    story_id: "neon-rain".into(),
+                    title: "Neon Rain".into(),
+                    locales: vec!["en".into(), "es".into()],
                 },
             ],
         },
         json!({"part": 0, "parts": 1, "stories": [
-            {"storyId": "cripta-del-nigromante", "title": "La cripta del nigromante",
-             "locales": ["es"]},
-            {"storyId": "lluvia-de-neon", "title": "Lluvia de neón", "locales": ["es", "en"]}
+            {"storyId": "crypt-of-the-necromancer", "title": "Crypt of the Necromancer",
+             "locales": ["en", "es"]},
+            {"storyId": "neon-rain", "title": "Neon Rain", "locales": ["en", "es"]}
         ]}),
     );
     assert_wire(

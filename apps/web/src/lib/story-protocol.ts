@@ -328,8 +328,8 @@ export class StoryCatalogAssembler {
 
 /**
  * The language a story picker preselects: the reader's first preferred
- * language the story offers (exact tag, then primary language), else
- * Spanish when offered, else the story's default (its first locale).
+ * language the story offers (exact tag, then primary language), else the
+ * story's default (its first locale).
  */
 export function preferredStoryLocale(
   locales: readonly string[],
@@ -344,8 +344,7 @@ export function preferredStoryLocale(
     const primary = offered.indexOf(tag.split('-', 1)[0]);
     if (primary >= 0) return locales[primary];
   }
-  const spanish = offered.indexOf('es');
-  return spanish >= 0 ? locales[spanish] : (locales[0] ?? 'es');
+  return locales[0] ?? 'en';
 }
 
 export function parseStoryLeft(data: Record<string, unknown>): StoryLeft | undefined {

@@ -4,12 +4,12 @@ use crate::story_sessions::{StoryCatalog, StoryLimits};
 use std::collections::BTreeMap;
 use tiamud_story_core::StoryPack;
 
-const CRIPTA: &str = "cripta-del-nigromante";
+const CRIPTA: &str = "crypt-of-the-necromancer";
 
 fn stories(media: BTreeMap<String, String>) -> StoryManager {
     let bytes = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-core/fixtures/cripta-del-nigromante.story.json"),
+            .join("../story-core/fixtures/crypt-of-the-necromancer.story.json"),
     )
     .unwrap();
     let pack = StoryPack::from_json_slice(&bytes).unwrap();
@@ -76,8 +76,7 @@ async fn telnet_lists_story_languages_and_speaks_the_session_locale() {
         StoryPack::from_json_slice(&bytes).unwrap()
     };
     let manager = StoryManager::new(
-        StoryCatalog::from_packs(vec![pack(CRIPTA), pack("lluvia-de-neon")], BTreeMap::new())
-            .unwrap(),
+        StoryCatalog::from_packs(vec![pack(CRIPTA), pack("neon-rain")], BTreeMap::new()).unwrap(),
         StoryLimits::default(),
     );
     let output = TelnetOutputQueue::new(256, 1024 * 1024);
@@ -85,11 +84,11 @@ async fn telnet_lists_story_languages_and_speaks_the_session_locale() {
     let mut story = TelnetStory::new(Some(manager), AccountId(9));
     story.line(&output, &mut input, "historias").await.unwrap();
     let listing = drain(&output).0;
-    assert!(listing.contains("lluvia-de-neon — Lluvia de neón [es, en]"));
+    assert!(listing.contains("neon-rain — Neon Rain [en, es]"));
     assert!(listing.contains("«historia <id> <idioma>»"));
 
     story
-        .line(&output, &mut input, "historia lluvia-de-neon en")
+        .line(&output, &mut input, "historia neon-rain en")
         .await
         .unwrap();
     let (text, _) = drain(&output);
@@ -132,11 +131,12 @@ async fn telnet_plays_by_number_undoes_and_leaves() {
     assert!(
         drain(&output)
             .0
-            .contains("cripta-del-nigromante — La cripta del nigromante [es]")
+            .contains("crypt-of-the-necromancer — Crypt of the Necromancer [en, es]")
     );
 
+    // Spanish on request (English is the pack's default).
     story
-        .line(&output, &mut input, &format!("historia {CRIPTA}"))
+        .line(&output, &mut input, &format!("historia {CRIPTA} es"))
         .await
         .unwrap();
     assert!(story.active());
@@ -199,8 +199,8 @@ async fn telnet_resumes_after_reconnect_and_reports_disabled_stories() {
     second.resume(&output, &mut input).await.unwrap();
     assert!(second.active());
     let (resumed, _) = drain(&output);
-    assert!(resumed.contains("Continúas la historia «La cripta del nigromante»."));
-    let tail = before.rsplit("== La cripta").next().unwrap();
+    assert!(resumed.contains("You resume the story «Crypt of the Necromancer»."));
+    let tail = before.rsplit("== Crypt").next().unwrap();
     assert!(resumed.ends_with(tail));
 
     let mut disabled = TelnetStory::new(None, AccountId(4));
@@ -237,7 +237,7 @@ async fn gmcp_story_summary_and_media_follow_negotiation() {
         .unwrap();
     let view: serde_json::Value = serde_json::from_str(view).unwrap();
     assert_eq!(view["choices"][0]["number"], 1);
-    assert_eq!(view["title"], "La cripta del nigromante");
+    assert_eq!(view["title"], "Crypt of the Necromancer");
     assert!(view["ending"].is_null());
     assert!(
         view["choices"][0].get("id").is_none(),
@@ -246,9 +246,9 @@ async fn gmcp_story_summary_and_media_follow_negotiation() {
 
     // Roll, go north, then fight: the reviewed combat music cue plays.
     for (choice, label) in [
-        ("1", "Tira un dado"),
-        ("2", "Avanzar por el pasillo"),
-        ("1", "Un esqueleto armado"),
+        ("1", "Roll one die"),
+        ("2", "Follow the passage"),
+        ("1", "An armed skeleton"),
     ] {
         assert!(
             story
@@ -292,7 +292,7 @@ async fn telnet_saves_loads_lists_deletes_and_continues_with_gmcp_slots() {
     let mut story = TelnetStory::new(Some(manager), account);
 
     story
-        .line(&output, &mut input, &format!("historia {CRIPTA}"))
+        .line(&output, &mut input, &format!("historia {CRIPTA} es"))
         .await
         .unwrap();
     let (text, gmcp) = drain(&output);
@@ -323,7 +323,7 @@ async fn telnet_saves_loads_lists_deletes_and_continues_with_gmcp_slots() {
     );
     assert!(drain(&output).0.contains("autoguardado"));
     story
-        .line(&output, &mut input, &format!("historia {CRIPTA}"))
+        .line(&output, &mut input, &format!("historia {CRIPTA} es"))
         .await
         .unwrap();
     let (text, gmcp) = drain(&output);
@@ -393,7 +393,7 @@ fn oversized_gmcp_story_summary_degrades_within_the_limit() {
 fn faro_stories() -> StoryManager {
     let bytes = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-core/fixtures/parser/faro-de-punta-gris.story.json"),
+            .join("../story-core/fixtures/parser/grey-point-lighthouse.story.json"),
     )
     .unwrap();
     let pack = StoryPack::from_json_slice(&bytes).unwrap();
@@ -418,7 +418,7 @@ async fn telnet_lines_are_parser_commands_in_a_parser_story() {
     let mut story = TelnetStory::new(Some(faro_stories()), AccountId(9));
     assert_eq!(
         story
-            .line(&output, &mut input, "historia faro-de-punta-gris")
+            .line(&output, &mut input, "historia grey-point-lighthouse es")
             .await
             .unwrap(),
         StoryLineOutcome::Handled

@@ -11,12 +11,12 @@ use tiamud_persistence_sqlite::story_saves::{
     MAX_STORIES_WITH_SAVES_PER_ACCOUNT, story_state_sha256,
 };
 
-const CRIPTA: &str = "cripta-del-nigromante";
+const CRIPTA: &str = "crypt-of-the-necromancer";
 
 fn cripta() -> StoryPack {
     let bytes = std::fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-core/fixtures/cripta-del-nigromante.story.json"),
+            .join("../story-core/fixtures/crypt-of-the-necromancer.story.json"),
     )
     .unwrap();
     StoryPack::from_json_slice(&bytes).unwrap()
@@ -25,7 +25,10 @@ fn cripta() -> StoryPack {
 /// Same pack id, different content: another revision of the story.
 fn cripta_revised() -> StoryPack {
     let mut pack = cripta();
-    pack.title = serde_json::from_value(serde_json::json!({"es": "La cripta (revisada)"})).unwrap();
+    pack.title = serde_json::from_value(
+        serde_json::json!({"en": "The crypt (revised)", "es": "La cripta (revisada)"}),
+    )
+    .unwrap();
     pack
 }
 
@@ -318,7 +321,10 @@ async fn declared_compatible_revisions_load_after_revalidation() {
     // Revision B declares A compatible: both slots are listed as
     // compatible, continue is offered and the state loads unchanged.
     let mut second = first.clone();
-    second.title = serde_json::from_value(serde_json::json!({"es": "La cripta (2.ª)"})).unwrap();
+    second.title = serde_json::from_value(
+        serde_json::json!({"en": "The crypt (2nd ed.)", "es": "La cripta (2.ª)"}),
+    )
+    .unwrap();
     second.compatible_revisions = vec![revision_of(&first)];
     let revised = stories_with(second.clone(), &fixture.store, Duration::from_secs(60));
     let link = revised.enter(fixture.account, CRIPTA).unwrap();

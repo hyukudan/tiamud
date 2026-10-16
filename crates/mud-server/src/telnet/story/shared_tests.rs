@@ -6,12 +6,12 @@ use crate::story_sessions::{StoryCatalog, StoryLimits};
 use std::{collections::BTreeMap, time::Duration};
 use tiamud_story_core::StoryPack;
 
-const CRIPTA: &str = "cripta-del-nigromante";
+const CRIPTA: &str = "crypt-of-the-necromancer";
 
 fn stories() -> StoryManager {
     let bytes = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-core/fixtures/cripta-del-nigromante.story.json"),
+            .join("../story-core/fixtures/crypt-of-the-necromancer.story.json"),
     )
     .unwrap();
     StoryManager::new(
@@ -112,7 +112,7 @@ async fn telnet_players_share_vote_by_number_and_see_text_tallies() {
     let mut bruno = Client::new(&manager, AccountId(2), "Bruno");
 
     assert_eq!(
-        aria.line(&format!("historia compartir {CRIPTA}")).await,
+        aria.line(&format!("historia compartir {CRIPTA} es")).await,
         StoryLineOutcome::Handled
     );
     let (text, gmcp) = aria.drain();
@@ -244,7 +244,7 @@ async fn a_solo_telnet_story_can_be_shared_and_ends_for_spectators() {
     let manager = stories();
     let mut aria = Client::new(&manager, AccountId(1), "Aria");
     let mut carla = Client::new(&manager, AccountId(3), "Carla");
-    aria.line(&format!("historia {CRIPTA}")).await;
+    aria.line(&format!("historia {CRIPTA} es")).await;
     aria.drain();
     aria.line("asientos").await;
     assert!(aria.drain().0.contains("no está compartida"));

@@ -2,9 +2,11 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 
-// Real `story.catalog`, `story.entered` and English `story.view` frames
+// Real `story.catalog`, `story.entered` and Spanish `story.view` frames
 // recorded by the Rust server (`browser_e2e_fixtures_are_current`), plus the
-// recorded menu adventure whose dialogue lines carry speaker portraits.
+// recorded English menu adventure whose dialogue lines carry speaker
+// portraits. The catalog holds a Spanish-only story and the two bilingual
+// samples, which default to English.
 interface CatalogFixture {
   catalog: unknown[];
   entered: { storyId: string; title: string; locale: string; locales: string[] };
@@ -25,13 +27,13 @@ const catalog = JSON.parse(readFileSync(
   new URL('./fixtures/story-catalog.json', import.meta.url), 'utf8',
 )) as CatalogFixture;
 const lluvia = JSON.parse(readFileSync(
-  new URL('./fixtures/story-lluvia.json', import.meta.url), 'utf8',
+  new URL('./fixtures/story-neon-rain.json', import.meta.url), 'utf8',
 )) as StoryFixture;
 
 /**
  * A scripted server: `story.catalog` answers with the recorded catalog,
- * `historia lluvia-de-neon en` enters the recorded English instance and
- * `historia lluvia-de-neon es` replays the recorded Spanish adventure.
+ * `historia neon-rain es` enters the recorded Spanish instance and
+ * `historia neon-rain en` replays the recorded English adventure.
  */
 async function installPickerServer(page: Page): Promise<void> {
   await page.route('**/api/characters', async (route) => {
@@ -92,18 +94,18 @@ async function installPickerServer(page: Page): Promise<void> {
           case 'command.submit': {
             const command = String(message.data.command);
             state.pickerCommands?.push(command);
-            const english = command === 'historia lluvia-de-neon en';
-            const spanish = command === 'historia lluvia-de-neon es';
+            const english = command === 'historia neon-rain en';
+            const spanish = command === 'historia neon-rain es';
             this.emitFrame('action.result', {
               requestId: message.data.requestId, ok: english || spanish,
               message: english ? 'You enter «Neon Rain».' : spanish ? 'Entras en «Lluvia de neón».' : 'Unknown command.',
             });
-            if (english) {
+            if (spanish) {
               this.emitFrame('story.entered', fixtures.catalog.entered);
               for (const part of fixtures.catalog.view) this.emitFrame('story.view', part);
-            } else if (spanish) {
+            } else if (english) {
               this.emitFrame('story.entered', {
-                storyId: 'lluvia-de-neon', title: 'Lluvia de neón', locale: 'es', locales: ['es', 'en'],
+                storyId: 'neon-rain', title: 'Neon Rain', locale: 'en', locales: ['en', 'es'],
               });
               for (const part of fixtures.lluvia.steps[0].view) this.emitFrame('story.view', part);
             }
@@ -161,35 +163,53 @@ test.describe('with an English browser', () => {
     const { picker, toggle } = await openPicker(page);
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     const stories = picker.getByRole('list', { name: 'Available stories' }).getByRole('listitem');
-    await expect(stories).toHaveCount(2);
+    await expect(stories).toHaveCount(3);
     // A single-language story shows its language without a select.
-    await expect(stories.nth(0)).toContainText('La cripta del nigromante');
+    await expect(stories.nth(0)).toContainText('Breve');
     await expect(stories.nth(0).getByRole('combobox')).toHaveCount(0);
-    const language = picker.getByRole('combobox', { name: 'Language for Lluvia de neón' });
+    await expect(stories.nth(1)).toContainText('Crypt of the Necromancer');
+    const language = picker.getByRole('combobox', { name: 'Language for Neon Rain' });
     await expect(language).toHaveValue('en');
     await expectNoViolations(page, 'section.story-picker');
 
-    await stories.nth(1).getByRole('button', { name: 'Play' }).click();
+    await stories.nth(2).getByRole('button', { name: 'Play' }).click();
     const panel = page.locator('section.story-panel');
     await expect(panel.getByRole('heading', { level: 1, name: 'Neon Rain' })).toBeVisible();
     await expect(panel.getByRole('heading', { level: 1 })).toHaveAttribute('lang', 'en');
     await expect(panel.getByRole('group', { name: 'INVESTIGATE' })).toBeVisible();
     await expect(page.locator('section.story-picker')).toHaveCount(0);
     expect(await page.evaluate(() => (window as Window & { pickerCommands?: string[] }).pickerCommands))
-      .toEqual(['historia lluvia-de-neon en']);
+      .toEqual(['historia neon-rain en']);
+  });
+});
+
+test.describe('with a Spanish browser', () => {
+  test.use({ locale: 'es-ES' });
+
+  test('the picker preselects Spanish and enters the story in it', async ({ page }) => {
+    const { picker } = await openPicker(page);
+    const language = picker.getByRole('combobox', { name: 'Language for Neon Rain' });
+    await expect(language).toHaveValue('es');
+    await picker.getByRole('listitem').nth(2).getByRole('button', { name: 'Play' }).click();
+    const panel = page.locator('section.story-panel');
+    await expect(panel.getByRole('heading', { level: 1, name: 'Lluvia de neón' })).toBeVisible();
+    await expect(panel.getByRole('heading', { level: 1 })).toHaveAttribute('lang', 'es');
+    await expect(panel.getByRole('group', { name: 'INVESTIGAR' })).toBeVisible();
+    expect(await page.evaluate(() => (window as Window & { pickerCommands?: string[] }).pickerCommands))
+      .toEqual(['historia neon-rain es']);
   });
 });
 
 test.describe('with a French browser', () => {
   test.use({ locale: 'fr-FR' });
 
-  test('the picker falls back to Spanish, switches language by keyboard and closes with Escape', async ({ page }) => {
+  test('the picker falls back to the story default, switches language by keyboard and closes with Escape', async ({ page }) => {
     const { picker, toggle } = await openPicker(page);
-    const language = picker.getByRole('combobox', { name: 'Language for Lluvia de neón' });
-    await expect(language).toHaveValue('es');
-    await language.selectOption('en');
+    const language = picker.getByRole('combobox', { name: 'Language for Neon Rain' });
     await expect(language).toHaveValue('en');
     await language.selectOption('es');
+    await expect(language).toHaveValue('es');
+    await language.selectOption('en');
     await page.keyboard.press('Escape');
     await expect(page.locator('section.story-picker')).toHaveCount(0);
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
@@ -198,7 +218,7 @@ test.describe('with a French browser', () => {
   });
 });
 
-/** Plays the recorded Spanish adventure up to Lola's first dialogue line. */
+/** Plays the recorded English adventure up to Lola's first dialogue line. */
 async function talkToLola(page: Page, readerMode = false) {
   if (readerMode) {
     await page.addInitScript(() => {
@@ -206,10 +226,10 @@ async function talkToLola(page: Page, readerMode = false) {
     });
   }
   const { picker } = await openPicker(page);
-  await picker.getByRole('combobox', { name: 'Language for Lluvia de neón' }).selectOption('es');
-  await picker.getByRole('listitem').nth(1).getByRole('button', { name: 'Play' }).click();
+  await picker.getByRole('combobox', { name: 'Language for Neon Rain' }).selectOption('en');
+  await picker.getByRole('listitem').nth(2).getByRole('button', { name: 'Play' }).click();
   const panel = page.locator('section.story-panel');
-  await expect(panel.getByRole('heading', { level: 1, name: 'Lluvia de neón' })).toBeVisible();
+  await expect(panel.getByRole('heading', { level: 1, name: 'Neon Rain' })).toBeVisible();
   for (const step of lluvia.steps.slice(0, 7)) {
     const [verb, target] = (step.label ?? '').split(' → ');
     await panel.getByRole('group', { name: verb }).getByRole('button', { name: target, exact: true }).click();

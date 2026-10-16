@@ -8,7 +8,7 @@ use crate::persistence::SqliteCharacterStore;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-const CRIPTA: &str = "cripta-del-nigromante";
+const CRIPTA: &str = "crypt-of-the-necromancer";
 const HOST: AccountId = AccountId(1);
 const BRUNO: AccountId = AccountId(2);
 const CARLA: AccountId = AccountId(3);
@@ -16,7 +16,7 @@ const CARLA: AccountId = AccountId(3);
 fn cripta() -> StoryPack {
     let bytes = std::fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-core/fixtures/cripta-del-nigromante.story.json"),
+            .join("../story-core/fixtures/crypt-of-the-necromancer.story.json"),
     )
     .unwrap();
     StoryPack::from_json_slice(&bytes).unwrap()

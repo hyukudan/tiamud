@@ -169,7 +169,8 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
             ],
         )
         .unwrap();
-    let story_state = r#"{"format_version":2,"pack_id":"cripta-del-nigromante","node":"inicio"}"#;
+    let story_state =
+        r#"{"format_version":2,"pack_id":"crypt-of-the-necromancer","node":"inicio"}"#;
     let story_state_sha256 = hex::encode(Sha256::digest(story_state.as_bytes()));
     sqlite
         .execute(
@@ -177,7 +178,7 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
                  (account_id, story_id, slot, pack_id, pack_sha256,
                   state_format_version, state_json, state_sha256,
                   created_at, updated_at)
-             VALUES (2, 'cripta-del-nigromante', 0, 'cripta-del-nigromante',
+             VALUES (2, 'crypt-of-the-necromancer', 0, 'crypt-of-the-necromancer',
                      ?1, 2, ?2, ?3, 990, 995)",
             params!["c".repeat(64), story_state, story_state_sha256],
         )
@@ -255,9 +256,9 @@ fn migrates_a_representative_current_database_when_postgres_is_available() {
         )
         .unwrap();
     assert_eq!(story_row.get::<_, i64>(0), 2);
-    assert_eq!(story_row.get::<_, String>(1), "cripta-del-nigromante");
+    assert_eq!(story_row.get::<_, String>(1), "crypt-of-the-necromancer");
     assert_eq!(story_row.get::<_, i16>(2), 0);
-    assert_eq!(story_row.get::<_, String>(3), "cripta-del-nigromante");
+    assert_eq!(story_row.get::<_, String>(3), "crypt-of-the-necromancer");
     assert_eq!(story_row.get::<_, String>(4), "c".repeat(64));
     assert_eq!(story_row.get::<_, i32>(5), 2);
     assert_eq!(

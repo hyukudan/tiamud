@@ -11,7 +11,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-const DUELO: &str = "duelo-en-el-paso";
+const DUELO: &str = "duel-at-the-pass";
 const ROTO: &str = "guion-roto";
 const ARIA: AccountId = AccountId(1);
 const BRUNO: AccountId = AccountId(2);
@@ -19,7 +19,7 @@ const BRUNO: AccountId = AccountId(2);
 fn duelo() -> StoryPack {
     let bytes = std::fs::read(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-script/fixtures/duelo-en-el-paso.story.json"),
+            .join("../story-script/fixtures/duel-at-the-pass.story.json"),
     )
     .unwrap();
     StoryPack::from_json_slice(&bytes).unwrap()
@@ -114,8 +114,8 @@ fn the_catalog_refuses_scripted_packs_unless_scripts_are_enabled() {
     let directory = TempDir::new().unwrap();
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-script/fixtures/duelo-en-el-paso.story.json"),
-        directory.path().join("duelo-en-el-paso.story.json"),
+            .join("../story-script/fixtures/duel-at-the-pass.story.json"),
+        directory.path().join("duel-at-the-pass.story.json"),
     )
     .unwrap();
     assert!(matches!(
@@ -231,22 +231,21 @@ async fn the_scripted_duel_plays_to_an_ending_through_the_instance_task() {
             .enter_seeded(account, DUELO, seed, Some(seed))
             .unwrap();
         let start = link.view().await.unwrap();
-        assert_eq!(labels(&start), ["Desenvainar (tira un dado y suma 6)"]);
-        let mut view = take(&link, &start, "Desenvainar (tira un dado y suma 6)").await;
+        assert_eq!(labels(&start), ["Draw your sword (roll one die and add 6)"]);
+        let mut view = take(&link, &start, "Draw your sword (roll one die and add 6)").await;
         let mut rounds = 0;
         while view.ending.is_none() {
             rounds += 1;
             assert!(rounds < 64, "the duel never ended");
             // The flee condition is a script evaluated with each view.
-            let flee = labels(&view).contains(&"Huir por la ladera".to_owned());
+            let flee = labels(&view).contains(&"Flee down the slope".to_owned());
             view = if seed % 3 == 0 && flee {
-                take(&link, &view, "Huir por la ladera").await
-            } else if seed % 2 == 0
-                && labels(&view).contains(&"Beber la poción de vigor".to_owned())
+                take(&link, &view, "Flee down the slope").await
+            } else if seed % 2 == 0 && labels(&view).contains(&"Drink the vigor potion".to_owned())
             {
-                take(&link, &view, "Beber la poción de vigor").await
+                take(&link, &view, "Drink the vigor potion").await
             } else {
-                take(&link, &view, "Atacar con la espada").await
+                take(&link, &view, "Attack with your sword").await
             };
         }
         assert!(view.actions().is_empty());
@@ -301,7 +300,7 @@ async fn an_exhausted_input_budget_fails_without_running_more_scripts() {
     let start = link.view().await.unwrap();
     let failed = link
         .input(
-            action(&start, "Desenvainar (tira un dado y suma 6)").request(),
+            action(&start, "Draw your sword (roll one die and add 6)").request(),
             start.view_rev,
         )
         .await;
@@ -327,8 +326,8 @@ async fn repeated_script_failures_close_the_instance_with_the_last_good_autosave
 
     let link = stories.enter(account, ROTO).unwrap();
     let start = link.view().await.unwrap();
-    let room = take(&link, &start, "Ir").await;
-    let request = action(&room, "Romper").request();
+    let room = take(&link, &start, "Go").await;
+    let request = action(&room, "Break").request();
     for _ in 0..scripts::SCRIPT_FAILURES_BEFORE_CLOSE {
         assert_eq!(
             link.input(request.clone(), room.view_rev).await,
@@ -371,7 +370,7 @@ async fn a_saturated_script_pool_answers_busy_and_changes_nothing() {
     let start = link.view().await.unwrap();
     // Another instance's job holds the only admission.
     let held = stories.inner.pool.admit().unwrap();
-    let request = action(&start, "Desenvainar (tira un dado y suma 6)").request();
+    let request = action(&start, "Draw your sword (roll one die and add 6)").request();
     assert_eq!(
         link.input(request.clone(), start.view_rev).await,
         Err(StoryFailure::Busy)
@@ -385,7 +384,7 @@ async fn a_saturated_script_pool_answers_busy_and_changes_nothing() {
     // Once the pool frees up the same input applies.
     drop(held);
     let duel = link.input(request, start.view_rev).await.unwrap();
-    assert!(labels(&duel).contains(&"Atacar con la espada".to_owned()));
+    assert!(labels(&duel).contains(&"Attack with your sword".to_owned()));
 }
 
 #[tokio::test]
@@ -406,11 +405,11 @@ async fn a_shared_vote_resolves_before_its_scripts_run() {
         assert!(decisions < 64, "the shared duel never ended");
         let label = if labels(&view)
             .iter()
-            .any(|label| label.starts_with("Desenvainar"))
+            .any(|label| label.starts_with("Draw your sword"))
         {
-            "Desenvainar (tira un dado y suma 6)"
+            "Draw your sword (roll one die and add 6)"
         } else {
-            "Atacar con la espada"
+            "Attack with your sword"
         };
         let chosen = action(&view, label);
         // One vote of two: counted, nothing runs yet.

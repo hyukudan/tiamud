@@ -228,15 +228,16 @@ Each format is a strict superset of the previous one, and `tiamud-story fmt
 
 ### Sample stories
 
-All four are original, reviewed and in Spanish; *Lluvia de neón* is also in
-English.
+All four are original and reviewed, written in English (their default
+language) with a full Spanish translation; pick a language on entry
+(`historia <id> es`) or in the browser's story picker.
 
 | Story | Format | Pitch |
 | --- | --- | --- |
-| [La cripta del nigromante](crates/story-core/fixtures/cripta-del-nigromante.story.json) | v1 gamebook | Roll your skill, fight a skeleton with dice and find the key to the necromancer's treasure — or escape without it. |
-| [Lluvia de neón](crates/story-core/fixtures/lluvia-de-neon.story.json) | v2 menu adventure | Rain-soaked noir: a memory dealer turned up dead, and Lola and Dámaso — with portraits and dialogue trees — know more than they say. Ships with sample art. |
-| [El faro de Punta Gris](crates/story-core/fixtures/parser/faro-de-punta-gris.story.json) | v3 parser IF | Washed ashore in a storm, you must relight the dark lighthouse before the boats out at sea need it. |
-| [Duelo en el paso](crates/story-script/fixtures/duelo-en-el-paso.story.json) | v3 + Lua | A bandit blocks the mountain pass; a Lua-scripted combat round decides the duel. |
+| [Crypt of the Necromancer](crates/story-core/fixtures/crypt-of-the-necromancer.story.json) | v1 gamebook | Roll your skill, fight a skeleton with dice and find the key to the necromancer's treasure — or escape without it. |
+| [Neon Rain](crates/story-core/fixtures/neon-rain.story.json) | v2 menu adventure | Rain-soaked noir: a memory dealer turned up dead, and Lola and Dámaso — with portraits and dialogue trees — know more than they say. Ships with sample art. |
+| [The Lighthouse at Grey Point](crates/story-core/fixtures/parser/grey-point-lighthouse.story.json) | v3 parser IF | Washed ashore in a storm, you must relight the dark lighthouse before the boats out at sea need it. |
+| [Duel at the Pass](crates/story-script/fixtures/duel-at-the-pass.story.json) | v3 + Lua | A bandit blocks the mountain pass; a Lua-scripted combat round decides the duel. |
 
 ## Clients
 
@@ -335,14 +336,14 @@ cargo run --locked -p tiamud-server
 - **Browser:** open <http://127.0.0.1:8080>, register, create a character.
 - **Telnet:** `telnet 127.0.0.1 4000`.
 - **Stories:** type `historias` (or `stories`), then for example
-  `historia cripta-del-nigromante`, `story lluvia-de-neon en` or
-  `historia faro-de-punta-gris`; in the browser use the **Stories** button.
+  `story crypt-of-the-necromancer`, `story neon-rain es` (Spanish) or
+  `historia grey-point-lighthouse`; in the browser use the **Stories** button.
 
 Without `TIAMUD_STORY_DIR` story sessions are off. The bundled
 `crates/story-core/fixtures` directory holds three packs (its `parser/`
 subdirectory is scanned too) plus the reviewed media map. The Lua sample
 lives in `crates/story-script/fixtures`; to try it, point `TIAMUD_STORY_DIR`
-at a directory that also contains `duelo-en-el-paso.story.json` and add
+at a directory that also contains `duel-at-the-pass.story.json` and add
 `TIAMUD_STORY_SCRIPTS=1` — without that switch a scripted pack stops the
 server at startup. See [story sessions](docs/operations/single-host.md#story-sessions)
 for every limit.
@@ -387,17 +388,17 @@ Work with packs offline using `tiamud-story`:
 alias tiamud-story='cargo run --locked -q -p tiamud-story-tools --bin tiamud-story --'
 
 # Validate and lint (unreachable nodes, impossible choices, soft-locks, ...)
-tiamud-story validate crates/story-core/fixtures/cripta-del-nigromante.story.json --deny-warnings
+tiamud-story validate crates/story-core/fixtures/crypt-of-the-necromancer.story.json --deny-warnings
 
 # Render a node or a dialogue as a player would see it
-tiamud-story preview crates/story-core/fixtures/lluvia-de-neon.story.json --locale en
+tiamud-story preview crates/story-core/fixtures/neon-rain.story.json --locale es
 
 # Replay a scripted playthrough with a fixed seed and check expectations
-tiamud-story test crates/story-core/fixtures/parser/faro-de-punta-gris.story.json \
-  --script crates/story-tools/tests/fixtures/faro-victoria.script.json
+tiamud-story test crates/story-core/fixtures/parser/grey-point-lighthouse.story.json \
+  --script crates/story-tools/tests/fixtures/lighthouse-victory.script.json
 
 # Play interactively in the terminal (Lua host included)
-tiamud-story play crates/story-script/fixtures/duelo-en-el-paso.story.json --seed 7
+tiamud-story play crates/story-script/fixtures/duel-at-the-pass.story.json --seed 7
 
 # Canonical formatting, upgrade to v3, and the v3 JSON Schema
 tiamud-story fmt my.story.json --upgrade --output my.v3.story.json

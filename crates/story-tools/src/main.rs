@@ -51,8 +51,10 @@ enum Command {
         /// `dialogue/node`, on top of the scene.
         #[arg(long)]
         dialogue: Option<String>,
-        #[arg(long, default_value = "es")]
-        locale: String,
+        /// Display language; defaults to the pack's default locale (its
+        /// first parser lexicon, else English when the title offers it).
+        #[arg(long)]
+        locale: Option<String>,
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
@@ -67,8 +69,10 @@ enum Command {
         pack: PathBuf,
         #[arg(long, default_value_t = 0)]
         seed: u64,
-        #[arg(long, default_value = "es")]
-        locale: String,
+        /// Display and parser language; defaults to the pack's default
+        /// locale (its first parser lexicon, else English when offered).
+        #[arg(long)]
+        locale: Option<String>,
     },
     /// Print the canonical form of a StoryPack, check it, or write it.
     Fmt {
@@ -221,8 +225,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
             locale,
             seed,
         } => {
-            check_locale(&locale)?;
             let (pack, _) = load_pack(&path)?;
+            let locale = locale.unwrap_or_else(|| pack.default_locale());
+            check_locale(&locale)?;
             let mut state = StoryState::new(&pack, seed)?;
             if let Some(node_id) = node {
                 if node_id.is_empty() || node_id.len() > MAX_ID_BYTES {
@@ -301,8 +306,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
             seed,
             locale,
         } => {
-            check_locale(&locale)?;
             let (pack, _) = load_pack(&path)?;
+            let locale = locale.unwrap_or_else(|| pack.default_locale());
+            check_locale(&locale)?;
             let stdin = io::stdin();
             let stdout = io::stdout();
             play(&pack, seed, &locale, stdin.lock(), stdout.lock())?;

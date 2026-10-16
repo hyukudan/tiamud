@@ -17,7 +17,7 @@ fn fixture(name: &str) -> String {
 
 fn cripta() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../story-core/fixtures/cripta-del-nigromante.story.json")
+        .join("../story-core/fixtures/crypt-of-the-necromancer.story.json")
         .to_string_lossy()
         .into_owned()
 }
@@ -56,20 +56,20 @@ fn validates_reviewed_fixture_without_findings() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "valid StoryPack \"cripta-del-nigromante\" (format v1): 10 node(s), 13 choice(s), 5 variable(s), 2 item(s); 0 warning(s), 0 lint(s)\n"
+        "valid StoryPack \"crypt-of-the-necromancer\" (format v1): 10 node(s), 13 choice(s), 5 variable(s), 2 item(s); 0 warning(s), 0 lint(s)\n"
     );
 
     let output = run(&["validate", &noir(), "--deny-warnings"]);
     assert!(output.status.success(), "{}", stdout(&output));
     assert_eq!(
         stdout(&output),
-        "valid StoryPack \"lluvia-de-neon\" (format v2): 5 node(s), 0 choice(s), 5 variable(s), 2 item(s), 6 verb(s), 14 menu entr(y/ies), 2 character(s), 2 dialogue(s); 0 warning(s), 0 lint(s)\n"
+        "valid StoryPack \"neon-rain\" (format v2): 5 node(s), 0 choice(s), 5 variable(s), 2 item(s), 6 verb(s), 14 menu entr(y/ies), 2 character(s), 2 dialogue(s); 0 warning(s), 0 lint(s)\n"
     );
 }
 
 fn noir() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../story-core/fixtures/lluvia-de-neon.story.json")
+        .join("../story-core/fixtures/neon-rain.story.json")
         .to_string_lossy()
         .into_owned()
 }
@@ -107,7 +107,7 @@ fn reports_menu_dialogue_and_portrait_lints() {
 #[test]
 fn menu_scenes_preview_test_and_play_like_a_telnet_player() {
     let pack = noir();
-    let output = run(&["preview", &pack]);
+    let output = run(&["preview", &pack, "--locale", "es"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let scene = stdout(&output);
     assert!(scene.starts_with("== Lluvia de neón ==\n[fondo: fondo-oficina]\n"));
@@ -117,7 +117,7 @@ fn menu_scenes_preview_test_and_play_like_a_telnet_player() {
     assert!(scene.contains("3) USAR: (nada)\n"));
     assert!(!scene.contains("investigar-mesa") && !scene.contains("pista_tarjeta"));
 
-    let output = run(&["preview", &pack, "--node", "club", "--locale", "en"]);
+    let output = run(&["preview", &pack, "--node", "club"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let scene = stdout(&output);
     assert!(scene.contains("Present: Lola [portrait: retrato-lola-neutral]"));
@@ -130,6 +130,8 @@ fn menu_scenes_preview_test_and_play_like_a_telnet_player() {
         "club",
         "--dialogue",
         "charla-lola/iker",
+        "--locale",
+        "es",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
     let scene = stdout(&output);
@@ -141,7 +143,7 @@ fn menu_scenes_preview_test_and_play_like_a_telnet_player() {
     let output = run(&["preview", &pack, "--dialogue", "nada"]);
     assert!(!output.status.success());
 
-    let script = fixture("lluvia-victoria.script.json");
+    let script = fixture("neon-rain-victory.script.json");
     let output = run(&["test", &pack, "--script", &script]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
@@ -150,7 +152,10 @@ fn menu_scenes_preview_test_and_play_like_a_telnet_player() {
     );
 
     let input = "investigar ventana\n2 2\nINVESTIGAR VENTANA\nmirar nevera\nusar\n7\n2 1\nusar tarjeta\nmoverse puerta\nhablar lola\nmirar barra\n2\n1\n3\n1\nestado\nsalir\n";
-    let output = run_with_stdin(&["play", &pack, "--seed", "5"], input.as_bytes());
+    let output = run_with_stdin(
+        &["play", &pack, "--seed", "5", "--locale", "es"],
+        input.as_bytes(),
+    );
     assert!(output.status.success(), "{}", stderr(&output));
     let transcript = stdout(&output);
     for expected in [
@@ -252,24 +257,35 @@ fn reports_core_warnings_and_authoring_lints() {
 #[test]
 fn previews_nodes_like_a_player_without_authored_ids() {
     let pack = cripta();
+    // Without `--locale` the pack's default language (English) is shown.
     let output = run(&["preview", &pack]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let scene = stdout(&output);
+    assert!(scene.starts_with("== Crypt of the Necromancer ==\n"));
+    assert!(scene.contains("Turn 0 · Score 0 · Skill 0 · Stamina 12"));
+    assert!(scene.contains("1) Roll one die and add 6 to set your skill\n"));
+    assert!(!scene.contains("tirar-destreza"));
+    assert!(!scene.contains("vida_esqueleto"));
+
+    let output = run(&["preview", &pack, "--locale", "es"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let scene = stdout(&output);
     assert!(scene.starts_with("== La cripta del nigromante ==\n"));
     assert!(scene.contains("Turno 0 · Puntuación 0 · Destreza 0 · Resistencia 12"));
     assert!(scene.contains("1) Tira un dado y suma 6 para fijar tu destreza\n"));
-    assert!(!scene.contains("tirar-destreza"));
-    assert!(!scene.contains("vida_esqueleto"));
 
     let output = run(&["preview", &pack, "--node", "pasillo"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let scene = stdout(&output);
-    assert!(scene.contains("1) Un esqueleto armado se alza: luchar\n2) Volver al vestíbulo\n"));
+    assert!(scene.contains("1) An armed skeleton rises: fight\n2) Go back to the entrance hall\n"));
     assert!(scene.contains("(1 choice(s) hidden by conditions in the initial state)"));
 
-    let output = run(&["preview", &pack, "--node", "muerte"]);
+    let output = run(&["preview", &pack, "--node", "muerte", "--locale", "es"]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("*** FIN (derrota) ***"));
+    let output = run(&["preview", &pack, "--node", "muerte"]);
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("*** THE END (defeat) ***"));
 
     let output = run(&["preview", &pack, "--node", "nowhere"]);
     assert!(!output.status.success());
@@ -279,7 +295,7 @@ fn previews_nodes_like_a_player_without_authored_ids() {
 #[test]
 fn scripted_tests_pass_and_fail_deterministically() {
     let pack = cripta();
-    let passing = fixture("cripta-victoria.script.json");
+    let passing = fixture("crypt-victory.script.json");
     let output = run(&["test", &pack, "--script", &passing]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
@@ -287,7 +303,7 @@ fn scripted_tests_pass_and_fail_deterministically() {
         "story test passed: 17 step(s), 9 choice(s), 7 expectation(s); final node \"vestibulo\" at turn 8\n"
     );
 
-    let failing = fixture("cripta-falla.script.json");
+    let failing = fixture("crypt-fail.script.json");
     let output = run(&["test", &pack, "--script", &failing]);
     assert!(!output.status.success());
     assert!(
@@ -326,7 +342,7 @@ fn interactive_play_supports_undo_state_and_bounded_input() {
     input.extend_from_slice(b"1\n");
     input.extend_from_slice(&[b'x'; 4096]);
     input.extend_from_slice(b"\n9\nestado\ndeshacer\nundo\nhola\nsalir\n1\n");
-    let output = run_with_stdin(&["play", &pack, "--seed", "3"], &input);
+    let output = run_with_stdin(&["play", &pack, "--seed", "3", "--locale", "es"], &input);
     assert!(output.status.success(), "{}", stderr(&output));
     let transcript = stdout(&output);
     assert!(
@@ -342,7 +358,8 @@ fn interactive_play_supports_undo_state_and_bounded_input() {
     // `salir` stops before the trailing choice is read.
     assert_eq!(transcript.matches("Turno 1 ·").count(), 1);
 
-    let output = run_with_stdin(&["play", &pack, "--locale", "en"], b"help\n");
+    // English is the pack's default language.
+    let output = run_with_stdin(&["play", &pack], b"help\n");
     assert!(output.status.success());
     let transcript = stdout(&output);
     assert!(transcript.contains("Commands: choice number, undo, state, look, help, quit."));
@@ -407,7 +424,7 @@ fn fmt_upgrade_rewrites_v1_packs_as_v3_losslessly() {
 
 fn faro() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../story-core/fixtures/parser/faro-de-punta-gris.story.json")
+        .join("../story-core/fixtures/parser/grey-point-lighthouse.story.json")
         .to_string_lossy()
         .into_owned()
 }
@@ -419,22 +436,26 @@ fn parser_worlds_validate_test_and_play_with_free_text() {
     assert!(output.status.success(), "{}", stdout(&output));
     assert_eq!(
         stdout(&output),
-        "valid StoryPack \"faro-de-punta-gris\" (format v3): 7 node(s), 0 choice(s), 3 variable(s), 0 item(s), 6 room(s), 14 object(s), 14 rule(s), lexicon(s) es; 0 warning(s), 0 lint(s)\n"
+        "valid StoryPack \"grey-point-lighthouse\" (format v3): 7 node(s), 0 choice(s), 3 variable(s), 0 item(s), 6 room(s), 14 object(s), 14 rule(s), lexicon(s) en+es; 0 warning(s), 0 lint(s)\n"
     );
 
-    let script = fixture("faro-victoria.script.json");
-    let output = run(&["test", &pack, "--script", &script]);
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(
-        stdout(&output),
-        "story test passed: 40 step(s), 21 choice(s), 18 expectation(s); final node \"amanecer\" at turn 21\n"
-    );
+    for script in [
+        "lighthouse-victory.script.json",
+        "lighthouse-victory-es.script.json",
+    ] {
+        let output = run(&["test", &pack, "--script", &fixture(script)]);
+        assert!(output.status.success(), "{script}: {}", stderr(&output));
+        assert_eq!(
+            stdout(&output),
+            "story test passed: 40 step(s), 21 choice(s), 18 expectation(s); final node \"amanecer\" at turn 21\n"
+        );
+    }
 
     let temp = tempfile::tempdir().unwrap();
     let wrong = temp.path().join("wrong.json");
     fs::write(
         &wrong,
-        r#"{"format_version":3,"steps":[{"text":"coge la llave"},{"expect":{"transcript":["Coges"]}},{"text":"examina la barca"},{"expect":{"carried":["medalla"]}}]}"#,
+        r#"{"format_version":3,"language":"es","steps":[{"text":"coge la llave"},{"expect":{"transcript":["Coges"]}},{"text":"examina la barca"},{"expect":{"carried":["medalla"]}}]}"#,
     )
     .unwrap();
     let output = run(&["test", &pack, "--script", wrong.to_str().unwrap()]);
@@ -455,7 +476,10 @@ fn parser_worlds_validate_test_and_play_with_free_text() {
     assert!(stderr(&output).contains("need a pack with a parser world"));
 
     let input = "examina la barca\ncoge la medalla y póntela\nsur\nguardar\ndeshacer\nestado\nxyzzy\nsalir\nmira\n";
-    let output = run_with_stdin(&["play", &pack, "--seed", "2"], input.as_bytes());
+    let output = run_with_stdin(
+        &["play", &pack, "--seed", "2", "--locale", "es"],
+        input.as_bytes(),
+    );
     assert!(output.status.success(), "{}", stderr(&output));
     let transcript = stdout(&output);
     for expected in [
@@ -499,7 +523,7 @@ fn reports_parser_world_lints() {
 
 fn duelo() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../story-script/fixtures/duelo-en-el-paso.story.json")
+        .join("../story-script/fixtures/duel-at-the-pass.story.json")
         .to_string_lossy()
         .into_owned()
 }
@@ -510,19 +534,19 @@ fn validates_tests_and_plays_a_pack_with_lua_scripts() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "valid StoryPack \"duelo-en-el-paso\" (format v3): 5 node(s), 4 choice(s), 5 variable(s), 1 item(s), 3 Lua script(s); 0 warning(s), 0 lint(s)\n"
+        "valid StoryPack \"duel-at-the-pass\" (format v3): 5 node(s), 4 choice(s), 5 variable(s), 1 item(s), 3 Lua script(s); 0 warning(s), 0 lint(s)\n"
     );
     let output = run(&[
         "test",
         &duelo(),
         "--script",
-        &fixture("duelo-victoria.script.json"),
+        &fixture("duel-victory.script.json"),
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stdout(&output).starts_with("story test passed: 11 step(s)"));
     let output = run_with_stdin(&["play", &duelo(), "--seed", "3"], b"1\n1\n");
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stdout(&output).contains("Atacar con la espada"));
+    assert!(stdout(&output).contains("Attack with your sword"));
 }
 
 #[test]

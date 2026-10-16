@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import fixture from '../../e2e/fixtures/story-faro.json';
+import fixture from '../../e2e/fixtures/story-lighthouse.json';
 import { createStoryCommand } from './protocol';
 import {
   MAX_STORY_COMMAND_BYTES,
@@ -11,7 +11,7 @@ import {
 } from './story-protocol';
 
 describe('parser story protocol (StoryPack v3)', () => {
-  it('accepts every real server frame of the recorded Spanish parser adventure', () => {
+  it('accepts every real server frame of the recorded parser adventure', () => {
     const assembler = new StoryViewAssembler();
     let questions = 0;
     for (const step of fixture.steps) {
@@ -32,7 +32,7 @@ describe('parser story protocol (StoryPack v3)', () => {
       } else {
         expect(model.prompt).toBeUndefined();
         expect(model.ending).toBe('victory');
-        expect(model.command).toBe('el fanal');
+        expect(model.command).toBe('the great lamp');
       }
     }
     expect(questions).toBe(1);

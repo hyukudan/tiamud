@@ -78,9 +78,11 @@ use tiamud_story_core::{
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-/// Default locale of a story instance when the pack offers it (otherwise the
-/// pack's first locale). A session may pick another one of the pack's
-/// locales when it enters (`historia <id> <locale>`).
+/// Locale of the server's own story text outside a story session (catalog
+/// listing, errors before a session exists). An instance plays in its pack's
+/// default locale ([`StoryPack::default_locale`]: the first parser lexicon,
+/// else English when offered) unless the session picks another one of the
+/// pack's locales when it enters (`story <id> <locale>`, `historia <id> <idioma>`).
 pub const STORY_LOCALE: &str = "es";
 /// Maximum bytes of a requested story locale tag.
 const MAX_LOCALE_BYTES: usize = 35;
@@ -430,8 +432,8 @@ pub struct CatalogStory {
     /// Lowercase hexadecimal SHA-256 of the exact pack bytes; the revision a
     /// save slot is bound to (ADR 0030).
     pack_sha256: String,
-    /// Default language of an instance: the parser lexicon (`es` when the
-    /// pack has one, else its first lexicon) and the locale its views resolve.
+    /// Default language of an instance: the pack's first parser lexicon (else
+    /// English when its title offers it) and the locale its views resolve.
     language: String,
     /// Every language an instance may play in, default first: the parser
     /// lexicons of a v3 world, else the locales of the pack title.
@@ -447,7 +449,7 @@ impl CatalogStory {
         self.pack.world.is_some()
     }
 
-    /// The default instance language (`es` unless the pack only declares others).
+    /// The default instance language ([`StoryPack::default_locale`]).
     #[cfg(test)]
     pub fn language(&self) -> &str {
         &self.language
@@ -515,35 +517,11 @@ fn pack_locales(pack: &StoryPack, default: &str) -> Vec<String> {
     locales
 }
 
-/// The default language of an instance of `pack`: Spanish when the parser
-/// world has a Spanish lexicon (or, without a parser, when the title has a
-/// Spanish text or no locale at all), else its first lexicon or title locale.
+/// The default language of an instance of `pack`: its first parser lexicon,
+/// else English when the title offers it, else the title's first locale
+/// ([`StoryPack::default_locale`]).
 fn pack_language(pack: &StoryPack) -> String {
-    let Some(world) = &pack.world else {
-        if pack
-            .title
-            .0
-            .keys()
-            .any(|locale| locale.eq_ignore_ascii_case(STORY_LOCALE))
-        {
-            return STORY_LOCALE.to_owned();
-        }
-        return pack.title.0.keys().next().map_or_else(
-            || STORY_LOCALE.to_owned(),
-            |locale| locale.to_ascii_lowercase(),
-        );
-    };
-    if world
-        .lexicons
-        .iter()
-        .any(|lexicon| lexicon.id == STORY_LOCALE)
-    {
-        return STORY_LOCALE.to_owned();
-    }
-    world
-        .lexicons
-        .first()
-        .map_or_else(|| STORY_LOCALE.to_owned(), |lexicon| lexicon.id.clone())
+    pack.default_locale()
 }
 
 /// A reviewed story image of the media map: the content-addressed pipeline
@@ -776,13 +754,13 @@ impl StoryCatalog {
                         .unwrap_or_else(|| "validation failed".to_owned()),
                 });
             }
-            let title = pack
-                .title
-                .resolve(STORY_LOCALE)
-                .unwrap_or(pack.id.as_str())
-                .to_owned();
             let id = pack.id.clone();
             let language = pack_language(&pack);
+            let title = pack
+                .title
+                .resolve(&language)
+                .unwrap_or(pack.id.as_str())
+                .to_owned();
             let locales = pack_locales(&pack, &language);
             let compatible = pack.compatible_revisions.iter().cloned().collect();
             if stories

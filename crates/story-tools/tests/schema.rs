@@ -144,7 +144,7 @@ fn schema() -> Value {
 
 fn fixture() -> Value {
     serde_json::from_slice(include_bytes!(
-        "../../story-core/fixtures/cripta-del-nigromante.story.json"
+        "../../story-core/fixtures/crypt-of-the-necromancer.story.json"
     ))
     .unwrap()
 }
@@ -183,7 +183,7 @@ fn reviewed_fixtures_and_canonical_output_satisfy_the_schema() {
 
 fn noir() -> Value {
     serde_json::from_slice(include_bytes!(
-        "../../story-core/fixtures/lluvia-de-neon.story.json"
+        "../../story-core/fixtures/neon-rain.story.json"
     ))
     .unwrap()
 }
@@ -393,7 +393,7 @@ fn schema_bounds_match_core_constants() {
 
 fn faro() -> Value {
     serde_json::from_slice(include_bytes!(
-        "../../story-core/fixtures/parser/faro-de-punta-gris.story.json"
+        "../../story-core/fixtures/parser/grey-point-lighthouse.story.json"
     ))
     .unwrap()
 }
@@ -513,7 +513,7 @@ fn v3_schema_bounds_match_core_constants() {
 
 fn duelo() -> Value {
     serde_json::from_slice(include_bytes!(
-        "../../story-script/fixtures/duelo-en-el-paso.story.json"
+        "../../story-script/fixtures/duel-at-the-pass.story.json"
     ))
     .unwrap()
 }

@@ -65,7 +65,7 @@ class Broker {
     if (!step || step.actor !== actor || canonical(step.input) !== canonical(wire)) {
       this.rejected.push(`${actor}: ${canonical(wire)}`);
       await this.#deliver(actor, [{
-        type: 'story.error', data: { code: 'unknown_choice', message: 'Esa opción no está disponible.' },
+        type: 'story.error', data: { code: 'unknown_choice', message: 'That option is not available.' },
       }]);
       return;
     }

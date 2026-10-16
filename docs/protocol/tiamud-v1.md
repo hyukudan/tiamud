@@ -1278,14 +1278,15 @@ command answers that stories are unavailable.
 
 Entering and listing reuse `command.submit`: `historias`/`stories` returns the
 catalog in `action.result.message` (each story with its languages, default
-first: `id — title [es, en]`) followed by the typed `story.catalog`; a client
+first: `id — title [en, es]`) followed by the typed `story.catalog`; a client
 may also ask for `story.catalog` alone with `story.catalog {}`. `historia <id>
 [locale]`/`story <id> [locale]` answers with a correlated `action.result`, then
 `story.entered` and the current `story.view`. The browser's story picker
 enters with exactly this command (`historia <id> <locale>`), so browser and
 Telnet stay equivalent. The optional locale picks one of the story's
 languages for a **new** instance (`en`, or `en-GB` for `en`); without it the
-story's default (Spanish when offered) is used, a language the story does not
+story's default is used (its first parser lexicon, else English when its
+title offers it, else its first title locale), a language the story does not
 offer answers `unknown_locale`, and a live instance keeps its language. While a session is in a story, other `command.submit` lines and
 every `action.perform` are answered with `ok: false` and never reach the world;
 typed numbers choose the numbered action, `deshacer`/`undo` undoes,
@@ -1436,8 +1437,8 @@ accepted) is played with free text. While such a story accepts text, its
 to the question shown in the last `reply` block (which object, or what with).
 `prompt` is absent after the ending, while a dialogue must be answered and in
 every gamebook or menu story. The instance plays in the language chosen on
-entry among the world's lexicons (by default Spanish when the pack has a
-Spanish lexicon, else its first lexicon); the parser uses that lexicon.
+entry among the world's lexicons (by default the pack's first lexicon); the
+parser uses that lexicon.
 
 - Client `story.command {text, viewRev}`: one line of at most 256 UTF-8 bytes
   typed against view `viewRev` (strict; a longer `text`, a missing field or

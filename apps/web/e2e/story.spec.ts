@@ -110,7 +110,7 @@ async function installStoryServer(page: Page, story: StoryFixture): Promise<void
         const expected = fixture.steps[this.stepIndex]?.input;
         if (!expected || canonical(expected) !== canonical({ type: message.type, data: message.data })) {
           state.storyRejected = (state.storyRejected ?? 0) + 1;
-          this.emitFrame('story.error', { code: 'unknown_choice', message: 'Esa opción no está disponible.' });
+          this.emitFrame('story.error', { code: 'unknown_choice', message: 'That option is not available.' });
           return;
         }
         state.storyInputs = (state.storyInputs ?? 0) + 1;
@@ -157,16 +157,16 @@ async function expectNoViolations(page: Page): Promise<void> {
   expect(results.violations).toEqual([]);
 }
 
-test('the sample Spanish gamebook is playable to an ending with keyboard and buttons', async ({ page }) => {
-  const story = load('story-cripta.json');
+test('the sample gamebook is playable to an ending with keyboard and buttons', async ({ page }) => {
+  const story = load('story-crypt.json');
   const panel = await enterStory(page, story);
-  await expect(panel.getByRole('button', { name: /Tira un dado/ })).toBeVisible();
+  await expect(panel.getByRole('button', { name: /Roll one die/ })).toBeVisible();
   await expectNoViolations(page);
 
   // The first choice by keyboard shortcut, the rest by activating buttons.
   await panel.getByRole('heading', { level: 1 }).focus();
   await page.keyboard.press('1');
-  await expect(panel).toContainText('Tirada 1d6+6');
+  await expect(panel).toContainText('Roll 1d6+6');
   for (const step of story.steps.slice(1, -1)) {
     const button = panel.getByRole('list', { name: 'Choices' })
       .getByRole('button', { name: step.label ?? '' });
@@ -183,13 +183,13 @@ test('the sample Spanish gamebook is playable to an ending with keyboard and but
   await expect(page.getByRole('heading', { name: 'Lantern Square' })).toBeVisible();
 });
 
-test('the Spanish parser adventure is playable to its ending by typing commands', async ({ page }) => {
-  const story = load('story-faro.json');
+test('the parser adventure is playable to its ending by typing commands', async ({ page }) => {
+  const story = load('story-lighthouse.json');
   const panel = await enterStory(page, story);
   await expect(panel.getByRole('textbox', { name: 'Your command' })).toBeVisible();
   const field = panel.locator('#story-command');
   await expect(panel.getByRole('log', { name: 'Story replies' }))
-    .toContainText('La tormenta te sorprendió');
+    .toContainText('The storm caught you');
   await expectNoViolations(page);
 
   const steps = story.steps.slice(0, -1);
@@ -213,7 +213,7 @@ test('the Spanish parser adventure is playable to its ending by typing commands'
     if (index < steps.length - 1) await expect(field).toBeFocused();
   }
   await expect(panel.getByRole('log', { name: 'Story replies' }))
-    .toContainText('Abres el globo de cristal');
+    .toContainText('You open the glass globe');
   await expect(panel.getByRole('status')).toContainText('Victory.');
   await expect(panel.getByRole('textbox')).toHaveCount(0);
   await expectAccepted(page, steps.length);
@@ -221,7 +221,7 @@ test('the Spanish parser adventure is playable to its ending by typing commands'
 });
 
 test('the verb-menu adventure plays verbs, targets and dialogue to its ending', async ({ page }) => {
-  const story = load('story-lluvia.json');
+  const story = load('story-neon-rain.json');
   const panel = await enterStory(page, story);
   await expectNoViolations(page);
 
@@ -261,9 +261,9 @@ function recordedAlt(story: StoryFixture): { office: string; club: string; lola:
 }
 
 test('reviewed story backgrounds and portraits load with their alt text', async ({ page }) => {
-  const story = load('story-lluvia.json');
+  const story = load('story-neon-rain.json');
   const alt = recordedAlt(story);
-  expect(alt.office).toContain('despacho');
+  expect(alt.office).toContain("detective's office");
   const panel = await enterStory(page, story);
 
   const office = panel.getByRole('img', { name: alt.office });
@@ -285,7 +285,7 @@ test('reviewed story backgrounds and portraits load with their alt text', async 
 });
 
 test('missing story images degrade to their alt text and play goes on', async ({ page }) => {
-  const story = load('story-lluvia.json');
+  const story = load('story-neon-rain.json');
   const alt = recordedAlt(story);
   let blocked = 0;
   await page.route(/\/assets\/[a-f0-9]{64}\/manifest\.json$/, async (route) => {
@@ -304,7 +304,7 @@ test('missing story images degrade to their alt text and play goes on', async ({
 });
 
 test('reader mode shows story alt text without downloading images', async ({ page }) => {
-  const story = load('story-lluvia.json');
+  const story = load('story-neon-rain.json');
   const alt = recordedAlt(story);
   const requested: string[] = [];
   page.on('request', (request) => {
@@ -391,7 +391,7 @@ async function installSlotServer(page: Page, story: SlotFixture): Promise<void> 
           return true;
         }
         state.slotRejected = (state.slotRejected ?? 0) + 1;
-        this.emitFrame('story.error', { code: 'unknown_choice', message: 'Esa opción no está disponible.' });
+        this.emitFrame('story.error', { code: 'unknown_choice', message: 'That option is not available.' });
         return false;
       }
 
@@ -473,7 +473,7 @@ test('a saved game survives leaving and continues after re-entering, by keyboard
   await expect(panel.getByRole('button', { name: 'Continue saved game' })).toHaveCount(0);
 
   await panel.getByRole('button', { name: story.play.label }).click();
-  await expect(panel).toContainText('Coger la antorcha');
+  await expect(panel).toContainText('Take the torch');
 
   // Open the saved games panel from the keyboard; it lists the slots.
   const toggle = panel.getByRole('button', { name: 'Saved games', exact: true });
@@ -504,10 +504,10 @@ test('a saved game survives leaving and continues after re-entering, by keyboard
   const again = page.locator('section.story-panel');
   const offer = again.getByRole('group', { name: /You have an autosaved game/ });
   await expect(offer).toBeVisible();
-  await expect(again).toContainText('Tira un dado');
+  await expect(again).toContainText('Roll one die');
   await offer.getByRole('button', { name: 'Continue saved game' }).click();
   await expect(again.getByRole('status').filter({ hasText: 'Continued from the autosave.' })).toBeVisible();
-  await expect(again.getByRole('button', { name: 'Avanzar por el pasillo del norte' })).toBeEnabled();
+  await expect(again.getByRole('button', { name: 'Follow the passage north' })).toBeEnabled();
   await expect(offer).toHaveCount(0);
 
   const inputs = await page.evaluate(() => {

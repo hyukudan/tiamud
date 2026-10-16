@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import fixture from '../../e2e/fixtures/story-cripta.json';
+import fixture from '../../e2e/fixtures/story-crypt.json';
 import slotFixture from '../../e2e/fixtures/story-slots.json';
 import {
   createStoryChoose,
@@ -124,7 +124,7 @@ describe('story protocol', () => {
   });
 
   it('parses the control messages strictly', () => {
-    expect(parseStoryEntered({ storyId: 'lluvia-de-neon', title: 'Lluvia' })).toBeDefined();
+    expect(parseStoryEntered({ storyId: 'neon-rain', title: 'Lluvia' })).toBeDefined();
     expect(parseStoryEntered({ storyId: 'Bad Id', title: 'Lluvia' })).toBeUndefined();
     expect(parseStoryLeft({ reason: 'evicted' })).toEqual({ reason: 'evicted' });
     expect(parseStoryLeft({ reason: 'gone' })).toBeUndefined();

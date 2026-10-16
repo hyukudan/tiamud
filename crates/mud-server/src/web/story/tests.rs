@@ -8,12 +8,12 @@ use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
 use tiamud_story_core::StoryPack;
 
-const CRIPTA: &str = "cripta-del-nigromante";
+const CRIPTA: &str = "crypt-of-the-necromancer";
 
 fn stories() -> StoryManager {
     let bytes = std::fs::read(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../story-core/fixtures/cripta-del-nigromante.story.json"),
+            .join("../story-core/fixtures/crypt-of-the-necromancer.story.json"),
     )
     .unwrap();
     StoryManager::new(
@@ -218,8 +218,7 @@ fn bilingual_stories() -> StoryManager {
         StoryPack::from_json_slice(&bytes).unwrap()
     };
     StoryManager::new(
-        StoryCatalog::from_packs(vec![pack(CRIPTA), pack("lluvia-de-neon")], BTreeMap::new())
-            .unwrap(),
+        StoryCatalog::from_packs(vec![pack(CRIPTA), pack("neon-rain")], BTreeMap::new()).unwrap(),
         StoryLimits::default(),
     )
 }
@@ -236,8 +235,8 @@ async fn browsers_list_story_languages_and_enter_in_the_chosen_one() {
     assert_eq!(
         listed[0]["data"],
         serde_json::json!({"part": 0, "parts": 1, "stories": [
-            {"storyId": CRIPTA, "title": "La cripta del nigromante", "locales": ["es"]},
-            {"storyId": "lluvia-de-neon", "title": "Lluvia de neón", "locales": ["es", "en"]}
+            {"storyId": CRIPTA, "title": "Crypt of the Necromancer", "locales": ["en", "es"]},
+            {"storyId": "neon-rain", "title": "Neon Rain", "locales": ["en", "es"]}
         ]})
     );
     // The typed command answers in text and also sends the catalog.
@@ -250,12 +249,13 @@ async fn browsers_list_story_languages_and_enter_in_the_chosen_one() {
         answered[0]["data"]["message"]
             .as_str()
             .unwrap()
-            .contains("lluvia-de-neon — Lluvia de neón [es, en]")
+            .contains("neon-rain — Neon Rain [en, es]")
     );
 
-    // Entering in English: confirmation, help and errors follow the locale.
+    // Entering without a language plays in the pack's default, English:
+    // confirmation, help and errors follow the locale.
     session
-        .text_command(&out, &mut seq, "r2", "historia lluvia-de-neon en")
+        .text_command(&out, &mut seq, "r2", "historia neon-rain")
         .await;
     let entered = frames(&out);
     assert_eq!(entered[0]["data"]["message"], "You enter «Neon Rain».");
@@ -493,7 +493,7 @@ async fn browser_saves_leaves_reenters_and_continues_with_sqlite_slots() {
         text[0]["data"]["message"]
             .as_str()
             .unwrap()
-            .contains("0 (autoguardado)")
+            .contains("0 (autosave)")
     );
     session.text_command(&out, &mut seq, "r5", "borrar 2").await;
     let deleted = frames(&out);
@@ -525,8 +525,8 @@ fn parser_stories() -> StoryManager {
     StoryManager::new(
         StoryCatalog::from_packs(
             vec![
-                read("parser/faro-de-punta-gris.story.json"),
-                read("cripta-del-nigromante.story.json"),
+                read("parser/grey-point-lighthouse.story.json"),
+                read("crypt-of-the-necromancer.story.json"),
             ],
             BTreeMap::new(),
         )
@@ -557,7 +557,7 @@ async fn browser_plays_a_parser_story_with_story_command_and_typed_text() {
     let mut session = WebStorySession::new(Some(manager), AccountId(1), false);
     assert_eq!(
         session
-            .text_command(&out, &mut seq, "r1", "historia faro-de-punta-gris")
+            .text_command(&out, &mut seq, "r1", "historia grey-point-lighthouse")
             .await,
         Some(true)
     );
@@ -569,18 +569,14 @@ async fn browser_plays_a_parser_story_with_story_command_and_typed_text() {
     // `story.command` echoes the line and answers with reply blocks.
     assert!(
         session
-            .command(&out, &mut seq, "examina la barca", view_rev(&view))
+            .command(&out, &mut seq, "examine the boat", view_rev(&view))
             .await
     );
     let answered = frames(&out);
     assert_eq!(types(&answered), ["story.view"]);
     let view = last_view(&answered).clone();
-    assert_eq!(kinds(&view, "command"), ["examina la barca"]);
-    assert!(
-        kinds(&view, "reply")
-            .join("\n")
-            .contains("una medalla de plata")
-    );
+    assert_eq!(kinds(&view, "command"), ["examine the boat"]);
+    assert!(kinds(&view, "reply").join("\n").contains("a silver medal"));
 
     // A stale view is answered with the current one; nothing changes.
     assert!(session.command(&out, &mut seq, "n", 1).await);
@@ -593,7 +589,7 @@ async fn browser_plays_a_parser_story_with_story_command_and_typed_text() {
     // reserved words keep their meaning.
     assert_eq!(
         session
-            .text_command(&out, &mut seq, "r2", "coge la medalla")
+            .text_command(&out, &mut seq, "r2", "take the medal")
             .await,
         Some(true)
     );
@@ -601,12 +597,12 @@ async fn browser_plays_a_parser_story_with_story_command_and_typed_text() {
     assert_eq!(types(&typed), ["action.result", "story.view"]);
     assert_eq!(typed[0]["data"]["ok"], true);
     let view = last_view(&typed).clone();
-    assert_eq!(kinds(&view, "reply"), ["Coges la medalla de plata."]);
+    assert_eq!(kinds(&view, "reply"), ["You take the silver medal."]);
 
-    // «guardar» without a slot lists the slots (none here: no store).
+    // "save" without a slot lists the slots (none here: no store).
     assert!(
         session
-            .command(&out, &mut seq, "guardar", view_rev(&view))
+            .command(&out, &mut seq, "save", view_rev(&view))
             .await
     );
     let save = frames(&out);
@@ -614,10 +610,10 @@ async fn browser_plays_a_parser_story_with_story_command_and_typed_text() {
     assert_eq!(save[1]["data"]["code"], "slots_unavailable");
     let view = last_view(&save).clone();
 
-    // The parser's quit leaves the story like «salir».
+    // The parser's quit leaves the story like "leave".
     assert!(
         session
-            .command(&out, &mut seq, "fin", view_rev(&view))
+            .command(&out, &mut seq, "quit", view_rev(&view))
             .await
     );
     let quit = frames(&out);
@@ -627,7 +623,7 @@ async fn browser_plays_a_parser_story_with_story_command_and_typed_text() {
     // A gamebook refuses free text with a typed error.
     assert_eq!(
         session
-            .text_command(&out, &mut seq, "r3", "historia cripta-del-nigromante")
+            .text_command(&out, &mut seq, "r3", "historia crypt-of-the-necromancer")
             .await,
         Some(true)
     );

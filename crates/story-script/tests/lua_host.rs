@@ -10,7 +10,7 @@ use tiamud_story_core::{
 use tiamud_story_script::{LuaStoryHost, story_script_limits, unused_scripts, validate_pack};
 
 fn fixture() -> StoryPack {
-    StoryPack::from_json_slice(include_bytes!("../fixtures/duelo-en-el-paso.story.json")).unwrap()
+    StoryPack::from_json_slice(include_bytes!("../fixtures/duel-at-the-pass.story.json")).unwrap()
 }
 
 /// Takes the choice with this label in the current scripted view.

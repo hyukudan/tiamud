@@ -1,6 +1,6 @@
 import { render } from 'svelte/server';
 import { describe, expect, it } from 'vitest';
-import lluvia from '../../e2e/fixtures/story-lluvia.json';
+import lluvia from '../../e2e/fixtures/story-neon-rain.json';
 import StoryPanel from '../components/StoryPanel.svelte';
 import {
   StoryViewAssembler,
@@ -69,8 +69,8 @@ describe('story images and locales', () => {
   });
 
   it('reads the instance locale from story.entered and defaults older servers to Spanish', () => {
-    expect(parseStoryEntered({ storyId: 'lluvia-de-neon', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'] }))
-      .toEqual({ storyId: 'lluvia-de-neon', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'] });
+    expect(parseStoryEntered({ storyId: 'neon-rain', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'] }))
+      .toEqual({ storyId: 'neon-rain', title: 'Neon Rain', locale: 'en', locales: ['es', 'en'] });
     expect(parseStoryEntered({ storyId: 'cripta', title: 'Cripta' }))
       .toEqual({ storyId: 'cripta', title: 'Cripta', locale: 'es', locales: ['es'] });
     for (const bad of [

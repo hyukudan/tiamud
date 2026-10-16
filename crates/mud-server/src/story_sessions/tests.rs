@@ -38,8 +38,8 @@ fn manager(packs: Vec<StoryPack>, limits: StoryLimits) -> StoryManager {
     )
 }
 
-const CRIPTA: &str = "cripta-del-nigromante";
-const LLUVIA: &str = "lluvia-de-neon";
+const CRIPTA: &str = "crypt-of-the-necromancer";
+const LLUVIA: &str = "neon-rain";
 
 fn choice_ids(view: &StoryProjection) -> Vec<String> {
     view.items
@@ -122,23 +122,26 @@ fn catalog_loads_the_fixture_directory_and_rejects_bad_content() {
         vec![
             (
                 CRIPTA.to_owned(),
-                "La cripta del nigromante".to_owned(),
-                owned(&["es"])
+                "Crypt of the Necromancer".to_owned(),
+                owned(&["en", "es"])
             ),
             (
-                "faro-de-punta-gris".to_owned(),
-                "El faro de Punta Gris".to_owned(),
-                owned(&["es"])
+                "grey-point-lighthouse".to_owned(),
+                "The Lighthouse at Grey Point".to_owned(),
+                owned(&["en", "es"])
             ),
             (
                 LLUVIA.to_owned(),
-                "Lluvia de neón".to_owned(),
-                owned(&["es", "en"])
+                "Neon Rain".to_owned(),
+                owned(&["en", "es"])
             ),
         ]
     );
-    assert!(catalog.get("faro-de-punta-gris").unwrap().is_parser());
-    assert_eq!(catalog.get("faro-de-punta-gris").unwrap().language(), "es");
+    assert!(catalog.get("grey-point-lighthouse").unwrap().is_parser());
+    assert_eq!(
+        catalog.get("grey-point-lighthouse").unwrap().language(),
+        "en"
+    );
     assert!(!catalog.get(CRIPTA).unwrap().is_parser());
 
     // Only one level is scanned, hidden directories are skipped and the
@@ -241,19 +244,19 @@ fn story_commands_parse_in_both_languages() {
     assert_eq!(parse_story_command("historias"), Some(StoryCommand::List));
     assert_eq!(parse_story_command("Stories"), Some(StoryCommand::List));
     assert_eq!(
-        parse_story_command("historia Cripta-del-Nigromante"),
+        parse_story_command("historia Crypt-Of-The-Necromancer"),
         Some(StoryCommand::Enter(CRIPTA.into(), None))
     );
     assert_eq!(
-        parse_story_command("story cripta-del-nigromante"),
+        parse_story_command("story crypt-of-the-necromancer"),
         Some(StoryCommand::Enter(CRIPTA.into(), None))
     );
     assert_eq!(
-        parse_story_command("historia lluvia-de-neon EN"),
+        parse_story_command("historia neon-rain EN"),
         Some(StoryCommand::Enter(LLUVIA.into(), Some("en".into())))
     );
     assert_eq!(
-        parse_story_command("story host lluvia-de-neon en"),
+        parse_story_command("story host neon-rain en"),
         Some(StoryCommand::Host(LLUVIA.into(), Some("en".into())))
     );
     assert_eq!(
@@ -285,7 +288,7 @@ async fn entering_projects_opaque_choices_without_authored_ids() {
     let link = stories.enter(AccountId(1), CRIPTA).unwrap();
     let view = link.view().await.unwrap();
     assert_eq!(view.view_rev, 1);
-    assert_eq!(view.title, "La cripta del nigromante");
+    assert_eq!(view.title, "Crypt of the Necromancer");
     let ids = choice_ids(&view);
     assert_eq!(ids.len(), 1);
     assert!(valid_choice_id(&ids[0]));
@@ -308,7 +311,7 @@ async fn entering_projects_opaque_choices_without_authored_ids() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(stats, ["Destreza", "Resistencia"]);
+    assert_eq!(stats, ["Skill", "Stamina"]);
     assert!(!view.can_undo);
 }
 
@@ -362,7 +365,7 @@ async fn forged_and_stale_ids_are_rejected_without_changing_state() {
     assert!(
         texts(&next, StoryBlockKind::Event)
             .iter()
-            .any(|text| text.starts_with("Tirada 1d6+6"))
+            .any(|text| text.starts_with("Roll 1d6+6"))
     );
     // The id of the previous view no longer resolves, even with the new rev.
     assert_eq!(
@@ -428,8 +431,8 @@ async fn the_sample_gamebook_reaches_an_ending_and_then_refuses_choices() {
         Err(StoryFailure::Ended)
     );
     let text = render_text(last);
-    assert!(text.contains("FIN — "));
-    assert!(text.contains("«salir» (leave)"));
+    assert!(text.contains("THE END — "));
+    assert!(text.contains("\"leave\" (salir)"));
 
     // Same seeds, same inputs: the same playthrough.
     let replay = manager(vec![fixture_pack()], StoryLimits::default());
@@ -459,7 +462,7 @@ async fn the_menu_adventure_plays_verbs_targets_and_dialogue_to_its_ending() {
     assert!(
         view.items
             .iter()
-            .any(|item| matches!(item, StoryItem::Verb { label, needs_target: true, .. } if label == "INVESTIGAR"))
+            .any(|item| matches!(item, StoryItem::Verb { label, needs_target: true, .. } if label == "INVESTIGATE"))
     );
     // A verb needing a target refuses to run without one or with a target of
     // another verb.
@@ -493,13 +496,13 @@ async fn the_menu_adventure_plays_verbs_targets_and_dialogue_to_its_ending() {
         );
     }
     for label in [
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Ventana",
-        "INVESTIGAR → Escritorio",
-        "USAR → Tarjeta de memoria",
-        "MOVERSE → Puerta",
-        "HABLAR → Lola",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Window",
+        "INVESTIGATE → Desk",
+        "USE → Memory card",
+        "MOVE → Door",
+        "TALK → Lola",
     ] {
         view = act(&link, &view, label).await;
     }
@@ -515,14 +518,14 @@ async fn the_menu_adventure_plays_verbs_targets_and_dialogue_to_its_ending() {
     let text = render_text(&view);
     assert!(text.contains("Lola: «"));
     for label in [
-        "Pedir un café solo",
-        "Seguir hablando",
-        "Despedirte",
-        "MOSTRAR → Tarjeta de memoria",
-        "INVESTIGAR → Reservado",
-        "MOVERSE → Callejón trasero",
-        "HABLAR → Dámaso",
-        "Acusarle con el vídeo y el mechero",
+        "Order a black coffee",
+        "Keep talking",
+        "Say goodbye",
+        "SHOW → Memory card",
+        "INVESTIGATE → Booth",
+        "MOVE → Back alley",
+        "TALK → Dámaso",
+        "Accuse him with the video and the lighter",
     ] {
         view = act(&link, &view, label).await;
     }
@@ -682,19 +685,19 @@ async fn telnet_text_numbers_choices_and_shows_every_playable_fact() {
         .unwrap();
     let start = link.view().await.unwrap();
     let text = render_text(&start);
-    assert!(text.contains("== La cripta del nigromante =="));
-    assert!(text.contains("1) Tira un dado y suma 6 para fijar tu destreza\r\n"));
-    assert!(text.contains("Destreza: 0"));
-    assert!(text.contains("Inventario: (vacío)"));
+    assert!(text.contains("== Crypt of the Necromancer =="));
+    assert!(text.contains("1) Roll one die and add 6 to set your skill\r\n"));
+    assert!(text.contains("Skill: 0"));
+    assert!(text.contains("Inventory: (empty)"));
     assert!(!text.contains(&choice_ids(&start)[0]));
     let next = link
         .choose(&choice_ids(&start)[0], start.view_rev)
         .await
         .unwrap();
     let text = render_text(&next);
-    assert!(text.contains("* Tirada 1d6+6: ["));
-    assert!(text.contains("* Destreza: 0 → "));
-    assert!(text.contains("1) Coger la antorcha\r\n2) Avanzar por el pasillo del norte\r\n"));
+    assert!(text.contains("* Roll 1d6+6: ["));
+    assert!(text.contains("* Skill: 0 → "));
+    assert!(text.contains("1) Take the torch\r\n2) Follow the passage north\r\n"));
 }
 
 #[tokio::test]
@@ -711,9 +714,9 @@ async fn unreviewed_cues_never_play_and_reviewed_cues_resolve() {
             .unwrap();
         let mut view = link.view().await.unwrap();
         for label in [
-            "Tira un dado y suma 6 para fijar tu destreza",
-            "Avanzar por el pasillo del norte",
-            "Un esqueleto armado se alza: luchar",
+            "Roll one die and add 6 to set your skill",
+            "Follow the passage north",
+            "An armed skeleton rises: fight",
         ] {
             view = act(&link, &view, label).await;
         }
@@ -746,21 +749,21 @@ async fn unreviewed_cues_never_play_and_reviewed_cues_resolve() {
 }
 
 const LLUVIA_SCRIPT: [&str; 15] = [
-    "INVESTIGAR → Ventana",
-    "INVESTIGAR → Ventana",
-    "INVESTIGAR → Ventana",
-    "INVESTIGAR → Escritorio",
-    "USAR → Tarjeta de memoria",
-    "MOVERSE → Puerta",
-    "HABLAR → Lola",
-    "Pedir un café solo",
-    "Seguir hablando",
-    "Despedirte",
-    "MOSTRAR → Tarjeta de memoria",
-    "INVESTIGAR → Reservado",
-    "MOVERSE → Callejón trasero",
-    "HABLAR → Dámaso",
-    "Acusarle con el vídeo y el mechero",
+    "INVESTIGATE → Window",
+    "INVESTIGATE → Window",
+    "INVESTIGATE → Window",
+    "INVESTIGATE → Desk",
+    "USE → Memory card",
+    "MOVE → Door",
+    "TALK → Lola",
+    "Order a black coffee",
+    "Keep talking",
+    "Say goodbye",
+    "SHOW → Memory card",
+    "INVESTIGATE → Booth",
+    "MOVE → Back alley",
+    "TALK → Dámaso",
+    "Accuse him with the video and the lighter",
 ];
 
 /// The `tiamud.v1` client message a browser sends for `action`.
@@ -825,10 +828,11 @@ async fn record(
 #[tokio::test]
 async fn browser_e2e_fixtures_are_current() {
     const UPDATE: &str = "TIAMUD_UPDATE_STORY_E2E_FIXTURE";
-    // With the reviewed sample media map, so the browser sees real images.
+    // With the reviewed sample media map, so the browser sees real images,
+    // and a Spanish-only story so the picker shows a single-language entry.
     let stories = StoryManager::new(
         StoryCatalog::from_packs(
-            vec![fixture_pack(), fixture(LLUVIA)],
+            vec![tiny_pack("breve"), fixture_pack(), fixture(LLUVIA)],
             super::media_tests::fixture_media(),
         )
         .unwrap(),
@@ -842,31 +846,32 @@ async fn browser_e2e_fixtures_are_current() {
     .await
     .len()
         - 1;
-    // The language picker: the typed catalog and the English entry of the
-    // bilingual menu adventure.
-    let english = stories
-        .enter_seeded_in(AccountId(3), LLUVIA, Some("en"), 7, Some(1))
+    // The language picker: the typed catalog and the Spanish entry of the
+    // bilingual menu adventure (the recorded walkthroughs below play in
+    // English, the packs' default language).
+    let spanish = stories
+        .enter_seeded_in(AccountId(3), LLUVIA, Some("es"), 7, Some(1))
         .unwrap();
-    let english_view = english.view().await.unwrap();
+    let spanish_view = spanish.view().await.unwrap();
     let catalog = json!({
         "catalog": catalog_parts(&stories.listing()),
         "entered": protocol::StoryEntered {
-            story_id: english.story_id().to_owned(),
-            title: english.title().to_owned(),
-            locale: english.locale().to_owned(),
-            locales: english.locales().to_vec(),
+            story_id: spanish.story_id().to_owned(),
+            title: spanish.title().to_owned(),
+            locale: spanish.locale().to_owned(),
+            locales: spanish.locales().to_vec(),
         },
-        "view": english_view.web_parts(false),
+        "view": spanish_view.web_parts(false),
     });
-    english.leave().await.unwrap();
+    spanish.leave().await.unwrap();
     let fixtures = [
         ("story-catalog.json", catalog),
         (
-            "story-cripta.json",
+            "story-crypt.json",
             record(&stories, CRIPTA, &vec![None; cripta_length]).await,
         ),
         (
-            "story-lluvia.json",
+            "story-neon-rain.json",
             record(&stories, LLUVIA, &LLUVIA_SCRIPT.map(Some)).await,
         ),
     ];

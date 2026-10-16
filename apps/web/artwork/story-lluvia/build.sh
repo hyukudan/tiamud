@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Publishes the sample art of `lluvia-de-neon` through the reviewed asset
-# pipeline into apps/web/public/assets. Run from the repository root after
+# Publishes the sample art of `neon-rain` through the reviewed asset
+# pipeline into apps/web/public/assets. The provenance text below keeps the
+# pack's id at publication time (`lluvia-de-neon`) so a rebuild reproduces
+# the published manifests byte for byte. Run from the repository root after
 # `python3 -I apps/web/artwork/story-lluvia/generate.py apps/web/artwork/story-lluvia/sources`.
 set -euo pipefail
 

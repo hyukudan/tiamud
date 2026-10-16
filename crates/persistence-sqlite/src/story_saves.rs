@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn identifiers_follow_the_story_pack_grammar() {
-        assert!(valid_story_identifier("cripta-del-nigromante"));
+        assert!(valid_story_identifier("crypt-of-the-necromancer"));
         assert!(valid_story_identifier("9.a_b"));
         assert!(valid_story_identifier(&"a".repeat(64)));
         for invalid in ["", "-a", "Sala", "a b", "ñ", "a/b"] {
