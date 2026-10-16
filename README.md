@@ -463,7 +463,7 @@ tools/envy-import/           offline historical importer
 worlds/                      reviewed WorldPacks and area modules
 scripts/                     smoke, load, soak and licenses
 docs/                        protocol, decisions, operation and status
-deploy/                      Caddy, systemd and environment examples
+deploy/                      Caddy, systemd, environment examples; example/ host kit
 ```
 
 ## Documentation
