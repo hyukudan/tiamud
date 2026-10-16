@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "assetId": "sha256:1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc",
+  "revision": 1,
+  "kind": "atmosphere",
+  "alt": "Portrait silhouette of Lola, a woman with a bob haircut, backlit by pink neon against a teal night.",
+  "focalPoint": {
+    "xPerMille": 500,
+    "yPerMille": 450
+  },
+  "dominantColor": "#1c2535",
+  "author": "Tiamud project contributors",
+  "license": "CC-BY-4.0",
+  "provenance": "Original placeholder drawn only from code (gradients and geometric shapes) by apps/web/artwork/story-lluvia/generate.py for the lluvia-de-neon StoryPack; no external image, font, photograph or model was used.",
+  "generator": "apps/web/artwork/story-lluvia/generate.py (deterministic Pillow drawing)",
+  "contentClassification": "general",
+  "humanReviewedAt": "2026-10-15T00:00:00Z",
+  "source": {
+    "sha256": "663f3ecdb25d5ebcff9a2c077c3c7fbd5d738c494976f92190be104d7714a9d1",
+    "width": 1280,
+    "height": 1280
+  },
+  "variants": [
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 640,
+      "height": 640,
+      "bytes": 2818,
+      "sha256": "728dbfad81097d54daf81f8314eff6b963b4678eb5107b24f8de74b6b9ecdc70",
+      "path": "1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/scene-640.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 640,
+      "height": 640,
+      "bytes": 4888,
+      "sha256": "af32e269396acbb8b8fcf3a65305a7bf596e759da5ef8cac336ce316b26e7f1a",
+      "path": "1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/scene-640.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 640,
+      "height": 640,
+      "bytes": 22218,
+      "sha256": "958a23ecaaf77a5a4a5cb749e1c9b0737b71b5d36bb2b0906b29c753cdb8fee1",
+      "path": "1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/scene-640.jpg"
+    },
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 1280,
+      "height": 1280,
+      "bytes": 5686,
+      "sha256": "78a5978c66c47fe8b0ee6b2af579ef0e1f65a7be73f4526dafae409e716a00ad",
+      "path": "1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/scene-1280.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 1280,
+      "height": 1280,
+      "bytes": 12034,
+      "sha256": "638dc9fc0eac5728fca3e1f3e8395b622332002dfa693f527b2d0d15e69b8cc3",
+      "path": "1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/scene-1280.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 1280,
+      "height": 1280,
+      "bytes": 69178,
+      "sha256": "2c4b1fee48b9a5f4951a9616fef9c5fbd207cb5740f436de5a462a8bb4793b00",
+      "path": "1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/scene-1280.jpg"
+    }
+  ]
+}

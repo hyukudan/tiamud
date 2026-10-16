@@ -22,10 +22,13 @@ describe el baseline vigente de personajes, inventario y medios.
 
 Tiamud es un MUD con servidor Rust (actor de mundo con escritor único),
 clientes navegador y Telnet que comparten dominio, persistencia y proyección, y
-un backend único PostgreSQL o SQLite (esquema v15). El baseline vigente cubre
+un backend único PostgreSQL o SQLite (esquema v17). El baseline vigente cubre
 personajes v3, inventario con instancias/pilas/contenedores,
 `give`/trade/botín/recompensas/afijos, sistemas sociales 1–5E, y áreas locales
-6A–6C con retirada reversible 6D **parcial**.
+6A–6C con retirada reversible 6D **parcial**. El esquema v16 añadió la capa
+de persistencia de slots de historia S3 (ADR 0030 aceptado); el v17 guarda el
+snapshot de runtime seccionado y reescribe solo las secciones sucias
+(ADR 0035 aceptado).
 
 No dupliques aquí el detalle: la descripción normativa completa vive en
 [`AGENTS.md`](AGENTS.md) (sección "Baseline implementado", invariantes y límites
@@ -55,7 +58,10 @@ local no es evidencia de CI, release ni producción.
 - WorldPack requiere esquema, validador, normalización, composición, loader,
   datos revisados y CLI tests.
 - Protocolo requiere Rust, TypeScript estricto, socket/recovery, Playwright y
-  paridad Telnet/GMCP.
+  paridad Telnet/GMCP. Los tipos de cable viven en `crates/protocol` y las
+  vistas en `tiamud-core`/`tiamud-server`; regenera
+  `apps/web/src/lib/generated/` con
+  `TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript`.
 - Medios pasan por pipeline y manifiesto revisado; perderlos no cambia juego.
 - La identidad durable prototype/instance, las pilas derivadas y los
   contenedores acotados, `give`, trade confirmado y botín repetible con

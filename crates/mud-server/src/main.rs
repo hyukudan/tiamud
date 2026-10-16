@@ -8,6 +8,7 @@ mod persistence_postgres;
 mod runtime_content;
 mod social;
 mod staff;
+mod story_sessions;
 mod telnet;
 mod telnet_transport;
 mod web;
@@ -88,6 +89,62 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         optional_env("TIAMUD_AREA_CATALOG")?,
     )?;
     let legacy_area_generation_ack = optional_env("TIAMUD_ACK_LEGACY_AREA_GENERATION")?;
+    // Story sessions are disabled unless a StoryPack directory is configured.
+    // A configured catalog is validated completely before any backend opens.
+    let mut story_config = story_sessions::story_config(
+        optional_env("TIAMUD_STORY_DIR")?,
+        optional_env("TIAMUD_STORY_MAX_INSTANCES")?,
+        optional_env("TIAMUD_STORY_IDLE_SECONDS")?,
+    )?;
+    // Shared story instances (ADR 0033): seats, spectators, vote window and
+    // the grace period of a disconnected seat.
+    story_sessions::apply_shared_story_env(
+        &mut story_config,
+        &story_sessions::SharedStoryEnv {
+            max_seats: optional_env("TIAMUD_STORY_MAX_SEATS")?,
+            max_spectators: optional_env("TIAMUD_STORY_MAX_SPECTATORS")?,
+            vote_seconds: optional_env("TIAMUD_STORY_VOTE_SECONDS")?,
+            grace_seconds: optional_env("TIAMUD_STORY_SEAT_GRACE_SECONDS")?,
+        },
+    )?;
+    // Lua StoryPack scripts (ADR 0034, S6): off unless TIAMUD_STORY_SCRIPTS=1;
+    // with it every script is compiled while the catalog loads.
+    story_sessions::apply_script_story_env(
+        &mut story_config,
+        &story_sessions::ScriptStoryEnv {
+            enabled: optional_env("TIAMUD_STORY_SCRIPTS")?,
+            budget_ms: optional_env("TIAMUD_STORY_SCRIPT_BUDGET_MS")?,
+            workers: optional_env("TIAMUD_STORY_SCRIPT_WORKERS")?,
+            queue: optional_env("TIAMUD_STORY_SCRIPT_QUEUE")?,
+        },
+    )?;
+    let stories = match &story_config.directory {
+        Some(directory) => {
+            let catalog = story_sessions::StoryCatalog::load_dir_with(
+                directory,
+                story_config.limits.scripts.enabled,
+            )?;
+            info!(
+                stories = catalog.len(),
+                max_instances = story_config.limits.max_instances,
+                idle_seconds = story_config.limits.idle_timeout.as_secs(),
+                max_seats = story_config.limits.shared.max_seats,
+                max_spectators = story_config.limits.shared.max_spectators,
+                vote_seconds = story_config.limits.shared.vote_seconds,
+                seat_grace_seconds = story_config.limits.shared.grace.as_secs(),
+                scripts = story_config.limits.scripts.enabled,
+                script_budget_ms = story_config.limits.scripts.budget.as_millis(),
+                script_workers = story_config.limits.scripts.workers,
+                script_queue = story_config.limits.scripts.queue,
+                "story catalog loaded"
+            );
+            Some(story_sessions::StoryManager::new(
+                catalog,
+                story_config.limits.clone(),
+            ))
+        }
+        None => None,
+    };
     // Catalog mode must fail before opening a backend because opening either
     // backend may create a database or run migrations. Pin and validate the
     // exact generation, including its verified monolithic fallback, first.
@@ -102,6 +159,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let store: Arc<dyn CharacterStore> =
         Arc::new(MeasuredCharacterStore::new(store, metrics.clone()));
     let store_shutdown = store.clone();
+    // Story save slots (ADR 0030) go through the same measured store and its
+    // persistence worker queue; never through the world actor.
+    if let Some(stories) = &stories {
+        stories.attach_store(store.clone());
+    }
     let durable_generation_before_recovery = store.load_area_generation().await?;
     let mut recovery = store.load_startup_world_recovery().await?;
     let has_durable_character_authority = store.has_durable_character_authority().await?;
@@ -265,7 +327,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         command_burst,
         shutdown: shutdown_receiver.clone(),
         action_replay: web::action_replay_cache(),
+        stories: stories.clone(),
     };
+    let story_shutdown = stories.clone();
 
     let app = Router::new()
         .route("/health/live", get(web::live))
@@ -302,7 +366,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         auth_rate_limiter,
         active_session_limiter,
         metrics,
-    );
+    )
+    .with_stories(stories);
     let telnet_task = tokio::spawn(async move {
         if let Err(error) = telnet::run(
             telnet_listener,
@@ -341,6 +406,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 let _ = area_reconciler_task.await;
             }
         }
+    }
+    // Listeners are closed: autosave every live story instance while the
+    // persistence worker still accepts requests.
+    if let Some(stories) = &story_shutdown
+        && timeout(Duration::from_secs(10), stories.shutdown())
+            .await
+            .is_err()
+    {
+        error!("story autosave on shutdown exceeded its ten-second timeout");
     }
     match timeout(Duration::from_secs(10), world_shutdown.shutdown()).await {
         Ok(Ok(())) => info!("world actor drained and stopped"),

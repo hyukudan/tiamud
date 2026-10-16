@@ -30,6 +30,17 @@ implementación por fase vive en
 | [0022](0022-reversible-area-unit-retirement.md) | Reversible area-unit retirement | Aceptado (implementación parcial) | Áreas 6D |
 | [0023](0023-need-greed-and-master-loot-distribution.md) | Need/greed and master-loot distribution | Aceptado (implementación parcial) | Botín 4C |
 | [0024](0024-phase-6d-acceptance-closure-plan.md) | Phase 6D acceptance closure plan | Aceptado (implementación parcial: Gate 2) | Áreas 6D |
+| [0025](0025-narrative-ruleset-story-core.md) | Narrative ruleset (story-core), StoryPack and instanced story sessions | Aceptado (implementación parcial: S0 y herramientas S1 de biblioteca; fases posteriores en la matriz) | Narrativa S0–S8 |
+| [0026](0026-typed-protocol-source-and-typescript-codegen.md) | Typed `tiamud.v1` source and generated TypeScript | Aceptado (implementación parcial: generación incremental) | Protocolo navegador |
+| [0027](0027-durable-dirty-tracking-for-tick-commits.md) | Durable dirty tracking for tick commits | Aceptado (implementado; el propietario aceptó el retroceso acotado del reloj lógico de hasta 60 ticks tras un crash no ordenado) | Actor de mundo / persistencia |
+| [0028](0028-story-menus-portraits-and-dialogue-trees.md) | Story verb menus, portraits and dialogue trees (StoryPack v2) | Aceptado (implementación parcial: modelo de núcleo y entrega a clientes) | Narrativa S4 |
+| [0030](0030-story-save-slots-and-schema-v16.md) | Story save slots and schema v16 | Aceptado (implementación parcial: esquema v16 conectado a sesiones) | Narrativa S3 |
+| [0029](0029-story-session-instances-and-story-protocol.md) | Story session instances and `story.*` protocol | Aceptado (implementación parcial: sesiones de un jugador) | Narrativa S2 |
+| [0031](0031-parser-interactive-fiction-storypack-v3.md) | Parser interactive fiction (StoryPack v3) | Aceptado (implementación parcial: parser cableado al servidor, Web y Telnet) | Narrativa S5 |
+| [0032](0032-worldpack-v10-quests-and-shops.md) | WorldPack v10 quests, commodities and shops | Aceptado (implementación parcial: implementado en el MUD) | Contenido MUD (S8 lado MUD) |
+| [0033](0033-shared-story-instances-and-voting.md) | Shared story instances, seats and voting | Aceptado (implementación parcial S7) | Narrativa S7 |
+| [0034](0034-lua-scripts-in-storypacks.md) | Optional Lua scripts in StoryPacks | Aceptado (implementación parcial: biblioteca, herramientas y sesiones del servidor tras `TIAMUD_STORY_SCRIPTS=1`) | Narrativa S6 |
+| [0035](0035-sectioned-runtime-snapshot-storage-schema-v17.md) | Sectioned runtime snapshot storage (schema v17) | Aceptado (implementado en SQLite y PostgreSQL, esquema v17; PostgreSQL real sin ejecutar) | Actor de mundo / persistencia |
 
 El estado de fase (`Complete`/`Partial`) es autoridad de
 [`../project/COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).

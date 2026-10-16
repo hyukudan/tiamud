@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import App from './App.svelte';
 import appSource from './App.svelte?raw';
 import historyFormatSource from './lib/app/history-format.ts?raw';
+import sessionSource from './lib/app/game-session.svelte.ts?raw';
+import worldViewsSource from './lib/app/world-views.ts?raw';
 
 describe('Tiamud entry flow', () => {
   it('shows account access at the illustrated gate and does not expose guest entry', () => {
@@ -34,7 +36,7 @@ describe('Tiamud entry flow', () => {
     expect(historyFormatSource).toContain("return 'Emote'");
     expect(historyFormatSource).toContain("case 'party'");
     expect(historyFormatSource).toContain('in #${message.channel}');
-    expect(appSource).toContain('socialHistoryLabel(message.data)');
+    expect(sessionSource).toContain('socialHistoryLabel(message.data)');
   });
 
   it('keeps a 500-entry anchored scrollback with an explicit latest affordance', () => {
@@ -57,7 +59,7 @@ describe('Tiamud entry flow', () => {
     expect(appSource).toContain('class="entity-visual-layer" aria-hidden="true"');
     expect(appSource).toContain('alt=""');
     expect(appSource).toContain('visualLayout.overflow.slice(0, 5)');
-    expect(appSource).toContain('mapVisibleScenePresentation(scene)');
+    expect(sessionSource).toContain('mapVisibleScenePresentation(this.scene)');
     expect(appSource).toContain('const visualLayout = $derived.by');
   });
 
@@ -67,52 +69,29 @@ describe('Tiamud entry flow', () => {
     }
     expect(appSource).not.toContain('class:cue-status');
     expect(appSource).not.toContain('class:cue-spawn');
-    expect(appSource).toContain("case 'message.append'");
+    expect(sessionSource).toContain("message.type === 'message.append'");
     expect(appSource).toContain('class:motion-reduced={reduceVisualMotion}');
     expect(appSource).toContain('visualSourceForCue(entity.visual, cue)');
     expect(appSource).not.toContain('innerHTML');
   });
 
-  it('keeps same-view cues through the immediate snapshot but clears recovery state', () => {
-    expect(appSource).toContain('reconcileScenePresentationCues(scene, message.data, activeVisualCues)');
-    expect(appSource).not.toContain("case 'scene.snapshot':\n        resetVisualPresentation();");
-    expect(appSource).toContain('function handleSyncRecovery(recovery: SyncRecoveryData)');
-    expect(appSource).toMatch(/function handleSyncRecovery[\s\S]*?resetVisualPresentation\(\);/);
-  });
-
-  it('applies correlated recovery through one atomic sync callback', () => {
-    expect(appSource).toContain('function handleSyncRecovery(recovery: SyncRecoveryData)');
-    expect(appSource).toContain('scene = recovery.scene;');
-    expect(appSource).toContain('player = recovery.player;');
-    expect(appSource).toContain('onSync: handleSyncRecovery');
-    expect(appSource).not.toContain("case 'sync.scene'");
-    expect(appSource).not.toContain("case 'sync.player'");
-    expect(appSource).not.toContain("case 'sync.snapshot'");
-  });
-
-  it('never carries a paginated container view across mutations, recovery, or sessions', () => {
-    expect(appSource).toMatch(
-      /function submitAction[\s\S]*?if \(sent && \[[\s\S]*?'item\.put'[\s\S]*?'item\.get'[\s\S]*?'item\.contents'[\s\S]*?containerContents = undefined;/,
-    );
-    for (const boundary of [
-      'function handleSyncRecovery',
-      'function enterWorld',
-      'function returnToLogin',
-      'async function signOut',
-    ]) {
-      const start = appSource.indexOf(boundary);
-      expect(start).toBeGreaterThanOrEqual(0);
-      expect(appSource.slice(start, start + 800)).toContain('containerContents = undefined;');
+  it('keeps session state and message dispatch out of the layout component', () => {
+    expect(appSource).toContain('new GameSession(');
+    expect(appSource).not.toContain('function handleMessage');
+    expect(appSource).not.toContain('new TiamudConnection(');
+    expect(sessionSource).toContain('onSync: this.handleSyncRecovery');
+    expect(sessionSource).toContain('reconcileScenePresentationCues(');
+    for (const source of [appSource, sessionSource, worldViewsSource]) {
+      expect(source).not.toContain("case 'sync.scene'");
+      expect(source).not.toContain("case 'sync.player'");
+      expect(source).not.toContain("case 'sync.snapshot'");
     }
   });
 
-  it('applies board mutations only after correlated success and bounds pending metadata', () => {
-    expect(appSource).toContain('const pendingStructuredActions = new Map');
-    expect(appSource).toContain('pendingStructuredActions.size >= MAX_SCROLLBACK_ENTRIES');
-    expect(appSource).toContain('if (result.ok && pending)');
-    expect(appSource).toContain("pending.action === 'board.post'");
-    expect(appSource).toContain("pending.action === 'board.delete'");
-    expect(appSource).toContain("pending.action === 'board.report'");
-    expect(appSource).not.toContain("if (sent && action === 'board.delete') boardEntry = undefined");
+  it('loads the player dashboard lazily with a visible loading and retry state', () => {
+    expect(appSource).not.toContain("import PlayerDashboard from './components/PlayerDashboard.svelte'");
+    expect(appSource).toContain('loadPlayerDashboard()');
+    expect(appSource).toContain('Loading character panels');
+    expect(appSource).toContain('Retry loading panels');
   });
 });

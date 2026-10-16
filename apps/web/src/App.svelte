@@ -1,29 +1,8 @@
 <script lang="ts">
   import { browserStorage } from './lib/storage';
   import { onMount, tick } from 'svelte';
-  import type {
-    ActionResultData,
-    ActionPerformFields,
-    BoardCatalogData,
-    BoardEntryData,
-    BoardListData,
-    ConnectionState,
-    ContainerContentsData,
-    LiveServerMessage,
-    MailListData,
-    MailMessageData,
-    MessageAppendData,
-    MessagePresentationCue,
-    PlayerStateSnapshot,
-    RewardOddsData,
-    SceneEntityVisualSource,
-    SceneSnapshot,
-    ServerNoticeData,
-    SyncRecoveryData,
-    TradeContentsData,
-  } from './lib/protocol';
+  import type { SceneEntityVisualSource, SceneSnapshot } from './lib/protocol';
   import { localizedImageAlt } from './lib/protocol';
-  import { isLootRollProjection } from './lib/dashboard/loot';
   import {
     imageAfterFailures,
     imageUrl,
@@ -34,18 +13,9 @@
   import WelcomeGate from './components/WelcomeGate.svelte';
   import AccountAccess from './components/AccountAccess.svelte';
   import PreferencesPanel from './components/PreferencesPanel.svelte';
-  import PlayerDashboard from './components/PlayerDashboard.svelte';
+  import StoryPanel from './components/StoryPanel.svelte';
   import { PRODUCT_NAME } from './lib/brand';
-  import {
-    clearStoredAccess,
-    logout as revokeAccess,
-    sessionHasExpired,
-    type CharacterSelection,
-  } from './lib/auth';
-  import {
-    TiamudConnection,
-    websocketUrl,
-  } from './lib/socket';
+  import type { CharacterSelection } from './lib/auth';
   import {
     loadPreferences,
     motionReduced,
@@ -53,12 +23,9 @@
     savePreferences,
     type ClientPreferences,
   } from './lib/preferences';
-  import { loadCommandHistory, rememberCommand } from './lib/history';
   import { AudioController } from './lib/audio';
-  import { createRequestId } from './lib/request-id';
   import {
     MAX_SCROLLBACK_ENTRIES,
-    boundedScrollback,
     isScrollAnchored,
   } from './lib/scrollback';
   import {
@@ -66,35 +33,20 @@
     type VisualPlacement,
   } from './lib/scene-layout';
   import {
-    mapVisibleScenePresentation,
-    presentationCueEntityId,
-    presentationCuePose,
-    reconcileScenePresentationCues,
     visualSourceForCue,
     type ActiveScenePresentationCue,
   } from './lib/scene-presentation';
   import { capabilitiesFor } from './lib/app/capabilities';
-  import {
-    connectionLabelFor,
-    itemActionName,
-    socialHistoryLabel,
-  } from './lib/app/history-format';
+  import { connectionLabelFor, itemActionName } from './lib/app/history-format';
   import { directVisualSource, visualSourceUrl } from './lib/app/visual-source';
   import { computeCommandSuggestions } from './lib/app/command-suggestions';
-
-  interface HistoryEntry {
-    id: string;
-    command: string;
-    state: 'pending' | 'complete' | 'failed';
-    response?: string;
-  }
-
-  interface PendingStructuredAction {
-    action: string;
-    fields?: ActionPerformFields;
-  }
-
-  type VisualSceneEntity = ReturnType<typeof mapVisibleScenePresentation>[number];
+  import {
+    GameSession,
+    type HistoryView,
+    type VisualSceneEntity,
+  } from './lib/app/game-session.svelte';
+  import { loadPlayerDashboard, type PlayerDashboardComponent } from './lib/app/lazy-dashboard';
+  import { keepCommandVisible } from './lib/app/visual-viewport';
 
   interface RenderedVisualEntity {
     entity: VisualSceneEntity;
@@ -103,38 +55,16 @@
     cue?: ActiveScenePresentationCue;
   }
 
-  let connectionState = $state<ConnectionState>('connecting');
-  let hasEntered = $state(false);
-  let scene = $state<SceneSnapshot>();
-  let player = $state<PlayerStateSnapshot>();
-  let containerContents = $state<ContainerContentsData>();
-  let tradeContents = $state<TradeContentsData>();
-  let rewardOdds = $state<RewardOddsData>();
-  let mailList = $state<MailListData>();
-  let mailMessage = $state<MailMessageData>();
-  let boardCatalog = $state<BoardCatalogData>();
-  let boardList = $state<BoardListData>();
-  let boardEntry = $state<BoardEntryData>();
-  let lastActionResult = $state<ActionResultData>();
-  let lootRoll = $state<string>();
   let manifestImage = $state<SceneSnapshot['image']>();
   let activeAssetKey: string | undefined;
   let failedImageUrls = $state<string[]>([]);
-  let notice = $state<ServerNoticeData>();
-  let command = $state('');
   let commandInput = $state<HTMLInputElement>();
-  let history = $state<HistoryEntry[]>([]);
+  let commandForm = $state<HTMLFormElement>();
   let historyScroller = $state<HTMLDivElement>();
   let historyAnchored = $state(true);
   let unseenHistory = $state(0);
-  let eventCounter = 0;
-  let activeVisualCues = $state<Record<string, ActiveScenePresentationCue>>({});
-  const visualCueTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const pendingStructuredActions = new Map<string, PendingStructuredAction>();
-  const seenMessageCueKeys: string[] = [];
-  let connection: TiamudConnection | undefined;
-  let selectedAccess = $state<CharacterSelection>();
-  let accessError = $state<string>();
+  let PlayerDashboard = $state<PlayerDashboardComponent>();
+  let dashboardLoadFailed = $state(false);
   const browserSaveData = typeof navigator !== 'undefined' &&
     (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData === true;
   const initialPreferences = loadPreferences(
@@ -142,27 +72,63 @@
     browserSaveData,
   );
   let preferences = $state(initialPreferences);
-  let rememberedCommands = $state(
-    loadCommandHistory(browserStorage()),
-  );
-  let historyCursor = $state(0);
+  const systemReducedMotionNow = (): boolean => typeof window !== 'undefined' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const audioController = typeof Audio === 'undefined'
     ? undefined
-    : new AudioController((url) => new Audio(url), initialPreferences);
+    : new AudioController((url) => new Audio(url), initialPreferences, {
+        systemReducedMotion: systemReducedMotionNow,
+      });
+
+  const historyView: HistoryView = {
+    beforeReplace() {
+      const scroller = historyScroller;
+      const wasAnchored = scroller ? isScrollAnchored(scroller) : true;
+      historyAnchored = wasAnchored;
+      return wasAnchored;
+    },
+    afterReplace(wasAnchored, activity) {
+      void tick().then(() => {
+        if (!historyScroller) return;
+        if (wasAnchored) {
+          historyScroller.scrollTop = historyScroller.scrollHeight;
+          historyAnchored = true;
+          unseenHistory = 0;
+        } else if (activity > 0) {
+          historyAnchored = false;
+          unseenHistory = Math.min(MAX_SCROLLBACK_ENTRIES, unseenHistory + activity);
+        }
+      });
+    },
+    reset() {
+      historyAnchored = true;
+      unseenHistory = 0;
+    },
+  };
+
+  const session = new GameSession({
+    storage: browserStorage,
+    capabilities: () => capabilitiesFor(preferences, systemReducedMotionNow()),
+    audio: audioController,
+    historyView,
+  });
+
   const showMultimedia = $derived(multimediaAllowed(preferences));
-  const systemReducedMotion = typeof window !== 'undefined' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const systemReducedMotion = systemReducedMotionNow();
   const reduceVisualMotion = $derived(motionReduced(preferences, systemReducedMotion));
 
-  const connectionLabel = $derived(connectionLabelFor(connectionState));
+  const connectionLabel = $derived(connectionLabelFor(session.connectionState));
   const browserLocale = typeof navigator === 'undefined' ? 'en' : navigator.language;
   const localizedSceneImage = $derived(
-    scene?.image
-      ? { ...scene.image, alt: localizedImageAlt(scene.image, browserLocale) ?? scene.image.alt }
+    session.scene?.image
+      ? {
+          ...session.scene.image,
+          alt: localizedImageAlt(session.scene.image, browserLocale) ?? session.scene.image.alt,
+        }
       : undefined,
   );
-  const directImageUrl = $derived(imageUrl(scene?.image));
-  const manifestUrl = $derived(directImageUrl ? undefined : scene?.image?.manifest);
+  const directImageUrl = $derived(imageUrl(session.scene?.image));
+  const manifestUrl = $derived(directImageUrl ? undefined : session.scene?.image?.manifest);
   const sceneAssetKey = $derived(showMultimedia ? (directImageUrl ?? manifestUrl) : undefined);
   const atmosphereImage = $derived(
     showMultimedia
@@ -170,14 +136,9 @@
       : undefined,
   );
   const imageRenderKey = $derived(`${sceneAssetKey ?? 'none'}:${failedImageUrls.join('|')}`);
-  const visualEntities = $derived.by((): VisualSceneEntity[] => {
-    return mapVisibleScenePresentation(scene).filter((entity) =>
-      Boolean(directVisualSource(entity.visual.poses.idle)),
-    );
-  });
   const visualLayout = $derived.by(() =>
     showMultimedia && Boolean(atmosphereImage)
-      ? layoutSceneEntities(visualEntities.map((entity) => ({
+      ? layoutSceneEntities(session.visualEntities.map((entity) => ({
           id: entity.id,
           priority: entity.visual.priority,
           footprint: entity.visual.footprint,
@@ -187,21 +148,21 @@
   );
   const renderedVisualEntities = $derived.by((): RenderedVisualEntity[] =>
     visualLayout.placements.flatMap((placement) => {
-      const entity = visualEntities.find((candidate) => candidate.id === placement.id);
+      const entity = session.visualEntities.find((candidate) => candidate.id === placement.id);
       if (!entity) return [];
-      const cue = activeVisualCues[entity.id];
+      const cue = session.activeVisualCues[entity.id];
       const requested = visualSourceForCue(entity.visual, cue);
       const source = directVisualSource(requested) ?? directVisualSource(entity.visual.poses.idle);
       return source ? [{ entity, placement, source, cue }] : [];
     }),
   );
   const overflowVisualEntities = $derived(visualLayout.overflow.slice(0, 5).flatMap((id) =>
-    visualEntities.find((entity) => entity.id === id) ?? [],
+    session.visualEntities.find((entity) => entity.id === id) ?? [],
   ));
   const commandSuggestions = $derived.by(() =>
     computeCommandSuggestions(
-      scene?.exits.map((exit) => exit.command) ?? [],
-      rememberedCommands,
+      session.scene?.exits.map((exit) => exit.command) ?? [],
+      session.rememberedCommands,
     ),
   );
 
@@ -243,31 +204,17 @@
     savePreferences(browserStorage(), current);
   });
 
+  // Keep the fixed mobile command bar above the on-screen keyboard.
+  $effect(() => {
+    if (!session.hasEntered || !commandForm || typeof window === 'undefined') return;
+    return keepCommandVisible(window, commandForm);
+  });
+
   function updatePreferences(next: ClientPreferences): void {
     if (next.audio && !preferences.audio) audioController?.unlockFromGesture();
     audioController?.updatePreferences(next);
     preferences = next;
-    connection?.updateCapabilities(
-      capabilitiesFor(next, window.matchMedia('(prefers-reduced-motion: reduce)').matches),
-    );
-  }
-
-  function replaceHistory(next: HistoryEntry[], activity = 1): void {
-    const scroller = historyScroller;
-    const wasAnchored = scroller ? isScrollAnchored(scroller) : true;
-    historyAnchored = wasAnchored;
-    history = boundedScrollback(next);
-    void tick().then(() => {
-      if (!historyScroller) return;
-      if (wasAnchored) {
-        historyScroller.scrollTop = historyScroller.scrollHeight;
-        historyAnchored = true;
-        unseenHistory = 0;
-      } else if (activity > 0) {
-        historyAnchored = false;
-        unseenHistory = Math.min(MAX_SCROLLBACK_ENTRIES, unseenHistory + activity);
-      }
-    });
+    session.updateCapabilities(capabilitiesFor(next, systemReducedMotionNow()));
   }
 
   function handleHistoryScroll(): void {
@@ -282,10 +229,7 @@
     if (typeof historyScroller.scrollTo === 'function') {
       historyScroller.scrollTo({
         top,
-        behavior: motionReduced(
-          preferences,
-          window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-        ) ? 'auto' : 'smooth',
+        behavior: motionReduced(preferences, systemReducedMotionNow()) ? 'auto' : 'smooth',
       });
     } else {
       historyScroller.scrollTop = top;
@@ -294,574 +238,38 @@
     unseenHistory = 0;
   }
 
-  function markPendingInterrupted(): void {
-    pendingStructuredActions.clear();
-    if (!history.some((entry) => entry.state === 'pending')) return;
-    replaceHistory(history.map((entry) => entry.state === 'pending'
-      ? {
-          ...entry,
-          state: 'failed' as const,
-          response: 'The connection closed before the server confirmed this action.',
-        }
-      : entry));
-  }
-
-  function handleActionResult(result: ActionResultData): void {
-    if (!result.requestId) {
-      if (result.message) {
-        notice = { level: result.ok ? 'info' : 'error', message: result.message };
-        if (result.ok && isLootRollProjection(result.message)) {
-          lootRoll = result.message;
-        }
-      }
-      return;
-    }
-
-    const pending = pendingStructuredActions.get(result.requestId);
-    pendingStructuredActions.delete(result.requestId);
-    lastActionResult = result;
-    if (result.ok && result.message && isLootRollProjection(result.message)) {
-      lootRoll = result.message;
-    }
-    if (result.ok && pending) {
-      applyConfirmedStructuredAction(pending);
-    }
-
-    replaceHistory(history.map((entry) =>
-      entry.id === result.requestId
-        ? {
-            ...entry,
-            state: result.ok ? 'complete' : 'failed',
-            response: result.message ?? (result.ok ? 'Done.' : 'The action failed.'),
-          }
-        : entry,
-    ));
-  }
-
-  function applyConfirmedStructuredAction(pending: PendingStructuredAction): void {
-    if (pending.action === 'mail.delete' && pending.fields?.mailId) {
-      if (mailMessage?.id === pending.fields.mailId) mailMessage = undefined;
-      // Reload authoritative totals/pagination rather than retaining a deleted
-      // entry or guessing whether the last page still exists.
-      mailList = undefined;
-      return;
-    }
-    if (pending.action === 'board.post') {
-      boardList = undefined;
-      return;
-    }
-    const postId = pending.fields?.postId;
-    if (pending.action === 'board.delete' && postId) {
-      if (boardEntry?.postId === postId) boardEntry = undefined;
-      if (boardList?.posts.some((entry) => entry.postId === postId)) boardList = undefined;
-      return;
-    }
-    if (pending.action === 'board.report' && postId) {
-      if (boardEntry?.postId === postId) {
-        boardEntry = { ...boardEntry, canReport: false };
-      }
-      if (boardList) {
-        boardList = {
-          ...boardList,
-          posts: boardList.posts.map((entry) => entry.postId === postId
-            ? { ...entry, canReport: false }
-            : entry),
-        };
-      }
-    }
-  }
-
-  function clearEntityVisualCue(entityId: string): void {
-    const timer = visualCueTimers.get(entityId);
-    if (timer !== undefined) clearTimeout(timer);
-    visualCueTimers.delete(entityId);
-    if (activeVisualCues[entityId]) {
-      const { [entityId]: _removed, ...remaining } = activeVisualCues;
-      activeVisualCues = remaining;
-    }
-  }
-
-  function cancelVisualCues(): void {
-    for (const timer of visualCueTimers.values()) clearTimeout(timer);
-    visualCueTimers.clear();
-    seenMessageCueKeys.length = 0;
-    activeVisualCues = {};
-  }
-
-  function resetVisualPresentation(): void {
-    cancelVisualCues();
-  }
-
-  function applyVisualCue(
-    cue: MessagePresentationCue,
-    message: MessageAppendData,
-    eventKey: string,
-  ): void {
-    if (seenMessageCueKeys.includes(eventKey)) return;
-    seenMessageCueKeys.push(eventKey);
-    if (seenMessageCueKeys.length > 128) {
-      seenMessageCueKeys.splice(0, seenMessageCueKeys.length - 128);
-    }
-    const entityId = presentationCueEntityId(cue, message);
-    if (!visualEntities.some((entity) => entity.id === entityId)) return;
-
-    clearEntityVisualCue(entityId);
-    activeVisualCues = {
-      ...activeVisualCues,
-      [entityId]: { ...cue, pose: presentationCuePose(cue), eventKey },
-    };
-    visualCueTimers.set(entityId, setTimeout(() => {
-      visualCueTimers.delete(entityId);
-      const { [entityId]: _expired, ...remaining } = activeVisualCues;
-      activeVisualCues = remaining;
-    }, cue.durationMs));
-  }
-
-  function handleMessage(message: LiveServerMessage): void {
-    switch (message.type) {
-      case 'server.welcome':
-        if (message.data.motd) {
-          notice = { level: 'info', message: message.data.motd };
-        }
-        break;
-      case 'scene.snapshot':
-        {
-          const retained = reconcileScenePresentationCues(scene, message.data, activeVisualCues);
-          for (const entityId of Object.keys(activeVisualCues)) {
-            if (!retained[entityId]) clearEntityVisualCue(entityId);
-          }
-          activeVisualCues = retained;
-        }
-        scene = message.data;
-        break;
-      case 'scene.patch':
-        if (scene?.viewId === message.data.viewId && (scene.revision ?? 0) <= message.data.revision) {
-          const { image, ...patch } = message.data;
-          scene = {
-            ...scene,
-            ...patch,
-            ...(image === null ? { image: undefined } : image ? { image } : {}),
-          };
-        }
-        break;
-      case 'entity.upsert':
-        if (scene?.viewId === message.data.viewId && (scene.revision ?? 0) <= message.data.revision) {
-          if (message.data.kind === 'item') {
-            scene = {
-              ...scene,
-              revision: message.data.revision,
-              items: [
-                ...scene.items.filter((entity) => entity.id !== message.data.id),
-                message.data.entity,
-              ],
-            };
-          } else {
-            scene = {
-              ...scene,
-              revision: message.data.revision,
-              npcs: [
-                ...scene.npcs.filter((entity) => entity.id !== message.data.id),
-                message.data.entity,
-              ],
-            };
-          }
-        }
-        break;
-      case 'entity.remove':
-        if (scene?.viewId === message.data.viewId && (scene.revision ?? 0) <= message.data.revision) {
-          clearEntityVisualCue(message.data.id);
-          scene = message.data.kind === 'item'
-            ? {
-                ...scene,
-                revision: message.data.revision,
-                items: scene.items.filter((entity) => entity.id !== message.data.id),
-              }
-            : {
-                ...scene,
-                revision: message.data.revision,
-                npcs: scene.npcs.filter((entity) => entity.id !== message.data.id),
-              };
-        }
-        break;
-      case 'player.snapshot':
-        if (
-          !message.data.trade
-          || tradeContents?.tradeId !== message.data.trade.id
-          || (
-            player?.trade?.stateRevision !== undefined
-            && player.trade.stateRevision !== message.data.trade.stateRevision
-          )
-        ) {
-          tradeContents = undefined;
-        }
-        if (rewardOdds && !message.data.inventory.some((item) => item.id === rewardOdds?.selector)) {
-          rewardOdds = undefined;
-        }
-        player = message.data;
-        break;
-      case 'vitals.update':
-        if (player && player.revision <= message.data.revision) {
-          player = { ...player, revision: message.data.revision, character: message.data.character };
-        }
-        break;
-      case 'inventory.patch':
-        if (player && player.revision <= message.data.revision) {
-          player = {
-            ...player,
-            revision: message.data.revision,
-            inventory: message.data.inventory,
-            equipment: message.data.equipment,
-            inventoryCapacity: message.data.inventoryCapacity,
-          };
-          containerContents = undefined;
-          tradeContents = undefined;
-          if (rewardOdds && !message.data.inventory.some((item) => item.id === rewardOdds?.selector)) {
-            rewardOdds = undefined;
-          }
-        }
-        break;
-      case 'container.contents':
-        containerContents = message.data;
-        break;
-      case 'trade.contents':
-        tradeContents = message.data;
-        break;
-      case 'reward.odds':
-        rewardOdds = message.data;
-        break;
-      case 'mail.list':
-        mailList = message.data;
-        if (mailMessage && !message.data.messages.some((entry) => entry.id === mailMessage?.id)) {
-          mailMessage = undefined;
-        }
-        break;
-      case 'mail.message':
-        mailMessage = message.data;
-        if (mailList) {
-          mailList = {
-            ...mailList,
-            unreadCount: Math.max(
-              0,
-              mailList.unreadCount - (mailList.messages.some(
-                (entry) => entry.id === message.data.id && !entry.read,
-              ) ? 1 : 0),
-            ),
-            messages: mailList.messages.map((entry) => entry.id === message.data.id
-              ? { ...entry, read: true }
-              : entry),
-          };
-        }
-        break;
-      case 'board.catalog':
-        boardCatalog = message.data;
-        break;
-      case 'board.list':
-        boardList = message.data;
-        if (boardEntry && !message.data.posts.some((entry) => entry.postId === boardEntry?.postId)) {
-          boardEntry = undefined;
-        }
-        break;
-      case 'board.entry':
-        boardEntry = message.data;
-        if (boardList?.board === message.data.board) {
-          boardList = {
-            ...boardList,
-            posts: boardList.posts.map((entry) => entry.postId === message.data.postId
-              ? {
-                  postId: message.data.postId,
-                  board: message.data.board,
-                  author: message.data.author,
-                  subject: message.data.subject,
-                  createdAt: message.data.createdAt,
-                  expiresAt: message.data.expiresAt,
-                  canDelete: message.data.canDelete,
-                  canReport: message.data.canReport,
-                }
-              : entry),
-          };
-        }
-        break;
-      case 'map.snapshot':
-        if (player && player.revision <= message.data.revision) {
-          player = { ...player, revision: message.data.revision, map: message.data.map };
-        }
-        break;
-      case 'message.append':
-        if (message.data.kind === 'characterMoved') containerContents = undefined;
-        eventCounter += 1;
-        replaceHistory([
-          ...history,
-          {
-            id: `event-${message.seq ?? eventCounter}-${eventCounter}`,
-            command: 'World event',
-            state: 'complete' as const,
-            response: message.data.text,
-          },
-        ]);
-        if (message.data.cue) {
-          applyVisualCue(
-            message.data.cue,
-            message.data,
-            `${message.seq ?? 0}:${message.id ?? ''}:${message.data.revision}`,
-          );
-        }
-        break;
-      case 'action.result':
-        handleActionResult(message.data);
-        break;
-      case 'server.notice':
-        notice = message.data;
-        break;
-      case 'media.play':
-        void audioController?.play(message.data.channel, message.data.url, message.data.loop);
-        break;
-      case 'media.stop':
-        audioController?.stop(message.data.channel);
-        break;
-      case 'chat.message':
-        replaceHistory([
-          ...history,
-          {
-            id: `chat-${message.seq ?? createRequestId()}`,
-            command: socialHistoryLabel(message.data),
-            state: 'complete',
-            response: message.data.text,
-          },
-        ]);
-        break;
-    }
-  }
-
-  function handleSyncRecovery(recovery: SyncRecoveryData): void {
-    resetVisualPresentation();
-    scene = recovery.scene;
-    player = recovery.player;
-    containerContents = undefined;
-    tradeContents = undefined;
-    rewardOdds = undefined;
-    mailList = undefined;
-    mailMessage = undefined;
-    boardCatalog = undefined;
-    boardList = undefined;
-    boardEntry = undefined;
-  }
-
-  function submitCommand(value = command): void {
-    const submitted = value.trim();
-    if (!submitted) {
-      return;
-    }
-
-    const id = createRequestId();
-    const sent = connection?.submit(submitted, id) ?? false;
-    recordSubmission(submitted, id, sent);
-  }
-
-  function submitAction(
-    action: string,
-    fields: ActionPerformFields | undefined,
-    label: string,
-  ): string | undefined {
-    const id = createRequestId();
-    const sent = connection?.perform(action, fields, id) ?? false;
-    if (sent && [
-      'item.take', 'item.drop', 'item.put', 'item.get', 'item.give', 'item.contents',
-      'item.use', 'item.equip', 'item.unequip', 'loot.pass',
-    ].includes(action)) {
-      containerContents = undefined;
-    }
-    if (sent && action.startsWith('trade.') && action !== 'trade.contents') {
-      tradeContents = undefined;
-    }
-    if (sent && action === 'reward.open') rewardOdds = undefined;
-    if (sent && action === 'mail.delete') mailMessage = undefined;
-    if (sent && ['board.post', 'board.delete', 'board.report'].includes(action)) {
-      if (pendingStructuredActions.size >= MAX_SCROLLBACK_ENTRIES) {
-        const oldest = pendingStructuredActions.keys().next().value;
-        if (oldest) pendingStructuredActions.delete(oldest);
-      }
-      pendingStructuredActions.set(id, { action, fields });
-    }
-    recordSubmission(label, id, sent);
-    return sent ? id : undefined;
-  }
-
-  function submitAbility(abilityId: string, target: string | undefined, label: string): void {
-    const id = createRequestId();
-    const sent = connection?.performAbility(abilityId, target, id) ?? false;
-    recordSubmission(label, id, sent);
-  }
-
-  function submitPromotion(classId: string, label: string): void {
-    const id = createRequestId();
-    const sent = connection?.promote(classId, id) ?? false;
-    recordSubmission(label, id, sent);
-  }
-
-  function submitTalent(graphId: string, nodeId: string, label: string): void {
-    const id = createRequestId();
-    const sent = connection?.acquireTalent(graphId, nodeId, id) ?? false;
-    recordSubmission(label, id, sent);
-  }
-
-  function recordSubmission(submitted: string, id: string, sent: boolean): void {
-
-    replaceHistory([
-      ...history,
-      {
-        id,
-        command: submitted,
-        state: sent ? 'pending' : 'failed',
-        response: sent ? undefined : 'The command was not sent because the server is unavailable.',
+  function requestDashboard(): void {
+    if (PlayerDashboard) return;
+    dashboardLoadFailed = false;
+    void loadPlayerDashboard().then(
+      (component) => {
+        PlayerDashboard = component;
       },
-    ]);
-    rememberedCommands = rememberCommand(
-      rememberedCommands,
-      submitted,
-      browserStorage(),
+      () => {
+        dashboardLoadFailed = true;
+      },
     );
-    historyCursor = rememberedCommands.length;
-    command = '';
-  }
-
-  function navigateCommandHistory(event: KeyboardEvent): void {
-    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
-    if (rememberedCommands.length === 0) return;
-    event.preventDefault();
-    if (event.key === 'ArrowUp') {
-      historyCursor = Math.max(0, historyCursor - 1);
-      command = rememberedCommands[historyCursor] ?? '';
-    } else {
-      historyCursor = Math.min(rememberedCommands.length, historyCursor + 1);
-      command = historyCursor === rememberedCommands.length
-        ? ''
-        : (rememberedCommands[historyCursor] ?? '');
-    }
   }
 
   function enterWorld(selection: CharacterSelection): void {
-    if (sessionHasExpired(selection)) {
-      returnToLogin('Your session has expired. Sign in again.');
-      return;
-    }
-    containerContents = undefined;
-    tradeContents = undefined;
-    rewardOdds = undefined;
-    mailList = undefined;
-    mailMessage = undefined;
-    boardCatalog = undefined;
-    boardList = undefined;
-    boardEntry = undefined;
-    accessError = undefined;
-    selectedAccess = selection;
-    if (!connection) {
-      connection = new TiamudConnection(
-        websocketUrl(window.location),
-        {
-          token: selection.token,
-          characterId: selection.characterId,
-          expiresAt: selection.expiresAt,
-        },
-        {
-          onMessage: handleMessage,
-          onSync: handleSyncRecovery,
-          onStateChange: (state) => {
-            connectionState = state;
-            if (state === 'disconnected') {
-              markPendingInterrupted();
-              cancelVisualCues();
-              containerContents = undefined;
-              tradeContents = undefined;
-              rewardOdds = undefined;
-              mailList = undefined;
-              mailMessage = undefined;
-              boardCatalog = undefined;
-              boardList = undefined;
-              boardEntry = undefined;
-            }
-          },
-          onProtocolError: () => {
-            notice = { level: 'warning', message: 'The server sent a message this client could not read.' };
-          },
-          onAccessRejected: (message, clearCredentials) => returnToLogin(
-            message || 'Your session was rejected. Sign in again.',
-            clearCredentials,
-          ),
-        },
-        capabilitiesFor(preferences, window.matchMedia('(prefers-reduced-motion: reduce)').matches),
-      );
-      connection.connect();
-    }
-
-    hasEntered = true;
-    void tick().then(() => commandInput?.focus());
-  }
-
-  function returnToLogin(message: string, clearCredentials = true): void {
-    audioController?.stop();
-    connection = undefined;
-    selectedAccess = undefined;
-    hasEntered = false;
-    connectionState = 'disconnected';
-    scene = undefined;
-    resetVisualPresentation();
-    player = undefined;
-    containerContents = undefined;
-    tradeContents = undefined;
-    rewardOdds = undefined;
-    mailList = undefined;
-    mailMessage = undefined;
-    boardCatalog = undefined;
-    boardList = undefined;
-    boardEntry = undefined;
-    notice = undefined;
-    history = [];
-    historyAnchored = true;
-    unseenHistory = 0;
-    accessError = message;
-    if (clearCredentials) clearStoredAccess(browserStorage());
-  }
-
-  async function signOut(): Promise<void> {
-    const token = selectedAccess?.token;
-    connection?.close();
-    audioController?.stop();
-    connection = undefined;
-    selectedAccess = undefined;
-    hasEntered = false;
-    connectionState = 'connecting';
-    scene = undefined;
-    resetVisualPresentation();
-    player = undefined;
-    containerContents = undefined;
-    tradeContents = undefined;
-    rewardOdds = undefined;
-    mailList = undefined;
-    mailMessage = undefined;
-    boardCatalog = undefined;
-    boardList = undefined;
-    boardEntry = undefined;
-    notice = undefined;
-    history = [];
-    historyAnchored = true;
-    unseenHistory = 0;
-    accessError = undefined;
-    clearStoredAccess(browserStorage());
-    if (token) {
-      try {
-        await revokeAccess(token);
-      } catch {
-        // Local sign-out remains effective when an expired token cannot be revoked.
-      }
+    requestDashboard();
+    if (session.enterWorld(selection)) {
+      void tick().then(() => commandInput?.focus());
     }
   }
 
   onMount(() => {
-    historyCursor = rememberedCommands.length;
+    // Warm the dashboard chunk while the reader is still on the welcome gate,
+    // without competing with first paint.
+    // Safari has no requestIdleCallback; fall back to a short timer.
+    const idle = typeof window.requestIdleCallback === 'function';
+    const handle = idle
+      ? window.requestIdleCallback(requestDashboard, { timeout: 3_000 })
+      : window.setTimeout(requestDashboard, 1_500);
     return () => {
-      connection?.close();
-      audioController?.stop();
-      resetVisualPresentation();
+      if (idle) window.cancelIdleCallback(handle);
+      else window.clearTimeout(handle);
+      session.dispose();
     };
   });
 </script>
@@ -870,10 +278,10 @@
   <title>{PRODUCT_NAME}</title>
 </svelte:head>
 
-{#if !hasEntered}
+{#if !session.hasEntered}
   <WelcomeGate onenter={() => undefined} showArtwork={showMultimedia}>
     {#snippet access(_enterWorld)}
-      {#if accessError}<p class="access-error" role="alert">{accessError}</p>{/if}
+      {#if session.accessError}<p class="access-error" role="alert">{session.accessError}</p>{/if}
       <AccountAccess onselect={enterWorld} />
       <PreferencesPanel value={preferences} onchange={updatePreferences} />
     {/snippet}
@@ -883,25 +291,72 @@
   <header class="topbar">
     <a class="brand" href="/" aria-label={`${PRODUCT_NAME} home`}>{PRODUCT_NAME}</a>
     <div class="session-controls">
-      {#if selectedAccess}<span class="character-name">{selectedAccess.characterName}</span>{/if}
-      <p class:connected={connectionState === 'connected'} class="connection" role="status">
+      {#if session.selectedAccess}<span class="character-name">{session.selectedAccess.characterName}</span>{/if}
+      <p class:connected={session.connectionState === 'connected'} class="connection" role="status">
         <span aria-hidden="true"></span>{connectionLabel}
       </p>
-      <button type="button" onclick={() => void signOut()}>Sign out</button>
+      <button type="button" onclick={() => void session.signOut()}>Sign out</button>
       <PreferencesPanel value={preferences} onchange={updatePreferences} />
     </div>
   </header>
 
-  {#if notice}
-    <aside class:warning={notice.level === 'warning'} class:error={notice.level === 'error'} class="notice">
-      <p role={notice.level === 'error' ? 'alert' : 'status'}>{notice.message}</p>
-      <button aria-label="Dismiss notice" onclick={() => (notice = undefined)}>×</button>
+  {#if session.storyInvitation && !session.story}
+    {@const invitation = session.storyInvitation}
+    <aside class="notice story-invitation" aria-labelledby="story-invitation-text">
+      <p id="story-invitation-text" role="status">
+        {invitation.host} invites you to the shared story «<span lang="es">{invitation.title}</span>».
+        Join code {invitation.code}.
+      </p>
+      <button type="button" onclick={() => session.joinStory(invitation.code)}>Join story</button>
+      <button type="button" onclick={() => session.joinStory(invitation.code, true)}>Watch</button>
+      <button type="button" aria-label="Dismiss invitation" onclick={session.dismissStoryInvitation}>×</button>
+    </aside>
+  {/if}
+
+  {#if session.notice}
+    <aside class:warning={session.notice.level === 'warning'} class:error={session.notice.level === 'error'} class="notice">
+      <p role={session.notice.level === 'error' ? 'alert' : 'status'}>{session.notice.message}</p>
+      <button aria-label="Dismiss notice" onclick={session.dismissNotice}>×</button>
     </aside>
   {/if}
 
   <main>
     <section class="scene" aria-labelledby="scene-title">
-      {#if scene}
+      {#if session.story}
+        <!-- While absorbed in a story the character stays parked in its room. -->
+        <StoryPanel
+          view={session.story}
+          connected={session.connectionState === 'connected'}
+          pending={session.storyPending}
+          error={session.storyError}
+          headingId="scene-title"
+          lang={session.storyLocale}
+          images={showMultimedia}
+          onchoose={session.chooseStory}
+          onmenu={session.storyMenu}
+          onundo={session.undoStory}
+          onleave={session.leaveStory}
+          slots={session.storySlots}
+          offerContinue={session.storyOfferContinue}
+          notice={session.storyNotice}
+          onsave={session.saveStory}
+          onrestore={session.restoreStory}
+          ondeleteslot={session.deleteStorySlot}
+          onslots={session.refreshStorySlots}
+          oncontinue={session.continueStory}
+          ondismisscontinue={session.dismissStoryContinue}
+          lobby={session.storyLobby}
+          tally={session.storyTally}
+          deadline={session.storyDeadline}
+          votes={session.storyVotes}
+          onshare={session.shareStory}
+          oninvite={session.inviteToStory}
+          onkick={session.kickFromStory}
+          onmode={session.setStoryMode}
+          onwithdraw={session.withdrawStoryVote}
+          oncommand={session.commandStory}
+        />
+      {:else if session.scene}
         {#if atmosphereImage}
           <div class="visual-stage">
             {#key imageRenderKey}
@@ -987,38 +442,38 @@
 
         <div class="narrative">
           <p class="eyebrow">Current location</p>
-          <h1 id="scene-title">{scene.title}</h1>
+          <h1 id="scene-title">{session.scene.title}</h1>
           <p class="scene-weather">
-            <span>{scene.weather.condition}</span>
+            <span>{session.scene.weather.condition}</span>
             <span aria-hidden="true">·</span>
-            <span>Day {scene.weather.day}, hour {scene.weather.hour}</span>
-            <span class="sr-only">Weather may change in {scene.weather.nextChangeInTicks} world ticks.</span>
+            <span>Day {session.scene.weather.day}, hour {session.scene.weather.hour}</span>
+            <span class="sr-only">Weather may change in {session.scene.weather.nextChangeInTicks} world ticks.</span>
           </p>
-          {#each scene.prose as paragraph}
+          {#each session.scene.prose as paragraph}
             <p>{paragraph}</p>
           {/each}
 
-          {#if scene.exits.length > 0}
+          {#if session.scene.exits.length > 0}
             <nav class="exits" aria-label="Exits">
               <h2>Ways onward</h2>
               <ul>
-                {#each scene.exits as exit (exit.id)}
-                  <li><button onclick={() => submitAction('move', { target: exit.command }, exit.command)}>{exit.label}</button></li>
+                {#each session.scene.exits as exit (exit.id)}
+                  <li><button onclick={() => session.submitAction('move', { target: exit.command }, exit.command)}>{exit.label}</button></li>
                 {/each}
               </ul>
             </nav>
           {/if}
 
-          {#if scene.items.length > 0}
+          {#if session.scene.items.length > 0}
             <section class="scene-items" aria-labelledby="items-title">
               <h2 id="items-title">Within reach</h2>
               <button
                 class="loot-status-button"
                 type="button"
-                onclick={() => submitAction('loot.status', undefined, 'loot status')}
+                onclick={() => session.submitAction('loot.status', undefined, 'loot status')}
               >Review loot rights</button>
               <ul>
-                {#each scene.items as item (item.id)}
+                {#each session.scene.items as item (item.id)}
                   <li>
                     <div>
                       <strong>{item.label} ×{item.quantity}</strong>
@@ -1058,17 +513,17 @@
                           type="button"
                           onclick={() => {
                             if (action.command.trim().toLowerCase().startsWith('loot pass ')) {
-                              submitAction('loot.pass', { target: item.id }, action.command);
+                              session.submitAction('loot.pass', { target: item.id }, action.command);
                             } else {
                               const actionName = itemActionName(action.command);
                               if (actionName === 'item.contents') {
-                                submitAction(actionName, { container: item.id, page: 1 }, action.command);
+                                session.submitAction(actionName, { container: item.id, page: 1 }, action.command);
                               } else if (actionName === 'reward.odds') {
-                                submitAction(actionName, { target: item.id, page: 1 }, action.command);
+                                session.submitAction(actionName, { target: item.id, page: 1 }, action.command);
                               } else if (actionName) {
-                                submitAction(actionName, { target: item.id }, action.command);
+                                session.submitAction(actionName, { target: item.id }, action.command);
                               }
-                              else submitCommand(action.command);
+                              else session.submitCommand(action.command);
                             }
                           }}
                         >{action.label}</button>
@@ -1080,11 +535,11 @@
             </section>
           {/if}
 
-          {#if scene.npcs.length > 0}
+          {#if session.scene.npcs.length > 0}
             <section class="scene-items scene-npcs" aria-labelledby="npcs-title">
               <h2 id="npcs-title">Nearby creatures</h2>
               <ul>
-                {#each scene.npcs as npc (npc.id)}
+                {#each session.scene.npcs as npc (npc.id)}
                   <li>
                     <div>
                       <strong>{npc.label}</strong>
@@ -1100,8 +555,8 @@
                         <button
                           type="button"
                           onclick={() => action.command.trim().toLowerCase().startsWith('attack ')
-                            ? submitAction('combat.attack', { target: npc.id }, action.command)
-                            : submitCommand(action.command)}
+                            ? session.submitAction('combat.attack', { target: npc.id }, action.command)
+                            : session.submitCommand(action.command)}
                         >{action.label}</button>
                       {/each}
                     </div>
@@ -1111,7 +566,7 @@
             </section>
           {/if}
         </div>
-        <p class="sr-only" aria-live="polite">Current location: {scene.title}</p>
+        <p class="sr-only" aria-live="polite">Current location: {session.scene.title}</p>
       {:else}
         <div class="empty-scene">
           <p class="eyebrow">Entering the world</p>
@@ -1122,31 +577,42 @@
     </section>
 
     <div class="side-stack">
+      {#if PlayerDashboard}
       <PlayerDashboard
-        value={player}
-        {containerContents}
-        {tradeContents}
-        {rewardOdds}
-        {mailList}
-        {mailMessage}
-        {boardCatalog}
-        {boardList}
-        {boardEntry}
-        actionResult={lastActionResult}
-        {lootRoll}
-        {connectionState}
-        abilityTargets={scene?.npcs ?? []}
-        oncommand={submitCommand}
-        onaction={submitAction}
-        onability={submitAbility}
-        onpromote={submitPromotion}
-        ontalent={submitTalent}
+        value={session.player}
+        containerContents={session.containerContents}
+        tradeContents={session.tradeContents}
+        rewardOdds={session.rewardOdds}
+        mailList={session.mailList}
+        mailMessage={session.mailMessage}
+        boardCatalog={session.boardCatalog}
+        boardList={session.boardList}
+        boardEntry={session.boardEntry}
+        actionResult={session.lastActionResult}
+        lootRoll={session.lootRoll}
+        connectionState={session.connectionState}
+        abilityTargets={session.scene?.npcs ?? []}
+        oncommand={session.submitCommand}
+        onaction={session.submitAction}
+        onability={session.submitAbility}
+        onpromote={session.submitPromotion}
+        ontalent={session.submitTalent}
       />
+      {:else}
+        <section class="dashboard-loading" aria-label="Character panels" aria-busy={!dashboardLoadFailed}>
+          {#if dashboardLoadFailed}
+            <p role="alert">The character panels could not be loaded.</p>
+            <button type="button" onclick={requestDashboard}>Retry loading panels</button>
+          {:else}
+            <p role="status">Loading character panels…</p>
+          {/if}
+        </section>
+      {/if}
 
       <section class="console" aria-labelledby="console-title">
       <div class="console-heading">
         <h2 id="console-title">Command history</h2>
-        <div><button type="button" onclick={() => submitCommand('inventory')}>Inventory</button><span>{history.length} / {MAX_SCROLLBACK_ENTRIES}</span></div>
+        <div><button type="button" onclick={() => session.submitCommand('inventory')}>Inventory</button><span>{session.history.length} / {MAX_SCROLLBACK_ENTRIES}</span></div>
       </div>
 
       <div
@@ -1159,10 +625,10 @@
         onscroll={handleHistoryScroll}
       >
         <ol class="history">
-          {#if history.length === 0}
+          {#if session.history.length === 0}
             <li class="history-empty">Try <kbd>look</kbd> to examine your surroundings.</li>
           {:else}
-            {#each history as entry (entry.id)}
+            {#each session.history as entry (entry.id)}
               <li class:failed={entry.state === 'failed'}>
                 <div><span aria-hidden="true">›</span> <code>{entry.command}</code></div>
                 {#if entry.response}<p>{entry.response}</p>{/if}
@@ -1182,10 +648,11 @@
       {/if}
 
       <form
+        bind:this={commandForm}
         class="command-form"
         onsubmit={(event) => {
           event.preventDefault();
-          submitCommand();
+          session.submitCommand();
         }}
       >
         <label for="command">What do you do?</label>
@@ -1194,21 +661,21 @@
           <input
             id="command"
             bind:this={commandInput}
-            bind:value={command}
+            bind:value={session.command}
             autocomplete="off"
             autocapitalize="none"
             enterkeyhint="send"
             list="command-suggestions"
             placeholder="look, north, take lantern…"
-            onkeydown={navigateCommandHistory}
-            oninput={() => (historyCursor = rememberedCommands.length)}
+            onkeydown={session.navigateCommandHistory}
+            oninput={session.resetHistoryCursor}
           />
           <datalist id="command-suggestions">
             {#each commandSuggestions as suggestion}
               <option value={suggestion}></option>
             {/each}
           </datalist>
-          <button type="submit" disabled={!command.trim()}>Send</button>
+          <button type="submit" disabled={!session.command.trim()}>Send</button>
         </div>
       </form>
       </section>

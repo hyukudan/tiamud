@@ -19,7 +19,7 @@ The implemented importer can:
 - preserve raw room flags, sectors, exit values, and legacy VNUMs;
 - resolve exits between rooms in the same file while retaining external VNUMs;
 - convert each reviewed object VNUM used by an unconditional room reset into
-  one WorldPack v9 item prototype and each reset into a distinct initial item
+  one WorldPack v10 item prototype and each reset into a distinct initial item
   instance;
 - preserve every other historical construct as inert structured data with
   line/VNUM diagnostics and recommendations;
@@ -29,11 +29,15 @@ The implemented importer can:
   shop, special, program-owner, and recall references without guessing;
 - emit either validated WorldPack JSON or a complete machine-readable report.
 
-WorldPack v9 separates reusable item prototypes from initial item instances
+WorldPack v10 separates reusable item prototypes from initial item instances
 and supports reviewed repeatable loot tables, earned sealed rewards and
 affixes. The historical importer always leaves those collections and
 `sealedLootTableId` empty: it never invents probabilities, rights, seals or
 modifiers from legacy resets.
+It emits no WorldPack v10 `commodities`, `quests` or `shops`: historical
+shop keepers stay inert diagnostics, and a world built directly at v10 does not
+receive the legacy starter quest or market that normalization adds to v2–v9
+packs.
 It also leaves every ability communication definition empty: prose, specials
 or historical programs that resemble telepathy remain inert until an author
 explicitly reviews the ability, resource cost, cooldown, target scope and

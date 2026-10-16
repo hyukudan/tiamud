@@ -248,6 +248,7 @@ pub(crate) struct ProgressionCatalog {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressionOptionView {
     pub id: String,
@@ -280,6 +281,7 @@ pub enum BackgroundSelection<'a> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct RequirementStatusView {
     pub met: bool,
@@ -287,6 +289,7 @@ pub struct RequirementStatusView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PromotionView {
     pub class: ClassView,
@@ -296,6 +299,7 @@ pub struct PromotionView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TalentNodeView {
     pub id: String,
@@ -310,6 +314,7 @@ pub struct TalentNodeView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TalentGraphView {
     pub id: String,

@@ -5,6 +5,23 @@ import {
   createCommandSubmit,
   createHeartbeatAck,
   createPromotionPerform,
+  createStoryChoose,
+  createStoryContinue,
+  createStoryDeleteSlot,
+  createStoryListSlots,
+  createStoryRestore,
+  createStorySave,
+  createStoryDialogue,
+  createStoryLeave,
+  createStoryMenu,
+  createStoryUndo,
+  createStoryInvite,
+  createStoryJoin,
+  createStoryKick,
+  createStoryMode,
+  createStoryShare,
+  createStoryVote,
+  createStoryCommand,
   createSyncRequest,
   createTalentPerform,
   parseServerMessage,
@@ -15,6 +32,7 @@ import {
   type SyncRecoveryData,
 } from './protocol';
 import { WEBSOCKET_SUBPROTOCOL } from './brand';
+import type { StoryDecisionMode } from './generated/protocol';
 
 export interface ConnectionCallbacks {
   onMessage(message: LiveServerMessage): void;
@@ -50,8 +68,78 @@ type LocationLike = Pick<Location, 'protocol' | 'host'>;
 
 export const SERVER_SILENCE_TIMEOUT_MS = 45_000;
 export const SYNC_RESPONSE_TIMEOUT_MS = 10_000;
+/** Base and ceiling of the exponential reconnect window (full jitter applies). */
+export const RECONNECT_BASE_DELAY_MS = 500;
+export const RECONNECT_MAX_DELAY_MS = 10_000;
+/**
+ * A page that returns to the foreground or regains the network treats an open
+ * socket as stale after this much server silence. The server heartbeats every
+ * 15 s, so a healthy socket is never older than one interval plus jitter.
+ */
+export const WAKE_STALE_AFTER_MS = 20_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const MAX_TIMER_DELAY_MS = 2_147_000_000;
+const MAX_BACKOFF_EXPONENT = 16;
+
+/**
+ * Full-jitter exponential backoff: a uniform delay in
+ * `[0, min(max, base * 2^(attempt-1))]`. Spreading the delay over the whole
+ * window prevents every client from reconnecting in lockstep after a server
+ * restart. `random` must return a value in `[0, 1)`; anything else is clamped.
+ */
+export function reconnectDelay(
+  attempt: number,
+  random: () => number,
+  base = RECONNECT_BASE_DELAY_MS,
+  max = RECONNECT_MAX_DELAY_MS,
+): number {
+  const exponent = Math.min(MAX_BACKOFF_EXPONENT, Math.max(0, Math.floor(attempt) - 1));
+  const window = Math.min(max, base * 2 ** exponent);
+  const sample = random();
+  const unit = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 1;
+  return Math.floor(window * unit);
+}
+
+export interface ReconnectTimers {
+  setTimeout(callback: () => void, delay: number): ReturnType<typeof setTimeout>;
+  clearTimeout(handle: ReturnType<typeof setTimeout>): void;
+}
+
+/** Minimal surface of `window`/`document` used for lifecycle wake-ups. */
+export interface LifecycleEventTarget {
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
+export interface ConnectionLifecycle {
+  /** Receives `online`. */
+  window?: LifecycleEventTarget;
+  /** Receives `visibilitychange`; its `visibilityState` gates the wake-up. */
+  document?: LifecycleEventTarget & { readonly visibilityState?: string };
+}
+
+export interface ConnectionOptions {
+  random?: () => number;
+  timers?: ReconnectTimers;
+  /** `null` disables lifecycle listeners; `undefined` uses the browser globals. */
+  lifecycle?: ConnectionLifecycle | null;
+}
+
+const defaultTimers: ReconnectTimers = {
+  setTimeout: (callback, delay) => setTimeout(callback, delay),
+  clearTimeout: (handle) => clearTimeout(handle),
+};
+
+function browserLifecycle(): ConnectionLifecycle {
+  return {
+    window: typeof window !== 'undefined' && typeof window.addEventListener === 'function'
+      ? window
+      : undefined,
+    document: typeof document !== 'undefined' && typeof document.addEventListener === 'function'
+      ? document
+      : undefined,
+  };
+}
 
 export function websocketUrl(location: LocationLike): string {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -78,17 +166,35 @@ export class TiamudConnection {
   #welcomed = false;
   #accessRejected = false;
   #reconnectImmediately = false;
+  readonly #random: () => number;
+  readonly #timers: ReconnectTimers;
+  readonly #lifecycle?: ConnectionLifecycle;
+  #lifecycleBound = false;
+  readonly #onOnline = (): void => {
+    this.wake();
+  };
+  readonly #onVisibilityChange = (): void => {
+    if (this.#lifecycle?.document?.visibilityState === 'visible') {
+      this.wake();
+    }
+  };
 
   constructor(
     url: string,
     auth: ConnectionAuth,
     callbacks: ConnectionCallbacks,
     capabilities?: BrowserCapabilities,
+    options: ConnectionOptions = {},
   ) {
     this.#url = url;
     this.#auth = auth;
     this.#callbacks = callbacks;
     this.#capabilities = capabilities;
+    this.#random = options.random ?? Math.random;
+    this.#timers = options.timers ?? defaultTimers;
+    this.#lifecycle = options.lifecycle === null
+      ? undefined
+      : (options.lifecycle ?? browserLifecycle());
   }
 
   connect(): void {
@@ -99,7 +205,9 @@ export class TiamudConnection {
       return;
     }
 
+    this.#cancelReconnectTimer();
     this.#closedByClient = false;
+    this.#bindLifecycle();
     this.#callbacks.onStateChange('connecting');
 
     const socket = new WebSocket(this.#url, [WEBSOCKET_SUBPROTOCOL]);
@@ -192,10 +300,7 @@ export class TiamudConnection {
       return true;
     }
 
-    if (this.#reconnectTimer) {
-      clearTimeout(this.#reconnectTimer);
-      this.#reconnectTimer = undefined;
-    }
+    this.#cancelReconnectTimer();
     this.#reconnectImmediately = true;
     const socket = this.#socket;
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
@@ -246,22 +351,175 @@ export class TiamudConnection {
     return true;
   }
 
+  storyChoose(id: string, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryChoose(id, viewRev)));
+    return true;
+  }
+
+  storyDialogue(id: string, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryDialogue(id, viewRev)));
+    return true;
+  }
+
+  storyMenu(verb: string, target: string | undefined, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryMenu(verb, target, viewRev)));
+    return true;
+  }
+
+  storyUndo(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryUndo()));
+    return true;
+  }
+
+  storyLeave(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryLeave()));
+    return true;
+  }
+
+  storySave(slot: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStorySave(slot)));
+    return true;
+  }
+
+  storyRestore(slot: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryRestore(slot)));
+    return true;
+  }
+
+  storyDeleteSlot(slot: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryDeleteSlot(slot)));
+    return true;
+  }
+
+  storySlots(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryListSlots()));
+    return true;
+  }
+
+  storyContinue(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryContinue()));
+    return true;
+  }
+
+  storyVote(choiceId: string | undefined, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryVote(choiceId, viewRev)));
+    return true;
+  }
+
+  storyCommand(text: string, viewRev: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryCommand(text, viewRev)));
+    return true;
+  }
+
+  storyShare(): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryShare()));
+    return true;
+  }
+
+  storyJoin(code: string, spectate: boolean): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryJoin(code, spectate)));
+    return true;
+  }
+
+  storyInvite(name: string): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryInvite(name)));
+    return true;
+  }
+
+  storyKick(name: string): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryKick(name)));
+    return true;
+  }
+
+  storyMode(mode: StoryDecisionMode, voteSeconds?: number): boolean {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return false;
+    this.#socket.send(JSON.stringify(createStoryMode(mode, voteSeconds)));
+    return true;
+  }
+
   close(): void {
     this.#closedByClient = true;
     this.#reconnectImmediately = false;
-    if (this.#reconnectTimer) {
-      clearTimeout(this.#reconnectTimer);
-      this.#reconnectTimer = undefined;
-    }
+    this.#cancelReconnectTimer();
+    this.#unbindLifecycle();
     this.#stopConnectionTimers();
     this.#socket?.close(1000, 'Client closed');
     this.#socket = undefined;
   }
 
+  /**
+   * Liveness check for lifecycle signals (page visible again, network back).
+   * A down socket waiting on backoff reconnects now through `connect()`; an
+   * open socket that has been silent longer than one heartbeat window is
+   * closed so the normal close path reconnects immediately. A healthy or
+   * still-connecting socket is left alone, so repeated signals cannot storm.
+   * Returns true when it started a reconnect.
+   */
+  wake(): boolean {
+    if (this.#closedByClient || this.#accessRejected) return false;
+    const socket = this.#socket;
+    if (!socket) {
+      this.connect();
+      return true;
+    }
+    if (socket.readyState === WebSocket.CONNECTING) return false;
+    if (socket.readyState === WebSocket.OPEN) {
+      if (Date.now() - this.#lastServerActivity < WAKE_STALE_AFTER_MS) return false;
+      this.#reconnectImmediately = true;
+      socket.close(4000, 'Server heartbeat timeout');
+      return true;
+    }
+    // CLOSING/CLOSED but the close event has not been delivered yet: the close
+    // handler reconnects without waiting for backoff.
+    this.#reconnectImmediately = true;
+    return true;
+  }
+
   #scheduleReconnect(): void {
-    this.#reconnectAttempts += 1;
-    const delay = Math.min(10_000, 500 * 2 ** (this.#reconnectAttempts - 1));
-    this.#reconnectTimer = setTimeout(() => this.connect(), delay);
+    this.#reconnectAttempts = Math.min(MAX_BACKOFF_EXPONENT + 1, this.#reconnectAttempts + 1);
+    const delay = reconnectDelay(this.#reconnectAttempts, this.#random);
+    this.#cancelReconnectTimer();
+    this.#reconnectTimer = this.#timers.setTimeout(() => {
+      this.#reconnectTimer = undefined;
+      this.connect();
+    }, delay);
+  }
+
+  #cancelReconnectTimer(): void {
+    if (this.#reconnectTimer !== undefined) {
+      this.#timers.clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+    }
+  }
+
+  #bindLifecycle(): void {
+    if (this.#lifecycleBound || !this.#lifecycle) return;
+    this.#lifecycle.window?.addEventListener('online', this.#onOnline);
+    this.#lifecycle.document?.addEventListener('visibilitychange', this.#onVisibilityChange);
+    this.#lifecycleBound = true;
+  }
+
+  #unbindLifecycle(): void {
+    if (!this.#lifecycleBound || !this.#lifecycle) return;
+    this.#lifecycle.window?.removeEventListener('online', this.#onOnline);
+    this.#lifecycle.document?.removeEventListener('visibilitychange', this.#onVisibilityChange);
+    this.#lifecycleBound = false;
   }
 
   #handleSequenced(message: ServerMessage, socket: WebSocket): void {
@@ -440,10 +698,8 @@ export class TiamudConnection {
     this.#accessRejected = true;
     this.#closedByClient = true;
     this.#reconnectImmediately = false;
-    if (this.#reconnectTimer) {
-      clearTimeout(this.#reconnectTimer);
-      this.#reconnectTimer = undefined;
-    }
+    this.#cancelReconnectTimer();
+    this.#unbindLifecycle();
     this.#stopConnectionTimers();
     this.#callbacks.onAccessRejected?.(message, clearCredentials);
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {

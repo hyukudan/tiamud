@@ -1,2 +1,3 @@
 export const PRODUCT_NAME = 'Tiamud' as const;
-export const WEBSOCKET_SUBPROTOCOL = 'tiamud.v1' as const;
+// The subprotocol name is generated from crates/protocol (the wire source of truth).
+export { WEBSOCKET_SUBPROTOCOL } from './generated/protocol';

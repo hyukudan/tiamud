@@ -31,6 +31,7 @@ pub const MAX_STATUS_MAGNITUDE: i32 = 100_000;
 pub const MAX_RESISTANCE_PERCENT: u16 = 90;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DamageType {
     Physical,
@@ -209,6 +210,7 @@ pub struct ResourcePool {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ActiveStatusKind {
     AttributeModifier,
@@ -238,6 +240,7 @@ pub struct ActiveStatusEffect {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AttributeView {
     pub id: String,
@@ -246,6 +249,7 @@ pub struct AttributeView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceView {
     pub id: String,
@@ -255,6 +259,7 @@ pub struct ResourceView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AbilityResourceCostView {
     pub resource_id: String,
@@ -263,6 +268,7 @@ pub struct AbilityResourceCostView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AbilityView {
     pub id: String,
@@ -277,6 +283,7 @@ pub struct AbilityView {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AbilityPurpose {
     Gameplay,
@@ -284,6 +291,7 @@ pub enum AbilityPurpose {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ResistanceView {
     pub damage_type: DamageType,
@@ -291,6 +299,7 @@ pub struct ResistanceView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct StatusView {
     pub id: String,

@@ -7,7 +7,12 @@ members = [
     "crates/mud-server",
     "crates/persistence-postgres",
     "crates/persistence-sqlite",
+    "crates/protocol",
     "crates/scripting",
+    "crates/story-core",
+    "crates/story-parser",
+    "crates/story-script",
+    "crates/story-tools",
     "crates/telnet-codec",
     "crates/tiamud-admin",
     "crates/world-pack",
@@ -31,6 +36,7 @@ hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 mlua = { version = "0.11.6", default-features = false, features = ["lua54", "vendored"] }
 mime_guess = "2.0.5"
+png = "0.18.1"
 postgres = "0.19.14"
 ravif = { version = "0.13.0", default-features = false }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
@@ -44,7 +50,7 @@ sha2 = "0.11.0"
 slotmap = "1.1.1"
 tempfile = "3.24.0"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["full"] }
+tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower-http = { version = "0.7.0", features = ["trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }

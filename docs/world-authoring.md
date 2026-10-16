@@ -1,7 +1,7 @@
 # World authoring, validation, and publishing
 
-This guide describes Tiamud's current authoring contract: **WorldPack v9** as
-the canonical runtime artifact, **AreaPack v8** as the authoring module, and
+This guide describes Tiamud's current authoring contract: **WorldPack v10** as
+the canonical runtime artifact, **AreaPack v9** as the authoring module, and
 `WorldProjectManifest` v2 as offline composition. The exact authority is the
 types and validators in `crates/world-pack`; the reviewed example is
 [`worlds/lantern-square.world.json`](../worlds/lantern-square.world.json).
@@ -15,7 +15,7 @@ variants, scripts, and content tests.
 The server picks exactly one source before opening listeners:
 
 - monolithic mode: `TIAMUD_WORLD_PACK` selects a complete
-  `WorldPackDocument` v9; without world variables the embedded Lantern Square is
+  `WorldPackDocument` v10; without world variables the embedded Lantern Square is
   used; or
 - catalog mode 6B: `TIAMUD_AREA_REGISTRY` and `TIAMUD_AREA_CATALOG` must be
   defined together and point to a local registry plus the exact
@@ -42,9 +42,9 @@ flowchart LR
     accDescr: Areas are composed and validated offline. The server picks the full WorldPack or a durable local generation, incorporates bundles on demand, and can replace only the whole generation while quiescent.
 
     Project[WorldProjectManifest v2] --> Compose[tiamud-world compose]
-    Areas[AreaPack v8<br/>1..=256 modules] --> Compose
+    Areas[AreaPack v9<br/>1..=256 modules] --> Compose
     Compose --> Validate[Global validation<br/>references · limits · Lua]
-    Validate --> Artifact[Canonical WorldPack v9]
+    Validate --> Artifact[Canonical WorldPack v10]
     Artifact --> Monolithic[Server<br/>monolithic mode]
     Validate --> Publish[area-publish 6A]
     Publish --> Catalog[Catalog + bundles<br/>local and immutable]
@@ -61,14 +61,14 @@ flowchart LR
 
 | Input | Handling |
 | --- | --- |
-| WorldPack v9 | Native canonical format. |
-| WorldPack v8/v7/v6/v5/v4/v3/v2 | Deterministically normalized to v9 before validation, without inventing emotes; v2-v7 also do not invent communication, v2-v6 also do not invent seals or affixes, and v2-v5 also do not invent loot tables or sources. |
-| AreaPack v8 | Native modular format. |
-| AreaPack v7/v6/v5/v4/v3/v2/v1 | Normalized to v8 before composition, without inventing emotes; v1-v6 also do not invent communication, v1-v5 also do not invent seals or affixes, and v1-v4 also do not invent loot tables or sources. |
+| WorldPack v10 | Native canonical format. |
+| WorldPack v9/v8/v7/v6/v5/v4/v3/v2 | Deterministically normalized to v10 before validation. They receive the implied legacy `first-hunt` quest, the `tonic`/`trail-ration` commodities and the `lantern-market` shop bound to `startRoomId` (the behaviour every pre-v10 runtime hardcoded); v2-v8 do not invent emotes, v2-v7 also do not invent communication, v2-v6 also do not invent seals or affixes, and v2-v5 also do not invent loot tables or sources. |
+| AreaPack v9 | Native modular format. |
+| AreaPack v8/v7/v6/v5/v4/v3/v2/v1 | Normalized to v9 before composition with empty `commodities`, `quests` and `shops`; v1-v7 do not invent emotes, v1-v6 also do not invent communication, v1-v5 also do not invent seals or affixes, and v1-v4 also do not invent loot tables or sources. |
 | Envy/Merc | Only passes through `envy-import`; the historical programs are never executed. |
 
 Legacy compatibility does not allow writing legacy vocabulary into a native
-document. WorldPack v9 and AreaPack v8 reject `items`, `room.items`,
+document. WorldPack v10 and AreaPack v9 reject `items`, `room.items`,
 `itemRules`, and `lootItemIds`: use `itemPrototypes` and
 `initialItemInstances`.
 
@@ -93,6 +93,13 @@ Authored emotes originate in WorldPack v9 and AreaPack v8. `socialEmotes`, even
 an empty array, is rejected in WorldPack v2-v8 and AreaPack v1-v7. Normalization
 produces an empty collection, and `envy-import` never converts socials,
 programs, or historical prose into executable templates.
+
+Quests, commodities and shops originate in WorldPack v10 and AreaPack v9.
+`commodities`, `quests` or `shops`, even empty, are rejected in WorldPack v2-v9
+and AreaPack v1-v8. Unlike other additions, normalizing a WorldPack v2-v9 makes
+the formerly hardcoded starter quest and market explicit (see
+[Quests, commodities and shops](#quests-commodities-and-shops)); an AreaPack
+v1-v8 normalizes to empty collections because no single legacy area owned them.
 
 WorldPack v4 and AreaPack v3 receive `maxStackUnits: 1` through normalization,
 with no container and `transferPolicy: transferable`. In those versions the
@@ -147,15 +154,15 @@ Example:
 }
 ```
 
-## AreaPack v8
+## AreaPack v9
 
 Each area reuses the same WorldPack registries; it does not create a second
 representation of rooms, items, or NPCs. It only adds `id` and `dependsOn` as an
 ownership boundary.
 
 ```text
-AreaPack v8
-├── schemaVersion! = 8
+AreaPack v9
+├── schemaVersion! = 9
 ├── id!
 ├── dependsOn[]?
 ├── itemPrototypes[]?
@@ -175,6 +182,9 @@ AreaPack v8
 ├── talentGraphs[]?
 ├── abilities[]?
 ├── socialEmotes[]?
+├── commodities[]?
+├── quests[]?
+├── shops[]?
 ├── npcAbilitySets[]?
 ├── roomMedia[]?
 ├── entityMedia[]?
@@ -319,15 +329,15 @@ Loot does not live in `npcPrototypes`. The `npc_spawn` location of an instance
 is authored fixed loot, assigned exactly once and validated. Repeatable loot is
 declared separately through `lootTables` and `lootSources`, as detailed below.
 
-## WorldPack v9
+## WorldPack v10
 
 The flat artifact holds identity, item catalogs, rooms, and gameplay. The
 media/perception/scripts extensions are flattened into the document by
 `WorldPackDocument`, even though the Rust structure separates the world core.
 
 ```text
-WorldPack v9
-├── schemaVersion! = 9
+WorldPack v10
+├── schemaVersion! = 10
 ├── id!
 ├── name!
 ├── startRoomId!
@@ -346,7 +356,10 @@ WorldPack v9
 │   ├── lootTables[]?
 │   ├── lootSources[]?
 │   ├── affixes[]?
-│   └── affixPools[]?
+│   ├── affixPools[]?
+│   ├── commodities[]?
+│   ├── quests[]?
+│   └── shops[]?
 ├── roomMedia[]?
 ├── entityMedia[]?
 ├── roomPerception[]?
@@ -359,7 +372,7 @@ A minimal world with no items:
 
 ```json
 {
-  "schemaVersion": 9,
+  "schemaVersion": 10,
   "id": "ejemplo",
   "name": "Mundo de ejemplo",
   "startRoomId": "ejemplo:entrada",
@@ -418,7 +431,7 @@ they are not written into the WorldPack.
 
 ## Authored social emotes
 
-WorldPack v9 declares `gameplay.socialEmotes`; AreaPack v8 uses `socialEmotes`
+WorldPack v10 declares `gameplay.socialEmotes`; AreaPack v9 uses `socialEmotes`
 at its root. There are at most 32 per world. Each definition contains a
 namespaced `id` of up to 64 bytes, a unique ASCII `command` matching
 `[a-z][a-z0-9-]*` (up to 32 bytes), a safe name of up to 64 bytes,
@@ -452,6 +465,109 @@ namespaced `id` of up to 64 bytes, a unique ASCII `command` matching
 or placeholders, controls, ESC, CR/LF, `<`, `>`, and `&` are rejected; the
 result of substituting 64-byte names must fit in 512 bytes. The templates grant
 no authority or visibility: the runtime computes the room audience.
+
+## Quests, commodities and shops
+
+[ADR 0032](decisions/0032-worldpack-v10-quests-and-shops.md) (accepted) moves
+the formerly hardcoded starter quest and market into data. WorldPack v10 places
+`commodities`, `quests` and `shops` under `gameplay`; AreaPack v9 declares them
+at its root and composition registers their IDs in the same global namespace as
+every other entity. The IDs, stage order, objective order and `stockId` values
+are durable once published: character progress, commodity balances and runtime
+stock are keyed by them. Display text is `LocalizedText`; because there is no
+per-player locale yet, the runtime shows `en` or, without it, the first locale
+in lexicographic order.
+
+Commodities are abstract counted goods held per character, not item instances:
+
+```json
+{ "id": "tonic", "name": { "en": "healing tonic" }, "maxOwned": 99 }
+```
+
+A quest has a closed repeatability policy, 1..=16 stages of 1..=8 objectives,
+optional coin/experience rewards and an optional prerequisite:
+
+```json
+{
+  "id": "first-hunt",
+  "name": { "en": "First Hunt" },
+  "summary": { "en": "Defeat one hostile creature; reward 25 coin and 50 experience." },
+  "aliases": ["first hunt", "hunt"],
+  "repeatability": "once",
+  "stages": [
+    { "id": "hunt", "objectives": [{ "kind": "defeat_npc", "count": 1 }] }
+  ],
+  "rewards": { "coins": 25, "experience": 50 }
+}
+```
+
+| Objective | Fields | Progress |
+| --- | --- | --- |
+| `defeat_npc` | `npcPrototypeId?`, `count` 1..=1000 | Each NPC defeat resolved by the logical tick; without a prototype any NPC counts. |
+| `collect_item` | `itemPrototypeId`, `count` 1..=1000 | Units of that prototype carried or equipped at once, including nested containers. Items are not consumed. |
+| `visit_room` | `roomId` | Standing in the room after any successful action. |
+| `talk_to_npc` | `npcPrototypeId` | `talk <npc>` / `talk to <npc>` on a visible living NPC of that prototype. |
+
+A stage completes when every objective reaches its count; the next stage starts
+from zero and only re-checks `collect_item`/`visit_room` immediately, so one
+defeat or conversation never advances two stages. Completing the last stage
+makes the quest `ready_to_claim`. `quest complete` grants the rewards and marks
+it `completed` in one atomic action; a second claim fails. `repeatable` quests
+may be accepted again after a claim and count completions; `once` quests may
+not. A character holds at most 32 quests.
+
+`prerequisite` is a closed subset of the scene `Condition` language: `all`,
+`any`, `not`, integer comparisons on `actor.level`, and `contains` on
+`actor.flags` or `actor.quest_states`, with at most 32 nodes and depth 4. Any
+other field (time, weather, world instance, preferences, senses) is rejected
+because the runtime evaluates prerequisites only from the actor's own durable
+state. `actor.quest_states` contains `<quest>:active|ready_to_claim|completed`
+and, while a quest is not completed, `<quest>:stage:<stageId>`, so scene
+variants and scripts can react to a stage.
+
+A shop binds to one room (at most one shop per room) and, optionally, to a
+`keeperNpcSpawnId` that must spawn in that room and be alive for the shop to
+trade. Each of its 1..=32 stock entries references one commodity once:
+
+```json
+{
+  "id": "lantern-market",
+  "name": { "en": "Lantern Market" },
+  "roomId": "demo:lantern-square",
+  "stock": [
+    {
+      "stockId": "tonic",
+      "commodityId": "tonic",
+      "buyPrice": 12,
+      "sellPrice": 6,
+      "initialStock": 20,
+      "maxStock": 100,
+      "restock": { "kind": "none" }
+    }
+  ]
+}
+```
+
+`buyPrice` is 1..=1,000,000 and `sellPrice` may not exceed it, so a buy/sell
+loop never creates coin. `maxStock` is 1..=10,000 and bounds both
+`initialStock` and stock returned by sales. `restock` is `none` or
+`{"kind":"interval","everyTicks":1..=100000,"amount":1..=maxStock,"ceiling":1..=maxStock}`,
+applied deterministically on logical ticks that are multiples of `everyTicks`.
+A world declares at most 64 commodities, 256 quests and 64 shops; `stockId` is
+unique across all shops.
+
+Quest and shop references to rooms, NPC prototypes or items are validated on the
+composed world and do not create hard area dependencies: in catalog mode the
+whole adventure catalog is pinned from the verified monolithic fallback, like
+progression and emotes. Changing it changes gameplay, so a 6C cutover rejects
+it. A catalog published before AreaPack v9 owns none of it; its WorldPack v9
+fallback normalizes with the implied legacy content, which verification accepts
+only when it is exactly that content and no area owns any adventure ID.
+
+Not yet implemented: item-prototype stock (shops sell only commodities), sealed
+rewards or progression grants as quest rewards, item consumption on claim,
+per-player locales and defeat credit outside the logical tick (an NPC defeated
+directly by an ability action does not count, as before).
 
 ## Item prototypes and instances
 
@@ -821,12 +937,12 @@ Composition:
 
 Lantern Square is composed from three areas and produces three rooms, ten
 prototypes, nine initial instances, two loot tables, one source, one affix, one
-pool, one direct telepathy ability, and one authored social emote. The
-53,567-byte artifact is byte-for-byte identical to the canonical WorldPack, and
-its SHA-256 is:
+pool, one direct telepathy ability, one authored social emote, two
+commodities, one quest and one shop. The 55,264-byte artifact is byte-for-byte
+identical to the canonical WorldPack, and its SHA-256 is:
 
 ```text
-9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75
+666dda61438a6a1e2b17d6ef0ba825b4d72c7e1b9d122e93284d71dab8ab4092
 ```
 
 The demo keeps `tiamud:road-token` and `tiamud:wolf-clasp` as `transferable`:
@@ -1070,7 +1186,7 @@ advance its version.
 Invalid references, cycles, depth, capacity, counter, owner, binding,
 participant, reservation, cohort, or provenance are also rejected.
 
-SQLite and PostgreSQL use schema v15. `world_area_generation` stores only
+SQLite and PostgreSQL use schema v17. `world_area_generation` stores only
 `worldId`, active digest, previous digest, activation sequence, and timestamp;
 paths are derived from the configured registry. A 6C transition updates that row
 and the v8 snapshot in the same transaction via compare-and-swap. It is not
@@ -1094,12 +1210,15 @@ restart. Those temporary aggregates do not remain in the active world.
 The runtime allows up to 65,536 instances. Inherited raw v1-v5 snapshots keep the
 physical limit of 1 MiB; v6–v8 snapshots, as well as each new
 admission/commit, allow up to 2 MiB. The sum of inspected owner sheets remains
-limited to 1 MiB and each sheet to 64 KiB. SQLite and PostgreSQL schema v15 store
-the snapshot as opaque `TEXT` within the existing transaction. The v10→v11
-migration transactionally raises the runtime singleton's physical constraint to
-2 MiB and preserves version, JSON, covered sequence, and date; it does not
-convert the JSON or create another authority. There is no mirror/escrow/loot
-table, double write, or `jsonb`.
+limited to 1 MiB and each sheet to 64 KiB. SQLite and PostgreSQL schema v17 store
+the snapshot as opaque `TEXT` within the existing transaction, split into a
+scalar head, a manifest and ten digested sections that are rewritten only when
+they change ([ADR 0035](decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
+accepted); the 1/2 MiB limits apply to the reassembled document, which is the
+same snapshot DTO. The v10→v11 migration transactionally raised the runtime
+singleton's physical constraint to 2 MiB, and v16→v17 splits that document into
+sections without converting its content; neither creates another authority.
+There is no mirror/escrow/loot table, double write, or `jsonb`.
 
 After a future stable release, renaming an ID will require an alias, tombstone,
 or explicit migration. Never recycle a published ID for another meaning.

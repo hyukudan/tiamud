@@ -1,7 +1,7 @@
 # World authoring
 
 This is the current entry point for creating Tiamud content. The runtime consumes
-a canonical **WorldPack v9**. Authors can keep it as strict **AreaPack v8**
+a canonical **WorldPack v10**. Authors can keep it as strict **AreaPack v9**
 modules under a **WorldProjectManifest v2** and compose them offline. 6A publishes
 a local catalog and immutable bundles; 6B incorporates them on demand; 6C can
 replace only the whole generation during a quiescent cutover; 6D internally allows
@@ -22,6 +22,13 @@ without duplicating every field.
 4. Define [progression, abilities, and combat](progression-and-combat.md).
 5. Compile and reference [atmospheric media or sprites](media.md).
 6. Run all the [validation and publishing gates](validation-and-publishing.md).
+
+Branching gamebooks for the separate narrative ruleset (ADR 0025, accepted) use
+**StoryPacks**, not WorldPacks. They are authored and tested offline with
+`tiamud-story`; see [StoryPack authoring](story-packs.md). They are not yet
+playable on a running server. A standalone Spanish/English interactive-fiction
+command parser library exists but is not integrated with StoryPacks yet; see
+[story parser](story-parser.md).
 
 The reviewed example contains:
 
@@ -260,11 +267,12 @@ smoke, cargo-deny, and licenses/notices. It must not be attributed to 6C.
 - [Optional editorial AI](../../crates/editorial-ai/README.md)
 - [Historical Envy/Merc importer](../../tools/envy-import/README.md)
 
-The [WorldPack v9/AreaPack v8 guide](../world-authoring.md) is the compact schema
+The [WorldPack v10/AreaPack v9 guide](../world-authoring.md) is the compact schema
 and flow reference. Lantern Square contains three rooms, ten prototypes, nine
 initial instances, two tables, one source, one affix, one pool, one direct
-telepathy, and one emote. The 53,567-byte canonical artifact has SHA-256
-`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
+telepathy, one emote, two commodities, one quest, and one shop. The 55,264-byte
+canonical artifact has SHA-256
+`666dda61438a6a1e2b17d6ef0ba825b4d72c7e1b9d122e93284d71dab8ab4092`.
 It keeps `tiamud:road-token` and `tiamud:wolf-clasp` as transferable and
 demonstrates 3C with the non-transferable `tiamud:rain-writ` in `demo:north-gate`
 and the bound fixed loot `tiamud:stormglass-talon` from `tiamud:gate-stalker-1`.

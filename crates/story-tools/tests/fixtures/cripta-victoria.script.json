@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "seed": 3,
+  "steps": [
+    { "expect": { "node": "inicio", "turn": 0, "choices": 1, "ended": false } },
+    { "choose": 1 },
+    { "expect": { "node": "vestibulo", "vars": { "destreza": 12 }, "choices": 2 } },
+    { "choose": 2 },
+    { "choose": 1 },
+    { "expect": { "node": "combate" } },
+    { "choose": 1 },
+    { "choose": 1 },
+    { "choose": 1 },
+    { "expect": { "node": "victoria-esqueleto", "score": 50, "vars": { "esqueleto_vencido": true, "vida_esqueleto": 0 } } },
+    { "choose": 1 },
+    { "expect": { "node": "pasillo", "has": ["llave-de-hierro"] } },
+    { "choose": 2 },
+    { "choose": 2 },
+    { "expect": { "ended": true, "ending": "tesoro", "score": 150, "lacks": ["llave-de-hierro"], "choices": 0 } },
+    "undo",
+    { "expect": { "node": "vestibulo", "ended": false, "has": ["llave-de-hierro"], "score": 50 } }
+  ]
+}

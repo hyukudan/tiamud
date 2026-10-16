@@ -8,6 +8,6 @@ publish = false
 description = "Bounded transport-neutral terminal cell art for Tiamud"
 
 [dependencies]
-image.workspace = true
+png.workspace = true
 serde.workspace = true
 thiserror.workspace = true

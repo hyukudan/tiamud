@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "assetId": "sha256:8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c",
+  "revision": 1,
+  "kind": "atmosphere",
+  "alt": "Portrait silhouette of Dámaso, a broad man in a wide-brimmed hat, backlit by amber light.",
+  "focalPoint": {
+    "xPerMille": 500,
+    "yPerMille": 450
+  },
+  "dominantColor": "#32190e",
+  "author": "Tiamud project contributors",
+  "license": "CC-BY-4.0",
+  "provenance": "Original placeholder drawn only from code (gradients and geometric shapes) by apps/web/artwork/story-lluvia/generate.py for the lluvia-de-neon StoryPack; no external image, font, photograph or model was used.",
+  "generator": "apps/web/artwork/story-lluvia/generate.py (deterministic Pillow drawing)",
+  "contentClassification": "general",
+  "humanReviewedAt": "2026-10-15T00:00:00Z",
+  "source": {
+    "sha256": "08f65b7133618ba3690ea0ed3511eb88f9e51c25e1c0f921c3954ca6447124a7",
+    "width": 1280,
+    "height": 1280
+  },
+  "variants": [
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 640,
+      "height": 640,
+      "bytes": 3160,
+      "sha256": "3e9796f713bfbe85977a8894d7eff80ede57854a836022cba7e2d7293b115d7a",
+      "path": "8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/scene-640.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 640,
+      "height": 640,
+      "bytes": 5998,
+      "sha256": "6f3bc0ca3f5f1ab506ffd03c70ab7a9c7f45ece1e35ac0085fe993cb460e5049",
+      "path": "8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/scene-640.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 640,
+      "height": 640,
+      "bytes": 24338,
+      "sha256": "e35b85a0ef218c3149db35c01a0da233d357e94d80fda9eed9a1c6f61c588a36",
+      "path": "8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/scene-640.jpg"
+    },
+    {
+      "format": "avif",
+      "mediaType": "image/avif",
+      "width": 1280,
+      "height": 1280,
+      "bytes": 6764,
+      "sha256": "7c20fd9f1baa2228e468dd2acbff2f7218372a1eb540744a0fb5a5933ba72e33",
+      "path": "8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/scene-1280.avif"
+    },
+    {
+      "format": "webp",
+      "mediaType": "image/webp",
+      "width": 1280,
+      "height": 1280,
+      "bytes": 13540,
+      "sha256": "2bac3bce1d252a3cf645807b927aed713dcd2caf00144718541c9ee7d77c1322",
+      "path": "8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/scene-1280.webp"
+    },
+    {
+      "format": "jpeg",
+      "mediaType": "image/jpeg",
+      "width": 1280,
+      "height": 1280,
+      "bytes": 73715,
+      "sha256": "cfd93b243a3a56de08d2f863f50a6b0a4156476744ce662d616f5923ffb81486",
+      "path": "8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/scene-1280.jpg"
+    }
+  ]
+}

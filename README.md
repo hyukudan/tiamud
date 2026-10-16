@@ -77,8 +77,9 @@ baseline needs no Kubernetes, Redis, object storage or AI.
 - **Safe media:** optional scene image and audio, immutable content-addressed
   assets, alternative text and preferences for media, motion, contrast and
   screen readers.
-- **Modular authoring:** AreaPack v8 splits a world into areas; the offline
-  composition of WorldProject v2 produces a canonical WorldPack v9. Phases 6A–6C
+- **Modular authoring:** AreaPack v9 splits a world into areas; the offline
+  composition of WorldProject v2 produces a canonical WorldPack v10, which also
+  declares quests, commodities and shops as data. Phases 6A–6C
   add verifiable catalogs/bundles, catalog boot with additive on-demand loading,
   and quiescent replacement of a whole generation. Phase 6D, **partial**, adds
   reversible retirement of same-generation SCC units with a durable checkpoint;
@@ -144,6 +145,15 @@ TIAMUD_TELNET_MODE=plaintext cargo run --locked -p tiamud-server
 Open <http://127.0.0.1:8080> or connect Telnet to `127.0.0.1:4000`. The Rust
 server bundles the web build and the reviewed Lantern Square WorldPack.
 
+Single-player StoryPack sessions (phase S2, with persisted save slots and an
+autosave from phase S3) are off by default. To try the sample gamebook and menu adventure locally, add
+`TIAMUD_STORY_DIR=crates/story-core/fixtures` to the command above, then type
+`historias` and `historia cripta-del-nigromante` (or `story lluvia-de-neon`,
+which shows the reviewed sample backgrounds and portraits in the browser;
+`historia lluvia-de-neon en` plays it in English) in the browser or Telnet. See
+[ADR 0029](docs/decisions/0029-story-session-instances-and-story-protocol.md)
+and [single-host operation](docs/operations/single-host.md#story-sessions).
+
 > Unencrypted Telnet is a local-development exception. It must not be exposed to
 > the internet: registration and login would travel in the clear. Telnet TLS is
 > the default mode and fails closed without a valid certificate and key.
@@ -198,7 +208,7 @@ configuration does not publish metrics.
 
 ## Characters, classes and progression
 
-WorldPack v9 keeps the v3 character model: it composes a character from a
+WorldPack v10 keeps the v3 character model: it composes a character from a
 lineage, optional background and a base class. Accumulated XP governs the global
 level, class grants and separate point reserves. There is one active class and
 an ordered history, not free multiclassing.
@@ -279,8 +289,8 @@ explicit.
 
 ![Technical illustration of the three Lantern Square rooms and their media, perception, variant, script and test modules.](docs/images/tiamud-worldpack.webp)
 
-The runtime consumes **one canonical WorldPack v9**. To work with less coupling,
-authors split a **WorldProject v2** into **AreaPack v8** with declared
+The runtime consumes **one canonical WorldPack v10**. To work with less coupling,
+authors split a **WorldProject v2** into **AreaPack v9** with declared
 dependencies and ownership, then compose them offline:
 
 ```sh
@@ -387,6 +397,12 @@ node --test scripts/bot.test.mjs scripts/verify-soak-report.test.mjs scripts/tel
 node scripts/smoke.mjs
 ```
 
+`cargo test --workspace --locked` also fails if any of
+`apps/web/src/lib/generated/{protocol,core,server}.ts` is stale against
+`crates/protocol`, the `tiamud-core` views or the `tiamud-server`
+`action.perform`/presentation types; regenerate them with
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript` and review the diff.
+
 The baseline is verified locally per phase with formatting, strict clippy,
 workspace tests, the web client and license checks. Exact per-phase figures,
 retained evidence and unrun limits live in
@@ -431,11 +447,15 @@ apps/web/                    official Svelte 5 client
 clients/                     TinTin++ and Mudlet integrations
 crates/mud-core/             transport-independent domain and perception
 crates/mud-server/           actor, transports, persistence and embedded web
+crates/protocol/             typed tiamud.v1 wire types; generates web TypeScript
 crates/telnet-codec/         shared, fuzzed Telnet parser
 crates/cell-frame/           bounded, consented cell graphics
 crates/persistence-*/        SQLite/PostgreSQL schemas and migration
 crates/world-pack/           authoring model, composition and CLI
 crates/scripting/            quota-bounded Lua capabilities
+crates/story-core/           pure narrative ruleset prototype (StoryPack, S0)
+crates/story-tools/          offline StoryPack authoring CLI (tiamud-story, S1)
+crates/story-parser/         standalone ES/EN interactive-fiction parser library (not integrated)
 crates/asset-pipeline/       deterministic, reviewed media pipeline
 crates/editorial-ai/         optional authoring-only AI
 crates/tiamud-admin/         operator integrity and recovery
@@ -454,7 +474,7 @@ entry points:
 
 - **Protocol:** [`tiamud.v1`](docs/protocol/tiamud-v1.md) (experimental).
 - **Operation:** [single host](docs/operations/single-host.md).
-- **Authoring:** [WorldPack v9](docs/authoring/README.md) ·
+- **Authoring:** [WorldPack v10](docs/authoring/README.md) ·
   [areas and catalogs](docs/world-authoring.md).
 - **Status:** [completion matrix](docs/project/COMPLETION_MATRIX.md) ·
   [project memory](docs/project/PROJECT_MEMORY.md).

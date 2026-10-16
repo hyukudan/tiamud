@@ -17,15 +17,17 @@ use tiamud_core::{
     AbilityHealDefinition as CoreAbilityHealDefinition,
     AbilityStatusEffectDefinition as CoreAbilityStatusEffectDefinition,
     AbilityTargeting as CoreAbilityTargeting, ActiveEffect,
-    AdvancedClassDefinition as CoreAdvancedClassDefinition, AffixDefinition as CoreAffixDefinition,
+    AdvancedClassDefinition as CoreAdvancedClassDefinition,
+    AdventureContent as CoreAdventureContent, AffixDefinition as CoreAffixDefinition,
     AffixPoolDefinition as CoreAffixPoolDefinition, AffixPoolEntry as CoreAffixPoolEntry,
     AffixPoolEntryKind as CoreAffixPoolEntryKind, AffixPosition as CoreAffixPosition,
     BackgroundDefinition as CoreBackgroundDefinition,
     BaseClassDefinition as CoreBaseClassDefinition,
     CharacterDefaultsDefinition as CoreCharacterDefaultsDefinition,
     CharacterProgressionDefinition as CoreCharacterProgressionDefinition,
-    DamageType as CoreDamageType, Direction as CoreDirection, EffectKind as CoreEffectKind,
-    EquipmentSlot as CoreEquipmentSlot, ExitDefinition, GrantDefinition as CoreGrantDefinition,
+    CommodityDefinition as CoreCommodityDefinition, DamageType as CoreDamageType,
+    Direction as CoreDirection, EffectKind as CoreEffectKind, EquipmentSlot as CoreEquipmentSlot,
+    ExitDefinition, GrantDefinition as CoreGrantDefinition,
     InitialItemInstanceDefinition as CoreInitialItemInstanceDefinition,
     InitialItemLocation as CoreInitialItemLocation,
     ItemContainerDefinition as CoreItemContainerDefinition, ItemInstanceId,
@@ -39,10 +41,14 @@ use tiamud_core::{
     LootSourceDefinition as CoreLootSourceDefinition, LootSourceKind as CoreLootSourceKind,
     LootTableDefinition as CoreLootTableDefinition,
     NpcAbilitySetDefinition as CoreNpcAbilitySetDefinition, NpcDefinition,
+    QuestComparison as CoreQuestComparison, QuestDefinition as CoreQuestDefinition,
+    QuestObjective as CoreQuestObjective, QuestRequirement as CoreQuestRequirement,
+    QuestStageDefinition as CoreQuestStageDefinition,
     RequirementDefinition as CoreRequirementDefinition,
     RequirementDisclosure as CoreRequirementDisclosure,
     RequirementPredicate as CoreRequirementPredicate, RoomDefinition, RoomPresentationDefinition,
-    SceneAudio, SceneImage, SocialEmoteAudience as CoreSocialEmoteAudience,
+    SceneAudio, SceneImage, ShopDefinition as CoreShopDefinition, ShopRestock as CoreShopRestock,
+    ShopStockDefinition as CoreShopStockDefinition, SocialEmoteAudience as CoreSocialEmoteAudience,
     SocialEmoteDefinition as CoreSocialEmoteDefinition,
     SocialEmoteTargetedTemplates as CoreSocialEmoteTargetedTemplates,
     SocialEmoteTargeting as CoreSocialEmoteTargeting,
@@ -77,6 +83,7 @@ pub struct LoadedWorldDefinition {
     pub character_progression: CoreCharacterProgressionDefinition,
     pub abilities: Vec<CoreAbilityDefinition>,
     pub social_emotes: Vec<CoreSocialEmoteDefinition>,
+    pub adventure: CoreAdventureContent,
     pub npcs: Vec<NpcDefinition>,
     pub npc_ability_sets: Vec<CoreNpcAbilitySetDefinition>,
     pub loot_tables: Vec<CoreLootTableDefinition>,
@@ -103,6 +110,7 @@ pub(crate) struct PinnedWorldContent {
     pub(crate) character_progression: CoreCharacterProgressionDefinition,
     pub(crate) abilities: Vec<CoreAbilityDefinition>,
     pub(crate) social_emotes: Vec<CoreSocialEmoteDefinition>,
+    pub(crate) adventure: CoreAdventureContent,
     authored_character_progression: world_pack::CharacterProgressionDefinition,
     authored_abilities: Vec<world_pack::AbilityDefinition>,
     authored_social_emotes: Vec<world_pack::SocialEmoteDefinition>,
@@ -164,6 +172,7 @@ pub fn build_loaded_world(
         loaded.abilities.clone(),
     )?;
     world.configure_social_emotes(loaded.social_emotes.clone())?;
+    world.configure_adventure_content(loaded.adventure.clone())?;
     for npc in &loaded.npcs {
         world.spawn_npc(npc.clone())?;
     }
@@ -283,6 +292,7 @@ pub(crate) fn parse_pinned_world_content(
         character_progression: loaded.character_progression,
         abilities: loaded.abilities,
         social_emotes: loaded.social_emotes,
+        adventure: loaded.adventure,
         authored_character_progression,
         authored_abilities,
         authored_social_emotes,
@@ -385,6 +395,11 @@ pub(crate) fn convert_compiled_area(
             loot_sources: std::mem::take(&mut area.loot_sources),
             affixes: std::mem::take(&mut area.affixes),
             affix_pools: std::mem::take(&mut area.affix_pools),
+            // Quests, commodities and shops are global rules pinned from the
+            // verified monolithic fallback, never installed per area.
+            commodities: Vec::new(),
+            quests: Vec::new(),
+            shops: Vec::new(),
         },
     };
     let loaded = convert_pack(
@@ -465,8 +480,12 @@ fn convert_pack(
         loot_sources: pack_loot_sources,
         affixes: pack_affixes,
         affix_pools: pack_affix_pools,
+        commodities: pack_commodities,
+        quests: pack_quests,
+        shops: pack_shops,
         ..
     } = std::mem::take(&mut pack.gameplay);
+    let adventure = map_adventure(pack_commodities, pack_quests, pack_shops, &npc_spawns)?;
     let start_room_id = pack.start_room_id.clone();
     let item_prototypes = std::mem::take(&mut pack.item_prototypes)
         .into_iter()
@@ -665,6 +684,7 @@ fn convert_pack(
         character_progression,
         abilities,
         social_emotes,
+        adventure,
         npcs,
         npc_ability_sets,
         loot_tables,
@@ -677,6 +697,173 @@ fn convert_pack(
         secret_exits,
         runtime_content: RuntimeContent::default(),
     })
+}
+
+/// Resolves localized text for the runtime, which has no per-player locale.
+fn english(text: &world_pack::LocalizedText) -> String {
+    text.resolve("en").unwrap_or_default().to_owned()
+}
+
+/// Maps WorldPack v10 adventure content. NPC prototype references become
+/// the exact spawn IDs of that prototype, which is what the runtime records
+/// when an NPC is defeated or spoken to.
+fn map_adventure(
+    commodities: Vec<world_pack::CommodityDefinition>,
+    quests: Vec<world_pack::QuestDefinition>,
+    shops: Vec<world_pack::ShopDefinition>,
+    npc_spawns: &[world_pack::NpcSpawn],
+) -> Result<CoreAdventureContent, WorldLoadError> {
+    let spawns_of = |prototype_id: &str| {
+        let mut ids = npc_spawns
+            .iter()
+            .filter(|spawn| spawn.prototype_id == prototype_id)
+            .map(|spawn| spawn.id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    let map_objective = |objective| match objective {
+        world_pack::QuestObjectiveDefinition::DefeatNpc {
+            npc_prototype_id,
+            count,
+        } => CoreQuestObjective::DefeatNpc {
+            npc_ids: npc_prototype_id
+                .as_deref()
+                .map(spawns_of)
+                .unwrap_or_default(),
+            count,
+        },
+        world_pack::QuestObjectiveDefinition::CollectItem {
+            item_prototype_id,
+            count,
+        } => CoreQuestObjective::CollectItem {
+            item_prototype_id,
+            count,
+        },
+        world_pack::QuestObjectiveDefinition::VisitRoom { room_id } => {
+            CoreQuestObjective::VisitRoom { room_id }
+        }
+        world_pack::QuestObjectiveDefinition::TalkToNpc { npc_prototype_id } => {
+            CoreQuestObjective::TalkToNpc {
+                npc_ids: spawns_of(&npc_prototype_id),
+            }
+        }
+    };
+    let mut mapped_quests = Vec::with_capacity(quests.len());
+    for quest in quests {
+        let prerequisite = match &quest.prerequisite {
+            None => None,
+            Some(condition) => Some(map_quest_requirement(condition).ok_or_else(|| {
+                WorldLoadError::UnsupportedQuestPrerequisite {
+                    quest_id: quest.id.clone(),
+                }
+            })?),
+        };
+        mapped_quests.push(CoreQuestDefinition {
+            name: english(&quest.name),
+            summary: english(&quest.summary),
+            aliases: quest.aliases,
+            prerequisite,
+            repeatable: quest.repeatability == world_pack::QuestRepeatability::Repeatable,
+            stages: quest
+                .stages
+                .into_iter()
+                .map(|stage| CoreQuestStageDefinition {
+                    id: stage.id,
+                    summary: stage.summary.as_ref().map(english),
+                    objectives: stage.objectives.into_iter().map(map_objective).collect(),
+                })
+                .collect(),
+            reward_coins: quest.rewards.coins,
+            reward_experience: quest.rewards.experience,
+            id: quest.id,
+        });
+    }
+    Ok(CoreAdventureContent {
+        commodities: commodities
+            .into_iter()
+            .map(|commodity| CoreCommodityDefinition {
+                label: english(&commodity.name),
+                id: commodity.id,
+                max_owned: commodity.max_owned,
+            })
+            .collect(),
+        quests: mapped_quests,
+        shops: shops
+            .into_iter()
+            .map(|shop| CoreShopDefinition {
+                name: english(&shop.name),
+                id: shop.id,
+                room_id: shop.room_id,
+                keeper_npc_id: shop.keeper_npc_spawn_id,
+                stock: shop
+                    .stock
+                    .into_iter()
+                    .map(|entry| CoreShopStockDefinition {
+                        stock_id: entry.stock_id,
+                        commodity_id: entry.commodity_id,
+                        buy_price: entry.buy_price,
+                        sell_price: entry.sell_price,
+                        initial_stock: entry.initial_stock,
+                        max_stock: entry.max_stock,
+                        restock: match entry.restock {
+                            world_pack::ShopRestockPolicy::None => CoreShopRestock::None,
+                            world_pack::ShopRestockPolicy::Interval {
+                                every_ticks,
+                                amount,
+                                ceiling,
+                            } => CoreShopRestock::Interval {
+                                every_ticks: u64::from(every_ticks),
+                                amount,
+                                ceiling,
+                            },
+                        },
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+fn map_quest_requirement(condition: &world_pack::Condition) -> Option<CoreQuestRequirement> {
+    use world_pack::{Condition, ConditionField, ConditionValue};
+    let level = |comparison, value: i64| Some(CoreQuestRequirement::Level(comparison, value));
+    match condition {
+        Condition::All(children) => children
+            .iter()
+            .map(map_quest_requirement)
+            .collect::<Option<Vec<_>>>()
+            .map(CoreQuestRequirement::All),
+        Condition::Any(children) => children
+            .iter()
+            .map(map_quest_requirement)
+            .collect::<Option<Vec<_>>>()
+            .map(CoreQuestRequirement::Any),
+        Condition::Not(child) => {
+            map_quest_requirement(child).map(|child| CoreQuestRequirement::Not(Box::new(child)))
+        }
+        Condition::Eq(ConditionField::ActorLevel, ConditionValue::Integer(value)) => {
+            level(CoreQuestComparison::Eq, *value)
+        }
+        Condition::Ne(ConditionField::ActorLevel, ConditionValue::Integer(value)) => {
+            level(CoreQuestComparison::Ne, *value)
+        }
+        Condition::Gt(ConditionField::ActorLevel, value) => level(CoreQuestComparison::Gt, *value),
+        Condition::Gte(ConditionField::ActorLevel, value) => {
+            level(CoreQuestComparison::Gte, *value)
+        }
+        Condition::Lt(ConditionField::ActorLevel, value) => level(CoreQuestComparison::Lt, *value),
+        Condition::Lte(ConditionField::ActorLevel, value) => {
+            level(CoreQuestComparison::Lte, *value)
+        }
+        Condition::Contains(ConditionField::ActorFlags, value) => {
+            Some(CoreQuestRequirement::HasFlag(value.clone()))
+        }
+        Condition::Contains(ConditionField::ActorQuestStates, value) => {
+            Some(CoreQuestRequirement::HasQuestState(value.clone()))
+        }
+        _ => None,
+    }
 }
 
 fn map_loot_table(table: world_pack::LootTableDefinition) -> CoreLootTableDefinition {
@@ -1371,6 +1558,8 @@ pub enum WorldLoadError {
     TooLarge { size: usize, max: usize },
     #[error("WorldPack v3 requires a character progression definition")]
     MissingCharacterProgression,
+    #[error("quest {quest_id:?} prerequisite uses a field or operator the runtime cannot evaluate")]
+    UnsupportedQuestPrerequisite { quest_id: String },
     #[error("verified fallback has no authored room {room_id:?}")]
     MissingAuthoredRoom { room_id: String },
     #[error("NPC spawn {npc_id:?} references missing prototype {prototype_id:?}")]
@@ -1502,6 +1691,72 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_and_legacy_packs_load_the_formerly_hardcoded_adventure_content() {
+        let loaded = default_loaded_world().unwrap();
+        assert_eq!(
+            loaded.adventure,
+            CoreAdventureContent::legacy("demo:lantern-square")
+        );
+        let world = build_loaded_world(&loaded).unwrap();
+        assert_eq!(
+            world.runtime_snapshot().adventure.shop_stock,
+            tiamud_core::AdventureRuntimeSnapshot::default().shop_stock
+        );
+
+        let mut legacy: serde_json::Value = serde_json::from_slice(DEFAULT_WORLD_PACK).unwrap();
+        legacy["schemaVersion"] = serde_json::json!(9);
+        for field in ["commodities", "quests", "shops"] {
+            legacy["gameplay"].as_object_mut().unwrap().remove(field);
+        }
+        let legacy = parse_loaded_world(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(legacy.adventure, loaded.adventure);
+
+        let pinned = parse_pinned_world_content(DEFAULT_WORLD_PACK).unwrap();
+        assert_eq!(pinned.adventure, loaded.adventure);
+    }
+
+    #[test]
+    fn quest_prerequisites_and_npc_prototypes_map_to_runtime_rules() {
+        let mut value: serde_json::Value = serde_json::from_slice(DEFAULT_WORLD_PACK).unwrap();
+        value["gameplay"]["quests"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "demo:stalker-talk",
+                "name": {"es": "Charla", "en": "A Word"},
+                "summary": {"en": "Speak with the stalker."},
+                "prerequisite": {"not": {"contains": ["actor.flags", "banned"]}},
+                "repeatability": "once",
+                "stages": [{"id": "talk", "objectives": [
+                    {"kind": "talk_to_npc", "npcPrototypeId": "tiamud:gate-stalker"},
+                    {"kind": "defeat_npc", "npcPrototypeId": "tiamud:gate-stalker", "count": 1}
+                ]}]
+            }));
+        let loaded = parse_loaded_world(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let quest = loaded.adventure.quest("demo:stalker-talk").unwrap();
+        assert_eq!(quest.name, "A Word");
+        assert_eq!(
+            quest.prerequisite,
+            Some(CoreQuestRequirement::Not(Box::new(
+                CoreQuestRequirement::HasFlag("banned".into())
+            )))
+        );
+        assert_eq!(
+            quest.stages[0].objectives,
+            vec![
+                CoreQuestObjective::TalkToNpc {
+                    npc_ids: vec!["tiamud:gate-stalker-1".into()]
+                },
+                CoreQuestObjective::DefeatNpc {
+                    npc_ids: vec!["tiamud:gate-stalker-1".into()],
+                    count: 1
+                },
+            ]
+        );
+        build_loaded_world(&loaded).unwrap();
+    }
+
+    #[test]
     fn reviewed_pack_loads_as_a_runtime_definition() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../worlds/lantern-square.world.json");
@@ -1582,6 +1837,9 @@ mod tests {
             talent_graphs: Vec::new(),
             abilities: Vec::new(),
             social_emotes: Vec::new(),
+            commodities: Vec::new(),
+            quests: Vec::new(),
+            shops: Vec::new(),
             npc_ability_sets: Vec::new(),
             room_media: Vec::new(),
             entity_media: Vec::new(),

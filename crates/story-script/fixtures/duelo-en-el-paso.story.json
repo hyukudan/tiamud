@@ -1,0 +1,114 @@
+{
+  "format_version": 3,
+  "id": "duelo-en-el-paso",
+  "title": { "es": "Duelo en el paso" },
+  "start": "inicio",
+  "variables": [
+    {
+      "id": "destreza",
+      "label": { "es": "Destreza" },
+      "visible": true,
+      "kind": { "int": { "min": 0, "max": 12, "initial": 0 } }
+    },
+    {
+      "id": "vigor",
+      "label": { "es": "Vigor" },
+      "visible": true,
+      "kind": { "int": { "min": 0, "max": 14, "initial": 12 } }
+    },
+    {
+      "id": "vigor_bandido",
+      "label": { "es": "Vigor del bandido" },
+      "visible": true,
+      "kind": { "int": { "min": 0, "max": 12, "initial": 10 } }
+    },
+    {
+      "id": "ronda",
+      "kind": { "int": { "min": 0, "max": 99, "initial": 0 } }
+    },
+    {
+      "id": "ultimo_golpe",
+      "kind": { "int": { "min": -20, "max": 20, "initial": 0 } }
+    }
+  ],
+  "items": [{ "id": "pocion", "name": { "es": "Poción de vigor" } }],
+  "initial_inventory": ["pocion"],
+  "scripts": [
+    {
+      "id": "asalto",
+      "kind": "effect",
+      "source": "-- Un asalto: 2d6 + destreza contra 2d6 + 7. Si sacas 5 o más de ventaja,\n-- el golpe es crítico y duplica el daño; un empate no hiere a nadie.\nfunction run(story, args)\n  local v = story.vars\n  local heroe = dice(2, 6) + v.destreza\n  local bandido = dice(2, 6) + 7\n  fx.add(\"ronda\", 1)\n  if heroe > bandido then\n    local dano = 2 + (args.arma or 0)\n    if heroe - bandido >= 5 then dano = dano * 2 end\n    fx.add(\"vigor_bandido\", -dano)\n    fx.set(\"ultimo_golpe\", dano)\n    if v.vigor_bandido - dano <= 0 then\n      fx.score(50)\n      fx.go(\"victoria\")\n    end\n  elseif bandido > heroe then\n    fx.add(\"vigor\", -3)\n    fx.set(\"ultimo_golpe\", -3)\n    if v.vigor - 3 <= 0 then fx.go(\"derrota\") end\n  else\n    fx.set(\"ultimo_golpe\", 0)\n  end\nend\n",
+      "writes": ["vigor", "vigor_bandido", "ronda", "ultimo_golpe"],
+      "goto": ["victoria", "derrota"],
+      "score": true
+    },
+    {
+      "id": "puede_huir",
+      "kind": "condition",
+      "source": "-- Solo puedes huir tras aguantar unas rondas y con fuerzas para correr.\nfunction check(story, args)\n  return story.vars.ronda >= (args.rondas or 2) and story.vars.vigor >= 4\nend\n"
+    },
+    {
+      "id": "beber",
+      "kind": "effect",
+      "source": "function run(story, args)\n  if story.items.pocion then\n    fx.take(\"pocion\")\n    fx.add(\"vigor\", 4 + dice(1, 4))\n  end\nend\n",
+      "writes": ["vigor"],
+      "items": ["pocion"]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "inicio",
+      "text": { "es": "Un bandido te cierra el paso en el desfiladero. Antes de luchar, mide tu destreza." },
+      "choices": [
+        {
+          "id": "desenvainar",
+          "label": { "es": "Desenvainar (tira un dado y suma 6)" },
+          "effects": [
+            { "roll": { "dice": { "count": 1, "sides": 6, "modifier": 6 }, "store": "destreza" } }
+          ],
+          "target": "combate"
+        }
+      ]
+    },
+    {
+      "id": "combate",
+      "text": { "es": "El bandido gira su cimitarra. Cada asalto enfrenta 2d6 más tu destreza contra 2d6 más 7." },
+      "choices": [
+        {
+          "id": "atacar",
+          "label": { "es": "Atacar con la espada" },
+          "effects": [{ "script": { "id": "asalto", "args": { "arma": 1 } } }],
+          "target": "combate"
+        },
+        {
+          "id": "beber",
+          "label": { "es": "Beber la poción de vigor" },
+          "when": { "has_item": "pocion" },
+          "effects": [{ "script": { "id": "beber" } }],
+          "target": "combate"
+        },
+        {
+          "id": "huir",
+          "label": { "es": "Huir por la ladera" },
+          "when": { "script": { "id": "puede_huir", "args": { "rondas": 2 } } },
+          "target": "huida"
+        }
+      ]
+    },
+    {
+      "id": "victoria",
+      "text": { "es": "El bandido cae y el paso queda libre." },
+      "ending": { "id": "paso-libre", "kind": "victory" }
+    },
+    {
+      "id": "derrota",
+      "text": { "es": "Caes de rodillas. El bandido se queda con tu bolsa." },
+      "ending": { "id": "sin-bolsa", "kind": "defeat" }
+    },
+    {
+      "id": "huida",
+      "text": { "es": "Te deslizas ladera abajo y escapas, magullado pero vivo." },
+      "ending": { "id": "huida", "kind": "neutral" }
+    }
+  ]
+}

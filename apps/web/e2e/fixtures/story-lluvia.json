@@ -1,0 +1,1839 @@
+{
+  "steps": [
+    {
+      "input": {
+        "data": {
+          "target": "c85e7bb0f12278575",
+          "verb": "cc34d0bff90150280",
+          "viewRev": 1
+        },
+        "type": "story.menu"
+      },
+      "label": "INVESTIGAR → Ventana",
+      "view": [
+        {
+          "canUndo": false,
+          "items": [
+            {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "id": "c910a2dec89025cc1",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cbeeb8da1658eec67",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "c910a2dec89025cc1"
+            },
+            {
+              "id": "cf893a2eefb32555e",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "c910a2dec89025cc1"
+            },
+            {
+              "id": "c71c18690ee42c90b",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "c910a2dec89025cc1"
+            },
+            {
+              "id": "c71bb54d8d101b5b9",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "c910a2dec89025cc1"
+            },
+            {
+              "id": "cc34d0bff90150280",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "ce099ec6cd7363ca5",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "cc34d0bff90150280"
+            },
+            {
+              "id": "c85e7bb0f12278575",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "cc34d0bff90150280"
+            },
+            {
+              "id": "c491718de357e3da8",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "cc34d0bff90150280"
+            },
+            {
+              "id": "ccb435c8e74616796",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "cc34d0bff90150280"
+            },
+            {
+              "id": "c6775dc7701564f61",
+              "label": "USAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c9afcd44d14cf8bfe",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c7476cf8a4baa5dc0",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "c9afcd44d14cf8bfe"
+            },
+            {
+              "id": "c87b341d690d7a28a",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "c9afcd44d14cf8bfe"
+            },
+            {
+              "id": "c6f9b6dae6f4c57a8",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "c9afcd44d14cf8bfe"
+            },
+            {
+              "id": "c2ac2ce17a5794a3b",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "c9afcd44d14cf8bfe"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 0,
+          "viewRev": 1
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "c1f8410633ef306ac",
+          "verb": "c14d7973c5c2a449c",
+          "viewRev": 2
+        },
+        "type": "story.menu"
+      },
+      "label": "INVESTIGAR → Ventana",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "kind": "line",
+              "text": "El cristal está sucio de hollín. Te parece ver un destello al otro lado de la calle.",
+              "type": "block"
+            },
+            {
+              "id": "ca534a6a6b7fd0b63",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cd0bad0da572baaf1",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "ca534a6a6b7fd0b63"
+            },
+            {
+              "id": "cae84379630af89ee",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "ca534a6a6b7fd0b63"
+            },
+            {
+              "id": "ce263183773ef6508",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "ca534a6a6b7fd0b63"
+            },
+            {
+              "id": "c10e2c46865e98746",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "ca534a6a6b7fd0b63"
+            },
+            {
+              "id": "c14d7973c5c2a449c",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c7ef1fd0ed1548fcd",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "c14d7973c5c2a449c"
+            },
+            {
+              "id": "c1f8410633ef306ac",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "c14d7973c5c2a449c"
+            },
+            {
+              "id": "c497305c5d1aab99f",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "c14d7973c5c2a449c"
+            },
+            {
+              "id": "c0c43407dc177b6f7",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "c14d7973c5c2a449c"
+            },
+            {
+              "id": "c83f91ca7864a7135",
+              "label": "USAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cb6b9aeef0d2df7ab",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c0b331645445bcd27",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "cb6b9aeef0d2df7ab"
+            },
+            {
+              "id": "cff6c67e81909778a",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "cb6b9aeef0d2df7ab"
+            },
+            {
+              "id": "c990cd70b12c5d084",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "cb6b9aeef0d2df7ab"
+            },
+            {
+              "id": "c962b1967c90789ba",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "cb6b9aeef0d2df7ab"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 1,
+          "viewRev": 2
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "cab27a171be5b133c",
+          "verb": "cbf8c59bb003553c1",
+          "viewRev": 3
+        },
+        "type": "story.menu"
+      },
+      "label": "INVESTIGAR → Ventana",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "kind": "line",
+              "text": "Te fijas mejor: un dron de vigilancia lleva horas apostado frente a tu ventana.",
+              "type": "block"
+            },
+            {
+              "id": "c65ace2685a072c6d",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c70616f2f48dce01c",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "c65ace2685a072c6d"
+            },
+            {
+              "id": "c40d6824e2ef3fc17",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "c65ace2685a072c6d"
+            },
+            {
+              "id": "c879e2e2256feff0c",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "c65ace2685a072c6d"
+            },
+            {
+              "id": "c8b2e02445e4be0f5",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "c65ace2685a072c6d"
+            },
+            {
+              "id": "cbf8c59bb003553c1",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cd16aa4b296eb9d18",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "cbf8c59bb003553c1"
+            },
+            {
+              "id": "cab27a171be5b133c",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "cbf8c59bb003553c1"
+            },
+            {
+              "id": "cdca0c749607e2c86",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "cbf8c59bb003553c1"
+            },
+            {
+              "id": "cb54b3c40881e2907",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "cbf8c59bb003553c1"
+            },
+            {
+              "id": "c3c821fbf59108163",
+              "label": "USAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "ca7ff0d388687ffb2",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cde70d1019fc66081",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "ca7ff0d388687ffb2"
+            },
+            {
+              "id": "cd6de6acd12c87e38",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "ca7ff0d388687ffb2"
+            },
+            {
+              "id": "c530e0e6118e9685e",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "ca7ff0d388687ffb2"
+            },
+            {
+              "id": "c28bff9ea304d9f96",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "ca7ff0d388687ffb2"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 2,
+          "viewRev": 3
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "c64c70b0b0c5b4a8f",
+          "verb": "cf0af3ce429ca1790",
+          "viewRev": 4
+        },
+        "type": "story.menu"
+      },
+      "label": "INVESTIGAR → Escritorio",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "kind": "line",
+              "text": "El dron sigue ahí. Nada nuevo.",
+              "type": "block"
+            },
+            {
+              "id": "ce4d9303221373073",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "ce9a6100461edd57a",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "ce4d9303221373073"
+            },
+            {
+              "id": "c4d4673ef77ba0574",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "ce4d9303221373073"
+            },
+            {
+              "id": "c21af8cfd4c4cbee5",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "ce4d9303221373073"
+            },
+            {
+              "id": "c536000f4bd6ae8f8",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "ce4d9303221373073"
+            },
+            {
+              "id": "cf0af3ce429ca1790",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c64c70b0b0c5b4a8f",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "cf0af3ce429ca1790"
+            },
+            {
+              "id": "c167587272751ecaf",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "cf0af3ce429ca1790"
+            },
+            {
+              "id": "c9b679c859acd7aaf",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "cf0af3ce429ca1790"
+            },
+            {
+              "id": "c27cd5f9ec8c694cc",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "cf0af3ce429ca1790"
+            },
+            {
+              "id": "cf55540b2bff06252",
+              "label": "USAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "ce02852925a4dc852",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c86c5d1b05ce2ce14",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "ce02852925a4dc852"
+            },
+            {
+              "id": "c1180b23a1075b77f",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "ce02852925a4dc852"
+            },
+            {
+              "id": "cc09a1a817914ffbc",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "ce02852925a4dc852"
+            },
+            {
+              "id": "c88b894e1401ed25b",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "ce02852925a4dc852"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 3,
+          "viewRev": 4
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "c7878834768668743",
+          "verb": "c90ccb6a06cd2330e",
+          "viewRev": 5
+        },
+        "type": "story.menu"
+      },
+      "label": "USAR → Tarjeta de memoria",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Obtienes: Tarjeta de memoria",
+              "type": "block"
+            },
+            {
+              "kind": "line",
+              "text": "Entre facturas sin pagar encuentras una tarjeta de memoria con el logotipo de un club: «El Faro Azul».",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "id": "cb86c9a98359e0b62",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c47a9dc6739325fac",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "cb86c9a98359e0b62"
+            },
+            {
+              "id": "c099545b4ca73e0f3",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "cb86c9a98359e0b62"
+            },
+            {
+              "id": "c05a2e18941c3936b",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "cb86c9a98359e0b62"
+            },
+            {
+              "id": "c91866d4d0cde66a9",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "cb86c9a98359e0b62"
+            },
+            {
+              "id": "c1eb967d7929813bb",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c29663e9ea0ec2561",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "c1eb967d7929813bb"
+            },
+            {
+              "id": "cd2c61eeb27a21187",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "c1eb967d7929813bb"
+            },
+            {
+              "id": "cf902155aa328d575",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "c1eb967d7929813bb"
+            },
+            {
+              "id": "cb0eb094e6f1dcf73",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "c1eb967d7929813bb"
+            },
+            {
+              "id": "c90ccb6a06cd2330e",
+              "label": "USAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c7878834768668743",
+              "label": "Tarjeta de memoria",
+              "type": "target",
+              "verb": "c90ccb6a06cd2330e"
+            },
+            {
+              "id": "c9fbd96359554aa53",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cdc3320bb97ca63be",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "c9fbd96359554aa53"
+            },
+            {
+              "id": "cce45a342c10ffb55",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "c9fbd96359554aa53"
+            },
+            {
+              "id": "c1bea994d2e7d779d",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "c9fbd96359554aa53"
+            },
+            {
+              "id": "ca64b31c22cc57f39",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "c9fbd96359554aa53"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 4,
+          "viewRev": 5
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "cd80391ffb30d1390",
+          "verb": "cf3f0a4b172d1294b",
+          "viewRev": 6
+        },
+        "type": "story.menu"
+      },
+      "label": "MOVERSE → Puerta",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "Un despacho de detective de noche: un ventanal surcado de lluvia sobre torres oscuras, un neón rosa al otro lado de la calle y una lámpara encendida en el escritorio.",
+                "manifest": "/assets/fb9c51c757db6b8908ca3a7228d31e1e7270d8d857036c1c2fa4b52c8ac131d2/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "Tu despacho en el piso cuarenta. La lluvia ácida resbala por el cristal y el neón de enfrente tiñe de rosa los expedientes. Iker Soto, traficante de recuerdos, apareció muerto anoche. El caso es tuyo.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "kind": "line",
+              "text": "Insertas la tarjeta. Un vídeo granuloso: Iker Soto discute en un reservado con un hombre de abrigo largo que juega con un mechero.",
+              "type": "block"
+            },
+            {
+              "kind": "line",
+              "text": "La grabación se corta con un fogonazo.",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "id": "c388495061eb06ce1",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c6c38537a931e49d7",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "c388495061eb06ce1"
+            },
+            {
+              "id": "ce31d5ce0684b83f2",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "c388495061eb06ce1"
+            },
+            {
+              "id": "caf60baae69576109",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "c388495061eb06ce1"
+            },
+            {
+              "id": "cf0dad8272e600eb1",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "c388495061eb06ce1"
+            },
+            {
+              "id": "cc0257e403811c379",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c2072b26dfe81f26e",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "cc0257e403811c379"
+            },
+            {
+              "id": "c2d4de979b560315c",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "cc0257e403811c379"
+            },
+            {
+              "id": "cbcf35b6db5f3ba40",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "cc0257e403811c379"
+            },
+            {
+              "id": "cc7c9572ddea951a8",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "cc0257e403811c379"
+            },
+            {
+              "id": "c635b0b7e74f0c83e",
+              "label": "USAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c18c80a5e762810c2",
+              "label": "Tarjeta de memoria",
+              "type": "target",
+              "verb": "c635b0b7e74f0c83e"
+            },
+            {
+              "id": "cf3f0a4b172d1294b",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c98d0ff43e17386ae",
+              "label": "Escritorio",
+              "type": "target",
+              "verb": "cf3f0a4b172d1294b"
+            },
+            {
+              "id": "c180a2bd6343d01f8",
+              "label": "Ventana",
+              "type": "target",
+              "verb": "cf3f0a4b172d1294b"
+            },
+            {
+              "id": "cdb20290ac13e4a81",
+              "label": "Terminal",
+              "type": "target",
+              "verb": "cf3f0a4b172d1294b"
+            },
+            {
+              "id": "cd80391ffb30d1390",
+              "label": "Puerta",
+              "type": "target",
+              "verb": "cf3f0a4b172d1294b"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 5,
+          "viewRev": 6
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "c7bc42e82782acb92",
+          "verb": "caa3de53fbde4ae5b",
+          "viewRev": 7
+        },
+        "type": "story.menu"
+      },
+      "label": "HABLAR → Lola",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
+              "name": "Lola",
+              "type": "portrait"
+            },
+            {
+              "kind": "line",
+              "text": "Te pones la gabardina y bajas a la calle rumbo al Faro Azul.",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "id": "c00077ba99ea524f2",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c4f05f03735c3b951",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c00077ba99ea524f2"
+            },
+            {
+              "id": "cbc73014050141d01",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c00077ba99ea524f2"
+            },
+            {
+              "id": "c96bf5d405151ec53",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c00077ba99ea524f2"
+            },
+            {
+              "id": "caa3de53fbde4ae5b",
+              "label": "HABLAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c7bc42e82782acb92",
+              "label": "Lola",
+              "type": "target",
+              "verb": "caa3de53fbde4ae5b"
+            },
+            {
+              "id": "c764176e3c9cf4b25",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cfd845ef300ce2d0b",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c764176e3c9cf4b25"
+            },
+            {
+              "id": "ca3e9bfbbf6c43e6f",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c764176e3c9cf4b25"
+            },
+            {
+              "id": "c0781577a0f53e5d6",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c764176e3c9cf4b25"
+            },
+            {
+              "id": "cd909c315b21d8f6c",
+              "label": "MOSTRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "ce8e6022a79eb517b",
+              "label": "Tarjeta de memoria",
+              "type": "target",
+              "verb": "cd909c315b21d8f6c"
+            },
+            {
+              "id": "c62db179ca8487c5a",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c263346a69dd14426",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c62db179ca8487c5a"
+            },
+            {
+              "id": "ca2e4fe841f72235e",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c62db179ca8487c5a"
+            },
+            {
+              "id": "c98f30af45f97eca2",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c62db179ca8487c5a"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 6,
+          "viewRev": 7
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c19a3c59084763a12",
+          "viewRev": 8
+        },
+        "type": "story.dialogue"
+      },
+      "label": "Pedir un café solo",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
+              "name": "Lola",
+              "type": "portrait"
+            },
+            {
+              "kind": "line",
+              "speaker": "Lola",
+              "text": "—Otra vez la pasma.",
+              "type": "block"
+            },
+            {
+              "kind": "line",
+              "speaker": "Lola",
+              "text": "—¿Qué te pongo, detective?",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "id": "c2f596652cb9a9f17",
+              "label": "Preguntar por Iker Soto",
+              "type": "dialogueOption"
+            },
+            {
+              "id": "c19a3c59084763a12",
+              "label": "Pedir un café solo",
+              "type": "dialogueOption"
+            },
+            {
+              "id": "cfd0d1f90df4a692f",
+              "label": "Despedirte",
+              "type": "dialogueOption"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 7,
+          "viewRev": 8
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c67cae465669e4cc4",
+          "viewRev": 9
+        },
+        "type": "story.dialogue"
+      },
+      "label": "Seguir hablando",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
+              "name": "Lola",
+              "type": "portrait"
+            },
+            {
+              "kind": "line",
+              "speaker": "Lola",
+              "text": "—Por fin alguien que no pide sintéticos.",
+              "type": "block"
+            },
+            {
+              "kind": "line",
+              "speaker": "Lola",
+              "text": "—Si tienes algo que enseñarme, ahora te escucho.",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "id": "c67cae465669e4cc4",
+              "label": "Seguir hablando",
+              "type": "dialogueOption"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 8,
+          "viewRev": 9
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c9005becd29b95dbb",
+          "viewRev": 10
+        },
+        "type": "story.dialogue"
+      },
+      "label": "Despedirte",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
+              "name": "Lola",
+              "type": "portrait"
+            },
+            {
+              "kind": "line",
+              "speaker": "Lola",
+              "text": "—¿Qué te pongo, detective?",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "id": "c795179bbe709a102",
+              "label": "Preguntar por Iker Soto",
+              "type": "dialogueOption"
+            },
+            {
+              "id": "c9005becd29b95dbb",
+              "label": "Despedirte",
+              "type": "dialogueOption"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 9,
+          "viewRev": 10
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "c852c7e934ff96a96",
+          "verb": "c3df9d9ce5974e6ed",
+          "viewRev": 11
+        },
+        "type": "story.menu"
+      },
+      "label": "MOSTRAR → Tarjeta de memoria",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
+              "name": "Lola",
+              "type": "portrait"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "id": "cb19892fd50ff4222",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cbd7de8f23cff78de",
+              "label": "Barra",
+              "type": "target",
+              "verb": "cb19892fd50ff4222"
+            },
+            {
+              "id": "cf85a587bb6c47b9f",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "cb19892fd50ff4222"
+            },
+            {
+              "id": "c7a2d99b9da657470",
+              "label": "Salida",
+              "type": "target",
+              "verb": "cb19892fd50ff4222"
+            },
+            {
+              "id": "c3782f608dcd26b70",
+              "label": "HABLAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c32647003725b6ed3",
+              "label": "Lola",
+              "type": "target",
+              "verb": "c3782f608dcd26b70"
+            },
+            {
+              "id": "c1805127cc0db4d9d",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c6524e51ffe73cb44",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c1805127cc0db4d9d"
+            },
+            {
+              "id": "c3d285f4226bfd385",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c1805127cc0db4d9d"
+            },
+            {
+              "id": "c528f9e0312cacff8",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c1805127cc0db4d9d"
+            },
+            {
+              "id": "c3df9d9ce5974e6ed",
+              "label": "MOSTRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c852c7e934ff96a96",
+              "label": "Tarjeta de memoria",
+              "type": "target",
+              "verb": "c3df9d9ce5974e6ed"
+            },
+            {
+              "id": "c963578705d25aa70",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c140232e315426b40",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c963578705d25aa70"
+            },
+            {
+              "id": "c75bc51bc37031a95",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c963578705d25aa70"
+            },
+            {
+              "id": "c0bf99fe6cbdde2d6",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c963578705d25aa70"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 10,
+          "viewRev": 11
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "c3ffdb73eb9b069e4",
+          "verb": "c8c7ca121fd9fb515",
+          "viewRev": 12
+        },
+        "type": "story.menu"
+      },
+      "label": "INVESTIGAR → Reservado",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
+              "name": "Lola",
+              "type": "portrait"
+            },
+            {
+              "kind": "line",
+              "speaker": "Lola",
+              "text": "—Esa tarjeta era de Iker. Se la iba a vender a Dámaso, el del callejón de atrás.",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "id": "ca97450076ed129d2",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c0942629f167fa313",
+              "label": "Barra",
+              "type": "target",
+              "verb": "ca97450076ed129d2"
+            },
+            {
+              "id": "c159d2ce0c38cdeec",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "ca97450076ed129d2"
+            },
+            {
+              "id": "c63aa57bb3618b5f2",
+              "label": "Salida",
+              "type": "target",
+              "verb": "ca97450076ed129d2"
+            },
+            {
+              "id": "ca6fefb55c353a1ea",
+              "label": "Callejón trasero",
+              "type": "target",
+              "verb": "ca97450076ed129d2"
+            },
+            {
+              "id": "cbd081362a82af3b3",
+              "label": "HABLAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c962fe90a4d66c623",
+              "label": "Lola",
+              "type": "target",
+              "verb": "cbd081362a82af3b3"
+            },
+            {
+              "id": "c8c7ca121fd9fb515",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "ce816e3b6f608968d",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c8c7ca121fd9fb515"
+            },
+            {
+              "id": "c3ffdb73eb9b069e4",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c8c7ca121fd9fb515"
+            },
+            {
+              "id": "cd2c7a4d8ae9e9fbd",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c8c7ca121fd9fb515"
+            },
+            {
+              "id": "c8b6bbb0d9453627f",
+              "label": "Callejón trasero",
+              "type": "target",
+              "verb": "c8c7ca121fd9fb515"
+            },
+            {
+              "id": "cd4d2fac5e33b4804",
+              "label": "MOSTRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c4083da61bd55a196",
+              "label": "Tarjeta de memoria",
+              "type": "target",
+              "verb": "cd4d2fac5e33b4804"
+            },
+            {
+              "id": "c3ed180b55721039f",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c8290184daf554eb1",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c3ed180b55721039f"
+            },
+            {
+              "id": "c3781b4a074d6fcc6",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c3ed180b55721039f"
+            },
+            {
+              "id": "cceed949a2ef12bec",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c3ed180b55721039f"
+            },
+            {
+              "id": "c3b2682ca23c4ff68",
+              "label": "Callejón trasero",
+              "type": "target",
+              "verb": "c3ed180b55721039f"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 11,
+          "viewRev": 12
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "c537c82c1ec3792e6",
+          "verb": "c6d86104f53aa0cf9",
+          "viewRev": 13
+        },
+        "type": "story.menu"
+      },
+      "label": "MOVERSE → Callejón trasero",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "background": {
+                "alt": "La barra en penumbra de un club: estanterías de botellas bajo luz violeta, un neón cian y taburetes vacíos junto al mostrador.",
+                "manifest": "/assets/7f2a2d0796ad2b0b7ec90b8484213f18390d5784898f73c0967073b3fdc5eb98/manifest.json"
+              },
+              "ending": null,
+              "score": 0,
+              "text": "El Faro Azul huele a ozono y a ginebra sintética. Tras la barra, Lola seca vasos sin quitarte el ojo de encima.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Obtienes: Mechero grabado",
+              "type": "block"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Lola, una mujer con melena corta, recortada contra un neón rosa en la noche verdeazulada.",
+                "manifest": "/assets/1397e02d05d58ed08bc4c75411dc5d9c8a1dd89246cbb476fd109ed23247e1fc/manifest.json"
+              },
+              "name": "Lola",
+              "type": "portrait"
+            },
+            {
+              "kind": "line",
+              "text": "Bajo el asiento del reservado aparece un mechero grabado con las iniciales D. R.",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "name": "Mechero grabado",
+              "type": "item"
+            },
+            {
+              "id": "c49e92cf9955c4d96",
+              "label": "MIRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "ce23e7fe1b4b4114d",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c49e92cf9955c4d96"
+            },
+            {
+              "id": "c4bccda436a2ddba9",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c49e92cf9955c4d96"
+            },
+            {
+              "id": "c28f7deebb10d1df4",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c49e92cf9955c4d96"
+            },
+            {
+              "id": "cef6c8982a6072624",
+              "label": "Callejón trasero",
+              "type": "target",
+              "verb": "c49e92cf9955c4d96"
+            },
+            {
+              "id": "c00b8c36dd01153d0",
+              "label": "HABLAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c2919452b44db5340",
+              "label": "Lola",
+              "type": "target",
+              "verb": "c00b8c36dd01153d0"
+            },
+            {
+              "id": "cb8e5450d9a3b51ab",
+              "label": "INVESTIGAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cc655ee3eb4602dcf",
+              "label": "Barra",
+              "type": "target",
+              "verb": "cb8e5450d9a3b51ab"
+            },
+            {
+              "id": "c4a1d2716a0fa615a",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "cb8e5450d9a3b51ab"
+            },
+            {
+              "id": "c5a6821d3d440b5a7",
+              "label": "Salida",
+              "type": "target",
+              "verb": "cb8e5450d9a3b51ab"
+            },
+            {
+              "id": "cdba5860ff63d5025",
+              "label": "Callejón trasero",
+              "type": "target",
+              "verb": "cb8e5450d9a3b51ab"
+            },
+            {
+              "id": "c701c8369e4818ff3",
+              "label": "MOSTRAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c631669651fa41445",
+              "label": "Tarjeta de memoria",
+              "type": "target",
+              "verb": "c701c8369e4818ff3"
+            },
+            {
+              "id": "c100ba66a4ed81db5",
+              "label": "Mechero grabado",
+              "type": "target",
+              "verb": "c701c8369e4818ff3"
+            },
+            {
+              "id": "c6d86104f53aa0cf9",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c6c5cc4ca8405df9c",
+              "label": "Barra",
+              "type": "target",
+              "verb": "c6d86104f53aa0cf9"
+            },
+            {
+              "id": "c0630166a1b8951b6",
+              "label": "Reservado",
+              "type": "target",
+              "verb": "c6d86104f53aa0cf9"
+            },
+            {
+              "id": "ce1713a2a460ac44f",
+              "label": "Salida",
+              "type": "target",
+              "verb": "c6d86104f53aa0cf9"
+            },
+            {
+              "id": "c537c82c1ec3792e6",
+              "label": "Callejón trasero",
+              "type": "target",
+              "verb": "c6d86104f53aa0cf9"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 12,
+          "viewRev": 13
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "target": "c1d54db73ce48415b",
+          "verb": "c098b74eaa67dc0db",
+          "viewRev": 14
+        },
+        "type": "story.menu"
+      },
+      "label": "HABLAR → Dámaso",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "Un callejón encharcado detrás del club. Dámaso fuma apoyado en un contenedor, con el abrigo largo empapado.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Dámaso, un hombre corpulento con sombrero de ala ancha, recortada contra una luz ámbar.",
+                "manifest": "/assets/8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/manifest.json"
+              },
+              "name": "Dámaso",
+              "type": "portrait"
+            },
+            {
+              "kind": "line",
+              "text": "Sales por la puerta de servicio.",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "name": "Mechero grabado",
+              "type": "item"
+            },
+            {
+              "id": "c098b74eaa67dc0db",
+              "label": "HABLAR",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "c1d54db73ce48415b",
+              "label": "Dámaso",
+              "type": "target",
+              "verb": "c098b74eaa67dc0db"
+            },
+            {
+              "id": "c56e2a0da4d34c963",
+              "label": "MOVERSE",
+              "needsTarget": true,
+              "type": "verb"
+            },
+            {
+              "id": "cecb27f56777e13da",
+              "label": "Puerta del club",
+              "type": "target",
+              "verb": "c56e2a0da4d34c963"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 13,
+          "viewRev": 14
+        }
+      ]
+    },
+    {
+      "input": {
+        "data": {
+          "id": "c4e929e233ce0235b",
+          "viewRev": 15
+        },
+        "type": "story.dialogue"
+      },
+      "label": "Acusarle con el vídeo y el mechero",
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": null,
+              "score": 0,
+              "text": "Un callejón encharcado detrás del club. Dámaso fuma apoyado en un contenedor, con el abrigo largo empapado.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "image": {
+                "alt": "Silueta de Dámaso, un hombre corpulento con sombrero de ala ancha, recortada contra una luz ámbar.",
+                "manifest": "/assets/8432f72a44714fd24b61af713105a731edb0002022ba313632ba7acb914c577c/manifest.json"
+              },
+              "name": "Dámaso",
+              "type": "portrait"
+            },
+            {
+              "kind": "line",
+              "text": "Te plantas delante de él.",
+              "type": "block"
+            },
+            {
+              "kind": "line",
+              "speaker": "Dámaso",
+              "text": "—Este callejón es mío, poli. ¿Qué quieres?",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "name": "Mechero grabado",
+              "type": "item"
+            },
+            {
+              "id": "cca750608b9bc7cfc",
+              "label": "Preguntar qué hacía con Iker",
+              "type": "dialogueOption"
+            },
+            {
+              "id": "c4e929e233ce0235b",
+              "label": "Acusarle con el vídeo y el mechero",
+              "type": "dialogueOption"
+            },
+            {
+              "id": "c723bd128e303416d",
+              "label": "Marcharte",
+              "type": "dialogueOption"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 14,
+          "viewRev": 15
+        }
+      ]
+    },
+    {
+      "input": null,
+      "label": null,
+      "view": [
+        {
+          "canUndo": true,
+          "items": [
+            {
+              "ending": {
+                "kind": "victory"
+              },
+              "score": 100,
+              "text": "Las esposas se cierran con un chasquido. Mientras la patrulla se lleva a Dámaso, la lluvia por fin amaina. Caso cerrado.",
+              "title": "Lluvia de neón",
+              "type": "scene"
+            },
+            {
+              "kind": "event",
+              "text": "Puntuación +100 (total 100)",
+              "type": "block"
+            },
+            {
+              "name": "Tarjeta de memoria",
+              "type": "item"
+            },
+            {
+              "name": "Mechero grabado",
+              "type": "item"
+            }
+          ],
+          "part": 0,
+          "parts": 1,
+          "turn": 15,
+          "viewRev": 16
+        }
+      ]
+    }
+  ],
+  "storyId": "lluvia-de-neon",
+  "title": "Lluvia de neón"
+}

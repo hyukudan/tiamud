@@ -136,6 +136,41 @@ Every sequenced server message uses:
 `server.heartbeat` is deliberately unsequenced so best-effort liveness traffic
 cannot displace an accepted command result.
 
+### Typed source and generated TypeScript
+
+The Rust crate `crates/protocol` (`tiamud-protocol`, accepted
+[ADR 0026](../decisions/0026-typed-protocol-source-and-typescript-codegen.md))
+is the single typed source of the envelope, the server/client message type
+names, every client payload except `action.perform`, and the server payloads
+whose shape belongs to the transport. Payloads that embed a `tiamud-core`
+projection (scene, player, item, map, narrative event) are generic over it. The
+server builds every WebSocket message from these types; the encoded JSON is
+byte-identical to the former hand-built objects, which golden tests in both
+crates pin.
+
+TypeScript declarations are generated with ts-rs (a test-only dependency under
+`cfg_attr(test, ...)`, outside the release graph) and committed under
+`apps/web/src/lib/generated/`, one file per owning crate:
+
+- `protocol.ts` from `tiamud-protocol` (envelope, vocabularies, transport
+  payloads);
+- `core.ts` from `tiamud-core` (the embedded scene, player, item, map,
+  narrative-event and reward-odds projections, plus the closed staff/channel
+  vocabularies accepted by `action.perform`);
+- `server.ts` from `tiamud-server` (the `action.perform` payload and the scene
+  presentation annotation).
+
+`cargo test --workspace --locked` fails when any of them is stale; regenerate
+with
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript`.
+Generated declarations describe the wire, not trust: the official client still
+validates every inbound frame at runtime in `protocol.ts`, and its validators
+return the generated types. The client refines a generated type only where its
+validator narrows a field the server projects as a string (item rarity,
+equipment slot, quest status, ability kind/targeting, presentation layer) or
+normalises `null` to absent (`nextCost`, `recoveryInTicks`,
+`action.result.message`); no `tiamud.v1` wire shape is hand-mirrored any more.
+
 ### Additive v1 rollout policy
 
 `tiamud.v1` has not yet reached its first compatibility milestone nor been used
@@ -254,7 +289,9 @@ sequenceDiagram
 ```
 
 The command is at most 1024 bytes and contains no control characters. It reaches
-the same `PlayerAction` parser as Telnet.
+the same `PlayerAction` parser as Telnet, except story commands and any line
+typed while the session is inside a story, which go to the story instance
+(see [Story sessions](#story-sessions)).
 
 Textual item delivery uses exactly:
 
@@ -654,6 +691,9 @@ traffic.
 | `sync.scene`, `sync.player` | Correlated current scene/player recovery pair after a gap request. |
 | `media.play`, `media.stop` | Optional opted-in safe audio transition. |
 | `server.heartbeat` | Unsequenced best-effort liveness challenge. |
+| `story.entered`, `story.view`, `story.left`, `story.error`, `story.slots`, `story.saved`, `story.restored` | Story session state and save slots; see [Story sessions](#story-sessions). Critical priority. |
+| `story.lobby`, `story.tally` | Seats, rules and public vote counts of a shared story; see [Shared story instances](#shared-story-instances). Critical priority. |
+| `story.invitation` | A host invited this character to a shared story. Narrative priority. |
 
 State messages are coalescible, while narrative output has lower priority than
 critical results. When a connection cannot drain critical output within the
@@ -1226,6 +1266,272 @@ Channels are `music`, `ambience` or `effects`; formats are Opus/Ogg/MP3 under a
 content-addressed same-origin asset path. The browser independently requires a
 user gesture and enabled preference before playback. `media.stop` identifies a
 channel. Media never carries exclusive gameplay information.
+
+## Story sessions
+
+Story sessions ([ADR 0029](../decisions/0029-story-session-instances-and-story-protocol.md),
+accepted) are an additive, single-player surface whose live state is in memory
+and whose save slots persist in the backend
+([ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md), accepted). They exist only
+when the server is started with `TIAMUD_STORY_DIR`; otherwise every story
+command answers that stories are unavailable.
+
+Entering and listing reuse `command.submit`: `historias`/`stories` returns the
+catalog in `action.result.message`; `historia <id> [locale]`/`story <id>
+[locale]` answers with a correlated `action.result`, then `story.entered` and
+the current `story.view`. The optional locale picks one of the story's
+languages for a **new** instance (`en`, or `en-GB` for `en`); without it the
+story's default (Spanish when offered) is used, a language the story does not
+offer answers `unknown_locale`, and a live instance keeps its language. While a session is in a story, other `command.submit` lines and
+every `action.perform` are answered with `ok: false` and never reach the world;
+typed numbers choose the numbered action, `deshacer`/`undo` undoes,
+`ver`/`look` re-sends the view and `salir`/`leave`/`salir historia` leave.
+`guardar N`/`save N`, `cargar N`/`load N`/`restore N`, `partidas`/`saves`,
+`borrar N`/`delete N` and `continuar`/`continue` mirror the slot messages
+below, answered with an `action.result` plus the same typed frames. The
+character stays connected and visible in its room.
+
+Server messages:
+
+- `story.entered`: `{storyId, title, locale, locales}`. `storyId` is the
+  public catalog id; `title` is in the instance language `locale`; `locales`
+  (1–16 lowercase tags, default first, containing `locale`) lists the
+  languages the story can be played in. Every text of the views, including
+  image alt text, is in `locale`; server hints and error messages stay
+  Spanish. Clients written before this field treat a missing `locale` as
+  `es`.
+- `story.view`: `{viewRev, part, parts, turn, canUndo, items}`. A view whose
+  sequenced frame would exceed 15 KiB is split into `parts` frames that share
+  `viewRev`; the client applies the view only when parts `0..parts` arrived
+  in order and concatenates `items`. `items` are tagged by `type`:
+  `scene {title, text, score, ending: null | {kind: victory|defeat|neutral},
+  prompt?: {text, question}, background?: image}` (exactly one per view;
+  `prompt` only in parser stories, see [Parser stories](#parser-stories)),
+  `cue {action: play|stop, channel, url?, loop}`,
+  `portrait {name, image?}`, `block {kind: event|line|command|reply, speaker?, text}`,
+  `stat {label, value}`, `item {name}`, `choice {id, label}`,
+  `verb {id, label, needsTarget}`, `target {verb, id, label}` (where `verb` is
+  the id of a verb of the same view) and `dialogueOption {id, label}`. Every
+  `id` is `c` followed by 16 lowercase hex digits, random per view, never
+  derived from authored ids, ordinals or prose, and stops resolving when the
+  next view is published. A `play` cue carries a content-addressed
+  `/assets/<sha256>/audio-*.{opus,ogg,mp3}` URL resolved from the reviewed
+  story media map; cues are omitted for clients without audio. An `image` is
+  `{manifest, alt}`: `manifest` is exactly
+  `/assets/<64 lowercase hex>/manifest.json`, a reviewed asset-pipeline
+  manifest (schema 2, opaque AVIF/WebP/JPEG variants, the same contract as
+  world scene images) that the client fetches, validates and renders only
+  when multimedia is allowed; `alt` is 1–512 bytes of plain one-line text in
+  the instance language. It is present only when the authored background or
+  portrait id is listed in the reviewed story media map; an unlisted id sends
+  no image and loses nothing playable (the scene text and `portrait.name`
+  remain). Images are sent regardless of the audio opt-in.
+- `story.left`: `{reason: left|evicted|kicked|ended}`. `evicted` also covers
+  an instance closed by another session of the same account (or a lapsed
+  shared seat); `kicked` and `ended` belong to shared instances.
+- `story.error`: `{code, message}` with `code` one of `disabled`,
+  `unknown_story`, `already_in_story`, `capacity`, `not_in_story`,
+  `stale_view`, `unknown_choice`, `ended`, `nothing_to_undo`, `busy`,
+  `internal`, `slots_unavailable`, `invalid_slot`, `slot_empty`,
+  `slot_corrupt`, `slot_incompatible`, `slot_capacity`, `rate_limited`, and
+  for shared instances `host_only`, `spectator`, `not_your_turn`,
+  `unknown_code`, `seats_full`, `not_shared`, `unknown_member`,
+  `invalid_setting`, for parser stories `no_parser` and
+  `invalid_command`, and `unknown_locale` when entering in a language the
+  story does not offer. `stale_view` is followed by the current view. `message` is Spanish
+  player-facing text and never names authored ids, digests or store details.
+- `story.slots`: `{slots: [{slot, updatedAt, compatible}], offerContinue}`.
+  At most ten entries in ascending, unique `slot` order (`0..=9`; `0` is the
+  autosave). `updatedAt` is Unix seconds of the last write; `compatible` is
+  false when the slot was saved with another revision (SHA-256) of the
+  StoryPack that the current pack does not declare in its
+  `compatible_revisions`, and would be refused. No saved state, digest, turn or summary of
+  hidden variables is sent. `offerContinue` is true only in the listing sent
+  right after `story.view` when entering a **fresh** instance of a story with a
+  compatible autosave; resuming a live instance sends no listing.
+- `story.saved`: `{slot, updatedAt}` with `slot` in `1..=9`.
+- `story.restored`: `{slot}`; the restored `story.view` (new `viewRev`,
+  `canUndo: false`) follows immediately.
+
+Client messages (all strict, unknown fields rejected):
+
+- `story.choose {id, viewRev}`: a `choice` or `dialogueOption` id.
+- `story.dialogue {id, viewRev}`: a `dialogueOption` id only.
+- `story.menu {verb, target?, viewRev}`: `target` is required exactly when the
+  verb has `needsTarget` and must be a `target` of that verb.
+- `story.undo {}` and `story.leave {}`: exactly an empty object.
+- `story.save {slot}`: `slot` in `1..=9`; slot `0` answers `invalid_slot`.
+  Answered by `story.saved`.
+- `story.restore {slot}`: `slot` in `0..=9`. Answered by `story.restored` and
+  the new view, or `slot_empty`, `slot_corrupt`, `slot_incompatible`. A slot
+  of a declared compatible revision whose state no longer re-validates
+  against the current pack is `slot_incompatible`; one of the exact revision
+  that fails is `slot_corrupt`.
+- `story.deleteSlot {slot}`: `slot` in `0..=9`. Answered by the remaining
+  `story.slots` or `slot_empty`.
+- `story.slots {}` and `story.continue {}` (restore of slot `0`): exactly an
+  empty object.
+
+A `slot` above 9 or of another JSON type is an invalid envelope. Slot
+operations require being inside the story; per account, `save`/`deleteSlot`
+share a budget of 6 per minute and `slots`/`restore`/`continue` one of 30 per
+minute (burst 10), answered with `rate_limited` beyond it. Leaving, idle
+eviction and graceful shutdown write the autosave (slot `0`) when the
+instance has progress (turn > 0); a failed autosave never blocks leaving.
+Restoring re-validates the stored document against the current pack and
+replaces the game; undo history is never persisted, so it restarts empty.
+
+A stale `viewRev`, an id that was never published, an id of the wrong kind or
+a target of another verb is rejected without changing state. After
+`sync.request` and after every reconnection of the account, the server
+re-sends `story.entered` and the current view (with only the current music as
+cue). An idle instance (30 minutes by default) is evicted; its progress
+survives only in the autosave slot, when the server has a store that
+implements slots.
+
+Telnet renders the same view as text: title, the background's alt text as
+`[…]` when the view carries a background image, prose, events, speaker
+lines, present characters, stats and inventory, then every action numbered
+`1) …` in the browser's order (choices, dialogue options, verbs or
+`VERB → target` pairs). GMCP clients that negotiated `Tiamud.Story 1` receive
+`Tiamud.Story.View` (`viewRev`, `title`, `turn`, `score`, `ending`,
+`canUndo`, `dialogue`, numbered `choices` with labels, `present`, `stats`,
+`inventory`; no prose and no ids), `Tiamud.Story.Slots {slots: [{slot,
+updatedAt, compatible}], offerContinue}` (after entering a fresh instance and
+after `partidas`/`borrar`) and `Tiamud.Story.Left {reason}`. An
+oversized summary degrades to bounded labels with `truncated`/`overflow`, then
+to `{viewRev, choiceCount, truncated, overflow}`, always under 8 KiB. Story
+cues use `Client.Media.Play`/`Stop` only with the media opt-in.
+
+### Parser stories
+
+A StoryPack v3 with a parser world ([ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md),
+accepted) is played with free text. While such a story accepts text, its
+`scene` item carries `prompt: {text, question}`: `text` is the prompt to show
+(the pack's `world.prompt` in the instance language, at most 64 bytes, else
+`>`) and `question` is true while the parser waits for the answer
+to the question shown in the last `reply` block (which object, or what with).
+`prompt` is absent after the ending, while a dialogue must be answered and in
+every gamebook or menu story. The instance plays in the language chosen on
+entry among the world's lexicons (by default Spanish when the pack has a
+Spanish lexicon, else its first lexicon); the parser uses that lexicon.
+
+- Client `story.command {text, viewRev}`: one line of at most 256 UTF-8 bytes
+  typed against view `viewRev` (strict; a longer `text`, a missing field or
+  `viewRev: 0` is an invalid envelope). Answered by the new `story.view`, whose
+  first `block {kind: command}` echoes the line (control characters removed)
+  and whose `block {kind: reply}` items are the parser's replies (library
+  messages, rule texts, room descriptions, questions and errors) and server
+  hints. A stale `viewRev` answers `stale_view` plus the current view; a
+  story without a parser answers `no_parser`; text while no prompt is shown
+  answers `invalid_command`. Lines are rate limited per account (120 per
+  minute, burst 20) with `rate_limited`.
+- Meta commands of the parser map to session operations: `deshacer`/`undo`
+  undoes like `story.undo` (a line that ran commands before it undoes exactly
+  that line); `reiniciar`/`restart` first shows a confirmation and restarts
+  from the beginning only when typed again against that very view (any other
+  input cancels; the restart is itself undoable); `puntos`/`score` and
+  `ayuda`/`help` answer in the view; `guardar`/`cargar` without a slot add a
+  hint and are followed by `story.slots` (or its error); the quit command
+  (`fin`, `salir`, `quit`) leaves the story like `story.leave`, autosave
+  included. Only executed world commands are undo steps and take turns;
+  parse errors and questions do not.
+- `command.submit` inside a parser story: reserved words keep their story
+  meaning (numbers, `deshacer`, `salir`, `ver`, `guardar N`, `cargar N`,
+  `partidas`, `borrar N`, `continuar`, `votar N`, `asientos`, `compartir`,
+  `invitar`, `expulsar`, `modo`, `historias`); `look`/`l` and a bare
+  `guardar`/`cargar` go to the parser, and every other line is a parser
+  command answered by an `action.result` (`ok: true`, no message) plus the
+  same frames as `story.command`. Telnet behaves identically, printing the
+  echo as `> línea` and the replies as text, and `Tiamud.Story.View` gains
+  `prompt: {text, question} | null`.
+- Shared parser stories never put free text to a vote: in `host` and `vote`
+  modes only the host types (others receive `host_only` and still vote on
+  numbered actions of views that have them); in `turns` mode only the turn
+  holder types (`not_your_turn`), and the turn passes only after a line that
+  executed world commands; spectators receive `spectator`. Undo and restart
+  from a parser line are host-only, like `story.undo`.
+
+## Shared story instances
+
+Shared instances ([ADR 0033](../decisions/0033-shared-story-instances-and-voting.md),
+accepted, phase S7) let several characters play one story instance. The
+instance stays a single writer; a pure table decides which action applies.
+
+Text commands (`command.submit` and Telnet): `historia compartir <id>`/`story
+host <id>` enters and shares a story; inside a solo story `compartir`/`share`
+shares it. `historia unirse <code>`/`story join <code>` takes a seat and
+`historia mirar <code>`/`story watch <code>` joins as a read-only spectator.
+Inside a shared story: a typed number (or `votar N`/`vote N`) chooses or
+votes, `votar 0`/`vote 0` withdraws the vote, `asientos`/`seats` shows the
+lobby; the host may `invitar <name>`/`invite <name>`, `expulsar <name>`/`kick
+<name>` and `modo anfitrion|votacion|turnos [seconds]`/`mode
+host|vote|turns [seconds]`. `salir`/`leave` gives up the seat.
+
+Server messages:
+
+- `story.lobby`: `{mode: host|vote|turns, voteSeconds, you:
+  host|player|spectator, code?, seats: [{name, role: host|player, connected,
+  turn}], spectators, maxSeats, maxSpectators}`. Sent after entering, on
+  every membership, presence, role, turn or rule change and on recovery.
+  `seats` are in seat order and the first seat is the host; `code` (eight
+  characters of `23456789ABCDEFGHJKLMNPQRSTUVWXYZ`) is present only for the
+  host. Spectators are counted, never named. `connected: false` marks a seat
+  held for a disconnected player; `turn` marks the turn holder in turns mode.
+- `story.tally`: `{viewRev, mode, choices: [{choiceId, votes}], voted,
+  eligible, remainingSeconds?, yourVote?}`. Public counts only, never voter
+  identities: `choices` lists the actions with at least one vote, addressed
+  by their leaf id (the `choice`/`dialogueOption` id, the `target` id or the
+  untargeted `verb` id) and summing to `voted`; `eligible` counts the
+  connected seats in vote mode (otherwise 1). `remainingSeconds` (at most 120)
+  is present while a vote window or a turn runs; clients count down locally.
+  `yourVote` is the recipient's own vote. Sent after every view and every vote
+  change, and in answer to every accepted shared input.
+- `story.invitation`: `{host, storyId, title, code}`; delivered to every
+  connected session of the invited character, never acknowledged to the host.
+
+Client messages (strict, unknown fields rejected):
+
+- `story.share {}`: shares the current solo instance (owner only).
+- `story.join {code, spectate}`: `code` is 1..=8 ASCII alphanumerics (case
+  folded by the server); an unknown, malformed or refused code answers
+  `unknown_code`; full seats or spectator places answer `seats_full`. At most
+  10 attempts per account and minute (`rate_limited`).
+- `story.invite {name}` and `story.kick {name}`: `name` is 1..=64 bytes
+  without control characters; host only. Invitations: 10 per host and
+  minute; the answer never reveals whether the name exists or is connected.
+  Kicking the host itself or an unknown name answers `unknown_member`; a
+  kicked account cannot rejoin that instance.
+- `story.mode {mode, voteSeconds?}`: host only; `voteSeconds` in `30..=120`
+  (else `invalid_setting`). Changing the mode discards open votes; turns
+  start with the host.
+- `story.vote {choiceId?, viewRev}`: a vote for the action whose leaf id is
+  `choiceId` in view `viewRev`; without `choiceId` the vote is withdrawn. A
+  forged id answers `unknown_choice`, another revision `stale_view`.
+
+Decision modes: in `vote`, seated players vote (`story.choose`, `story.menu`
+and `story.dialogue` from a seat count as votes too); the window starts with
+the first vote and closes early when every connected seat voted; otherwise the
+majority of the cast votes wins when it expires. Ties go to the host's vote
+when it is among them, else to the lowest action number. In `host`, only the
+host's input applies; other seats get `host_only` for inputs and may leave
+advisory votes. In `turns`, the turn holder's input applies and the turn
+passes in seat order; an idle (window elapsed) or disconnected holder loses
+the turn without an action applied. Spectators get `spectator` for every
+input. Only the host undoes (others see `canUndo: false`) and uses save slots,
+which belong to the host's account; the autosave is written to the host at
+close. A disconnected seat is held for the grace period
+(`TIAMUD_STORY_SEAT_GRACE_SECONDS`), then lapses; the host role migrates to
+the longest-seated player; the instance ends (`story.left {reason: ended}`
+for everyone left) when no seat remains. Recovery and reconnection re-send
+`story.lobby`, the view and `story.tally`.
+
+Telnet prints the lobby as text and a tally line such as `Votos (1/2): 1) 1 ·
+cierra en 60 s · tu voto: 1`; invitations as a line with the join commands.
+GMCP clients with `Tiamud.Story 1` also receive `Tiamud.Story.Lobby` (the
+`story.lobby` object), `Tiamud.Story.Tally {viewRev, mode, votes: [{number,
+votes}], voted, eligible, remainingSeconds, yourVote}` (by action number, no
+opaque ids) and `Tiamud.Story.Invitation`.
 
 ## Telnet GMCP scene overflow
 

@@ -30,3 +30,9 @@ Supported hooks are `on_enter`, `on_leave`, `on_look`, `on_use`, `on_talk`,
 The runtime returns inert `ScriptEvent` values. The authoritative world decides
 whether and how to translate them into domain actions; scripts never receive a
 direct reference to game state.
+
+`call_function` and `validate_functions` are a generic sibling API for
+non-WorldPack hosts (StoryPack scripts, ADR 0034): they call a named global
+function with bounded copied `ScriptValue` arguments (depth 4, 16,384 values,
+1 KiB strings), accept only a caller-supplied closed set of event kinds and
+return the first scalar result. The same sandbox, hardening and quotas apply.

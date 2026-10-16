@@ -107,39 +107,51 @@ struct Bucket {
     last_seen: Instant,
 }
 
-/// Bounded per-IP token bucket used for password-bearing endpoints.
+/// Bounded per-key token bucket. Tracking at most `max_tracked` keys keeps
+/// memory bounded; the least recently seen key is forgotten first.
 #[derive(Debug)]
-pub struct AuthRateLimiter {
-    buckets: Mutex<HashMap<IpAddr, Bucket>>,
+pub struct KeyedRateLimiter<K> {
+    buckets: Mutex<HashMap<K, Bucket>>,
     refill_per_second: f64,
     burst: f64,
+    max_tracked: usize,
 }
+
+/// Per-IP limiter used for password-bearing endpoints.
+pub type AuthRateLimiter = KeyedRateLimiter<IpAddr>;
 
 impl AuthRateLimiter {
     pub fn per_minute(attempts: u32, burst: u32) -> Self {
+        Self::per_minute_tracking(attempts, burst, MAX_TRACKED_AUTH_ADDRESSES)
+    }
+}
+
+impl<K: Copy + Eq + std::hash::Hash> KeyedRateLimiter<K> {
+    pub fn per_minute_tracking(attempts: u32, burst: u32, max_tracked: usize) -> Self {
         Self {
             buckets: Mutex::new(HashMap::new()),
             refill_per_second: f64::from(attempts.max(1)) / 60.0,
             burst: f64::from(burst.max(1)),
+            max_tracked: max_tracked.max(1),
         }
     }
 
-    pub fn check(&self, address: IpAddr, now: Instant) -> bool {
+    pub fn check(&self, key: K, now: Instant) -> bool {
         let mut buckets = self
             .buckets
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if !buckets.contains_key(&address)
-            && buckets.len() >= MAX_TRACKED_AUTH_ADDRESSES
+        if !buckets.contains_key(&key)
+            && buckets.len() >= self.max_tracked
             && let Some(oldest) = buckets
                 .iter()
                 .min_by_key(|(_, bucket)| bucket.last_seen)
-                .map(|(address, _)| *address)
+                .map(|(key, _)| *key)
         {
             buckets.remove(&oldest);
         }
 
-        let bucket = buckets.entry(address).or_insert(Bucket {
+        let bucket = buckets.entry(key).or_insert(Bucket {
             tokens: self.burst,
             updated_at: now,
             last_seen: now,

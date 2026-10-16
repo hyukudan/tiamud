@@ -10,6 +10,7 @@ use crate::{
         MailMessage, MailPage, StoreError,
     },
     social::{MAX_CHAT_MESSAGE_BYTES, MAX_SOCIAL_TARGET_BYTES},
+    story_sessions::{STORY_INPUT_HELP, parse_story_command},
     world_actor::{
         CharacterBackgroundSelection, CombatCueKind, GameError, ProjectedViewEvent, WorldHandle,
     },
@@ -47,6 +48,7 @@ use tiamud_core::{
     valid_board_visible_text, valid_mail_public_id, valid_mail_subject, valid_mail_target,
     valid_mail_visible_text,
 };
+use tiamud_protocol::{self as protocol, ServerMessageType};
 use tokio::{
     sync::{Notify, mpsc, watch},
     task::JoinHandle,
@@ -90,6 +92,8 @@ pub struct AppState {
     pub command_burst: u32,
     pub shutdown: watch::Receiver<bool>,
     pub(crate) action_replay: Arc<Mutex<RequestCache>>,
+    /// `None` when story sessions are disabled (no `TIAMUD_STORY_DIR`).
+    pub(crate) stories: Option<crate::story_sessions::StoryManager>,
 }
 
 pub(crate) fn action_replay_cache() -> Arc<Mutex<RequestCache>> {
@@ -143,24 +147,6 @@ struct CharacterResponse {
     character: CharacterSnapshot,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "camelCase")]
-struct ClientAuth {
-    token: String,
-    character_id: i64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClientCapabilities {
-    images: Vec<String>,
-    #[serde(rename = "reducedMotion")]
-    _reduced_motion: bool,
-    #[serde(default)]
-    audio: bool,
-}
-
 #[derive(Debug, Eq, PartialEq)]
 struct ClientHelloCredentials {
     token: String,
@@ -168,42 +154,11 @@ struct ClientHelloCredentials {
     audio: bool,
 }
 
+/// `action.perform` payload. Its TypeScript shape is generated into
+/// `apps/web/src/lib/generated/server.ts` (see `web/typescript.rs`); the
+/// closed vocabularies come from `tiamud-core` and are named, not inlined.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClientHelloData {
-    client: String,
-    capabilities: ClientCapabilities,
-    auth: ClientAuth,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClientHello {
-    v: u8,
-    #[serde(rename = "type")]
-    message_type: String,
-    data: ClientHelloData,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClientEnvelope {
-    v: u8,
-    #[serde(rename = "type")]
-    message_type: String,
-    #[serde(default)]
-    id: Option<String>,
-    data: Value,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct CommandSubmitData {
-    request_id: String,
-    command: String,
-}
-
-#[derive(Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(optional_fields))]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ActionPerformData {
     request_id: String,
@@ -215,6 +170,7 @@ struct ActionPerformData {
     #[serde(default)]
     post_id: Option<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "BoardKey", optional))]
     board: Option<BoardKey>,
     #[serde(default)]
     subject: Option<String>,
@@ -247,22 +203,28 @@ struct ActionPerformData {
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "SocialChannelName", optional))]
     channel: Option<SocialChannelName>,
     #[serde(default)]
     duration_seconds: Option<u64>,
     #[serde(default)]
     reason: Option<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "AccountRole", optional))]
     role: Option<AccountRole>,
     #[serde(default)]
     report_id: Option<i64>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "StaffReportResolution", optional))]
     resolution: Option<StaffReportResolution>,
     #[serde(default, deserialize_with = "deserialize_nullable_field")]
+    #[cfg_attr(test, ts(type = "StaffProfileKey | null", optional = nullable))]
     profile: NullableField<StaffProfileKey>,
     #[serde(default, deserialize_with = "deserialize_nullable_field")]
+    #[cfg_attr(test, ts(type = "string | null", optional = nullable))]
     lore_title: NullableField<String>,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "StaffCapability", optional))]
     capability: Option<StaffCapability>,
     #[serde(default)]
     enabled: Option<bool>,
@@ -285,18 +247,6 @@ where
         Some(value) => NullableField::Value(value),
         None => NullableField::Null,
     })
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct SyncRequestData {
-    after_seq: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HeartbeatData {
-    nonce: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -662,13 +612,61 @@ struct RequestedAction {
     signature: String,
     action: Result<PlayerAction, String>,
     trade_selector: Option<String>,
+    /// Raw `command.submit` text, checked for story commands before the world.
+    text: Option<String>,
 }
 
 #[derive(Debug)]
 enum ClientMessage {
     Action(RequestedAction),
-    Sync { after_seq: u64 },
-    Heartbeat { nonce: u64 },
+    Sync {
+        after_seq: u64,
+    },
+    Heartbeat {
+        nonce: u64,
+    },
+    StoryInput {
+        request: crate::story_sessions::StoryRequest,
+        view_rev: u32,
+    },
+    StoryUndo,
+    StoryLeave,
+    StorySave {
+        slot: u8,
+    },
+    /// `story.restore {slot}`; `story.continue` is slot 0.
+    StoryRestore {
+        slot: u8,
+    },
+    StorySlots,
+    StoryDeleteSlot {
+        slot: u8,
+    },
+    /// `story.vote {choiceId?, viewRev}` (ADR 0033).
+    StoryVote {
+        leaf: Option<String>,
+        view_rev: u32,
+    },
+    StoryShare,
+    StoryJoin {
+        code: String,
+        spectate: bool,
+    },
+    StoryInvite {
+        name: String,
+    },
+    StoryKick {
+        name: String,
+    },
+    StoryMode {
+        mode: protocol::StoryDecisionMode,
+        vote_seconds: Option<u16>,
+    },
+    /// `story.command {text, viewRev}`: free text for a parser story.
+    StoryCommand {
+        text: String,
+        view_rev: u32,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -766,16 +764,19 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     state
         .metrics
         .set_database_queue_depth(state.store.queue_depth());
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(
+    let mut body = state.metrics.prometheus(state.world.queue_depth());
+    if let Some(stories) = &state.stories {
+        body.push_str(&stories.prometheus());
+    }
+    (
+        StatusCode::OK,
+        [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
-        )
-        .body(Body::from(
-            state.metrics.prometheus(state.world.queue_depth()),
-        ))
-        .expect("valid metrics response")
+        )],
+        Body::from(body),
+    )
+        .into_response()
 }
 
 pub async fn status() -> Json<Value> {
@@ -944,12 +945,12 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
         _ => None,
     };
     let Some(credentials) = credentials else {
-        let _ = send_json(
+        reject_before_welcome(
             &mut socket,
-            json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "code": "access.protocol_rejected", "message": "Expected an authenticated client.hello"}}),
+            "access.protocol_rejected",
+            "Expected an authenticated client.hello",
         )
         .await;
-        let _ = socket.send(Message::Close(None)).await;
         return;
     };
     let character_id = CharacterId(credentials.character_id);
@@ -964,12 +965,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
         Err(error) => {
             warn!(%error, "authenticated client could not enter the world");
             let code = access_rejection_code(&error);
-            let _ = send_json(
-                &mut socket,
-                json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "code": code, "message": public_game_error(&error)}}),
-            )
-            .await;
-            let _ = socket.send(Message::Close(None)).await;
+            reject_before_welcome(&mut socket, code, &public_game_error(&error)).await;
             return;
         }
     };
@@ -988,12 +984,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                     "This network address has reached its concurrent session limit."
                 }
             };
-            let _ = send_json(
-                &mut socket,
-                json!({"v": 1, "type": "server.notice", "seq": 1, "data": {"level": "error", "code": "access.session_limit", "message": message}}),
-            )
-            .await;
-            let _ = socket.send(Message::Close(None)).await;
+            reject_before_welcome(&mut socket, "access.session_limit", message).await;
             return;
         }
     };
@@ -1024,16 +1015,16 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
         &mut sequence,
         OutboundPriority::Control,
         None,
-        "server.welcome",
-        json!({
-            "serverName": "Tiamud",
-            "motd": "Welcome to Tiamud, a text-complete world of adventures.",
-            "sessionId": entered.session_id.0.to_string()
-        }),
+        ServerMessageType::ServerWelcome,
+        protocol::ServerWelcome {
+            server_name: "Tiamud".to_owned(),
+            motd: "Welcome to Tiamud, a text-complete world of adventures.".to_owned(),
+            session_id: entered.session_id.0.to_string(),
+        },
     ) || !queue_scene(
         &outbound,
         &mut sequence,
-        "scene.snapshot",
+        ServerMessageType::SceneSnapshot,
         &last_scene,
         &last_presentation,
     ) || !queue_player(&outbound, &mut sequence, &last_player)
@@ -1045,6 +1036,14 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
             last_scene.audio.as_ref(),
         )
     {
+        finish_websocket_driver(&outbound, driver).await;
+        return;
+    }
+    // A reconnect resumes the account's live story instance, if any.
+    let mut story =
+        story::WebStorySession::new(state.stories.clone(), entered.account_id, audio_enabled)
+            .with_name(&last_player.character.name);
+    if !story.resume(&outbound, &mut sequence).await {
         finish_websocket_driver(&outbound, driver).await;
         return;
     }
@@ -1072,11 +1071,11 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         &mut sequence,
                         OutboundPriority::Critical,
                         None,
-                        "server.notice",
-                        json!({
-                            "level": "info",
-                            "message": "Server shutdown is starting; new traffic is stopping and accepted actions will be drained."
-                        }),
+                        ServerMessageType::ServerNotice,
+                        protocol::ServerNotice::new(
+                            protocol::NoticeLevel::Info,
+                            "Server shutdown is starting; new traffic is stopping and accepted actions will be drained.",
+                        ),
                     );
                     outbound.disconnect("Server shutdown.");
                     break;
@@ -1127,7 +1126,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         ) || !queue_scene(
                             &outbound,
                             &mut sequence,
-                            "scene.snapshot",
+                            ServerMessageType::SceneSnapshot,
                             &last_scene,
                             &last_presentation,
                         ) || !queue_player(&outbound, &mut sequence, &last_player) {
@@ -1156,7 +1155,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                                 ) || !queue_scene(
                                     &outbound,
                                     &mut sequence,
-                                    "scene.snapshot",
+                                    ServerMessageType::SceneSnapshot,
                                     &last_scene,
                                     &last_presentation,
                                 ) || !queue_player(&outbound, &mut sequence, &last_player)
@@ -1173,8 +1172,8 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             &mut sequence,
                             OutboundPriority::Narrative,
                             None,
-                            "chat.message",
-                            json!(delivery),
+                            ServerMessageType::ChatMessage,
+                            chat_message(delivery),
                         ) {
                             break 'session;
                         }
@@ -1189,6 +1188,22 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         }
                     }
                     None => break,
+                }
+            }
+            event = story.next_event() => {
+                let was_in_story = story.active();
+                if !story.handle_event(&outbound, &mut sequence, event)
+                    || (was_in_story
+                        && !story.active()
+                        && !queue_media_transition(
+                            &outbound,
+                            &mut sequence,
+                            audio_enabled,
+                            None,
+                            last_scene.audio.as_ref(),
+                        ))
+                {
+                    break;
                 }
             }
             inbound = inbound_rx.recv() => {
@@ -1231,7 +1246,131 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             &last_scene,
                             &last_presentation,
                             &last_player,
-                        ) {
+                        ) || !story.resend(&outbound, &mut sequence).await
+                        {
+                            break;
+                        }
+                    }
+                    message @ (ClientMessage::StoryInput { .. }
+                    | ClientMessage::StoryUndo
+                    | ClientMessage::StoryLeave
+                    | ClientMessage::StorySave { .. }
+                    | ClientMessage::StoryRestore { .. }
+                    | ClientMessage::StorySlots
+                    | ClientMessage::StoryDeleteSlot { .. }
+                    | ClientMessage::StoryVote { .. }
+                    | ClientMessage::StoryShare
+                    | ClientMessage::StoryJoin { .. }
+                    | ClientMessage::StoryInvite { .. }
+                    | ClientMessage::StoryKick { .. }
+                    | ClientMessage::StoryMode { .. }
+                    | ClientMessage::StoryCommand { .. }) => {
+                        if !command_limiter.check(Instant::now()) {
+                            if !queue_notice(&outbound, &mut sequence, "Command rate limit exceeded.") {
+                                break;
+                            }
+                            rate_violations += 1;
+                            if rate_violations >= MAX_PROTOCOL_ERRORS {
+                                break;
+                            }
+                            continue;
+                        }
+                        rate_violations = 0;
+                        let was_in_story = story.active();
+                        let delivered = match message {
+                            ClientMessage::StoryInput { request, view_rev } => {
+                                story.input(&outbound, &mut sequence, request, view_rev).await
+                            }
+                            ClientMessage::StoryUndo => story.undo(&outbound, &mut sequence).await,
+                            ClientMessage::StorySave { slot } => {
+                                story.save(&outbound, &mut sequence, slot).await
+                            }
+                            ClientMessage::StoryRestore { slot } => {
+                                story.restore(&outbound, &mut sequence, slot).await
+                            }
+                            ClientMessage::StorySlots => story.slots(&outbound, &mut sequence).await,
+                            ClientMessage::StoryDeleteSlot { slot } => {
+                                story.delete_slot(&outbound, &mut sequence, slot).await
+                            }
+                            ClientMessage::StoryVote { leaf, view_rev } => {
+                                story.vote(&outbound, &mut sequence, leaf, view_rev).await
+                            }
+                            ClientMessage::StoryShare => story.share(&outbound, &mut sequence).await,
+                            ClientMessage::StoryJoin { code, spectate } => {
+                                story.join(&outbound, &mut sequence, &code, spectate).await
+                            }
+                            ClientMessage::StoryInvite { name } => {
+                                story.invite(&outbound, &mut sequence, &name).await
+                            }
+                            ClientMessage::StoryKick { name } => {
+                                story.kick(&outbound, &mut sequence, &name).await
+                            }
+                            ClientMessage::StoryMode { mode, vote_seconds } => {
+                                story.mode(&outbound, &mut sequence, mode, vote_seconds).await
+                            }
+                            ClientMessage::StoryCommand { text, view_rev } => {
+                                story.command(&outbound, &mut sequence, &text, view_rev).await
+                            }
+                            _ => story.leave(&outbound, &mut sequence).await,
+                        };
+                        if !delivered
+                            || (was_in_story
+                                && !story.active()
+                                && !queue_media_transition(
+                                    &outbound,
+                                    &mut sequence,
+                                    audio_enabled,
+                                    None,
+                                    last_scene.audio.as_ref(),
+                                ))
+                        {
+                            break;
+                        }
+                    }
+                    ClientMessage::Action(requested)
+                        if story.active()
+                            || requested
+                                .text
+                                .as_deref()
+                                .is_some_and(|text| parse_story_command(text).is_some()) =>
+                    {
+                        if !command_limiter.check(Instant::now()) {
+                            if !queue_notice(&outbound, &mut sequence, "Command rate limit exceeded.") {
+                                break;
+                            }
+                            rate_violations += 1;
+                            if rate_violations >= MAX_PROTOCOL_ERRORS {
+                                break;
+                            }
+                            continue;
+                        }
+                        rate_violations = 0;
+                        let was_in_story = story.active();
+                        let delivered = match requested.text.as_deref() {
+                            Some(text) => story
+                                .text_command(&outbound, &mut sequence, &requested.request_id, text)
+                                .await
+                                .unwrap_or(true),
+                            // Structured world actions wait until the story ends.
+                            None => queue_action_result(
+                                &outbound,
+                                &mut sequence,
+                                &requested.request_id,
+                                false,
+                                Some(STORY_INPUT_HELP.to_owned()),
+                            ),
+                        };
+                        if !delivered
+                            || (was_in_story
+                                && !story.active()
+                                && !queue_media_transition(
+                                    &outbound,
+                                    &mut sequence,
+                                    audio_enabled,
+                                    None,
+                                    last_scene.audio.as_ref(),
+                                ))
+                        {
                             break;
                         }
                     }
@@ -1281,7 +1420,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                             }) || !queue_scene(
                                 &outbound,
                                 &mut sequence,
-                                "scene.snapshot",
+                                ServerMessageType::SceneSnapshot,
                                 &last_scene,
                                 &last_presentation,
                             ) || !queue_player(
@@ -1501,7 +1640,7 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                         if ok && (!queue_scene(
                             &outbound,
                             &mut sequence,
-                            "scene.snapshot",
+                            ServerMessageType::SceneSnapshot,
                             &last_scene,
                             &last_presentation,
                         ) || !queue_player(&outbound, &mut sequence, &last_player)) {
@@ -1517,18 +1656,15 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
                 }
                 heartbeat_nonce = heartbeat_nonce.wrapping_add(1).max(1);
                 pending_heartbeat = Some(heartbeat_nonce);
+                let Some(value) = heartbeat_frame(heartbeat_nonce) else {
+                    outbound.disconnect("Server output could not be encoded.");
+                    break;
+                };
                 let result = outbound.enqueue(OutboundEnvelope {
                     priority: OutboundPriority::BestEffort,
                     coalesce: Some(CoalesceKey::Heartbeat),
                     sequence: None,
-                    value: json!({
-                        "v": 1,
-                        "type": "server.heartbeat",
-                        "data": {
-                            "nonce": heartbeat_nonce,
-                            "timeoutMs": HEARTBEAT_TIMEOUT.as_millis()
-                        }
-                    }),
+                    value,
                 });
                 if result == EnqueueResult::Disconnect {
                     break;
@@ -1538,6 +1674,46 @@ async fn websocket_session(mut socket: WebSocket, state: AppState, peer_address:
     }
 
     finish_websocket_driver(&outbound, driver).await;
+}
+
+fn heartbeat_frame(nonce: u64) -> Option<Value> {
+    protocol_value(protocol::UnsequencedEnvelope::new(
+        ServerMessageType::ServerHeartbeat,
+        protocol::ServerHeartbeat {
+            nonce,
+            timeout_ms: u64::try_from(HEARTBEAT_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+        },
+    ))
+}
+
+/// Converts the transport-neutral social delivery into its v1 wire payload.
+fn chat_message(delivery: crate::social::SocialMessage) -> protocol::ChatMessage {
+    use crate::social::SocialChannel;
+    let channel = match delivery.channel {
+        SocialChannel::Announcement => protocol::ChatChannel::Announcement,
+        SocialChannel::Say => protocol::ChatChannel::Say,
+        SocialChannel::Yell => protocol::ChatChannel::Yell,
+        SocialChannel::Shout => protocol::ChatChannel::Shout,
+        SocialChannel::Tell => protocol::ChatChannel::Tell,
+        SocialChannel::Telepathy => protocol::ChatChannel::Telepathy,
+        SocialChannel::Emote => protocol::ChatChannel::Emote,
+        SocialChannel::Party => protocol::ChatChannel::Party,
+        SocialChannel::General => protocol::ChatChannel::General,
+        SocialChannel::Newbie => protocol::ChatChannel::Newbie,
+        SocialChannel::Staff => protocol::ChatChannel::Staff,
+    };
+    protocol::ChatMessage {
+        channel,
+        sender: delivery.sender,
+        text: delivery.text,
+    }
+}
+
+const fn protocol_board_key(board: BoardKey) -> protocol::BoardKey {
+    match board {
+        BoardKey::General => protocol::BoardKey::General,
+        BoardKey::Newbie => protocol::BoardKey::Newbie,
+    }
 }
 
 async fn send_json(socket: &mut WebSocket, value: Value) -> Result<(), axum::Error> {
@@ -1621,44 +1797,82 @@ async fn finish_websocket_driver(outbound: &OutboundHandle, driver: JoinHandle<(
     let _ = timeout(WS_WRITE_TIMEOUT, driver).await;
 }
 
+/// Encodes a typed `tiamud.v1` server message as the canonical JSON value.
+///
+/// Conversion through `serde_json::Value` keeps the exact key order and bytes
+/// of the former ad hoc construction (`serde_json::Map` sorts keys).
+fn protocol_value(message: impl Serialize) -> Option<Value> {
+    serde_json::to_value(message)
+        .inspect_err(|error| warn!(%error, "could not encode a typed protocol message"))
+        .ok()
+}
+
+fn sequenced_frame(
+    message_type: ServerMessageType,
+    seq: u64,
+    data: impl Serialize,
+) -> Option<Value> {
+    protocol_value(protocol::ServerEnvelope::new(message_type, seq, data))
+}
+
+/// Byte length of one compact sequenced frame, or `usize::MAX` if it cannot
+/// be encoded. Used by the 16 KiB budget fallbacks before queueing.
+fn sequenced_frame_bytes(message_type: ServerMessageType, seq: u64, data: impl Serialize) -> usize {
+    serde_json::to_vec(&protocol::ServerEnvelope::new(message_type, seq, data))
+        .map_or(usize::MAX, |bytes| bytes.len())
+}
+
 fn queue_sequenced(
     outbound: &OutboundHandle,
     sequence: &mut u64,
     priority: OutboundPriority,
     coalesce: Option<CoalesceKey>,
-    message_type: &'static str,
-    data: Value,
+    message_type: ServerMessageType,
+    data: impl Serialize,
 ) -> bool {
     let current = *sequence;
     *sequence = sequence.wrapping_add(1).max(1);
+    let Some(value) = sequenced_frame(message_type, current, data) else {
+        // Fail closed: never emit a partial or substitute frame.
+        outbound.disconnect("Server output could not be encoded.");
+        return false;
+    };
     outbound.enqueue(OutboundEnvelope {
         priority,
         coalesce,
         sequence: Some(current),
-        value: json!({"v": 1, "type": message_type, "seq": current, "data": data}),
+        value,
     }) != EnqueueResult::Disconnect
+}
+
+/// A sequenced error notice sent directly on the socket before `server.welcome`.
+fn pre_welcome_rejection(code: &str, message: &str) -> Option<Value> {
+    sequenced_frame(
+        ServerMessageType::ServerNotice,
+        1,
+        protocol::ServerNotice::with_code(protocol::NoticeLevel::Error, code, message),
+    )
+}
+
+/// Sends a pre-welcome rejection and closes the socket.
+async fn reject_before_welcome(socket: &mut WebSocket, code: &str, message: &str) {
+    if let Some(frame) = pre_welcome_rejection(code, message) {
+        let _ = send_json(socket, frame).await;
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 fn queue_scene(
     outbound: &OutboundHandle,
     sequence: &mut u64,
-    message_type: &'static str,
+    message_type: ServerMessageType,
     scene: &SceneView,
     presentation: &crate::runtime_content::ScenePresentation,
 ) -> bool {
     let mut presentation = presentation.clone();
     loop {
-        let mut data = json!(scene);
-        if !presentation.is_empty() {
-            data["presentation"] = json!(presentation);
-        }
-        let candidate = json!({
-            "v": 1,
-            "type": message_type,
-            "seq": *sequence,
-            "data": data,
-        });
-        if serde_json::to_vec(&candidate).is_ok_and(|bytes| bytes.len() <= MAX_WS_MESSAGE_BYTES)
+        let data = scene_with_presentation(scene, &presentation);
+        if sequenced_frame_bytes(message_type, *sequence, &data) <= MAX_WS_MESSAGE_BYTES
             || presentation.entities.is_empty()
         {
             return queue_sequenced(
@@ -1785,16 +1999,19 @@ fn bounded_web_presentation(
 }
 
 fn queue_player(outbound: &OutboundHandle, sequence: &mut u64, player: &PlayerStateView) -> bool {
-    let data = bounded_player_projection(player, |data| {
-        let candidate = json!({"v": 1, "type": "player.snapshot", "seq": *sequence, "data": data});
-        serde_json::to_vec(&candidate).is_ok_and(|bytes| bytes.len() <= MAX_WS_MESSAGE_BYTES)
-    });
+    let Some(data) = bounded_player_projection(player, |data| {
+        sequenced_frame_bytes(ServerMessageType::PlayerSnapshot, *sequence, data)
+            <= MAX_WS_MESSAGE_BYTES
+    }) else {
+        outbound.disconnect("Server output could not be encoded.");
+        return false;
+    };
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::State,
         Some(CoalesceKey::Player),
-        "player.snapshot",
+        ServerMessageType::PlayerSnapshot,
         data,
     )
 }
@@ -1804,18 +2021,21 @@ fn queue_player(outbound: &OutboundHandle, sequence: &mut u64, player: &PlayerSt
 /// push a player frame over the protocol budget. If even the shortest safe
 /// labels do not fit, the unchanged outbound budget guard disconnects rather
 /// than emitting a partial or oversized state.
-fn bounded_player_projection(player: &PlayerStateView, fits: impl Fn(&Value) -> bool) -> Value {
-    let mut projection = json!(player);
+fn bounded_player_projection(
+    player: &PlayerStateView,
+    fits: impl Fn(&Value) -> bool,
+) -> Option<Value> {
+    let mut projection = protocol_value(player)?;
     if fits(&projection) {
-        return projection;
+        return Some(projection);
     }
     for maximum in TRADE_LABEL_FALLBACK_BYTES {
         truncate_trade_offer_labels(&mut projection, maximum);
         if fits(&projection) {
-            return projection;
+            return Some(projection);
         }
     }
-    projection
+    Some(projection)
 }
 
 fn truncate_trade_offer_labels(player: &mut Value, maximum_bytes: usize) {
@@ -1851,9 +2071,9 @@ fn truncate_trade_offer_labels(player: &mut Value, maximum_bytes: usize) {
                 end = next;
             }
             let shortened = label[..end].to_owned();
-            line.as_object_mut()
-                .expect("trade lines serialize as objects")
-                .insert("label".into(), Value::String(shortened));
+            if let Some(object) = line.as_object_mut() {
+                object.insert("label".into(), Value::String(shortened));
+            }
         }
     }
 }
@@ -1875,13 +2095,13 @@ fn queue_sync_recovery(
     let sync_id = format!("sync-{}", *sequence);
     let mut presentation = presentation.clone();
     let scene_queued = loop {
-        let data = json!({
-            "syncId": sync_id,
-            "afterSeq": after_seq,
-            "scene": scene_with_presentation(scene, &presentation),
-        });
-        let candidate = json!({"v": 1, "type": "sync.scene", "seq": *sequence, "data": data});
-        if serde_json::to_vec(&candidate).is_ok_and(|bytes| bytes.len() <= MAX_WS_MESSAGE_BYTES)
+        let data = protocol::SyncScene {
+            sync_id: sync_id.clone(),
+            after_seq,
+            scene: scene_with_presentation(scene, &presentation),
+        };
+        if sequenced_frame_bytes(ServerMessageType::SyncScene, *sequence, &data)
+            <= MAX_WS_MESSAGE_BYTES
             || presentation.entities.is_empty()
         {
             break queue_sequenced(
@@ -1889,51 +2109,43 @@ fn queue_sync_recovery(
                 sequence,
                 OutboundPriority::Critical,
                 Some(CoalesceKey::SyncScene),
-                "sync.scene",
+                ServerMessageType::SyncScene,
                 data,
             );
         }
         presentation.entities.pop();
     };
-    let player = bounded_player_projection(player, |player| {
-        let candidate = json!({
-            "v": 1,
-            "type": "sync.player",
-            "seq": *sequence,
-            "data": {
-                "syncId": sync_id,
-                "afterSeq": after_seq,
-                "player": player,
-                "complete": true,
-            },
-        });
-        serde_json::to_vec(&candidate).is_ok_and(|bytes| bytes.len() <= MAX_WS_MESSAGE_BYTES)
-    });
+    let Some(player) = bounded_player_projection(player, |player| {
+        sequenced_frame_bytes(
+            ServerMessageType::SyncPlayer,
+            *sequence,
+            protocol::SyncPlayer::new(sync_id.as_str(), after_seq, player),
+        ) <= MAX_WS_MESSAGE_BYTES
+    }) else {
+        outbound.disconnect("Server output could not be encoded.");
+        return false;
+    };
     scene_queued
         && queue_sequenced(
             outbound,
             sequence,
             OutboundPriority::Critical,
             Some(CoalesceKey::SyncPlayer),
-            "sync.player",
-            json!({
-                "syncId": sync_id,
-                "afterSeq": after_seq,
-                "player": player,
-                "complete": true,
-            }),
+            ServerMessageType::SyncPlayer,
+            protocol::SyncPlayer::new(sync_id, after_seq, player),
         )
 }
 
-fn scene_with_presentation(
-    scene: &SceneView,
-    presentation: &crate::runtime_content::ScenePresentation,
-) -> Value {
-    let mut value = json!(scene);
-    if !presentation.is_empty() {
-        value["presentation"] = json!(presentation);
+/// `scene.snapshot`/`sync.scene` scene payload: the projection with its
+/// optional presentation annotation merged into the same object.
+fn scene_with_presentation<'a>(
+    scene: &'a SceneView,
+    presentation: &'a crate::runtime_content::ScenePresentation,
+) -> protocol::SceneFrame<&'a SceneView, &'a crate::runtime_content::ScenePresentation> {
+    protocol::SceneFrame {
+        scene,
+        presentation: (!presentation.is_empty()).then_some(presentation),
     }
-    value
 }
 
 fn queue_media_transition(
@@ -1947,40 +2159,47 @@ fn queue_media_transition(
         return true;
     }
     if let Some(previous) = previous
-        && safe_audio_channel(&previous.channel)
+        && let Some(channel) = safe_audio_channel(&previous.channel)
         && !queue_sequenced(
             outbound,
             sequence,
             OutboundPriority::Critical,
             None,
-            "media.stop",
-            json!({"channel": previous.channel}),
+            ServerMessageType::MediaStop,
+            protocol::MediaStop { channel },
         )
     {
         return false;
     }
     next.is_none_or(|next| {
-        !safe_scene_audio(next)
-            || queue_sequenced(
-                outbound,
-                sequence,
-                OutboundPriority::State,
-                None,
-                "media.play",
-                json!({"channel": next.channel, "url": next.url, "loop": next.looped}),
-            )
+        let Some(channel) = safe_scene_audio(next) else {
+            return true;
+        };
+        queue_sequenced(
+            outbound,
+            sequence,
+            OutboundPriority::State,
+            None,
+            ServerMessageType::MediaPlay,
+            protocol::MediaPlay {
+                channel,
+                url: next.url.clone(),
+                looped: next.looped,
+            },
+        )
     })
 }
 
-fn safe_scene_audio(audio: &tiamud_core::SceneAudio) -> bool {
-    safe_audio_channel(&audio.channel) && safe_content_addressed_audio_url(&audio.url)
+/// The closed media channel of a safe, content-addressed scene audio track.
+fn safe_scene_audio(audio: &tiamud_core::SceneAudio) -> Option<protocol::MediaChannel> {
+    safe_audio_channel(&audio.channel).filter(|_| safe_content_addressed_audio_url(&audio.url))
 }
 
-fn safe_audio_channel(channel: &str) -> bool {
-    matches!(channel, "ambience" | "effects" | "music")
+fn safe_audio_channel(channel: &str) -> Option<protocol::MediaChannel> {
+    protocol::MediaChannel::from_name(channel)
 }
 
-fn safe_content_addressed_audio_url(value: &str) -> bool {
+pub(crate) fn safe_content_addressed_audio_url(value: &str) -> bool {
     if value.len() > 161 || value.contains(['?', '#', '\\']) {
         return false;
     }
@@ -2013,8 +2232,11 @@ fn queue_semantic_updates(
     previous_player: &PlayerStateView,
     player: &PlayerStateView,
 ) -> bool {
-    let previous_scene_json = json!(previous_scene);
-    let scene_json = json!(scene);
+    let (Some(previous_scene_json), Some(scene_json)) =
+        (protocol_value(previous_scene), protocol_value(scene))
+    else {
+        return false;
+    };
     let Some(previous_scene_object) = previous_scene_json.as_object() else {
         return false;
     };
@@ -2037,27 +2259,34 @@ fn queue_semantic_updates(
             .count();
     let emit_scene_deltas = entity_delta_count <= MAX_WS_SEMANTIC_DELTA_FRAMES;
 
-    let mut patch = Map::from_iter([
-        ("viewId".to_owned(), json!(scene.view_id)),
-        ("revision".to_owned(), json!(scene.revision)),
-    ]);
-    for field in ["title", "prose", "image", "exits", "weather"] {
-        if previous_scene_object.get(field) != scene_object.get(field) {
-            patch.insert(
-                field.to_owned(),
-                scene_object.get(field).cloned().unwrap_or(Value::Null),
-            );
-        }
+    // Change detection compares the encoded projections, exactly as the wire
+    // observes them; the patch then carries the typed changed fields.
+    let changed = |field: &str| previous_scene_object.get(field) != scene_object.get(field);
+    let mut patch = protocol::ScenePatch::new(scene.view_id.as_str(), scene.revision);
+    if changed("title") {
+        patch.title = Some(scene.title.clone());
+    }
+    if changed("prose") {
+        patch.prose = Some(scene.prose.clone());
+    }
+    if changed("image") {
+        patch.image = Some(scene.image.as_ref());
+    }
+    if changed("exits") {
+        patch.exits = Some(scene.exits.iter().collect::<Vec<_>>());
+    }
+    if changed("weather") {
+        patch.weather = Some(&scene.weather);
     }
     if emit_scene_deltas
-        && patch.len() > 2
+        && patch.has_changes()
         && !queue_sequenced(
             outbound,
             sequence,
             OutboundPriority::State,
             Some(CoalesceKey::ScenePatch),
-            "scene.patch",
-            Value::Object(patch),
+            ServerMessageType::ScenePatch,
+            patch,
         )
     {
         return false;
@@ -2072,13 +2301,13 @@ fn queue_semantic_updates(
             sequence,
             OutboundPriority::State,
             None,
-            "entity.remove",
-            json!({
-                "viewId": scene.view_id,
-                "revision": scene.revision,
-                "kind": kind,
-                "id": id,
-            }),
+            ServerMessageType::EntityRemove,
+            protocol::EntityRemove {
+                view_id: scene.view_id.clone(),
+                revision: scene.revision,
+                kind: *kind,
+                id: id.clone(),
+            },
         ) {
             return false;
         }
@@ -2094,14 +2323,14 @@ fn queue_semantic_updates(
             sequence,
             OutboundPriority::State,
             None,
-            "entity.upsert",
-            json!({
-                "viewId": scene.view_id,
-                "revision": scene.revision,
-                "kind": kind,
-                "id": id,
-                "entity": entity,
-            }),
+            ServerMessageType::EntityUpsert,
+            protocol::EntityUpsert {
+                view_id: scene.view_id.clone(),
+                revision: scene.revision,
+                kind: *kind,
+                id: id.clone(),
+                entity,
+            },
         ) {
             return false;
         }
@@ -2113,8 +2342,11 @@ fn queue_semantic_updates(
             sequence,
             OutboundPriority::State,
             Some(CoalesceKey::Vitals),
-            "vitals.update",
-            json!({"revision": player.revision, "character": player.character}),
+            ServerMessageType::VitalsUpdate,
+            protocol::VitalsUpdate {
+                revision: player.revision,
+                character: &player.character,
+            },
         )
     {
         return false;
@@ -2127,13 +2359,13 @@ fn queue_semantic_updates(
             sequence,
             OutboundPriority::State,
             Some(CoalesceKey::Inventory),
-            "inventory.patch",
-            json!({
-                "revision": player.revision,
-                "inventory": player.inventory,
-                "equipment": player.equipment,
-                "inventoryCapacity": player.inventory_capacity,
-            }),
+            ServerMessageType::InventoryPatch,
+            protocol::InventoryPatch {
+                revision: player.revision,
+                inventory: player.inventory.iter().collect(),
+                equipment: player.equipment.iter().collect(),
+                inventory_capacity: &player.inventory_capacity,
+            },
         )
     {
         return false;
@@ -2144,8 +2376,11 @@ fn queue_semantic_updates(
             sequence,
             OutboundPriority::State,
             Some(CoalesceKey::Map),
-            "map.snapshot",
-            json!({"revision": player.revision, "map": player.map}),
+            ServerMessageType::MapSnapshot,
+            protocol::MapSnapshot {
+                revision: player.revision,
+                map: &player.map,
+            },
         )
     {
         return false;
@@ -2159,15 +2394,18 @@ fn queue_semantic_updates(
     !other_player_state_changed || queue_player(outbound, sequence, player)
 }
 
-fn scene_entities(scene: &Map<String, Value>) -> BTreeMap<(String, String), Value> {
+fn scene_entities(scene: &Map<String, Value>) -> BTreeMap<(protocol::EntityKind, String), Value> {
     let mut entities = BTreeMap::new();
-    for (kind, field) in [("item", "items"), ("npc", "npcs")] {
+    for (kind, field) in [
+        (protocol::EntityKind::Item, "items"),
+        (protocol::EntityKind::Npc, "npcs"),
+    ] {
         let Some(values) = scene.get(field).and_then(Value::as_array) else {
             continue;
         };
         for value in values {
             if let Some(id) = value.get("id").and_then(Value::as_str) {
-                entities.insert((kind.to_owned(), id.to_owned()), value.clone());
+                entities.insert((kind, id.to_owned()), value.clone());
             }
         }
     }
@@ -2186,8 +2424,12 @@ fn queue_action_result(
         sequence,
         OutboundPriority::Critical,
         None,
-        "action.result",
-        json!({"requestId": request_id, "ok": ok, "message": message}),
+        ServerMessageType::ActionResult,
+        protocol::ActionResult {
+            request_id: request_id.to_owned(),
+            ok,
+            message,
+        },
     )
 }
 
@@ -2202,28 +2444,25 @@ fn queue_container_contents(
     let items = contents
         .items
         .iter()
-        .map(|item| {
-            let mut summary = json!(item);
-            summary
-                .as_object_mut()
-                .expect("player item views serialize as objects")
-                .remove("description");
-            summary
-        })
-        .collect::<Vec<_>>();
+        .map(item_summary_without_description)
+        .collect::<Option<Vec<_>>>();
+    let Some(items) = items else {
+        outbound.disconnect("Server output could not be encoded.");
+        return false;
+    };
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::Critical,
         None,
-        "container.contents",
-        json!({
-            "container": contents.selector,
-            "items": items,
-            "page": contents.page,
-            "totalPages": contents.total_pages,
-            "capacity": contents.capacity,
-        }),
+        ServerMessageType::ContainerContents,
+        protocol::ContainerContents {
+            container: contents.selector.clone(),
+            items,
+            page: contents.page,
+            total_pages: contents.total_pages,
+            capacity: &contents.capacity,
+        },
     )
 }
 
@@ -2239,30 +2478,36 @@ fn queue_trade_contents(
     let items = contents
         .items
         .iter()
-        .map(|item| {
-            let mut summary = json!(item);
-            summary
-                .as_object_mut()
-                .expect("player item views serialize as objects")
-                .remove("description");
-            summary
-        })
-        .collect::<Vec<_>>();
+        .map(item_summary_without_description)
+        .collect::<Option<Vec<_>>>();
+    let Some(items) = items else {
+        outbound.disconnect("Server output could not be encoded.");
+        return false;
+    };
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::Critical,
         None,
-        "trade.contents",
-        json!({
-            "tradeId": contents.trade_id,
-            "container": contents.container,
-            "items": items,
-            "page": contents.page,
-            "totalPages": contents.total_pages,
-            "capacity": contents.capacity,
-        }),
+        ServerMessageType::TradeContents,
+        protocol::TradeContents {
+            trade_id: contents.trade_id.clone(),
+            container: contents.container.clone(),
+            items,
+            page: contents.page,
+            total_pages: contents.total_pages,
+            capacity: &contents.capacity,
+        },
     )
+}
+
+/// A paged item summary: the core item projection without its prose.
+fn item_summary_without_description(item: &tiamud_core::PlayerItemView) -> Option<Value> {
+    let mut summary = protocol_value(item)?;
+    if let Some(object) = summary.as_object_mut() {
+        object.remove("description");
+    }
+    Some(summary)
 }
 
 fn queue_reward_odds(outbound: &OutboundHandle, sequence: &mut u64, odds: &RewardOddsView) -> bool {
@@ -2274,42 +2519,38 @@ fn queue_reward_odds(outbound: &OutboundHandle, sequence: &mut u64, odds: &Rewar
         sequence,
         OutboundPriority::Critical,
         None,
-        "reward.odds",
-        json!(odds),
+        ServerMessageType::RewardOdds,
+        odds,
     )
 }
 
-fn mail_summary_json(summary: &crate::persistence::MailMessageSummary) -> Value {
-    json!({
-        "id": summary.public_id,
-        "sender": summary.sender_name,
-        "subject": summary.subject,
-        "createdAt": summary.created_at,
-        "expiresAt": summary.expires_at,
-        "read": summary.read,
-    })
+fn mail_summary(summary: &crate::persistence::MailMessageSummary) -> protocol::MailMessageSummary {
+    protocol::MailMessageSummary {
+        id: summary.public_id.clone(),
+        sender: summary.sender_name.clone(),
+        subject: summary.subject.clone(),
+        created_at: summary.created_at,
+        expires_at: summary.expires_at,
+        read: summary.read,
+    }
 }
 
 fn queue_mail_page(outbound: &OutboundHandle, sequence: &mut u64, page: &MailPage) -> bool {
-    let messages = page
-        .messages
-        .iter()
-        .map(mail_summary_json)
-        .collect::<Vec<_>>();
+    let messages = page.messages.iter().map(mail_summary).collect::<Vec<_>>();
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::Critical,
         None,
-        "mail.list",
-        json!({
-            "page": page.page,
-            "totalPages": page.total_pages,
-            "totalMessages": page.total_messages,
-            "unreadCount": page.unread_count,
-            "capacity": page.capacity,
-            "messages": messages,
-        }),
+        ServerMessageType::MailList,
+        protocol::MailList {
+            page: page.page,
+            total_pages: page.total_pages,
+            total_messages: page.total_messages,
+            unread_count: page.unread_count,
+            capacity: page.capacity,
+            messages,
+        },
     )
 }
 
@@ -2324,30 +2565,30 @@ fn queue_mail_message(
         sequence,
         OutboundPriority::Critical,
         None,
-        "mail.message",
-        json!({
-            "id": summary.public_id,
-            "sender": summary.sender_name,
-            "subject": summary.subject,
-            "body": message.body,
-            "createdAt": summary.created_at,
-            "expiresAt": summary.expires_at,
-            "read": summary.read,
-        }),
+        ServerMessageType::MailMessage,
+        protocol::MailMessage {
+            id: summary.public_id.clone(),
+            sender: summary.sender_name.clone(),
+            subject: summary.subject.clone(),
+            body: message.body.clone(),
+            created_at: summary.created_at,
+            expires_at: summary.expires_at,
+            read: summary.read,
+        },
     )
 }
 
-fn board_summary_json(summary: &crate::persistence::BoardPostSummary) -> Value {
-    json!({
-        "postId": summary.public_id,
-        "board": summary.board,
-        "author": summary.author_name,
-        "subject": summary.subject,
-        "createdAt": summary.created_at,
-        "expiresAt": summary.expires_at,
-        "canDelete": summary.can_delete,
-        "canReport": summary.can_report,
-    })
+fn board_summary(summary: &crate::persistence::BoardPostSummary) -> protocol::BoardPostSummary {
+    protocol::BoardPostSummary {
+        post_id: summary.public_id.clone(),
+        board: protocol_board_key(summary.board),
+        author: summary.author_name.clone(),
+        subject: summary.subject.clone(),
+        created_at: summary.created_at,
+        expires_at: summary.expires_at,
+        can_delete: summary.can_delete,
+        can_report: summary.can_report,
+    }
 }
 
 fn queue_board_catalog(
@@ -2362,12 +2603,12 @@ fn queue_board_catalog(
                 BoardKey::General => ("General", "Conversación comunitaria deliberada."),
                 BoardKey::Newbie => ("Personas nuevas", "Preguntas y orientación para empezar."),
             };
-            json!({
-                "key": descriptor.board,
-                "label": label,
-                "description": description,
-                "canPost": descriptor.can_post,
-            })
+            protocol::BoardDescriptor {
+                key: protocol_board_key(descriptor.board),
+                label: label.to_owned(),
+                description: description.to_owned(),
+                can_post: descriptor.can_post,
+            }
         })
         .collect::<Vec<_>>();
     queue_sequenced(
@@ -2375,46 +2616,52 @@ fn queue_board_catalog(
         sequence,
         OutboundPriority::Critical,
         None,
-        "board.catalog",
-        json!({"boards": boards, "retentionDays": 90}),
+        ServerMessageType::BoardCatalog,
+        protocol::BoardCatalog {
+            boards,
+            retention_days: 90,
+        },
     )
 }
 
 fn queue_board_page(outbound: &OutboundHandle, sequence: &mut u64, page: &BoardPage) -> bool {
-    let posts = page
-        .posts
-        .iter()
-        .map(board_summary_json)
-        .collect::<Vec<_>>();
+    let posts = page.posts.iter().map(board_summary).collect::<Vec<_>>();
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::Critical,
         None,
-        "board.list",
-        json!({
-            "board": page.board,
-            "page": page.page,
-            "totalPages": page.total_pages,
-            "totalPosts": page.total_posts,
-            "capacity": page.capacity,
-            "posts": posts,
-        }),
+        ServerMessageType::BoardList,
+        protocol::BoardList {
+            board: protocol_board_key(page.board),
+            page: page.page,
+            total_pages: page.total_pages,
+            total_posts: page.total_posts,
+            capacity: page.capacity,
+            posts,
+        },
     )
 }
 
 fn queue_board_entry(outbound: &OutboundHandle, sequence: &mut u64, entry: &BoardEntry) -> bool {
-    let mut data = board_summary_json(&entry.summary);
-    data.as_object_mut()
-        .expect("board summaries serialize as objects")
-        .insert("body".into(), json!(entry.body));
+    let summary = &entry.summary;
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::Critical,
         None,
-        "board.entry",
-        data,
+        ServerMessageType::BoardEntry,
+        protocol::BoardEntry {
+            post_id: summary.public_id.clone(),
+            board: protocol_board_key(summary.board),
+            author: summary.author_name.clone(),
+            subject: summary.subject.clone(),
+            body: entry.body.clone(),
+            created_at: summary.created_at,
+            expires_at: summary.expires_at,
+            can_delete: summary.can_delete,
+            can_report: summary.can_report,
+        },
     )
 }
 
@@ -2424,8 +2671,8 @@ fn queue_notice(outbound: &OutboundHandle, sequence: &mut u64, message: &str) ->
         sequence,
         OutboundPriority::Critical,
         None,
-        "server.notice",
-        json!({"level": "error", "message": message}),
+        ServerMessageType::ServerNotice,
+        protocol::ServerNotice::new(protocol::NoticeLevel::Error, message),
     )
 }
 
@@ -2436,42 +2683,27 @@ fn queue_view_event(
     previous_presentation: &crate::runtime_content::ScenePresentation,
     current_presentation: &crate::runtime_content::ScenePresentation,
 ) -> bool {
-    let mut data = json!(event.event);
-    if let Some(cue) = event.combat_cue.filter(|cue| {
-        previous_presentation.contains_entity(&cue.entity_id)
-            || current_presentation.contains_entity(&cue.entity_id)
-    }) {
-        data["cue"] = match cue.kind {
-            CombatCueKind::Attack => json!({
-                "kind": "attack",
-                "entityId": cue.entity_id,
-                "pose": "attack",
-                "intensity": 2,
-                "durationMs": 420,
-            }),
-            CombatCueKind::Hit => json!({
-                "kind": "hit",
-                "entityId": cue.entity_id,
-                "pose": "hit",
-                "intensity": 2,
-                "durationMs": 320,
-            }),
-            CombatCueKind::Defeat => json!({
-                "kind": "defeat",
-                "entityId": cue.entity_id,
-                "pose": "defeated",
-                "intensity": 3,
-                "durationMs": 700,
-            }),
-        };
-    }
+    let cue = event
+        .combat_cue
+        .filter(|cue| {
+            previous_presentation.contains_entity(&cue.entity_id)
+                || current_presentation.contains_entity(&cue.entity_id)
+        })
+        .map(|cue| match cue.kind {
+            CombatCueKind::Attack => protocol::CombatCue::attack(cue.entity_id),
+            CombatCueKind::Hit => protocol::CombatCue::hit(cue.entity_id),
+            CombatCueKind::Defeat => protocol::CombatCue::defeat(cue.entity_id),
+        });
     queue_sequenced(
         outbound,
         sequence,
         OutboundPriority::Narrative,
         None,
-        "message.append",
-        data,
+        ServerMessageType::MessageAppend,
+        protocol::MessageAppend {
+            event: &event.event,
+            cue,
+        },
     )
 }
 
@@ -2488,15 +2720,15 @@ fn queue_view_events(
             sequence,
             OutboundPriority::Narrative,
             None,
-            "server.notice",
-            json!({
-                "level": "info",
-                "code": "world.events_coalesced",
-                "message": format!(
+            ServerMessageType::ServerNotice,
+            protocol::ServerNotice::with_code(
+                protocol::NoticeLevel::Info,
+                "world.events_coalesced",
+                format!(
                     "{} world changes were coalesced; the authoritative scene follows.",
                     events.len()
                 ),
-            }),
+            ),
         );
     }
     events.into_iter().all(|event| {
@@ -2537,18 +2769,21 @@ pub async fn static_asset(uri: Uri) -> Response {
             } else {
                 "no-cache"
             };
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .header(header::CACHE_CONTROL, cache)
-                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-                .header(header::REFERRER_POLICY, "no-referrer")
-                .header(
-                    header::CONTENT_SECURITY_POLICY,
-                    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-                )
-                .body(Body::from(asset.data.into_owned()))
-                .expect("valid static response")
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, mime.as_ref()),
+                    (header::CACHE_CONTROL, cache),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                    (header::REFERRER_POLICY, "no-referrer"),
+                    (
+                        header::CONTENT_SECURITY_POLICY,
+                        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                    ),
+                ],
+                Body::from(asset.data.into_owned()),
+            )
+                .into_response()
         }
         None => (StatusCode::NOT_FOUND, "Not found").into_response(),
     }
@@ -2582,13 +2817,13 @@ fn parse_client_hello(text: &str) -> Option<ClientHelloCredentials> {
     if text.len() > MAX_WS_MESSAGE_BYTES || !json_depth_within(text, MAX_JSON_DEPTH) {
         return None;
     }
-    let message = serde_json::from_value::<ClientHello>(parse_unique_json(text).ok()?).ok()?;
-    (message.v == 1
+    let message =
+        serde_json::from_value::<protocol::ClientHello>(parse_unique_json(text).ok()?).ok()?;
+    (message.v == protocol::PROTOCOL_VERSION
         && message.message_type == "client.hello"
-        && message.data.client == "web"
+        && message.data.client == protocol::ClientKind::Web
         && (message.data.capabilities.images.is_empty()
-            || message.data.capabilities.images
-                == ["avif".to_owned(), "webp".to_owned(), "jpeg".to_owned()])
+            || message.data.capabilities.images == protocol::SUPPORTED_IMAGE_FORMATS)
         && message.data.auth.character_id > 0
         && message.data.auth.token.len() == 64
         && message
@@ -2608,11 +2843,11 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
     if text.len() > MAX_WS_MESSAGE_BYTES || !json_depth_within(text, MAX_JSON_DEPTH) {
         return Err(ClientMessageError::InvalidEnvelope);
     }
-    let envelope = serde_json::from_value::<ClientEnvelope>(
+    let envelope = serde_json::from_value::<protocol::ClientEnvelope>(
         parse_unique_json(text).map_err(|_| ClientMessageError::MalformedJson)?,
     )
     .map_err(|_| ClientMessageError::MalformedJson)?;
-    if envelope.v != 1 {
+    if envelope.v != protocol::PROTOCOL_VERSION {
         return Err(ClientMessageError::UnsupportedVersion);
     }
     if envelope
@@ -2625,7 +2860,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
 
     match envelope.message_type.as_str() {
         "command.submit" => {
-            let data = serde_json::from_value::<CommandSubmitData>(envelope.data)
+            let data = serde_json::from_value::<protocol::CommandSubmitData>(envelope.data)
                 .map_err(|_| ClientMessageError::InvalidEnvelope)?;
             if !valid_request_id(&data.request_id)
                 || data.command.len() > MAX_COMMAND_BYTES
@@ -2638,6 +2873,7 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 signature: format!("command:{}", data.command),
                 action: parse_action(&data.command).map_err(|error| error.to_string()),
                 trade_selector: None,
+                text: Some(data.command),
             }))
         }
         "action.perform" => {
@@ -2818,25 +3054,175 @@ fn parse_client_message(text: &str) -> Result<ClientMessage, ClientMessageError>
                 signature,
                 action,
                 trade_selector,
+                text: None,
             }))
         }
         "sync.request" => {
-            let data = serde_json::from_value::<SyncRequestData>(envelope.data)
+            let data = serde_json::from_value::<protocol::SyncRequestData>(envelope.data)
                 .map_err(|_| ClientMessageError::InvalidEnvelope)?;
             Ok(ClientMessage::Sync {
                 after_seq: data.after_seq,
             })
         }
         "client.heartbeat" => {
-            let data = serde_json::from_value::<HeartbeatData>(envelope.data)
+            let data = serde_json::from_value::<protocol::ClientHeartbeatData>(envelope.data)
                 .map_err(|_| ClientMessageError::InvalidEnvelope)?;
             if data.nonce == 0 {
                 return Err(ClientMessageError::InvalidEnvelope);
             }
             Ok(ClientMessage::Heartbeat { nonce: data.nonce })
         }
+        "story.choose" | "story.dialogue" => {
+            let data = serde_json::from_value::<protocol::StoryChooseData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            // Shape only: whether the id was ever published is decided by the
+            // instance, which rejects forged and stale ids without changes.
+            if !valid_story_id_shape(&data.id) || data.view_rev == 0 {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            let request = if envelope.message_type == "story.choose" {
+                crate::story_sessions::StoryRequest::Choose { id: data.id }
+            } else {
+                crate::story_sessions::StoryRequest::Dialogue { id: data.id }
+            };
+            Ok(ClientMessage::StoryInput {
+                request,
+                view_rev: data.view_rev,
+            })
+        }
+        "story.menu" => {
+            let data = serde_json::from_value::<protocol::StoryMenuData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            if !valid_story_id_shape(&data.verb)
+                || data
+                    .target
+                    .as_deref()
+                    .is_some_and(|target| !valid_story_id_shape(target))
+                || data.view_rev == 0
+            {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(ClientMessage::StoryInput {
+                request: crate::story_sessions::StoryRequest::Menu {
+                    verb: data.verb,
+                    target: data.target,
+                },
+                view_rev: data.view_rev,
+            })
+        }
+        "story.undo" | "story.leave" => {
+            // Exactly `{}`: serde would also accept an empty array.
+            if !envelope.data.as_object().is_some_and(Map::is_empty) {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(if envelope.message_type == "story.undo" {
+                ClientMessage::StoryUndo
+            } else {
+                ClientMessage::StoryLeave
+            })
+        }
+        "story.save" | "story.restore" | "story.deleteSlot" => {
+            let data = serde_json::from_value::<protocol::StorySlotData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            // Shape only: slot 0 (the autosave) is refused for `story.save` by
+            // the session with a typed `invalid_slot` error.
+            if data.slot > protocol::MAX_STORY_SLOT {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(match envelope.message_type.as_str() {
+                "story.save" => ClientMessage::StorySave { slot: data.slot },
+                "story.restore" => ClientMessage::StoryRestore { slot: data.slot },
+                _ => ClientMessage::StoryDeleteSlot { slot: data.slot },
+            })
+        }
+        "story.slots" | "story.continue" | "story.share" => {
+            if !envelope.data.as_object().is_some_and(Map::is_empty) {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(match envelope.message_type.as_str() {
+                "story.slots" => ClientMessage::StorySlots,
+                "story.share" => ClientMessage::StoryShare,
+                _ => ClientMessage::StoryRestore { slot: 0 },
+            })
+        }
+        "story.command" => {
+            let data = serde_json::from_value::<protocol::StoryCommandData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            // Shape only; the instance answers stale views and the parser
+            // answers empty or unknown text.
+            if data.text.len() > protocol::MAX_STORY_COMMAND_BYTES || data.view_rev == 0 {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(ClientMessage::StoryCommand {
+                text: data.text,
+                view_rev: data.view_rev,
+            })
+        }
+        "story.vote" => {
+            let data = serde_json::from_value::<protocol::StoryVoteData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            if data
+                .choice_id
+                .as_deref()
+                .is_some_and(|id| !valid_story_id_shape(id))
+                || data.view_rev == 0
+            {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(ClientMessage::StoryVote {
+                leaf: data.choice_id,
+                view_rev: data.view_rev,
+            })
+        }
+        "story.join" => {
+            let data = serde_json::from_value::<protocol::StoryJoinData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            // Shape only; the code itself is checked (and rate limited) later.
+            if data.code.is_empty()
+                || data.code.len() > protocol::STORY_JOIN_CODE_BYTES
+                || !data.code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            Ok(ClientMessage::StoryJoin {
+                code: data.code,
+                spectate: data.spectate,
+            })
+        }
+        "story.invite" | "story.kick" => {
+            let data = serde_json::from_value::<protocol::StoryNameData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            let name = data.name.trim();
+            if name.is_empty()
+                || name.len() > crate::story_sessions::shared::MAX_MEMBER_NAME_BYTES
+                || name.chars().any(char::is_control)
+            {
+                return Err(ClientMessageError::InvalidEnvelope);
+            }
+            let name = name.to_owned();
+            Ok(if envelope.message_type == "story.invite" {
+                ClientMessage::StoryInvite { name }
+            } else {
+                ClientMessage::StoryKick { name }
+            })
+        }
+        "story.mode" => {
+            let data = serde_json::from_value::<protocol::StoryModeData>(envelope.data)
+                .map_err(|_| ClientMessageError::InvalidEnvelope)?;
+            Ok(ClientMessage::StoryMode {
+                mode: data.mode,
+                vote_seconds: data.vote_seconds,
+            })
+        }
         _ => Err(ClientMessageError::UnknownType),
     }
+}
+
+/// Bounded alphanumeric shape of a story id; publication is checked later.
+fn valid_story_id_shape(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= protocol::STORY_CHOICE_ID_BYTES
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 struct UniqueJsonValue(Value);
@@ -3332,6 +3718,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         Ok(reason)
     };
+    let trade_fields_error = || format!("Action {action:?} has unexpected or missing fields.");
     let trade_fields_exact = |target: bool,
                               recipient: bool,
                               quantity: bool,
@@ -3362,9 +3749,7 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
             && matches!(data.lore_title, NullableField::Missing)
             && data.capability.is_none()
             && data.enabled.is_none();
-        exact
-            .then_some(())
-            .ok_or_else(|| format!("Action {action:?} has unexpected or missing fields."))
+        exact.then_some(()).ok_or_else(trade_fields_error)
     };
     match action {
         "look" => exact_no_fields().map(|()| PlayerAction::Look),
@@ -3521,9 +3906,10 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         "item.unequip" => gameplay_target().map(PlayerAction::Unequip),
         "trade.request" => {
             trade_fields_exact(false, true, false, false, false, false, false)?;
-            Ok(PlayerAction::Trade(TradeAction::Request(
-                data.recipient.clone().expect("validated recipient"),
-            )))
+            let Some(recipient) = data.recipient.clone() else {
+                return Err(trade_fields_error());
+            };
+            Ok(PlayerAction::Trade(TradeAction::Request(recipient)))
         }
         "trade.accept" => {
             trade_fields_exact(false, false, false, false, false, false, true)?;
@@ -3535,39 +3921,47 @@ fn structured_action(data: &ActionPerformData) -> Result<PlayerAction, String> {
         }
         "trade.item.set" => {
             trade_fields_exact(true, false, true, false, false, false, true)?;
-            let quantity = data.quantity.expect("validated quantity");
+            let (Some(query), Some(quantity)) = (data.target.clone(), data.quantity) else {
+                return Err(trade_fields_error());
+            };
             if quantity > 128 {
                 return Err("Trade item quantity must be between 1 and 128.".to_owned());
             }
             Ok(PlayerAction::Trade(TradeAction::OfferItem(ItemSelection {
-                query: data.target.clone().expect("validated target"),
+                query,
                 quantity,
             })))
         }
         "trade.item.remove" => {
             trade_fields_exact(true, false, false, false, false, false, true)?;
-            Ok(PlayerAction::Trade(TradeAction::RemoveItem(
-                data.target.clone().expect("validated target"),
-            )))
+            let Some(target) = data.target.clone() else {
+                return Err(trade_fields_error());
+            };
+            Ok(PlayerAction::Trade(TradeAction::RemoveItem(target)))
         }
         "trade.coins.set" => {
             trade_fields_exact(false, false, false, false, true, false, true)?;
-            Ok(PlayerAction::Trade(TradeAction::OfferCoins(
-                data.coins.expect("validated coins"),
-            )))
+            let Some(coins) = data.coins else {
+                return Err(trade_fields_error());
+            };
+            Ok(PlayerAction::Trade(TradeAction::OfferCoins(coins)))
         }
         "trade.contents" => {
             trade_fields_exact(true, false, false, true, false, false, true)?;
+            let (Some(container), Some(page)) = (data.target.clone(), data.page) else {
+                return Err(trade_fields_error());
+            };
             Ok(PlayerAction::Trade(TradeAction::Contents {
-                container: data.target.clone().expect("validated target"),
-                page: data.page.expect("validated page"),
+                container,
+                page,
             }))
         }
         "trade.confirm" => {
             trade_fields_exact(false, false, false, false, false, true, true)?;
-            Ok(PlayerAction::Trade(TradeAction::Confirm {
-                state_revision: data.state_revision.expect("validated revision"),
-            }))
+            let Some(state_revision) = data.state_revision else {
+                return Err(trade_fields_error());
+            };
+            Ok(PlayerAction::Trade(TradeAction::Confirm { state_revision }))
         }
         "trade.status" => {
             trade_fields_exact(false, false, false, false, false, false, true)?;
@@ -4499,14 +4893,17 @@ fn request_address(headers: &HeaderMap, remote: SocketAddr) -> std::net::IpAddr 
 }
 
 fn rate_limit_error() -> Response {
-    Response::builder()
-        .status(StatusCode::TOO_MANY_REQUESTS)
-        .header(header::RETRY_AFTER, "60")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [
+            (header::RETRY_AFTER, "60"),
+            (header::CONTENT_TYPE, "application/json"),
+        ],
+        Body::from(
             json!({"error": "Too many authentication attempts. Try again later."}).to_string(),
-        ))
-        .expect("valid rate limit response")
+        ),
+    )
+        .into_response()
 }
 
 fn api_error(error: GameError) -> Response {
@@ -4573,6 +4970,15 @@ fn websocket_request_allowed(headers: &HeaderMap) -> bool {
             .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
 }
 
+mod story;
+
+#[cfg(test)]
+mod typescript;
+
+#[cfg(test)]
+#[path = "web_protocol_golden_tests.rs"]
+mod protocol_golden_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4584,7 +4990,7 @@ mod tests {
         action
     }
 
-    fn test_entity_presentation() -> crate::runtime_content::ScenePresentation {
+    pub(super) fn test_entity_presentation() -> crate::runtime_content::ScenePresentation {
         let session = SessionId(8_800);
         let mut world = tiamud_core::World::demo();
         world
@@ -6984,7 +7390,7 @@ mod tests {
         assert!(queue_scene(
             &outbound,
             &mut sequence,
-            "scene.snapshot",
+            ServerMessageType::SceneSnapshot,
             &scene,
             &presentation,
         ));
@@ -7053,7 +7459,7 @@ mod tests {
         assert!(queue_scene(
             &outbound,
             &mut sequence,
-            "scene.snapshot",
+            ServerMessageType::SceneSnapshot,
             &scene,
             &presentation,
         ));
@@ -7116,7 +7522,7 @@ mod tests {
         assert!(!queue_scene(
             &outbound,
             &mut sequence,
-            "scene.snapshot",
+            ServerMessageType::SceneSnapshot,
             &scene,
             &crate::runtime_content::ScenePresentation::default()
         ));
@@ -7217,7 +7623,7 @@ mod tests {
         assert!(queue_scene(
             &outbound,
             &mut sequence,
-            "scene.snapshot",
+            ServerMessageType::SceneSnapshot,
             &second,
             &crate::runtime_content::ScenePresentation::default(),
         ));
@@ -7251,7 +7657,7 @@ mod tests {
         assert!(queue_scene(
             &outbound,
             &mut sequence,
-            "scene.snapshot",
+            ServerMessageType::SceneSnapshot,
             &replacement,
             &crate::runtime_content::ScenePresentation::default(),
         ));

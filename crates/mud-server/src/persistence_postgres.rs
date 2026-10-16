@@ -5,93 +5,62 @@
 //! runs in a separately bounded blocking service, and no PostgreSQL call runs
 //! on an async executor thread.
 
-use std::{
-    collections::BTreeSet,
-    thread,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::thread;
 
 use async_trait::async_trait;
-use postgres::{Client, GenericClient, IsolationLevel};
+use postgres::{Client, GenericClient, IsolationLevel, ToStatement};
 use tiamud_core::{
     AccountId, AccountRole, AccountSnapshot, BoardKey, CharacterGameplaySnapshot, CharacterId,
     CharacterSnapshot, DomainEvent, DurableCharacterSnapshot, MAX_BOARD_BODY_BYTES,
     MAX_BOARD_REPORT_REASON_BYTES, MAX_BOARD_SUBJECT_BYTES, MAX_MAIL_BODY_BYTES,
-    MAX_MAIL_REPORT_REASON_BYTES, MAX_MAIL_SUBJECT_BYTES, SocialChannelName, StaffCapability,
-    StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot, valid_board_public_id,
-    valid_board_subject, valid_board_visible_text, valid_mail_public_id, valid_mail_visible_text,
+    MAX_MAIL_REPORT_REASON_BYTES, MAX_MAIL_SUBJECT_BYTES, RuntimeSectionSet, SocialChannelName,
+    StaffCapability, StaffProfileKey, StaffReportResolution, WorldRuntimeSnapshot,
+    valid_board_public_id, valid_board_subject, valid_mail_public_id, valid_mail_visible_text,
 };
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{Duration, timeout},
+    time::timeout,
 };
 
 use crate::{
     auth::{
-        AuthenticatedSession, DEFAULT_SESSION_TTL, PasswordService, PasswordWorkError,
-        SessionToken, digest_token, validate_password,
+        AuthenticatedSession, DEFAULT_SESSION_TTL, PasswordService, SessionToken, digest_token,
+        validate_password,
     },
     persistence::{
-        BOARD_ACCOUNT_CAPACITY, BOARD_CAPACITY_PER_BOARD, BOARD_MAX_PAGES, BOARD_PAGE_SIZE,
-        BoardEntry, BoardPage, BoardPostSummary, BoardReportEvidence, CharacterStore,
-        DOMAIN_EVENT_RETENTION, DurableAreaCheckpoint, DurableAreaGeneration,
-        DurableCharacterGameplay, MailMessage, MailMessageSummary, MailPage, MailReportEvidence,
+        self, BOARD_CAPACITY_PER_BOARD, BOARD_MAX_PAGES, BOARD_PAGE_SIZE, BoardEntry, BoardPage,
+        BoardPostSummary, BoardReportEvidence, CharacterStore, DOMAIN_EVENT_RETENTION,
+        DurableAreaCheckpoint, DurableAreaGeneration, DurableCharacterGameplay, MAILBOX_CAPACITY,
+        MAX_REPORT_REASON_BYTES, MailMessage, MailMessageSummary, MailPage, MailReportEvidence,
         MailSendResult, ModerationAction, PersistenceCommandHandler, PreparedLogin, Request,
         SocialProfile, SocialRelationKind, StaffAccess, StaffAuditEntry, StaffAuditRecord,
         StaffReport, StartupGameplayLoadLimits, StartupWorldRecovery, StoreError,
-        decode_runtime_snapshot, decode_startup_domain_events, decode_startup_gameplay,
+        StoryPackCompatibility, StorySaveRecord, StorySaveSummary, StorySaveWrite, StorySlot,
+        decode_startup_domain_events, decode_startup_gameplay, decode_stored_runtime,
         dispatch_persistence_request, ensure_all_character_ids_exist,
         ensure_all_startup_characters_loaded, normalise_character_identity_ids,
-        normalise_startup_character_ids, validate_area_checkpoint, validate_area_generation,
-        validate_area_generation_transition, validate_area_rehydration_commit,
-        validate_area_rehydration_previous_runtime, validate_area_retirement_commit,
-        validate_area_retirement_previous_runtime,
+        normalise_startup_character_ids, runtime_section_error, validate_area_checkpoint,
+        validate_area_generation, validate_area_generation_transition,
+        validate_area_rehydration_commit, validate_area_rehydration_previous_runtime,
+        validate_area_retirement_commit, validate_area_retirement_previous_runtime,
     },
 };
+// Backend-agnostic bounds, JSON shaping, quota/capacity, retention and staff
+// authority policy shared with the SQLite store.
+use crate::persistence::common::*;
+use tiamud_persistence_sqlite::runtime_sections;
 
+#[cfg(test)]
+use crate::persistence::decode_runtime_snapshot;
 #[cfg(test)]
 use crate::persistence::{AuditEntry, area_checkpoint_unit_id};
 
-const MAX_IDENTITY_NAME_BYTES: usize = 64;
-const MAX_ACTIVE_SESSIONS: i64 = 16;
-const MAX_CHARACTER_JSON_BYTES: usize = 65_536;
-const MAX_EVENT_JSON_BYTES: usize = 65_536;
-const MAX_RUNTIME_JSON_BYTES: usize = tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES;
-const MAX_SOCIAL_REASON_BYTES: usize = 1_024;
-const MAX_REPORT_REASON_BYTES: usize = 2_048;
-const MAX_AUDIT_DETAILS_BYTES: usize = 4_096;
-const MAX_STAFF_ACTION_BYTES: usize = 64;
-const MAX_STAFF_LORE_TITLE_BYTES: usize = 128;
-const STAFF_LIST_LIMIT: i64 = 10;
-const MAIL_PAGE_SIZE: i64 = 10;
-const MAIL_MAX_PAGES: i64 = 7;
-const MAILBOX_CAPACITY: i64 = 64;
-const MAILBOX_BYTE_CAPACITY: i64 = 128 * 1024;
-const MAIL_GLOBAL_CAPACITY: i64 = 100_000;
-const MAIL_HOURLY_CAPACITY: i64 = 20;
-const MAIL_DAILY_CAPACITY: i64 = 50;
-const MAIL_HOUR_SECONDS: i64 = 60 * 60;
-const MAIL_DAY_SECONDS: i64 = 24 * MAIL_HOUR_SECONDS;
-const MAIL_RETENTION_SECONDS: i64 = 30 * MAIL_DAY_SECONDS;
-const MAIL_REPORT_EVIDENCE_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
-const MAIL_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
-const MAIL_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
-const MAIL_PURGE_LIMIT: i64 = 256;
+// PostgreSQL binds `BIGINT` page arithmetic; the values are the shared `u32`
+// public bounds widened losslessly.
+const MAIL_PAGE_SIZE: i64 = persistence::MAIL_PAGE_SIZE as i64;
+const MAIL_MAX_PAGES: i64 = persistence::MAIL_MAX_PAGES as i64;
 const MAIL_TRANSACTION_LOCK_ID: i64 = 0x5449_414d_4d41_494c;
-const BOARD_BYTE_CAPACITY_PER_BOARD: i64 = 4 * 1_024 * 1_024;
-const BOARD_GLOBAL_CAPACITY: i64 = 2_000;
-const BOARD_GLOBAL_BYTE_CAPACITY: i64 = 8 * 1_024 * 1_024;
-const BOARD_HOURLY_CAPACITY: i64 = 5;
-const BOARD_DAILY_CAPACITY: i64 = 20;
-const BOARD_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
-const BOARD_REPORT_EVIDENCE_RETENTION_SECONDS: i64 = 90 * MAIL_DAY_SECONDS;
-const BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT: i64 = 8;
-const BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY: i64 = 10_000;
-const BOARD_PURGE_LIMIT: i64 = 256;
 const BOARD_TRANSACTION_LOCK_ID: i64 = 0x5449_414d_424f_4152;
-const MAX_MODERATION_DURATION_SECONDS: i64 = 365 * 24 * 60 * 60;
-const PERSISTENCE_REQUEST_QUEUE_CAPACITY: usize = 256;
-const PERSISTENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const POSTGRES_CHARACTER_BATCH_SIZE: usize =
     tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES / MAX_CHARACTER_JSON_BYTES;
 const POSTGRES_CHARACTER_EXISTENCE_BATCH_SIZE: usize = 4_096;
@@ -359,13 +328,51 @@ impl PersistenceCommandHandler for PostgresCommandHandler {
         load_domain_events(&mut self.connection)
     }
 
+    fn save_story_slot(&mut self, write: StorySaveWrite) -> Result<StorySaveSummary, StoreError> {
+        save_story_slot(&mut self.connection, write, unix_timestamp())
+    }
+
+    fn load_story_slot(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError> {
+        load_story_slot(&mut self.connection, account_id, &story_id, slot, &pack)
+    }
+
+    fn list_story_slots(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+    ) -> Result<Vec<StorySaveSummary>, StoreError> {
+        list_story_slots(&mut self.connection, account_id, &story_id)
+    }
+
+    fn delete_story_slot(
+        &mut self,
+        account_id: AccountId,
+        story_id: String,
+        slot: StorySlot,
+    ) -> Result<bool, StoreError> {
+        delete_story_slot(&mut self.connection, account_id, &story_id, slot)
+    }
+
     fn commit_action(
         &mut self,
         characters: Vec<DurableCharacterSnapshot>,
         runtime: WorldRuntimeSnapshot,
+        sections: RuntimeSectionSet,
         events: Vec<DomainEvent>,
     ) -> Result<(), StoreError> {
-        commit_action(&mut self.connection, &characters, &runtime, &events)
+        commit_action(
+            &mut self.connection,
+            &characters,
+            &runtime,
+            sections,
+            &events,
+        )
     }
 
     fn commit_staff_action(
@@ -383,6 +390,13 @@ impl PersistenceCommandHandler for PostgresCommandHandler {
             audit,
             unix_timestamp(),
         )
+    }
+
+    fn commit_characters(
+        &mut self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        commit_characters_only(&mut self.connection, &characters)
     }
 
     fn social_profile(&mut self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
@@ -1023,6 +1037,69 @@ impl CharacterStore for PostgresCharacterStore {
             .await
     }
 
+    async fn save_story_slot(&self, write: StorySaveWrite) -> Result<StorySaveSummary, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::SaveStorySlot { write, reply }, receive)
+            .await
+    }
+
+    async fn load_story_slot(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+        slot: StorySlot,
+        pack: StoryPackCompatibility,
+    ) -> Result<Option<StorySaveRecord>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::LoadStorySlot {
+                account_id,
+                story_id: story_id.to_owned(),
+                slot,
+                pack,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn list_story_slots(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+    ) -> Result<Vec<StorySaveSummary>, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request(
+            Request::ListStorySlots {
+                account_id,
+                story_id: story_id.to_owned(),
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
+    async fn delete_story_slot(
+        &self,
+        account_id: AccountId,
+        story_id: &str,
+        slot: StorySlot,
+    ) -> Result<bool, StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(
+            Request::DeleteStorySlot {
+                account_id,
+                story_id: story_id.to_owned(),
+                slot,
+                reply,
+            },
+            receive,
+        )
+        .await
+    }
+
     async fn social_profile(&self, character_id: CharacterId) -> Result<SocialProfile, StoreError> {
         let (reply, receive) = oneshot::channel();
         self.request(
@@ -1473,11 +1550,23 @@ impl CharacterStore for PostgresCharacterStore {
         runtime: WorldRuntimeSnapshot,
         events: Vec<DomainEvent>,
     ) -> Result<(), StoreError> {
+        self.commit_action_sections(characters, runtime, RuntimeSectionSet::ALL, events)
+            .await
+    }
+
+    async fn commit_action_sections(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+        runtime: WorldRuntimeSnapshot,
+        sections: RuntimeSectionSet,
+        events: Vec<DomainEvent>,
+    ) -> Result<(), StoreError> {
         let (reply, receive) = oneshot::channel();
         self.request_commit(
             Request::CommitAction {
                 characters,
                 runtime,
+                sections,
                 events,
                 reply,
             },
@@ -1506,30 +1595,15 @@ impl CharacterStore for PostgresCharacterStore {
         )
         .await
     }
-}
 
-fn normalise_name(name: &str, kind: &'static str) -> Result<String, StoreError> {
-    let name = name.trim();
-    if !valid_mail_visible_text(name, MAX_IDENTITY_NAME_BYTES) || name.contains('|') {
-        return Err(StoreError::InvalidName { kind });
+    async fn commit_characters(
+        &self,
+        characters: Vec<DurableCharacterSnapshot>,
+    ) -> Result<(), StoreError> {
+        let (reply, receive) = oneshot::channel();
+        self.request_commit(Request::CommitCharacters { characters, reply }, receive)
+            .await
     }
-    Ok(name.to_owned())
-}
-
-fn map_password_work_error(error: PasswordWorkError) -> StoreError {
-    match error {
-        PasswordWorkError::Overloaded | PasswordWorkError::Timeout => StoreError::RequestTimeout,
-        PasswordWorkError::Execution => StoreError::PasswordHashing,
-    }
-}
-
-fn unix_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .try_into()
-        .unwrap_or(i64::MAX)
 }
 
 fn finish_register_account(
@@ -1844,11 +1918,7 @@ fn load_or_create_character_with_gameplay<C: GenericClient>(
 ) -> Result<CharacterSnapshot, StoreError> {
     ensure_account_exists(connection, account_id)?;
     let name = normalise_name(name, "character")?;
-    let gameplay_json = bounded_json(
-        initial_gameplay,
-        "character gameplay",
-        MAX_CHARACTER_JSON_BYTES,
-    )?;
+    let gameplay_json = encode_character_gameplay(initial_gameplay)?;
     connection.execute(
         "INSERT INTO characters (account_id, name, room_id, gameplay_json)
          VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
@@ -1899,17 +1969,28 @@ fn character_from_row(row: &postgres::Row) -> Result<CharacterSnapshot, StoreErr
     })
 }
 
+const SAVE_CHARACTER_SQL: &str = "UPDATE characters
+     SET name = $1, room_id = $2, item_locations_json = $3,
+         updated_at = floor(extract(epoch FROM now()))::BIGINT
+     WHERE id = $4 AND account_id = $5";
+
 fn save<C: GenericClient>(
     connection: &mut C,
     snapshot: &CharacterSnapshot,
 ) -> Result<(), StoreError> {
-    let name = normalise_name(&snapshot.name, "character")?;
-    let item_locations_json = serde_json::to_string(&snapshot.item_locations)?;
+    save_with(connection, SAVE_CHARACTER_SQL, snapshot)
+}
+
+/// Saves one character through `statement`, which is either
+/// [`SAVE_CHARACTER_SQL`] or a statement prepared from it once per transaction.
+fn save_with<C: GenericClient, T: ?Sized + ToStatement>(
+    connection: &mut C,
+    statement: &T,
+    snapshot: &CharacterSnapshot,
+) -> Result<(), StoreError> {
+    let (name, item_locations_json) = encode_character_row(snapshot)?;
     let updated = connection.execute(
-        "UPDATE characters
-         SET name = $1, room_id = $2, item_locations_json = $3,
-             updated_at = floor(extract(epoch FROM now()))::BIGINT
-         WHERE id = $4 AND account_id = $5",
+        statement,
         &[
             &name,
             &snapshot.room_id,
@@ -1999,40 +2080,128 @@ fn load_runtime_snapshot<C: GenericClient>(
     load_durable_runtime_snapshot(connection).map(|snapshot| snapshot.map(|(_, snapshot)| snapshot))
 }
 
+fn load_stored_runtime<C: GenericClient>(
+    connection: &mut C,
+    for_update: bool,
+) -> Result<Option<runtime_sections::StoredRuntime>, StoreError> {
+    tiamud_persistence_postgres::runtime_sections::load_stored_runtime(connection, for_update)
+        .map_err(|error| match error {
+            tiamud_persistence_postgres::runtime_sections::RuntimeRowsError::Postgres(error) => {
+                StoreError::Postgres(error)
+            }
+            tiamud_persistence_postgres::runtime_sections::RuntimeRowsError::Sections(error) => {
+                runtime_section_error(error)
+            }
+        })
+}
+
 fn load_runtime_snapshot_for_update<C: GenericClient>(
     connection: &mut C,
 ) -> Result<Option<WorldRuntimeSnapshot>, StoreError> {
-    connection
-        .query_opt(
-            "SELECT snapshot_version, snapshot_json
-             FROM world_runtime WHERE singleton = 1 FOR UPDATE",
-            &[],
-        )?
-        .map(|row| {
-            let snapshot_version: i64 = row.get(0);
-            let json: String = row.get(1);
-            decode_runtime_snapshot(snapshot_version, &json)
-        })
+    load_stored_runtime(connection, true)?
+        .map(|stored| decode_stored_runtime(&stored).map(|(_, snapshot)| snapshot))
         .transpose()
 }
 
 fn load_durable_runtime_snapshot<C: GenericClient>(
     connection: &mut C,
 ) -> Result<Option<(u32, WorldRuntimeSnapshot)>, StoreError> {
-    connection
+    load_stored_runtime(connection, false)?
+        .map(|stored| decode_stored_runtime(&stored))
+        .transpose()
+}
+
+/// PostgreSQL twin of the SQLite `persist_runtime` (ADR 0035): head and
+/// manifest always, only the planned sections, the `world_adventure` mirror
+/// when its section changed, the watermark and ledger compaction. The head
+/// row is locked first so the plan is computed from the manifest it replaces.
+fn persist_runtime<C: GenericClient>(
+    transaction: &mut C,
+    runtime: &WorldRuntimeSnapshot,
+    encoded: EncodedRuntime,
+    event_retention: i64,
+) -> Result<(), StoreError> {
+    let previous = transaction
         .query_opt(
-            "SELECT snapshot_version, snapshot_json FROM world_runtime WHERE singleton = 1",
+            "SELECT snapshot_version, manifest_json
+             FROM world_runtime WHERE singleton = 1 FOR UPDATE",
             &[],
         )?
-        .map(|row| {
-            let snapshot_version: i64 = row.get(0);
-            let json: String = row.get(1);
-            let durable_version =
-                u32::try_from(snapshot_version).map_err(|_| StoreError::InvalidRuntimeSnapshot)?;
-            decode_runtime_snapshot(snapshot_version, &json)
-                .map(|snapshot| (durable_version, snapshot))
-        })
-        .transpose()
+        .map(|row| (row.get::<_, i64>(0), row.get::<_, String>(1)));
+    let plan = plan_runtime_write(previous, runtime, encoded)?;
+    if plan.replace_all {
+        transaction.execute("DELETE FROM world_runtime_sections", &[])?;
+    }
+    if !plan.sections.is_empty() {
+        let upsert = transaction.prepare(
+            "INSERT INTO world_runtime_sections
+                 (section, revision, section_json, section_sha256, updated_at)
+             VALUES ($1, $2, $3, $4, floor(extract(epoch FROM now()))::BIGINT)
+             ON CONFLICT(section) DO UPDATE SET
+                 revision = excluded.revision,
+                 section_json = excluded.section_json,
+                 section_sha256 = excluded.section_sha256,
+                 updated_at = excluded.updated_at",
+        )?;
+        for section in &plan.sections {
+            transaction.execute(
+                &upsert,
+                &[
+                    &section.section.field_name(),
+                    &plan.revision,
+                    &section.json,
+                    &section.sha256,
+                ],
+            )?;
+        }
+    }
+    if let Some(world_adventure_json) = plan.world_adventure_json() {
+        transaction.execute(
+            "INSERT INTO world_adventure (singleton, state_json, updated_at)
+             VALUES (1, $1, floor(extract(epoch FROM now()))::BIGINT)
+             ON CONFLICT(singleton) DO UPDATE SET
+                 state_json = excluded.state_json,
+                 updated_at = excluded.updated_at",
+            &[&world_adventure_json],
+        )?;
+    }
+    let last_event_sequence: i64 = transaction
+        .query_one(
+            "SELECT GREATEST(
+                 COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
+                 COALESCE((SELECT last_event_sequence FROM world_runtime
+                           WHERE singleton = 1), 0)
+             )",
+            &[],
+        )?
+        .get(0);
+    transaction.execute(
+        "INSERT INTO world_runtime
+             (singleton, snapshot_version, head_json, manifest_json,
+              last_event_sequence, updated_at)
+         VALUES (1, $1, $2, $3, $4, floor(extract(epoch FROM now()))::BIGINT)
+         ON CONFLICT(singleton) DO UPDATE SET
+             snapshot_version = excluded.snapshot_version,
+             head_json = excluded.head_json,
+             manifest_json = excluded.manifest_json,
+             last_event_sequence = excluded.last_event_sequence,
+             updated_at = excluded.updated_at",
+        &[
+            &plan.snapshot_version,
+            &plan.head_json,
+            &plan.manifest_json,
+            &last_event_sequence,
+        ],
+    )?;
+    transaction.execute(
+        // Prepared parameters are initially `unknown` to PostgreSQL. Keep the
+        // casts on both arithmetic operands so PostgreSQL 18 can resolve `-`.
+        "DELETE FROM domain_events
+         WHERE sequence <= ($1::BIGINT - $2::BIGINT)
+           AND sequence <= $1::BIGINT",
+        &[&last_event_sequence, &event_retention],
+    )?;
+    Ok(())
 }
 
 fn has_durable_character_authority<C: GenericClient>(
@@ -2136,48 +2305,8 @@ fn persist_area_runtime<C: GenericClient>(
     transaction: &mut C,
     runtime: &WorldRuntimeSnapshot,
 ) -> Result<(), StoreError> {
-    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
-    let adventure_json = bounded_json(
-        &runtime.adventure,
-        "world adventure",
-        MAX_RUNTIME_JSON_BYTES,
-    )?;
-    transaction.execute(
-        "INSERT INTO world_adventure (singleton, state_json, updated_at)
-         VALUES (1, $1, floor(extract(epoch FROM now()))::BIGINT)
-         ON CONFLICT(singleton) DO UPDATE SET
-             state_json = excluded.state_json,
-             updated_at = excluded.updated_at",
-        &[&adventure_json],
-    )?;
-    let last_event_sequence: i64 = transaction
-        .query_one(
-            "SELECT GREATEST(
-                 COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
-                 COALESCE((SELECT last_event_sequence FROM world_runtime
-                           WHERE singleton = 1), 0))",
-            &[],
-        )?
-        .get(0);
-    let snapshot_version = i64::from(runtime.snapshot_version);
-    transaction.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json,
-              last_event_sequence, updated_at)
-         VALUES (1, $1, $2, $3, floor(extract(epoch FROM now()))::BIGINT)
-         ON CONFLICT(singleton) DO UPDATE SET
-             snapshot_version = excluded.snapshot_version,
-             snapshot_json = excluded.snapshot_json,
-             last_event_sequence = excluded.last_event_sequence,
-             updated_at = excluded.updated_at",
-        &[&snapshot_version, &runtime_json, &last_event_sequence],
-    )?;
-    transaction.execute(
-        "DELETE FROM domain_events
-         WHERE sequence <= ($1::BIGINT - $2::BIGINT) AND sequence <= $1::BIGINT",
-        &[&last_event_sequence, &DOMAIN_EVENT_RETENTION],
-    )?;
-    Ok(())
+    let encoded = encode_runtime(runtime, RuntimeSectionSet::ALL)?;
+    persist_runtime(transaction, runtime, encoded, DOMAIN_EVENT_RETENTION)
 }
 
 fn commit_area_retirement(
@@ -2264,6 +2393,195 @@ fn commit_area_rehydration(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Story save slots (schema v16, ADR 0030)
+// ---------------------------------------------------------------------------
+
+/// Atomic upsert of one slot. `SELECT .. FOR UPDATE` on the account row
+/// serializes concurrent writers of the same account (also across processes)
+/// between the cap check and the write; the whole operation is one
+/// transaction.
+fn save_story_slot(
+    connection: &mut Client,
+    write: StorySaveWrite,
+    now: i64,
+) -> Result<StorySaveSummary, StoreError> {
+    let prepared = prepare_story_save(write)?;
+    // The shared contract bounds slot to 0..=9 and the version to 1..=255.
+    let slot = i16::try_from(prepared.slot).map_err(|_| StoreError::InvalidStorySave)?;
+    let state_format_version =
+        i32::try_from(prepared.state_format_version).map_err(|_| StoreError::InvalidStorySave)?;
+    let mut transaction = connection.transaction()?;
+    if transaction
+        .query_opt(
+            "SELECT id FROM accounts WHERE id = $1 FOR UPDATE",
+            &[&prepared.account_id.0],
+        )?
+        .is_none()
+    {
+        return Err(StoreError::AccountNotFound(prepared.account_id));
+    }
+    let totals = transaction.query_one(
+        "SELECT COUNT(DISTINCT story_id)::BIGINT,
+                COALESCE(SUM(octet_length(state_json)), 0)::BIGINT
+         FROM story_saves WHERE account_id = $1",
+        &[&prepared.account_id.0],
+    )?;
+    let stories_with_saves: i64 = totals.get(0);
+    let account_bytes: i64 = totals.get(1);
+    let story_has_saves: bool = transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM story_saves WHERE account_id = $1 AND story_id = $2)",
+            &[&prepared.account_id.0, &prepared.story_id],
+        )?
+        .get(0);
+    let replaced_bytes: i64 = transaction
+        .query_opt(
+            "SELECT octet_length(state_json)::BIGINT FROM story_saves
+             WHERE account_id = $1 AND story_id = $2 AND slot = $3",
+            &[&prepared.account_id.0, &prepared.story_id, &slot],
+        )?
+        .map_or(0, |row| row.get(0));
+    check_story_save_account_capacity(
+        stories_with_saves,
+        story_has_saves,
+        account_bytes,
+        replaced_bytes,
+        prepared.state_bytes,
+    )?;
+    let now = now.max(0);
+    transaction.execute(
+        "INSERT INTO story_saves
+             (account_id, story_id, slot, pack_id, pack_sha256,
+              state_format_version, state_json, state_sha256,
+              created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+         ON CONFLICT (account_id, story_id, slot) DO UPDATE SET
+             pack_id = EXCLUDED.pack_id,
+             pack_sha256 = EXCLUDED.pack_sha256,
+             state_format_version = EXCLUDED.state_format_version,
+             state_json = EXCLUDED.state_json,
+             state_sha256 = EXCLUDED.state_sha256,
+             updated_at = GREATEST(story_saves.created_at, EXCLUDED.updated_at)",
+        &[
+            &prepared.account_id.0,
+            &prepared.story_id,
+            &slot,
+            &prepared.pack_id,
+            &prepared.pack_sha256,
+            &state_format_version,
+            &prepared.state_json,
+            &prepared.state_sha256,
+            &now,
+        ],
+    )?;
+    let row = read_story_save_row(
+        &mut transaction,
+        prepared.account_id,
+        &prepared.story_id,
+        slot,
+    )?
+    .ok_or(StoreError::StorySaveCorrupt)?;
+    let record = decode_story_save_row(row)?;
+    transaction.commit()?;
+    Ok(record.summary)
+}
+
+fn read_story_save_row<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    story_id: &str,
+    slot: i16,
+) -> Result<Option<StorySaveRow>, StoreError> {
+    Ok(connection
+        .query_opt(
+            "SELECT story_id, slot, pack_id, pack_sha256, state_format_version,
+                    state_json, state_sha256, created_at, updated_at
+             FROM story_saves
+             WHERE account_id = $1 AND story_id = $2 AND slot = $3",
+            &[&account_id.0, &story_id, &slot],
+        )?
+        .map(|row| StorySaveRow {
+            story_id: row.get(0),
+            slot: i64::from(row.get::<_, i16>(1)),
+            pack_id: row.get(2),
+            pack_sha256: row.get(3),
+            state_format_version: i64::from(row.get::<_, i32>(4)),
+            state_json: row.get(5),
+            state_sha256: row.get(6),
+            created_at: row.get(7),
+            updated_at: row.get(8),
+        }))
+}
+
+fn load_story_slot<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    story_id: &str,
+    slot: StorySlot,
+    pack: &StoryPackCompatibility,
+) -> Result<Option<StorySaveRecord>, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    validate_story_pack_compatibility(pack)?;
+    let Some(row) = read_story_save_row(connection, account_id, story_id, i16::from(slot.get()))?
+    else {
+        return Ok(None);
+    };
+    let record = decode_story_save_row(row)?;
+    check_story_pack_compatibility(&record.summary, pack)?;
+    Ok(Some(record))
+}
+
+fn list_story_slots<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    story_id: &str,
+) -> Result<Vec<StorySaveSummary>, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    let limit = row_count(tiamud_persistence_sqlite::story_saves::STORY_SLOTS_PER_STORY + 1);
+    let rows = connection.query(
+        "SELECT story_id, slot, pack_id, pack_sha256, state_format_version,
+                octet_length(state_json)::BIGINT, state_sha256, created_at, updated_at
+         FROM story_saves
+         WHERE account_id = $1 AND story_id = $2
+         ORDER BY slot
+         LIMIT $3",
+        &[&account_id.0, &story_id, &limit],
+    )?;
+    if rows.len() > tiamud_persistence_sqlite::story_saves::STORY_SLOTS_PER_STORY {
+        return Err(StoreError::StorySaveCorrupt);
+    }
+    rows.into_iter()
+        .map(|row| {
+            decode_story_save_summary(
+                row.get(0),
+                i64::from(row.get::<_, i16>(1)),
+                row.get(2),
+                row.get(3),
+                i64::from(row.get::<_, i32>(4)),
+                row.get(5),
+                row.get(6),
+                row.get(7),
+                row.get(8),
+            )
+        })
+        .collect()
+}
+
+fn delete_story_slot<C: GenericClient>(
+    connection: &mut C,
+    account_id: AccountId,
+    story_id: &str,
+    slot: StorySlot,
+) -> Result<bool, StoreError> {
+    validate_story_lookup(account_id, story_id)?;
+    let deleted = connection.execute(
+        "DELETE FROM story_saves WHERE account_id = $1 AND story_id = $2 AND slot = $3",
+        &[&account_id.0, &story_id, &i16::from(slot.get())],
+    )?;
+    Ok(deleted == 1)
+}
+
 fn bind_area_generation_if_absent(
     connection: &mut Client,
     generation: &DurableAreaGeneration,
@@ -2295,12 +2613,7 @@ fn commit_area_generation_activation(
     next: &DurableAreaGeneration,
 ) -> Result<(), StoreError> {
     validate_area_generation_transition(expected, next)?;
-    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
-    let world_adventure_json = bounded_json(
-        &runtime.adventure,
-        "world adventure",
-        MAX_RUNTIME_JSON_BYTES,
-    )?;
+    let encoded = encode_runtime(runtime, RuntimeSectionSet::ALL)?;
     let expected_sequence = i64::try_from(expected.activation_sequence)
         .map_err(|_| StoreError::InvalidAreaGeneration)?;
     let next_sequence =
@@ -2341,43 +2654,7 @@ fn commit_area_generation_activation(
     if changed != 1 {
         return Err(StoreError::AreaGenerationConflict);
     }
-    transaction.execute(
-        "INSERT INTO world_adventure (singleton, state_json, updated_at)
-         VALUES (1, $1, floor(extract(epoch FROM now()))::BIGINT)
-         ON CONFLICT(singleton) DO UPDATE SET
-             state_json = excluded.state_json,
-             updated_at = excluded.updated_at",
-        &[&world_adventure_json],
-    )?;
-    let last_event_sequence: i64 = transaction
-        .query_one(
-            "SELECT GREATEST(
-                 COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
-                 COALESCE((SELECT last_event_sequence FROM world_runtime
-                           WHERE singleton = 1), 0)
-             )",
-            &[],
-        )?
-        .get(0);
-    let snapshot_version = i64::from(runtime.snapshot_version);
-    transaction.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json,
-              last_event_sequence, updated_at)
-         VALUES (1, $1, $2, $3, floor(extract(epoch FROM now()))::BIGINT)
-         ON CONFLICT(singleton) DO UPDATE SET
-             snapshot_version = excluded.snapshot_version,
-             snapshot_json = excluded.snapshot_json,
-             last_event_sequence = excluded.last_event_sequence,
-             updated_at = excluded.updated_at",
-        &[&snapshot_version, &runtime_json, &last_event_sequence],
-    )?;
-    transaction.execute(
-        "DELETE FROM domain_events
-         WHERE sequence <= ($1::BIGINT - $2::BIGINT)
-           AND sequence <= $1::BIGINT",
-        &[&last_event_sequence, &DOMAIN_EVENT_RETENTION],
-    )?;
+    persist_runtime(&mut transaction, runtime, encoded, DOMAIN_EVENT_RETENTION)?;
     transaction.commit()?;
     Ok(())
 }
@@ -2441,12 +2718,14 @@ fn commit_action(
     connection: &mut Client,
     characters: &[DurableCharacterSnapshot],
     runtime: &WorldRuntimeSnapshot,
+    sections: RuntimeSectionSet,
     events: &[DomainEvent],
 ) -> Result<(), StoreError> {
     commit_action_with_retention(
         connection,
         characters,
         runtime,
+        sections,
         events,
         DOMAIN_EVENT_RETENTION,
         None,
@@ -2465,169 +2744,149 @@ fn commit_staff_action(
         connection,
         characters,
         runtime,
+        RuntimeSectionSet::ALL,
         events,
         DOMAIN_EVENT_RETENTION,
         Some((audit, now)),
     )
 }
 
-fn commit_action_with_retention(
+/// Characters-only commit (ADR 0027): the same character rows that
+/// `commit_action_with_retention` writes, in one transaction, without
+/// touching the runtime snapshot, world adventure row or event ledger.
+fn commit_characters_only(
     connection: &mut Client,
     characters: &[DurableCharacterSnapshot],
-    runtime: &WorldRuntimeSnapshot,
-    events: &[DomainEvent],
-    event_retention: i64,
-    staff_audit: Option<(StaffAuditRecord, i64)>,
 ) -> Result<(), StoreError> {
-    debug_assert!(event_retention > 0);
-    let gameplay_json = characters
+    let rows = characters
         .iter()
         .map(|snapshot| {
-            bounded_json(
-                &snapshot.gameplay,
-                "character gameplay",
-                MAX_CHARACTER_JSON_BYTES,
-            )
+            Ok::<_, StoreError>((
+                snapshot,
+                encode_character_gameplay(&snapshot.gameplay)?,
+                encode_character_adventure(&snapshot.gameplay)?,
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let adventure_json = characters
-        .iter()
-        .map(|snapshot| {
-            bounded_json(
-                &serde_json::json!({
-                    "coins": snapshot.gameplay.coins,
-                    "commodities": snapshot.gameplay.commodities,
-                    "quests": snapshot.gameplay.quests,
-                }),
-                "character adventure",
-                MAX_CHARACTER_JSON_BYTES,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let runtime_json = bounded_json(runtime, "world runtime", MAX_RUNTIME_JSON_BYTES)?;
-    let world_adventure_json = bounded_json(
-        &runtime.adventure,
-        "world adventure",
-        MAX_RUNTIME_JSON_BYTES,
-    )?;
-    let event_json = events
-        .iter()
-        .map(|event| bounded_json(event, "domain event", MAX_EVENT_JSON_BYTES))
-        .collect::<Result<Vec<_>, _>>()?;
-    let staff_audit = staff_audit
-        .map(|(audit, now)| prepare_staff_audit(audit).map(|audit| (audit, now)))
-        .transpose()?;
-
     let mut transaction = connection.transaction()?;
-    if let Some((audit, _)) = &staff_audit {
-        validate_staff_authority(&mut transaction, audit, None, audit.target_account_id)?;
-    }
-    for ((snapshot, gameplay_json), adventure_json) in
-        characters.iter().zip(gameplay_json).zip(adventure_json)
-    {
-        save(&mut transaction, &snapshot.character)?;
-        let updated = transaction.execute(
+    if !rows.is_empty() {
+        let save_character = transaction.prepare(SAVE_CHARACTER_SQL)?;
+        let update_gameplay = transaction.prepare(
             "UPDATE characters
              SET gameplay_json = $1,
                  updated_at = floor(extract(epoch FROM now()))::BIGINT
              WHERE id = $2 AND account_id = $3",
-            &[
-                &gameplay_json,
-                &snapshot.character.id.0,
-                &snapshot.character.account_id.0,
-            ],
         )?;
-        if updated == 0 {
-            return Err(StoreError::CharacterNotFound {
-                account_id: snapshot.character.account_id,
-                character_id: snapshot.character.id,
-            });
-        }
-        transaction.execute(
+        let upsert_adventure = transaction.prepare(
             "INSERT INTO character_adventure (character_id, state_json, updated_at)
              VALUES ($1, $2, floor(extract(epoch FROM now()))::BIGINT)
              ON CONFLICT(character_id) DO UPDATE SET
                  state_json = excluded.state_json,
                  updated_at = excluded.updated_at",
-            &[&snapshot.character.id.0, &adventure_json],
         )?;
-    }
-    transaction.execute(
-        "INSERT INTO world_adventure (singleton, state_json, updated_at)
-         VALUES (1, $1, floor(extract(epoch FROM now()))::BIGINT)
-         ON CONFLICT(singleton) DO UPDATE SET
-             state_json = excluded.state_json,
-             updated_at = excluded.updated_at",
-        &[&world_adventure_json],
-    )?;
-    for json in event_json {
-        transaction.execute(
-            "INSERT INTO domain_events (event_json) VALUES ($1)",
-            &[&json],
-        )?;
-    }
-    let last_event_sequence: i64 = transaction
-        .query_one(
-            "SELECT GREATEST(
-                 COALESCE((SELECT MAX(sequence) FROM domain_events), 0),
-                 COALESCE((SELECT last_event_sequence FROM world_runtime
-                           WHERE singleton = 1), 0)
-             )",
-            &[],
-        )?
-        .get(0);
-    let snapshot_version = i64::from(runtime.snapshot_version);
-    transaction.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json,
-              last_event_sequence, updated_at)
-         VALUES (1, $1, $2, $3, floor(extract(epoch FROM now()))::BIGINT)
-         ON CONFLICT(singleton) DO UPDATE SET
-             snapshot_version = excluded.snapshot_version,
-             snapshot_json = excluded.snapshot_json,
-             last_event_sequence = excluded.last_event_sequence,
-             updated_at = excluded.updated_at",
-        &[&snapshot_version, &runtime_json, &last_event_sequence],
-    )?;
-    transaction.execute(
-        // Prepared parameters are initially `unknown` to PostgreSQL. Keep the
-        // casts on both arithmetic operands so PostgreSQL 18 can resolve `-`.
-        "DELETE FROM domain_events
-         WHERE sequence <= ($1::BIGINT - $2::BIGINT)
-           AND sequence <= $1::BIGINT",
-        &[&last_event_sequence, &event_retention],
-    )?;
-    if let Some((audit, now)) = &staff_audit {
-        insert_staff_audit(&mut transaction, audit, *now)?;
+        for (snapshot, gameplay_json, adventure_json) in rows {
+            save_with(&mut transaction, &save_character, &snapshot.character)?;
+            let updated = transaction.execute(
+                &update_gameplay,
+                &[
+                    &gameplay_json,
+                    &snapshot.character.id.0,
+                    &snapshot.character.account_id.0,
+                ],
+            )?;
+            if updated == 0 {
+                return Err(StoreError::CharacterNotFound {
+                    account_id: snapshot.character.account_id,
+                    character_id: snapshot.character.id,
+                });
+            }
+            transaction.execute(
+                &upsert_adventure,
+                &[&snapshot.character.id.0, &adventure_json],
+            )?;
+        }
     }
     transaction.commit()?;
     Ok(())
 }
 
-fn role_from_database(value: &str) -> Result<AccountRole, StoreError> {
-    match value {
-        "player" => Ok(AccountRole::Player),
-        "moderator" => Ok(AccountRole::Moderator),
-        "admin" => Ok(AccountRole::Admin),
-        _ => Err(StoreError::InvalidSocialInput),
-    }
-}
+fn commit_action_with_retention(
+    connection: &mut Client,
+    characters: &[DurableCharacterSnapshot],
+    runtime: &WorldRuntimeSnapshot,
+    sections: RuntimeSectionSet,
+    events: &[DomainEvent],
+    event_retention: i64,
+    staff_audit: Option<(StaffAuditRecord, i64)>,
+) -> Result<(), StoreError> {
+    debug_assert!(event_retention > 0);
+    let EncodedActionCommit {
+        gameplay_json,
+        adventure_json,
+        runtime: encoded_runtime,
+        event_json,
+        staff_audit,
+    } = encode_action_commit(characters, runtime, sections, events, staff_audit)?;
 
-fn role_as_database(role: AccountRole) -> &'static str {
-    match role {
-        AccountRole::Player => "player",
-        AccountRole::Moderator => "moderator",
-        AccountRole::Admin => "admin",
+    let mut transaction = connection.transaction()?;
+    if let Some((audit, _)) = &staff_audit {
+        validate_staff_authority(&mut transaction, audit, None, audit.target_account_id)?;
     }
-}
-
-fn social_channel_from_database(value: &str) -> Result<SocialChannelName, StoreError> {
-    match value {
-        "general" => Ok(SocialChannelName::General),
-        "newbie" => Ok(SocialChannelName::Newbie),
-        "staff" => Ok(SocialChannelName::Staff),
-        _ => Err(StoreError::InvalidSocialInput),
+    // Statements repeated per character or per event are prepared once per
+    // transaction instead of once per execution. Order and atomicity are
+    // unchanged: every row is still written by the same transaction.
+    if !characters.is_empty() {
+        let save_character = transaction.prepare(SAVE_CHARACTER_SQL)?;
+        let update_gameplay = transaction.prepare(
+            "UPDATE characters
+             SET gameplay_json = $1,
+                 updated_at = floor(extract(epoch FROM now()))::BIGINT
+             WHERE id = $2 AND account_id = $3",
+        )?;
+        let upsert_adventure = transaction.prepare(
+            "INSERT INTO character_adventure (character_id, state_json, updated_at)
+             VALUES ($1, $2, floor(extract(epoch FROM now()))::BIGINT)
+             ON CONFLICT(character_id) DO UPDATE SET
+                 state_json = excluded.state_json,
+                 updated_at = excluded.updated_at",
+        )?;
+        for ((snapshot, gameplay_json), adventure_json) in
+            characters.iter().zip(gameplay_json).zip(adventure_json)
+        {
+            save_with(&mut transaction, &save_character, &snapshot.character)?;
+            let updated = transaction.execute(
+                &update_gameplay,
+                &[
+                    &gameplay_json,
+                    &snapshot.character.id.0,
+                    &snapshot.character.account_id.0,
+                ],
+            )?;
+            if updated == 0 {
+                return Err(StoreError::CharacterNotFound {
+                    account_id: snapshot.character.account_id,
+                    character_id: snapshot.character.id,
+                });
+            }
+            transaction.execute(
+                &upsert_adventure,
+                &[&snapshot.character.id.0, &adventure_json],
+            )?;
+        }
     }
+    if !event_json.is_empty() {
+        let insert_event =
+            transaction.prepare("INSERT INTO domain_events (event_json) VALUES ($1)")?;
+        for json in event_json {
+            transaction.execute(&insert_event, &[&json])?;
+        }
+    }
+    persist_runtime(&mut transaction, runtime, encoded_runtime, event_retention)?;
+    if let Some((audit, now)) = &staff_audit {
+        insert_staff_audit(&mut transaction, audit, *now)?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn ensure_social_character_exists<C: GenericClient>(
@@ -2852,14 +3111,6 @@ fn set_social_channel_subscription(
     Ok(())
 }
 
-fn normalise_mail_text(value: &str, maximum: usize) -> Result<String, StoreError> {
-    if !valid_mail_visible_text(value, maximum) {
-        Err(StoreError::InvalidMailInput)
-    } else {
-        Ok(value.to_owned())
-    }
-}
-
 fn send_mail(
     connection: &mut Client,
     sender: CharacterId,
@@ -2914,36 +3165,20 @@ fn send_mail(
          FROM social_mail_usage WHERE account_id = $1 FOR UPDATE",
         &[&sender_account],
     )?;
-    let (hour_started_at, hour_count, day_started_at, day_count) =
-        usage.map_or((now, 0_i64, now, 0_i64), |row| {
-            let stored_hour: i64 = row.get(0);
-            let stored_hour_count: i32 = row.get(1);
-            let stored_day: i64 = row.get(2);
-            let stored_day_count: i32 = row.get(3);
-            let hour_expired =
-                now < stored_hour || now.saturating_sub(stored_hour) >= MAIL_HOUR_SECONDS;
-            let day_expired =
-                now < stored_day || now.saturating_sub(stored_day) >= MAIL_DAY_SECONDS;
-            (
-                if hour_expired { now } else { stored_hour },
-                if hour_expired {
-                    0
-                } else {
-                    i64::from(stored_hour_count)
-                },
-                if day_expired { now } else { stored_day },
-                if day_expired {
-                    0
-                } else {
-                    i64::from(stored_day_count)
-                },
-            )
-        });
-    if hour_count >= MAIL_HOURLY_CAPACITY || day_count >= MAIL_DAILY_CAPACITY {
+    let window = usage.map_or(QuotaWindow::empty(now), |row| {
+        QuotaWindow {
+            hour_started_at: row.get(0),
+            hour_count: i64::from(row.get::<_, i32>(1)),
+            day_started_at: row.get(2),
+            day_count: i64::from(row.get::<_, i32>(3)),
+        }
+        .rolled(now)
+    });
+    if window.exhausted(MAIL_HOURLY_CAPACITY, MAIL_DAILY_CAPACITY) {
         return Err(StoreError::MailRateLimited);
     }
-    let next_hour_count = i32::try_from(hour_count + 1).expect("mail hourly cap fits i32");
-    let next_day_count = i32::try_from(day_count + 1).expect("mail daily cap fits i32");
+    let next_hour_count = next_quota_count(window.hour_count).ok_or(StoreError::MailRateLimited)?;
+    let next_day_count = next_quota_count(window.day_count).ok_or(StoreError::MailRateLimited)?;
     transaction.execute(
         "INSERT INTO social_mail_usage
              (account_id, hour_started_at, hour_count,
@@ -2957,9 +3192,9 @@ fn send_mail(
              updated_at = excluded.updated_at",
         &[
             &sender_account,
-            &hour_started_at,
+            &window.hour_started_at,
             &next_hour_count,
-            &day_started_at,
+            &window.day_started_at,
             &next_day_count,
             &now,
         ],
@@ -3049,9 +3284,7 @@ fn send_mail(
         .get(0);
     let suppressed = recipient_banned
         || policy_suppressed
-        || mailbox_count >= MAILBOX_CAPACITY
-        || mailbox_bytes.saturating_add(added_bytes) > MAILBOX_BYTE_CAPACITY
-        || global_count >= MAIL_GLOBAL_CAPACITY;
+        || mail_delivery_exceeds_capacity(mailbox_count, mailbox_bytes, added_bytes, global_count);
     if suppressed {
         transaction.commit()?;
         return Ok(MailSendResult::Suppressed);
@@ -3083,7 +3316,7 @@ fn mailbox_page(
     page: u32,
     now: i64,
 ) -> Result<MailPage, StoreError> {
-    if !(1..=u32::try_from(MAIL_MAX_PAGES).expect("mail page cap fits u32")).contains(&page) {
+    if !(1..=MAIL_MAX_PAGES).contains(&i64::from(page)) {
         return Err(StoreError::InvalidMailInput);
     }
     ensure_social_character_exists(connection, recipient)?;
@@ -3096,11 +3329,11 @@ fn mailbox_page(
     )?;
     let total: i64 = totals.get(0);
     let unread: i64 = totals.get(1);
-    let total_pages = ((total + MAIL_PAGE_SIZE - 1) / MAIL_PAGE_SIZE).max(1);
+    let total_pages = (total.saturating_add(MAIL_PAGE_SIZE - 1) / MAIL_PAGE_SIZE).max(1);
     if total_pages > MAIL_MAX_PAGES {
         return Err(StoreError::InvalidMailInput);
     }
-    let offset = (i64::from(page) - 1) * MAIL_PAGE_SIZE;
+    let offset = (i64::from(page) - 1).saturating_mul(MAIL_PAGE_SIZE);
     let messages = connection
         .query(
             "SELECT public_id, sender_name, subject, created_at, expires_at,
@@ -3126,7 +3359,7 @@ fn mailbox_page(
         total_pages: u32::try_from(total_pages).map_err(|_| StoreError::InvalidMailInput)?,
         total_messages: u32::try_from(total).map_err(|_| StoreError::InvalidMailInput)?,
         unread_count: u32::try_from(unread).map_err(|_| StoreError::InvalidMailInput)?,
-        capacity: u32::try_from(MAILBOX_CAPACITY).expect("mailbox cap fits u32"),
+        capacity: MAILBOX_CAPACITY,
         messages,
     })
 }
@@ -3243,9 +3476,7 @@ fn report_mail(
             &[&recipient_account],
         )?
         .get(0);
-    if open_reports >= MAIL_OPEN_REPORT_CAPACITY_PER_ACCOUNT {
-        return Err(StoreError::MailReportLimit);
-    }
+    check_mail_report_quota(open_reports)?;
     let evidence_count: i64 = transaction
         .query_one(
             "SELECT COUNT(*)::BIGINT FROM social_mail_report_evidence
@@ -3253,9 +3484,7 @@ fn report_mail(
             &[&now],
         )?
         .get(0);
-    if evidence_count >= MAIL_REPORT_EVIDENCE_GLOBAL_CAPACITY {
-        return Err(StoreError::MailEvidenceLimit);
-    }
+    check_mail_evidence_capacity(evidence_count)?;
 
     let report_id: i64 = transaction
         .query_one(
@@ -3331,8 +3560,8 @@ fn purge_expired_mail_rows<C: GenericClient>(
          RETURNING messages.id",
         &[&now, &limit],
     )?;
-    let message_count = i64::try_from(message_rows.len()).expect("purge batch fits i64");
-    let remaining = limit - message_count;
+    let message_count = row_count(message_rows.len());
+    let remaining = purge_remaining(limit, message_rows.len());
     if remaining == 0 {
         return Ok(message_count);
     }
@@ -3346,45 +3575,7 @@ fn purge_expired_mail_rows<C: GenericClient>(
          RETURNING evidence.report_id",
         &[&now, &remaining],
     )?;
-    Ok(message_count + i64::try_from(evidence_rows.len()).expect("purge batch fits i64"))
-}
-
-fn normalise_board_text(value: &str, maximum: usize) -> Result<String, StoreError> {
-    if valid_board_visible_text(value, maximum) {
-        Ok(value.to_owned())
-    } else {
-        Err(StoreError::InvalidBoardInput)
-    }
-}
-
-fn check_board_capacity(
-    account_count: i64,
-    board_count: i64,
-    board_bytes: i64,
-    global_count: i64,
-    global_bytes: i64,
-    added_bytes: i64,
-) -> Result<(), StoreError> {
-    if account_count >= i64::from(BOARD_ACCOUNT_CAPACITY)
-        || board_count >= i64::from(BOARD_CAPACITY_PER_BOARD)
-        || board_bytes.saturating_add(added_bytes) > BOARD_BYTE_CAPACITY_PER_BOARD
-        || global_count >= BOARD_GLOBAL_CAPACITY
-        || global_bytes.saturating_add(added_bytes) > BOARD_GLOBAL_BYTE_CAPACITY
-    {
-        Err(StoreError::BoardCapacity)
-    } else {
-        Ok(())
-    }
-}
-
-fn check_board_report_capacity(open_reports: i64, evidence_count: i64) -> Result<(), StoreError> {
-    if open_reports >= BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT {
-        Err(StoreError::BoardReportLimit)
-    } else if evidence_count >= BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY {
-        Err(StoreError::BoardEvidenceLimit)
-    } else {
-        Ok(())
-    }
+    Ok(message_count.saturating_add(row_count(evidence_rows.len())))
 }
 
 fn consume_board_usage<C: GenericClient>(
@@ -3397,36 +3588,21 @@ fn consume_board_usage<C: GenericClient>(
          FROM social_board_usage WHERE account_id = $1 FOR UPDATE",
         &[&account_id.0],
     )?;
-    let (hour_started_at, hour_count, day_started_at, day_count) =
-        usage.map_or((now, 0_i64, now, 0_i64), |row| {
-            let stored_hour: i64 = row.get(0);
-            let stored_hour_count: i32 = row.get(1);
-            let stored_day: i64 = row.get(2);
-            let stored_day_count: i32 = row.get(3);
-            let hour_expired =
-                now < stored_hour || now.saturating_sub(stored_hour) >= MAIL_HOUR_SECONDS;
-            let day_expired =
-                now < stored_day || now.saturating_sub(stored_day) >= MAIL_DAY_SECONDS;
-            (
-                if hour_expired { now } else { stored_hour },
-                if hour_expired {
-                    0
-                } else {
-                    i64::from(stored_hour_count)
-                },
-                if day_expired { now } else { stored_day },
-                if day_expired {
-                    0
-                } else {
-                    i64::from(stored_day_count)
-                },
-            )
-        });
-    if hour_count >= BOARD_HOURLY_CAPACITY || day_count >= BOARD_DAILY_CAPACITY {
+    let window = usage.map_or(QuotaWindow::empty(now), |row| {
+        QuotaWindow {
+            hour_started_at: row.get(0),
+            hour_count: i64::from(row.get::<_, i32>(1)),
+            day_started_at: row.get(2),
+            day_count: i64::from(row.get::<_, i32>(3)),
+        }
+        .rolled(now)
+    });
+    if window.exhausted(BOARD_HOURLY_CAPACITY, BOARD_DAILY_CAPACITY) {
         return Err(StoreError::BoardRateLimited);
     }
-    let next_hour_count = i32::try_from(hour_count + 1).expect("board hourly cap fits i32");
-    let next_day_count = i32::try_from(day_count + 1).expect("board daily cap fits i32");
+    let next_hour_count =
+        next_quota_count(window.hour_count).ok_or(StoreError::BoardRateLimited)?;
+    let next_day_count = next_quota_count(window.day_count).ok_or(StoreError::BoardRateLimited)?;
     connection.execute(
         "INSERT INTO social_board_usage
              (account_id, hour_started_at, hour_count,
@@ -3440,9 +3616,9 @@ fn consume_board_usage<C: GenericClient>(
              updated_at = excluded.updated_at",
         &[
             &account_id.0,
-            &hour_started_at,
+            &window.hour_started_at,
             &next_hour_count,
-            &day_started_at,
+            &window.day_started_at,
             &next_day_count,
             &now,
         ],
@@ -3820,8 +3996,8 @@ fn purge_expired_boards(connection: &mut Client, now: i64) -> Result<u64, StoreE
          USING expired WHERE posts.id = expired.id RETURNING posts.id",
         &[&now, &BOARD_PURGE_LIMIT],
     )?;
-    let post_count = i64::try_from(post_rows.len()).expect("board purge batch fits i64");
-    let remaining = BOARD_PURGE_LIMIT - post_count;
+    let post_count = row_count(post_rows.len());
+    let remaining = purge_remaining(BOARD_PURGE_LIMIT, post_rows.len());
     let evidence_count = if remaining > 0 {
         let rows = transaction.query(
             "WITH expired AS (
@@ -3833,7 +4009,7 @@ fn purge_expired_boards(connection: &mut Client, now: i64) -> Result<u64, StoreE
              RETURNING evidence.report_id",
             &[&now, &remaining],
         )?;
-        i64::try_from(rows.len()).expect("board evidence purge batch fits i64")
+        row_count(rows.len())
     } else {
         0
     };
@@ -3878,16 +4054,6 @@ fn report_character(
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct PreparedStaffAudit {
-    actor_account_id: AccountId,
-    target_account_id: Option<AccountId>,
-    capability: StaffCapability,
-    action: String,
-    reason: String,
-    details_json: String,
-}
-
 fn staff_access<C: GenericClient>(
     connection: &mut C,
     character_id: CharacterId,
@@ -3918,74 +4084,19 @@ fn staff_access_by_account<C: GenericClient>(
     let role: String = row.get(0);
     let profile: Option<String> = row.get(1);
     let lore_title: Option<String> = row.get(2);
-    let profile = profile
-        .as_deref()
-        .map(|value| {
-            StaffProfileKey::parse(value)
-                .ok_or_else(|| StoreError::InvalidStaffState(format!("profile {value:?}")))
-        })
-        .transpose()?;
-    let capabilities = connection
-        .query(
-            "SELECT capability FROM staff_capability_assignments
-             WHERE account_id = $1 ORDER BY capability",
-            &[&account_id.0],
-        )?
-        .into_iter()
-        .map(|row| {
-            let value: String = row.get(0);
-            StaffCapability::parse(&value)
-                .ok_or_else(|| StoreError::InvalidStaffState(format!("capability {value:?}")))
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if profile.is_none() && !capabilities.is_empty() {
-        return Err(StoreError::InvalidStaffState(format!(
-            "account {} has capabilities without a profile",
-            account_id.0
-        )));
-    }
-    Ok(StaffAccess {
+    let profile = parse_staff_profile(profile.as_deref())?;
+    let capabilities = connection.query(
+        "SELECT capability FROM staff_capability_assignments
+         WHERE account_id = $1 ORDER BY capability",
+        &[&account_id.0],
+    )?;
+    staff_access_from_rows(
         account_id,
-        role: role_from_database(&role)?,
+        &role,
         profile,
         lore_title,
-        capabilities,
-    })
-}
-
-fn prepare_staff_audit(record: StaffAuditRecord) -> Result<PreparedStaffAudit, StoreError> {
-    let action = normalise_staff_text(&record.action, MAX_STAFF_ACTION_BYTES)?;
-    let reason = normalise_staff_text(&record.reason, MAX_SOCIAL_REASON_BYTES)?;
-    let details_json = serde_json::to_string(&record.details)?;
-    if details_json.len() > MAX_AUDIT_DETAILS_BYTES {
-        return Err(StoreError::InvalidStaffInput);
-    }
-    if record.target_account_id == Some(record.actor_account_id) {
-        return Err(StoreError::StaffHierarchy);
-    }
-    Ok(PreparedStaffAudit {
-        actor_account_id: record.actor_account_id,
-        target_account_id: record.target_account_id,
-        capability: record.capability,
-        action,
-        reason,
-        details_json,
-    })
-}
-
-fn normalise_staff_text(value: &str, maximum: usize) -> Result<String, StoreError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
-        Err(StoreError::InvalidStaffInput)
-    } else {
-        Ok(value.to_owned())
-    }
-}
-
-fn normalise_lore_title(value: Option<&str>) -> Result<Option<String>, StoreError> {
-    value
-        .map(|value| normalise_staff_text(value, MAX_STAFF_LORE_TITLE_BYTES))
-        .transpose()
+        capabilities.into_iter().map(|row| row.get::<_, String>(0)),
+    )
 }
 
 fn validate_staff_authority<C: GenericClient>(
@@ -3994,31 +4105,9 @@ fn validate_staff_authority<C: GenericClient>(
     expected_capability: Option<StaffCapability>,
     target_account: Option<AccountId>,
 ) -> Result<StaffAccess, StoreError> {
-    if expected_capability.is_some_and(|expected| expected != audit.capability)
-        || audit.target_account_id != target_account
-    {
-        return Err(StoreError::StaffForbidden);
-    }
-    let actor = staff_access_by_account(connection, audit.actor_account_id)?;
-    if !actor.capabilities.contains(&audit.capability) {
-        return Err(StoreError::StaffForbidden);
-    }
-    let Some(actor_profile) = actor.profile else {
-        return Err(StoreError::StaffForbidden);
-    };
-    if let Some(target_account) = target_account {
-        if target_account == actor.account_id {
-            return Err(StoreError::StaffHierarchy);
-        }
-        let target = staff_access_by_account(connection, target_account)?;
-        if target
-            .profile
-            .is_some_and(|profile| profile.authority_rank() >= actor_profile.authority_rank())
-        {
-            return Err(StoreError::StaffHierarchy);
-        }
-    }
-    Ok(actor)
+    validate_staff_authority_with(audit, expected_capability, target_account, |account| {
+        staff_access_by_account(connection, account)
+    })
 }
 
 fn insert_staff_audit<C: GenericClient>(
@@ -4103,7 +4192,24 @@ fn staff_reports(
         .map(|row| {
             let evidence_sender: Option<String> = row.get(8);
             let board_key: Option<String> = row.get(14);
-            StaffReport {
+            let board_evidence = match board_key {
+                Some(board_key) => Some(BoardReportEvidence {
+                    board: BoardKey::parse(&board_key).ok_or_else(|| {
+                        StoreError::InvalidStaffState(format!(
+                            "board report evidence key {board_key:?}"
+                        ))
+                    })?,
+                    post_public_id: row.get(15),
+                    author_name: row.get(16),
+                    subject: row.get(17),
+                    body: row.get(18),
+                    posted_at: row.get(19),
+                    created_at: row.get(20),
+                    expires_at: row.get(21),
+                }),
+                None => None,
+            };
+            Ok(StaffReport {
                 id: row.get(0),
                 reporter_character_id: CharacterId(row.get(1)),
                 reporter_name: row.get(2),
@@ -4120,19 +4226,10 @@ fn staff_reports(
                     created_at: row.get(12),
                     expires_at: row.get(13),
                 }),
-                board_evidence: board_key.map(|board_key| BoardReportEvidence {
-                    board: BoardKey::parse(&board_key).expect("schema limits board keys"),
-                    post_public_id: row.get(15),
-                    author_name: row.get(16),
-                    subject: row.get(17),
-                    body: row.get(18),
-                    posted_at: row.get(19),
-                    created_at: row.get(20),
-                    expires_at: row.get(21),
-                }),
-            }
+                board_evidence,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, StoreError>>()?;
     transaction.commit()?;
     Ok(reports)
 }
@@ -4161,13 +4258,7 @@ fn resolve_staff_report(
         )?
         .map(|row| AccountId(row.get(0)))
         .ok_or(StoreError::StaffReportUnavailable(report_id))?;
-    if audit
-        .target_account_id
-        .is_some_and(|account_id| account_id != target_account)
-    {
-        return Err(StoreError::StaffForbidden);
-    }
-    audit.target_account_id = Some(target_account);
+    bind_report_audit_target(&mut audit, target_account)?;
     validate_staff_authority(
         &mut transaction,
         &audit,
@@ -4225,18 +4316,7 @@ fn set_staff_profile(
         Some(StaffCapability::StaffAssign),
         Some(target_account),
     )?;
-    let actor_profile = actor.profile.ok_or(StoreError::StaffForbidden)?;
-    if profile.is_some_and(|profile| profile.authority_rank() >= actor_profile.authority_rank()) {
-        return Err(StoreError::StaffHierarchy);
-    }
-    if profile.is_some_and(|profile| {
-        profile
-            .default_capabilities()
-            .iter()
-            .any(|capability| !actor.capabilities.contains(capability))
-    }) {
-        return Err(StoreError::StaffForbidden);
-    }
+    authorize_profile_assignment(&actor, profile)?;
     transaction.execute(
         "DELETE FROM staff_capability_assignments WHERE account_id = $1",
         &[&target_account.0],
@@ -4301,9 +4381,7 @@ fn set_staff_capability(
         Some(target_account),
     )?;
     let target = staff_access_by_account(&mut transaction, target_account)?;
-    if enabled && (target.profile.is_none() || !actor.capabilities.contains(&capability)) {
-        return Err(StoreError::StaffForbidden);
-    }
+    authorize_capability_change(&actor, &target, capability, enabled)?;
     if enabled {
         transaction.execute(
             "INSERT INTO staff_capability_assignments
@@ -4396,55 +4474,12 @@ fn moderate_character(
     if actor == target {
         return Err(StoreError::SocialSelfTarget);
     }
-    let (required_capability, action_name, reason, details) = match &action {
-        ModerationAction::Mute { expires_at, reason } => {
-            validate_expiry(*expires_at, now)?;
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::ModerationMute,
-                "mute",
-                reason.clone(),
-                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
-            )
-        }
-        ModerationAction::Unmute { reason } => {
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::ModerationMute,
-                "unmute",
-                reason.clone(),
-                serde_json::json!({"reason": reason}),
-            )
-        }
-        ModerationAction::Ban { expires_at, reason } => {
-            validate_expiry(*expires_at, now)?;
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::ModerationBan,
-                "ban",
-                reason.clone(),
-                serde_json::json!({"expiresAt": expires_at, "reason": reason}),
-            )
-        }
-        ModerationAction::Unban { reason } => {
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::ModerationBan,
-                "unban",
-                reason.clone(),
-                serde_json::json!({"reason": reason}),
-            )
-        }
-        ModerationAction::SetRole { role, reason } => {
-            let reason = normalise_staff_text(reason, MAX_SOCIAL_REASON_BYTES)?;
-            (
-                StaffCapability::StaffAssign,
-                "set_role",
-                reason.clone(),
-                serde_json::json!({"role": role_as_database(*role), "reason": reason}),
-            )
-        }
-    };
+    let PreparedModeration {
+        required_capability,
+        action_name,
+        reason,
+        details,
+    } = prepare_moderation(&action, now)?;
     let mut transaction = connection.transaction()?;
     let actor_profile = social_profile(&mut transaction, actor, now)?;
     let target_profile = social_profile(&mut transaction, target, now)?;
@@ -4557,16 +4592,6 @@ fn moderate_character(
     Ok(())
 }
 
-fn validate_expiry(expires_at: Option<i64>, now: i64) -> Result<(), StoreError> {
-    if expires_at.is_some_and(|expires_at| {
-        expires_at <= now || expires_at.saturating_sub(now) > MAX_MODERATION_DURATION_SECONDS
-    }) {
-        Err(StoreError::InvalidSocialInput)
-    } else {
-        Ok(())
-    }
-}
-
 fn revoke_active<C: GenericClient>(
     connection: &mut C,
     table: &str,
@@ -4587,15 +4612,6 @@ fn revoke_active<C: GenericClient>(
     Ok(())
 }
 
-fn normalise_social_text(value: &str, maximum: usize) -> Result<String, StoreError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
-        Err(StoreError::InvalidSocialInput)
-    } else {
-        Ok(value.to_owned())
-    }
-}
-
 fn append_audit<C: GenericClient>(
     connection: &mut C,
     actor: AccountId,
@@ -4604,10 +4620,7 @@ fn append_audit<C: GenericClient>(
     details: serde_json::Value,
     now: i64,
 ) -> Result<(), StoreError> {
-    let details_json = serde_json::to_string(&details)?;
-    if action.is_empty() || action.len() > 64 || details_json.len() > MAX_AUDIT_DETAILS_BYTES {
-        return Err(StoreError::InvalidSocialInput);
-    }
+    let details_json = encode_moderation_audit_details(action, &details)?;
     connection.execute(
         "INSERT INTO moderation_audit
              (actor_account_id, target_account_id, action, details_json, created_at)
@@ -4644,1470 +4657,5 @@ fn audit_log(connection: &mut Client) -> Result<Vec<AuditEntry>, StoreError> {
         .collect())
 }
 
-fn bounded_json<T: serde::Serialize>(
-    value: &T,
-    kind: &'static str,
-    maximum: usize,
-) -> Result<String, StoreError> {
-    let json = serde_json::to_string(value)?;
-    if json.len() > maximum {
-        return Err(StoreError::SnapshotTooLarge { kind, maximum });
-    }
-    Ok(json)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sha2::{Digest, Sha256};
-    use std::{collections::BTreeMap, env, process, time::Duration};
-    use tiamud_core::{
-        AdventureRuntimeSnapshot, AreaDynamicCheckpoint, AreaDynamicCheckpointIdentity,
-        AreaRuntimeResidence, Direction, ItemBinding, ItemInstanceId, ItemLocationSnapshot,
-        ItemProvenance, LootDropId, RuntimeItemInstanceSnapshot, RuntimeItemInstanceSnapshotV3,
-        RuntimeItemLocation, WORLD_RUNTIME_SNAPSHOT_VERSION, World, WorldRuntimeSnapshot,
-        WorldRuntimeSnapshotV3,
-    };
-
-    fn area_generation(
-        world_id: &str,
-        active: char,
-        previous: Option<char>,
-        activation_sequence: u64,
-    ) -> DurableAreaGeneration {
-        DurableAreaGeneration {
-            world_id: world_id.into(),
-            active_catalog_sha256: active.to_string().repeat(64),
-            previous_catalog_sha256: previous.map(|digest| digest.to_string().repeat(64)),
-            activation_sequence,
-        }
-    }
-
-    fn area_checkpoint(runtime: &WorldRuntimeSnapshot) -> DurableAreaCheckpoint {
-        let checkpoint = AreaDynamicCheckpoint {
-            checkpoint_version: tiamud_core::AREA_DYNAMIC_CHECKPOINT_VERSION,
-            generation_sha256: "a".repeat(64),
-            areas: vec![AreaDynamicCheckpointIdentity {
-                area_id: "demo:archive".into(),
-                revision: 1,
-                bundle_sha256: "d".repeat(64),
-                residency_epoch: 2,
-            }],
-            captured_world_revision: runtime.revision,
-            captured_logical_tick: runtime.logical_tick,
-            captured_rng_state: runtime.rng_state,
-            captured_next_item_instance_sequence: runtime.next_item_instance_sequence,
-            captured_next_loot_drop_id: runtime.next_loot_drop_id,
-            captured_next_reward_open_id: runtime.next_reward_open_id,
-            npcs: BTreeMap::new(),
-            item_instances: BTreeMap::new(),
-            item_provenance: BTreeMap::new(),
-            ground_loot: BTreeMap::new(),
-        };
-        tiamud_core::validate_area_dynamic_checkpoint(&checkpoint).unwrap();
-        let checkpoint_json = serde_json::to_string(&checkpoint).unwrap();
-        DurableAreaCheckpoint {
-            generation_sha256: checkpoint.generation_sha256.clone(),
-            unit_id: area_checkpoint_unit_id(&checkpoint),
-            residency_epoch: checkpoint.areas[0].residency_epoch,
-            checkpoint_version: checkpoint.checkpoint_version,
-            checkpoint_sha256: hex::encode(Sha256::digest(checkpoint_json.as_bytes())),
-            captured_logical_tick: checkpoint.captured_logical_tick,
-            checkpoint_json,
-        }
-    }
-
-    fn retired_runtime(
-        mut runtime: WorldRuntimeSnapshot,
-        durable: &DurableAreaCheckpoint,
-    ) -> WorldRuntimeSnapshot {
-        runtime.area_residency.insert(
-            "demo:archive".into(),
-            AreaRuntimeResidence::Retired {
-                revision: 1,
-                bundle_sha256: "d".repeat(64),
-                residency_epoch: durable.residency_epoch,
-                checkpoint_version: durable.checkpoint_version,
-                checkpoint_sha256: durable.checkpoint_sha256.clone(),
-            },
-        );
-        runtime
-    }
-
-    fn initial_resident_runtime(mut runtime: WorldRuntimeSnapshot) -> WorldRuntimeSnapshot {
-        runtime.area_residency.insert(
-            "demo:archive".into(),
-            AreaRuntimeResidence::Resident {
-                revision: 1,
-                bundle_sha256: "d".repeat(64),
-                residency_epoch: 1,
-            },
-        );
-        runtime
-    }
-
-    fn rehydrated_runtime(mut runtime: WorldRuntimeSnapshot) -> WorldRuntimeSnapshot {
-        runtime.area_residency.insert(
-            "demo:archive".into(),
-            AreaRuntimeResidence::Resident {
-                revision: 1,
-                bundle_sha256: "d".repeat(64),
-                residency_epoch: 3,
-            },
-        );
-        runtime
-    }
-
-    #[test]
-    fn postgres_mail_contract_keeps_exact_input_and_storage_bounds() {
-        assert_eq!(MAILBOX_CAPACITY, 64);
-        assert_eq!(MAILBOX_BYTE_CAPACITY, 128 * 1024);
-        assert_eq!(MAIL_PAGE_SIZE, 10);
-        assert_eq!(MAIL_MAX_PAGES, 7);
-        assert_eq!(MAIL_HOURLY_CAPACITY, 20);
-        assert_eq!(MAIL_DAILY_CAPACITY, 50);
-        assert_eq!(MAIL_GLOBAL_CAPACITY, 100_000);
-        assert_eq!(MAIL_PURGE_LIMIT, 256);
-        assert_eq!(
-            normalise_mail_text("subject", MAX_MAIL_SUBJECT_BYTES).unwrap(),
-            "subject"
-        );
-        assert!(matches!(
-            normalise_mail_text(" subject ", MAX_MAIL_SUBJECT_BYTES),
-            Err(StoreError::InvalidMailInput)
-        ));
-        assert!(matches!(
-            normalise_mail_text("bad\nbody", MAX_MAIL_BODY_BYTES),
-            Err(StoreError::InvalidMailInput)
-        ));
-        assert!(matches!(
-            normalise_name("A\u{202e}B", "character"),
-            Err(StoreError::InvalidName { kind: "character" })
-        ));
-        assert!(matches!(
-            normalise_name("A|B", "character"),
-            Err(StoreError::InvalidName { kind: "character" })
-        ));
-        assert!(valid_mail_public_id("m0123456789abcdef0123456789abcdef"));
-        assert!(!valid_mail_public_id("M0123456789abcdef0123456789abcdef"));
-    }
-
-    #[test]
-    fn postgres_board_contract_keeps_exact_limits_and_validation() {
-        assert_eq!(BOARD_ACCOUNT_CAPACITY, 64);
-        assert_eq!(BOARD_CAPACITY_PER_BOARD, 1_000);
-        assert_eq!(BOARD_BYTE_CAPACITY_PER_BOARD, 4 * 1_024 * 1_024);
-        assert_eq!(BOARD_GLOBAL_CAPACITY, 2_000);
-        assert_eq!(BOARD_GLOBAL_BYTE_CAPACITY, 8 * 1_024 * 1_024);
-        assert_eq!(BOARD_PAGE_SIZE, 10);
-        assert_eq!(BOARD_MAX_PAGES, 100);
-        assert_eq!(BOARD_HOURLY_CAPACITY, 5);
-        assert_eq!(BOARD_DAILY_CAPACITY, 20);
-        assert_eq!(BOARD_PURGE_LIMIT, 256);
-        assert_eq!(BOARD_RETENTION_SECONDS, 90 * MAIL_DAY_SECONDS);
-        assert!(valid_board_public_id("b0123456789abcdef0123456789abcdef"));
-        assert!(!valid_board_public_id("B0123456789abcdef0123456789abcdef"));
-        assert!(valid_board_subject("Visible subject"));
-        assert!(!valid_board_subject("Bad | subject"));
-        assert!(matches!(
-            normalise_board_text(" padded ", MAX_BOARD_SUBJECT_BYTES),
-            Err(StoreError::InvalidBoardInput)
-        ));
-        assert!(
-            check_board_capacity(
-                i64::from(BOARD_ACCOUNT_CAPACITY) - 1,
-                i64::from(BOARD_CAPACITY_PER_BOARD) - 1,
-                BOARD_BYTE_CAPACITY_PER_BOARD - 2,
-                BOARD_GLOBAL_CAPACITY - 1,
-                BOARD_GLOBAL_BYTE_CAPACITY - 2,
-                2,
-            )
-            .is_ok()
-        );
-        for result in [
-            check_board_capacity(i64::from(BOARD_ACCOUNT_CAPACITY), 0, 0, 0, 0, 2),
-            check_board_capacity(0, i64::from(BOARD_CAPACITY_PER_BOARD), 0, 0, 0, 2),
-            check_board_capacity(0, 0, BOARD_BYTE_CAPACITY_PER_BOARD - 1, 0, 0, 2),
-            check_board_capacity(0, 0, 0, BOARD_GLOBAL_CAPACITY, 0, 2),
-            check_board_capacity(0, 0, 0, 0, BOARD_GLOBAL_BYTE_CAPACITY - 1, 2),
-        ] {
-            assert!(matches!(result, Err(StoreError::BoardCapacity)));
-        }
-        assert!(
-            check_board_report_capacity(
-                BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT - 1,
-                BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY - 1,
-            )
-            .is_ok()
-        );
-        assert!(matches!(
-            check_board_report_capacity(
-                BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT,
-                BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY - 1,
-            ),
-            Err(StoreError::BoardReportLimit)
-        ));
-        assert!(matches!(
-            check_board_report_capacity(
-                BOARD_OPEN_REPORT_CAPACITY_PER_ACCOUNT - 1,
-                BOARD_REPORT_EVIDENCE_GLOBAL_CAPACITY,
-            ),
-            Err(StoreError::BoardEvidenceLimit)
-        ));
-    }
-
-    #[test]
-    fn postgres_runtime_decoder_accepts_current_and_upgrades_strict_v3_v4_v6() {
-        let mut current = World::demo().runtime_snapshot();
-        let item_id = current.item_instances.keys().next().unwrap().clone();
-        let item = current.item_instances.get_mut(&item_id).unwrap();
-        item.location = RuntimeItemLocation::Carried {
-            character_id: CharacterId(77),
-        };
-        item.binding = ItemBinding::Character {
-            character_id: CharacterId(77),
-        };
-        let current_json = serde_json::to_value(&current).unwrap();
-        assert_eq!(
-            current_json["itemInstances"][item_id.0.as_str()]["binding"],
-            serde_json::json!({"kind":"character", "characterId":77})
-        );
-        let decoded = decode_runtime_snapshot(
-            i64::from(WORLD_RUNTIME_SNAPSHOT_VERSION),
-            &current_json.to_string(),
-        )
-        .unwrap();
-        assert_eq!(
-            decoded.item_instances[&item_id].binding,
-            ItemBinding::Character {
-                character_id: CharacterId(77)
-            }
-        );
-
-        let legacy = WorldRuntimeSnapshotV3 {
-            snapshot_version: 3,
-            revision: 5,
-            logical_tick: 6,
-            rng_state: 7,
-            next_item_instance_sequence: 8,
-            item_instances: BTreeMap::from([(
-                ItemInstanceId("legacy:item".into()),
-                RuntimeItemInstanceSnapshotV3 {
-                    prototype_id: "legacy:item".into(),
-                    location: RuntimeItemLocation::Room {
-                        room_id: "legacy:room".into(),
-                    },
-                },
-            )]),
-            npcs: BTreeMap::new(),
-            adventure: AdventureRuntimeSnapshot::default(),
-            progression_flags: Default::default(),
-        };
-        let legacy_json = serde_json::to_string(&legacy).unwrap();
-        let upgraded = decode_runtime_snapshot(3, &legacy_json).unwrap();
-        assert_eq!(
-            upgraded.item_instances[&ItemInstanceId("legacy:item".into())].binding,
-            ItemBinding::Unbound
-        );
-        assert!(decode_runtime_snapshot(4, &legacy_json).is_err());
-
-        let mut smuggled = serde_json::to_value(legacy).unwrap();
-        smuggled["itemInstances"]["legacy:item"]["binding"] =
-            serde_json::json!({"kind":"character", "characterId":77});
-        assert!(decode_runtime_snapshot(3, &smuggled.to_string()).is_err());
-
-        let mut v4 = current_json;
-        v4["snapshotVersion"] = serde_json::json!(4);
-        for field in [
-            "nextTradeId",
-            "trades",
-            "nextLootDropId",
-            "itemProvenance",
-            "lootEncounters",
-            "groundLoot",
-            "partyLootCursors",
-            "nextRewardOpenId",
-            "areaResidency",
-        ] {
-            v4.as_object_mut().unwrap().remove(field);
-        }
-        for item in v4["itemInstances"].as_object_mut().unwrap().values_mut() {
-            item.as_object_mut().unwrap().remove("itemAffixes");
-        }
-        decode_runtime_snapshot(4, &v4.to_string()).unwrap();
-        v4["trades"] = serde_json::json!({});
-        assert!(decode_runtime_snapshot(4, &v4.to_string()).is_err());
-
-        let mut v6 = serde_json::to_value(&current).unwrap();
-        v6["snapshotVersion"] = serde_json::json!(6);
-        v6.as_object_mut().unwrap().remove("nextRewardOpenId");
-        v6.as_object_mut().unwrap().remove("areaResidency");
-        for item in v6["itemInstances"].as_object_mut().unwrap().values_mut() {
-            item.as_object_mut().unwrap().remove("itemAffixes");
-        }
-        let upgraded = decode_runtime_snapshot(6, &v6.to_string()).unwrap();
-        assert_eq!(upgraded.next_reward_open_id, tiamud_core::RewardOpenId(1));
-        v6["itemInstances"][item_id.0.as_str()]["itemAffixes"] = serde_json::json!([]);
-        assert!(decode_runtime_snapshot(6, &v6.to_string()).is_err());
-    }
-
-    fn scoped_url(base: &str, schema: &str) -> String {
-        let separator = if base.contains('?') { '&' } else { '?' };
-        format!("{base}{separator}options=-csearch_path%3D{schema}")
-    }
-
-    async fn admin_batch(base_url: &str, sql: String) {
-        let base_url = base_url.to_owned();
-        tokio::task::spawn_blocking(move || {
-            tiamud_persistence_postgres::connect(&base_url)
-                .unwrap()
-                .batch_execute(&sql)
-                .unwrap();
-        })
-        .await
-        .unwrap();
-    }
-
-    async fn admin_count(base_url: &str, sql: String) -> i64 {
-        let base_url = base_url.to_owned();
-        tokio::task::spawn_blocking(move || {
-            tiamud_persistence_postgres::connect(&base_url)
-                .unwrap()
-                .query_one(&sql, &[])
-                .unwrap()
-                .get(0)
-        })
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn postgres_startup_recovery_is_atomic_and_snapshot_authoritative() {
-        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
-            return;
-        };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let schema = format!("tiamud_recovery_test_{}_{}", process::id(), nonce);
-        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
-        let store = PostgresCharacterStore::open(&scoped_url(&base_url, &schema))
-            .await
-            .unwrap();
-
-        let empty = store.load_startup_world_recovery().await.unwrap();
-        assert_eq!(empty, StartupWorldRecovery::Empty);
-        assert!(!empty.requires_full_generation());
-
-        let event = DomainEvent::CharacterMoved {
-            actor_id: CharacterId(1),
-            actor_name: "Aria".into(),
-            from_room_id: "room:a".into(),
-            to_room_id: "room:b".into(),
-            direction: Direction::North,
-        };
-        let event_json = serde_json::to_string(&event).unwrap().replace('\'', "''");
-        admin_batch(
-            &base_url,
-            format!("INSERT INTO {schema}.domain_events (event_json) VALUES ('{event_json}')"),
-        )
-        .await;
-        let ledger = store.load_startup_world_recovery().await.unwrap();
-        assert_eq!(ledger, StartupWorldRecovery::Ledger(vec![event]));
-        assert!(ledger.requires_full_generation());
-
-        let snapshot = World::demo().runtime_snapshot();
-        store
-            .commit_action(Vec::new(), snapshot.clone(), Vec::new())
-            .await
-            .unwrap();
-        assert_eq!(
-            store.load_startup_world_recovery().await.unwrap(),
-            StartupWorldRecovery::Snapshot {
-                durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
-                snapshot: snapshot.clone(),
-            }
-        );
-
-        let mut legacy = serde_json::to_value(snapshot).unwrap();
-        let object = legacy.as_object_mut().unwrap();
-        object.insert("snapshotVersion".into(), serde_json::json!(7));
-        object.remove("areaResidency");
-        let legacy_json = serde_json::to_string(&legacy).unwrap().replace('\'', "''");
-        admin_batch(
-            &base_url,
-            format!(
-                "UPDATE {schema}.world_runtime
-                 SET snapshot_version = 7, snapshot_json = '{legacy_json}'
-                 WHERE singleton = 1"
-            ),
-        )
-        .await;
-        let StartupWorldRecovery::Snapshot {
-            durable_version,
-            snapshot,
-        } = store.load_startup_world_recovery().await.unwrap()
-        else {
-            panic!("expected durable snapshot authority");
-        };
-        assert_eq!(durable_version, 7);
-        assert!(snapshot.area_residency.is_empty());
-
-        // A present but invalid snapshot must never fall through to the valid
-        // retained ledger observed by the same repeatable-read transaction.
-        admin_batch(
-            &base_url,
-            format!("UPDATE {schema}.world_runtime SET snapshot_json = '{{}}' WHERE singleton = 1"),
-        )
-        .await;
-        assert!(matches!(
-            store.load_startup_world_recovery().await,
-            Err(StoreError::InvalidRuntimeSnapshot)
-        ));
-
-        admin_batch(
-            &base_url,
-            format!(
-                "DELETE FROM {schema}.world_runtime;
-                 DELETE FROM {schema}.domain_events;
-                 INSERT INTO {schema}.domain_events (sequence, event_json)
-                 VALUES (1, '{event_json}'), (3, '{event_json}')"
-            ),
-        )
-        .await;
-        assert!(matches!(
-            store.load_startup_world_recovery().await,
-            Err(StoreError::InvalidStartupLedger)
-        ));
-
-        admin_batch(
-            &base_url,
-            format!(
-                "DELETE FROM {schema}.domain_events;
-                 INSERT INTO {schema}.domain_events (sequence, event_json)
-                 SELECT sequence, '{{}}'
-                 FROM generate_series(1, {}) AS generated(sequence)",
-                DOMAIN_EVENT_RETENTION + 1
-            ),
-        )
-        .await;
-        assert!(matches!(
-            store.load_startup_world_recovery().await,
-            Err(StoreError::InvalidStartupLedger)
-        ));
-
-        drop(store);
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
-    }
-
-    #[tokio::test]
-    async fn postgres_area_generation_bind_and_activation_are_restart_safe_and_cas_guarded() {
-        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
-            return;
-        };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let schema = format!("tiamud_generation_test_{}_{}", process::id(), nonce);
-        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
-        let scoped_url = scoped_url(&base_url, &schema);
-        let store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
-        let competing_store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
-        assert_eq!(store.load_area_generation().await.unwrap(), None);
-
-        let initial = area_generation("Mundo de Ámbar", 'a', None, 1);
-        assert_eq!(
-            store
-                .bind_area_generation_if_absent(initial.clone())
-                .await
-                .unwrap(),
-            initial
-        );
-        assert_eq!(
-            competing_store
-                .bind_area_generation_if_absent(area_generation("Mundo de Ámbar", 'b', None, 1,))
-                .await
-                .unwrap(),
-            initial
-        );
-
-        let mut activated_runtime = World::demo().runtime_snapshot();
-        activated_runtime.logical_tick = 41;
-        let activated = area_generation("Mundo de Ámbar", 'b', Some('a'), 2);
-        store
-            .commit_area_generation_activation(
-                activated_runtime.clone(),
-                initial.clone(),
-                activated.clone(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            competing_store.load_area_generation().await.unwrap(),
-            Some(activated.clone())
-        );
-        assert_eq!(
-            store.load_startup_world_recovery().await.unwrap(),
-            StartupWorldRecovery::Snapshot {
-                durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
-                snapshot: activated_runtime.clone(),
-            }
-        );
-
-        let mut stale_runtime = activated_runtime.clone();
-        stale_runtime.logical_tick = 99;
-        assert!(matches!(
-            competing_store
-                .commit_area_generation_activation(
-                    stale_runtime,
-                    initial,
-                    area_generation("Mundo de Ámbar", 'c', Some('a'), 2),
-                )
-                .await,
-            Err(StoreError::AreaGenerationConflict)
-        ));
-        assert_eq!(
-            store.load_area_generation().await.unwrap(),
-            Some(activated.clone())
-        );
-        assert_eq!(
-            store.load_startup_world_recovery().await.unwrap(),
-            StartupWorldRecovery::Snapshot {
-                durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
-                snapshot: activated_runtime.clone(),
-            }
-        );
-
-        admin_batch(
-            &base_url,
-            format!(
-                "CREATE FUNCTION {schema}.reject_generation_snapshot() RETURNS trigger
-                 LANGUAGE plpgsql AS $$
-                 BEGIN
-                     RAISE EXCEPTION 'injected snapshot failure';
-                 END;
-                 $$;
-                 CREATE TRIGGER reject_generation_snapshot
-                 BEFORE UPDATE ON {schema}.world_runtime
-                 FOR EACH ROW EXECUTE FUNCTION {schema}.reject_generation_snapshot()"
-            ),
-        )
-        .await;
-        let replacement = {
-            let mut runtime = World::demo().runtime_snapshot();
-            runtime.logical_tick = 73;
-            runtime
-        };
-        assert!(
-            store
-                .commit_area_generation_activation(
-                    replacement,
-                    activated.clone(),
-                    area_generation("Mundo de Ámbar", 'c', Some('b'), 3),
-                )
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            store.load_area_generation().await.unwrap(),
-            Some(activated.clone()),
-            "the pointer update must roll back when snapshot persistence fails"
-        );
-        assert_eq!(
-            store.load_startup_world_recovery().await.unwrap(),
-            StartupWorldRecovery::Snapshot {
-                durable_version: tiamud_core::WORLD_RUNTIME_SNAPSHOT_VERSION,
-                snapshot: activated_runtime,
-            }
-        );
-
-        drop(competing_store);
-        drop(store);
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
-    }
-
-    #[tokio::test]
-    async fn postgres_area_checkpoint_transitions_are_exact_restart_safe_and_atomic() {
-        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
-            return;
-        };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let schema = format!("tiamud_area_checkpoint_test_{}_{}", process::id(), nonce);
-        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
-        let scoped_url = scoped_url(&base_url, &schema);
-        let store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
-        let generation = area_generation("Mundo de Ámbar", 'a', None, 1);
-        store
-            .bind_area_generation_if_absent(generation.clone())
-            .await
-            .unwrap();
-        let baseline = initial_resident_runtime(World::demo().runtime_snapshot());
-        store
-            .commit_action(Vec::new(), baseline.clone(), Vec::new())
-            .await
-            .unwrap();
-        let stale_checkpoint = area_checkpoint(&baseline);
-        let stale_retired = retired_runtime(baseline.clone(), &stale_checkpoint);
-        let mut current = baseline;
-        current.logical_tick += 1;
-        store
-            .commit_action(Vec::new(), current.clone(), Vec::new())
-            .await
-            .unwrap();
-        assert!(matches!(
-            store
-                .commit_area_retirement(stale_retired, generation.clone(), stale_checkpoint,)
-                .await,
-            Err(StoreError::AreaCheckpointConflict)
-        ));
-        let checkpoint = area_checkpoint(&current);
-        let retired = retired_runtime(current.clone(), &checkpoint);
-
-        admin_batch(
-            &base_url,
-            format!(
-                "CREATE FUNCTION {schema}.reject_area_checkpoint_snapshot() RETURNS trigger
-                 LANGUAGE plpgsql AS $$
-                 BEGIN
-                     RAISE EXCEPTION 'injected area checkpoint snapshot failure';
-                 END;
-                 $$;
-                 CREATE TRIGGER reject_area_checkpoint_snapshot
-                 BEFORE UPDATE ON {schema}.world_runtime
-                 FOR EACH ROW EXECUTE FUNCTION {schema}.reject_area_checkpoint_snapshot()"
-            ),
-        )
-        .await;
-        assert!(
-            store
-                .commit_area_retirement(retired.clone(), generation.clone(), checkpoint.clone(),)
-                .await
-                .is_err()
-        );
-        assert!(store.load_area_checkpoints().await.unwrap().is_empty());
-        assert_eq!(store.load_runtime_snapshot().await.unwrap(), Some(current));
-
-        admin_batch(
-            &base_url,
-            format!("DROP TRIGGER reject_area_checkpoint_snapshot ON {schema}.world_runtime"),
-        )
-        .await;
-        store
-            .commit_area_retirement(retired.clone(), generation.clone(), checkpoint.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            store.load_area_checkpoints().await.unwrap(),
-            vec![checkpoint.clone()]
-        );
-        assert_eq!(
-            store.load_runtime_snapshot().await.unwrap(),
-            Some(retired.clone())
-        );
-        assert!(matches!(
-            store
-                .commit_area_retirement(retired.clone(), generation.clone(), checkpoint.clone())
-                .await,
-            Err(StoreError::AreaCheckpointConflict)
-        ));
-
-        let stale_resident = rehydrated_runtime(retired.clone());
-        let mut current_retired = retired;
-        current_retired.logical_tick += 1;
-        store
-            .commit_action(Vec::new(), current_retired.clone(), Vec::new())
-            .await
-            .unwrap();
-        assert!(matches!(
-            store
-                .commit_area_rehydration(stale_resident, generation.clone(), checkpoint.clone(),)
-                .await,
-            Err(StoreError::AreaCheckpointConflict)
-        ));
-        assert_eq!(
-            store.load_area_checkpoints().await.unwrap(),
-            vec![checkpoint.clone()]
-        );
-        let resident = rehydrated_runtime(current_retired.clone());
-        admin_batch(
-            &base_url,
-            format!(
-                "CREATE TRIGGER reject_area_checkpoint_snapshot
-                 BEFORE UPDATE ON {schema}.world_runtime
-                 FOR EACH ROW EXECUTE FUNCTION {schema}.reject_area_checkpoint_snapshot()"
-            ),
-        )
-        .await;
-        assert!(
-            store
-                .commit_area_rehydration(resident.clone(), generation.clone(), checkpoint.clone(),)
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            store.load_area_checkpoints().await.unwrap(),
-            vec![checkpoint.clone()]
-        );
-        assert_eq!(
-            store.load_runtime_snapshot().await.unwrap(),
-            Some(current_retired)
-        );
-        admin_batch(
-            &base_url,
-            format!("DROP TRIGGER reject_area_checkpoint_snapshot ON {schema}.world_runtime"),
-        )
-        .await;
-        store
-            .commit_area_rehydration(resident.clone(), generation.clone(), checkpoint.clone())
-            .await
-            .unwrap();
-        assert!(store.load_area_checkpoints().await.unwrap().is_empty());
-        assert_eq!(
-            store.load_runtime_snapshot().await.unwrap(),
-            Some(resident.clone())
-        );
-        assert!(matches!(
-            store
-                .commit_area_rehydration(resident, generation, checkpoint)
-                .await,
-            Err(StoreError::AreaCheckpointConflict)
-        ));
-
-        drop(store);
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
-    }
-
-    #[tokio::test]
-    async fn postgres_board_advisory_lock_serializes_concurrent_quota() {
-        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
-            return;
-        };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let schema = format!("tiamud_board_lock_test_{}_{}", process::id(), nonce);
-        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
-        let scoped_url = scoped_url(&base_url, &schema);
-        let first_store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
-        let account = first_store
-            .register_account("Concurrent Board", "correct horse battery staple")
-            .await
-            .unwrap();
-        let character = first_store
-            .load_or_create_character(account.account.id, "Quill", "room:start")
-            .await
-            .unwrap();
-        let second_store = PostgresCharacterStore::open(&scoped_url).await.unwrap();
-
-        let (first, second, third, fourth, fifth, sixth) = tokio::join!(
-            first_store.publish_board_post(
-                character.id,
-                BoardKey::General,
-                "b00000000000000000000000000000001",
-                "Concurrent one",
-                "Body",
-            ),
-            second_store.publish_board_post(
-                character.id,
-                BoardKey::General,
-                "b00000000000000000000000000000002",
-                "Concurrent two",
-                "Body",
-            ),
-            first_store.publish_board_post(
-                character.id,
-                BoardKey::General,
-                "b00000000000000000000000000000003",
-                "Concurrent three",
-                "Body",
-            ),
-            second_store.publish_board_post(
-                character.id,
-                BoardKey::General,
-                "b00000000000000000000000000000004",
-                "Concurrent four",
-                "Body",
-            ),
-            first_store.publish_board_post(
-                character.id,
-                BoardKey::General,
-                "b00000000000000000000000000000005",
-                "Concurrent five",
-                "Body",
-            ),
-            second_store.publish_board_post(
-                character.id,
-                BoardKey::General,
-                "b00000000000000000000000000000006",
-                "Concurrent six",
-                "Body",
-            ),
-        );
-        let results = [first, second, third, fourth, fifth, sixth];
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 5);
-        assert_eq!(
-            results
-                .iter()
-                .filter(|result| matches!(result, Err(StoreError::BoardRateLimited)))
-                .count(),
-            1
-        );
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_board_posts"),
-            )
-            .await,
-            5
-        );
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!(
-                    "SELECT hour_count::BIGINT FROM {schema}.social_board_usage
-                     WHERE account_id = {}",
-                    account.account.id.0
-                ),
-            )
-            .await,
-            BOARD_HOURLY_CAPACITY
-        );
-
-        let now = unix_timestamp();
-        admin_batch(
-            &base_url,
-            format!(
-                "UPDATE {schema}.social_board_usage
-                 SET hour_started_at = {now}, hour_count = 0,
-                     day_started_at = {now}, day_count = 20, updated_at = {now}
-                 WHERE account_id = {}",
-                account.account.id.0
-            ),
-        )
-        .await;
-        assert!(matches!(
-            first_store
-                .publish_board_post(
-                    character.id,
-                    BoardKey::General,
-                    "b00000000000000000000000000000007",
-                    "Daily limit",
-                    "Body",
-                )
-                .await,
-            Err(StoreError::BoardRateLimited)
-        ));
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!(
-                    "SELECT day_count::BIGINT FROM {schema}.social_board_usage
-                     WHERE account_id = {}",
-                    account.account.id.0
-                ),
-            )
-            .await,
-            BOARD_DAILY_CAPACITY
-        );
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_board_posts"),
-            )
-            .await,
-            5,
-            "the daily rejection must not create a sixth post"
-        );
-
-        first_store.shutdown().await.unwrap();
-        second_store.shutdown().await.unwrap();
-        drop(first_store);
-        drop(second_store);
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
-    }
-
-    #[tokio::test]
-    async fn postgres_store_round_trips_auth_characters_runtime_and_social_policy() {
-        let Ok(base_url) = env::var("TIAMUD_TEST_POSTGRES_URL") else {
-            return;
-        };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let schema = format!("tiamud_store_test_{}_{}", process::id(), nonce);
-        admin_batch(&base_url, format!("CREATE SCHEMA {schema}")).await;
-
-        let store = PostgresCharacterStore::open(&scoped_url(&base_url, &schema))
-            .await
-            .unwrap();
-        store.health_check().await.unwrap();
-        assert!(!store.has_durable_character_authority().await.unwrap());
-
-        let keeper = store
-            .register_account(" Keeper ", "correct horse battery staple")
-            .await
-            .unwrap();
-        let player = store
-            .register_account("Player", "another correct horse battery staple")
-            .await
-            .unwrap();
-        let login = store
-            .login_account("KEEPER", "correct horse battery staple")
-            .await
-            .unwrap();
-        assert_eq!(login.account, keeper.account);
-        assert_eq!(
-            store.resolve_session(login.token.as_str()).await.unwrap(),
-            keeper.account
-        );
-
-        let keeper_character = store
-            .load_or_create_character(keeper.account.id, "Aster", "room:start")
-            .await
-            .unwrap();
-        assert!(store.has_durable_character_authority().await.unwrap());
-        let keeper_staff = store.staff_access(keeper_character.id).await.unwrap();
-        assert_eq!(keeper_staff.profile, Some(StaffProfileKey::Implementor));
-        assert_eq!(
-            keeper_staff.capabilities,
-            StaffCapability::ALL.into_iter().collect()
-        );
-        let defaults = CharacterGameplaySnapshot::default();
-        let mut selected_gameplay = CharacterGameplaySnapshot {
-            lineage_id: "tiamud:mortal".into(),
-            background_id: Some("tiamud:city-guard".into()),
-            base_class_id: "tiamud:vanguard".into(),
-            active_class_id: "tiamud:bastion".into(),
-            class_history: vec!["tiamud:vanguard".into(), "tiamud:bastion".into()],
-            attributes: tiamud_core::Attributes {
-                defence: 9,
-                ..defaults.attributes
-            },
-            resources: BTreeMap::from([(
-                "tiamud:focus".into(),
-                tiamud_core::ResourcePool {
-                    current: 7,
-                    max: 12,
-                },
-            )]),
-            ability_cooldowns: BTreeMap::from([("tiamud:mind-whisper".into(), 23)]),
-            ..defaults
-        };
-        selected_gameplay
-            .progression_points
-            .insert("talent".into(), 0);
-        selected_gameplay.talent_node_ranks.insert(
-            "tiamud:martial-talents".into(),
-            BTreeMap::from([("tiamud:guarded-stance".into(), 1)]),
-        );
-        selected_gameplay.tags.insert("tiamud:founder".into());
-        selected_gameplay
-            .received_signals
-            .insert("tiamud:heard-call".into());
-        let player_character = store
-            .load_or_create_character_with_gameplay(
-                player.account.id,
-                "Bryn",
-                "room:start",
-                selected_gameplay.clone(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            store
-                .load_character_gameplay(player_character.id)
-                .await
-                .unwrap(),
-            selected_gameplay
-        );
-        let all_gameplay = store
-            .load_character_gameplay_batch(
-                vec![player_character.id, keeper_character.id],
-                StartupGameplayLoadLimits::ITEM_OWNERS,
-            )
-            .await
-            .unwrap();
-        assert_eq!(all_gameplay.len(), 2);
-        assert_eq!(all_gameplay[0].character_id, keeper_character.id);
-        assert_eq!(all_gameplay[1].character_id, player_character.id);
-        assert_eq!(all_gameplay[1].gameplay, selected_gameplay);
-        assert_eq!(
-            store.list_characters(keeper.account.id).await.unwrap(),
-            vec![keeper_character.clone()]
-        );
-        assert_eq!(
-            store
-                .load_character(keeper.account.id, keeper_character.id)
-                .await
-                .unwrap(),
-            keeper_character
-        );
-
-        let mut updated_character = keeper_character.clone();
-        updated_character.room_id = "room:north".into();
-        updated_character
-            .item_locations
-            .insert("item:lamp".into(), ItemLocationSnapshot::Carried);
-        let gameplay = selected_gameplay;
-        let runtime = WorldRuntimeSnapshot {
-            snapshot_version: WORLD_RUNTIME_SNAPSHOT_VERSION,
-            revision: 9,
-            logical_tick: 3,
-            rng_state: 42,
-            next_item_instance_sequence: 1,
-            item_instances: BTreeMap::from([(
-                ItemInstanceId("item:lamp".into()),
-                RuntimeItemInstanceSnapshot {
-                    prototype_id: "item:lamp".into(),
-                    location: RuntimeItemLocation::Carried {
-                        character_id: keeper_character.id,
-                    },
-                    binding: ItemBinding::Character {
-                        character_id: keeper_character.id,
-                    },
-                    item_affixes: Vec::new(),
-                },
-            )]),
-            next_loot_drop_id: LootDropId(1),
-            item_provenance: BTreeMap::from([(
-                ItemInstanceId("item:lamp".into()),
-                ItemProvenance::AuthoredInitial,
-            )]),
-            loot_encounters: BTreeMap::new(),
-            ground_loot: BTreeMap::new(),
-            party_loot_cursors: BTreeMap::new(),
-            npcs: BTreeMap::new(),
-            adventure: AdventureRuntimeSnapshot::default(),
-            progression_flags: Default::default(),
-            next_trade_id: tiamud_core::TradeId(1),
-            trades: BTreeMap::new(),
-            next_reward_open_id: tiamud_core::RewardOpenId(1),
-            area_residency: BTreeMap::new(),
-        };
-        let event = DomainEvent::CharacterMoved {
-            actor_id: keeper_character.id,
-            actor_name: keeper_character.name.clone(),
-            from_room_id: "room:start".into(),
-            to_room_id: "room:north".into(),
-            direction: Direction::North,
-        };
-        store
-            .commit_action(
-                vec![DurableCharacterSnapshot {
-                    character: updated_character.clone(),
-                    gameplay: gameplay.clone(),
-                }],
-                runtime.clone(),
-                vec![event.clone()],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            store
-                .load_character_gameplay(keeper_character.id)
-                .await
-                .unwrap(),
-            gameplay
-        );
-        assert_eq!(
-            store.load_runtime_snapshot().await.unwrap(),
-            Some(runtime.clone())
-        );
-        assert_eq!(
-            store.load_domain_events().await.unwrap(),
-            vec![event.clone()]
-        );
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!(
-                    "SELECT last_event_sequence FROM {schema}.world_runtime WHERE singleton = 1"
-                ),
-            )
-            .await,
-            1
-        );
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.character_adventure"),
-            )
-            .await,
-            1
-        );
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.world_adventure"),
-            )
-            .await,
-            1
-        );
-        assert_eq!(
-            store
-                .load_character(keeper.account.id, keeper_character.id)
-                .await
-                .unwrap(),
-            updated_character
-        );
-
-        assert_eq!(
-            store
-                .social_profile(keeper_character.id)
-                .await
-                .unwrap()
-                .role,
-            AccountRole::Admin
-        );
-        assert!(
-            store
-                .social_channel_subscriptions(player_character.id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        for channel in [SocialChannelName::Newbie, SocialChannelName::General] {
-            store
-                .set_social_channel_subscription(player_character.id, channel, true)
-                .await
-                .unwrap();
-        }
-        store
-            .set_social_channel_subscription(keeper_character.id, SocialChannelName::General, true)
-            .await
-            .unwrap();
-        assert_eq!(
-            store
-                .social_channel_subscriptions(player_character.id)
-                .await
-                .unwrap(),
-            vec![SocialChannelName::General, SocialChannelName::Newbie]
-        );
-        assert_eq!(
-            store
-                .social_channel_subscribers(SocialChannelName::General)
-                .await
-                .unwrap(),
-            vec![keeper_character.id, player_character.id]
-        );
-        let public_id = "m0123456789abcdef0123456789abcdef";
-        assert_eq!(
-            store
-                .send_mail(
-                    keeper_character.id,
-                    &player_character.name,
-                    public_id,
-                    "Lanterns",
-                    "Meet beneath the arch.",
-                )
-                .await
-                .unwrap(),
-            MailSendResult::Stored
-        );
-        let page = store.mailbox_page(player_character.id, 1).await.unwrap();
-        assert_eq!(page.total_messages, 1);
-        assert_eq!(page.unread_count, 1);
-        assert_eq!(page.capacity, 64);
-        assert_eq!(page.messages[0].public_id, public_id);
-        let message = store
-            .read_mail(player_character.id, public_id)
-            .await
-            .unwrap();
-        assert_eq!(message.body, "Meet beneath the arch.");
-        assert!(message.summary.read);
-        let mail_report = store
-            .report_mail(player_character.id, public_id, "Unwanted offline contact")
-            .await
-            .unwrap();
-        assert!(mail_report > 0);
-        store
-            .delete_mail(player_character.id, public_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_mail_report_evidence"),
-            )
-            .await,
-            1
-        );
-        let board_public_id = "b0123456789abcdef0123456789abcdef";
-        let board_entry = store
-            .publish_board_post(
-                keeper_character.id,
-                BoardKey::General,
-                board_public_id,
-                "Lantern board",
-                "A durable public entry.",
-            )
-            .await
-            .unwrap();
-        assert!(board_entry.summary.can_delete);
-        let board_page = store
-            .list_board_posts(player_character.id, BoardKey::General, 1)
-            .await
-            .unwrap();
-        assert_eq!(board_page.total_posts, 1);
-        assert!(board_page.posts[0].can_report);
-        assert_eq!(
-            store
-                .read_board_post(player_character.id, board_public_id)
-                .await
-                .unwrap()
-                .body,
-            "A durable public entry."
-        );
-        store
-            .report_board_post(
-                player_character.id,
-                board_public_id,
-                "Public board evidence",
-            )
-            .await
-            .unwrap();
-        store
-            .delete_board_post(keeper_character.id, board_public_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_board_report_evidence"),
-            )
-            .await,
-            1
-        );
-
-        let actionable_id = "bfedcba9876543210fedcba9876543210";
-        store
-            .publish_board_post(
-                player_character.id,
-                BoardKey::Newbie,
-                actionable_id,
-                "Actionable board entry",
-                "Remove this after staff review.",
-            )
-            .await
-            .unwrap();
-        let board_report_id = store
-            .report_board_post(keeper_character.id, actionable_id, "Requires staff action")
-            .await
-            .unwrap();
-        let reports = store
-            .staff_reports(StaffAuditRecord {
-                actor_account_id: keeper.account.id,
-                target_account_id: None,
-                capability: StaffCapability::ReportsView,
-                action: "reports.list".into(),
-                reason: "review board evidence".into(),
-                details: serde_json::json!({}),
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            reports
-                .iter()
-                .find(|report| report.id == board_report_id)
-                .unwrap()
-                .board_evidence
-                .as_ref()
-                .unwrap()
-                .subject,
-            "Actionable board entry"
-        );
-        store
-            .resolve_staff_report(
-                board_report_id,
-                StaffReportResolution::ActionTaken,
-                "board post removed",
-                StaffAuditRecord {
-                    actor_account_id: keeper.account.id,
-                    target_account_id: None,
-                    capability: StaffCapability::ReportsResolve,
-                    action: "reports.resolve".into(),
-                    reason: "review completed".into(),
-                    details: serde_json::json!({"reportId": board_report_id}),
-                },
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            store
-                .read_board_post(keeper_character.id, actionable_id)
-                .await,
-            Err(StoreError::BoardPostUnavailable)
-        ));
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.social_board_report_evidence"),
-            )
-            .await,
-            2
-        );
-        store
-            .set_social_relation(
-                player_character.id,
-                keeper_character.id,
-                SocialRelationKind::Ignore,
-                true,
-            )
-            .await
-            .unwrap();
-        assert!(
-            !store
-                .social_delivery_allowed(keeper_character.id, player_character.id)
-                .await
-                .unwrap()
-        );
-        assert_eq!(
-            store
-                .send_mail(
-                    keeper_character.id,
-                    &player_character.name,
-                    "mfedcba9876543210fedcba9876543210",
-                    "Suppressed",
-                    "This body must not be stored.",
-                )
-                .await
-                .unwrap(),
-            MailSendResult::Suppressed
-        );
-        assert_eq!(
-            store
-                .mailbox_page(player_character.id, 1)
-                .await
-                .unwrap()
-                .total_messages,
-            0
-        );
-        store
-            .moderate_character(
-                keeper_character.id,
-                player_character.id,
-                ModerationAction::Mute {
-                    expires_at: None,
-                    reason: "integration test".into(),
-                },
-            )
-            .await
-            .unwrap();
-        assert!(
-            store
-                .social_profile(player_character.id)
-                .await
-                .unwrap()
-                .muted
-        );
-        store
-            .report_character(player_character.id, keeper_character.id, "test report")
-            .await
-            .unwrap();
-        assert!(store.audit_log().await.unwrap().len() >= 4);
-
-        admin_batch(
-            &base_url,
-            format!(
-                "INSERT INTO {schema}.domain_events (event_json)
-                 SELECT '{{\"type\":\"retained-test\"}}'
-                 FROM generate_series(1, {DOMAIN_EVENT_RETENTION})"
-            ),
-        )
-        .await;
-        store
-            .commit_action(Vec::new(), runtime.clone(), vec![event.clone()])
-            .await
-            .unwrap();
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.domain_events"),
-            )
-            .await,
-            DOMAIN_EVENT_RETENTION
-        );
-        let compacted_watermark = DOMAIN_EVENT_RETENTION + 2;
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!(
-                    "SELECT last_event_sequence FROM {schema}.world_runtime WHERE singleton = 1"
-                ),
-            )
-            .await,
-            compacted_watermark
-        );
-
-        admin_batch(
-            &base_url,
-            format!(
-                "CREATE FUNCTION {schema}.reject_domain_event_compaction()
-                 RETURNS trigger LANGUAGE plpgsql AS $$
-                 BEGIN
-                     RAISE EXCEPTION 'injected compaction failure';
-                 END $$;
-                 CREATE TRIGGER reject_domain_event_compaction
-                 BEFORE DELETE ON {schema}.domain_events
-                 FOR EACH STATEMENT
-                 EXECUTE FUNCTION {schema}.reject_domain_event_compaction();"
-            ),
-        )
-        .await;
-        let mut rejected_runtime = runtime.clone();
-        rejected_runtime.logical_tick += 1;
-        assert!(
-            store
-                .commit_action(Vec::new(), rejected_runtime, vec![event])
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!("SELECT COUNT(*)::BIGINT FROM {schema}.domain_events"),
-            )
-            .await,
-            DOMAIN_EVENT_RETENTION
-        );
-        assert_eq!(
-            admin_count(
-                &base_url,
-                format!(
-                    "SELECT last_event_sequence FROM {schema}.world_runtime WHERE singleton = 1"
-                ),
-            )
-            .await,
-            compacted_watermark
-        );
-        admin_batch(
-            &base_url,
-            format!(
-                "DROP TRIGGER reject_domain_event_compaction ON {schema}.domain_events;
-                 DROP FUNCTION {schema}.reject_domain_event_compaction();"
-            ),
-        )
-        .await;
-
-        store.revoke_session(login.token.as_str()).await.unwrap();
-        assert!(matches!(
-            store.resolve_session(login.token.as_str()).await,
-            Err(StoreError::SessionRevoked)
-        ));
-
-        drop(store);
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        admin_batch(&base_url, format!("DROP SCHEMA {schema} CASCADE")).await;
-    }
-}
+mod tests;

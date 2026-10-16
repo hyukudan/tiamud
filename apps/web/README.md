@@ -56,14 +56,28 @@ exposes:
   Markdown, links or remote content;
 - persistent validated command history (100 entries), suggestions and
   up/down keyboard recall;
-- responsive panels and a fixed reachable command form on narrow screens;
+- responsive panels and a fixed reachable command form on narrow screens that
+  rises above an overlaying on-screen keyboard (`visualViewport` inset), with
+  interactive controls of at least 44x44 CSS pixels on narrow or touch-first
+  screens;
 - persistent image, audio, separate music/ambience/effects volume, motion,
   Save-Data, contrast, text-size and screen-reader preferences.
 
 Audio starts disabled. Enabling it is the required user gesture; the controller
 then accepts only same-origin content-addressed audio URLs announced by the
-server. Save-Data and screen-reader mode prevent scene images from being
+server. Music and ambience changes crossfade over 600 ms (instant when motion
+is reduced), with at most one outgoing track per channel; effects overlap in a
+pool of four voices that evicts the oldest. Audio carries no gameplay facts. Save-Data and screen-reader mode prevent scene images from being
 requested. Motion preferences combine the system setting and the manual mode.
+
+`<html lang>` is resolved at startup from an explicit content locale (the v1
+protocol has none), then the reader's `navigator.languages` matched against
+the UI locales this client ships (only English today), then English. It never
+labels English text with an unshipped reader language.
+
+The production build splits the Svelte runtime and the player dashboard into
+separate chunks; the dashboard is fetched on idle after first paint or on
+world entry, with a loading state and explicit retry.
 
 The production Service Worker caches at most 32 same-origin shell entries. It
 does not cache API, WebSocket, image or audio traffic and deletes old cache
@@ -132,7 +146,11 @@ inventory/map/chat/mail/board/media updates. Server messages are bounded and val
 opaque view/entity IDs are required where appropriate. It discards duplicate
 or backwards sequence numbers, requests `sync.snapshot` after a gap and answers
 unsequenced server heartbeats. A 45-second silence watchdog closes the socket so
-the bounded exponential reconnect can obtain a fresh authoritative snapshot.
+the bounded reconnect can obtain a fresh authoritative snapshot. Reconnect
+delays use full jitter over an exponential window (500 ms doubling, capped at
+10 s). When the page becomes visible again or the browser reports `online`,
+a socket waiting on backoff reconnects at once and an open socket silent for
+more than 20 s is replaced immediately; a healthy socket is left alone.
 An unanswered synchronization request similarly reconnects after ten seconds,
 preventing the client from suppressing state snapshots forever.
 The client never automatically replays an unconfirmed command.
@@ -154,9 +172,10 @@ Playwright includes axe A/AA/WCAG 2.2 tags, keyboard, mobile overflow and fixed
 command checks for Chromium, Firefox and WebKit in CI.
 
 This automation is not a substitute for a real assistive-technology pass. A
-manual screen-reader audit is still pending. All 26 current Chromium and
-Firefox scenarios passed together in the final combined invocation. WebKit
-discovers its thirteen scenarios but could not load
+manual screen-reader audit is still pending. In the final combined invocation
+of the 2026-10-15 web-client change all 26 scenarios passed in both Chromium
+and Firefox (52 runs), including the mobile 44 px touch-target and simulated
+on-screen keyboard checks. WebKit discovers the same 26 scenarios but could not load
 on the most recent validation host because the required GTK/GStreamer, media
 and related runtime libraries were absent; this is neither an observed
 application failure nor a current WebKit pass. A retained

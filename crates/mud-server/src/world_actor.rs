@@ -780,15 +780,17 @@ impl WorldHandle {
                                     Ok(events) => {
                                         cancellation_events.extend(events);
                                         cancellation_events.is_empty()
-                                            || actor_store
-                                                .commit_action(
-                                                    durable_connected_characters(&world)
-                                                        .unwrap_or_default(),
-                                                    world.runtime_snapshot(),
+                                            || match world.durable_character_changes() {
+                                                Ok(characters) => commit_durable(
+                                                    &mut world,
+                                                    actor_store.as_ref(),
+                                                    characters,
                                                     cancellation_events,
                                                 )
                                                 .await
-                                                .is_ok()
+                                                .is_ok(),
+                                                Err(_) => false,
+                                            }
                                     }
                                     Err(_) => false,
                                 }
@@ -1018,15 +1020,17 @@ impl WorldHandle {
                                 Ok(events) => {
                                     committed_events.extend(events);
                                     (hook.changed || !committed_events.is_empty())
-                                        && actor_store
-                                            .commit_action(
-                                                durable_connected_characters(&world)
-                                                    .unwrap_or_default(),
-                                                world.runtime_snapshot(),
+                                        && match world.durable_character_changes() {
+                                            Ok(characters) => commit_durable(
+                                                &mut world,
+                                                actor_store.as_ref(),
+                                                characters,
                                                 committed_events.clone(),
                                             )
                                             .await
-                                            .is_err()
+                                            .is_err(),
+                                            Err(_) => true,
+                                        }
                                 }
                                 Err(_) => true,
                             };
@@ -1049,6 +1053,7 @@ impl WorldHandle {
                         actor_delivery.unregister(session);
                     }
                     Command::Shutdown { reply } => {
+                        flush_durable_state_for_shutdown(&mut world, actor_store.as_ref()).await;
                         rx.close();
                         let _ = reply.send(());
                         break;
@@ -1754,6 +1759,22 @@ impl WorldHandle {
     }
 }
 
+/// Best-effort final commit on graceful shutdown: skipped ticks may have left
+/// the durable logical clock (or, after a failed commit, other state) behind
+/// the in-memory world. Failure is logged; recovery then uses the last
+/// confirmed snapshot, exactly as after a crash.
+async fn flush_durable_state_for_shutdown(world: &mut World, store: &dyn CharacterStore) {
+    let Ok(characters) = world.durable_character_changes() else {
+        return;
+    };
+    if characters.is_empty() && !world.durable_clock_lags() && !world.runtime_durably_dirty() {
+        return;
+    }
+    if let Err(error) = commit_durable(world, store, characters, Vec::new()).await {
+        tracing::warn!(%error, "could not flush durable world state on shutdown");
+    }
+}
+
 async fn maintain_expired_social_content(store: &dyn CharacterStore) {
     match store.purge_expired_mail().await {
         Ok(0) => {}
@@ -2328,13 +2349,13 @@ async fn enter_prepared_character(
         }
     }
     if !trade_events.is_empty()
-        && let Err(error) = store
-            .commit_action(
-                durable_connected_characters(world)?,
-                world.runtime_snapshot(),
-                trade_events,
-            )
-            .await
+        && let Err(error) = commit_durable(
+            world,
+            store,
+            world.durable_character_changes()?,
+            trade_events,
+        )
+        .await
     {
         world.restore_checkpoint(checkpoint);
         return Err(error.into());
@@ -2386,13 +2407,13 @@ async fn finish_enter(
         }
     }
     if (hook.changed || !committed_events.is_empty())
-        && let Err(error) = store
-            .commit_action(
-                durable_connected_characters(world)?,
-                world.runtime_snapshot(),
-                committed_events.clone(),
-            )
-            .await
+        && let Err(error) = commit_durable(
+            world,
+            store,
+            world.durable_character_changes()?,
+            committed_events.clone(),
+        )
+        .await
     {
         world.restore_checkpoint(checkpoint);
         world.disconnect(entered.session_id);
@@ -2505,7 +2526,7 @@ async fn apply(
                 return Err(error);
             }
         }
-        let characters = match durable_connected_characters(world) {
+        let characters = match world.durable_character_changes() {
             Ok(characters) => characters,
             Err(error) => {
                 world.restore_checkpoint(checkpoint);
@@ -2535,13 +2556,7 @@ async fn apply(
                 return Err(error.into());
             }
         };
-        if let Err(error) = store
-            .commit_action(
-                characters,
-                world.runtime_snapshot(),
-                committed_events.clone(),
-            )
-            .await
+        if let Err(error) = commit_durable(world, store, characters, committed_events.clone()).await
         {
             world.restore_checkpoint(checkpoint);
             return Err(error.into());
@@ -2769,13 +2784,13 @@ async fn apply(
             }
         }
         if (hook.changed || !committed_events.is_empty())
-            && let Err(error) = store
-                .commit_action(
-                    durable_connected_characters(world)?,
-                    world.runtime_snapshot(),
-                    committed_events.clone(),
-                )
-                .await
+            && let Err(error) = commit_durable(
+                world,
+                store,
+                world.durable_character_changes()?,
+                committed_events.clone(),
+            )
+            .await
         {
             world.restore_checkpoint(checkpoint);
             disconnect_planned_sessions(
@@ -2933,13 +2948,13 @@ async fn apply(
         || outcome.changed_character.is_some()
         || !committed_events.is_empty()
         || script_changed)
-        && let Err(error) = store
-            .commit_action(
-                durable_connected_characters(world)?,
-                world.runtime_snapshot(),
-                committed_events.clone(),
-            )
-            .await
+        && let Err(error) = commit_durable(
+            world,
+            store,
+            world.durable_character_changes()?,
+            committed_events.clone(),
+        )
+        .await
     {
         world.restore_checkpoint(checkpoint);
         return Err(error.into());
@@ -3354,14 +3369,74 @@ fn combine_output(output: Option<String>, narration: Vec<String>) -> Option<Stri
     Some(combined)
 }
 
-fn durable_connected_characters(
-    world: &World,
-) -> Result<Vec<tiamud_core::DurableCharacterSnapshot>, CoreWorldError> {
-    world
-        .connected_sessions()
-        .into_iter()
-        .map(|session| world.durable_character_snapshot(session))
-        .collect()
+/// Commits one accepted action: `characters` (computed by
+/// `World::durable_character_changes` immediately before, so every other
+/// connected character already matches the durable baseline), the runtime
+/// snapshot and `events`, atomically. A confirmed commit advances the
+/// world's durable baseline; any error, including an ambiguous one, drops
+/// it so the next commit rewrites the full state (ADR 0027).
+async fn commit_durable(
+    world: &mut World,
+    store: &dyn CharacterStore,
+    characters: Vec<tiamud_core::DurableCharacterSnapshot>,
+    events: Vec<DomainEvent>,
+) -> Result<(), StoreError> {
+    match store
+        .commit_action_sections(
+            characters.clone(),
+            world.runtime_snapshot(),
+            world.runtime_dirty_sections(),
+            events,
+        )
+        .await
+    {
+        Ok(()) => {
+            world.mark_durable_commit(true, characters, true);
+            Ok(())
+        }
+        Err(error) => {
+            world.invalidate_durable_baseline();
+            Err(error)
+        }
+    }
+}
+
+/// Persists the durable effect of one tick. A tick that changed nothing
+/// durable (no persisted events, runtime clean within the clock heartbeat,
+/// no changed character) writes nothing. Otherwise it writes the changed
+/// characters, plus the runtime snapshot when the runtime is dirty or events
+/// must be recorded, in one transaction (ADR 0027).
+async fn commit_tick(
+    world: &mut World,
+    store: &dyn CharacterStore,
+    persisted_events: Vec<DomainEvent>,
+) -> Result<(), ()> {
+    let characters = world.durable_character_changes().map_err(|_| ())?;
+    let runtime = !persisted_events.is_empty() || world.runtime_needs_durable_commit();
+    let result = if runtime {
+        store
+            .commit_action_sections(
+                characters.clone(),
+                world.runtime_snapshot(),
+                world.runtime_dirty_sections(),
+                persisted_events,
+            )
+            .await
+    } else if !characters.is_empty() {
+        store.commit_characters(characters.clone()).await
+    } else {
+        return Ok(());
+    };
+    match result {
+        Ok(()) => {
+            world.mark_durable_commit(runtime, characters, true);
+            Ok(())
+        }
+        Err(_) => {
+            world.invalidate_durable_baseline();
+            Err(())
+        }
+    }
 }
 
 fn advance_tick_with_expiry_barrier(world: &mut World) -> Result<Vec<DomainEvent>, CoreWorldError> {
@@ -3461,8 +3536,7 @@ async fn persist_tick_with_script_budget(
                 targeted_narration.push((session, narration));
             }
         }
-        let characters = durable_connected_characters(world)?;
-        Ok::<_, CoreWorldError>((characters, events))
+        Ok::<_, CoreWorldError>(events)
     })();
     if scripting_budget_exhausted {
         world.restore_checkpoint(checkpoint.clone());
@@ -3482,21 +3556,12 @@ async fn persist_tick_with_script_budget(
                 return false;
             }
         }
-        let Ok(characters) = durable_connected_characters(world) else {
-            world.restore_checkpoint(checkpoint);
-            return false;
-        };
-        let runtime = world.runtime_snapshot();
         let persisted_events = events
             .iter()
             .filter(|event| !is_internal_tick_event(event))
             .cloned()
             .collect();
-        if store
-            .commit_action(characters, runtime, persisted_events)
-            .await
-            .is_err()
-        {
+        if commit_tick(world, store, persisted_events).await.is_err() {
             world.restore_checkpoint(checkpoint);
             return false;
         }
@@ -3510,7 +3575,7 @@ async fn persist_tick_with_script_budget(
         );
         return true;
     }
-    let Ok((characters, mut events)) = result else {
+    let Ok(mut events) = result else {
         world.restore_checkpoint(checkpoint);
         return false;
     };
@@ -3521,17 +3586,12 @@ async fn persist_tick_with_script_budget(
             return false;
         }
     }
-    let runtime = world.runtime_snapshot();
     let persisted_events = events
         .iter()
         .filter(|event| !is_internal_tick_event(event))
         .cloned()
         .collect();
-    if store
-        .commit_action(characters, runtime, persisted_events)
-        .await
-        .is_err()
-    {
+    if commit_tick(world, store, persisted_events).await.is_err() {
         world.restore_checkpoint(checkpoint);
         return false;
     }
@@ -3612,6 +3672,9 @@ mod tests {
     };
     use tiamud_scripting::{ScriptCapability, ScriptLimits};
 
+    mod durable_dirty;
+    mod hot_path_bench;
+
     #[derive(Default)]
     struct MemoryState {
         next_account: i64,
@@ -3622,6 +3685,8 @@ mod tests {
         characters: HashMap<CharacterId, CharacterSnapshot>,
         gameplay: HashMap<CharacterId, CharacterGameplaySnapshot>,
         runtime: Option<WorldRuntimeSnapshot>,
+        /// The sectioned rows a SQL store would hold (ADR 0035).
+        runtime_rows: Option<MemoryRuntimeRows>,
         domain_events: Vec<tiamud_core::DomainEvent>,
         roles: HashMap<AccountId, tiamud_core::AccountRole>,
         muted: HashSet<AccountId>,
@@ -3763,14 +3828,127 @@ mod tests {
         expires_at: i64,
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct MemoryRuntimeRows {
+        snapshot_version: i64,
+        head_json: String,
+        manifest_json: String,
+        sections: BTreeMap<String, tiamud_persistence_sqlite::runtime_sections::RuntimeSectionRow>,
+    }
+
+    impl MemoryRuntimeRows {
+        fn assemble(&self) -> WorldRuntimeSnapshot {
+            let stored = tiamud_persistence_sqlite::runtime_sections::StoredRuntime {
+                snapshot_version: self.snapshot_version,
+                head_json: self.head_json.clone(),
+                manifest_json: self.manifest_json.clone(),
+                last_event_sequence: None,
+                sections: self.sections.values().cloned().collect(),
+            };
+            crate::persistence::decode_stored_runtime(&stored)
+                .unwrap()
+                .1
+        }
+    }
+
     #[derive(Default)]
     struct MemoryStore {
         state: Mutex<MemoryState>,
         fail_saves: AtomicBool,
         fail_social_reads: AtomicBool,
         successful_commits: AtomicUsize,
+        /// Serialized JSON bytes a SQL adapter would write for committed
+        /// character aggregates, runtime head/manifest/sections and events.
+        bytes_written: AtomicUsize,
+        characters_written: AtomicUsize,
+        runtime_snapshots_written: AtomicUsize,
+        /// Runtime section rows written (ADR 0035).
+        runtime_sections_written: AtomicUsize,
+        /// The section names written by the latest runtime commit.
+        last_runtime_sections: Mutex<Vec<&'static str>>,
+        /// Skip the per-commit assembly check (used only by the measurement).
+        skip_section_verification: AtomicBool,
         purge_mail_calls: AtomicUsize,
         purge_board_calls: AtomicUsize,
+    }
+
+    impl MemoryStore {
+        /// Applies one runtime write exactly as the SQL stores plan it and,
+        /// unless disabled, proves that the stored sections assemble back to
+        /// the full snapshot the actor passed: a missed dirty section fails
+        /// every test that commits through this store.
+        fn apply_runtime(
+            &self,
+            state: &mut MemoryState,
+            runtime: &WorldRuntimeSnapshot,
+            sections: tiamud_core::RuntimeSectionSet,
+        ) -> Result<usize, StoreError> {
+            let encoded = crate::persistence::common::encode_runtime(runtime, sections)?;
+            let previous = state
+                .runtime_rows
+                .as_ref()
+                .map(|rows| (rows.snapshot_version, rows.manifest_json.clone()));
+            let plan = crate::persistence::common::plan_runtime_write(previous, runtime, encoded)?;
+            let bytes = plan.written_bytes();
+            let rows = state.runtime_rows.get_or_insert_with(Default::default);
+            if plan.replace_all {
+                rows.sections.clear();
+            }
+            *self.last_runtime_sections.lock().unwrap() = plan
+                .sections
+                .iter()
+                .map(|encoded| encoded.section.field_name())
+                .collect();
+            self.runtime_sections_written
+                .fetch_add(plan.sections.len(), Ordering::SeqCst);
+            for encoded in plan.sections {
+                let name = encoded.section.field_name().to_owned();
+                rows.sections.insert(
+                    name.clone(),
+                    tiamud_persistence_sqlite::runtime_sections::RuntimeSectionRow {
+                        name,
+                        revision: plan.revision,
+                        json: encoded.json,
+                        sha256: encoded.sha256,
+                    },
+                );
+            }
+            rows.snapshot_version = plan.snapshot_version;
+            rows.head_json = plan.head_json;
+            rows.manifest_json = plan.manifest_json;
+            if !self.skip_section_verification.load(Ordering::SeqCst) {
+                assert_eq!(
+                    &rows.assemble(),
+                    runtime,
+                    "the sectioned runtime no longer assembles to the committed snapshot"
+                );
+            }
+            Ok(bytes)
+        }
+
+        fn record_written(
+            &self,
+            characters: &[tiamud_core::DurableCharacterSnapshot],
+            runtime_bytes: Option<usize>,
+            events: &[tiamud_core::DomainEvent],
+        ) {
+            let mut bytes = 0_usize;
+            for snapshot in characters {
+                bytes += serde_json::to_vec(&snapshot.gameplay).unwrap().len();
+                bytes += serde_json::to_vec(&snapshot.character).unwrap().len();
+            }
+            if let Some(runtime_bytes) = runtime_bytes {
+                bytes += runtime_bytes;
+                self.runtime_snapshots_written
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            for event in events {
+                bytes += serde_json::to_vec(event).unwrap().len();
+            }
+            self.bytes_written.fetch_add(bytes, Ordering::SeqCst);
+            self.characters_written
+                .fetch_add(characters.len(), Ordering::SeqCst);
+        }
     }
 
     fn durable_gameplay_world() -> World {
@@ -5138,6 +5316,22 @@ mod tests {
             runtime: WorldRuntimeSnapshot,
             events: Vec<tiamud_core::DomainEvent>,
         ) -> Result<(), StoreError> {
+            self.commit_action_sections(
+                characters,
+                runtime,
+                tiamud_core::RuntimeSectionSet::ALL,
+                events,
+            )
+            .await
+        }
+
+        async fn commit_action_sections(
+            &self,
+            characters: Vec<tiamud_core::DurableCharacterSnapshot>,
+            runtime: WorldRuntimeSnapshot,
+            sections: tiamud_core::RuntimeSectionSet,
+            events: Vec<tiamud_core::DomainEvent>,
+        ) -> Result<(), StoreError> {
             if self.fail_saves.load(Ordering::SeqCst) {
                 return Err(StoreError::WorkerStopped);
             }
@@ -5153,6 +5347,8 @@ mod tests {
                     });
                 }
             }
+            let runtime_bytes = self.apply_runtime(&mut state, &runtime, sections)?;
+            self.record_written(&characters, Some(runtime_bytes), &events);
             for snapshot in characters {
                 state
                     .gameplay
@@ -5191,6 +5387,7 @@ mod tests {
             }
             memory_authorize_staff(&state, &audit)?;
             memory_append_staff_audit(&mut state, audit)?;
+            self.apply_runtime(&mut state, &runtime, tiamud_core::RuntimeSectionSet::ALL)?;
             for snapshot in characters {
                 state
                     .gameplay
@@ -5201,6 +5398,38 @@ mod tests {
             }
             state.runtime = Some(runtime);
             state.domain_events.extend(events);
+            Ok(())
+        }
+
+        async fn commit_characters(
+            &self,
+            characters: Vec<tiamud_core::DurableCharacterSnapshot>,
+        ) -> Result<(), StoreError> {
+            if self.fail_saves.load(Ordering::SeqCst) {
+                return Err(StoreError::WorkerStopped);
+            }
+            let mut state = self.state.lock().unwrap();
+            for snapshot in &characters {
+                if !matches!(
+                    state.characters.get(&snapshot.character.id),
+                    Some(stored) if stored.account_id == snapshot.character.account_id
+                ) {
+                    return Err(StoreError::CharacterNotFound {
+                        account_id: snapshot.character.account_id,
+                        character_id: snapshot.character.id,
+                    });
+                }
+            }
+            self.record_written(&characters, None, &[]);
+            for snapshot in characters {
+                state
+                    .gameplay
+                    .insert(snapshot.character.id, snapshot.gameplay);
+                state
+                    .characters
+                    .insert(snapshot.character.id, snapshot.character);
+            }
+            self.successful_commits.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -7823,7 +8052,12 @@ mod tests {
                     .unwrap()
                     .runtime
                     .as_ref()
-                    .is_some_and(|runtime| runtime.logical_tick >= 1);
+                    // Combat resolves on a scheduler tick: wait until the
+                    // defeat itself is durable, not merely any tick.
+                    .is_some_and(|runtime| {
+                        runtime.logical_tick >= 1
+                            && runtime.npcs["test:guardian"].respawn_at_tick.is_some()
+                    });
                 if ready {
                     break;
                 }

@@ -1,0 +1,61 @@
+{
+  "format_version": 1,
+  "id": "pruebas-de-lint",
+  "title": { "es": "Pruebas de lint" },
+  "start": "inicio",
+  "variables": [
+    { "id": "fuerza", "label": { "es": "Fuerza" }, "visible": true, "kind": { "int": { "min": 0, "max": 10, "initial": 5 } } },
+    { "id": "oro", "kind": { "int": { "min": 0, "max": 100, "initial": 0 } } },
+    { "id": "bendito", "kind": { "bool": { "initial": false } } }
+  ],
+  "items": [
+    { "id": "llave", "name": { "es": "Llave" } },
+    { "id": "amuleto", "name": { "es": "Amuleto" } }
+  ],
+  "initial_inventory": ["amuleto"],
+  "nodes": [
+    {
+      "id": "inicio",
+      "text": { "es": "Una puerta, un cofre y un altar." },
+      "choices": [
+        { "id": "forzar", "label": { "es": "Forzar la puerta" }, "when": { "var_cmp": { "var": "fuerza", "op": "gt", "value": 10 } }, "target": "tesoro" },
+        { "id": "pagar", "label": { "es": "Pagar al guardián" }, "when": { "var_cmp": { "var": "oro", "op": "ge", "value": 50 } }, "target": "tesoro" },
+        { "id": "rezar", "label": { "es": "Rezar" }, "when": { "flag": "bendito" }, "target": "tesoro" },
+        { "id": "abrir", "label": { "es": "Abrir con la llave" }, "when": { "has_item": "llave" }, "target": "tesoro" },
+        { "id": "amuleto", "label": { "es": "Tocar el amuleto" }, "when": { "has_item": "amuleto" }, "target": "bucle" },
+        {
+          "id": "entrenar",
+          "label": { "es": "Entrenar" },
+          "effects": [
+            { "add": { "var": "fuerza", "delta": 1 } },
+            { "if": { "when": { "has_item": "llave" }, "then": [{ "score": 1 }] } }
+          ],
+          "target": "inicio"
+        },
+        {
+          "id": "saltar",
+          "label": { "es": "Saltar el muro" },
+          "effects": [
+            { "roll": { "dice": { "count": 1, "sides": 6 }, "test": { "at_least": 20, "success": "tesoro", "failure": "inicio" } } }
+          ]
+        },
+        { "id": "rendirse", "label": { "es": "Rendirse" }, "target": "fin" },
+        { "id": "callejon", "label": { "es": "Entrar en el callejón" }, "target": "callejon" }
+      ]
+    },
+    {
+      "id": "bucle",
+      "text": { "es": "Un pasillo circular." },
+      "choices": [{ "id": "girar", "label": { "es": "Seguir girando" }, "target": "bucle-2" }]
+    },
+    {
+      "id": "bucle-2",
+      "text": { "es": "El mismo pasillo circular." },
+      "choices": [{ "id": "volver", "label": { "es": "Seguir girando" }, "target": "bucle" }]
+    },
+    { "id": "callejon", "text": { "es": "Un callejón sin salida." } },
+    { "id": "tesoro", "text": { "es": "El tesoro." }, "ending": { "id": "tesoro", "kind": "victory" } },
+    { "id": "fin", "text": { "es": "Te rindes." }, "ending": { "id": "rendicion", "kind": "defeat" } },
+    { "id": "huerfano", "text": { "es": "Nadie llega aquí." }, "ending": { "id": "huerfano", "kind": "neutral" } }
+  ]
+}

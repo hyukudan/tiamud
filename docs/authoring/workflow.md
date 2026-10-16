@@ -6,7 +6,7 @@ CLI, and a reviewable asset directory; it then publishes immutable artifacts to
 the server's local registry.
 
 ```text
-AreaPack v8 + reviewed assets
+AreaPack v9 + reviewed assets
               |
               v
       compose and validate
@@ -77,7 +77,7 @@ the [editorial AI guide](../../crates/editorial-ai/README.md).
 ## Runtime boundary
 
 The server loads the embedded WorldPack, `TIAMUD_WORLD_PACK`, or the
-`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG` pair. In catalog mode, SQL v15
+`TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG` pair. In catalog mode, SQL (v14+)
 binds the durable generation and prevails on restart over `area-active`; SIGHUP
 is the only live reconciliation. `WorldRuntimeSnapshot` uses v8 and an activation
 confirms snapshot + pointer via CAS before the in-memory swap.
@@ -94,7 +94,8 @@ implicitly. An ambiguous commit re-reads SQL and remains fail-stop with readines
 503 if it cannot determine G0/G1. The ACK fails closed in monolithic mode, with a
 binding, without recovery/character, or against a different digest.
 
-The artifact contract stays WorldPack v9/AreaPack v8/Project v2. Raw snapshots
+The artifact contract is now WorldPack v10/AreaPack v9/Project v2
+(ADR 0032 added quests, commodities and shops). Raw snapshots
 v1–v5 allow 1 MiB; v6–v8, 2 MiB. There is no other loot, inventory, or trade
 authority and no double writes. The 6C gate passes 774 Rust tests —329 of them
 server— and the re-audit 0 P1/0 P2. Disposable PostgreSQL 18 passes 20/20

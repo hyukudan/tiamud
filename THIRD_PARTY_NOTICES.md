@@ -8,7 +8,7 @@ release dependency graphs and includes the license and notice texts shipped by
 their packages. It does not replace the terms of those licenses.
 
 - Release target: `x86_64-unknown-linux-gnu`
-- Cargo lockfile SHA-256: `c6ca913756d58142e92b5116df969c07f0a78cf20fae540c11c99889fef783c7`
+- Cargo lockfile SHA-256: `dd49de58ff74df8d666153838b904ac6995833a9554538565b8b7c5bbe956019`
 - pnpm lockfile SHA-256: `9275125a07de8f672f32191dc79a57304d2746cfe2164afe06c200cb09df65ba`
 - Rust release dependencies: 308
 - Web build/runtime dependencies: 76
@@ -42,8 +42,8 @@ file fails generation pending human review.
 | `av-scenechange 0.14.1` | `MIT` | <https://github.com/rust-av/av-scenechange> |
 | `av1-grain 0.2.5` | `BSD-2-Clause` | <https://github.com/rust-av/av1-grain> |
 | `avif-serialize 0.8.9` | `BSD-3-Clause` | <https://github.com/kornelski/avif-serialize> |
-| `aws-lc-rs 1.17.1` | `ISC AND (Apache-2.0 OR ISC)` | <https://github.com/aws/aws-lc-rs> |
-| `aws-lc-sys 0.42.0` | `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)` | <https://github.com/aws/aws-lc-rs> |
+| `aws-lc-rs 1.18.2` | `ISC AND (Apache-2.0 OR ISC)` | <https://github.com/aws/aws-lc-rs> |
+| `aws-lc-sys 0.46.0` | `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)` | <https://github.com/aws/aws-lc-rs> |
 | `axum 0.8.9` | `MIT` | <https://github.com/tokio-rs/axum> |
 | `axum-core 0.5.6` | `MIT` | <https://github.com/tokio-rs/axum> |
 | `base64 0.22.1` | `MIT OR Apache-2.0` | <https://github.com/marshallpierce/rust-base64> |
@@ -63,7 +63,7 @@ file fails generation pending human review.
 | `cc 1.2.67` | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cc-rs> |
 | `cfg_aliases 0.2.1` | `MIT` | <https://github.com/katharostech/cfg_aliases> |
 | `cfg-if 1.0.4` | `MIT OR Apache-2.0` | <https://github.com/rust-lang/cfg-if> |
-| `chacha20 0.10.1` | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/stream-ciphers> |
+| `chacha20 0.10.2` | `MIT OR Apache-2.0` | <https://github.com/RustCrypto/stream-ciphers> |
 | `clap 4.6.1` | `MIT OR Apache-2.0` | <https://github.com/clap-rs/clap> |
 | `clap_builder 4.6.0` | `MIT OR Apache-2.0` | <https://github.com/clap-rs/clap> |
 | `clap_derive 4.6.1` | `MIT OR Apache-2.0` | <https://github.com/clap-rs/clap> |
@@ -230,11 +230,11 @@ file fails generation pending human review.
 | `rust-embed-utils 8.12.0` | `MIT` | <https://pyrossh.dev/repos/rust-embed> |
 | `rustc-hash 2.1.3` | `Apache-2.0 OR MIT` | <https://github.com/rust-lang/rustc-hash> |
 | `rustix 1.1.4` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | <https://github.com/bytecodealliance/rustix> |
-| `rustls 0.23.42` | `Apache-2.0 OR ISC OR MIT` | <https://github.com/rustls/rustls> |
+| `rustls 0.23.46` | `Apache-2.0 OR ISC OR MIT` | <https://github.com/rustls/rustls> |
 | `rustls-native-certs 0.8.4` | `Apache-2.0 OR ISC OR MIT` | <https://github.com/rustls/rustls-native-certs> |
 | `rustls-pki-types 1.15.0` | `MIT OR Apache-2.0` | <https://github.com/rustls/pki-types> |
 | `rustls-platform-verifier 0.7.0` | `MIT OR Apache-2.0` | <https://github.com/rustls/rustls-platform-verifier> |
-| `rustls-webpki 0.103.13` | `ISC` | <https://github.com/rustls/webpki> |
+| `rustls-webpki 0.103.15` | `ISC` | <https://github.com/rustls/webpki> |
 | `rustversion 1.0.23` | `MIT OR Apache-2.0` | <https://github.com/dtolnay/rustversion> |
 | `ryu 1.0.23` | `Apache-2.0 OR BSL-1.0` | <https://github.com/dtolnay/ryu> |
 | `same-file 1.0.6` | `Unlicense/MIT` | <https://github.com/BurntSushi/same-file> |
@@ -4560,7 +4560,7 @@ Source filename(s): `LICENSE-MIT`
 
 Applies to:
 
-- Rust `aws-lc-sys@0.42.0`
+- Rust `aws-lc-sys@0.46.0`
 
 Source filename(s): `aws-lc/third_party/fiat/LICENSE`
 
@@ -5747,7 +5747,7 @@ Source filename(s): `LICENSE-APACHE`
 
 Applies to:
 
-- Rust `rustls-webpki@0.103.13`
+- Rust `rustls-webpki@0.103.15`
 
 Source filename(s): `LICENSE`
 
@@ -7507,7 +7507,7 @@ Applies to:
 
 - Rust `hyper-rustls@0.27.9`
 - Rust `rustls-native-certs@0.8.4`
-- Rust `rustls@0.23.42`
+- Rust `rustls@0.23.46`
 
 Source filename(s): `LICENSE-MIT`
 
@@ -7576,7 +7576,7 @@ Source filename(s): `LICENSE-MIT`
 
 Applies to:
 
-- Rust `aws-lc-sys@0.42.0`
+- Rust `aws-lc-sys@0.46.0`
 
 Source filename(s): `LICENSE`, `aws-lc/LICENSE`
 
@@ -8488,7 +8488,7 @@ Applies to:
 
 - Rust `hyper-rustls@0.27.9`
 - Rust `rustls-native-certs@0.8.4`
-- Rust `rustls@0.23.42`
+- Rust `rustls@0.23.46`
 
 Source filename(s): `LICENSE-ISC`
 
@@ -8814,7 +8814,7 @@ Applies to:
 - Rust `ring@0.17.14`
 - Rust `rustix@1.1.4`
 - Rust `rustls-native-certs@0.8.4`
-- Rust `rustls@0.23.42`
+- Rust `rustls@0.23.46`
 - Rust `scopeguard@1.2.0`
 - Rust `signal-hook-registry@1.4.8`
 - Rust `smallvec@1.15.2`
@@ -14564,7 +14564,7 @@ Applies to:
 - Rust `blake2@0.10.6`
 - Rust `block-buffer@0.10.4`
 - Rust `block-buffer@0.12.1`
-- Rust `chacha20@0.10.1`
+- Rust `chacha20@0.10.2`
 - Rust `const-oid@0.10.2`
 - Rust `const-oid@0.9.6`
 - Rust `cpufeatures@0.2.17`
@@ -16016,7 +16016,7 @@ Source filename(s): `LICENSE-MIT`
 
 Applies to:
 
-- Rust `aws-lc-rs@1.17.1`
+- Rust `aws-lc-rs@1.18.2`
 
 Source filename(s): `LICENSE`
 
@@ -16286,7 +16286,7 @@ Source filename(s): `LICENSE-MIT`
 
 Applies to:
 
-- Rust `chacha20@0.10.1`
+- Rust `chacha20@0.10.2`
 - Rust `zeroize_derive@1.5.0`
 
 Source filename(s): `LICENSE-MIT`

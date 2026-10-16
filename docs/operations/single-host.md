@@ -81,6 +81,134 @@ The recommended environment uses `TIAMUD_DATABASE_URL=postgresql://...`.
 recommendation. Startup selects exactly one store and readiness reports its
 backend; Tiamud never dual-writes.
 
+## Story sessions
+
+Story sessions ([ADR 0029](../decisions/0029-story-session-instances-and-story-protocol.md),
+accepted, phase S2) are disabled unless `TIAMUD_STORY_DIR` names a directory
+of `*.story.json` StoryPacks. At startup, before any database or listener
+opens, every pack is parsed and validated with `tiamud-story-core`; an invalid
+pack, a duplicate story id, an empty directory, more than 64 packs or more
+than 1,024 directory entries stops the server.
+
+- `TIAMUD_STORY_MAX_INSTANCES` (`1..=4096`, default `256`) bounds live
+  instances; each account may hold one.
+- `TIAMUD_STORY_IDLE_SECONDS` (`60..=86400`, default `1800`) evicts an idle
+  instance.
+- Save slots ([ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md),
+  accepted) live in the configured backend's `story_saves` table (added in schema v16)
+  and go through the same measured store and persistence worker; there is no
+  separate setting. Players save to slots `1..=9`; slot `0` is the autosave
+  written on leave, on idle eviction and on graceful shutdown when the game
+  has progress. On shutdown the server stops the listeners, then autosaves
+  every live instance (bounded to 10 s overall, 5 s per store call) before
+  draining the world actor and the persistence worker; instances still
+  running when a process is killed are lost. Loading a slot re-validates it
+  against the exact pack bytes (SHA-256): **replacing a `*.story.json` with
+  a different revision makes earlier slots of that story unloadable**
+  (`slot_incompatible`), by design, unless the new StoryPack v3 lists the old
+  file's SHA-256 in `compatible_revisions` (at most 16); such slots are
+  re-validated against the new pack and still fail closed with
+  `slot_incompatible` when their state no longer fits. Record
+  `sha256sum <old>.story.json` before replacing a pack. The undo history is
+  not persisted. Per account: 16 stories with
+  saves, 1 MiB of state, 6 slot writes and 30 slot reads per minute. Backups
+  of the database include the slots.
+- An optional `story-media.json` at the top of the directory (≤64 KiB) is the
+  reviewed story media map. Format 1,
+  `{"formatVersion":1,"assets":{"<asset-id>":"assets/<sha256>/audio-<name>.ogg"}}`,
+  maps authored cue asset ids to reviewed content-addressed audio already
+  served by the web build. Format 2 adds `"images": {"<id>": {"manifest":
+  "assets/<sha256>/manifest.json", "alt": {"es": "…", "en": "…"}}}` (≤256
+  images, 1–16 alt locales of ≤512 bytes) for scene backgrounds and character
+  portraits. Each manifest must be a bundle published by `tiamud-assets
+  build` (atmosphere profile: AVIF/WebP/JPEG at 640/1280 px with author,
+  licence, provenance and review time) and served from the web build's
+  `/assets/`, exactly like world scene images: deploy the bundle with the web
+  assets before (or together with) the map. The server checks only the path
+  shape and the alt text at startup and sends `{manifest, alt}`; browsers
+  fetch and integrity-check the manifest and fall back to the alt text when
+  it is missing, so a forgotten bundle loses the picture, never play. Unmapped
+  cues never play and unmapped images are never shown. The reviewed fixtures
+  directory `crates/story-core/fixtures` ships such a map for the
+  `lluvia-de-neon` sample art in `apps/web/public/assets/`.
+- Players choose a story language on entry (`historia <id> en`) among the
+  pack's lexicons (parser stories) or title locales; Spanish is the default
+  when offered. No setting is needed.
+
+Story metrics carry no story, node or account labels:
+`tiamud_story_catalog_stories`, `tiamud_story_instances`,
+`tiamud_story_instances_started_total`,
+`tiamud_story_instances_closed_total{reason}`,
+`tiamud_story_enter_rejected_total{reason}` and
+`tiamud_story_inputs_total{result}`,
+`tiamud_story_saves_total{kind=manual|autosave,result=ok|failed}`,
+`tiamud_story_restores_total{result=ok|rejected}` and
+`tiamud_story_slot_rate_limited_total`; `closed_total{reason}` also counts
+`shutdown`. A rising `saves_total{kind="autosave",result="failed"}` usually
+means accounts at their slot capacity or a store problem (see the server
+log, which never logs state contents). While a player is in a story the
+character stays connected and visible in its room.
+
+Shared story instances ([ADR 0033](../decisions/0033-shared-story-instances-and-voting.md),
+accepted, phase S7) need no extra service; all four settings fail closed out
+of range and are refused without `TIAMUD_STORY_DIR`:
+
+- `TIAMUD_STORY_MAX_SEATS` (`2..=8`, default `8`) seats per shared instance.
+- `TIAMUD_STORY_MAX_SPECTATORS` (`0..=32`, default `32`) read-only
+  spectators per shared instance; `0` disables spectating.
+- `TIAMUD_STORY_VOTE_SECONDS` (`30..=120`, default `60`) default vote and
+  turn window; the host may change it per instance within the same range.
+- `TIAMUD_STORY_SEAT_GRACE_SECONDS` (`30..=600`, default `120`) how long a
+  disconnected player's seat is held before it lapses.
+
+A shared instance counts once against `TIAMUD_STORY_MAX_INSTANCES`. Join
+attempts are limited to 10 per account and minute and invitations to 10 per
+host and minute; invitations do not yet consult the world's ignore/block
+lists (they carry only the host name, story title and join code). Save slots
+and the autosave of a shared instance belong to the host account. Shared
+metrics: `tiamud_story_shared_instances`,
+`tiamud_story_shared_started_total`,
+`tiamud_story_shared_joins_total{result=ok|rejected}`,
+`tiamud_story_shared_votes_total`, `tiamud_story_shared_decisions_total`,
+`tiamud_story_shared_invitations_total`, `tiamud_story_shared_kicks_total`
+and `tiamud_story_shared_seat_lapses_total`. A closed shared instance counts
+in `tiamud_story_instances_closed_total{reason="left"}` when its last seat
+leaves or lapses.
+
+Lua scripts in StoryPacks ([ADR 0034](../decisions/0034-lua-scripts-in-storypacks.md),
+accepted, phase S6) are **off by default**. Without the switch a
+`*.story.json` that declares `scripts` stops the server at startup, like any
+invalid pack. All settings fail closed out of range, are refused without
+`TIAMUD_STORY_DIR`, and the limits are refused without the switch:
+
+- `TIAMUD_STORY_SCRIPTS` (`0` or `1`, default `0`) lets the catalog load
+  scripted packs; every script is compiled in the sandbox while the catalog
+  loads, and one that does not compile stops the server.
+- `TIAMUD_STORY_SCRIPT_BUDGET_MS` (`10..=400`, default `100`) aggregate wall
+  time of all script calls of one input, on top of the sandbox quotas of each
+  call (2 MiB, 100,000 instructions, 25 ms, at most 16 calls per input).
+- `TIAMUD_STORY_SCRIPT_WORKERS` (`1..=64`, default the host's parallelism up
+  to 16) script jobs running at once on Tokio's blocking pool; scripts never
+  run on an async worker or in the world actor.
+- `TIAMUD_STORY_SCRIPT_QUEUE` (`0..=1024`, default four times the workers)
+  further jobs that may wait for a worker. Beyond it an input is answered
+  `busy` and nothing changes.
+
+A failing script, quota or budget shows players a generic error (Spanish or
+English, after the story's language) and leaves the game unchanged; the
+author-facing detail (`script:line: …`) is logged as `story script failed`
+with the story id. Three consecutive failures close the instance after
+autosaving its last good state (`story instance closed after repeated script
+failures`). Script metrics carry no story or script labels:
+`tiamud_story_script_invocations_total`,
+`tiamud_story_script_failures_total`,
+`tiamud_story_script_budget_exceeded_total`,
+`tiamud_story_script_busy_total` and
+`tiamud_story_instances_closed_total{reason="script_failures"}`. A rising busy
+count means the pool is saturated (raise the workers only on a host with
+spare cores); a rising budget count points at a pack whose scripts are too
+heavy.
+
 ## Rate limits and metrics
 
 The environment example configures bounded browser authentication and command
@@ -179,7 +307,7 @@ fragments is unsupported; use the verified whole-backend recovery path.
 
 ## Event retention and SQLite file size
 
-In current schema v15, both SQLite and PostgreSQL retain the
+In current schema v17, both SQLite and PostgreSQL retain the
 `last_event_sequence` snapshot watermark behavior. The same transaction retains the
 covered 10,000-sequence suffix and removes only rows older than that watermark;
 sequence gaps can make the exact row count smaller. A database without a
@@ -262,6 +390,52 @@ manifest fails closed without its exact checkpoint and that the mover copies or
 rejects each row atomically. Do not enable LRU or automatic retirements just by
 migrating.
 
+Schema v16 adds only `story_saves`, the persisted story save slots of
+[ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md) (accepted).
+Each row is keyed by account, story and slot `0..=9` and retains the pack id
+and SHA-256, the state format version, an opaque state document of at most
+64 KiB and the SHA-256 of its exact bytes; deleting an account cascades to its
+slots. Per account at most 16 stories and 1 MiB of state are accepted. The
+v15→v16 migration creates the empty table in both backends and changes no other
+table or snapshot. The server does not yet expose story sessions, so the table
+stays empty until that work lands. SQLite `tiamud-admin backup`,
+`verify-backup` and `restore` copy the table with the rest of the database;
+PostgreSQL `pg_dump` or physical backups must include it. A v15 binary refuses a
+v16 database as a future schema: rolling the binary back requires restoring
+the backup taken before the migration, which also discards any slot written
+after it.
+
+Schema v17 changes how the runtime snapshot is stored, not what it contains
+([ADR 0035](../decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
+accepted). `world_runtime` keeps `snapshot_version`, a small scalar
+`head_json`, a `manifest_json` (per section: byte length, revision and
+SHA-256) and `last_event_sequence`; the old `snapshot_json` column is gone.
+`world_runtime_sections` holds ten closed sections (`itemInstances`,
+`itemProvenance`, `npcs`, `adventure`, `progressionFlags`, `trades`,
+`lootEncounters`, `groundLoot`, `partyLootCursors`, `areaResidency`). Each
+command or tick commit rewrites the head, the manifest and only the sections
+that changed, in the same transaction as characters and events. The v16→v17
+migration (both backends, inside the migration transaction) splits the single
+legacy document into verified sections and keeps its version, watermark and
+`updated_at`.
+
+Operational consequences:
+
+- Startup reassembles and verifies the sections. A missing, extra, altered or
+  stale section row, a malformed manifest, or section rows without a head row
+  fail startup closed with an invalid runtime snapshot error; the retained
+  event ledger is never used as a fallback. The fix is to restore a verified
+  backup, never to edit or delete section rows by hand.
+- Backups must keep `world_runtime` and `world_runtime_sections` from the same
+  committed point. SQLite `tiamud-admin backup`, `verify-backup` and `restore`
+  copy the whole database, and `tiamud-admin check` verifies the assembled
+  snapshot of both pre-v17 and v17 files. A PostgreSQL `pg_dump` or physical
+  backup must include both tables (a single consistent dump does).
+- Tools or queries that read `world_runtime.snapshot_json` no longer work; read
+  the assembled document through the server or `tiamud-admin check` instead.
+- A v16 binary refuses a v17 database as a future schema: rolling the binary
+  back requires restoring the backup taken before the migration.
+
 For an existing 6B installation, the v14 row is born empty and there is no way
 to automatically reconstruct which v13 catalog was running. Recovery without a
 snapshot/ledger may still contain characters; that is why the server consults
@@ -321,7 +495,7 @@ tiamud-admin recover-admin \
 sudo systemctl start tiamud
 ```
 
-The command requires schema v15 and refuses to run while any operational
+The command requires schema v17 and refuses to run while any operational
 `administrator` or `implementor` profile exists. A legacy `admin` role alone
 does not count as executable authority. Recovery replaces the target's profile
 with `implementor`, clears its lore title and previous direct assignments,
@@ -333,7 +507,7 @@ commit in one transaction; any failure rolls all of them back.
 `tiamud-admin` remains SQLite-only. For PostgreSQL, stop the server, take and
 verify the installation's normal `pg_dump` or physical backup, then run
 `psql "$TIAMUD_DATABASE_URL" --set=target_account=Keeper` and apply this
-equivalent schema-v15 transaction:
+equivalent schema-v17 transaction:
 
 ```sql
 BEGIN;
@@ -345,8 +519,8 @@ DECLARE
     target_id BIGINT;
     recovered_at BIGINT := floor(extract(epoch FROM now()))::BIGINT;
 BEGIN
-    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 15 THEN
-        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 15';
+    IF (SELECT version FROM tiamud_schema WHERE singleton = 1) IS DISTINCT FROM 17 THEN
+        RAISE EXCEPTION 'Implementor recovery requires Tiamud schema 17';
     END IF;
     IF EXISTS (
         SELECT 1 FROM staff_profiles
@@ -467,11 +641,14 @@ TIAMUD_POSTGRES_URL='postgresql://tiamud@db.example/tiamud?sslmode=require' \
   --confirm-offline
 ```
 
-The mover requires the current SQLite schema v15, including durable social
+The mover requires the current SQLite schema v17, including durable social
 channel subscriptions, staff profiles, capability assignments, report
 resolutions, staff audit, offline mail usage/messages and retained mail-report
 evidence, board posts, usage and retained evidence, and the durable area
-generation row and every validated area checkpoint when present. It refuses a
+generation row, every validated area checkpoint and every story save slot
+when present. Each story save row is checked against the shared row contract
+(bounds, metadata agreement and the SHA-256 of its exact bytes) before the
+PostgreSQL transaction opens; one corrupt slot aborts the whole move. It refuses a
 non-empty target and commits schema
 plus rows in one PostgreSQL transaction. Configure exactly one line in the
 service environment and remove/comment the other:
@@ -482,7 +659,7 @@ TIAMUD_DATABASE_URL=postgresql://tiamud@db.example/tiamud?sslmode=require
 ```
 
 Exercise registration, login, movement, combat and social state before deleting
-or archiving the SQLite rollback copy. For schema v15 explicitly send, list,
+or archiving the SQLite rollback copy. For schema v17 explicitly send, list,
 read, delete and report mail, restart, and confirm that the moved PostgreSQL
 state retains the inbox, usage quota and report evidence. Also publish, list,
 read, delete and report one board post; confirm post quota/evidence survive the
@@ -511,7 +688,7 @@ installation.
 
 This operation only exists when the service uses
 `TIAMUD_AREA_REGISTRY` + `TIAMUD_AREA_CATALOG`. The first run binds the verified
-catalog in SQL v15 before readiness. On later restarts the durable row prevails:
+catalog in SQL (v14+) before readiness. On later restarts the durable row prevails:
 the server derives the exact path from the registry, `worldId` and digest even
 if `area-active` points to a different publication. A catalog-bound base cannot
 start in monolithic WorldPack mode. If migrating from v13, first complete the G0

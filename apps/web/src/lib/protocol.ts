@@ -1,38 +1,127 @@
+import type {
+  ActionResult,
+  BoardCatalog,
+  BoardEntry,
+  BoardKey,
+  BoardList,
+  BoardPostSummary,
+  ChatChannel,
+  ChatMessage,
+  ClientHeartbeatData,
+  ClientHelloData,
+  ClientMessageType,
+  CombatCue,
+  CombatCueKind,
+  CommandSubmitData,
+  ContainerContents,
+  EntityRemove,
+  EntityUpsert,
+  InventoryPatch,
+  MailList,
+  MailMessage,
+  MailMessageSummary,
+  MapSnapshot,
+  MediaPlay,
+  MediaStop,
+  ProtocolVersion,
+  ScenePatch,
+  ServerHeartbeat,
+  ServerMessageType,
+  ServerNotice,
+  ServerWelcome,
+  StoryChooseData,
+  StoryDecisionMode,
+  StoryEmptyData,
+  StoryEntered,
+  StoryError,
+  StoryInvitation,
+  StoryJoinData,
+  StoryLeft,
+  StoryLobby,
+  StoryMenuData,
+  StoryModeData,
+  StoryNameData,
+  StoryRestored,
+  StorySaved,
+  StorySlotData,
+  StorySlots,
+  StoryTally,
+  StoryView,
+  StoryVoteData,
+  StoryCommandData,
+  SyncPlayer,
+  SyncRequestData,
+  SyncScene,
+  TradeContents,
+  VitalsUpdate,
+} from './generated/protocol';
+import type * as Core from './generated/core';
+import type * as Server from './generated/server';
+import type { ActionPerformData } from './generated/server';
 import { isRecord } from './guards';
+import {
+  MAX_STORY_VOTE_SECONDS,
+  MIN_STORY_VOTE_SECONDS,
+  STORY_CHOICE_ID,
+  STORY_JOIN_CODE,
+  MAX_STORY_COMMAND_BYTES,
+  parseStoryEntered,
+  parseStoryError,
+  parseStoryInvitation,
+  parseStoryLeft,
+  parseStoryLobby,
+  parseStoryTally,
+  parseStoryRestored,
+  parseStorySaved,
+  parseStorySlots,
+  parseStoryView,
+} from './story-protocol';
 
-export const PROTOCOL_VERSION = 1 as const;
+// Wire shapes generated from the Rust source of truth: envelopes and
+// transport payloads from `crates/protocol` (`generated/protocol.ts`), the
+// embedded core projections from `tiamud-core` (`generated/core.ts`) and the
+// `action.perform`/presentation shapes from `tiamud-server`
+// (`generated/server.ts`). The validators below still check every inbound
+// frame at runtime and return these generated types, refined only where the
+// client narrows or normalises a value.
+export type * from './generated/protocol';
+export type { ActionPerformData } from './generated/server';
+
+export const PROTOCOL_VERSION: ProtocolVersion = 1;
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 
-export interface Envelope<TType extends string, TData> {
-  v: number;
+export interface Envelope<TType extends ServerMessageType | ClientMessageType, TData> {
+  v: ProtocolVersion;
   type: TType;
   seq?: number;
   id?: string;
   data: TData;
 }
 
-export interface ServerWelcomeData {
-  serverName?: string;
-  motd?: string;
-  sessionId?: string;
-}
+/** The client tolerates a welcome without its informational fields. */
+export type ServerWelcomeData = Partial<ServerWelcome>;
 
-export interface SceneImage {
-  alt: string;
-  localizedAlt?: Record<string, string>;
-  manifest?: string;
-  avif?: string;
+/**
+ * Replaces fields of a generated wire type. Used only where the validator
+ * below narrows a field (a closed vocabulary the server projects as a string)
+ * or normalises it (`null` to absent); every other field is the generated one.
+ */
+type Refine<T, R> = Omit<T, keyof R> & R;
+
+/**
+ * Scene image as the client renders it: the generated `SceneImage` plus the
+ * PNG fallback and `srcset` strings that `assets.ts` resolves from the
+ * reviewed manifest after validation. None of these extra fields is sent by
+ * the server.
+ */
+export type SceneImage = Core.SceneImage & {
   avifSrcset?: string;
-  webp?: string;
   webpSrcset?: string;
-  jpeg?: string;
   jpegSrcset?: string;
   png?: string;
   pngSrcset?: string;
-  width?: number;
-  height?: number;
-}
+};
 
 export function localizedImageAlt(image: SceneImage | undefined, locale: string): string | undefined {
   if (!image) return undefined;
@@ -45,146 +134,93 @@ export function localizedImageAlt(image: SceneImage | undefined, locale: string)
   return exact ?? base ?? english ?? entries.toSorted(([left], [right]) => left.localeCompare(right))[0]?.[1] ?? image.alt;
 }
 
-export interface SceneExit {
-  id: string;
-  label: string;
-  command: string;
-}
+export type SceneExit = Core.SceneExit;
 
-export interface SceneAction {
-  label: string;
-  command: string;
-}
+export type SceneAction = Core.SceneAction;
 
-export type SceneEntityPose = 'idle' | 'attack' | 'hit' | 'defeated';
+export type SceneEntityPose = keyof Server.ProjectedPoses;
 
-export interface SceneEntityVisualSource {
-  /**
-   * Optional manifest/AVIF fields remain reserved for additive negotiation.
-   * The v1 server emits only validated direct WebP/PNG raster sources and
-   * sheds optional annotations before the 16 KiB frame boundary.
-   */
+/**
+ * Optional manifest/AVIF fields remain reserved for additive negotiation.
+ * The v1 server emits only validated direct WebP/PNG raster sources and
+ * sheds optional annotations before the 16 KiB frame boundary.
+ */
+export type SceneEntityVisualSource = Server.ProjectedSource & {
   manifest?: string;
   avif?: string;
-  webp?: string;
-  png?: string;
-}
+};
 
-export interface SceneEntityVisual {
-  alt: string;
-  decorative: boolean;
-  footprint: { width: number; height: number };
-  preferredAnchor?: { x: number; y: number };
-  priority: number;
-  layer: 'midground' | 'foreground' | 'overlay';
-  poses: Record<'idle', SceneEntityVisualSource> & Partial<
-    Record<Exclude<SceneEntityPose, 'idle'>, SceneEntityVisualSource>
-  >;
-}
+/** The server projects the layer as a string; the validator narrows it. */
+export type SceneEntityLayer = 'midground' | 'foreground' | 'overlay';
 
-export interface SceneEntityPresentation extends SceneEntityVisual {
-  id: string;
-}
+export type SceneEntityVisual = Refine<Omit<Server.ProjectedEntityMedia, 'id'>, {
+  layer: SceneEntityLayer;
+  poses: { [Pose in keyof Server.ProjectedPoses]: SceneEntityVisualSource };
+}>;
 
-export interface ScenePresentation {
+export type SceneEntityPresentation = SceneEntityVisual & Pick<Server.ProjectedEntityMedia, 'id'>;
+
+export type ScenePresentation = Refine<Server.ScenePresentation, {
   entities: SceneEntityPresentation[];
-}
+}>;
 
-export interface SceneItem {
-  id: string;
-  label: string;
-  description: string;
-  rarity: ItemRarity;
-  itemLevel: number;
-  weightGrams: number;
-  quantity: number;
-  stackSlots: number;
-  totalWeightGrams: number;
-  transferPolicy: ItemTransferPolicy;
-  boundToYou: boolean;
-  affix?: ItemAffixSnapshot;
-  containerCapacity?: InventoryCapacitySnapshot;
-  loot?: SceneLootAccess;
-  actions: SceneAction[];
-}
+/** The server projects rarity as a string; the validator narrows it. */
+export type ItemRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
 
+export type ItemTransferPolicy = Core.ItemTransferPolicy;
+
+export type ItemAffixSnapshot = Core.ItemAffixView;
+
+export type InventoryCapacitySnapshot = Core.InventoryCapacityView;
+
+/** The validator only accepts the exact `yours`/`reserved` field sets. */
 export type SceneLootAccess =
-  | { access: 'yours'; expiresInTicks: number }
-  | { access: 'reserved' };
+  | Refine<Core.SceneLootAccessView, { access: 'yours'; expiresInTicks: number }>
+  | Refine<Omit<Core.SceneLootAccessView, 'expiresInTicks'>, { access: 'reserved' }>;
 
-export interface SceneNpc {
-  id: string;
-  label: string;
-  description: string;
-  health: number;
-  maxHealth: number;
-  actions: SceneAction[];
-}
+export type SceneItem = Refine<Core.SceneItem, { rarity: ItemRarity; loot?: SceneLootAccess }>;
 
-export interface SceneWeather {
-  condition: string;
-  day: number;
-  hour: number;
-  nextChangeInTicks: number;
-}
+export type SceneNpc = Core.SceneNpc;
 
-export interface SceneSnapshot {
+export type SceneWeather = Core.WeatherView;
+
+/**
+ * Normalised scene: `viewId`/`revision` stay optional because the lenient
+ * scene normaliser tolerates their absence, the image is the client-enriched
+ * one, and the presentation annotation is merged into the same object.
+ */
+export type SceneSnapshot = Refine<Core.SceneView, {
   viewId?: string;
   revision?: number;
-  title: string;
-  prose: string[];
   image?: SceneImage;
-  presentation?: ScenePresentation;
-  exits: SceneExit[];
   items: SceneItem[];
-  npcs: SceneNpc[];
-  weather: SceneWeather;
-}
+}> & { presentation?: ScenePresentation };
 
-export interface ActionResultData {
-  requestId?: string;
-  ok: boolean;
-  message?: string;
-}
+/** The wire `message: string | null` is normalised to an optional string. */
+export type ActionResultData = Omit<ActionResult, 'message'> & { message?: string };
 
-export interface ServerNoticeData {
-  level?: 'info' | 'warning' | 'error';
-  code?: string;
-  message: string;
-}
+export type ServerNoticeData = ServerNotice;
 
-export interface MessageAppendData {
-  revision: number;
-  kind:
-    | 'characterMoved'
-    | 'itemTaken'
-    | 'itemDropped'
-    | 'itemGiven'
-    | 'tradeRequested'
-    | 'tradeChanged'
-    | 'tradeCompleted'
-    | 'tradeCancelled'
-    | 'gameplay'
-    | 'adventure';
-  text: string;
-  actorId: string;
-  targetId?: string;
-  itemId?: string;
-  cue?: MessagePresentationCue;
-}
+export type MessagePresentationCueKind = CombatCueKind | 'heal';
 
-export interface SyncSceneData {
-  syncId: string;
-  afterSeq: number;
-  scene: SceneSnapshot;
-}
+/**
+ * Narrative presentation cue. The server emits the generated `CombatCue`; the
+ * validator also tolerates the reserved `heal` kind and an omitted entity or
+ * pose, and narrows `intensity` to its 1–3 range.
+ */
+export type MessagePresentationCue = Refine<CombatCue, {
+  kind: MessagePresentationCueKind;
+  entityId?: string;
+  pose?: SceneEntityPose;
+  intensity: 1 | 2 | 3;
+}>;
 
-export interface SyncPlayerData {
-  syncId: string;
-  afterSeq: number;
-  player: PlayerStateSnapshot;
-  complete: true;
-}
+/** `message.append`: the generated narrative event with its optional cue. */
+export type MessageAppendData = Core.ViewEvent & { cue?: MessagePresentationCue };
+
+export type SyncSceneData = SyncScene<SceneSnapshot>;
+
+export type SyncPlayerData = SyncPlayer<PlayerStateSnapshot>;
 
 export interface SyncRecoveryData {
   syncId: string;
@@ -193,471 +229,126 @@ export interface SyncRecoveryData {
   player: PlayerStateSnapshot;
 }
 
-export interface ScenePatchData {
-  viewId: string;
-  revision: number;
-  title?: string;
-  prose?: string[];
-  image?: SceneImage | null;
-  exits?: SceneExit[];
-  weather?: SceneWeather;
-}
-
-interface EntityUpdateBase {
-  viewId: string;
-  revision: number;
-  id: string;
-}
+export type ScenePatchData = ScenePatch<SceneImage, SceneExit, SceneWeather>;
 
 export type EntityUpsertData =
-  | (EntityUpdateBase & { kind: 'item'; entity: SceneItem })
-  | (EntityUpdateBase & { kind: 'npc'; entity: SceneNpc });
+  | (EntityUpsert<SceneItem> & { kind: 'item' })
+  | (EntityUpsert<SceneNpc> & { kind: 'npc' });
 
-export interface EntityRemoveData {
-  viewId: string;
-  revision: number;
-  kind: 'item' | 'npc';
-  id: string;
-}
+export type EntityRemoveData = EntityRemove;
 
-export type MessagePresentationCueKind = 'attack' | 'hit' | 'heal' | 'defeat';
+export type VitalsUpdateData = VitalsUpdate<PlayerCharacterSnapshot>;
 
-export interface MessagePresentationCue {
-  kind: MessagePresentationCueKind;
-  entityId?: string;
-  pose?: SceneEntityPose;
-  intensity: 1 | 2 | 3;
-  durationMs: number;
-}
+export type InventoryPatchData = InventoryPatch<
+  PlayerItemSnapshot,
+  EquippedItemSnapshot,
+  InventoryCapacitySnapshot
+>;
 
-export interface VitalsUpdateData {
-  revision: number;
-  character: PlayerCharacterSnapshot;
-}
+export type TradeContentsData = TradeContents<ContainerItemSnapshot, InventoryCapacitySnapshot>;
 
-export interface InventoryPatchData {
-  revision: number;
-  inventory: PlayerItemSnapshot[];
-  equipment: EquippedItemSnapshot[];
-  inventoryCapacity: InventoryCapacitySnapshot;
-}
+export type MapSnapshotData = MapSnapshot<PlayerStateSnapshot['map']>;
 
-export interface TradeContentsData {
-  tradeId: string;
-  container: string;
-  items: ContainerItemSnapshot[];
-  page: number;
-  totalPages: number;
-  capacity: InventoryCapacitySnapshot;
-}
+export type ServerHeartbeatData = ServerHeartbeat;
 
-export interface MapSnapshotData {
-  revision: number;
-  map: PlayerStateSnapshot['map'];
-}
+export type MediaPlayData = MediaPlay;
 
-export interface ServerHeartbeatData {
-  nonce: number;
-  timeoutMs: number;
-}
+/** The client tolerates a stop without a channel (stop everything). */
+export type MediaStopData = Partial<MediaStop>;
 
-export interface MediaPlayData {
-  channel: 'music' | 'ambience' | 'effects';
-  url: string;
-  loop: boolean;
-}
+export type CommunityChannel = Core.SocialChannelName;
 
-export interface MediaStopData {
-  channel?: 'music' | 'ambience' | 'effects';
-}
+export type SocialMessageChannel = ChatChannel;
 
-export type CommunityChannel = 'general' | 'newbie' | 'staff';
+export type StaffReportResolution = Core.StaffReportResolution;
 
-export type SocialMessageChannel =
-  | 'announcement'
-  | 'say'
-  | 'yell'
-  | 'shout'
-  | 'tell'
-  | 'telepathy'
-  | 'emote'
-  | 'party'
-  | CommunityChannel;
+export type StaffProfile = Core.StaffProfileKey;
 
-export type StaffReportResolution = 'dismissed' | 'action_taken' | 'no_action';
+export type StaffCapability = Core.StaffCapability;
 
-export type StaffProfile =
-  | 'helper'
-  | 'builder'
-  | 'moderator'
-  | 'administrator'
-  | 'implementor';
-
-export type StaffCapability =
-  | 'reports.view'
-  | 'reports.resolve'
-  | 'moderation.mute'
-  | 'moderation.ban'
-  | 'staff.assign'
-  | 'staff.inspect'
-  | 'staff.where'
-  | 'staff.goto'
-  | 'staff.transfer'
-  | 'staff.restore'
-  | 'staff.announce'
-  | 'staff.audit';
-
-export interface SocialMessageData {
-  channel: SocialMessageChannel;
-  sender: string;
-  text: string;
-}
+export type SocialMessageData = ChatMessage;
 
 /** Retained for the v1 `chat.message` envelope name. */
 export type ChatMessageData = SocialMessageData;
 
-export interface PlayerCharacterSnapshot {
-  name: string;
-  level: number;
-  experience: number;
-  nextLevelExperience: number;
-  health: number;
-  maxHealth: number;
-  strength: number;
-  defence: number;
-  skills: Array<{ id: string; label: string; rank: number }>;
-  effects: Array<{
-    kind: 'regeneration' | 'strength';
-    magnitude: number;
-    remainingTicks: number;
-  }>;
+/** The server projects these as strings; the validator narrows them. */
+export type AbilityKind = 'martial' | 'spell' | 'utility';
+export type AbilityTargeting = 'self' | 'optionalTarget' | 'explicitTarget';
+
+export type AbilitySnapshot = Refine<Core.AbilityView, {
+  kind: AbilityKind;
+  targeting: AbilityTargeting;
+}>;
+
+/** The wire `nextCost: number | null` is normalised to an optional number. */
+export type TalentNodeSnapshot = Refine<Core.TalentNodeView, { nextCost?: number }>;
+
+export type TalentGraphSnapshot = Refine<Core.TalentGraphView, { nodes: TalentNodeSnapshot[] }>;
+
+/** The wire `recoveryInTicks: number | null` is normalised to optional. */
+export type PlayerCharacterSnapshot = Refine<Core.PlayerCharacterView, {
   recoveryInTicks?: number;
-  lineage: {
-    id: string;
-    label: string;
-    description: string;
-  };
-  background?: {
-    id: string;
-    label: string;
-    description: string;
-  };
-  baseClass: {
-    id: string;
-    label: string;
-    description: string;
-  };
-  activeClass: {
-    id: string;
-    label: string;
-    description: string;
-  };
-  classHistory: Array<{
-    id: string;
-    label: string;
-    description: string;
-  }>;
-  attributes: Array<{
-    id: string;
-    label: string;
-    value: number;
-  }>;
-  resistances: Array<{
-    damageType: 'physical' | 'arcane' | 'fire' | 'frost' | 'lightning';
-    percent: number;
-  }>;
-  statuses: Array<{
-    id: string;
-    label: string;
-    kind: 'attribute_modifier' | 'regeneration' | 'damage_over_time' | 'stun';
-    magnitude: number;
-    remainingTicks: number;
-  }>;
-  resources: Array<{
-    id: string;
-    label: string;
-    current: number;
-    max: number;
-  }>;
-  abilities: Array<{
-    id: string;
-    name: string;
-    description: string;
-    kind: 'martial' | 'spell' | 'utility';
-    resourceCosts: Array<{
-      resourceId: string;
-      label: string;
-      amount: number;
-    }>;
-    cooldownRemaining: number;
-    usable: boolean;
-    purpose: 'gameplay' | 'telepathy';
-    targeting: 'self' | 'optionalTarget' | 'explicitTarget';
-  }>;
-  progressionPoints: Record<string, number>;
-  talents: Array<{
-    id: string;
-    label: string;
-    description: string;
-    pointPoolId: string;
-    availablePoints: number;
-    nodes: Array<{
-      id: string;
-      label: string;
-      description: string;
-      rank: number;
-      maxRank: number;
-      nextCost?: number;
-      available: boolean;
-      requirements: Array<{ met: boolean; text: string }>;
-      command: string;
-    }>;
-  }>;
-  promotions: Array<{
-    class: {
-      id: string;
-      label: string;
-      description: string;
-    };
-    available: boolean;
-    requirements: Array<{ met: boolean; text: string }>;
-    command: string;
-  }>;
-}
+  abilities: AbilitySnapshot[];
+  talents: TalentGraphSnapshot[];
+}>;
 
-export interface PlayerItemSnapshot {
-  id: string;
-  label: string;
-  description: string;
+export type PlayerItemSnapshot = Refine<Core.PlayerItemView, { rarity: ItemRarity }>;
+
+/** The server projects the slot as a string; the validator narrows it. */
+export type EquipmentSlot = 'weapon' | 'body' | 'trinket';
+
+export type EquippedItemSnapshot = Refine<Core.EquippedItemView, {
   rarity: ItemRarity;
-  itemLevel: number;
-  weightGrams: number;
-  quantity: number;
-  availableQuantity: number;
-  reservedForTrade: number;
-  stackSlots: number;
-  totalWeightGrams: number;
-  transferPolicy: ItemTransferPolicy;
-  boundToYou: boolean;
-  affix?: ItemAffixSnapshot;
-  canGive: boolean;
-  canTrade: boolean;
-  containerCapacity?: InventoryCapacitySnapshot;
-  actions: SceneAction[];
-}
+  slot: EquipmentSlot;
+}>;
 
-export interface EquippedItemSnapshot {
-  id: string;
-  slot: 'weapon' | 'body' | 'trinket';
-  label: string;
-  rarity: ItemRarity;
-  itemLevel: number;
-  weightGrams: number;
-  quantity: number;
-  stackSlots: number;
-  totalWeightGrams: number;
-  transferPolicy: ItemTransferPolicy;
-  boundToYou: boolean;
-  affix?: ItemAffixSnapshot;
-  containerCapacity?: InventoryCapacitySnapshot;
-  actions: SceneAction[];
-}
-
-export type ItemRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
-export type ItemTransferPolicy = 'transferable' | 'character_bound' | 'non_transferable';
-
-export interface ItemAffixSnapshot {
-  label: string;
-  position: 'prefix' | 'suffix';
-  attackBonusDelta: number;
-  healAmountDelta: number;
-}
-
-export interface InventoryCapacitySnapshot {
-  usedSlots: number;
-  maxSlots: number;
-  usedWeightGrams: number;
-  maxWeightGrams: number;
-}
-
+/** Paged container/trade frames omit item prose (see `web.rs`). */
 export type ContainerItemSnapshot = Omit<PlayerItemSnapshot, 'description'>;
 
-export interface ContainerContentsData {
-  container: string;
-  items: ContainerItemSnapshot[];
-  page: number;
-  totalPages: number;
-  capacity: InventoryCapacitySnapshot;
-}
+export type ContainerContentsData = ContainerContents<
+  ContainerItemSnapshot,
+  InventoryCapacitySnapshot
+>;
 
-export interface RewardOddsGuaranteedRow {
-  label: string;
-  quantity: number;
-  affixPoolLabel?: string;
-}
+export type RewardOddsGuaranteedRow = Core.RewardOddsGuaranteedRow;
 
-export interface RewardOddsWeightedRow {
-  poolLabel: string;
-  rolls: number;
-  outcomeLabel: string;
-  minQuantity: number;
-  maxQuantity: number;
-  probabilityNumerator: number;
-  probabilityDenominator: number;
-  affixPoolLabel?: string;
-}
+export type RewardOddsWeightedRow = Core.RewardOddsWeightedRow;
 
-export interface RewardOddsAffixRow {
-  parentOutcomeLabel: string;
-  affixLabel: string;
-  position?: 'prefix' | 'suffix';
-  attackBonusDelta: number;
-  healAmountDelta: number;
-  conditionalProbabilityNumerator: number;
-  conditionalProbabilityDenominator: number;
-}
+export type RewardOddsAffixRow = Core.RewardOddsAffixRow;
 
-export interface RewardOddsData {
-  selector: string;
-  page: number;
-  totalPages: number;
-  guaranteed: RewardOddsGuaranteedRow[];
-  weighted: RewardOddsWeightedRow[];
-  affixes: RewardOddsAffixRow[];
-}
+export type RewardOddsData = Core.RewardOddsView;
 
-export interface MailMessageSummary {
-  id: string;
-  sender: string;
-  subject: string;
-  createdAt: number;
-  expiresAt: number;
-  read: boolean;
-}
+export type MailListData = MailList;
 
-export interface MailListData {
-  page: number;
-  totalPages: number;
-  totalMessages: number;
-  unreadCount: number;
-  capacity: number;
-  messages: MailMessageSummary[];
-}
+export type MailMessageData = MailMessage;
 
-export interface MailMessageData extends MailMessageSummary {
-  body: string;
-}
+/** The validator only accepts the fixed 90-day retention. */
+export type BoardCatalogData = BoardCatalog & { retentionDays: 90 };
 
-export type BoardKey = 'general' | 'newbie';
+/** The validator only accepts the fixed 1,000-post board capacity. */
+export type BoardListData = BoardList & { capacity: 1000 };
 
-export interface BoardCatalogData {
-  boards: Array<{ key: BoardKey; label: string; description: string; canPost: boolean }>;
-  retentionDays: 90;
-}
+export type BoardEntryData = BoardEntry;
 
-export interface BoardPostSummary {
-  postId: string;
-  board: BoardKey;
-  author: string;
-  subject: string;
-  createdAt: number;
-  expiresAt: number;
-  canDelete: boolean;
-  canReport: boolean;
-}
+/** The server projects quest status as a string; the validator narrows it. */
+export type QuestStatus = 'available' | 'active' | 'readyToClaim' | 'completed';
 
-export interface BoardListData {
-  board: BoardKey;
-  page: number;
-  totalPages: number;
-  totalPosts: number;
-  capacity: 1000;
-  posts: BoardPostSummary[];
-}
+export type QuestSnapshot = Refine<Core.QuestView, { status: QuestStatus }>;
 
-export interface BoardEntryData extends BoardPostSummary {
-  body: string;
-}
-
-export interface PlayerStateSnapshot {
-  revision: number;
+export type PlayerStateSnapshot = Refine<Core.PlayerStateView, {
   character: PlayerCharacterSnapshot;
   inventory: PlayerItemSnapshot[];
   equipment: EquippedItemSnapshot[];
-  inventoryCapacity: InventoryCapacitySnapshot;
-  map: {
-    currentRoomId: string;
-    rooms: Array<{ id: string; title: string; current: boolean }>;
-    paths: Array<{ from: string; direction: string; to?: string }>;
-  };
-  quests: Array<{
-    id: string;
-    label: string;
-    summary: string;
-    status: 'available' | 'active' | 'readyToClaim' | 'completed';
-    current: number;
-    target: number;
-    actions: SceneAction[];
-  }>;
-  party?: {
-    leader: boolean;
-    members: Array<{ id: string; name: string; leader: boolean; online: boolean }>;
-    actions: SceneAction[];
-  };
-  partyInvites: Array<{
-    leaderName: string;
-    expiresInTicks: number;
-    actions: SceneAction[];
-  }>;
-  economy: {
-    coins: number;
-    reservedCoins: number;
-    spendableCoins: number;
-    commodities: Array<{ id: string; label: string; quantity: number }>;
-    shopAvailable: boolean;
-    shop: Array<{
-      id: string;
-      label: string;
-      buyPrice: number;
-      sellPrice: number;
-      stock: number;
-      owned: number;
-      actions: SceneAction[];
-    }>;
-  };
-  social: {
-    online: Array<{ id: string; name: string; selfCharacter: boolean; nearby: boolean }>;
-  };
-  trade?: TradeSnapshot;
-}
+  quests: QuestSnapshot[];
+}>;
 
-export type TradePhase = 'requested' | 'negotiating';
+export type TradePhase = Core.TradePhase;
 
-export interface TradeOfferLineSnapshot {
-  target: string;
-  label: string;
-  quantity: number;
-  container: boolean;
-}
+export type TradeOfferLineSnapshot = Core.TradeOfferLineView;
 
-export interface TradeOfferSnapshot {
-  coins: number;
-  lines: TradeOfferLineSnapshot[];
-}
+export type TradeOfferSnapshot = Core.TradeOfferView;
 
-export interface TradeSnapshot {
-  id: string;
-  phase: TradePhase;
-  counterparty: string;
-  expiresInTicks: number;
-  stateRevision: number;
-  ownConfirmed: boolean;
-  counterpartyConfirmed: boolean;
-  ownOffer: TradeOfferSnapshot;
-  counterpartyOffer: TradeOfferSnapshot;
-  canAccept: boolean;
-  canConfirm: boolean;
-}
+export type TradeSnapshot = Core.TradeView;
 
 export type ServerMessage =
   | Envelope<'server.welcome', ServerWelcomeData>
@@ -685,78 +376,73 @@ export type ServerMessage =
   | Envelope<'server.heartbeat', ServerHeartbeatData>
   | Envelope<'media.play', MediaPlayData>
   | Envelope<'media.stop', MediaStopData>
-  | Envelope<'chat.message', ChatMessageData>;
+  | Envelope<'chat.message', ChatMessageData>
+  | Envelope<'story.entered', StoryEntered>
+  | Envelope<'story.view', StoryView>
+  | Envelope<'story.left', StoryLeft>
+  | Envelope<'story.error', StoryError>
+  | Envelope<'story.slots', StorySlots>
+  | Envelope<'story.saved', StorySaved>
+  | Envelope<'story.restored', StoryRestored>
+  | Envelope<'story.lobby', StoryLobby>
+  | Envelope<'story.tally', StoryTally>
+  | Envelope<'story.invitation', StoryInvitation>;
 
 export type LiveServerMessage = Exclude<
   ServerMessage,
   Envelope<'sync.scene', SyncSceneData> | Envelope<'sync.player', SyncPlayerData>
 >;
 
-export type ClientHello = Envelope<
-  'client.hello',
-  {
-    client: 'web';
-    capabilities: {
-      images: readonly ('avif' | 'webp' | 'jpeg')[];
-      reducedMotion: boolean;
-      audio: boolean;
-    };
-    auth: {
-      token: string;
-      characterId: number;
-    };
-  }
->;
+export type ClientHello = Envelope<'client.hello', ClientHelloData>;
 
-export type CommandSubmit = Envelope<
-  'command.submit',
-  {
-    requestId: string;
-    command: string;
-  }
->;
+export type CommandSubmit = Envelope<'command.submit', CommandSubmitData>;
 
-export interface ActionPerformFields {
-  abilityId?: string;
-  emote?: string;
-  target?: string;
-  recipient?: string;
-  container?: string;
-  quantity?: number;
-  page?: number;
-  tradeId?: string;
-  coins?: number;
-  stateRevision?: number;
-  message?: string;
-  channel?: CommunityChannel;
-  reason?: string;
-  mailId?: string;
-  postId?: string;
-  board?: BoardKey;
-  subject?: string;
-  body?: string;
-  reportId?: number;
-  resolution?: StaffReportResolution;
-  profile?: StaffProfile | null;
-  loreTitle?: string | null;
-  capability?: StaffCapability;
-  enabled?: boolean;
-}
+/**
+ * `action.perform` fields other than `requestId`/`action`, generated from the
+ * server's `ActionPerformData`. `createActionPerform` still validates every
+ * field it sends.
+ */
+export type ActionPerformFields = Omit<ActionPerformData, 'requestId' | 'action'>;
 
-export type ActionPerform = Envelope<
-  'action.perform',
-  ActionPerformFields & {
-    requestId: string;
-    action: string;
-    classId?: string;
-    graphId?: string;
-    nodeId?: string;
-  }
->;
+export type ActionPerform = Envelope<'action.perform', ActionPerformData>;
 
-export type SyncRequest = Envelope<'sync.request', { afterSeq: number }>;
+export type SyncRequest = Envelope<'sync.request', SyncRequestData>;
 
-export type ClientHeartbeat = Envelope<'client.heartbeat', { nonce: number }>;
+export type ClientHeartbeat = Envelope<'client.heartbeat', ClientHeartbeatData>;
+
+export type StoryChoose = Envelope<'story.choose', StoryChooseData>;
+
+export type StoryDialogue = Envelope<'story.dialogue', StoryChooseData>;
+
+export type StoryMenu = Envelope<'story.menu', StoryMenuData>;
+
+export type StoryUndo = Envelope<'story.undo', StoryEmptyData>;
+
+export type StoryLeave = Envelope<'story.leave', StoryEmptyData>;
+
+export type StorySave = Envelope<'story.save', StorySlotData>;
+
+export type StoryRestore = Envelope<'story.restore', StorySlotData>;
+
+export type StoryDeleteSlot = Envelope<'story.deleteSlot', StorySlotData>;
+
+export type StoryListSlots = Envelope<'story.slots', StoryEmptyData>;
+
+export type StoryContinue = Envelope<'story.continue', StoryEmptyData>;
+
+export type StoryShare = Envelope<'story.share', StoryEmptyData>;
+
+export type StoryJoin = Envelope<'story.join', StoryJoinData>;
+
+export type StoryInvite = Envelope<'story.invite', StoryNameData>;
+
+export type StoryKick = Envelope<'story.kick', StoryNameData>;
+
+export type StoryMode = Envelope<'story.mode', StoryModeData>;
+
+export type StoryVote = Envelope<'story.vote', StoryVoteData>;
+
+export type StoryCommand = Envelope<'story.command', StoryCommandData>;
 
 const stringOrUndefined = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -824,18 +510,15 @@ const parseInventoryCapacity = (value: unknown): InventoryCapacitySnapshot | und
   return { usedSlots, maxSlots, usedWeightGrams, maxWeightGrams };
 };
 
-interface ItemStackProjection {
-  quantity: number;
-  stackSlots: number;
-  totalWeightGrams: number;
-  containerCapacity?: InventoryCapacitySnapshot;
-}
+type ItemStackProjection = Pick<
+  PlayerItemSnapshot,
+  'quantity' | 'stackSlots' | 'totalWeightGrams' | 'containerCapacity'
+>;
 
-interface ItemTradeProjection {
-  availableQuantity: number;
-  reservedForTrade: number;
-  canTrade: boolean;
-}
+type ItemTradeProjection = Pick<
+  PlayerItemSnapshot,
+  'availableQuantity' | 'reservedForTrade' | 'canTrade'
+>;
 
 const parseItemTradeProjection = (
   value: Record<string, unknown>,
@@ -2674,6 +2357,46 @@ export function parseServerMessage(raw: string): ServerMessage | undefined {
       }
       return { ...base, type: candidate.type, data: { channel, sender, text } };
     }
+    case 'story.entered': {
+      const data = parseStoryEntered(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.view': {
+      const data = parseStoryView(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.left': {
+      const data = parseStoryLeft(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.error': {
+      const data = parseStoryError(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.slots': {
+      const data = parseStorySlots(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.saved': {
+      const data = parseStorySaved(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.restored': {
+      const data = parseStoryRestored(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.lobby': {
+      const data = parseStoryLobby(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.tally': {
+      const data = parseStoryTally(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
+    case 'story.invitation': {
+      const data = parseStoryInvitation(candidate.data);
+      return data ? { ...base, type: candidate.type, data } : undefined;
+    }
     case 'server.heartbeat': {
       const nonce = positiveIntegerOrUndefined(candidate.data.nonce);
       const timeoutMs = positiveIntegerOrUndefined(candidate.data.timeoutMs);
@@ -3069,5 +2792,159 @@ export function createHeartbeatAck(nonce: number): ClientHeartbeat {
     v: PROTOCOL_VERSION,
     type: 'client.heartbeat',
     data: { nonce },
+  };
+}
+
+/** `story.choose` for an opaque id published by view `viewRev`. */
+export function createStoryChoose(id: string, viewRev: number): StoryChoose {
+  if (!/^c[0-9a-f]{16}$/.test(id) || !Number.isSafeInteger(viewRev) || viewRev < 1 ||
+    viewRev > 0xffff_ffff) {
+    throw new Error('A story choice needs an opaque choice id and a positive view revision.');
+  }
+  return { v: PROTOCOL_VERSION, type: 'story.choose', data: { id, viewRev } };
+}
+
+/** `story.dialogue` for an opaque dialogue-option id of view `viewRev`. */
+export function createStoryDialogue(id: string, viewRev: number): StoryDialogue {
+  const { data } = createStoryChoose(id, viewRev);
+  return { v: PROTOCOL_VERSION, type: 'story.dialogue', data };
+}
+
+/** `story.menu`: a verb id plus, when the verb needs one, a target id of it. */
+export function createStoryMenu(verb: string, target: string | undefined, viewRev: number): StoryMenu {
+  createStoryChoose(verb, viewRev);
+  if (target !== undefined) createStoryChoose(target, viewRev);
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'story.menu',
+    data: target === undefined ? { verb, viewRev } : { verb, target, viewRev },
+  };
+}
+
+export function createStoryUndo(): StoryUndo {
+  return { v: PROTOCOL_VERSION, type: 'story.undo', data: {} };
+}
+
+export function createStoryLeave(): StoryLeave {
+  return { v: PROTOCOL_VERSION, type: 'story.leave', data: {} };
+}
+
+/** Highest save slot; `0` is the autosave and `1..=9` are manual slots. */
+export const MAX_STORY_SLOT = 9;
+
+function storySlot(slot: number, minimum: number): StorySlotData {
+  if (!Number.isSafeInteger(slot) || slot < minimum || slot > MAX_STORY_SLOT) {
+    throw new Error(`A story save slot must be an integer in ${minimum}..${MAX_STORY_SLOT}.`);
+  }
+  return { slot };
+}
+
+/** `story.save`: manual slots `1..=9` only; slot 0 is the autosave. */
+export function createStorySave(slot: number): StorySave {
+  return { v: PROTOCOL_VERSION, type: 'story.save', data: storySlot(slot, 1) };
+}
+
+/** `story.restore`: any slot `0..=9`; a `story.restored` and view follow. */
+export function createStoryRestore(slot: number): StoryRestore {
+  return { v: PROTOCOL_VERSION, type: 'story.restore', data: storySlot(slot, 0) };
+}
+
+export function createStoryDeleteSlot(slot: number): StoryDeleteSlot {
+  return { v: PROTOCOL_VERSION, type: 'story.deleteSlot', data: storySlot(slot, 0) };
+}
+
+export function createStoryListSlots(): StoryListSlots {
+  return { v: PROTOCOL_VERSION, type: 'story.slots', data: {} };
+}
+
+/** `story.continue`: restores the autosave offered on entry. */
+export function createStoryContinue(): StoryContinue {
+  return { v: PROTOCOL_VERSION, type: 'story.continue', data: {} };
+}
+
+// --- Shared story instances (ADR 0033) -------------------------------------
+
+/** `story.share`: opens the current story to other characters. */
+export function createStoryShare(): StoryShare {
+  return { v: PROTOCOL_VERSION, type: 'story.share', data: {} };
+}
+
+/** `story.join`: joins a shared story by its eight-character code. */
+export function createStoryJoin(code: string, spectate: boolean): StoryJoin {
+  const normalized = code.trim().toUpperCase();
+  if (!STORY_JOIN_CODE.test(normalized)) {
+    throw new Error('A join code has eight letters and digits.');
+  }
+  return { v: PROTOCOL_VERSION, type: 'story.join', data: { code: normalized, spectate } };
+}
+
+const CONTROL_CHARACTER = /\p{Cc}/u;
+
+function memberName(name: string): StoryNameData {
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || new TextEncoder().encode(trimmed).length > 64 ||
+    CONTROL_CHARACTER.test(trimmed)) {
+    throw new Error('A character name must be 1..64 bytes without control characters.');
+  }
+  return { name: trimmed };
+}
+
+/** `story.invite` (host): sends the join code to a connected character. */
+export function createStoryInvite(name: string): StoryInvite {
+  return { v: PROTOCOL_VERSION, type: 'story.invite', data: memberName(name) };
+}
+
+/** `story.kick` (host): removes a participant by name. */
+export function createStoryKick(name: string): StoryKick {
+  return { v: PROTOCOL_VERSION, type: 'story.kick', data: memberName(name) };
+}
+
+/** `story.mode` (host): decision mode and, optionally, the vote window. */
+export function createStoryMode(mode: StoryDecisionMode, voteSeconds?: number): StoryMode {
+  if (mode !== 'host' && mode !== 'vote' && mode !== 'turns') {
+    throw new Error('Unknown decision mode.');
+  }
+  if (voteSeconds !== undefined && (!Number.isSafeInteger(voteSeconds) ||
+    voteSeconds < MIN_STORY_VOTE_SECONDS || voteSeconds > MAX_STORY_VOTE_SECONDS)) {
+    throw new Error(
+      `The vote window must be ${MIN_STORY_VOTE_SECONDS}..${MAX_STORY_VOTE_SECONDS} seconds.`,
+    );
+  }
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'story.mode',
+    data: voteSeconds === undefined ? { mode } : { mode, voteSeconds },
+  };
+}
+
+/**
+ * `story.command`: one line of free text for a parser story, typed against
+ * view `viewRev`. Lines are 1..256 UTF-8 bytes after trimming.
+ */
+export function createStoryCommand(text: string, viewRev: number): StoryCommand {
+  const line = text.trim();
+  if (line.length === 0 || new TextEncoder().encode(line).length > MAX_STORY_COMMAND_BYTES ||
+    !Number.isSafeInteger(viewRev) || viewRev < 1 || viewRev > 0xffff_ffff) {
+    throw new Error(
+      `A story command is 1..${MAX_STORY_COMMAND_BYTES} bytes for a positive view revision.`,
+    );
+  }
+  return { v: PROTOCOL_VERSION, type: 'story.command', data: { text: line, viewRev } };
+}
+
+/**
+ * `story.vote`: a vote for the action whose opaque leaf id is `choiceId`
+ * (choice, dialogue option, untargeted verb or verb target) of view
+ * `viewRev`; `undefined` withdraws the vote.
+ */
+export function createStoryVote(choiceId: string | undefined, viewRev: number): StoryVote {
+  if ((choiceId !== undefined && !STORY_CHOICE_ID.test(choiceId)) ||
+    !Number.isSafeInteger(viewRev) || viewRev < 1 || viewRev > 0xffff_ffff) {
+    throw new Error('A story vote needs an opaque choice id and a positive view revision.');
+  }
+  return {
+    v: PROTOCOL_VERSION,
+    type: 'story.vote',
+    data: choiceId === undefined ? { viewRev } : { choiceId, viewRev },
   };
 }

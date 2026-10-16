@@ -76,15 +76,15 @@ matriz, memoria y documentación pública a la vez.
 - Mundo y conversación usan buzones acotados de 256 entradas por sesión,
   encaminados por `SessionId`. Conserva el fan-out O(S), recuperación por lag y
   limpieza segura ante cancelación.
-- PostgreSQL esquema v15 es el perfil recomendado para un host público nuevo.
-  SQLite esquema v15 es la ruta local/predeterminada sin servicios. Se abre un
+- PostgreSQL esquema v17 es el perfil recomendado para un host público nuevo.
+  SQLite esquema v17 es la ruta local/predeterminada sin servicios. Se abre un
   único sistema autoritativo; no hay doble escritura.
 - La última aceptación PostgreSQL integral retenida corresponde a v14 y usa
   PostgreSQL 18 desechable: 20/20 pruebas
   `--all-targets` del adaptador y 7/7 pruebas enfocadas del servidor, incluida la
   CAS de generación. El humo confirma esquema 14, liga G0, readiness, Web,
   Telnet, dos áreas residentes, `noop` por SIGHUP y cierre limpio. Esto no
-  demuestra por sí solo el esquema v15 ni sustituye TLS, backup/restore,
+  demuestra por sí solo los esquemas v15/v16/v17 ni sustituye TLS, backup/restore,
   monitorización o recuperación del operador.
 - `tiamud-migrate-postgres` traslada sin conexión una instantánea SQLite actual
   a PostgreSQL vacío en una transacción, incluidas suscripciones, perfiles,
@@ -99,10 +99,10 @@ matriz, memoria y documentación pública a la vez.
   instancia y contador de aperturas de v7 y añade un manifiesto acotado
   `Resident|Retired` para las áreas de una generación de catálogo. SQLite y
   PostgreSQL la confirman con personajes/eventos en su transacción existente;
-  ambos adaptadores usan esquema v15 y no hay tabla espejo ni custodia SQL de
-  trade o botín. DTO exactos v1-v8 se seleccionan por `snapshotVersion`;
+  ambos adaptadores usan esquema v17 y no hay tabla espejo ni custodia SQL de
+  trade o botín. DTO exactos v1-v9 se seleccionan por `snapshotVersion`;
   snapshots v1-v5 conservan su límite legado de 1 MiB y v6-v7 admiten hasta
-  2 MiB; v8 mantiene ese máximo. El DTO v6 estricto rechaza campos v7 y
+  2 MiB; v8 y v9 (aditivo, reparto de botín 4C) mantienen ese máximo. El DTO v6 estricto rechaza campos v7 y
   normaliza a afijos vacíos y
   `nextRewardOpenId: 1` sin inventar procedencia.
   v1-v3 se convierten a vínculo `unbound` y un campo
@@ -117,6 +117,31 @@ matriz, memoria y documentación pública a la vez.
   SHA-256. Retiro y rehidratación confirman por CAS checkpoint + snapshot v8 o
   consumen ambos atómicamente. El mover SQLite→PostgreSQL valida y copia esas
   filas; no son otra autoridad de trade, botín ni personajes.
+- El esquema v16 solo añade `story_saves`, la capa de persistencia de slots de
+  historia S3 ([ADR 0030](docs/decisions/0030-story-save-slots-and-schema-v16.md),
+  aceptado): clave `(cuenta, historia, slot 0..=9)`, FK de cuenta en cascada,
+  digest del pack, estado opaco ≤ 64 KiB con SHA-256 de bytes exactos y límites
+  por cuenta (16 historias, 1 MiB). Cargar verifica digest y metadatos y falla
+  cerrado ante otra revisión del pack no declarada compatible; el llamador
+  revalida con `story-core`. El mover valida y copia esas filas. Está
+  conectada a las sesiones S2 (`story.save/restore/slots/deleteSlot/continue`,
+  Telnet `guardar/cargar/partidas/borrar/continuar`, autoguardado en el slot 0
+  al salir, al desalojar por inactividad y en el apagado ordenado; revalida con
+  `StoryState::from_json_slice` contra el SHA-256 exacto del pack o una
+  revisión declarada en `compatible_revisions` de StoryPack v3, que si ya no
+  encaja falla con `slot_incompatible`, y no persiste el historial de
+  deshacer). Sus pruebas PostgreSQL no se han ejecutado contra
+  un servidor real.
+- El esquema v17 guarda el snapshot de runtime **seccionado**
+  ([ADR 0035](docs/decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
+  aceptado): `world_runtime` conserva versión, cabecera escalar, manifiesto y
+  watermark; `world_runtime_sections` guarda diez secciones cerradas con
+  revisión y SHA-256. Los commits de comando/tick reescriben solo las
+  secciones que la línea base de ADR 0027 no prueba limpias (desconocido =
+  sucio) en la misma transacción; la recuperación ensambla el mismo DTO y
+  falla cerrada ante cualquier desacuerdo, con el techo aplicado al documento
+  ensamblado. Una escritura nueva de runtime debe pasar por
+  `plan_runtime_write`. Sus pruebas PostgreSQL no se han ejecutado.
 - Cada snapshot registra la secuencia cubierta y conserva atómicamente solo el
   sufijo diagnóstico cubierto de 10.000 secuencias.
 - Autenticación registrada compartida entre web y Telnet. Trabajo Argon2id,
@@ -125,10 +150,15 @@ matriz, memoria y documentación pública a la vez.
 
 ### Mundo, personajes y juego
 
-- WorldPack v9 es canónico; AreaPack v8 es la autoría modular nativa y
-  WorldProject permanece en v2. WorldPack v8/v7/v6/v5/v4/v3/v2,
-  AreaPack v7/v6/v5/v4/v3/v2/v1 y Envy/Merc solo entran por
-  normalización/importación.
+- WorldPack v10 es canónico; AreaPack v9 es la autoría modular nativa y
+  WorldProject permanece en v2. WorldPack v9/v8/v7/v6/v5/v4/v3/v2,
+  AreaPack v8/v7/v6/v5/v4/v3/v2/v1 y Envy/Merc solo entran por
+  normalización/importación. WorldPack v10/AreaPack v9 declaran misiones,
+  mercancías y tiendas como datos
+  ([ADR 0032](docs/decisions/0032-worldpack-v10-quests-and-shops.md),
+  aceptado); normalizar un WorldPack v2–v9 hace explícitos la misión
+  `first-hunt` y el mercado que el núcleo tenía cableados. Sus IDs, el orden de
+  etapas/objetivos y los `stockId` son durables.
 - El arranque elige una fuente de mundo. `TIAMUD_WORLD_PACK` selecciona un
   WorldPack monolítico externo revisado; sin variables de mundo se usa el
   embebido. Como alternativa 6B, `TIAMUD_AREA_REGISTRY` y
@@ -280,7 +310,7 @@ matriz, memoria y documentación pública a la vez.
   `contents` pagina 20 grupos; Web, Telnet y GMCP reciben cantidad, slots, peso
   total, capacidad, política de transferencia y estado de vínculo mediante
   referencias opacas.
-- WorldPack v9 y AreaPack v8 aceptan el vocabulario cerrado `transferable`,
+- WorldPack v10/v9 y AreaPack v9/v8 aceptan el vocabulario cerrado `transferable`,
   `character_bound` y `non_transferable`, igual que WorldPack v6/v5 y AreaPack
   v5/v4;
   WorldPack v4/AreaPack v3 y anteriores solo normalizan `transferable`. La primera adquisición liga
@@ -338,7 +368,7 @@ matriz, memoria y documentación pública a la vez.
 - La conversación incluye `say` local, `tell`, `reply` en memoria mientras el
   destinatario siga conectado, chat de grupo y canales `general`, `newbie` y
   `staff`. Las suscripciones son durables desde v13 y se conservan en el esquema
-  v15 actual; `staff` requiere perfil
+  v17 actual; `staff` requiere perfil
   `moderator`, `administrator` o `implementor` al unirse, enviar y recibir;
   `helper` y `builder` no acceden. WorldPack v9/AreaPack v8 conservan una
   comunicación `telepathy/direct_online` en habilidades `spell|utility`
@@ -416,6 +446,16 @@ matriz, memoria y documentación pública a la vez.
   y composición son solo presentación.
 - `tiamud.v1` experimental usa secuencias monótonas, deduplicación acotada,
   heartbeats y recuperación autoritativa; no hay replay general de eventos.
+- `crates/protocol` (`tiamud-protocol`) tipa el sobre, los nombres de mensaje,
+  las cargas cliente salvo `action.perform` y las cargas servidor propias del
+  transporte; `web.rs` construye con ellas todo mensaje WebSocket con bytes
+  idénticos a la construcción `json!` previa (pruebas golden). El TypeScript
+  generado con ts-rs (solo dev, `cfg_attr(test)`) se versiona en
+  `apps/web/src/lib/generated/`: `protocol.ts` desde `tiamud-protocol`,
+  `core.ts` desde las vistas de `tiamud-core` y `server.ts` desde
+  `ActionPerformData` y la presentación de `tiamud-server`. El cliente no
+  duplica a mano ninguna forma de cable; solo refina los campos que su
+  validador estrecha o normaliza.
 - Una recuperación devuelve `sync.scene` y `sync.player` correlacionados, cada
   uno bajo 16 KiB; el navegador valida y aplica el par atómicamente. La ventana
   semántica Web para escenas es 14 KiB y conserva en orden botín propio,
@@ -465,6 +505,16 @@ matriz, memoria y documentación pública a la vez.
 - Lua 5.4 se ejecuta en VM nueva, solo con capacidades, sin sistema de archivos,
   red, procesos, módulos nativos ni debug. Código, memoria, instrucciones,
   tiempo y eventos tienen cuotas; un batch admite ocho módulos y 50 ms.
+- Los scripts Lua opcionales de StoryPack (S6, ADR 0034 aceptado) reutilizan
+  ese sandbox: funciones puras sobre una copia acotada del estado que solo
+  emiten intenciones del DSL cerrado limitadas por grants, con 16 llamadas por
+  paso. Las herramientas offline los ejecutan; el servidor solo con
+  `TIAMUD_STORY_SCRIPTS=1` (por defecto rechaza al arrancar los packs que los
+  declaran), compilándolos al cargar el catálogo y ejecutándolos en un pool
+  bloqueante acotado fuera del runtime async y del actor, con presupuesto
+  agregado de reloj por entrada (100 ms por defecto), `busy` al saturarse,
+  error genérico al jugador sin cambiar el estado y cierre con autoguardado
+  tras tres fallos seguidos.
 - IA editorial es opcional, solo de autoría y fuera del juego. `none` es el
   proveedor predeterminado; endpoints locales usan loopback y remotos HTTPS.
   Ningún borrador se publica sin validación y revisión humana.
@@ -576,10 +626,15 @@ No existe LRU ni política automática de memoria.
 | --- | --- |
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
-| `crates/persistence-sqlite/` | SQLite esquema v15 y almacenamiento local |
-| `crates/persistence-postgres/` | PostgreSQL esquema v15, adaptador y mover |
+| `crates/protocol/` | Tipos serde de `tiamud.v1` y generación del TypeScript del cliente (ADR 0026 aceptado) |
+| `crates/persistence-sqlite/` | SQLite esquema v17, almacenamiento local, contrato de fila de slots de historia y formato del runtime seccionado |
+| `crates/persistence-postgres/` | PostgreSQL esquema v17, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
+| `crates/story-core/` | Ruleset narrativo puro StoryPack v1–v3: librojuego S0, menús, retratos y diálogos S4 y mundos con parser S5 (ADR 0025, 0028 y 0031 aceptados); el servidor lo juega vía `story_sessions` (S2, ADR 0029 aceptado) con slots persistidos (S3, ADR 0030 aceptado) e instancias compartidas con asientos, votación y turnos (S7 parcial, ADR 0033 aceptado) |
+| `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5; integrado en `story-core` con StoryPack v3, ADR 0031 aceptado; jugable en el servidor con `story.command`, Web y Telnet, parcial) |
+| `crates/story-tools/` | CLI offline `tiamud-story` de autoría StoryPack: validate/lints, preview, test, play, fmt y esquema JSON (S1 herramientas); ejecuta packs con scripts Lua mediante `story-script` |
+| `crates/story-script/` | Anfitrión Lua opcional de StoryPacks (S6, ADR 0034 aceptado): scripts puros con cuotas que emiten intenciones cerradas de `story-core` limitadas por grants; lo usan `tiamud-story` y las sesiones del servidor cuando `TIAMUD_STORY_SCRIPTS=1` (`story_sessions::scripts`: pool bloqueante acotado y presupuesto por entrada) |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
 | `crates/telnet-codec/` | Parser Telnet de producción compartido con fuzzing |
 | `crates/cell-frame/` | Renderizado de celdas acotado |
@@ -613,7 +668,11 @@ No existe LRU ni política automática de memoria.
 - WorldPack suele exigir esquema, validador, normalización, composición,
   loader, datos revisados y CLI tests.
 - Protocolo web suele exigir serialización Rust, parser TypeScript estricto,
-  socket/recovery, Playwright y revisión Telnet/GMCP.
+  socket/recovery, Playwright y revisión Telnet/GMCP. Los tipos de cable viven
+  en `crates/protocol` y las proyecciones en `tiamud-core`/`tiamud-server`:
+  cambia el tipo, añade su prueba golden y regenera
+  `apps/web/src/lib/generated/`; no relajes la validación en tiempo de
+  ejecución de `protocol.ts` por existir tipos generados.
 - Medios pasan por manifiestos revisados y percepción.
 - Usa aritmética checked/saturating y límites explícitos; falla cerrado ante
   autoridad, esquema o seguridad ambiguos.
@@ -639,6 +698,12 @@ cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
+
+`cargo test --workspace --locked` incluye la comprobación de que
+`apps/web/src/lib/generated/{protocol,core,server}.ts` coinciden con
+`tiamud-protocol`, `tiamud-core` y `tiamud-server`. Para regenerarlos tras
+cambiar un tipo de cable o una vista proyectada, ejecuta
+`TIAMUD_UPDATE_GENERATED_PROTOCOL=1 cargo test --locked -p tiamud-protocol -p tiamud-core -p tiamud-server typescript` y revisa el diff.
 
 PostgreSQL requiere una base desechable y autoridad explícita:
 

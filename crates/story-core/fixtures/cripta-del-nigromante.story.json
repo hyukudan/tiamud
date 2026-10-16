@@ -1,0 +1,228 @@
+{
+  "format_version": 1,
+  "id": "cripta-del-nigromante",
+  "title": { "es": "La cripta del nigromante" },
+  "start": "inicio",
+  "variables": [
+    {
+      "id": "destreza",
+      "label": { "es": "Destreza" },
+      "visible": true,
+      "kind": { "int": { "min": 0, "max": 12, "initial": 0 } }
+    },
+    {
+      "id": "resistencia",
+      "label": { "es": "Resistencia" },
+      "visible": true,
+      "kind": { "int": { "min": 0, "max": 20, "initial": 12 } }
+    },
+    {
+      "id": "vida_esqueleto",
+      "kind": { "int": { "min": 0, "max": 6, "initial": 6 } }
+    },
+    {
+      "id": "tirada",
+      "kind": { "int": { "min": 0, "max": 40, "initial": 0 } }
+    },
+    {
+      "id": "esqueleto_vencido",
+      "kind": { "bool": { "initial": false } }
+    }
+  ],
+  "items": [
+    { "id": "antorcha", "name": { "es": "Antorcha" } },
+    { "id": "llave-de-hierro", "name": { "es": "Llave de hierro" } }
+  ],
+  "nodes": [
+    {
+      "id": "inicio",
+      "text": { "es": "Te detienes ante la entrada de la cripta del nigromante. Antes de bajar, pon a prueba tu destreza." },
+      "choices": [
+        {
+          "id": "tirar-destreza",
+          "label": { "es": "Tira un dado y suma 6 para fijar tu destreza" },
+          "effects": [
+            { "roll": { "dice": { "count": 1, "sides": 6, "modifier": 6 }, "store": "destreza" } }
+          ],
+          "target": "vestibulo"
+        }
+      ]
+    },
+    {
+      "id": "vestibulo",
+      "text": { "es": "Una antorcha arde junto a una puerta de hierro cerrada.\nAl norte, un pasillo se pierde en la oscuridad." },
+      "choices": [
+        {
+          "id": "coger-antorcha",
+          "label": { "es": "Coger la antorcha" },
+          "when": { "not": { "has_item": "antorcha" } },
+          "effects": [{ "give": "antorcha" }],
+          "target": "vestibulo"
+        },
+        {
+          "id": "abrir-puerta",
+          "label": { "es": "Abrir la puerta de hierro con la llave" },
+          "when": { "has_item": "llave-de-hierro" },
+          "effects": [{ "take": "llave-de-hierro" }, { "score": 100 }],
+          "target": "camara-del-tesoro"
+        },
+        {
+          "id": "ir-norte",
+          "label": { "es": "Avanzar por el pasillo del norte" },
+          "target": "pasillo"
+        }
+      ]
+    },
+    {
+      "id": "pasillo",
+      "text": { "es": "El pasillo desemboca en una sala de huesos. Más allá, un foso corta el paso." },
+      "choices": [
+        {
+          "id": "luchar",
+          "label": { "es": "Un esqueleto armado se alza: luchar" },
+          "when": { "not": { "flag": "esqueleto_vencido" } },
+          "effects": [{ "cue": { "music": { "asset": "musica-combate" } } }],
+          "target": "combate"
+        },
+        {
+          "id": "ir-al-foso",
+          "label": { "es": "Acercarte al foso" },
+          "when": { "flag": "esqueleto_vencido" },
+          "target": "foso"
+        },
+        {
+          "id": "volver",
+          "label": { "es": "Volver al vestíbulo" },
+          "target": "vestibulo"
+        }
+      ]
+    },
+    {
+      "id": "combate",
+      "text": { "es": "El esqueleto te ataca. Tira dos dados y suma tu destreza: con 14 o más lo hieres; si no, pierdes 2 de resistencia." },
+      "choices": [
+        {
+          "id": "atacar",
+          "label": { "es": "Atacar" },
+          "effects": [
+            { "roll": { "dice": { "count": 2, "sides": 6 }, "modifier_var": "destreza", "store": "tirada" } },
+            {
+              "if": {
+                "when": { "var_cmp": { "var": "tirada", "op": "ge", "value": 14 } },
+                "then": [
+                  { "add": { "var": "vida_esqueleto", "delta": -2 } },
+                  { "cue": { "sfx": { "asset": "sfx-golpe" } } }
+                ],
+                "otherwise": [{ "add": { "var": "resistencia", "delta": -2 } }]
+              }
+            },
+            {
+              "if": {
+                "when": { "var_cmp": { "var": "vida_esqueleto", "op": "le", "value": 0 } },
+                "then": [
+                  { "set": { "var": "esqueleto_vencido", "value": true } },
+                  { "score": 50 },
+                  { "cue": "stop_music" },
+                  { "goto": "victoria-esqueleto" }
+                ]
+              }
+            },
+            {
+              "if": {
+                "when": { "var_cmp": { "var": "resistencia", "op": "le", "value": 0 } },
+                "then": [{ "cue": "stop_music" }, { "goto": "muerte" }]
+              }
+            }
+          ],
+          "target": "combate"
+        },
+        {
+          "id": "huir",
+          "label": { "es": "Huir hacia el vestíbulo (pierdes 2 de resistencia)" },
+          "effects": [
+            { "add": { "var": "resistencia", "delta": -2 } },
+            { "cue": "stop_music" },
+            {
+              "if": {
+                "when": { "var_cmp": { "var": "resistencia", "op": "le", "value": 0 } },
+                "then": [{ "goto": "muerte" }]
+              }
+            }
+          ],
+          "target": "vestibulo"
+        }
+      ]
+    },
+    {
+      "id": "victoria-esqueleto",
+      "text": { "es": "El esqueleto se desmorona. Entre sus huesos brilla una llave de hierro." },
+      "choices": [
+        {
+          "id": "coger-llave",
+          "label": { "es": "Coger la llave y volver al pasillo" },
+          "effects": [{ "give": "llave-de-hierro" }],
+          "target": "pasillo"
+        }
+      ]
+    },
+    {
+      "id": "foso",
+      "text": { "es": "El foso es ancho y su fondo está erizado de estacas. Necesitas 12 o más (un dado más tu destreza) para saltarlo." },
+      "choices": [
+        {
+          "id": "saltar",
+          "label": { "es": "Saltar el foso" },
+          "effects": [
+            {
+              "roll": {
+                "dice": { "count": 1, "sides": 6 },
+                "modifier_var": "destreza",
+                "test": { "at_least": 12, "success": "otra-orilla", "failure": "caida" }
+              }
+            }
+          ]
+        },
+        {
+          "id": "retroceder",
+          "label": { "es": "Retroceder al pasillo" },
+          "target": "pasillo"
+        }
+      ]
+    },
+    {
+      "id": "caida",
+      "text": { "es": "Resbalas y caes al fondo del foso. Las estacas te hieren." },
+      "choices": [
+        {
+          "id": "trepar",
+          "label": { "es": "Trepar de vuelta al pasillo (pierdes 3 de resistencia)" },
+          "effects": [
+            { "add": { "var": "resistencia", "delta": -3 } },
+            {
+              "if": {
+                "when": { "var_cmp": { "var": "resistencia", "op": "le", "value": 0 } },
+                "then": [{ "goto": "muerte" }]
+              }
+            }
+          ],
+          "target": "pasillo"
+        }
+      ]
+    },
+    {
+      "id": "otra-orilla",
+      "text": { "es": "Aterrizas al otro lado y descubres una salida secreta hacia la superficie. Escapas, aunque sin el tesoro." },
+      "ending": { "id": "huida", "kind": "neutral" }
+    },
+    {
+      "id": "camara-del-tesoro",
+      "text": { "es": "La puerta cede. El tesoro del nigromante es tuyo." },
+      "ending": { "id": "tesoro", "kind": "victory" }
+    },
+    {
+      "id": "muerte",
+      "text": { "es": "Tus fuerzas se agotan. Tu aventura termina en la cripta." },
+      "ending": { "id": "muerte", "kind": "defeat" }
+    }
+  ]
+}

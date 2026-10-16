@@ -9,7 +9,7 @@ use crate::{APPLICATION_TABLES, SCHEMA_VERSION, SchemaError, migrate_in_transact
 
 const LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION: u32 = 5;
 
-const TABLES: [&str; 25] = APPLICATION_TABLES;
+const TABLES: [&str; 27] = APPLICATION_TABLES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableCount {
@@ -57,6 +57,8 @@ pub enum TransferError {
     InvalidAreaCheckpoint,
     #[error("SQLite source area checkpoint SHA-256 does not match its exact JSON bytes")]
     AreaCheckpointHashMismatch,
+    #[error("SQLite source contains an invalid story save row: {0}")]
+    InvalidStorySave(tiamud_persistence_sqlite::story_saves::StorySaveRowError),
     #[error(
         "PostgreSQL target table {table} contains {rows} row(s); refusing to merge or overwrite"
     )]
@@ -107,9 +109,14 @@ pub fn copy_sqlite_to_postgres(
         table: "domain_events",
         rows: copy_domain_events(&source, &mut target)?,
     });
+    let (runtime_rows, runtime_section_rows) = copy_world_runtime(&source, &mut target)?;
     tables.push(TableCount {
         table: "world_runtime",
-        rows: copy_world_runtime(&source, &mut target)?,
+        rows: runtime_rows,
+    });
+    tables.push(TableCount {
+        table: "world_runtime_sections",
+        rows: runtime_section_rows,
     });
     tables.push(TableCount {
         table: "world_area_generation",
@@ -191,6 +198,10 @@ pub fn copy_sqlite_to_postgres(
         table: "world_adventure",
         rows: copy_world_adventure(&source, &mut target)?,
     });
+    tables.push(TableCount {
+        table: "story_saves",
+        rows: copy_story_saves(&source, &mut target)?,
+    });
 
     reset_sequences(&mut target)?;
     source.execute_batch("COMMIT")?;
@@ -220,7 +231,8 @@ fn lock_target_tables<C: GenericClient>(target: &mut C) -> Result<(), postgres::
                     moderation_mutes, account_bans, social_reports,
                     moderation_audit, staff_profiles,
                     staff_capability_assignments, staff_audit,
-                    character_adventure, world_adventure
+                    character_adventure, world_adventure, story_saves,
+                    world_runtime_sections
          IN ACCESS EXCLUSIVE MODE",
     )
 }
@@ -252,6 +264,34 @@ fn validate_source(source: &Connection) -> Result<(), TransferError> {
         .unwrap_or(usize::MAX);
     if violations != 0 {
         return Err(TransferError::SourceForeignKeys { violations });
+    }
+    validate_source_story_saves(source)?;
+    Ok(())
+}
+
+/// Streams every source story save through the shared row contract before a
+/// PostgreSQL transaction opens, so a corrupt slot fails the transfer without
+/// touching the target. [`copy_story_saves`] re-checks each row it inserts.
+fn validate_source_story_saves(source: &Connection) -> Result<(), TransferError> {
+    let mut statement = source.prepare(
+        "SELECT story_id, slot, pack_id, pack_sha256, state_format_version,
+                state_json, state_sha256, created_at, updated_at
+         FROM story_saves",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        tiamud_persistence_sqlite::story_saves::validate_story_save_row(
+            &row.get::<_, String>(0)?,
+            row.get(1)?,
+            &row.get::<_, String>(2)?,
+            &row.get::<_, String>(3)?,
+            row.get(4)?,
+            &row.get::<_, String>(5)?,
+            &row.get::<_, String>(6)?,
+            row.get(7)?,
+            row.get(8)?,
+        )
+        .map_err(TransferError::InvalidStorySave)?;
     }
     Ok(())
 }
@@ -392,46 +432,50 @@ fn copy_domain_events<C: GenericClient>(
     Ok(count)
 }
 
+/// Copies the sectioned runtime rows verbatim (head, manifest and sections
+/// with their digests) after verifying that they assemble into a valid
+/// snapshot. Returns `(head rows, section rows)`.
 fn copy_world_runtime<C: GenericClient>(
     source: &Connection,
     target: &mut C,
-) -> Result<u64, TransferError> {
-    let row = source
-        .query_row(
-            "SELECT singleton, snapshot_version, snapshot_json,
-                    last_event_sequence, updated_at
-             FROM world_runtime WHERE singleton = 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((singleton, snapshot_version, snapshot_json, last_event_sequence, updated_at)) = row
-    else {
-        return Ok(0);
+) -> Result<(u64, u64), TransferError> {
+    use tiamud_persistence_sqlite::runtime_sections::{
+        RuntimeSectionError, assemble_stored_runtime, load_stored_runtime_sqlite,
     };
-    validate_runtime_snapshot(snapshot_version, &snapshot_json)?;
-    target.execute(
-        "INSERT INTO world_runtime
-             (singleton, snapshot_version, snapshot_json,
-              last_event_sequence, updated_at)
-         VALUES ($1, $2, $3, $4, $5)",
-        &[
-            &singleton,
-            &snapshot_version,
-            &snapshot_json,
-            &last_event_sequence,
-            &updated_at,
-        ],
+    let stored = load_stored_runtime_sqlite(source).map_err(|error| match error {
+        RuntimeSectionError::Sqlite(error) => TransferError::Sqlite(error),
+        _ => TransferError::InvalidRuntimeSnapshot,
+    })?;
+    let Some(stored) = stored else {
+        return Ok((0, 0));
+    };
+    let updated_at = source.query_row(
+        "SELECT updated_at FROM world_runtime WHERE singleton = 1",
+        [],
+        |row| row.get::<_, i64>(0),
     )?;
-    Ok(1)
+    let maximum = runtime_maximum(stored.snapshot_version)?;
+    let snapshot_json = assemble_stored_runtime(&stored, maximum).map_err(|error| match error {
+        RuntimeSectionError::TooLarge { maximum } => {
+            TransferError::RuntimeSnapshotTooLarge { maximum }
+        }
+        _ => TransferError::InvalidRuntimeSnapshot,
+    })?;
+    validate_runtime_snapshot(stored.snapshot_version, &snapshot_json)?;
+    let rows = crate::runtime_sections::insert_stored_runtime(target, &stored, updated_at)?;
+    Ok((1, rows - 1))
+}
+
+fn runtime_maximum(snapshot_version: i64) -> Result<usize, TransferError> {
+    let runtime_version =
+        u32::try_from(snapshot_version).map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
+    Ok(
+        if runtime_version <= LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION {
+            tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
+        } else {
+            tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
+        },
+    )
 }
 
 fn copy_world_area_generation<C: GenericClient>(
@@ -583,11 +627,7 @@ fn validate_runtime_snapshot(
 ) -> Result<(), TransferError> {
     let runtime_version =
         u32::try_from(snapshot_version).map_err(|_| TransferError::InvalidRuntimeSnapshot)?;
-    let maximum = if runtime_version <= LAST_ONE_MIB_RUNTIME_SNAPSHOT_VERSION {
-        tiamud_core::MAX_LEGACY_WORLD_RUNTIME_SNAPSHOT_BYTES
-    } else {
-        tiamud_core::MAX_WORLD_RUNTIME_SNAPSHOT_BYTES
-    };
+    let maximum = runtime_maximum(snapshot_version)?;
     if snapshot_json.len() > maximum {
         return Err(TransferError::RuntimeSnapshotTooLarge { maximum });
     }
@@ -1194,6 +1234,81 @@ fn copy_world_adventure<C: GenericClient>(
     Ok(1)
 }
 
+/// Copies every story save slot after validating the exact row contract the
+/// server enforces: bounded identity, slot, pack digest and format version,
+/// state bytes, metadata agreement and the SHA-256 of the exact stored bytes.
+/// A corrupt or tampered source row aborts the whole transfer.
+fn copy_story_saves<C: GenericClient>(
+    source: &Connection,
+    target: &mut C,
+) -> Result<u64, TransferError> {
+    let mut statement = source.prepare(
+        "SELECT account_id, story_id, slot, pack_id, pack_sha256,
+                state_format_version, state_json, state_sha256,
+                created_at, updated_at
+         FROM story_saves
+         ORDER BY account_id, story_id, slot",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut count = 0_u64;
+    while let Some(row) = rows.next()? {
+        let account_id: i64 = row.get(0)?;
+        let story_id: String = row.get(1)?;
+        let slot: i64 = row.get(2)?;
+        let pack_id: String = row.get(3)?;
+        let pack_sha256: String = row.get(4)?;
+        let state_format_version: i64 = row.get(5)?;
+        let state_json: String = row.get(6)?;
+        let state_sha256: String = row.get(7)?;
+        let created_at: i64 = row.get(8)?;
+        let updated_at: i64 = row.get(9)?;
+        tiamud_persistence_sqlite::story_saves::validate_story_save_row(
+            &story_id,
+            slot,
+            &pack_id,
+            &pack_sha256,
+            state_format_version,
+            &state_json,
+            &state_sha256,
+            created_at,
+            updated_at,
+        )
+        .map_err(TransferError::InvalidStorySave)?;
+        // The row contract bounds both values, so the narrowing is exact.
+        let slot = i16::try_from(slot).map_err(|_| {
+            TransferError::InvalidStorySave(
+                tiamud_persistence_sqlite::story_saves::StorySaveRowError::InvalidSlot,
+            )
+        })?;
+        let state_format_version = i32::try_from(state_format_version).map_err(|_| {
+            TransferError::InvalidStorySave(
+                tiamud_persistence_sqlite::story_saves::StorySaveRowError::InvalidFormatVersion,
+            )
+        })?;
+        target.execute(
+            "INSERT INTO story_saves
+                 (account_id, story_id, slot, pack_id, pack_sha256,
+                  state_format_version, state_json, state_sha256,
+                  created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &account_id,
+                &story_id,
+                &slot,
+                &pack_id,
+                &pack_sha256,
+                &state_format_version,
+                &state_json,
+                &state_sha256,
+                &created_at,
+                &updated_at,
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn reset_sequences<C: GenericClient>(target: &mut C) -> Result<(), postgres::Error> {
     target.batch_execute(
         "SELECT setval(pg_get_serial_sequence('accounts', 'id')::regclass,
@@ -1473,7 +1588,7 @@ mod tests {
             error,
             TransferError::UnsupportedSourceVersion {
                 found: 5,
-                required: 15
+                required: 17
             }
         ));
         assert_eq!(
@@ -1482,6 +1597,61 @@ mod tests {
                 .unwrap(),
             5
         );
+    }
+
+    #[test]
+    fn validates_story_saves_before_opening_a_target_transaction() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("state.sqlite3");
+        let connection = current_source(&path);
+        let state = r#"{"format_version":2,"pack_id":"cripta-del-nigromante","node":"inicio"}"#;
+        let digest = tiamud_persistence_sqlite::story_saves::story_state_sha256(state);
+        connection
+            .execute("INSERT INTO accounts (id, name) VALUES (1, 'Reader')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO story_saves
+                     (account_id, story_id, slot, pack_id, pack_sha256,
+                      state_format_version, state_json, state_sha256,
+                      created_at, updated_at)
+                 VALUES (1, 'cripta-del-nigromante', 3, 'cripta-del-nigromante',
+                         ?1, 2, ?2, ?3, 100, 120)",
+                params!["a".repeat(64), state, digest],
+            )
+            .unwrap();
+        validate_source(&connection).unwrap();
+
+        // Same length, different bytes: only the exact digest notices.
+        connection
+            .execute(
+                "UPDATE story_saves SET state_json = replace(state_json, 'inicio', 'inicia')",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            validate_source(&connection),
+            Err(TransferError::InvalidStorySave(
+                tiamud_persistence_sqlite::story_saves::StorySaveRowError::DigestMismatch
+            ))
+        ));
+
+        let other = r#"{"format_version":2,"pack_id":"otra","node":"inicio"}"#;
+        connection
+            .execute(
+                "UPDATE story_saves SET state_json = ?1, state_sha256 = ?2",
+                params![
+                    other,
+                    tiamud_persistence_sqlite::story_saves::story_state_sha256(other)
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            validate_source(&connection),
+            Err(TransferError::InvalidStorySave(
+                tiamud_persistence_sqlite::story_saves::StorySaveRowError::MetadataMismatch
+            ))
+        ));
     }
 
     #[test]
@@ -1512,7 +1682,7 @@ mod tests {
     fn transfer_manifest_is_parent_before_child_and_complete() {
         assert_eq!(TABLES[0], "accounts");
         assert_eq!(TABLES[1], "characters");
-        assert_eq!(TABLES.len(), 25);
+        assert_eq!(TABLES.len(), 27);
         let generation = TABLES
             .iter()
             .position(|table| *table == "world_area_generation")
@@ -1535,6 +1705,6 @@ mod tests {
             .position(|table| *table == "social_board_report_evidence")
             .unwrap();
         assert!(reports < posts && posts < evidence);
-        assert_eq!(TABLES.last(), Some(&"world_adventure"));
+        assert_eq!(TABLES.last(), Some(&"world_runtime_sections"));
     }
 }

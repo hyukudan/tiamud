@@ -1,0 +1,105 @@
+{
+  "format_version": 3,
+  "id": "lints-mundo",
+  "title": { "es": "Lints del mundo" },
+  "start": "plaza",
+  "nodes": [
+    {
+      "id": "plaza",
+      "text": { "es": "Una plaza." },
+      "room": {
+        "name": { "es": "Plaza" },
+        "exits": [{ "direction": "north", "to": "patio" }]
+      }
+    },
+    {
+      "id": "patio",
+      "text": { "es": "Un patio." },
+      "room": {
+        "name": { "es": "Patio" },
+        "exits": [{ "direction": "south", "to": "plaza" }]
+      }
+    },
+    {
+      "id": "sotano",
+      "text": { "es": "Un sótano al que no lleva ninguna salida." },
+      "room": { "name": { "es": "Sótano" } }
+    },
+    {
+      "id": "fin",
+      "text": { "es": "Fin." },
+      "ending": { "id": "fin", "kind": "neutral" }
+    }
+  ],
+  "world": {
+    "lexicons": [
+      {
+        "id": "es",
+        "verbs": [{ "action": "pray", "display": "rezar", "words": ["rezar", "reza"], "patterns": [{}] }]
+      },
+      { "id": "en" }
+    ],
+    "objects": [
+      {
+        "id": "moneda",
+        "name": { "es": "moneda de oro", "en": "gold coin" },
+        "gender": "feminine",
+        "nouns": { "es": ["moneda"], "en": ["coin"] },
+        "adjectives": { "es": ["oro"], "en": ["gold"] },
+        "description": { "es": "Brilla.", "en": "It shines." },
+        "location": { "room": "plaza" },
+        "portable": true
+      },
+      {
+        "id": "moneda-falsa",
+        "name": { "es": "moneda", "en": "fake" },
+        "gender": "feminine",
+        "nouns": { "es": ["moneda"], "en": ["fake"] },
+        "description": { "es": "No brilla.", "en": "It does not shine." },
+        "location": { "room": "plaza" },
+        "portable": true
+      },
+      {
+        "id": "llave",
+        "name": { "es": "llave", "en": "key" },
+        "gender": "feminine",
+        "nouns": { "es": ["llave"], "en": ["key"] },
+        "description": { "es": "Una llave.", "en": "A key." },
+        "location": "nowhere",
+        "portable": true
+      },
+      {
+        "id": "cofre",
+        "name": { "es": "cofre", "en": "chest" },
+        "nouns": { "es": ["cofre"], "en": ["chest"] },
+        "description": { "es": "Un cofre.", "en": "A chest." },
+        "location": { "room": "patio" },
+        "container": true,
+        "openable": true,
+        "locked": true,
+        "key": "llave"
+      },
+      {
+        "id": "reja",
+        "name": { "es": "reja", "en": "gate" },
+        "gender": "feminine",
+        "nouns": { "es": ["reja"], "en": ["gate"] },
+        "description": { "es": "Una reja.", "en": "A gate." },
+        "location": { "room": "patio" },
+        "scenery": true,
+        "openable": true,
+        "locked": true
+      }
+    ],
+    "rules": [
+      {
+        "id": "rezar",
+        "phase": "instead",
+        "action": "pray",
+        "effects": [{ "goto": "fin" }],
+        "text": { "es": "Rezas.", "en": "You pray." }
+      },
+      { "id": "vacia", "phase": "before", "action": "look" }
+    ]
+  }
+}

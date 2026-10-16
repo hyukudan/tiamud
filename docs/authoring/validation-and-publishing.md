@@ -84,10 +84,10 @@ IDs, secret predicates, hidden entities or undiscovered asset paths.
 
 For the reviewed Lantern Square sources, composition must reproduce three
 rooms, ten item prototypes, nine initial instances, two loot tables, one loot
-source, one affix, one affix pool, one authored direct-online telepathy ability
-and one authored room emote. The canonical file is 53,567 bytes with
-SHA-256
-`9a75894a9e2e0c48d20257633f323d52bbe78b9db106de8c497f4784392b5e75`.
+source, one affix, one affix pool, one authored direct-online telepathy ability,
+one authored room emote, two commodities, one quest and one shop. The canonical
+file is 55,264 bytes with SHA-256
+`666dda61438a6a1e2b17d6ef0ba825b4d72c7e1b9d122e93284d71dab8ab4092`.
 Its gate-stalker combines a fixed stormglass talon, a guaranteed road token,
 an earned sealed oath and one 60% wolf-clasp/40% nothing roll under party
 round-robin rights. The ordinary clasp drop and the oath's one talon each use
