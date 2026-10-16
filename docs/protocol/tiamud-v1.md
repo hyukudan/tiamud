@@ -138,7 +138,7 @@ cannot displace an accepted command result.
 
 ### Typed source and generated TypeScript
 
-The Rust crate `crates/protocol` (`tiamud-protocol`, proposed
+The Rust crate `crates/protocol` (`tiamud-protocol`, accepted
 [ADR 0026](../decisions/0026-typed-protocol-source-and-typescript-codegen.md))
 is the single typed source of the envelope, the server/client message type
 names, every client payload except `action.perform`, and the server payloads
@@ -1270,9 +1270,9 @@ channel. Media never carries exclusive gameplay information.
 ## Story sessions
 
 Story sessions ([ADR 0029](../decisions/0029-story-session-instances-and-story-protocol.md),
-proposed) are an additive, single-player surface whose live state is in memory
+accepted) are an additive, single-player surface whose live state is in memory
 and whose save slots persist in the backend
-([ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md), proposed). They exist only
+([ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md), accepted). They exist only
 when the server is started with `TIAMUD_STORY_DIR`; otherwise every story
 command answers that stories are unavailable.
 
@@ -1406,7 +1406,7 @@ cues use `Client.Media.Play`/`Stop` only with the media opt-in.
 ### Parser stories
 
 A StoryPack v3 with a parser world ([ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md),
-proposed) is played with free text. While such a story accepts text, its
+accepted) is played with free text. While such a story accepts text, its
 `scene` item carries `prompt: {text, question}`: `text` is the prompt to show
 (the pack's `world.prompt` in the instance language, at most 64 bytes, else
 `>`) and `question` is true while the parser waits for the answer
@@ -1455,7 +1455,7 @@ Spanish lexicon, else its first lexicon); the parser uses that lexicon.
 ## Shared story instances
 
 Shared instances ([ADR 0033](../decisions/0033-shared-story-instances-and-voting.md),
-proposed, phase S7) let several characters play one story instance. The
+accepted, phase S7) let several characters play one story instance. The
 instance stays a single writer; a pure table decides which action applies.
 
 Text commands (`command.submit` and Telnet): `historia compartir <id>`/`story

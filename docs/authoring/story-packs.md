@@ -1,7 +1,7 @@
 # StoryPack authoring
 
 A **StoryPack** is a self-contained branching narrative (gamebook, "choose your
-adventure" with stats and dice) for the separate narrative ruleset proposed in
+adventure" with stats and dice) for the separate narrative ruleset accepted in
 [ADR 0025](../decisions/0025-narrative-ruleset-story-core.md). It is not a
 WorldPack and shares no game state with the MUD.
 
@@ -9,19 +9,19 @@ Current status (see the [completion matrix](../project/COMPLETION_MATRIX.md)):
 the pure ruleset (`crates/story-core`, phase S0) and the offline authoring tools
 (`crates/story-tools`, binary `tiamud-story`, phase S1 tooling) exist. Format
 v2 adds menu-driven adventures — verb menus, hotspots, speakers with portraits
-and dialogue trees — as a library-only core model proposed in
+and dialogue trees — as a library-only core model accepted in
 [ADR 0028](../decisions/0028-story-menus-portraits-and-dialogue-trees.md)
 (see [Menu scenes](#menu-scenes-format-v2)). Format v3 adds parser-based
 interactive fiction — rooms with exits, objects, rules and a default library
-driven by free text — proposed in
+driven by free text — accepted in
 [ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md)
 (see [Parser worlds](#parser-worlds-format-v3)). ADR 0025, 0028 and 0031 are
-still **Proposed**. The server's story sessions (S2, ADR 0029) play v1–v3
+**Accepted** (partial implementation). The server's story sessions (S2, ADR 0029) play v1–v3
 packs through `story.*` (parser worlds through `story.command`), with
 reviewed background and portrait images, a per-session language and
 declared save-compatible revisions (see
 [Presentation, languages and save compatibility](#presentation-languages-and-save-compatibility)). Optional
-[Lua scripts](#lua-scripts-format-v3-optional) (ADR 0034, proposed) run
+[Lua scripts](#lua-scripts-format-v3-optional) (ADR 0034, accepted) run
 only in the offline tools; the server rejects packs that declare them.
 
 The Rust types and validator in `crates/story-core` are the exact authority.
@@ -345,7 +345,7 @@ is at most 12 KiB each (leaving room for a future protocol envelope within the
 Format v3 expresses classic Spanish *aventuras conversacionales* (PAWS/DAAD,
 InformATE): the player types `coge la lámpara y enciéndela`, the
 [story parser](story-parser.md) turns it into commands, and authored rules and
-a default library answer them. It is proposed in
+a default library answer them. It is accepted in
 [ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md).
 The reviewed example is
 [`parser/faro-de-punta-gris.story.json`](../../crates/story-core/fixtures/parser/faro-de-punta-gris.story.json),
@@ -658,7 +658,7 @@ Nothing is migrated, so do not list a revision whose state shape you changed.
 
 ## Lua scripts (format v3, optional)
 
-Proposed in [ADR 0034](../decisions/0034-lua-scripts-in-storypacks.md).
+Accepted in [ADR 0034](../decisions/0034-lua-scripts-in-storypacks.md).
 `tiamud-story` validates, tests and plays packs with scripts. The server
 plays them only when the operator starts it with `TIAMUD_STORY_SCRIPTS=1`
 (off by default; without it a scripted pack in the catalog **stops the

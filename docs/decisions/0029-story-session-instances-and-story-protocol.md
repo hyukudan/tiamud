@@ -1,11 +1,12 @@
 # ADR 0029: instancias de sesión de historia y protocolo `story.*`
 
-- Estado: propuesta. Implementada de forma incremental en este árbol como fase
+- Estado: aceptada — implementación parcial. Implementada de forma incremental en este árbol como fase
   S2 de [ADR 0025](0025-narrative-ruleset-story-core.md) (un jugador, estado
   vivo en memoria; slots persistidos conectados después, ver la nota de estado
   al final); ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md). Nada de este ADR
-  cambia decisiones aceptadas hasta que se acepte.
+  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md). Aceptada por el propietario; no
+  cambia decisiones previas ya aceptadas.
+  2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: `tiamud-server` (módulo `story_sessions`, adaptadores Web y Telnet),
   `tiamud-protocol` y el cliente navegador

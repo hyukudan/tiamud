@@ -50,14 +50,14 @@ validates `noop`, readiness, Web, Telnet and two resident areas. That evidence i
 schema v14 and is not relabeled as v15. See the
 [PostgreSQL v14/PWA log](project/log/2026-07-17-postgresql-v14-and-pwa-acceptance.md).
 Schema v16 only adds the `story_saves` table for persisted story save slots
-([ADR 0030](decisions/0030-story-save-slots-and-schema-v16.md), proposed),
+([ADR 0030](decisions/0030-story-save-slots-and-schema-v16.md), accepted),
 used by story sessions for manual slots and the autosave
 ([ADR 0029](decisions/0029-story-session-instances-and-story-protocol.md)). The
 mover validates and copies those rows too. Its PostgreSQL tests are written
 but have not run against a real server, so no PostgreSQL evidence is v16.
 Schema v17 stores the runtime snapshot sectioned
 ([ADR 0035](decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
-proposed): `world_runtime` keeps the version, a scalar head document, a
+accepted): `world_runtime` keeps the version, a scalar head document, a
 manifest and the event watermark, and `world_runtime_sections` keeps ten closed
 sections with their revision and SHA-256. Commits rewrite only the sections
 that the durable baseline cannot prove unchanged; recovery reassembles the
@@ -75,7 +75,7 @@ WorldPack v10 is the canonical target. AreaPack v9 allows strict modular
 composition under WorldProject v2. WorldPack v9/v8/v7/v6/v5/v4/v3/v2, AreaPack
 v8/v7/v6/v5/v4/v3/v2/v1 and Envy/Merc are normalized on import or composition
 (WorldPack v2–v9 gain the implied legacy `first-hunt` quest and market; quests,
-commodities and shops are WorldPack v10 data per the proposed
+commodities and shops are WorldPack v10 data per the accepted
 [ADR 0032](decisions/0032-worldpack-v10-quests-and-shops.md)); the
 domain keeps no legacy vocabulary and invents no seals, affixes, telepathy or
 emotes.
@@ -752,7 +752,7 @@ create a sequence and are not inferred from prose. Reference:
 | --- | --- |
 | Combat and bounded abilities | Baseline implemented and tested |
 | Cumulative limits and level without refill | Implemented and tested |
-| WorldPack v10/AreaPack v9/WorldProject v2, validator, normalizer and catalog | Integrated; WorldPack v9/v8/v7/v6/v5/v4/v3/v2 and AreaPack v8/v7/v6/v5/v4/v3/v2/v1 entries normalize without inventing seals, affixes, telepathy, emotes or absent loot; WorldPack v2–v9 gain only the implied legacy quest and market (ADR 0032, proposed) |
+| WorldPack v10/AreaPack v9/WorldProject v2, validator, normalizer and catalog | Integrated; WorldPack v9/v8/v7/v6/v5/v4/v3/v2 and AreaPack v8/v7/v6/v5/v4/v3/v2/v1 entries normalize without inventing seals, affixes, telepathy, emotes or absent loot; WorldPack v2–v9 gain only the implied legacy quest and market (ADR 0032, accepted) |
 | Areas 6A/6B/6C | Local catalog/bundles, additive loading and full quiescent replacement implemented. 6C adds SQL v14 identity, exact startup, SIGHUP, private staging, migration-free compatibility, zero sessions/leases, snapshot+pointer CAS and explicit rollback. The gate passes 774 Rust tests/329 server and the reaudit 0 P1/0 P2; the SQLite smoke G0→G1→G0/restart is retained. Real PostgreSQL 18 passes 20/20 adapter tests and 7/7 server tests with v14 CAS; its smoke binds G0 sequence 1 and validates `noop`, readiness, Web, Telnet and two resident areas. No per-area replacement/unload or LRU |
 | Areas 6D | Partial: snapshot v8, SQL v15, checkpoints, SCC/reverse closure, pins, internal same-revision retirement/rehydration and fail-closed recovery implemented. Server passes 337/337 and PostgreSQL v15 22/22+8/8; no operational surface, budget/LRU, RSS measurement or aggregated integral gate |
 | Lineage/class/talent/promotion and persistence | Implemented and tested |

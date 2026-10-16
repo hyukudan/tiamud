@@ -26,9 +26,9 @@ un backend único PostgreSQL o SQLite (esquema v17). El baseline vigente cubre
 personajes v3, inventario con instancias/pilas/contenedores,
 `give`/trade/botín/recompensas/afijos, sistemas sociales 1–5E, y áreas locales
 6A–6C con retirada reversible 6D **parcial**. El esquema v16 añadió la capa
-de persistencia de slots de historia S3 (ADR 0030 propuesto); el v17 guarda el
+de persistencia de slots de historia S3 (ADR 0030 aceptado); el v17 guarda el
 snapshot de runtime seccionado y reescribe solo las secciones sucias
-(ADR 0035 propuesto).
+(ADR 0035 aceptado).
 
 No dupliques aquí el detalle: la descripción normativa completa vive en
 [`AGENTS.md`](AGENTS.md) (sección "Baseline implementado", invariantes y límites

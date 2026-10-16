@@ -1,7 +1,9 @@
 # ADR 0035: almacenamiento seccionado del snapshot de runtime (esquema v17)
 
-- Estado: propuesto (implementado el 2026-10-15 en SQLite y PostgreSQL;
-  pendiente de aceptación del propietario y de una ejecución PostgreSQL real)
+- Estado: aceptado (implementado el 2026-10-15 en SQLite y PostgreSQL;
+  pendiente de una ejecución PostgreSQL real)
+  2026-10-16: aceptado por el propietario, incluido el esquema SQL v17. La
+  ejecución PostgreSQL real sigue pendiente.
 - Fecha: 2026-10-15
 - Alcance: `world_runtime` y la nueva tabla `world_runtime_sections` en ambos
   adaptadores, migración v16→v17, mover SQLite→PostgreSQL, `tiamud-admin`,

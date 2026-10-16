@@ -1,8 +1,9 @@
 # ADR 0027: seguimiento durable de cambios para los commits de tick
 
-- Estado: propuesto (implementado el 2026-10-15; pendiente de la decisión del
-  propietario sobre la consecuencia de que un crash pueda rebobinar el reloj
-  lógico y la revisión del mundo hasta 60 ticks)
+- Estado: aceptado (implementado el 2026-10-15)
+  2026-10-16: aceptado por el propietario, incluida expresamente la consecuencia
+  de que un crash no ordenado pueda rebobinar el reloj lógico y la revisión del
+  mundo hasta 60 ticks (retroceso acotado).
 - Fecha: 2026-10-15
 - Alcance: frontera de commit del actor de mundo (`world_actor.rs`),
   `tiamud-core` (`durability.rs`, `cow.rs`) y la fachada `CharacterStore`

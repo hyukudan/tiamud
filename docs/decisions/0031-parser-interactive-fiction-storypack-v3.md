@@ -1,11 +1,12 @@
 # ADR 0031: ficción interactiva con parser en StoryPack v3
 
-- Estado: propuesta. El núcleo (StoryPack v3, `StoryInput::Command`,
+- Estado: aceptada — implementación parcial. El núcleo (StoryPack v3, `StoryInput::Command`,
   `step_command`, biblioteca por defecto, vista con transcripción y aviso de
   entrada, validador, lints, CLI y fixture) existe como biblioteca en
   `crates/story-core`, `crates/story-parser` y `crates/story-tools`. No hay
   cableado de servidor, protocolo `story.command`/`story.prompt`, Telnet ni
   navegador. Ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: fase S5 de [ADR 0025](0025-narrative-ruleset-story-core.md)
   (parser de ficción interactiva en castellano), parte de modelo de

@@ -1,10 +1,11 @@
 # ADR 0030: slots de guardado de historias y esquema SQL v16
 
-- Estado: propuesta. La capa de persistencia (esquema v16 en SQLite y
+- Estado: aceptada — implementación parcial. La capa de persistencia (esquema v16 en SQLite y
   PostgreSQL, migración v15→v16, mover, API de store y pruebas) está
   implementada y, desde la nota de estado del final, conectada a sesiones de
   historia, protocolo y clientes. Ver
   [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: fase S3 de [ADR 0025](0025-narrative-ruleset-story-core.md)
   (slots persistidos), solo la frontera de persistencia

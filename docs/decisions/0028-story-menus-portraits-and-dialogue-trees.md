@@ -1,9 +1,10 @@
 # ADR 0028: menús de verbos, retratos y árboles de diálogo en StoryPack v2
 
-- Estado: propuesta. El modelo de núcleo (StoryPack v2 en `crates/story-core`
+- Estado: aceptada — implementación parcial. El modelo de núcleo (StoryPack v2 en `crates/story-core`
   y su soporte offline en `crates/story-tools`) está implementado como
   biblioteca; no existe protocolo, actor de servidor ni interfaz. Ver
   [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: fase S4 de [ADR 0025](0025-narrative-ruleset-story-core.md)
   (aventuras por menús de verbos), solo la parte de modelo de contenido,

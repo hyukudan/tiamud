@@ -119,7 +119,7 @@ matriz, memoria y documentación pública a la vez.
   filas; no son otra autoridad de trade, botín ni personajes.
 - El esquema v16 solo añade `story_saves`, la capa de persistencia de slots de
   historia S3 ([ADR 0030](docs/decisions/0030-story-save-slots-and-schema-v16.md),
-  propuesto): clave `(cuenta, historia, slot 0..=9)`, FK de cuenta en cascada,
+  aceptado): clave `(cuenta, historia, slot 0..=9)`, FK de cuenta en cascada,
   digest del pack, estado opaco ≤ 64 KiB con SHA-256 de bytes exactos y límites
   por cuenta (16 historias, 1 MiB). Cargar verifica digest y metadatos y falla
   cerrado ante otra revisión del pack no declarada compatible; el llamador
@@ -134,7 +134,7 @@ matriz, memoria y documentación pública a la vez.
   un servidor real.
 - El esquema v17 guarda el snapshot de runtime **seccionado**
   ([ADR 0035](docs/decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
-  propuesto): `world_runtime` conserva versión, cabecera escalar, manifiesto y
+  aceptado): `world_runtime` conserva versión, cabecera escalar, manifiesto y
   watermark; `world_runtime_sections` guarda diez secciones cerradas con
   revisión y SHA-256. Los commits de comando/tick reescriben solo las
   secciones que la línea base de ADR 0027 no prueba limpias (desconocido =
@@ -156,7 +156,7 @@ matriz, memoria y documentación pública a la vez.
   normalización/importación. WorldPack v10/AreaPack v9 declaran misiones,
   mercancías y tiendas como datos
   ([ADR 0032](docs/decisions/0032-worldpack-v10-quests-and-shops.md),
-  propuesto); normalizar un WorldPack v2–v9 hace explícitos la misión
+  aceptado); normalizar un WorldPack v2–v9 hace explícitos la misión
   `first-hunt` y el mercado que el núcleo tenía cableados. Sus IDs, el orden de
   etapas/objetivos y los `stockId` son durables.
 - El arranque elige una fuente de mundo. `TIAMUD_WORLD_PACK` selecciona un
@@ -505,7 +505,7 @@ matriz, memoria y documentación pública a la vez.
 - Lua 5.4 se ejecuta en VM nueva, solo con capacidades, sin sistema de archivos,
   red, procesos, módulos nativos ni debug. Código, memoria, instrucciones,
   tiempo y eventos tienen cuotas; un batch admite ocho módulos y 50 ms.
-- Los scripts Lua opcionales de StoryPack (S6, ADR 0034 propuesto) reutilizan
+- Los scripts Lua opcionales de StoryPack (S6, ADR 0034 aceptado) reutilizan
   ese sandbox: funciones puras sobre una copia acotada del estado que solo
   emiten intenciones del DSL cerrado limitadas por grants, con 16 llamadas por
   paso. Las herramientas offline los ejecutan; el servidor solo con
@@ -626,15 +626,15 @@ No existe LRU ni política automática de memoria.
 | --- | --- |
 | `crates/mud-core/` | Dominio, acciones, progresión y percepción |
 | `crates/mud-server/` | Actor, auth, transportes, routing, carga y fachada de persistencia |
-| `crates/protocol/` | Tipos serde de `tiamud.v1` y generación del TypeScript del cliente (ADR 0026 propuesto) |
+| `crates/protocol/` | Tipos serde de `tiamud.v1` y generación del TypeScript del cliente (ADR 0026 aceptado) |
 | `crates/persistence-sqlite/` | SQLite esquema v17, almacenamiento local, contrato de fila de slots de historia y formato del runtime seccionado |
 | `crates/persistence-postgres/` | PostgreSQL esquema v17, adaptador y mover |
 | `crates/world-pack/` | WorldPack/AreaPack, validación, composición y CLI |
 | `crates/scripting/` | Capacidades Lua con cuotas |
-| `crates/story-core/` | Ruleset narrativo puro StoryPack v1–v3: librojuego S0, menús, retratos y diálogos S4 y mundos con parser S5 (ADR 0025, 0028 y 0031 propuestos); el servidor lo juega vía `story_sessions` (S2, ADR 0029 propuesto) con slots persistidos (S3, ADR 0030 propuesto) e instancias compartidas con asientos, votación y turnos (S7 parcial, ADR 0033 propuesto) |
-| `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5; integrado en `story-core` con StoryPack v3, ADR 0031 propuesto; jugable en el servidor con `story.command`, Web y Telnet, parcial) |
+| `crates/story-core/` | Ruleset narrativo puro StoryPack v1–v3: librojuego S0, menús, retratos y diálogos S4 y mundos con parser S5 (ADR 0025, 0028 y 0031 aceptados); el servidor lo juega vía `story_sessions` (S2, ADR 0029 aceptado) con slots persistidos (S3, ADR 0030 aceptado) e instancias compartidas con asientos, votación y turnos (S7 parcial, ADR 0033 aceptado) |
+| `crates/story-parser/` | Biblioteca pura de parser de ficción interactiva castellano/inglés con léxicos JSON versionados (núcleo S5; integrado en `story-core` con StoryPack v3, ADR 0031 aceptado; jugable en el servidor con `story.command`, Web y Telnet, parcial) |
 | `crates/story-tools/` | CLI offline `tiamud-story` de autoría StoryPack: validate/lints, preview, test, play, fmt y esquema JSON (S1 herramientas); ejecuta packs con scripts Lua mediante `story-script` |
-| `crates/story-script/` | Anfitrión Lua opcional de StoryPacks (S6, ADR 0034 propuesto): scripts puros con cuotas que emiten intenciones cerradas de `story-core` limitadas por grants; lo usan `tiamud-story` y las sesiones del servidor cuando `TIAMUD_STORY_SCRIPTS=1` (`story_sessions::scripts`: pool bloqueante acotado y presupuesto por entrada) |
+| `crates/story-script/` | Anfitrión Lua opcional de StoryPacks (S6, ADR 0034 aceptado): scripts puros con cuotas que emiten intenciones cerradas de `story-core` limitadas por grants; lo usan `tiamud-story` y las sesiones del servidor cuando `TIAMUD_STORY_SCRIPTS=1` (`story_sessions::scripts`: pool bloqueante acotado y presupuesto por entrada) |
 | `crates/asset-pipeline/` | Compilador de medios determinista |
 | `crates/telnet-codec/` | Parser Telnet de producción compartido con fuzzing |
 | `crates/cell-frame/` | Renderizado de celdas acotado |

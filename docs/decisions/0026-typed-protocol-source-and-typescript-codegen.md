@@ -1,12 +1,12 @@
 # ADR 0026: fuente tipada única de `tiamud.v1` y TypeScript generado
 
-- Estado: propuesto. Implementado de forma incremental en este árbol (ver
-  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md)); queda pendiente
-  de aceptación del propietario. No cambia el formato de cable, el límite de
+- Estado: aceptado — implementación parcial. Implementado de forma incremental en este árbol (ver
+  [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md)); no cambia el formato de cable, el límite de
   16 KiB ni ninguna decisión aceptada. Actualización 2026-10-15: las formas
   internas de `tiamud-core` (escena, jugador, objeto, mapa, evento y odds), la
   anotación de presentación y `action.perform` también se generan (puntos 3–5
   y [registro](../project/log/2026-10-15-core-view-codegen-deny-licenses-and-flaky-tests.md)).
+  2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: protocolo navegador `tiamud.v1` (servidor `web.rs` y cliente
   `apps/web/src/lib/protocol.ts`)

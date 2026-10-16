@@ -1,6 +1,6 @@
 # ADR 0034: scripts Lua opcionales en StoryPacks
 
-- Estado: propuesta. El núcleo existe como biblioteca: puntos de enganche
+- Estado: aceptada — implementación parcial. El núcleo existe como biblioteca: puntos de enganche
   `ScriptHost` en `crates/story-core`, el anfitrión Lua en
   `crates/story-script` (`tiamud-story-script`), una API aditiva
   `call_function`/`validate_functions` en `crates/scripting` y el soporte de
@@ -9,6 +9,7 @@
   las sesiones del servidor ejecutan scripts solo con `TIAMUD_STORY_SCRIPTS=1`
   (desactivado por defecto: entonces el catálogo rechaza esos packs al
   arrancar). Ver [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
+  2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: fase S6 de [ADR 0025](0025-narrative-ruleset-story-core.md)
   («integración opcional de scripts con el sandbox Lua y cuotas»)

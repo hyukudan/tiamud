@@ -9,7 +9,7 @@ commands whose objects are ids supplied by the caller.
 
 Current status (see the [completion matrix](../project/COMPLETION_MATRIX.md)):
 the parser is integrated with `tiamud-story-core` as **StoryPack format v3**
-(parser worlds), proposed in
+(parser worlds), accepted in
 [ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md) —
 the parser and language ADR that
 [ADR 0025](../decisions/0025-narrative-ruleset-story-core.md) requires — and
@@ -247,7 +247,7 @@ mutated lexicons and assert no panic, bounded outcomes and determinism.
 ## Integration with story-core (StoryPack v3)
 
 [ADR 0031](../decisions/0031-parser-interactive-fiction-storypack-v3.md)
-(**Proposed**) integrates the parser into the pure ruleset; the authoring
+(**Accepted**) integrates the parser into the pure ruleset; the authoring
 side is documented in [Parser worlds](story-packs.md#parser-worlds-format-v3).
 The library shape:
 

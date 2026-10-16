@@ -84,7 +84,7 @@ backend; Tiamud never dual-writes.
 ## Story sessions
 
 Story sessions ([ADR 0029](../decisions/0029-story-session-instances-and-story-protocol.md),
-proposed, phase S2) are disabled unless `TIAMUD_STORY_DIR` names a directory
+accepted, phase S2) are disabled unless `TIAMUD_STORY_DIR` names a directory
 of `*.story.json` StoryPacks. At startup, before any database or listener
 opens, every pack is parsed and validated with `tiamud-story-core`; an invalid
 pack, a duplicate story id, an empty directory, more than 64 packs or more
@@ -95,7 +95,7 @@ than 1,024 directory entries stops the server.
 - `TIAMUD_STORY_IDLE_SECONDS` (`60..=86400`, default `1800`) evicts an idle
   instance.
 - Save slots ([ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md),
-  proposed) live in the configured backend's `story_saves` table (added in schema v16)
+  accepted) live in the configured backend's `story_saves` table (added in schema v16)
   and go through the same measured store and persistence worker; there is no
   separate setting. Players save to slots `1..=9`; slot `0` is the autosave
   written on leave, on idle eviction and on graceful shutdown when the game
@@ -150,7 +150,7 @@ log, which never logs state contents). While a player is in a story the
 character stays connected and visible in its room.
 
 Shared story instances ([ADR 0033](../decisions/0033-shared-story-instances-and-voting.md),
-proposed, phase S7) need no extra service; all four settings fail closed out
+accepted, phase S7) need no extra service; all four settings fail closed out
 of range and are refused without `TIAMUD_STORY_DIR`:
 
 - `TIAMUD_STORY_MAX_SEATS` (`2..=8`, default `8`) seats per shared instance.
@@ -176,7 +176,7 @@ in `tiamud_story_instances_closed_total{reason="left"}` when its last seat
 leaves or lapses.
 
 Lua scripts in StoryPacks ([ADR 0034](../decisions/0034-lua-scripts-in-storypacks.md),
-proposed, phase S6) are **off by default**. Without the switch a
+accepted, phase S6) are **off by default**. Without the switch a
 `*.story.json` that declares `scripts` stops the server at startup, like any
 invalid pack. All settings fail closed out of range, are refused without
 `TIAMUD_STORY_DIR`, and the limits are refused without the switch:
@@ -391,7 +391,7 @@ rejects each row atomically. Do not enable LRU or automatic retirements just by
 migrating.
 
 Schema v16 adds only `story_saves`, the persisted story save slots of
-[ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md) (proposed).
+[ADR 0030](../decisions/0030-story-save-slots-and-schema-v16.md) (accepted).
 Each row is keyed by account, story and slot `0..=9` and retains the pack id
 and SHA-256, the state format version, an opaque state document of at most
 64 KiB and the SHA-256 of its exact bytes; deleting an account cascades to its
@@ -407,7 +407,7 @@ after it.
 
 Schema v17 changes how the runtime snapshot is stored, not what it contains
 ([ADR 0035](../decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
-proposed). `world_runtime` keeps `snapshot_version`, a small scalar
+accepted). `world_runtime` keeps `snapshot_version`, a small scalar
 `head_json`, a `manifest_json` (per section: byte length, revision and
 SHA-256) and `last_event_sequence`; the old `snapshot_json` column is gone.
 `world_runtime_sections` holds ten closed sections (`itemInstances`,

@@ -468,7 +468,7 @@ no authority or visibility: the runtime computes the room audience.
 
 ## Quests, commodities and shops
 
-[ADR 0032](decisions/0032-worldpack-v10-quests-and-shops.md) (proposed) moves
+[ADR 0032](decisions/0032-worldpack-v10-quests-and-shops.md) (accepted) moves
 the formerly hardcoded starter quest and market into data. WorldPack v10 places
 `commodities`, `quests` and `shops` under `gameplay`; AreaPack v9 declares them
 at its root and composition registers their IDs in the same global namespace as
@@ -1214,7 +1214,7 @@ limited to 1 MiB and each sheet to 64 KiB. SQLite and PostgreSQL schema v17 stor
 the snapshot as opaque `TEXT` within the existing transaction, split into a
 scalar head, a manifest and ten digested sections that are rewritten only when
 they change ([ADR 0035](decisions/0035-sectioned-runtime-snapshot-storage-schema-v17.md),
-proposed); the 1/2 MiB limits apply to the reassembled document, which is the
+accepted); the 1/2 MiB limits apply to the reassembled document, which is the
 same snapshot DTO. The v10→v11 migration transactionally raised the runtime
 singleton's physical constraint to 2 MiB, and v16→v17 splits that document into
 sections without converting its content; neither creates another authority.

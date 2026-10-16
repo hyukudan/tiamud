@@ -1,10 +1,10 @@
 # ADR 0025: ruleset narrativo (story-core), StoryPack y sesiones de historia instanciadas
 
-- Estado: propuesta. La fase S0 (crate puro `crates/story-core`, sin servidor,
+- Estado: aceptada — implementación parcial. La fase S0 (crate puro `crates/story-core`, sin servidor,
   protocolo, persistencia ni cliente) está implementada como prototipo de
   biblioteca, y la parte de herramientas de S1 (CLI offline `tiamud-story` en
   `crates/story-tools` y esquema JSON publicado) también existe. El modelo de
-  núcleo de S4 (StoryPack v2 con menús, retratos y diálogos) se propone en
+  núcleo de S4 (StoryPack v2 con menús, retratos y diálogos) se define en
   [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md) y existe solo
   como biblioteca; ver
   [`COMPLETION_MATRIX.md`](../project/COMPLETION_MATRIX.md).
@@ -15,15 +15,16 @@
   StoryPack, actor, protocolo `story.command` ni cliente la usa, y su
   integración sigue requiriendo el ADR propio de parser e idioma.
   Nota de estado posterior (2026-10-15): ese ADR es
-  [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md) (propuesto);
+  [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md) (aceptado);
   StoryPack v3 integra el parser en `story-core` como biblioteca (mundo de
   objetos, reglas, biblioteca por defecto, `StoryInput::Command`) y la
   herramienta offline lo juega, pero ninguna sesión de servidor, protocolo
   `story.command`, Telnet ni navegador lo usa todavía.
-  La capa de persistencia de S3 (slots y esquema SQL v16) se propone en
+  La capa de persistencia de S3 (slots y esquema SQL v16) se define en
   [ADR 0030](0030-story-save-slots-and-schema-v16.md) y existe sin conectar a
   sesiones ni protocolo.
-  Nada de este ADR modifica decisiones aceptadas hasta que se acepte.
+  Aceptado por el propietario; no modifica decisiones previas ya aceptadas.
+  2026-10-16: aceptado por el propietario.
 - Fecha: 2026-10-15
 - Alcance: nuevo runtime narrativo hermano de `tiamud-core`
 - Relacionado: [ADR 0001](0001-project-foundation.md),
@@ -202,10 +203,10 @@ sus implicaciones de autorización, moderación y persistencia.
 | S0 | Crate puro `story-core`: StoryPack, validador/lints, DSL, RNG sembrado, `step`/`view`, `UndoRing`, fixture en castellano y pruebas deterministas | No (este ADR) |
 | S1 | CLI de autoría (`validate`/`play` en terminal) y esquema JSON publicado del StoryPack | No, salvo cambio de formato |
 | S2 | Actor de instancia en el servidor, límites globales/por cuenta, desalojo por inactividad, protocolo `story.*`, paridad Telnet/GMCP, Playwright | **Sí** (protocolo y actor) |
-| S3 | Slots de guardado persistidos, esquema SQL v16 SQLite/PostgreSQL, migración y paridad | **Sí** (persistencia: [ADR 0030](0030-story-save-slots-and-schema-v16.md), propuesto; capa de persistencia implementada, sin conectar a S2) |
-| S4 | Aventuras por menús de verbos: `story.menu`, diálogos, retratos y cues vía pipeline de medios | **Sí** (modelo de menús/diálogo: [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md), propuesto; su modelo de núcleo StoryPack v2 existe como biblioteca) |
-| S5 | Parser de ficción interactiva en castellano (`story.command`/`story.prompt`), gramática acotada y determinista | **Sí** (parser e idioma: [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md), propuesto; núcleo StoryPack v3 implementado y cableado a las sesiones con `story.command`, parcial) |
-| S6 | Integración opcional de scripts con el sandbox Lua y cuotas | **Sí** ([ADR 0034](0034-lua-scripts-in-storypacks.md), propuesto; núcleo de biblioteca, herramientas offline y cableado a las sesiones del servidor tras `TIAMUD_STORY_SCRIPTS=1`, parcial) |
+| S3 | Slots de guardado persistidos, esquema SQL v16 SQLite/PostgreSQL, migración y paridad | **Sí** (persistencia: [ADR 0030](0030-story-save-slots-and-schema-v16.md), aceptado; capa de persistencia implementada, sin conectar a S2) |
+| S4 | Aventuras por menús de verbos: `story.menu`, diálogos, retratos y cues vía pipeline de medios | **Sí** (modelo de menús/diálogo: [ADR 0028](0028-story-menus-portraits-and-dialogue-trees.md), aceptado; su modelo de núcleo StoryPack v2 existe como biblioteca) |
+| S5 | Parser de ficción interactiva en castellano (`story.command`/`story.prompt`), gramática acotada y determinista | **Sí** (parser e idioma: [ADR 0031](0031-parser-interactive-fiction-storypack-v3.md), aceptado; núcleo StoryPack v3 implementado y cableado a las sesiones con `story.command`, parcial) |
+| S6 | Integración opcional de scripts con el sandbox Lua y cuotas | **Sí** ([ADR 0034](0034-lua-scripts-in-storypacks.md), aceptado; núcleo de biblioteca, herramientas offline y cableado a las sesiones del servidor tras `TIAMUD_STORY_SCRIPTS=1`, parcial) |
 | S7 | Multijugador: instancias compartidas, votos, espectadores, asíncrono | **Sí** |
 | S8 | Herramientas de autoría avanzadas, importadores y aceptación (carga, soak de instancias) | Solo si cambia arquitectura |
 
