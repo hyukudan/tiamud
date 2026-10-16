@@ -13,7 +13,17 @@ const httpPort = await reservePort();
 const telnetPort = await reservePort();
 let output = '';
 
-const server = spawn('cargo', ['run', '--locked', '-p', 'tiamud-server'], {
+// Build before starting so the readiness budget below measures server
+// startup, not a cold compile (CI reaches this step without a debug binary).
+await runCommand('cargo', ['build', '--locked', '-p', 'tiamud-server', '--bin', 'tiamud-server']);
+const binary = path.join(
+  root,
+  'target',
+  'debug',
+  process.platform === 'win32' ? 'tiamud-server.exe' : 'tiamud-server',
+);
+
+const server = spawn(binary, [], {
   cwd: root,
   env: {
     ...process.env,
@@ -49,6 +59,17 @@ try {
     server.kill('SIGKILL');
   }
   await rm(temporary, { recursive: true, force: true });
+}
+
+async function runCommand(command, arguments_) {
+  await new Promise((resolve, reject) => {
+    const child = spawn(command, arguments_, { cwd: root, stdio: 'inherit' });
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} exited with ${code ?? signal}.`));
+    });
+  });
 }
 
 async function reservePort() {
