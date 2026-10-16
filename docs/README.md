@@ -43,7 +43,7 @@ govern architecture decisions.
 | [`authoring/`](authoring/) | Authoring guide split by topic (README, media, modular worlds, progression/combat, validation/publishing, workflow). |
 | [`decisions/`](decisions/) | Architecture Decision Records (ADR 0001–0024, Spanish). See [`decisions/README.md`](decisions/README.md). |
 | [`design/`](design/) | Design documents and roadmaps (v3 progression, scene compositor, social/staff/loot roadmap). |
-| [`operations/`](operations/) | Operations runbooks (releases, single-host deployment, soak testing). |
+| [`operations/`](operations/) | Operations runbooks (releases, single-host deployment, the unexecuted mud.example.org Apache/hosting-panel kit, soak testing). |
 | [`protocol/`](protocol/) | Protocol specification (`tiamud-v1.md`). |
 | [`project/`](project/) | Project meta-documents (Spanish): `PROJECT_MEMORY.md`, `COMPLETION_MATRIX.md`, `NAME_DOMAIN_PRECHECK.md` and `log/`. |
 | [`project/log/`](project/log/) | Dated logs per phase/milestone (Spanish). See [`project/log/README.md`](project/log/README.md). |
